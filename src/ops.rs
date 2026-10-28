@@ -19,7 +19,8 @@
 //! when the op was queued (PERSO-238): a folder can hold two copies under one
 //! `Message-ID`, and the IMAP arm acts on the row's own UID rather than on
 //! whichever copy a `HEADER Message-ID` search lists first. Graph has no UIDs
-//! and ignores it.
+//! and ignores it; a Graph move, delete and read toggle carry the row's Graph
+//! item id instead ([`GraphCopy`], PERSO-245), and act on that item.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -46,8 +47,9 @@ use crate::config::{AccountConfig, AuthMethod, GraphConfig, ImapConfig};
 pub struct NotFoundOnServer {
     /// The `Message-ID` the op named.
     pub message_id: String,
-    /// The source folder searched, when the backend knows it (IMAP). Graph
-    /// resolves by id across the mailbox, so it has no folder to name.
+    /// The source folder searched, when the backend names one: IMAP, and a
+    /// Graph move or delete (PERSO-245). The Graph read toggle and post-send
+    /// mark leave it out.
     pub mailbox: Option<String>,
 }
 
@@ -136,6 +138,40 @@ fn server_uid(uid: i64) -> Option<u32> {
     u32::try_from(uid).ok().filter(|uid| *uid > 0)
 }
 
+/// The one Graph item a per-message op acts on (PERSO-245): the Graph analogue
+/// of [`ServerCopy`].
+///
+/// A Graph row has no UID (its `uid` is a hash of the `Message-ID`), so the
+/// sync records the Graph id of the folder's item on the row instead
+/// (`messages.graph_id`, [`crate::ingest::bind_graph_ids`]) and the op carries
+/// it. The id is Graph's default one, the kind every listing returns, which
+/// names one item in one folder and changes when the item moves; a row a local
+/// move took elsewhere has none until the destination is listed
+/// ([`crate::store::write::move_row`]).
+///
+/// `siblings` are the ids the store bound to its other rows of the message in
+/// the same folder, never taken for this one. Absent from an op whose row had
+/// no id, and from a payload queued before the field existed: the Graph arm
+/// then acts only on a folder that holds one copy
+/// (`crate::graph_ops::resolve_item` has the whole rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphCopy {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub siblings: Vec<String>,
+}
+
+impl GraphCopy {
+    /// The item a row names by `id`, with its twins in the folder bound to
+    /// `siblings`; the row's own id is no sibling.
+    pub fn of_row(id: String, siblings: impl IntoIterator<Item = String>) -> GraphCopy {
+        let mut siblings: Vec<String> = siblings.into_iter().filter(|s| *s != id).collect();
+        siblings.sort_unstable();
+        siblings.dedup();
+        GraphCopy { id, siblings }
+    }
+}
+
 /// What the background thread (or the queue drain) will ask the server to do.
 ///
 /// Serializable so the durable [`crate::pending_ops`] queue can persist it in a
@@ -146,19 +182,25 @@ pub enum ServerOp {
     /// as destination, exactly as `move_email_on_server` has always framed it.
     ///
     /// `copy`, here and on the three ops below, is the copy in the source
-    /// folder the store row stood for ([`ServerCopy`], PERSO-238).
+    /// folder the store row stood for ([`ServerCopy`], PERSO-238), and
+    /// `graph_copy`, here and on the two ops below, the same on a Graph
+    /// account ([`GraphCopy`], PERSO-245).
     Move {
         message_id: String,
         source_mailbox: String,
         dest_mailbox: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copy: Option<ServerCopy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_copy: Option<GraphCopy>,
     },
     Delete {
         message_id: String,
         source_mailbox: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copy: Option<ServerCopy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_copy: Option<GraphCopy>,
     },
     SetRead {
         message_id: String,
@@ -166,6 +208,8 @@ pub enum ServerOp {
         read: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copy: Option<ServerCopy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_copy: Option<GraphCopy>,
     },
     /// Toggle the `\Flagged` star (#0007). Like [`ServerOp::SetRead`], the
     /// server is truth on the IMAP path, so a local toggle needs a UID STORE
@@ -316,6 +360,7 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             source_mailbox,
             dest_mailbox,
             copy,
+            ..
         } => {
             crate::imap_client::move_email_on_server(
                 config,
@@ -330,6 +375,7 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             message_id,
             source_mailbox,
             copy,
+            ..
         } => {
             crate::imap_client::delete_email_on_server(
                 config,
@@ -344,6 +390,7 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             mailbox,
             read,
             copy,
+            ..
         } => {
             if *read {
                 crate::imap_client::mark_read_on_server(config, message_id, mailbox, copy.as_ref())
@@ -416,15 +463,44 @@ async fn run_graph(config: &GraphConfig, op: &ServerOp) -> Result<()> {
     match op {
         ServerOp::Move {
             message_id,
+            source_mailbox,
             dest_mailbox,
+            graph_copy,
             ..
-        } => crate::graph::move_message_graph(config, message_id, dest_mailbox).await,
-        ServerOp::Delete { message_id, .. } => {
-            crate::graph::delete_message_graph(config, message_id).await
+        } => {
+            crate::graph_ops::move_message(
+                config,
+                message_id,
+                source_mailbox,
+                graph_copy.as_ref(),
+                dest_mailbox,
+            )
+            .await
+        }
+        ServerOp::Delete {
+            message_id,
+            source_mailbox,
+            graph_copy,
+            ..
+        } => {
+            crate::graph_ops::delete_message(
+                config,
+                message_id,
+                source_mailbox,
+                graph_copy.as_ref(),
+            )
+            .await
         }
         ServerOp::SetRead {
-            message_id, read, ..
-        } => crate::graph::mark_read_graph(config, message_id, *read).await,
+            message_id,
+            mailbox,
+            read,
+            graph_copy,
+            ..
+        } => {
+            crate::graph_ops::mark_read(config, message_id, mailbox, graph_copy.as_ref(), *read)
+                .await
+        }
         // Graph stays seen-only (#0007): the star is parked locally, honoured
         // by the store and the list, but never mirrored to Graph. A no-op Ok
         // rather than an error, so the optimistic local write stands.
@@ -459,6 +535,7 @@ mod tests {
             source_mailbox: source.to_string(),
             dest_mailbox: dest.to_string(),
             copy: None,
+            graph_copy: None,
         }
     }
 
@@ -467,6 +544,7 @@ mod tests {
             message_id: id.to_string(),
             source_mailbox: source.to_string(),
             copy: None,
+            graph_copy: None,
         }
     }
 
@@ -482,6 +560,7 @@ mod tests {
                 mailbox: "INBOX".to_string(),
                 read: false,
                 copy: None,
+                graph_copy: None,
             }
             .kind(),
             "set_read"
@@ -531,6 +610,7 @@ mod tests {
                     uidvalidity: Some(7),
                     siblings: Vec::new(),
                 }),
+                graph_copy: None,
             },
             ServerOp::SetFlagged {
                 message_id: "<4@x>".to_string(),
@@ -606,6 +686,7 @@ mod tests {
                 uidvalidity: Some(1700000000),
                 siblings: Vec::new(),
             }),
+            graph_copy: None,
         };
         let json = serde_json::to_string(&with_copy).unwrap();
         assert!(
@@ -646,5 +727,39 @@ mod tests {
             None,
             "a synthetic uid"
         );
+    }
+
+    /// An op queued before PERSO-245 carries no `graph_copy` and decodes as
+    /// one that names no Graph item; one that names an item writes it beside
+    /// the rest and reads it back, and its siblings leave out its own id.
+    #[test]
+    fn an_op_queued_before_the_graph_copy_existed_still_decodes() {
+        let old = r#"{"SetRead":{"message_id":"<8@x>","mailbox":"Inbox","read":true}}"#;
+        let op = ServerOp::SetRead {
+            message_id: "<8@x>".to_string(),
+            mailbox: "Inbox".to_string(),
+            read: true,
+            copy: None,
+            graph_copy: None,
+        };
+        assert_eq!(serde_json::from_str::<ServerOp>(old).unwrap(), op);
+        assert_eq!(serde_json::to_string(&op).unwrap(), old);
+
+        let named = ServerOp::Move {
+            message_id: "<9@x>".to_string(),
+            source_mailbox: "Inbox".to_string(),
+            dest_mailbox: "Archive".to_string(),
+            copy: None,
+            graph_copy: Some(GraphCopy::of_row(
+                "AAMk-b".to_string(),
+                ["AAMk-c", "AAMk-b", "AAMk-a", "AAMk-c"].map(String::from),
+            )),
+        };
+        let json = serde_json::to_string(&named).unwrap();
+        assert!(
+            json.contains(r#""graph_copy":{"id":"AAMk-b","siblings":["AAMk-a","AAMk-c"]}"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<ServerOp>(&json).unwrap(), named);
     }
 }

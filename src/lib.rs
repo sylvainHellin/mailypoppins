@@ -20,6 +20,7 @@ pub mod draft_mirror;
 pub mod dump;
 pub mod engine_lock;
 pub mod graph;
+pub mod graph_ops;
 pub mod imap_client;
 pub mod ingest;
 pub mod invite;

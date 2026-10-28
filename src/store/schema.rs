@@ -497,10 +497,20 @@ pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
 /// ([`crate::ingest::classify_inline_from_raw`] for a row with its raw
 /// message, the Graph metadata pass for one without) writes it. Every other
 /// blob kind leaves both `NULL`.
-const ADDITIVE_COLUMNS: [(&str, &str, &str); 5] = [
+///
+/// `messages.graph_id` is the Graph id of the folder item a Graph row stands
+/// for (PERSO-245), the handle a move, delete or read toggle acts on
+/// ([`crate::ops::GraphCopy`]). Graph's default id, which changes when the item
+/// moves, so every listing of the folder writes it again
+/// ([`crate::ingest::bind_graph_ids`]) and a local move clears it. `NULL` on an
+/// IMAP row, on a row a local move has taken to a folder not listed since,
+/// and on a Graph row until the first pass of a build that records it: the op
+/// then names no item, and acts only on a folder that holds one copy.
+const ADDITIVE_COLUMNS: [(&str, &str, &str); 6] = [
     ("drafts", "in_reply_to", "TEXT"),
     ("drafts", "forwarded_from", "TEXT"),
     ("messages", "conversation_id", "TEXT"),
+    ("messages", "graph_id", "TEXT"),
     ("message_blobs", "content_id", "TEXT"),
     ("message_blobs", "is_inline", "INTEGER"),
 ];

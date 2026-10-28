@@ -1517,6 +1517,50 @@ where
     updated
 }
 
+/// Record on each Graph row of `mailbox` the Graph id its folder listed it
+/// under, `(Message-ID, Graph id)` per listed item, in one transaction; the
+/// number of rows whose id changed (PERSO-245).
+///
+/// The id is what a move, delete or read toggle of the row acts on
+/// ([`crate::ops::GraphCopy`]). Graph's default id changes when the item
+/// moves, so it is written again by every listing rather than once at ingest:
+/// a row a local move took to this folder (on its `-id` sentinel, with no id)
+/// gains the moved item's new one, and a row whose item another client moved
+/// out and back has its stale one replaced. Matched on the `Message-ID` rather
+/// than on [`graph_uid`] for the first of those reasons. A row this pass
+/// cannot bind keeps the id it had, and an op on it falls back on the folder's
+/// one copy.
+pub fn bind_graph_ids<'a>(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    listed: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> usize {
+    let bind = || -> Result<usize> {
+        let tx = store
+            .conn()
+            .unchecked_transaction()
+            .context("opening the Graph id transaction")?;
+        let mut bound = 0;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE messages SET graph_id = ?4
+                 WHERE account = ?1 AND mailbox = ?2 AND message_id = ?3
+                   AND graph_id IS NOT ?4",
+            )?;
+            for (message_id, graph_id) in listed {
+                bound += stmt.execute(rusqlite::params![account, mailbox, message_id, graph_id])?;
+            }
+        }
+        tx.commit().context("committing the Graph ids")?;
+        Ok(bound)
+    };
+    bind().unwrap_or_else(|e| {
+        warn!("Failed to record the Graph ids of '{mailbox}': {e:#}");
+        0
+    })
+}
+
 /// How close to now a row's own `Date:` may be before the prune leaves it
 /// alone: 15 minutes, the watcher's longest poll delay
 /// ([`crate::outbox::backoff_secs`]'s ceiling), so a row survives at least one
@@ -2726,6 +2770,52 @@ mod tests {
         assert!(!too_fresh_to_prune(now + 10 * 365 * 86_400, now));
         // An unparseable `Date:` stores 0, which is prunable like any old row.
         assert!(!too_fresh_to_prune(0, now));
+    }
+
+    /// A listing binds each Graph row of its folder to the item it lists
+    /// under the row's Message-ID (PERSO-245), a row a local move parked on
+    /// its sentinel included; a row of another folder is not touched, and an
+    /// id already bound is not written again.
+    #[test]
+    fn a_listing_binds_its_rows_to_their_graph_items() {
+        let fx = crate::reconcile::tests::fixture();
+        let held = fx.ingest_plain("inbox", graph_uid("<held@x>"), "Held");
+        let moved = fx.ingest_plain("inbox", 7, "Moved");
+        let elsewhere = fx.ingest_plain("archive", 8, "Elsewhere");
+        let conn = fx.store.conn();
+        conn.execute(
+            "UPDATE messages SET message_id = '<held@x>' WHERE id = ?1",
+            [held],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE messages SET message_id = '<moved@x>', uid = -id WHERE id = ?1",
+            [moved],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE messages SET message_id = '<held@x>' WHERE id = ?1",
+            [elsewhere],
+        )
+        .unwrap();
+        let graph_id = |id: i64| -> Option<String> {
+            conn.query_row("SELECT graph_id FROM messages WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+
+        let listing = [("<held@x>", "AAMk-held"), ("<moved@x>", "AAMk-moved")];
+        assert_eq!(bind_graph_ids(&fx.store, "alice", "inbox", listing), 2);
+        assert_eq!(graph_id(held).as_deref(), Some("AAMk-held"));
+        assert_eq!(graph_id(moved).as_deref(), Some("AAMk-moved"));
+        assert_eq!(graph_id(elsewhere), None);
+        assert_eq!(bind_graph_ids(&fx.store, "alice", "inbox", listing), 0);
+
+        // Another client moved it out and back: the item has a new id.
+        let listing = [("<held@x>", "AAMk-back")];
+        assert_eq!(bind_graph_ids(&fx.store, "alice", "inbox", listing), 1);
+        assert_eq!(graph_id(held).as_deref(), Some("AAMk-back"));
     }
 
     mod attachment_repair {

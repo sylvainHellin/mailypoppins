@@ -83,9 +83,11 @@ pub fn row_coordinates(store: &Store, id: i64) -> Result<Option<MutatedRow>> {
 
 /// Move a row into `dest_mailbox`, returning where it came from.
 ///
-/// The uid becomes `-id` (see the module docs). `Ok(None)` means the row was
-/// already gone, which is a no-op rather than an error: two mutations racing on
-/// the same message is a user action, not a bug.
+/// The uid becomes `-id` (see the module docs), and the Graph id of the source
+/// folder's item is cleared, since Graph gives the moved item a new one
+/// (PERSO-245). `Ok(None)` means the row was already gone, which is a no-op
+/// rather than an error: two mutations racing on the same message is a user
+/// action, not a bug.
 pub fn move_row(store: &Store, id: i64, dest_mailbox: &str) -> Result<Option<MutatedRow>> {
     let Some(previous) = row_coordinates(store, id)? else {
         return Ok(None);
@@ -93,7 +95,7 @@ pub fn move_row(store: &Store, id: i64, dest_mailbox: &str) -> Result<Option<Mut
     store
         .conn()
         .execute(
-            "UPDATE messages SET mailbox = ?2, uid = ?3 WHERE id = ?1",
+            "UPDATE messages SET mailbox = ?2, uid = ?3, graph_id = NULL WHERE id = ?1",
             rusqlite::params![id, dest_mailbox, -id],
         )
         .context("moving a message row")?;

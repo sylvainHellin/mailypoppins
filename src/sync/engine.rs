@@ -2512,6 +2512,7 @@ mod tests {
             source_mailbox: from.1.to_string(),
             dest_mailbox: dest.to_string(),
             copy: copy_of(store, row),
+            graph_copy: None,
         };
         let (previous, op_id) = crate::pending_ops::apply_move(
             store,
@@ -2646,6 +2647,7 @@ mod tests {
                 message_id: mid("m"),
                 source_mailbox: "INBOX".to_string(),
                 copy: copy_of(&handle, row),
+                graph_copy: None,
             };
             let (_, op_id) = crate::pending_ops::apply_delete(
                 &handle,
@@ -2789,6 +2791,7 @@ mod tests {
             source_mailbox: "INBOX".to_string(),
             dest_mailbox: "archive".to_string(),
             copy: Some(copy),
+            graph_copy: None,
         };
         crate::pending_ops::apply_move(
             store,

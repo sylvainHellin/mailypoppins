@@ -268,6 +268,7 @@ The sync engine ingests through `ingest::ingest_listed`, which refuses to write 
 When a complete listing no longer holds the op's UID (another client moved the message out and back), the copy under its Message-ID is withheld too unless a copy a twin row stands for (`ServerCopy::siblings`) is listed beside it, which is the rule `imap_client::ops::resolve_copy` applies to the same folder when the server half runs (PERSO-246).
 The pass opens a `sync::departures::Watch` before it reads its skip lists: it holds the moves and deletes still `queued` or `settling` then, and journals every one `apply_move` and `apply_delete` commit while it is open, inside their transaction, because such an op may retire (delete its row) before ingest asks.
 A refused copy is no ingest failure and holds no prune back; a copy still listed after the departure landed is a second one, and the next pass ingests it.
+Each Graph listing also writes the Graph id of every listed item onto the folder's row of that Message-ID (`messages.graph_id`, `ingest::bind_graph_ids`): Graph's default id, the one the listings return, which changes when the item moves, so every listing writes it again and a local move clears it.
 A message with no `Message-ID` header gets a deterministic `sha256-<hex16>@local.invalid` synthetic id.
 
 ### Threading
@@ -677,6 +678,10 @@ Every listing prints the same UID-qualified form for a row whose mailbox holds a
 The server op a move, delete or flag toggle queues carries the store row's UID (`ops::ServerCopy`, PERSO-238), so it acts on the row's own copy when a folder holds two under one Message-ID, rather than on whichever one a `Message-ID` search lists first.
 It also carries the UIDs the store binds to the row's twins in that folder (`ServerCopy::siblings`), read when the op is queued: when the row's UID holds nothing any more (another client moved the message out and back), the op takes the folder's one copy for its own only if no twin row stands for it (`imap_client::ops::resolve_copy`).
 A move or delete that takes no copy converges as not found only when a completed run explains the miss: no copy left in the source, or only twins' copies, with the message already in a move's destination; any other miss is an ordinary error, which the drain retries and then rolls back.
+On a Graph account the op carries the row's Graph item id instead (`ops::GraphCopy`, PERSO-245) and looks the message up in its source folder only, where it used to take the first item of a mailbox-wide `Message-ID` lookup, which could be the copy filed in another folder (`graph_ops::resolve_item`).
+It acts on that item; with no id recorded it acts only on a folder that holds one copy.
+A recorded id that is not in the folder is never replaced by a remaining copy, unlike a stale UID: the store keeps one row per folder and Message-ID on a Graph account, so a twin has no row whose id would mark it, and a replay of a move that landed would move it too.
+Graph's immutable ids (`Prefer: IdType="ImmutableId"`) would survive moves, but the sync and its downloads use default ids throughout; switching them is a change to every listing and download, left until it can be tried on a live account.
 
 ## Performance-critical invariants
 
@@ -761,5 +766,5 @@ All of them run offline, the plain selection in a few seconds.
 - The store side is fixture-driven: `tests/store_ingest_integration.rs` ingests real RFC822 bytes and asserts rows, blobs, refcounts and FTS state; `tests/store_search_integration.rs` asserts the search itself (ranking, phrases, prefixes, unicode, mailbox and account scope) and that the index does not drift across re-ingest, a UIDVALIDITY rebind, a move, a delete and a prune; `tests/outbox_integration.rs` drives the state machine against a fake Sent mailbox.
 - The sync engine (`src/sync/engine.rs`) is tested offline against a fake `SyncBackend` (#0059): ingest and cursor advance, the #0074 arrival mark and its give-up bound, the UIDVALIDITY reset, the deferred prune pass and its account-wide coverage gate, `dry_run`, the flag application, and the departures gate, whose fake backend commits moves and deletes while the server is being listed (PERSO-240).
   `ops.rs` and `batch.rs` still have none: their seam is `ops::run_op`, not this one.
-  The Graph orchestrator still has none either, because it does not run on the engine yet.
+  The Graph orchestrator still has none either, because it does not run on the engine yet; the Graph move, delete and read toggle are tested against an in-memory mailbox behind `graph_ops::GraphItems` (PERSO-245).
 - There is no IMAP/SMTP mock server.

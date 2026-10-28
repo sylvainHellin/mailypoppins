@@ -3219,6 +3219,19 @@ pub async fn sync_mailboxes_graph(
         );
         span.mark(&format!("flags:{}", target.role));
 
+        // The item each row stands for, which a move, delete or read toggle
+        // of it acts on (PERSO-245): the rows this window wrote and the ones
+        // held before it, whose id a move elsewhere may have changed.
+        crate::ingest::bind_graph_ids(
+            &store,
+            account_name,
+            mailbox,
+            server
+                .iter()
+                .map(|(mid, entry)| (mid.as_str(), entry.graph_id.as_str())),
+        );
+        span.mark(&format!("graph_ids:{}", target.role));
+
         // Messages stored without the attachments their first fetch failed
         // to bring, a bounded handful per pass.
         client
@@ -3959,8 +3972,25 @@ impl GraphClient {
         &self,
         internet_message_id: &str,
     ) -> Result<Vec<String>> {
-        let url = message_lookup_url(internet_message_id)?;
+        self.lookup_ids(message_lookup_url(internet_message_id)?)
+            .await
+    }
 
+    /// The Graph ids of every copy of a message one folder holds, by its
+    /// RFC822 Message-ID (PERSO-245): the default ids a sync listing records,
+    /// so they compare with the one a row carries.
+    pub async fn folder_copies(
+        &self,
+        folder: &str,
+        internet_message_id: &str,
+    ) -> Result<Vec<String>> {
+        let folder_path = self.folder_path(folder).await?;
+        self.lookup_ids(folder_lookup_url(&folder_path, internet_message_id)?)
+            .await
+    }
+
+    /// The ids a `Message-ID` lookup answers with.
+    async fn lookup_ids(&self, url: reqwest::Url) -> Result<Vec<String>> {
         let resp = self
             .client
             .get(url)
@@ -4111,61 +4141,6 @@ impl GraphClient {
     }
 }
 
-/// Move a message to another folder via Graph (#0018), naming it by its
-/// `Message-ID` and touching nothing locally: the store row was already moved
-/// optimistically by the caller (`crate::store::write`). Archiving is this with
-/// the archive folder as destination.
-///
-/// A message the server does not have is not an error. Graph's copy may already
-/// be gone (moved from another client), and the local row is what the user is
-/// looking at.
-pub async fn move_message_graph(
-    config: &GraphConfig,
-    internet_message_id: &str,
-    dest_folder: &str,
-) -> Result<()> {
-    let client = GraphClient::new_async(config).await?;
-
-    match client
-        .find_message_by_internet_id(internet_message_id)
-        .await?
-    {
-        Some(graph_id) => {
-            client.move_message(&graph_id, dest_folder).await?;
-            info!(
-                "Graph: moved message {} to {}",
-                internet_message_id, dest_folder
-            );
-        }
-        None => warn!(
-            "Graph: message {} not found on server, nothing to move",
-            internet_message_id
-        ),
-    }
-    Ok(())
-}
-
-/// Delete a message via Graph, naming it by its `Message-ID`. Same contract as
-/// [`move_message_graph`]: server only, and a missing message is not an error.
-pub async fn delete_message_graph(config: &GraphConfig, internet_message_id: &str) -> Result<()> {
-    let client = GraphClient::new_async(config).await?;
-
-    match client
-        .find_message_by_internet_id(internet_message_id)
-        .await?
-    {
-        Some(graph_id) => {
-            client.delete_message(&graph_id).await?;
-            info!("Graph: deleted message {} from server", internet_message_id);
-        }
-        None => warn!(
-            "Graph: message {} not found on server, nothing to delete",
-            internet_message_id
-        ),
-    }
-    Ok(())
-}
-
 /// Record a reply or a forward on every server copy of a message, naming it by
 /// its `Message-ID` (PERSO-171): the Graph half of the post-send
 /// `set_answered` op.
@@ -4198,32 +4173,6 @@ pub async fn mark_last_verb_graph(
         copies.len()
     );
     Ok(())
-}
-
-/// Mark read/unread via Graph API.
-pub async fn mark_read_graph(
-    config: &GraphConfig,
-    internet_message_id: &str,
-    is_read: bool,
-) -> Result<()> {
-    let client = GraphClient::new_async(config).await?;
-
-    if let Some(graph_id) = client
-        .find_message_by_internet_id(internet_message_id)
-        .await?
-    {
-        client.update_read_status(&graph_id, is_read).await?;
-        Ok(())
-    } else {
-        // Typed not-found so the durable queue's drain converges a replay whose
-        // read toggle already landed (#0039 review); a direct caller still sees
-        // it as an error through `Display`.
-        Err(crate::ops::NotFoundOnServer {
-            message_id: internet_message_id.to_string(),
-            mailbox: None,
-        }
-        .into())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4398,6 +4347,16 @@ fn mime_url(graph_id: &str) -> String {
 /// lookup would quietly find nothing.
 fn message_lookup_url(internet_message_id: &str) -> Result<reqwest::Url> {
     internet_id_url("me/messages", internet_message_id, "id")
+}
+
+/// The URL looking a message up by its `Message-ID` in one folder, named as
+/// [`GraphClient::folder_path`] names it (PERSO-245).
+fn folder_lookup_url(folder_path: &str, internet_message_id: &str) -> Result<reqwest::Url> {
+    internet_id_url(
+        &format!("me/mailFolders/{folder_path}/messages"),
+        internet_message_id,
+        "id",
+    )
 }
 
 /// `{collection}?$filter=internetMessageId eq '<id>'&$select={select}`, the
@@ -4858,6 +4817,18 @@ mod tests {
             message_action_url("AAMk=", "send"),
             format!("{GRAPH_BASE}/me/messages/AAMk=/send")
         );
+    }
+
+    /// A move, delete or read toggle looks its message up in its own folder
+    /// only (PERSO-245), never across the mailbox, where the first item
+    /// listed could be the copy filed in another folder.
+    #[test]
+    fn a_message_op_looks_its_item_up_in_its_own_folder() {
+        let url = folder_lookup_url("inbox", "<a'b@x>").unwrap();
+        assert_eq!(url.path(), "/v1.0/me/mailFolders/inbox/messages");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(query["$filter"], "internetMessageId eq '<a''b@x>'");
+        assert_eq!(query["$select"], "id");
     }
 
     /// The sendMail MIME body is the message in standard, unwrapped base64.

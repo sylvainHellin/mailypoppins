@@ -24,7 +24,7 @@
 //! TUI's `MessageRef` wrapper around it: the daemon addresses a row by that id
 //! on the wire (`row_id`, P5-U4) and this module is below both clients.
 
-use crate::ops::{ServerCopy, ServerOp};
+use crate::ops::{GraphCopy, ServerCopy, ServerOp};
 use crate::pending_ops::{self, Runner};
 use crate::store::write;
 use crate::store::{BlobStore, Store};
@@ -43,24 +43,27 @@ pub struct Queued {
     pub op_id: i64,
 }
 
-/// How a queued op names its message, read off the row before the op is built:
-/// the Message-ID, and the server copy the row stands for (PERSO-238).
+/// How a queued op names its message: the Message-ID, and the server copy the
+/// row stands for, as an IMAP UID (PERSO-238) or a Graph item (PERSO-245).
+struct Addressing {
+    message_id: String,
+    copy: Option<ServerCopy>,
+    graph_copy: Option<GraphCopy>,
+}
+
+/// The [`Addressing`] of a row, read off it before the op is built.
 ///
 /// The durable `apply_*` functions read the row's coordinates themselves inside
 /// their commit, but they take the [`ServerOp`] ready-made; this is the one
 /// lightweight read that supplies its addressing. The copy is the row's UID
-/// with its mailbox's UIDVALIDITY, so the server op acts on this row's copy
-/// when the folder holds two under one Message-ID, and carries the UIDs of the
-/// row's twins in that folder ([`ServerCopy::siblings`]), so a stale UID is
-/// never resolved to a copy another row stands for. `None` (with a log line)
-/// when the row is already gone, or its twins cannot be read, which is a skip
-/// rather than an error.
-fn addressing_of(
-    store: &Store,
-    account: &str,
-    row_id: i64,
-    what: &str,
-) -> Option<(String, Option<ServerCopy>)> {
+/// with its mailbox's UIDVALIDITY, or on a Graph account the Graph id the last
+/// listing bound it to, so the server op acts on this row's copy when the
+/// folder holds two under one Message-ID; each carries the same handle of the
+/// row's twins in that folder ([`ServerCopy::siblings`],
+/// [`GraphCopy::siblings`]), so a stale one is never resolved to a copy
+/// another row stands for. `None` (with a log line) when the row is already
+/// gone, or its twins cannot be read, which is a skip rather than an error.
+fn addressing_of(store: &Store, account: &str, row_id: i64, what: &str) -> Option<Addressing> {
     let row = match write::row_coordinates(store, row_id) {
         Ok(Some(row)) => row,
         Ok(None) => {
@@ -83,29 +86,56 @@ fn addressing_of(
             None
         })
         .and_then(|cursor| cursor.uidvalidity);
-    let siblings = match sibling_uids(store, account, &row) {
-        Ok(siblings) => siblings,
+    let (graph_id, siblings) = match graph_id_of(store, row_id)
+        .and_then(|graph_id| Ok((graph_id, siblings_of(store, account, &row)?)))
+    {
+        Ok(read) => read,
         Err(e) => {
             log::warn!("[store] reading the twins of message {row_id} to {what} failed: {e:#}");
             return None;
         }
     };
-    let copy = ServerCopy::of_row(row.uid, uidvalidity).map(|copy| copy.with_siblings(siblings));
-    Some((row.message_id, copy))
+    let copy = ServerCopy::of_row(row.uid, uidvalidity)
+        .map(|copy| copy.with_siblings(siblings.iter().map(|(uid, _)| *uid)));
+    let graph_copy = graph_id.map(|id| {
+        GraphCopy::of_row(
+            id,
+            siblings.into_iter().filter_map(|(_, graph_id)| graph_id),
+        )
+    });
+    Some(Addressing {
+        message_id: row.message_id,
+        copy,
+        graph_copy,
+    })
 }
 
-/// The uids of the store's other rows of `row`'s message in its mailbox
-/// (PERSO-238).
-fn sibling_uids(store: &Store, account: &str, row: &write::MutatedRow) -> anyhow::Result<Vec<i64>> {
+/// The Graph id a listing bound the row to (PERSO-245), `None` on an IMAP row
+/// and on one no listing has bound since it was synced or moved.
+fn graph_id_of(store: &Store, row_id: i64) -> anyhow::Result<Option<String>> {
+    Ok(store.conn().query_row(
+        "SELECT graph_id FROM messages WHERE id = ?1",
+        [row_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// The uids and Graph ids of the store's other rows of `row`'s message in its
+/// mailbox (PERSO-238, PERSO-245).
+fn siblings_of(
+    store: &Store,
+    account: &str,
+    row: &write::MutatedRow,
+) -> anyhow::Result<Vec<(i64, Option<String>)>> {
     let mut stmt = store.conn().prepare(
-        "SELECT uid FROM messages
+        "SELECT uid, graph_id FROM messages
          WHERE account = ?1 AND mailbox = ?2 AND message_id = ?3 AND id <> ?4",
     )?;
-    let uids = stmt.query_map(
+    let siblings = stmt.query_map(
         rusqlite::params![account, row.mailbox, row.message_id, row.id],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(uids.collect::<rusqlite::Result<Vec<i64>>>()?)
+    Ok(siblings.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Move rows into `dest_mailbox` (the store's mailbox key) and queue the server
@@ -126,7 +156,12 @@ pub fn queue_move(
 ) -> Vec<Queued> {
     let mut moved = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some((message_id, copy)) = addressing_of(store, account, row_id, "move") else {
+        let Some(Addressing {
+            message_id,
+            copy,
+            graph_copy,
+        }) = addressing_of(store, account, row_id, "move")
+        else {
             continue;
         };
         let op = ServerOp::Move {
@@ -134,6 +169,7 @@ pub fn queue_move(
             source_mailbox: source_server.to_string(),
             dest_mailbox: dest_server.to_string(),
             copy,
+            graph_copy,
         };
         match pending_ops::apply_move(store, account, row_id, dest_mailbox, op, runner) {
             Ok(Some((_previous, op_id))) => moved.push(Queued { row_id, op_id }),
@@ -155,13 +191,19 @@ pub fn queue_delete(
 ) -> Vec<Queued> {
     let mut deleted = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some((message_id, copy)) = addressing_of(store, account, row_id, "delete") else {
+        let Some(Addressing {
+            message_id,
+            copy,
+            graph_copy,
+        }) = addressing_of(store, account, row_id, "delete")
+        else {
             continue;
         };
         let op = ServerOp::Delete {
             message_id,
             source_mailbox: source_server.to_string(),
             copy,
+            graph_copy,
         };
         match pending_ops::apply_delete(store, blobs, account, row_id, op, runner) {
             Ok(Some((_previous, op_id))) => deleted.push(Queued { row_id, op_id }),
@@ -184,7 +226,12 @@ pub fn queue_read_flag(
 ) -> Vec<Queued> {
     let mut out = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some((message_id, copy)) = addressing_of(store, account, row_id, "flag") else {
+        let Some(Addressing {
+            message_id,
+            copy,
+            graph_copy,
+        }) = addressing_of(store, account, row_id, "flag")
+        else {
             continue;
         };
         let op = ServerOp::SetRead {
@@ -192,6 +239,7 @@ pub fn queue_read_flag(
             mailbox: server_mailbox.to_string(),
             read,
             copy,
+            graph_copy,
         };
         match pending_ops::apply_set_read(store, account, row_id, read, op, runner) {
             Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
@@ -214,7 +262,11 @@ pub fn queue_flag(
 ) -> Vec<Queued> {
     let mut out = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some((message_id, copy)) = addressing_of(store, account, row_id, "flag") else {
+        // Graph does not mirror the star (#0007), so the op names no item.
+        let Some(Addressing {
+            message_id, copy, ..
+        }) = addressing_of(store, account, row_id, "flag")
+        else {
             continue;
         };
         let op = ServerOp::SetFlagged {
@@ -287,6 +339,7 @@ mod tests {
                 source_mailbox: "INBOX".to_string(),
                 dest_mailbox: "Archive".to_string(),
                 copy: ServerCopy::of_row(1, None),
+                graph_copy: None,
             }
         );
     }
@@ -316,6 +369,7 @@ mod tests {
                 message_id: "<archive-4@example.com>".to_string(),
                 source_mailbox: "Archive".to_string(),
                 copy: ServerCopy::of_row(4, None),
+                graph_copy: None,
             }
         );
     }
@@ -344,6 +398,7 @@ mod tests {
                 mailbox: "INBOX".to_string(),
                 read: true,
                 copy: ServerCopy::of_row(2, None),
+                graph_copy: None,
             }
         );
     }
@@ -587,6 +642,7 @@ mod tests {
                     source_mailbox: "Archive".to_string(),
                     dest_mailbox: "INBOX".to_string(),
                     copy: named(285, 288),
+                    graph_copy: None,
                 },
             ]
         );
@@ -605,6 +661,87 @@ mod tests {
             matches!(&queued[2].op, ServerOp::SetRead { copy: None, .. }),
             "{:?}",
             queued[2].op
+        );
+    }
+
+    /// A Graph row's op names the item the last listing bound the row to, with
+    /// the item another row of the message in the folder stands for as a
+    /// sibling, and no UID (PERSO-245). A local move clears the id, so the
+    /// moved row names no item until its destination is listed.
+    #[test]
+    fn a_graph_row_queues_an_op_naming_its_item() {
+        let fx = fixture();
+        let uid = crate::ingest::graph_uid("<g@example.com>");
+        let row = fx.ingest_plain("inbox", uid, "Graph");
+        let twin = fx.ingest_plain("inbox", uid - 1, "Graph");
+        fx.store
+            .conn()
+            .execute(
+                "UPDATE messages SET message_id = '<g@example.com>',
+                    graph_id = 'item-' || id WHERE id IN (?1, ?2)",
+                [row, twin],
+            )
+            .unwrap();
+
+        queue_read_flag(
+            &fx.store,
+            "alice",
+            &refs(&[row]),
+            true,
+            "Inbox",
+            Runner::Drain,
+        );
+        queue_move(
+            &fx.store,
+            "alice",
+            &refs(&[row]),
+            "archive",
+            "Inbox",
+            "Archive",
+            Runner::Drain,
+        );
+        queue_read_flag(
+            &fx.store,
+            "alice",
+            &refs(&[row]),
+            false,
+            "Archive",
+            Runner::Drain,
+        );
+        let ops: Vec<ServerOp> = pending_ops::queued_ops(&fx.store, "alice")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.op)
+            .collect();
+        let item = Some(GraphCopy {
+            id: format!("item-{row}"),
+            siblings: vec![format!("item-{twin}")],
+        });
+        assert_eq!(
+            ops,
+            vec![
+                ServerOp::SetRead {
+                    message_id: "<g@example.com>".to_string(),
+                    mailbox: "Inbox".to_string(),
+                    read: true,
+                    copy: None,
+                    graph_copy: item.clone(),
+                },
+                ServerOp::Move {
+                    message_id: "<g@example.com>".to_string(),
+                    source_mailbox: "Inbox".to_string(),
+                    dest_mailbox: "Archive".to_string(),
+                    copy: None,
+                    graph_copy: item,
+                },
+                ServerOp::SetRead {
+                    message_id: "<g@example.com>".to_string(),
+                    mailbox: "Archive".to_string(),
+                    read: false,
+                    copy: None,
+                    graph_copy: None,
+                },
+            ]
         );
     }
 }

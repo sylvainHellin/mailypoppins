@@ -352,8 +352,11 @@ pub fn apply_move(
     let Some(previous) = coordinates_in(&tx, id)? else {
         return Ok(None);
     };
+    // The Graph id goes with the source folder's item (PERSO-245): Graph
+    // gives the moved item a new one, which the next listing of the
+    // destination records.
     tx.execute(
-        "UPDATE messages SET mailbox = ?2, uid = ?3 WHERE id = ?1",
+        "UPDATE messages SET mailbox = ?2, uid = ?3, graph_id = NULL WHERE id = ?1",
         rusqlite::params![id, dest_mailbox, -id],
     )
     .context("moving the message row")?;
@@ -1728,6 +1731,7 @@ mod tests {
             source_mailbox: "INBOX".to_string(),
             dest_mailbox: "Archive".to_string(),
             copy: None,
+            graph_copy: None,
         }
     }
 
@@ -2160,6 +2164,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             read: true,
             copy: None,
+            graph_copy: None,
         };
         apply_set_read(&fx.store, "alice", id, true, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_read());
@@ -2195,6 +2200,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
             copy: None,
+            graph_copy: None,
         };
         apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().is_none());
@@ -2295,6 +2301,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
             copy: None,
+            graph_copy: None,
         };
         let (_prev, op_id) = apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain)
             .unwrap()
@@ -2457,6 +2464,7 @@ mod tests {
             message_id: "<inbox-2@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
             copy: None,
+            graph_copy: None,
         };
         apply_delete(&fx.store, &fx.blobs, "alice", deleted, delete, caller)
             .unwrap()
@@ -2466,6 +2474,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             read: true,
             copy: None,
+            graph_copy: None,
         };
         apply_set_read(&fx.store, "alice", read_one, true, read_op, caller)
             .unwrap()
@@ -2637,6 +2646,7 @@ mod tests {
             source_mailbox: "Archive".to_string(),
             dest_mailbox: "Receipts".to_string(),
             copy: None,
+            graph_copy: None,
         };
         apply_move(
             &fx.store,
@@ -2896,6 +2906,7 @@ mod tests {
             mailbox: "Archive".to_string(),
             read: true,
             copy: None,
+            graph_copy: None,
         };
         let mark_read = apply_set_read(&fx.store, "alice", id, true, read_op, Runner::Drain)
             .unwrap()
@@ -2910,6 +2921,7 @@ mod tests {
                 source_mailbox: "Archive".to_string(),
                 dest_mailbox: "Receipts".to_string(),
                 copy: None,
+                graph_copy: None,
             },
             Runner::Drain,
         )
@@ -3636,6 +3648,7 @@ mod tests {
                 message_id: "<x@x>".to_string(),
                 source_mailbox: "INBOX".to_string(),
                 copy: None,
+                graph_copy: None,
             },
             Runner::Drain
         )

@@ -163,6 +163,7 @@ fn departure_of(op: &ServerOp) -> Option<Leaving> {
             message_id,
             source_mailbox,
             copy,
+            ..
         } => Some(Leaving {
             source: source_mailbox.clone(),
             message_id: message_id.clone(),
@@ -297,6 +298,7 @@ mod tests {
             source_mailbox: from.to_string(),
             dest_mailbox: "Archive".to_string(),
             copy: None,
+            graph_copy: None,
         }
     }
 
@@ -349,6 +351,7 @@ mod tests {
                 message_id: "<d@x>".to_string(),
                 source_mailbox: "Archive".to_string(),
                 copy: None,
+                graph_copy: None,
             },
         );
         record(&store, "bob", &move_op("<b@x>", "INBOX"));
@@ -372,6 +375,7 @@ mod tests {
                 mailbox: "INBOX".to_string(),
                 read: true,
                 copy: None,
+                graph_copy: None,
             },
         );
         assert!(!watch.left("INBOX", "<a@x>"));
@@ -456,6 +460,7 @@ mod tests {
                     uidvalidity: Some(7),
                     siblings: Vec::new(),
                 }),
+                graph_copy: None,
             },
         );
         // The folder still lists UID 10, so UID 11 is a second copy.
@@ -501,6 +506,7 @@ mod tests {
                     uidvalidity: Some(7),
                     siblings: vec![30],
                 }),
+                graph_copy: None,
             },
         );
         let renumbered: HashSet<u32> = [25].into();

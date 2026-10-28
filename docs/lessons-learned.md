@@ -798,6 +798,14 @@ A miss is a converged replay only when a completed run explains it; for a move t
 The departures watch had to learn the same fallback (PERSO-246): it withheld only the op's own UID, so a sync listing the renumbered copy wrote it as a new row until the move landed and a later pass pruned it.
 Recording the UID the server half acted on would not have closed it, because that half may resolve the copy after the ingest that asks, and is not even running when the op is merely owed; the watch has to answer from the listing the pass already holds, by the rule the server half will apply to the same folder: the op's UID is gone, and the copy is not one listed beside a twin row's.
 
+## The stale-UID fallback does not carry over to Graph, because Graph twins have no rows
+
+The Graph ops looked a message up by `Message-ID` across the whole mailbox and acted on the first item listed, so a delete from the inbox could take the copy filed in Archive (PERSO-245); the fix looks in the op's own folder and names the row's item by its Graph id.
+The IMAP rule for a stale handle, take the folder's one copy when no twin row stands for it, is wrong on Graph: the store keys a Graph row on a hash of the `Message-ID`, so a folder holds one row per message and a twin has no row, no id in `siblings`, and looks exactly like the row's own copy under a new id.
+A replay of a move that landed would then move the twin too, the PERSO-236 double move, so a Graph op whose id the folder no longer holds acts on nothing, and the next listing rebinds the row.
+Graph's default id changes on every move, so it cannot be recorded once at ingest like a UID: each listing writes it again for every row of the folder, a local move clears it, and an op on a row with none acts only on a folder that holds one copy.
+Immutable ids would survive moves, but asking for them changes the id every listing, download and attachment request returns and takes, which is not a change to make without a live account to try it on.
+
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 
 The durable queue's failure policy is "roll the local half back to the server's truth and park the row as `failed`", which is right for a move or a read toggle: the user asserted a wish, the server refused it, so the wish is withdrawn.

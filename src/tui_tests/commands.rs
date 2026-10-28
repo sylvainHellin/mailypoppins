@@ -212,6 +212,7 @@ fn an_open_marks_the_row_it_resolved_and_queues_one_server_op() {
             read: true,
             // The row's own server copy (PERSO-238).
             copy: crate::ops::ServerCopy::of_row(1, None),
+            graph_copy: None,
         }
     );
     drop(store);

@@ -814,6 +814,7 @@ mod tests {
                     source_mailbox,
                     dest_mailbox,
                     copy,
+                    ..
                 } = op
                 else {
                     anyhow::bail!("only moves here");
