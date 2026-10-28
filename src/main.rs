@@ -506,10 +506,20 @@ Examples:
         #[command(subcommand)]
         action: SignatureAction,
     },
-    /// Calendar / iMIP invite operations
+    /// The calendar: list, view, show and hide calendars, rebuild
     Calendar {
         #[command(subcommand)]
         action: CalendarAction,
+    },
+    /// One calendar event: show it, answer it
+    #[command(after_help = "\
+Examples:
+  mp event show AAMkADev2 -A evoqs
+  mp event respond AAMkADev2 accept --comment \"See you there\" -A evoqs
+  mp event respond imip:42 decline -A perso")]
+    Event {
+        #[command(subcommand)]
+        action: EventAction,
     },
     /// Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
     #[command(after_help = "\
@@ -717,49 +727,214 @@ enum HooksAction {
     },
 }
 
-/// Organizer-side calendar operations (#0030).
+/// The calendar: the server calendar of an account with a
+/// `calendar_backend` and the invitation mails of every account (PERSO-200),
+/// and the organizer-side reply fold (#0030).
 #[derive(Subcommand)]
 enum CalendarAction {
+    /// List the calendars: account, name, id, backend, visibility, colour
+    ///
+    /// Every account unless -A names one. An account with a server calendar
+    /// lists the calendars of its last sync; an account holding invitation
+    /// mails lists its `imip` calendar too.
+    List {
+        /// Print the `calendar.list` answer as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the events of an agenda, a day or a week
+    #[command(after_help = "\
+Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
+today. The agenda runs from --on (default today) through 14 days later, or
+from --from through --to; a day is --on; a week is the ISO week holding --on.
+Each event line carries your answer: \u{2713} accepted, ~ tentative, \u{2717} declined,
+? not answered, \u{2605} organizer.
+
+Examples:
+  mp calendar view
+  mp calendar view week --on +7
+  mp calendar view day --on tomorrow -A evoqs
+  mp calendar view --from 2026-08-01 --to 2026-08-31 --json")]
+    View {
+        /// The layout
+        #[arg(value_enum, default_value_t = ViewLayout::Agenda)]
+        layout: ViewLayout,
+        /// The day shown, or the first day of the agenda (default today)
+        #[arg(long, value_name = "DATE", allow_hyphen_values = true, conflicts_with_all = ["from", "to"])]
+        on: Option<String>,
+        /// The agenda's first day
+        #[arg(long, value_name = "DATE", allow_hyphen_values = true, requires = "to")]
+        from: Option<String>,
+        /// The agenda's last day, included
+        #[arg(
+            long,
+            value_name = "DATE",
+            allow_hyphen_values = true,
+            requires = "from"
+        )]
+        to: Option<String>,
+        /// Only these accounts (repeatable; default every account)
+        #[arg(
+            short = 'A',
+            long = "account",
+            id = "account",
+            value_name = "ACCOUNT",
+            global = true,
+            action = clap::ArgAction::Append
+        )]
+        accounts: Vec<String>,
+        /// Only these calendar ids, as `mp calendar list` prints them (repeatable)
+        #[arg(long = "calendar", value_name = "ID")]
+        calendars: Vec<String>,
+        /// Include the hidden calendars' events
+        #[arg(long)]
+        hidden: bool,
+        /// The IANA zone to read the times in (default the local zone)
+        #[arg(long, value_name = "ZONE")]
+        zone: Option<String>,
+        /// Print the `calendar.view` answer as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a calendar's events visible in the views again
+    Show {
+        /// The calendar id, as `mp calendar list` prints it
+        #[arg(value_name = "CALENDAR")]
+        calendar: String,
+    },
+    /// Hide a calendar's events from the views (a local preference)
+    Hide {
+        /// The calendar id, as `mp calendar list` prints it
+        #[arg(value_name = "CALENDAR")]
+        calendar: String,
+    },
     /// Report what the stored attendee REPLY emails resolve on the stored
-    /// invitations. Writes nothing: attendee statuses are derived from the
+    /// invitations, and resync the server calendar of an account that has
+    /// one. The fold writes nothing: attendee statuses are derived from the
     /// `invite.ics` payloads wherever they are displayed, so there is no
     /// cached copy to rebuild. Covers every configured account unless `-A`
     /// names one.
     Rebuild,
 }
 
+/// The layouts of `mp calendar view`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ViewLayout {
+    /// Day by day, the days with events
+    Agenda,
+    /// One day
+    Day,
+    /// The ISO week, Monday to Sunday
+    Week,
+}
+
+impl From<ViewLayout> for mailypoppins::calendar_cmd::Layout {
+    fn from(layout: ViewLayout) -> Self {
+        match layout {
+            ViewLayout::Agenda => Self::Agenda,
+            ViewLayout::Day => Self::Day,
+            ViewLayout::Week => Self::Week,
+        }
+    }
+}
+
+/// One event of the calendar (PERSO-200), addressed by the id
+/// `mp calendar view --json` prints.
+#[derive(Subcommand)]
+enum EventAction {
+    /// Show one event: when, where, organizer, attendees, your answer
+    Show {
+        /// The event id: a server id, or imip:<row_id> for an invitation mail's event
+        #[arg(value_name = "EVENT")]
+        event: String,
+        /// Print the `event.get` answer as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer an invitation: through the server for a server event, by iMIP
+    /// reply for an invitation mail's event
+    Respond {
+        /// The event id: a server id, or imip:<row_id> for an invitation mail's event
+        #[arg(value_name = "EVENT")]
+        event: String,
+        /// The answer
+        #[arg(value_enum)]
+        response: EventResponse,
+        #[command(flatten)]
+        answer: AnswerFlags,
+        /// Print the settled `event.respond` result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The three answers to an invitation.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum EventResponse {
+    Accept,
+    Tentative,
+    Decline,
+}
+
+impl EventResponse {
+    /// The word `event.respond` takes.
+    fn word(self) -> &'static str {
+        match self {
+            EventResponse::Accept => "accept",
+            EventResponse::Tentative => "tentative",
+            EventResponse::Decline => "decline",
+        }
+    }
+
+    /// The verb of the reply's subject, `Accepted: <summary>`.
+    fn verb(self) -> &'static str {
+        match self {
+            EventResponse::Accept => "Accepted",
+            EventResponse::Tentative => "Tentative",
+            EventResponse::Decline => "Declined",
+        }
+    }
+}
+
+/// What an answer carries besides its word, on `mp event respond` and
+/// `mp invite`.
+#[derive(clap::Args, Clone, Debug, Default)]
+struct AnswerFlags {
+    /// A comment for the organizer
+    #[arg(long, value_name = "TEXT")]
+    comment: Option<String>,
+    /// Record the answer without telling the organizer (server events only:
+    /// an iMIP reply is the answer itself)
+    #[arg(long)]
+    no_send_response: bool,
+}
+
 /// RSVP actions for `mp invite <accept|tentative|decline> <selector>`.
 /// Whole-series only (v1); the target is a received message whose store row
-/// carries an `invite.ics` blob.
+/// carries an `invite.ics` blob. The answer is `event.respond`'s: through the
+/// server when the account's calendar holds the invitation's event, else the
+/// iMIP reply.
 #[derive(Subcommand)]
 enum InviteAction {
     /// Accept the invitation (PARTSTAT=ACCEPTED)
-    Accept {
-        /// Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
-        #[arg(value_name = "SELECTOR")]
-        selector: String,
-        /// Mailbox to resolve the selector in
-        #[arg(long)]
-        mailbox: Option<String>,
-    },
+    Accept(InviteAnswer),
     /// Tentatively accept the invitation (PARTSTAT=TENTATIVE)
-    Tentative {
-        /// Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
-        #[arg(value_name = "SELECTOR")]
-        selector: String,
-        /// Mailbox to resolve the selector in
-        #[arg(long)]
-        mailbox: Option<String>,
-    },
+    Tentative(InviteAnswer),
     /// Decline the invitation (PARTSTAT=DECLINED)
-    Decline {
-        /// Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
-        #[arg(value_name = "SELECTOR")]
-        selector: String,
-        /// Mailbox to resolve the selector in
-        #[arg(long)]
-        mailbox: Option<String>,
-    },
+    Decline(InviteAnswer),
+}
+
+/// The invitation `mp invite` answers, and how.
+#[derive(clap::Args)]
+struct InviteAnswer {
+    /// Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
+    #[arg(value_name = "SELECTOR")]
+    selector: String,
+    /// Mailbox to resolve the selector in
+    #[arg(long)]
+    mailbox: Option<String>,
+    #[command(flatten)]
+    answer: AnswerFlags,
 }
 
 #[derive(Subcommand)]
@@ -3199,6 +3374,9 @@ async fn routed_calendar_rebuild(accounts: &[String]) -> Result<()> {
             count("replies_seen"),
             count("cancelled"),
         );
+        if let Some(server) = result.get("server") {
+            mailypoppins::calendar_cmd::print_server_report(server);
+        }
     }
     Ok(())
 }
@@ -3440,32 +3618,299 @@ async fn routed_hooks_replay(
     Ok(())
 }
 
-/// `mp invite accept|tentative|decline`: the reply is built, submitted and
-/// filed by the daemon; the one line it prints is this process's.
+/// `mp invite accept|tentative|decline`: the answer is `event.respond`'s,
+/// through the server when the account's calendar holds the invitation's
+/// event (`message.invite`'s `event_id`, PERSO-200), else the iMIP reply the
+/// daemon builds, submits and files; the one line it prints is this
+/// process's.
+///
+/// The selector resolves first: a Graph account answers through its server
+/// calendar, so `ANO-4` is now the refusal of a Graph account's invitation
+/// with no server event to answer, which `event.respond` raises.
 async fn routed_rsvp(
-    account: &str,
-    selector: &str,
-    mailbox: Option<&str>,
-    response: &str,
+    account_config: &AccountConfig,
+    invite: &InviteAnswer,
+    response: EventResponse,
 ) -> Result<()> {
+    let account = account_config.name.as_str();
     let mut connection = operation_session().await;
-    let params = serde_json::json!({
-        "account": account,
-        "selector": selector,
-        "mailbox": mailbox,
-        "response": response,
-    });
-    let result = run_admin_operation(&mut connection, "calendar.rsvp", params, account).await?;
-    let organizer = wire_str(&result["organizer"]).to_string();
-    if !result["delivered"].as_bool().unwrap_or(false) {
+    let (selector, card) = fetch_on_miss(
+        account_config,
+        &invite.selector,
+        invite.mailbox.as_deref(),
+        StandIn::Allowed,
+        async |selector: &str, mailbox: Option<&str>| {
+            let mut params = serde_json::json!({"account": account, "selector": selector});
+            if let Some(mailbox) = mailbox {
+                params["mailbox"] = serde_json::json!(mailbox);
+            }
+            let card = daemon_try_call(&mut connection, "message.invite", params)
+                .await
+                .map_err(|e| refusal(account, e))?;
+            Ok((selector.to_string(), card))
+        },
+    )
+    .await?;
+    let row_id = card["row_id"].as_i64();
+    let event = match (card["event"].is_null(), card["event_id"].as_str(), row_id) {
+        (true, _, _) | (false, None, None) => {
+            bail!("{selector} carries no invitation to reply to")
+        }
+        (false, Some(server), _) => server.to_string(),
+        (false, None, Some(row_id)) => mailypoppins::calendar_view::imip_event_id(row_id),
+    };
+    let shown = event_get(&mut connection, account, &event).await?;
+    let settled = respond(&mut connection, account, &event, response, &invite.answer).await?;
+    let organizer = shown
+        .organizer
+        .as_ref()
+        .map(|organizer| organizer.email.clone())
+        .unwrap_or_else(|| "the organizer".to_string());
+    if settled.via == "imip" && !settled.delivered {
         return Err(anyhow!("Failed to send the RSVP to {organizer}"));
     }
-    println!(
-        "{} {} \u{2014} replied to {}",
-        "\u{2713}".green(),
-        wire_str(&result["subject"]),
-        organizer
+    let summary = if shown.summary.is_empty() {
+        "(no subject)"
+    } else {
+        &shown.summary
+    };
+    if settled.delivered {
+        println!(
+            "{} {}: {} \u{2014} replied to {}",
+            "\u{2713}".green(),
+            response.verb(),
+            summary,
+            organizer
+        );
+    } else {
+        println!(
+            "{} {}: {}, without telling {}",
+            "\u{2713}".green(),
+            response.verb(),
+            summary,
+            organizer
+        );
+    }
+    Ok(())
+}
+
+/// `event.get`, decoded.
+async fn event_get(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    event: &str,
+) -> Result<mp_protocol::calendar::CalendarEvent> {
+    let answer = daemon_try_call(
+        connection,
+        "event.get",
+        serde_json::json!({"account": account, "event": event}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    let answer: mp_protocol::calendar::EventGetResult =
+        serde_json::from_value(answer).context("reading the daemon's event.get answer")?;
+    Ok(answer.event)
+}
+
+/// `event.respond`, run to its settled result.
+async fn respond(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    event: &str,
+    response: EventResponse,
+    answer: &AnswerFlags,
+) -> Result<mp_protocol::calendar::EventRespondResult> {
+    let params = mp_client::queries::event_respond_params(
+        account,
+        event,
+        response.word(),
+        answer.comment.as_deref(),
+        !answer.no_send_response,
     );
+    let result = run_admin_operation(connection, "event.respond", params, account).await?;
+    serde_json::from_value(result).context("reading the settled event.respond result")
+}
+
+/// `calendar.list` for one account or every one, decoded.
+async fn calendar_list(
+    connection: &mut mp_client::Connection,
+    account: Option<&str>,
+) -> Result<serde_json::Value> {
+    let params = match account {
+        Some(account) => serde_json::json!({"account": account}),
+        None => serde_json::json!({}),
+    };
+    daemon_try_call(connection, "calendar.list", params)
+        .await
+        .map_err(|e| refusal(account.unwrap_or_default(), e))
+}
+
+fn calendar_infos(answer: &serde_json::Value) -> Result<Vec<mp_protocol::calendar::CalendarInfo>> {
+    let list: mp_protocol::calendar::CalendarListResult = serde_json::from_value(answer.clone())
+        .context("reading the daemon's calendar.list answer")?;
+    Ok(list.calendars)
+}
+
+/// `mp calendar list`.
+async fn routed_calendar_list(account: Option<&str>, json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let answer = calendar_list(&mut connection, account).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    print!(
+        "{}",
+        mailypoppins::calendar_cmd::render_calendars(&calendar_infos(&answer)?)
+    );
+    Ok(())
+}
+
+/// What `mp calendar view` was asked, before the dates are read.
+struct ViewRequest {
+    layout: mailypoppins::calendar_cmd::Layout,
+    on: Option<String>,
+    range: Option<(String, String)>,
+    accounts: Vec<String>,
+    calendars: Vec<String>,
+    hidden: bool,
+    zone: Option<String>,
+}
+
+/// The zone `--zone` names, else the local one.
+fn viewer_zone(zone: Option<&str>) -> Result<chrono_tz::Tz> {
+    match zone {
+        Some(name) => mailypoppins::calendar_view::parse_zone(name).ok_or_else(|| {
+            anyhow!("unknown time zone {name:?}; use an IANA name like Europe/Berlin")
+        }),
+        None => Ok(mailypoppins::calendar_view::local_zone()),
+    }
+}
+
+/// `mp calendar view`: the days are read here, in the viewer's zone, and the
+/// events are `calendar.view`'s.
+async fn routed_calendar_view(request: ViewRequest, json: bool) -> Result<()> {
+    use mailypoppins::calendar_cmd as cal;
+    let zone = viewer_zone(request.zone.as_deref())?;
+    let today = chrono::Utc::now().with_timezone(&zone).date_naive();
+    let date = |raw: &str| cal::parse_date(raw, today).map_err(|e| anyhow!(e));
+    let on = request.on.as_deref().map(date).transpose()?;
+    let range = match &request.range {
+        Some((from, to)) => Some((date(from)?, date(to)?)),
+        None => None,
+    };
+    let days = cal::view_days(request.layout, on, range, today).map_err(|e| anyhow!(e))?;
+    let params = cal::view_params(
+        days,
+        zone,
+        (!request.accounts.is_empty()).then_some(request.accounts.clone()),
+        (!request.calendars.is_empty()).then_some(request.calendars),
+        request.hidden,
+    );
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call(
+        &mut connection,
+        "calendar.view",
+        serde_json::to_value(&params)?,
+    )
+    .await
+    .map_err(|e| refusal(request.accounts.first().map_or("", String::as_str), e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let view: mp_protocol::calendar::CalendarViewResult =
+        serde_json::from_value(answer).context("reading the daemon's calendar.view answer")?;
+    let names = match request.accounts.as_slice() {
+        [one] => calendar_list(&mut connection, Some(one)).await?,
+        _ => calendar_list(&mut connection, None).await?,
+    };
+    let names = cal::calendar_names(&calendar_infos(&names)?);
+    print!(
+        "{}",
+        cal::render_view(request.layout, days, today, zone, &view.events, &names)
+    );
+    Ok(())
+}
+
+/// `mp calendar show|hide`.
+async fn routed_calendar_visibility(account: &str, calendar: &str, visible: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    daemon_try_call(
+        &mut connection,
+        "calendar.set_visibility",
+        serde_json::json!({"account": account, "calendar": calendar, "visible": visible}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    println!(
+        "{} {account}/{calendar} is {}",
+        "\u{2713}".green(),
+        if visible { "visible" } else { "hidden" }
+    );
+    Ok(())
+}
+
+/// `mp event show`.
+async fn routed_event_show(account: &str, event: &str, json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    if json {
+        let answer = daemon_try_call(
+            &mut connection,
+            "event.get",
+            serde_json::json!({"account": account, "event": event}),
+        )
+        .await
+        .map_err(|e| refusal(account, e))?;
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let shown = event_get(&mut connection, account, event).await?;
+    let names = calendar_list(&mut connection, Some(account)).await?;
+    let names = mailypoppins::calendar_cmd::calendar_names(&calendar_infos(&names)?);
+    print!(
+        "{}",
+        mailypoppins::calendar_cmd::render_event(
+            &shown,
+            mailypoppins::calendar_view::local_zone(),
+            &names
+        )
+    );
+    Ok(())
+}
+
+/// `mp event respond`: the settled answer, and how it reached the organizer.
+async fn routed_event_respond(
+    account: &str,
+    event: &str,
+    response: EventResponse,
+    answer: &AnswerFlags,
+    json: bool,
+) -> Result<()> {
+    let mut connection = operation_session().await;
+    let settled = respond(&mut connection, account, event, response, answer).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&settled)?);
+        return Ok(());
+    }
+    let how = match (settled.via.as_str(), settled.delivered) {
+        ("imip", true) => "iMIP reply sent to the organizer",
+        ("imip", false) => "the iMIP reply was not delivered",
+        (_, true) => "through the server, organizer told",
+        (_, false) => "through the server, organizer not told",
+    };
+    println!(
+        "{} {} {}: {how}",
+        "\u{2713}".green(),
+        response.verb(),
+        settled.event
+    );
+    if let Some(comment) = settled.comment.as_deref() {
+        println!("  comment: {comment}");
+    }
+    if settled.via == "imip" && !settled.delivered {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -4698,24 +5143,16 @@ async fn main() -> Result<()> {
         // daemon's from P4-U14, `ANO-4`'s refusal included; the one line the
         // command prints is still this process's.
         Some(Commands::Invite { action }) => {
-            let (selector, mailbox, response) = match action {
-                InviteAction::Accept { selector, mailbox } => (selector, mailbox, "accept"),
-                InviteAction::Tentative { selector, mailbox } => (selector, mailbox, "tentative"),
-                InviteAction::Decline { selector, mailbox } => (selector, mailbox, "decline"),
+            let (invite, response) = match action {
+                InviteAction::Accept(invite) => (invite, EventResponse::Accept),
+                InviteAction::Tentative(invite) => (invite, EventResponse::Tentative),
+                InviteAction::Decline(invite) => (invite, EventResponse::Decline),
             };
             // The invitation's own account answers, as for every other
             // received selector: a cross-account selector names its account.
-            let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            fetch_on_miss(
-                &account_config,
-                &selector,
-                mailbox.as_deref(),
-                StandIn::Allowed,
-                async |selector: &str, mailbox: Option<&str>| {
-                    routed_rsvp(&account_config.name, selector, mailbox, response).await
-                },
-            )
-            .await?;
+            let account_config =
+                account_for_selector(&invite.selector, &account_config, &global_config)?;
+            routed_rsvp(&account_config, &invite, response).await?;
         }
 
         Some(Commands::ListMailboxes { json }) => {
@@ -5191,7 +5628,75 @@ async fn main() -> Result<()> {
                 let acct = cli.account.clone();
                 routed_calendar_rebuild(&accounts_for(&global_config, acct.as_deref())?).await?;
             }
+            CalendarAction::List { json } => {
+                let account = match cli.account.as_deref() {
+                    Some(named) => Some(
+                        pick_account_named(&global_config, Some(named))?
+                            .name
+                            .clone(),
+                    ),
+                    None => None,
+                };
+                routed_calendar_list(account.as_deref(), json).await?;
+            }
+            CalendarAction::View {
+                layout,
+                on,
+                from,
+                to,
+                accounts,
+                calendars,
+                hidden,
+                zone,
+                json,
+            } => {
+                let accounts = accounts
+                    .iter()
+                    .map(|named| {
+                        Ok(pick_account_named(&global_config, Some(named))?
+                            .name
+                            .clone())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let request = ViewRequest {
+                    layout: layout.into(),
+                    on,
+                    range: from.zip(to),
+                    accounts,
+                    calendars,
+                    hidden,
+                    zone,
+                };
+                routed_calendar_view(request, json).await?;
+            }
+            CalendarAction::Show { calendar } => {
+                let account = pick_account_named(&global_config, cli.account.as_deref())?;
+                routed_calendar_visibility(&account.name, &calendar, true).await?;
+            }
+            CalendarAction::Hide { calendar } => {
+                let account = pick_account_named(&global_config, cli.account.as_deref())?;
+                routed_calendar_visibility(&account.name, &calendar, false).await?;
+            }
         },
+
+        Some(Commands::Event { action }) => {
+            let account = pick_account_named(&global_config, cli.account.as_deref())?
+                .name
+                .clone();
+            match action {
+                EventAction::Show { event, json } => {
+                    routed_event_show(&account, &event, json).await?;
+                }
+                EventAction::Respond {
+                    event,
+                    response,
+                    answer,
+                    json,
+                } => {
+                    routed_event_respond(&account, &event, response, &answer, json).await?;
+                }
+            }
+        }
 
         Some(Commands::Hooks { action }) => {
             let acct = cli.account.clone();
@@ -5589,6 +6094,10 @@ mod tests {
             &["mp", "contacts", "search", "ada", "-A", "x"][..],
             &["mp", "contacts", "rebuild", "--account", "x"][..],
             &["mp", "calendar", "rebuild", "-A", "x"][..],
+            &["mp", "calendar", "list", "-A", "x"][..],
+            &["mp", "calendar", "hide", "cal-1", "-A", "x"][..],
+            &["mp", "event", "show", "ev-1", "-A", "x"][..],
+            &["mp", "event", "respond", "ev-1", "accept", "-A", "x"][..],
             &["mp", "cutover", "--dry-run", "-A", "x"][..],
             &["mp", "config", "set-password", "smtp", "-A", "x"][..],
             &["mp", "config", "oauth2-login", "--account", "x"][..],
@@ -5597,5 +6106,31 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{args:?} must parse: {e}"));
             assert_eq!(cli.account.as_deref(), Some("x"), "{args:?}");
         }
+    }
+
+    /// `mp calendar view` takes `-A` more than once, before or after the
+    /// subcommand, and every account it names reaches the view.
+    #[test]
+    fn calendar_view_takes_several_accounts() {
+        use clap::Parser;
+        let accounts = |args: &[&str]| match super::Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("{args:?} must parse: {e}"))
+            .command
+        {
+            Some(super::Commands::Calendar {
+                action: super::CalendarAction::View { accounts, .. },
+            }) => accounts,
+            _ => panic!("{args:?} is a calendar view"),
+        };
+        assert_eq!(
+            accounts(&["mp", "calendar", "view", "-A", "a", "-A", "b"]),
+            ["a", "b"]
+        );
+        assert_eq!(accounts(&["mp", "-A", "a", "calendar", "view"]), ["a"]);
+        assert!(accounts(&["mp", "calendar", "view", "week"]).is_empty());
+        assert_eq!(
+            accounts(&["mp", "calendar", "view", "day", "--on", "-1", "-A", "a"]),
+            ["a"]
+        );
     }
 }

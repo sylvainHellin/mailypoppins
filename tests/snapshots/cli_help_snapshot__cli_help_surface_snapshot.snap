@@ -35,7 +35,8 @@ Commands:
   config          Manage configuration
   contacts        Contact index operations
   signature       Manage the signatures drafts carry, and each account's default
-  calendar        Calendar / iMIP invite operations
+  calendar        The calendar: list, view, show and hide calendars, rebuild
+  event           One calendar event: show it, answer it
   hooks           Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
   outbox          Inspect and unblock the durable send queue
   store           Local store maintenance (retention garbage collection)
@@ -234,6 +235,8 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --comment <TEXT>     A comment for the organizer
+      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -247,6 +250,8 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --comment <TEXT>     A comment for the organizer
+      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -260,6 +265,8 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --comment <TEXT>     A comment for the organizer
+      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -756,24 +763,173 @@ Options:
   -h, --help               Print help
 
 $ mp calendar --help
-Calendar / iMIP invite operations
+The calendar: list, view, show and hide calendars, rebuild
 
 Usage: mp calendar [OPTIONS] <COMMAND>
 
 Commands:
-  rebuild  Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
+  list     List the calendars: account, name, id, backend, visibility, colour
+  view     Show the events of an agenda, a day or a week
+  show     Make a calendar's events visible in the views again
+  hide     Hide a calendar's events from the views (a local preference)
+  rebuild  Report what the stored attendee REPLY emails resolve on the stored invitations, and resync the server calendar of an account that has one. The fold writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
   help     Print this message or the help of the given subcommand(s)
 
 Options:
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
+$ mp calendar list --help
+List the calendars: account, name, id, backend, visibility, colour
+
+Every account unless -A names one. An account with a server calendar lists the calendars of its last sync; an account holding invitation mails lists its `imip` calendar too.
+
+Usage: mp calendar list [OPTIONS]
+
+Options:
+      --json
+          Print the `calendar.list` answer as JSON on stdout
+
+  -A, --account <ACCOUNT>
+          Account to use
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+$ mp calendar view --help
+Show the events of an agenda, a day or a week
+
+Usage: mp calendar view [OPTIONS] [LAYOUT]
+
+Arguments:
+  [LAYOUT]
+          The layout
+
+          Possible values:
+          - agenda: Day by day, the days with events
+          - day:    One day
+          - week:   The ISO week, Monday to Sunday
+          
+          [default: agenda]
+
+Options:
+      --on <DATE>
+          The day shown, or the first day of the agenda (default today)
+
+      --from <DATE>
+          The agenda's first day
+
+      --to <DATE>
+          The agenda's last day, included
+
+  -A, --account <ACCOUNT>
+          Only these accounts (repeatable; default every account)
+
+      --calendar <ID>
+          Only these calendar ids, as `mp calendar list` prints them (repeatable)
+
+      --hidden
+          Include the hidden calendars' events
+
+      --zone <ZONE>
+          The IANA zone to read the times in (default the local zone)
+
+      --json
+          Print the `calendar.view` answer as JSON on stdout
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
+today. The agenda runs from --on (default today) through 14 days later, or
+from --from through --to; a day is --on; a week is the ISO week holding --on.
+Each event line carries your answer: ✓ accepted, ~ tentative, ✗ declined,
+? not answered, ★ organizer.
+
+Examples:
+  mp calendar view
+  mp calendar view week --on +7
+  mp calendar view day --on tomorrow -A evoqs
+  mp calendar view --from 2026-08-01 --to 2026-08-31 --json
+
+$ mp calendar show --help
+Make a calendar's events visible in the views again
+
+Usage: mp calendar show [OPTIONS] <CALENDAR>
+
+Arguments:
+  <CALENDAR>  The calendar id, as `mp calendar list` prints it
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp calendar hide --help
+Hide a calendar's events from the views (a local preference)
+
+Usage: mp calendar hide [OPTIONS] <CALENDAR>
+
+Arguments:
+  <CALENDAR>  The calendar id, as `mp calendar list` prints it
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
 $ mp calendar rebuild --help
-Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
+Report what the stored attendee REPLY emails resolve on the stored invitations, and resync the server calendar of an account that has one. The fold writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
 
 Usage: mp calendar rebuild [OPTIONS]
 
 Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp event --help
+One calendar event: show it, answer it
+
+Usage: mp event [OPTIONS] <COMMAND>
+
+Commands:
+  show     Show one event: when, where, organizer, attendees, your answer
+  respond  Answer an invitation: through the server for a server event, by iMIP reply for an invitation mail's event
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+Examples:
+  mp event show AAMkADev2 -A evoqs
+  mp event respond AAMkADev2 accept --comment "See you there" -A evoqs
+  mp event respond imip:42 decline -A perso
+
+$ mp event show --help
+Show one event: when, where, organizer, attendees, your answer
+
+Usage: mp event show [OPTIONS] <EVENT>
+
+Arguments:
+  <EVENT>  The event id: a server id, or imip:<row_id> for an invitation mail's event
+
+Options:
+      --json               Print the `event.get` answer as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp event respond --help
+Answer an invitation: through the server for a server event, by iMIP reply for an invitation mail's event
+
+Usage: mp event respond [OPTIONS] <EVENT> <RESPONSE>
+
+Arguments:
+  <EVENT>     The event id: a server id, or imip:<row_id> for an invitation mail's event
+  <RESPONSE>  The answer [possible values: accept, tentative, decline]
+
+Options:
+      --comment <TEXT>     A comment for the organizer
+      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --json               Print the settled `event.respond` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 

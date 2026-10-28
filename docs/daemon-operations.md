@@ -120,7 +120,12 @@ The table is what routes and through what:
 | `mp contacts stats [--account]` | `contact.stats` | P4-U14 |
 | `mp contacts rebuild [--account]` | one `contact.rebuild` per account, in configuration order | P4-U14 |
 | `mp calendar rebuild [--account]` | one `calendar.rebuild` per account, in configuration order | P4-U14 |
-| `mp invite accept\|tentative\|decline <selector> [--mailbox]` | `calendar.rsvp` | P4-U14 |
+| `mp calendar list [--account] [--json]` | `calendar.list` | PERSO-200 |
+| `mp calendar view [agenda\|day\|week] [--on\|--from --to] [-A ...] [--calendar ...] [--hidden] [--zone] [--json]` | `calendar.view` over the days read in the client, then `calendar.list` for the calendar names | PERSO-200 |
+| `mp calendar show\|hide <calendar> [--account]` | `calendar.set_visibility` | PERSO-200 |
+| `mp event show <event> [--account] [--json]` | `event.get`, then `calendar.list` for the calendar name | PERSO-200 |
+| `mp event respond <event> <accept\|tentative\|decline> [--comment] [--no-send-response] [--json]` | `event.respond` | PERSO-200 |
+| `mp invite accept\|tentative\|decline <selector> [--mailbox] [--comment] [--no-send-response]` | `message.invite`, then `event.get` and `event.respond` on its `event_id`, else on `imip:<row_id>` | P4-U14, PERSO-200 |
 | `mp store gc [--dry-run] [--force] [--all-accounts]` | one `diagnostic.store_gc` per account | P4-U14 |
 | `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
 | `mp config show` | `config.get`, `account.credentials` | P4-U14, 2026-10-22 |
