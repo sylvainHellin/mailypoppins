@@ -1,9 +1,11 @@
 mod bootstrap;
+mod calendar;
 pub(crate) mod jump_date;
 mod keymap;
 mod keys;
 mod types;
 
+pub use calendar::{day_part, DayPart};
 pub use keymap::{
     dump_json, dump_markdown, help_sections, hint_bindings, leader_is_view_agnostic,
     palette_actions, palette_match_text, prefix_continuations, resolve, Guard, KeyAction,
@@ -30,8 +32,9 @@ pub struct App {
     /// Contacts view state (#0033): read-only list + fuzzy search + detail
     /// pane over the local contacts index. Loaded lazily on first switch.
     pub contacts_view: ContactsView,
-    /// Calendar view state (#0034): a local-first agenda over the events the
-    /// iMIP traffic already produced. Loaded lazily on first switch.
+    /// Calendar view state (#0034, PERSO-200): the events of every account
+    /// `calendar.view` answers, in an agenda, a day or a week layout. Loaded
+    /// lazily on first switch.
     pub calendar_view: CalendarView,
     pub running: bool,
     pub terminal_width: u16,
@@ -727,121 +730,6 @@ impl App {
         index.contacts.get(addr)
     }
 
-    // -- Calendar view (#0034) -------------------------------------------
-
-    /// Lazily build the active account's agenda the first time the Calendar
-    /// view is shown. One indexed query plus one small blob read per invite
-    /// row (#0038 scope item 6), so it runs synchronously on the UI thread
-    /// like the Contacts cache load, and never at startup.
-    pub fn ensure_calendar_loaded(&mut self) {
-        if self.calendar_view.loaded {
-            return;
-        }
-        self.calendar_view.events = self.load_calendar_events();
-        self.calendar_view.loaded = true;
-        self.calendar_view.list_index = 0;
-        self.recompute_calendar_visible();
-    }
-
-    /// Build the agenda for the active account, or an empty agenda when there
-    /// is no account, no session, or nothing invited.
-    ///
-    /// One `calendar.events` on the session the `App` holds (P5-U10), and
-    /// nothing else: an `App` with no session shows an empty Calendar view
-    /// rather than reading the store behind the daemon's back (#0126,
-    /// P5-U10e). The store-backed build this used to fall back to is the
-    /// oracle the served answer is compared against, and it lives in the crate
-    /// that owns the store now.
-    pub fn load_calendar_events(&self) -> Vec<CalendarEvent> {
-        let account = self.account_config.name.trim().to_string();
-        if account.is_empty() {
-            return Vec::new();
-        }
-        let Some(queries) = self.queries() else {
-            log::warn!("[queries] no daemon session: the agenda of {account} stays empty");
-            return Vec::new();
-        };
-        super::queries::calendar_events(queries, &account).unwrap_or_else(|e| {
-            log::warn!("[queries] decoding the agenda of {account}: {e:#}");
-            Vec::new()
-        })
-    }
-
-    /// Drop the loaded agenda (events are per-account, so the view reloads
-    /// lazily for the newly-active account).
-    pub fn reset_calendar_view(&mut self) {
-        self.calendar_view = CalendarView::default();
-    }
-
-    /// Rebuild the agenda from the store (manual refresh key), picking up
-    /// invites and replies that arrived since it was last built.
-    pub fn refresh_calendar(&mut self) {
-        self.calendar_view.events = self.load_calendar_events();
-        self.calendar_view.loaded = true;
-        self.recompute_calendar_visible();
-        let count = self.calendar_view.visible.len();
-        self.set_status(format!("Calendar refreshed ({count} events)"));
-    }
-
-    /// Rebuild the agenda in place when the view is holding one, and say
-    /// nothing.
-    ///
-    /// The agenda is a snapshot of the invite rows, so a mutation that moved or
-    /// deleted one leaves it wrong until it is rebuilt (#0038 scope item 7).
-    /// This is [`Self::refresh_calendar`] without the status line, because the
-    /// mutation that triggers it has already written its own ("Archiving...")
-    /// and replacing that with a calendar count would hide what is in flight.
-    pub fn rebuild_calendar_if_loaded(&mut self) {
-        if !self.calendar_view.loaded {
-            return;
-        }
-        self.calendar_view.events = self.load_calendar_events();
-        self.recompute_calendar_visible();
-    }
-
-    /// Recompute the visible agenda rows for the current scope, clamping the
-    /// cursor. Upcoming-only by default: an event stays visible until its end
-    /// (or its start, when the end is unknown) is in the past. Undated events
-    /// are always listed — they cannot be placed on the timeline, so hiding
-    /// them would silently lose data.
-    pub fn recompute_calendar_visible(&mut self) {
-        let now = mp_core::calendar::now_sort_key();
-        let show_past = self.calendar_view.show_past;
-        self.calendar_view.visible = self
-            .calendar_view
-            .events
-            .iter()
-            .enumerate()
-            .filter(|(_, ev)| {
-                if show_past || ev.start_sort.is_empty() {
-                    return true;
-                }
-                let horizon = if ev.end_sort.is_empty() {
-                    &ev.start_sort
-                } else {
-                    &ev.end_sort
-                };
-                horizon.as_str() >= now.as_str()
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let len = self.calendar_view.visible.len();
-        if len == 0 {
-            self.calendar_view.list_index = 0;
-        } else if self.calendar_view.list_index >= len {
-            self.calendar_view.list_index = len - 1;
-        }
-    }
-
-    /// The agenda row currently under the Calendar cursor, if any.
-    pub fn selected_event(&self) -> Option<&CalendarEvent> {
-        let idx = *self
-            .calendar_view
-            .visible
-            .get(self.calendar_view.list_index)?;
-        self.calendar_view.events.get(idx)
-    }
-
     pub fn active_kind(&self) -> MailboxKind {
         self.mailboxes
             .get(self.active_mailbox)
@@ -874,6 +762,8 @@ impl App {
             | Overlay::Mailbox(_)
             | Overlay::Signatures(_)
             | Overlay::Rsvp(_)
+            | Overlay::Calendars(_)
+            | Overlay::EventCard(_)
             | Overlay::Thread(_)
             | Overlay::Palette(_)
             | Overlay::Error(_) => None,
@@ -1107,12 +997,8 @@ impl App {
         if self.view == View::Contacts {
             self.ensure_contacts_loaded();
         }
-        // Events are per-account too (#0034): drop them so the agenda reloads
-        // for the newly-active account.
-        self.reset_calendar_view();
-        if self.view == View::Calendar {
-            self.ensure_calendar_loaded();
-        }
+        // The Calendar view shows every account's events (PERSO-200), so an
+        // account switch keeps its layout, its day and its cursor.
         // The cursor identity to restore is the INCOMING account's own,
         // saved when it was last parked -- the outgoing account's path
         // can never appear in this account's list.
@@ -1828,6 +1714,20 @@ impl App {
         let account = self.account_config.name.clone();
         let queries = self.queries()?;
         super::queries::message_invite(queries, &account, msg).unwrap_or_else(|e| {
+            log::warn!("[queries] decoding the invitation on {msg} of {account}: {e:#}");
+            None
+        })
+    }
+
+    /// [`Self::load_message_invite`] with the server event the invitation
+    /// names (PERSO-200), which is what the respond overlay answers.
+    pub fn load_message_invite_card(
+        &self,
+        msg: MessageRef,
+    ) -> Option<mp_client::queries::InviteCard> {
+        let account = self.account_config.name.clone();
+        let queries = self.queries()?;
+        super::queries::message_invite_card(queries, &account, msg).unwrap_or_else(|e| {
             log::warn!("[queries] decoding the invitation on {msg} of {account}: {e:#}");
             None
         })

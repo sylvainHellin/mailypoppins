@@ -226,25 +226,20 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
         } => {
             match result {
                 Ok(msg) => {
-                    let text = if msg.is_empty() {
-                        "RSVP sent".into()
-                    } else {
-                        msg
-                    };
-                    app.set_status_level(text, StatusLevel::Success);
-                    // Our own reply is now a row in `sent` (the outbox
+                    app.set_status_level(msg, StatusLevel::Success);
+                    // An iMIP reply is now a row in `sent` (the outbox
                     // ingests the appended copy during the send), so the
-                    // derived own-RSVP has changed: refresh the open mailbox
-                    // and rebuild the agenda from it (#0038 item 6).
+                    // derived own-RSVP has changed: refresh the open mailbox.
+                    // The Calendar view reads its days again here as well as
+                    // on the `calendar.changed` the answer publishes, quietly,
+                    // so the line above stays.
                     if account_index == app.active_account {
                         app.invalidate_cache_idx(app.active_mailbox);
                         app.reload_current_mailbox();
-                        if app.calendar_view.loaded {
-                            app.refresh_calendar();
-                        }
                     } else {
                         app.invalidate_all_caches_on(account_index);
                     }
+                    app.rebuild_calendar_if_loaded();
                 }
                 Err(e) => app.set_status_level(format!("RSVP failed: {e}"), StatusLevel::Error),
             }
@@ -1148,6 +1143,7 @@ mod tests {
         let credentials = crate::app::Credentials {
             imap: true,
             smtp: true,
+            calendar_scope_missing: false,
         };
         handle_bg_result(
             &mut app,

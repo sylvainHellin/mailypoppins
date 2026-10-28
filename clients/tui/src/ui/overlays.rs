@@ -7,20 +7,22 @@ use ratatui::Frame;
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
     ConfirmDialog, DirPicker, DirPickerMode, MailboxPicker, PersistentError, PickerPurpose,
-    RsvpOverlay, SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
 use super::widgets::{modal_stack_areas, render_action_button, render_modal_shell};
 
-/// Render the three-choice RSVP overlay (#0029): Accept / Tentative / Decline
-/// for a received invite, opened with `V`. Esc cancels.
+/// Render the respond overlay (#0029, PERSO-200): Accept / Tentative /
+/// Decline, a comment line, and on a server event whether the organizer is
+/// told. Opened with `V`; Enter answers, Esc cancels.
 pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area: Rect) {
+    let height = if overlay.server { 11 } else { 10 };
     let Some((_, inner)) = render_modal_shell(
         frame,
         area,
-        46,
-        8,
+        60,
+        height,
         theme::active().accent,
         theme::active().panel_bg,
     ) else {
@@ -29,6 +31,11 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
 
     let stack = modal_stack_areas(inner, 0, 1);
     let inner_width = inner.width as usize;
+    let normal = Style::default().fg(theme::active().text);
+    let focused = Style::default()
+        .fg(theme::active().selection)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(theme::active().text_muted);
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -42,27 +49,54 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
 
     let choices = ["Accept", "Tentative", "Decline"];
     for (i, label) in choices.iter().enumerate() {
-        let selected = i == overlay.selected;
-        let marker = if selected { "\u{25b6} " } else { "  " };
-        let style = if selected {
-            Style::default()
-                .fg(theme::active().selection)
-                .add_modifier(Modifier::BOLD)
+        let chosen = i == overlay.selected;
+        let marker = if chosen { "\u{25b6} " } else { "  " };
+        let style = if overlay.row == RsvpRow::Choice(i) {
+            focused
+        } else if chosen {
+            normal.add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::active().text)
+            normal
         };
         lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
     }
 
+    let typing = overlay.row == RsvpRow::Comment;
+    let caret = if typing { "\u{258f}" } else { "" };
+    let comment = if overlay.comment.is_empty() && !typing {
+        "(none)".to_string()
+    } else {
+        format!("{}{caret}", overlay.comment)
+    };
+    let prefix = "  Comment: ";
+    lines.push(Line::from(vec![
+        Span::styled(prefix, if typing { focused } else { muted }),
+        Span::styled(
+            truncate(&comment, inner_width.saturating_sub(prefix.len())),
+            if typing { focused } else { normal },
+        ),
+    ]));
+    if overlay.server {
+        let toggle = if overlay.send_response {
+            "[x] yes"
+        } else {
+            "[ ] no"
+        };
+        let on = overlay.row == RsvpRow::SendResponse;
+        lines.push(Line::from(vec![
+            Span::styled("  Send response: ", if on { focused } else { muted }),
+            Span::styled(toggle, if on { focused } else { normal }),
+        ]));
+    }
+
     frame.render_widget(Paragraph::new(lines), stack.content);
     if let Some(footer) = stack.footer {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "  Enter confirm  ·  Esc cancel",
-                Style::default().fg(theme::active().text_muted),
-            )),
-            footer,
-        );
+        let keys = if overlay.server {
+            "  Enter answer \u{b7} Tab next \u{b7} Space toggle \u{b7} Esc cancel"
+        } else {
+            "  Enter answer \u{b7} Tab next \u{b7} Esc cancel"
+        };
+        frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
     }
 }
 

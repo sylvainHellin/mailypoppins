@@ -2,10 +2,9 @@
 //! own vocabulary.
 //!
 //! The reads themselves are `mp_client::queries`, typed over the protocol's
-//! rows (`MessageListRow`, `MailboxRow`, `AgendaEvent`, ...) so the desktop
+//! rows (`MessageListRow`, `MailboxRow`, `CalendarEvent`, ...) so the desktop
 //! client shares them. What is left here is the mapping from those rows into
-//! this client's model ([`EmailEntry`], [`MailboxInfo`], [`CalendarEvent`],
-//! [`MessageRef`]), the degrade-on-refusal policy (a refused preview is an
+//! this client's model ([`EmailEntry`], [`MailboxInfo`], [`MessageRef`]), the degrade-on-refusal policy (a refused preview is an
 //! empty pane and a line in the log), the Drafts branch and its file parse, and
 //! the uid index below.
 //!
@@ -48,7 +47,7 @@ use mp_protocol::listing::{MessageListRow, ThreadListing};
 
 use crate::app::{
     entry_from_conversation, entry_from_draft, entry_from_member, entry_from_row, entry_from_skip,
-    fill_draft_member, mailbox_key, status_for_mailbox, CalendarEvent, ConvRole, EmailEntry,
+    fill_draft_member, mailbox_key, status_for_mailbox, CalendarInfo, ConvRole, EmailEntry,
     MailboxInfo, MessageRef,
 };
 pub use mp_client::queries::{MessageRowDelta, Queries};
@@ -386,19 +385,33 @@ pub fn thread(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<ThreadL
 // Invitations and the agenda (P5-U10)
 // ---------------------------------------------------------------------------
 
-/// The active account's agenda, through `calendar.events`.
-///
-/// An empty agenda on a refusal, which is what an account with no store, no
-/// invites or no readable blob always looked like; a malformed answer
-/// degrades the same way.
-pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<CalendarEvent>> {
-    match wire::calendar_events(q, account) {
-        Ok(rows) => Ok(rows.into_iter().map(CalendarEvent::from_wire).collect()),
-        Err(e) => {
-            log::warn!("[queries] the agenda of {account}: {e:#}");
-            Ok(Vec::new())
-        }
-    }
+/// The events of a range across every account, through `calendar.view`
+/// (PERSO-200). A refusal is the caller's to show: an empty view and a view
+/// the daemon could not answer are different things to the user.
+pub fn calendar_view(
+    q: &dyn Queries,
+    params: &mp_protocol::calendar::CalendarViewParams,
+) -> Result<mp_protocol::calendar::CalendarViewResult> {
+    wire::calendar_view(q, params)
+}
+
+/// Every account's calendars, through `calendar.list`; none on a refusal,
+/// which only costs the tags their calendar names.
+pub fn calendar_list(q: &dyn Queries) -> Vec<CalendarInfo> {
+    wire::calendar_list(q, None).unwrap_or_else(|e| {
+        log::warn!("[queries] the calendar list: {e:#}");
+        Vec::new()
+    })
+}
+
+/// Show or hide one calendar, through `calendar.set_visibility`.
+pub fn calendar_set_visibility(
+    q: &dyn Queries,
+    account: &str,
+    calendar: &str,
+    visible: bool,
+) -> Result<()> {
+    wire::calendar_set_visibility(q, account, calendar, visible)
 }
 
 /// One message's invitation card, through `message.invite`; `None` on a
@@ -410,6 +423,22 @@ pub fn message_invite(
 ) -> Result<Option<mp_core::types::EventFrontmatter>> {
     match wire::message_invite(q, account, msg.row_id()) {
         Ok(event) => Ok(event),
+        Err(e) => {
+            log::warn!("[queries] the invitation on {msg} of {account}: {e:#}");
+            Ok(None)
+        }
+    }
+}
+
+/// [`message_invite`] with the server event the invitation names, through
+/// the same `message.invite`; `None` on a refusal.
+pub fn message_invite_card(
+    q: &dyn Queries,
+    account: &str,
+    msg: MessageRef,
+) -> Result<Option<wire::InviteCard>> {
+    match wire::message_invite_card(q, account, msg.row_id()) {
+        Ok(card) => Ok(card),
         Err(e) => {
             log::warn!("[queries] the invitation on {msg} of {account}: {e:#}");
             Ok(None)

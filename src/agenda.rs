@@ -1026,25 +1026,28 @@ mod tests {
         assert_eq!(upcoming(&fx), vec!["Starting soon"]);
     }
 
-    /// The subjects the Calendar view's default (upcoming-only) scope shows.
+    /// The subjects an upcoming-only agenda shows: a row stays until its end
+    /// (its start when the end is unknown) is past, and an undated row
+    /// always shows, because it cannot be placed on the timeline.
     ///
-    /// The two rows above it are about a sort key this module mints and a
-    /// filter the client applies to it, so the oracle has to be the client's
-    /// own `recompute_calendar_visible` rather than a second copy of the rule.
-    /// It is the one place this module's tests reach into the TUI, and it goes
-    /// with the filter the day the TUI is a crate of its own.
+    /// The two rows above it are about the sort keys this module mints for
+    /// that filter. The TUI applied it to `calendar.events` until PERSO-200
+    /// moved its Calendar view onto `calendar.view`, which answers a range;
+    /// the rule is kept here, beside the keys it reads, for the clients that
+    /// still list this agenda.
     fn upcoming(fx: &Fixture) -> Vec<String> {
-        let mut app = crate::tui::app::App::default_for_tests();
-        app.calendar_view.events = agenda(fx)
+        let now = crate::calendar::now_sort_key();
+        agenda(fx)
             .into_iter()
-            .map(crate::tui::app::CalendarEvent::from_wire)
-            .collect();
-        app.calendar_view.loaded = true;
-        app.recompute_calendar_visible();
-        app.calendar_view
-            .visible
-            .iter()
-            .map(|&i| app.calendar_view.events[i].subject.clone())
+            .filter(|row| {
+                let horizon = if row.end_sort.is_empty() {
+                    &row.start_sort
+                } else {
+                    &row.end_sort
+                };
+                row.start_sort.is_empty() || horizon.as_str() >= now.as_str()
+            })
+            .map(|row| row.subject)
             .collect()
     }
 

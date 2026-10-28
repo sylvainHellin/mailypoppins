@@ -921,7 +921,7 @@ fn the_watcher_threads_are_gone_from_the_tui() {
 ///
 /// The behavioural half is `a_quick_sync_starts_an_operation_and_polls_nothing`,
 /// which pins the one arm a test can drive; this pins the other three
-/// (`sync.full`, `send.approved`, `calendar.rsvp`) and every arm a later unit
+/// (`sync.full`, `send.approved`, `event.respond`) and every arm a later unit
 /// adds, because they all go through one helper and the string appears once.
 ///
 /// The one call site allowed is the re-query rule of #0121 in `events.rs`:

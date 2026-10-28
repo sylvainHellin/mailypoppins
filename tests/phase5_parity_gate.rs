@@ -599,6 +599,18 @@ const RETIRED_BINDINGS: &[(&str, &str, &str)] = &[
     ("EMAIL LIST", "ce", "Edit recipients (Drafts only)"),
     ("EMAIL LIST", "cA", "Approve draft (Drafts only)"),
     ("EMAIL LIST", "cD", "Unapprove, back to draft (Drafts only)"),
+    // PERSO-200: the Calendar view reads the server calendar by date range.
+    // `Enter` opens the event card and `e` alone the invitation's `.ics`, `t`
+    // goes to today now that a range replaced the past / upcoming scope, `V`
+    // answers with a comment, and `r` reads the daemon rather than the disk.
+    ("CALENDAR", "Enter / e", "Open the invite email in $EDITOR"),
+    (
+        "CALENDAR",
+        "V",
+        "RSVP to invitation (Accept/Tentative/Decline)",
+    ),
+    ("CALENDAR", "t", "Show past events / upcoming only"),
+    ("CALENDAR", "r", "Refresh events from disk"),
 ];
 
 fn is_retired(title: &serde_json::Value, binding: &serde_json::Value) -> bool {
