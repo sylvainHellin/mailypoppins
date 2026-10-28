@@ -130,7 +130,8 @@ pub struct IngestOutcome {
     /// True when a new row was inserted, false when an existing row was updated.
     pub inserted: bool,
     /// True when the row was found through the `message_id` index under a
-    /// different UID, i.e. a UIDVALIDITY reset was absorbed.
+    /// different UID: a locally moved row reaching its destination, or a
+    /// UIDVALIDITY reset absorbed.
     pub uid_rebound: bool,
 }
 

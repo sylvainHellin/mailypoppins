@@ -204,7 +204,7 @@ fn cli_lines(outcome: &SyncCompleted, dry_run: bool) -> Vec<String> {
     }
     if outcome.uid_rebound > 0 {
         lines.push(format!(
-            "ℹ {at}Rebound {} message(s) to new UIDs after a UIDVALIDITY reset",
+            "ℹ {at}Matched {} moved or renumbered message(s) to their new server UIDs",
             outcome.uid_rebound
         ));
     }

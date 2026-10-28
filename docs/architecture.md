@@ -263,7 +263,7 @@ A pin changes who may be a victim and nothing else: the store's size, the two-st
 A sync backend hands raw messages to `src/ingest.rs`, the only writer on the receive path.
 One transaction per message writes the `messages` row, its blob references and its FTS entry, so a crash leaves whole messages behind and never half of one.
 Re-ingesting a UID is an UPSERT that keeps the row `id`, its thread assignment and the blob references whose content did not change.
-After a UIDVALIDITY reset the row is found by Message-ID and rebound to the new UID in place.
+After a UIDVALIDITY reset, and when a locally moved row waiting on its `-id` sentinel reaches its destination, the row is found by Message-ID and rebound to the new UID in place (`uid_rebound`).
 The sync engine ingests through `ingest::ingest_listed`, which refuses to write a listed UID as a new row when it may be the copy a local move or delete is taking out of the mailbox, with a server half that may not have landed when the listing was taken (PERSO-240): the op's own copy UID when it names one (`ops::ServerCopy`), any copy of its Message-ID when its row was still on the move sentinel.
 The pass opens a `sync::departures::Watch` before it reads its skip lists: it holds the moves and deletes still `queued` or `settling` then, and journals every one `apply_move` and `apply_delete` commit while it is open, inside their transaction, because such an op may retire (delete its row) before ingest asks.
 A refused copy is no ingest failure and holds no prune back; a copy still listed after the departure landed is a second one, and the next pass ingests it.

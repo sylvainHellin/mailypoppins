@@ -220,7 +220,9 @@ pub struct SyncResult {
     /// it touched came back short and the diff cannot be trusted until one
     /// does not (see [`crate::ingest::pass_may_prune`]).
     pub prunes_deferred: usize,
-    /// Rows rebound to a new UID after a UIDVALIDITY reset.
+    /// Rows found through their Message-ID and moved onto the UID the server now
+    /// gives their message: a row a local move left on its sentinel, reached in
+    /// its destination, or a row a UIDVALIDITY reset renumbered.
     pub uid_rebound: usize,
     /// Mailboxes whose body fetch stopped at its deadline with new messages
     /// still to download (#0113). They resume on the next pass; the prune is

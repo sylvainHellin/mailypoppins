@@ -1293,7 +1293,7 @@ The one trace it leaves in a later bootstrap is the account's `sync_health` verd
 | `flags_updated` | u64 | rows whose flags were updated from the server |
 | `pruned` | u64 | rows deleted because the server no longer lists their UID |
 | `prunes_deferred` | u64 | rows found vanished and not deleted, because the pass came back short |
-| `uid_rebound` | u64 | rows rebound to a new UID after a UIDVALIDITY reset |
+| `uid_rebound` | u64 | rows matched by Message-ID to the new UID of their message: a locally moved row reaching its destination, or a row a UIDVALIDITY reset renumbered |
 | `uidvalidity_resets` | u64 | mailboxes refetched in full after a UIDVALIDITY mismatch |
 | `bodies_truncated` | u64 | mailboxes stopped at the body-fetch deadline with mail still to download |
 | `non_converging` | array of string | mailboxes that downloaded the same UIDs again, sorted and deduplicated |

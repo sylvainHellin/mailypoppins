@@ -95,7 +95,9 @@ pub struct SyncCompleted {
     /// Rows found vanished and not deleted, because the pass came back short
     /// and the diff cannot be trusted yet (#0072).
     pub prunes_deferred: u64,
-    /// Rows rebound to a new UID after a UIDVALIDITY reset.
+    /// Rows found through their Message-ID and moved onto the UID the server now
+    /// gives their message: a row a local move left on its sentinel, reached in
+    /// its destination, or a row a UIDVALIDITY reset renumbered.
     pub uid_rebound: u64,
     /// Mailboxes refetched in full after a UIDVALIDITY mismatch.
     pub uidvalidity_resets: u64,

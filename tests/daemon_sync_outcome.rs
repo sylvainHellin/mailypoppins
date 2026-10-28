@@ -1031,7 +1031,7 @@ fn the_cli_lines_are_todays_lines_in_todays_order() {
         vec![
             "✓ Synced: 3 new, 2 already present".to_string(),
             "ℹ Status updated on 4 message(s)".to_string(),
-            "ℹ Rebound 7 message(s) to new UIDs after a UIDVALIDITY reset".to_string(),
+            "ℹ Matched 7 moved or renumbered message(s) to their new server UIDs".to_string(),
             "ℹ 5 message(s) left their mailbox on the server".to_string(),
             "⚠ 6 removal(s) held back: this pass did not see every message, \
              run a full sync to apply them"

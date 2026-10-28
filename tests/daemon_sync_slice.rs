@@ -1248,7 +1248,7 @@ fn the_client_wordings_are_the_lines_mp_sync_prints() {
         vec![
             "✓ Synced: 3 new, 4 already present".to_string(),
             "ℹ Status updated on 5 message(s)".to_string(),
-            "ℹ Rebound 8 message(s) to new UIDs after a UIDVALIDITY reset".to_string(),
+            "ℹ Matched 8 moved or renumbered message(s) to their new server UIDs".to_string(),
             "ℹ 6 message(s) left their mailbox on the server".to_string(),
             "⚠ 7 removal(s) held back: this pass did not see every message, run a full sync \
              to apply them"
