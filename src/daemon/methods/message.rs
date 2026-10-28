@@ -1620,9 +1620,10 @@ impl Method for MessageMutationMethod {
             // drain's own I/O still runs on the daemon's runtime, through the
             // handle this thread blocks on.
             let runtimes = Arc::clone(&self.runtimes);
+            let canonical = Arc::clone(&self.canonical);
             let done = tokio::task::spawn_blocking(move || {
                 tokio::runtime::Handle::current()
-                    .block_on(mutate(&params, &snapshot, kind, &runtimes))
+                    .block_on(mutate(&params, &snapshot, kind, &runtimes, &canonical))
             })
             .await;
             let (result, resource) = match done {
@@ -1728,12 +1729,14 @@ async fn mutate(
     snapshot: &super::super::config::Snapshot,
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
+    canonical: &super::super::state::CanonicalState,
 ) -> Result<(Value, String), RpcError> {
     mutate_with(
         params,
         snapshot,
         kind,
         runtimes,
+        canonical,
         pending_ops::SETTLE_PATIENCE,
         |account| resolve_backend(snapshot, account),
     )
@@ -1761,11 +1764,14 @@ fn resolve_backend(
 /// resolved, before the store is touched, and never for `settle: false`.
 /// `patience` is how long the settle waits for the older ops on its message
 /// while the account's turn is free ([`pending_ops::SETTLE_PATIENCE`] live).
+/// `canonical` is where a refused settle announces the later ops on its
+/// message it rolled back with its own ([`settle`]).
 async fn mutate_with<E: OpExecutor>(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
+    canonical: &super::super::state::CanonicalState,
     patience: std::time::Duration,
     resolve: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
 ) -> Result<(Value, String), RpcError> {
@@ -1943,7 +1949,9 @@ async fn mutate_with<E: OpExecutor>(
         // (PERSO-241): the settle waits for the drain it asks for here.
         let older =
             pending_ops::OlderOps::wait_for(patience, &ask_for_drain).paused_while(&turn_held);
-        let settled = settle(&store, &blobs, &scope, queued.op_id, &mut backend, older).await;
+        let settled =
+            pending_ops::run_and_settle(&store, &blobs, &scope, queued.op_id, &mut backend, older)
+                .await;
         drop(scope);
         // A drain that ran while this op was on the server held back the ops
         // queued after it on the same message (PERSO-236). They are owed now,
@@ -1953,7 +1961,7 @@ async fn mutate_with<E: OpExecutor>(
         if waiting {
             ask_for_drain();
         }
-        settled?;
+        settled.map_err(|e| refused(canonical, &name, &e))?;
     }
     Ok((result, resource))
 }
@@ -1979,18 +1987,28 @@ fn bool_param(params: &Value, name: &str) -> Result<bool, RpcError> {
     }
 }
 
-/// Run the owed op and settle it, reporting the server's refusal verbatim.
-async fn settle<E: OpExecutor>(
-    store: &Store,
-    blobs: &BlobStore,
-    scope: &pending_ops::SettleScope,
-    op_id: i64,
-    backend: &mut E,
-    older: pending_ops::OlderOps<'_>,
-) -> Result<(), RpcError> {
-    pending_ops::run_and_settle(store, blobs, scope, op_id, backend, older)
-        .await
-        .map_err(|e| internal(format!("{e:#}")))
+/// The answer to a settle the server refused: its error verbatim.
+///
+/// A refused move also rolls back the later ops on its message, which a
+/// `settle: false` client queued and hears of only as the drain's failures
+/// (PERSO-243). The error names them for the caller, and they are announced
+/// to every client as `mutations.rolled_back`, as the drain announces the ops
+/// it parks, so the TUI and the desktop warn and reload the rows they undid.
+fn refused(
+    canonical: &super::super::state::CanonicalState,
+    account: &str,
+    error: &anyhow::Error,
+) -> RpcError {
+    let undone = pending_ops::LaterOpsUndone::count_in(error);
+    if undone > 0 {
+        canonical.apply(super::super::state::Change::MutationsRolledBack(
+            mp_protocol::events::MutationsRolledBack {
+                account: account.to_string(),
+                failed: undone as u64,
+            },
+        ));
+    }
+    internal(format!("{error:#}"))
 }
 
 /// `-32603` for an account whose credentials cannot be loaded, carrying the
@@ -3533,6 +3551,8 @@ mod tests {
             snapshot: Snapshot,
             runtime: Arc<AccountRuntime>,
             runtimes: RuntimeTable,
+            /// Where a settle announces what it rolled back.
+            canonical: crate::daemon::state::CanonicalState,
             _data: TestDataDir,
         }
 
@@ -3569,12 +3589,20 @@ mod tests {
                 Arc::new(AccountRuntime::start_at_with_hooks(&dir, account, 1, hooks).unwrap());
             let runtimes = RuntimeTable::default();
             runtimes.insert(Arc::clone(&runtime));
+            let canonical = crate::daemon::state::CanonicalState::new(
+                crate::daemon::state::InstanceId::new("test"),
+                vec![crate::daemon::state::AccountSeed {
+                    name: "alice".to_string(),
+                    mailboxes: Vec::new(),
+                }],
+            );
             Seeded {
                 fx,
                 id,
                 snapshot,
                 runtime,
                 runtimes,
+                canonical,
                 _data: data,
             }
         }
@@ -3604,6 +3632,7 @@ mod tests {
                     &self.snapshot,
                     kind,
                     &self.runtimes,
+                    &self.canonical,
                     patience,
                     server,
                 )
@@ -3642,6 +3671,8 @@ mod tests {
             store: std::path::PathBuf,
             queue: Arc<Mutex<Vec<Queue>>>,
             meanwhile: Option<Meanwhile>,
+            /// What the server answers every op with, `None` to take it.
+            refusal: Option<&'static str>,
         }
 
         impl FakeServer {
@@ -3652,6 +3683,7 @@ mod tests {
                     store: store.path().to_path_buf(),
                     queue: Arc::default(),
                     meanwhile: None,
+                    refusal: None,
                 }
             }
         }
@@ -3667,7 +3699,10 @@ mod tests {
                 if let Some(meanwhile) = self.meanwhile.take() {
                     meanwhile(&store);
                 }
-                Ok(())
+                match self.refusal {
+                    Some(refusal) => Err(anyhow::anyhow!(refusal)),
+                    None => Ok(()),
+                }
             }
         }
 
@@ -3783,6 +3818,77 @@ mod tests {
             .unwrap();
             assert_eq!(drained.completed, 1);
             assert_eq!(*log.lock().unwrap(), ["caller move", "drain set_flagged"]);
+        }
+
+        /// The same star, with the archive refused: the star is rolled back
+        /// and parked with it unrun, and the TUI that queued it is told, as
+        /// the drain tells it of the ops it parks. The settle used to drop
+        /// it, so it reached no `mutations.rolled_back` and no error, and the
+        /// drain skips a parked row (PERSO-243).
+        #[tokio::test]
+        async fn a_refused_settled_move_reports_the_later_op_it_rolled_back() {
+            use crate::daemon::state::{Change, ConnectionId};
+            let daemon = seeded();
+            let conn = ConnectionId(1);
+            let mut events = daemon.canonical.subscribe(conn);
+            daemon.canonical.bootstrap(conn);
+            let log = Arc::default();
+            let id = daemon.id;
+            let star = Arc::new(Mutex::new(0));
+            let starred = Arc::clone(&star);
+            let server = FakeServer {
+                meanwhile: Some(Box::new(move |store: &Store| {
+                    let op = ServerOp::SetFlagged {
+                        message_id: "<inbox-1@example.com>".to_string(),
+                        mailbox: "Archive".to_string(),
+                        flagged: true,
+                        copy: None,
+                    };
+                    *starred.lock().unwrap() = pending_ops::apply_set_flagged(
+                        store,
+                        "alice",
+                        id,
+                        true,
+                        op,
+                        pending_ops::Runner::Drain,
+                    )
+                    .unwrap()
+                    .unwrap();
+                })),
+                refusal: Some("NO refused"),
+                ..FakeServer::new("caller", &log, &daemon.fx.store)
+            };
+
+            let err = daemon
+                .call(Kind::Archive, by_row(daemon.id), |_| Ok(server))
+                .await
+                .unwrap_err();
+
+            let star = *star.lock().unwrap();
+            assert_eq!(
+                err.message,
+                format!(
+                    "NO refused; also undid 1 later change(s) on this message, which did not \
+                     run: op {star} (set_flagged)"
+                )
+            );
+            let changes: Vec<Change> = events.drain().into_iter().map(|(_, c)| c).collect();
+            assert_eq!(
+                changes,
+                [Change::MutationsRolledBack(
+                    mp_protocol::events::MutationsRolledBack {
+                        account: "alice".to_string(),
+                        failed: 1,
+                    }
+                )]
+            );
+            assert_eq!(
+                daemon.ops(),
+                [("set_flagged".to_string(), "failed".to_string())]
+            );
+            let row = read::find_by_id(&daemon.fx.store, id).unwrap().unwrap();
+            assert_eq!(row.mailbox, "inbox");
+            assert!(!row.is_flagged());
         }
 
         /// PERSO-241 through the daemon: the TUI stars a message

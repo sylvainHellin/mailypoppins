@@ -1169,7 +1169,8 @@ enum Refusal {
 
 /// Undo op `id`, refused for good, settle its row as `how` says, and, when it
 /// is a move, first roll back and park `failed` the later ops still owed on
-/// its message, newest first, returning their ids (PERSO-243).
+/// its message, newest first, returning them oldest first (PERSO-243), for
+/// the drain to count and a caller's settle to report ([`LaterOpsUndone`]).
 ///
 /// The later ops were committed against the local state the refused move
 /// left: a star or a second move names the folder it put the message in,
@@ -1200,7 +1201,13 @@ enum Refusal {
 /// copy may predate a refusal that already settled it: a row that is no
 /// longer owed is left alone, except that a caller's row an older refusal
 /// parked is discarded, as its caller reports it.
-fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) -> Result<Vec<i64>> {
+fn refuse(
+    store: &Store,
+    blobs: &BlobStore,
+    id: i64,
+    err: &str,
+    how: Refusal,
+) -> Result<Vec<PendingOp>> {
     let mut tx = store
         .immediate_transaction()
         .context("opening the refusal transaction")?;
@@ -1237,11 +1244,9 @@ fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) ->
          ({err})",
         row.id, row.kind
     );
-    let mut parked = Vec::with_capacity(later.len());
     for op in later.iter().rev() {
         let note = noted(&why, undo(&mut tx, blobs, op), op);
         park(&tx, op, &note, false)?;
-        parked.push(op.id);
     }
     match how {
         Refusal::Park => {
@@ -1255,7 +1260,7 @@ fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) ->
         }
     }
     tx.commit().context("committing the refusal")?;
-    Ok(parked)
+    Ok(later)
 }
 
 /// The ops still owed on `row`'s message that were committed after it,
@@ -1538,7 +1543,8 @@ impl<'a> OlderOps<'a> {
 /// server refusal, and the error says why.
 ///
 /// On success the row is retired; on any failure the local half is rolled back,
-/// the row is discarded, and the error is returned. Unlike [`drain`] this
+/// the row is discarded, and the error is returned, with the later ops a
+/// refused move took with it named ([`LaterOpsUndone`]). Unlike [`drain`] this
 /// does not converge every not-found: a synchronous caller runs the op once,
 /// in the same process that enqueued it, so it is never a crash replay. A
 /// message its folder no longer holds at all was moved or deleted by another
@@ -1692,6 +1698,10 @@ fn older_owed(store: &Store, account: &str, target: i64, before: i64) -> Result<
 /// folder that still holds copies other rows stand for, or copies the op
 /// cannot tell apart, is not that, and fails as before.
 ///
+/// The later ops a refused move rolls back are named on the error
+/// ([`LaterOpsUndone`]), so the caller reports them: the drain counts them
+/// among its failed ops, and nothing else would.
+///
 /// A refused move takes the later ops still owed on its message with it, as
 /// in the drain ([`refuse`], PERSO-243): a star the TUI queued behind the
 /// settle names the folder the move was taking the message to, and once the
@@ -1719,8 +1729,15 @@ fn settle(store: &Store, blobs: &BlobStore, row: &PendingOp, outcome: Result<()>
             _ => {}
         }
     }
-    refuse(store, blobs, row.id, &format!("{e:#}"), Refusal::Discard)?;
-    Err(e)
+    let later = refuse(store, blobs, row.id, &format!("{e:#}"), Refusal::Discard)?;
+    if later.is_empty() {
+        return Err(e);
+    }
+    Err(LaterOpsUndone {
+        error: e,
+        ops: later.into_iter().map(|op| (op.id, op.kind)).collect(),
+    }
+    .into())
 }
 
 /// The error a settled move reports when its source folder holds no copy of
@@ -1735,6 +1752,51 @@ fn moved_elsewhere(gone: &crate::ops::NotFoundOnServer) -> anyhow::Error {
          elsewhere; the next sync will show where",
         gone.message_id
     )
+}
+
+/// A settled op's error, when its refusal also rolled back the later ops on
+/// its message and parked them `failed` unrun ([`refuse`], PERSO-243).
+///
+/// The drain counts the ops it parks that way among its failed ones, which
+/// is what reaches the clients (`mutations.rolled_back`, a tick's
+/// `failed_mutations`); a settle's caller is told only of its own op, so the
+/// parked ones ride on its error: its text names them for the user, and the
+/// daemon reads their number off it ([`LaterOpsUndone::count_in`]) to announce
+/// them the way the drain does.
+#[derive(Debug)]
+pub struct LaterOpsUndone {
+    /// The settled op's own error.
+    pub error: anyhow::Error,
+    /// The ops rolled back with it, `(id, kind)`, oldest first.
+    pub ops: Vec<(i64, String)>,
+}
+
+impl std::fmt::Display for LaterOpsUndone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ops: Vec<String> = self
+            .ops
+            .iter()
+            .map(|(id, kind)| format!("op {id} ({kind})"))
+            .collect();
+        write!(
+            f,
+            "{:#}; also undid {} later change(s) on this message, which did not run: {}",
+            self.error,
+            self.ops.len(),
+            ops.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for LaterOpsUndone {}
+
+impl LaterOpsUndone {
+    /// How many later ops the settle that returned `err` rolled back, zero
+    /// for any other error.
+    pub fn count_in(err: &anyhow::Error) -> usize {
+        err.downcast_ref::<LaterOpsUndone>()
+            .map_or(0, |undone| undone.ops.len())
+    }
 }
 
 /// One decoded row by its `pending_ops.id`.
@@ -2724,7 +2786,17 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(format!("{err:#}"), "NO refused");
+        // The star is reported with the archive's own error, and counted for
+        // the daemon to announce, where the settle used to drop it: no
+        // client heard of it (PERSO-243).
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "NO refused; also undid 1 later change(s) on this message, which did not \
+                 run: op {star} (set_flagged)"
+            )
+        );
+        assert_eq!(LaterOpsUndone::count_in(&err), 1);
         let message = read::find_by_id(&fx.store, id).unwrap().unwrap();
         assert_eq!(message.mailbox, "inbox");
         assert!(!message.is_flagged(), "the star was not rolled back");
