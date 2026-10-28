@@ -34,8 +34,10 @@ use log::{debug, warn};
 /// Answers how many contacts the index holds once it was written, `None` when
 /// nothing was written, so the daemon can announce the change.
 ///
-/// The draft is the Sent copy the rebuild will later read back: its `From:`,
-/// `To:`, `Cc:` and `Bcc:` under the `sent` role, observed now.
+/// The draft's `From:`, `To:` and `Cc:` are what a rebuild later reads back
+/// from the Sent copy, under the `sent` role. Its `Bcc:` is not: the copy
+/// carries no `Bcc:` header, so a Bcc recipient reaches the index through
+/// this bump alone.
 ///
 /// `stored` is the number the outbox gave the Sent copy when it stored it
 /// ([`window::SentCopyClaim::stored`]), `None` when it stored none.
@@ -49,11 +51,11 @@ pub fn bump_after_send(
 
 /// [`bump_after_send`] against the account directory `root`.
 ///
-/// A stored copy is judged like a sync's observation of its row: dropped when
-/// the rebuild on disk walked it, merged otherwise, and logged into an open
-/// rebuild window either way (PERSO-234). A copy that was not stored is in no
-/// row a walk could have counted, so it is numbered now and always merged
-/// and logged.
+/// The To and Cc part of a stored copy is judged like a sync's observation of
+/// its row: dropped when the rebuild on disk walked it, merged otherwise, and
+/// logged into an open rebuild window either way (PERSO-234). The Bcc part,
+/// and the whole of a copy that was not stored, are in no row a walk could
+/// have counted, so they are numbered now and always merged and logged.
 pub fn bump_after_send_at(
     root: &Path,
     account: &AccountConfig,
@@ -65,21 +67,33 @@ pub fn bump_after_send_at(
     if blank(&front.to) && blank(&front.cc) && blank(&front.bcc) {
         return None;
     }
-    let observation = FreshObservation {
+    let date = Utc::now().to_rfc3339();
+    // What the Sent copy holds: a walk may have counted it.
+    let copy = FreshObservation {
         sequence: stored.unwrap_or_else(window::next_sequence),
         role: MailboxRole::Sent,
         from: front.from.clone().unwrap_or_default(),
         to: front.to.clone().unwrap_or_default(),
         cc: front.cc.clone(),
-        bcc: front.bcc.clone(),
-        date: Utc::now().to_rfc3339(),
+        bcc: None,
+        date: date.clone(),
     };
-    let observations = std::slice::from_ref(&observation);
+    // What it does not: no walk ever counts it.
+    let bcc = (!blank(&front.bcc)).then(|| FreshObservation {
+        sequence: window::next_sequence(),
+        role: MailboxRole::Sent,
+        from: String::new(),
+        to: String::new(),
+        cc: None,
+        bcc: front.bcc.clone(),
+        date,
+    });
     with_cache_lock(root, || {
-        let fresh = match stored {
-            Some(_) => window::uncounted(root, observations),
-            None => observations.iter().collect(),
+        let mut fresh = match stored {
+            Some(_) => window::uncounted(root, std::slice::from_ref(&copy)),
+            None => vec![&copy],
         };
+        fresh.extend(bcc.as_ref());
         merge_and_log(root, account, "send", &fresh)
     })
 }
@@ -711,7 +725,41 @@ mod tests {
         let _f = fixture("testaccount");
         let account = mk_account();
         store_sent_copy(&account, "<unclaimed@x>");
-        let late = window::SentCopyClaim::claim(&account.name, "<unclaimed@x>");
-        assert_eq!(late.stored(), None, "stored before the claim");
+        assert!(
+            !window::sent_copy_claimed(&account.name, "<unclaimed@x>"),
+            "a copy nobody claimed leaves no entry"
+        );
+
+        let claim = window::SentCopyClaim::claim(&account.name, "<claimed@x>");
+        store_sent_copy(&account, "<claimed@x>");
+        assert!(claim.stored().is_some());
+        drop(claim);
+        assert!(
+            !window::sent_copy_claimed(&account.name, "<claimed@x>"),
+            "forgotten with the send"
+        );
+    }
+
+    /// The Sent copy carries no `Bcc:`, so no walk counts a Bcc recipient:
+    /// a rebuild that commits between the copy being stored and the send's
+    /// bump drops the To part of the bump, which it counted, and keeps the
+    /// Bcc part, which it could not.
+    #[test]
+    fn a_bcc_recipient_survives_a_rebuild_between_the_copy_and_the_bump() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+
+        let sent_copy = window::SentCopyClaim::claim(&account.name, "<with-bcc@x>");
+        store_sent_copy(&account, "<with-bcc@x>");
+        commit(&account, walk(&account));
+        let mut draft = mk_draft("Zed <zed@example.com>", None);
+        draft.frontmatter.bcc = Some("Bea <bea@example.com>".into());
+        bump_after_send(&account, &draft, sent_copy.stored());
+
+        let cached = load_cache(&f.account_root).unwrap().unwrap();
+        let bea = cached.contacts.get("bea@example.com").expect("bea kept");
+        assert_eq!(bea.sent_cc, 1, "the Bcc recipient, once");
+        assert_eq!(sent_to_zed(&f.account_root), 1, "the To recipient, once");
     }
 }

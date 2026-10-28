@@ -43,12 +43,13 @@
 //! A send is observed the same way. The outbox stores the Sent copy itself
 //! ([`crate::outbox::ingest_sent_copy`]) before the send returns, and a send
 //! that will bump the index claims the copy first ([`SentCopyClaim`]), so the
-//! copy is numbered the moment it is stored ([`sent_copy_stored`]) and its
-//! bump is judged like a sync's. A send whose copy was not stored (the local
-//! ingest failed, or the copy waits for an APPEND) is numbered at its bump
-//! and always merged and logged: no walk has seen a row for it. The sync
-//! that later stores that row observes it once more, as it did before the
-//! window existed.
+//! copy is numbered the moment it is stored ([`sent_copy_stored`]) and the
+//! To and Cc part of its bump is judged like a sync's. The copy carries no
+//! `Bcc:`, so no walk counts a Bcc recipient: the Bcc part of a bump is
+//! numbered at the bump and always merged and logged. So is the whole of a
+//! send whose copy was not stored (the local ingest failed, or the copy waits
+//! for an APPEND): no walk has seen a row for it. The sync that later stores
+//! that row observes it once more, as it did before the window existed.
 //!
 //! The state is this process's alone, which is enough: the daemon is the
 //! cache's only writer, and an observation never outlives the process that
@@ -155,6 +156,13 @@ pub fn sent_copy_stored(account: &str, message_id: &str) {
     if let Some(number) = sent_copies().get_mut(&key) {
         number.get_or_insert_with(next_sequence);
     }
+}
+
+/// Whether a claim on the Sent copy of `message_id` is recorded, for the
+/// tests that check a stored copy nobody claimed leaves nothing behind.
+#[cfg(test)]
+pub fn sent_copy_claimed(account: &str, message_id: &str) -> bool {
+    sent_copies().contains_key(&(account.to_string(), message_id.to_string()))
 }
 
 fn accounts() -> MutexGuard<'static, HashMap<PathBuf, Account>> {
