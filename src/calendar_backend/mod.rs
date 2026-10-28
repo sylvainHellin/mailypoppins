@@ -6,6 +6,12 @@
 //! [`crate::calendar_model`], and the engine merges the accounts, dedups and
 //! serves the clients without knowing which backend an event came from.
 //! [`fake::FakeCalendarBackend`] stands in for a server in tests.
+//!
+//! [`choose_backend`] and [`backend_for`] decide which backend serves an
+//! account: the fake when [`fake::FAKE_CALENDAR_ENV`] arms it, Graph for
+//! `calendar_backend = "graph"`, nothing for `none`, and a refusal for the
+//! backends a later phase builds. [`AccountBackend`] is the closed set they
+//! return, dispatched statically.
 
 pub mod fake;
 pub mod graph;
@@ -13,10 +19,14 @@ pub mod graph;
 use std::fmt;
 use std::future::Future;
 
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar_model::{Calendar, CalendarWindow, Event, EventId};
 use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
+
+use fake::FakeCalendarBackend;
+use graph::GraphCalendarBackend;
 
 /// An answer to an invitation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +194,147 @@ pub trait CalendarBackend {
     /// backend that resolves series (Graph) does not ask for them again. A
     /// backend whose occurrences carry the series `UID` ignores it.
     fn remember_series(&self, _known: Vec<SeriesInfo>) {}
+
+    /// The server event an invitation mail stands for, by the mail's server
+    /// id (Graph: the `event` of an `eventMessage`); `None` when the mail is
+    /// no invitation or the backend cannot tell.
+    fn event_for_message(
+        &self,
+        _message_id: &str,
+    ) -> impl Future<Output = BackendResult<Option<EventId>>> + Send {
+        async { Ok(None) }
+    }
+}
+
+/// Which backend serves an account's calendar, decided without a network
+/// call.
+#[derive(Debug, Clone)]
+pub enum BackendChoice {
+    /// `calendar_backend = "none"`: the iMIP path of the invitation mails.
+    None,
+    /// The fake [`fake::FAKE_CALENDAR_ENV`] armed, already serving this
+    /// account's name.
+    Fake(FakeCalendarBackend),
+    /// Microsoft Graph, signed in through the account's token.
+    Graph,
+}
+
+/// The backend `account`'s calendar uses.
+///
+/// The fake, when the daemon runs under [`fake::FAKE_CALENDAR_ENV`], stands
+/// in for every account whose `calendar_backend` is not `none`, whatever that
+/// backend is. A backend a later phase builds (`ews`, `caldav`) is refused
+/// with a sentence naming it.
+pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
+    let kind = account.calendar_backend();
+    if kind == CalendarBackendKind::None {
+        return Ok(BackendChoice::None);
+    }
+    if let Some(fake) = FakeCalendarBackend::from_env() {
+        return Ok(BackendChoice::Fake(fake.serving(&account.name)));
+    }
+    match kind {
+        CalendarBackendKind::Graph => Ok(BackendChoice::Graph),
+        CalendarBackendKind::None => Ok(BackendChoice::None),
+        other => Err(unsupported(other)),
+    }
+}
+
+/// The refusal of a backend this build does not implement yet.
+pub fn unsupported(kind: CalendarBackendKind) -> CalendarBackendError {
+    CalendarBackendError::Other(anyhow!(
+        "calendar backend {} is not supported yet",
+        kind.as_str()
+    ))
+}
+
+/// Whether `account`'s calendar is served by a backend this build runs: the
+/// views read its events from the store cache rather than only from its
+/// invitation mails.
+pub fn has_backend(account: &AccountConfig) -> bool {
+    matches!(
+        choose_backend(account),
+        Ok(BackendChoice::Fake(_) | BackendChoice::Graph)
+    )
+}
+
+/// The scope check a write runs before an operation starts: the fake's
+/// `missing_scope`, or the Graph token's scopes ([`calendar_scope_check`]).
+/// No network call either way.
+pub fn preflight_scope(account: &AccountConfig) -> BackendResult<()> {
+    match choose_backend(account)? {
+        BackendChoice::Fake(fake) => fake.check_scope(),
+        BackendChoice::Graph => calendar_scope_check(account),
+        BackendChoice::None => Ok(()),
+    }
+}
+
+/// The backend serving `account`, connected: `None` for an account without
+/// one. A Graph token without the calendar scope is
+/// [`CalendarBackendError::MissingScope`] before any network call.
+pub async fn backend_for(account: &AccountConfig) -> BackendResult<Option<AccountBackend>> {
+    Ok(match choose_backend(account)? {
+        BackendChoice::None => None,
+        BackendChoice::Fake(fake) => Some(AccountBackend::Fake(fake)),
+        BackendChoice::Graph => Some(AccountBackend::Graph(Box::new(
+            GraphCalendarBackend::connect(account).await?,
+        ))),
+    })
+}
+
+/// One connected backend of the closed set this build implements.
+pub enum AccountBackend {
+    Fake(FakeCalendarBackend),
+    /// Boxed: the Graph client is a few hundred bytes the fake does not pay.
+    Graph(Box<GraphCalendarBackend>),
+}
+
+impl CalendarBackend for AccountBackend {
+    async fn list_calendars(&self) -> BackendResult<Vec<Calendar>> {
+        match self {
+            AccountBackend::Fake(b) => b.list_calendars().await,
+            AccountBackend::Graph(b) => b.list_calendars().await,
+        }
+    }
+
+    async fn sync_window(
+        &self,
+        calendar: &Calendar,
+        window: CalendarWindow,
+        token: Option<String>,
+    ) -> BackendResult<SyncResult> {
+        match self {
+            AccountBackend::Fake(b) => b.sync_window(calendar, window, token).await,
+            AccountBackend::Graph(b) => b.sync_window(calendar, window, token).await,
+        }
+    }
+
+    async fn respond(
+        &self,
+        event: &str,
+        response: Response,
+        comment: Option<String>,
+        send_response: bool,
+    ) -> BackendResult<()> {
+        match self {
+            AccountBackend::Fake(b) => b.respond(event, response, comment, send_response).await,
+            AccountBackend::Graph(b) => b.respond(event, response, comment, send_response).await,
+        }
+    }
+
+    fn remember_series(&self, known: Vec<SeriesInfo>) {
+        match self {
+            AccountBackend::Fake(b) => b.remember_series(known),
+            AccountBackend::Graph(b) => b.remember_series(known),
+        }
+    }
+
+    async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<EventId>> {
+        match self {
+            AccountBackend::Fake(b) => b.event_for_message(message_id).await,
+            AccountBackend::Graph(b) => b.event_for_message(message_id).await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +395,39 @@ mod tests {
         let opted_out = account(AuthMethod::Graph, Some(CalendarBackendKind::None));
         assert!(missing_scopes(&opted_out).is_empty());
         assert!(calendar_scope_check(&opted_out).is_ok());
+    }
+
+    /// `none` has no backend, `graph` is Graph's, and the backends a later
+    /// phase builds are refused by name. The test process never arms the
+    /// fake, so the choice is the configured one.
+    #[test]
+    fn the_choice_follows_the_setting_and_refuses_the_later_backends() {
+        assert!(std::env::var(fake::FAKE_CALENDAR_ENV).is_err());
+        let choice = |auth, kind| choose_backend(&account(auth, kind));
+        assert!(matches!(
+            choice(AuthMethod::Password, None),
+            Ok(BackendChoice::None)
+        ));
+        assert!(matches!(
+            choice(AuthMethod::Graph, None),
+            Ok(BackendChoice::Graph)
+        ));
+        assert!(matches!(
+            choice(AuthMethod::Graph, Some(CalendarBackendKind::None)),
+            Ok(BackendChoice::None)
+        ));
+        for (kind, name) in [
+            (CalendarBackendKind::Ews, "ews"),
+            (CalendarBackendKind::Caldav, "caldav"),
+        ] {
+            let err = choice(AuthMethod::Password, Some(kind)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("calendar backend {name} is not supported yet")
+            );
+            assert!(!has_backend(&account(AuthMethod::Password, Some(kind))));
+        }
+        assert!(has_backend(&account(AuthMethod::Graph, None)));
+        assert!(!has_backend(&account(AuthMethod::Password, None)));
     }
 }

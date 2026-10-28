@@ -52,8 +52,8 @@ use super::{
     BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult,
 };
 use crate::calendar_model::{
-    Attendee, AttendeeRole, Calendar, CalendarWindow, Event, EventTime, OwnResponse, Person,
-    ResponseStatus, Sensitivity, ShowAs,
+    Attendee, AttendeeRole, Calendar, CalendarWindow, Event, EventId, EventTime, OwnResponse,
+    Person, ResponseStatus, Sensitivity, ShowAs,
 };
 use crate::config::{AccountConfig, GraphConfig};
 use crate::graph::{encode_id, GraphClient, GRAPH_BASE, PREFER_IMMUTABLE_ID};
@@ -1226,6 +1226,40 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
             });
         }
         Err(anyhow!("Graph refused the {action}: {}", error_text(&answer)).into())
+    }
+
+    /// `GET /me/messages/{id}?$expand=microsoft.graph.eventMessage/event`:
+    /// the immutable id of the event an `eventMessage` stands for. A message
+    /// that is no `eventMessage` carries no `event`, and one the server no
+    /// longer has (404) stands for nothing either.
+    async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<EventId>> {
+        let url = format!(
+            "{GRAPH_BASE}/me/messages/{}?$select=id&$expand=microsoft.graph.eventMessage/event($select=id)",
+            encode_id(message_id)
+        );
+        let answer = self.fetch.get(&url, &[]).await?;
+        if answer.status == 404 {
+            return Ok(None);
+        }
+        if answer.status == 403 {
+            return Err(CalendarBackendError::MissingScope {
+                scope: CALENDAR_SCOPE_NAME.into(),
+            });
+        }
+        if !(200..300).contains(&answer.status) {
+            return Err(anyhow!(
+                "Graph refused the invitation's event lookup: {}",
+                error_text(&answer)
+            )
+            .into());
+        }
+        let body: serde_json::Value =
+            serde_json::from_str(&answer.body).context("unreadable Graph message")?;
+        Ok(body
+            .get("event")
+            .and_then(|event| event.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
     }
 
     fn remember_series(&self, known: Vec<SeriesInfo>) {

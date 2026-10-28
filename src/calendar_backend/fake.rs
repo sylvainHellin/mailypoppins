@@ -12,9 +12,16 @@
 //!   "calendars": [<Calendar>...],
 //!   "events": [<Event>...],
 //!   "log": "<path>",
-//!   "missing_scope": false
+//!   "missing_scope": false,
+//!   "message_events": {"<server message id>": "<event id>"}
 //! }
 //! ```
+//!
+//! The daemon serves every account whose `calendar_backend` is not `none`
+//! from the fake, each through [`FakeCalendarBackend::serving`], which
+//! rewrites the calendars' and the events' `account` to that account's name.
+
+use std::collections::HashMap;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -81,6 +88,8 @@ struct FakeSpec {
     log: Option<PathBuf>,
     #[serde(default)]
     missing_scope: bool,
+    #[serde(default)]
+    message_events: HashMap<String, String>,
 }
 
 /// A calendar server with fixed contents that records every answer.
@@ -95,6 +104,9 @@ pub struct FakeCalendarBackend {
     missing_scope: bool,
     log: Option<PathBuf>,
     responses: Arc<Mutex<Vec<RecordedResponse>>>,
+    /// The invitation mails the fake knows the event of, by server message
+    /// id ([`CalendarBackend::event_for_message`]).
+    message_events: HashMap<String, String>,
 }
 
 impl FakeCalendarBackend {
@@ -154,7 +166,29 @@ impl FakeCalendarBackend {
         let mut fake = FakeCalendarBackend::new(spec.calendars, spec.events);
         fake.missing_scope = spec.missing_scope;
         fake.log = spec.log;
+        fake.message_events = spec.message_events;
         Some(fake)
+    }
+
+    /// The same server, serving `account`: every calendar and event names it,
+    /// whatever account the spec wrote, so one armed spec serves every
+    /// account with a backend.
+    pub fn serving(mut self, account: &str) -> Self {
+        for calendar in &mut self.calendars {
+            calendar.account = account.to_string();
+        }
+        for event in &mut self.state().events {
+            event.account = account.to_string();
+        }
+        self
+    }
+
+    /// Answer [`CalendarBackend::event_for_message`] for `message_id` with
+    /// `event`.
+    pub fn with_message_event(mut self, message_id: &str, event: &str) -> Self {
+        self.message_events
+            .insert(message_id.to_string(), event.to_string());
+        self
     }
 
     /// Every call fails with [`CalendarBackendError::MissingScope`], the way
@@ -267,7 +301,9 @@ impl FakeCalendarBackend {
         )
     }
 
-    fn check_scope(&self) -> BackendResult<()> {
+    /// [`CalendarBackendError::MissingScope`] for a fake armed without the
+    /// scope, the check a write runs before its operation starts.
+    pub fn check_scope(&self) -> BackendResult<()> {
         if self.missing_scope {
             return Err(CalendarBackendError::MissingScope {
                 scope: FAKE_MISSING_SCOPE.into(),
@@ -381,6 +417,11 @@ impl CalendarBackend for FakeCalendarBackend {
             comment,
             send_response,
         })
+    }
+
+    async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<String>> {
+        self.check_scope()?;
+        Ok(self.message_events.get(message_id).cloned())
     }
 }
 

@@ -573,6 +573,36 @@ async fn respond_posts_the_answer_with_its_comment_and_send_choice() {
     );
 }
 
+/// An `eventMessage` names its event, a plain message names none, and a
+/// message the server no longer has stands for nothing; every lookup asks for
+/// immutable ids.
+#[tokio::test]
+async fn an_invitation_mail_resolves_to_its_server_event() {
+    let fetch = ScriptedFetch::default()
+        .route(
+            &format!("{BASE}/me/messages/"),
+            ok(r#"{"id":"AAMk/msg=","event":{"id":"AAMk/ev="}}"#),
+        )
+        .route(&format!("{BASE}/me/messages/"), ok(r#"{"id":"plain"}"#))
+        .route(&format!("{BASE}/me/messages/"), status(404, "{}"));
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    assert_eq!(
+        backend.event_for_message("AAMk/msg=").await.unwrap(),
+        Some("AAMk/ev=".to_string())
+    );
+    assert_eq!(backend.event_for_message("plain").await.unwrap(), None);
+    assert_eq!(backend.event_for_message("gone").await.unwrap(), None);
+    let sent = backend.fetch.sent();
+    assert_eq!(
+        sent[0].url,
+        format!(
+            "{BASE}/me/messages/AAMk%2Fmsg=?$select=id\
+             &$expand=microsoft.graph.eventMessage/event($select=id)"
+        )
+    );
+    assert!(sent[0].prefer.contains("ImmutableId"), "{}", sent[0].prefer);
+}
+
 #[tokio::test]
 async fn the_last_word_on_an_id_wins_within_one_sync() {
     let page = serde_json::json!({
