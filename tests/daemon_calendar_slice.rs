@@ -7,7 +7,8 @@
 //! - `calendar.list` lists the fake's calendars and each account's virtual
 //!   invitation calendar;
 //! - `calendar.view` merges the server cache and the invitation mails, keeps
-//!   the server copy of an invitation the server also has, hides a hidden
+//!   the server copy of an invitation the server also has (the occurrences of
+//!   a series invitation included), hides a hidden
 //!   calendar, and keeps it hidden across `calendar.rebuild`;
 //! - an account without a backend views exactly its iMIP agenda;
 //! - `event.respond` reaches the fake with every answer, comment and
@@ -35,7 +36,10 @@ use mailypoppins::calendar_backend::Response;
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::RpcError;
 
-use support::calendar_fixture::{day, fake_spec, seed, IMIP, LOCAL_UID, MEETING_UID, SERVER};
+use support::calendar_fixture::{
+    day, fake_spec_with, seed, seed_series, series_occurrences, IMIP, LOCAL_UID, MEETING_UID,
+    SERIES_UID, SERVER,
+};
 use support::parity::{socket_path, DaemonFixture};
 use support::read_fixture;
 use support::send_fixture;
@@ -59,9 +63,21 @@ impl Slice {
     }
 
     fn start_with(missing_scope: bool, extra: &[(&str, String)]) -> Slice {
+        Slice::start_seeded(missing_scope, extra, |_| (), Vec::new())
+    }
+
+    /// The fixture plus what `seed_more` writes, and `events` on the fake
+    /// beside its own.
+    fn start_seeded(
+        missing_scope: bool,
+        extra: &[(&str, String)],
+        seed_more: impl FnOnce(&Path),
+        events: Vec<mailypoppins::calendar_model::Event>,
+    ) -> Slice {
         let tmp = tempfile::tempdir().unwrap();
         seed(tmp.path());
-        let spec = fake_spec(&tmp.path().join("calendar.jsonl"), missing_scope);
+        seed_more(tmp.path());
+        let spec = fake_spec_with(&tmp.path().join("calendar.jsonl"), missing_scope, events);
         let mut env: Vec<(&str, &str)> = vec![(FAKE_CALENDAR_ENV, spec.as_str())];
         env.extend(extra.iter().map(|(k, v)| (*k, v.as_str())));
         let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
@@ -339,6 +355,32 @@ async fn calendar_view_merges_dedups_and_hides() {
     )
     .await;
     assert_eq!(zone.code, -32602);
+}
+
+/// A series invitation, which carries no RECURRENCE-ID, gives way to the
+/// server's occurrences of its UID: the view shows the two occurrences and
+/// no copy of the mail beside them.
+#[tokio::test]
+async fn a_series_invitation_gives_way_to_the_servers_occurrences() {
+    let slice = Slice::start_seeded(false, &[], seed_series, series_occurrences());
+    let mut conn = slice.connect().await;
+    let status = run_operation(&mut conn, "calendar.rebuild", json!({"account": SERVER})).await;
+    let server = &succeeded(&status)["server"];
+    assert_eq!(server["upserts"], 4, "{server}");
+
+    let events = view(&mut conn, json!({"accounts": [SERVER]})).await;
+    assert_eq!(
+        ids(&events),
+        [
+            format!("{SERVER}/ev-meeting"),
+            format!("{SERVER}/ev-holiday"),
+            format!("{SERVER}/ev-series-1"),
+            format!("{SERVER}/ev-series-2"),
+        ]
+    );
+    let series: Vec<&Value> = events.iter().filter(|e| e["uid"] == SERIES_UID).collect();
+    assert_eq!(series.len(), 2);
+    assert!(series.iter().all(|e| e.get("source").is_none()));
 }
 
 /// An account without a backend views exactly its agenda: the rows of

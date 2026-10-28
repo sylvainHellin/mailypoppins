@@ -125,7 +125,15 @@ pub fn view(
         let name = account.name.as_str();
         let store = open_store(name)?;
         if has_backend(account) {
-            taken.extend(cache::event_keys(&store, name)?);
+            for key in cache::event_keys(&store, name)? {
+                // A series invitation carries no RECURRENCE-ID, and the cache
+                // holds a series' occurrences but never its master: any
+                // occurrence of the UID takes the series' key too.
+                if key.recurrence_id.is_some() {
+                    taken.insert(EventKey::new(&key.uid, None));
+                }
+                taken.insert(key);
+            }
             let visible: Vec<(String, bool)> = cache::list_calendars(&store, name)?
                 .into_iter()
                 .map(|calendar| (calendar.id, calendar.visible))

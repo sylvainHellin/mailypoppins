@@ -31,6 +31,9 @@ pub const MEETING_UID: &str = "meeting-1@example.com";
 pub const LOCAL_UID: &str = "loc-day@tum.de";
 /// The Graph id the server account's invitation row is bound to.
 pub const INVITE_GRAPH_ID: &str = "AAMkAD-invite";
+/// The `UID` of the weekly series [`seed_series`] invites the server account
+/// to and [`series_occurrences`] holds on the server.
+pub const SERIES_UID: &str = "weekly-sync@example.com";
 
 pub const CONFIG: &str = r#"
 [[accounts]]
@@ -160,10 +163,22 @@ pub fn fake_spec_with(log: &Path, missing_scope: bool, extra: Vec<Event>) -> Str
 }
 
 pub fn request_ics(uid: &str, summary: &str, start: DateTime<Utc>, attendee: &str) -> Vec<u8> {
+    request_ics_with(uid, summary, start, attendee, "")
+}
+
+/// [`request_ics`] with `extra` content lines in the `VEVENT`, each ending in
+/// `\r\n`.
+fn request_ics_with(
+    uid: &str,
+    summary: &str,
+    start: DateTime<Utc>,
+    attendee: &str,
+    extra: &str,
+) -> Vec<u8> {
     format!(
         "BEGIN:VCALENDAR\r\nPRODID:-//mailypoppins//calendar slice//EN\r\nVERSION:2.0\r\n\
          METHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nSEQUENCE:0\r\n\
-         DTSTAMP:20260101T000000Z\r\nSUMMARY:{summary}\r\nDTSTART:{}\r\nDTEND:{}\r\n\
+         DTSTAMP:20260101T000000Z\r\nSUMMARY:{summary}\r\nDTSTART:{}\r\nDTEND:{}\r\n{extra}\
          LOCATION:Room 4.12\r\nORGANIZER:mailto:chair@tum.de\r\n\
          ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{attendee}\r\n\
          END:VEVENT\r\nEND:VCALENDAR\r\n",
@@ -171,6 +186,49 @@ pub fn request_ics(uid: &str, summary: &str, start: DateTime<Utc>, attendee: &st
         ics_time(start + Days::hours(1)),
     )
     .into_bytes()
+}
+
+/// The two server occurrences of the weekly series, ten and seventeen days
+/// out, each named by its original start the way Graph names one; the server
+/// never lists the series master.
+pub fn series_occurrences() -> Vec<Event> {
+    [("ev-series-1", 10), ("ev-series-2", 17)]
+        .into_iter()
+        .map(|(id, days)| {
+            let start = at(days, 8);
+            let mut occurrence = event(
+                id,
+                "cal-main",
+                SERIES_UID,
+                "Weekly sync",
+                EventTime::timed(start, start + Days::hours(1), "Europe/Berlin").unwrap(),
+            );
+            occurrence.recurrence_id = Some(start.to_rfc3339());
+            occurrence.series_master_id = Some("ev-series".into());
+            occurrence
+        })
+        .collect()
+}
+
+/// A second invitation mail on the server account: the request for the whole
+/// weekly series, with an `RRULE` and no `RECURRENCE-ID`.
+pub fn seed_series(root: &Path) {
+    let mut mail = read_fixture::email(
+        "Ada <ada@example.com>",
+        "sylvain@example.com",
+        "Invitation: Weekly sync",
+        "Mon, 6 Jul 2026 11:00:00 +0200",
+        "every week\n",
+    );
+    mail.message_id = Some("<weekly-sync@example.com>".into());
+    mail.calendar_ics = Some(request_ics_with(
+        SERIES_UID,
+        "Weekly sync",
+        at(10, 8),
+        "sylvain@example.com",
+        "RRULE:FREQ=WEEKLY;COUNT=2\r\n",
+    ));
+    read_fixture::ingest(root, SERVER, "inbox", 2, &mail);
 }
 
 /// The configuration and one invitation mail per account: the server
