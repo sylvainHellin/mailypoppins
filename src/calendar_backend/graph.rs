@@ -30,9 +30,9 @@
 //! Both delta routes trim an `occurrence` to its `id`, `seriesMasterId`,
 //! `type`, `start` and `end`, while the series master in the same feed
 //! carries the subject, the all-day flag, the people and the free/busy (the
-//! plain `calendarView` answers every occurrence in full). An occurrence
-//! takes each property it lacks from its master, kept with the series
-//! ([`SeriesInfo::master`]); one trimmed to its times is listed in
+//! plain `calendarView` answers every occurrence in full). A trimmed
+//! occurrence takes its all-day flag, zone and details from its master, kept
+//! with the series ([`SeriesInfo::master`]), and is listed in
 //! [`SyncResult::inheriting`], so the store re-derives it when only the
 //! master changes ([`Event::inherit_from`]).
 //!
@@ -327,20 +327,10 @@ mod wire {
         pub range: Option<RecurrenceRange>,
     }
 
-    /// A property that may be absent, `null`, or a value: `None` when the
-    /// key is absent, `Some(None)` for `null`.
-    fn present<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-        T: Deserialize<'de>,
-    {
-        Option::<T>::deserialize(de).map(Some)
-    }
-
     /// An event as `calendarView` and its delta return it. Every field but
     /// the id is optional, so an event Graph trims is converted on what it
-    /// has rather than failing the page; `None` is an absent property, which
-    /// an occurrence takes from its series master ([`super::from_graph`]).
+    /// has rather than failing the page; a trimmed occurrence takes its
+    /// details from its series master ([`super::from_graph`]).
     #[derive(Debug, Clone, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Event {
@@ -365,10 +355,8 @@ mod wire {
         pub original_start_time_zone: Option<String>,
         pub reminder_minutes_before_start: Option<i64>,
         pub is_reminder_on: Option<bool>,
-        #[serde(default, deserialize_with = "present")]
-        pub online_meeting: Option<Option<OnlineMeeting>>,
-        #[serde(default, deserialize_with = "present")]
-        pub online_meeting_url: Option<Option<String>>,
+        pub online_meeting: Option<OnlineMeeting>,
+        pub online_meeting_url: Option<String>,
         pub sensitivity: Option<String>,
         pub show_as: Option<String>,
         pub is_cancelled: Option<bool>,
@@ -618,9 +606,10 @@ fn is_trimmed(event: &wire::Event) -> bool {
 }
 
 /// A Graph event as the neutral model has it. `series` is the event's series
-/// master, for an occurrence: its `UID` is the one the series shares, and
-/// each property the occurrence lacks (a delta trims an occurrence to its
-/// times) is the master's, on the same set [`Event::inherit_from`] copies.
+/// master, for an occurrence: its `UID` is the one the series shares, and an
+/// occurrence a delta trimmed to its times places them with the master's
+/// all-day flag and zone and takes every detail from it
+/// ([`Event::inherit_from`]).
 pub(crate) fn from_graph(
     account: &str,
     calendar: &str,
@@ -630,8 +619,6 @@ pub(crate) fn from_graph(
     let instance = is_instance(event.kind.as_deref());
     let series = series.filter(|_| instance);
     let master = series.and_then(|s| s.master.as_deref());
-    // The master's value of a property the occurrence lacks.
-    let inherited = |pick: fn(&Event) -> Option<String>| master.and_then(pick);
 
     let start = event.start.as_ref().ok_or("no start")?;
     let end = event.end.as_ref().ok_or("no end")?;
@@ -665,81 +652,50 @@ pub(crate) fn from_graph(
         None
     };
 
-    Ok(Event {
+    let mut converted = Event {
         account: account.to_string(),
         calendar: calendar.to_string(),
         id: event.id.clone(),
         uid,
         recurrence_id,
         series_master_id: event.series_master_id.clone().filter(|_| instance),
-        summary: match &event.subject {
-            Some(subject) => subject.clone(),
-            None => inherited(|m| Some(m.summary.clone())).unwrap_or_default(),
-        },
-        location: match &event.location {
-            Some(location) => location
-                .display_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string),
-            None => inherited(|m| m.location.clone()),
-        },
-        body: if event.body.is_none() && event.body_preview.is_none() {
-            inherited(|m| m.body.clone())
-        } else {
-            plain_body(event)
-        },
-        organizer: match &event.organizer {
-            Some(organizer) => person(Some(organizer)),
-            None => master.and_then(|m| m.organizer.clone()),
-        },
-        attendees: match &event.attendees {
-            Some(attendees) => attendees.iter().filter_map(attendee).collect(),
-            None => master.map(|m| m.attendees.clone()).unwrap_or_default(),
-        },
-        own_response: match (&event.response_status, master) {
-            (None, Some(master)) => master.own_response,
-            (status, _) => own_response(status.as_ref().and_then(|s| s.response.as_deref())),
-        },
-        recurrence: None,
-        reminder: match (event.is_reminder_on, master) {
-            (None, Some(master)) if event.reminder_minutes_before_start.is_none() => {
-                master.reminder
-            }
-            (on, _) => event
-                .reminder_minutes_before_start
-                .filter(|_| on.unwrap_or(false))
-                .and_then(|minutes| u32::try_from(minutes).ok()),
-        },
-        online_meeting_url: if event.online_meeting.is_none() && event.online_meeting_url.is_none()
-        {
-            inherited(|m| m.online_meeting_url.clone())
-        } else {
+        summary: event.subject.clone().unwrap_or_default(),
+        location: event
+            .location
+            .as_ref()
+            .and_then(|location| location.display_name.as_deref())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
+        body: plain_body(event),
+        organizer: person(event.organizer.as_ref()),
+        attendees: event
+            .attendees
+            .iter()
+            .flatten()
+            .filter_map(attendee)
+            .collect(),
+        own_response: own_response(
             event
-                .online_meeting
-                .clone()
-                .flatten()
-                .and_then(|m| m.join_url)
-                .or_else(|| event.online_meeting_url.clone().flatten())
-                .filter(|url| !url.trim().is_empty())
-        },
-        sensitivity: match (&event.sensitivity, master) {
-            (None, Some(master)) => master.sensitivity,
-            (raw, _) => sensitivity(raw.as_deref()),
-        },
-        show_as: match (&event.show_as, master) {
-            (None, Some(master)) => master.show_as,
-            (raw, _) => show_as(raw.as_deref()),
-        },
-        cancelled: event
-            .is_cancelled
-            .or(master.map(|m| m.cancelled))
-            .unwrap_or(false),
-        is_organizer: event
-            .is_organizer
-            .or(master.map(|m| m.is_organizer))
-            .unwrap_or(false),
+                .response_status
+                .as_ref()
+                .and_then(|s| s.response.as_deref()),
+        ),
+        recurrence: None,
+        reminder: event
+            .reminder_minutes_before_start
+            .filter(|_| event.is_reminder_on.unwrap_or(false))
+            .and_then(|minutes| u32::try_from(minutes).ok()),
+        online_meeting_url: event
+            .online_meeting
+            .as_ref()
+            .and_then(|m| m.join_url.clone())
+            .or_else(|| event.online_meeting_url.clone())
+            .filter(|url| !url.trim().is_empty()),
+        sensitivity: sensitivity(event.sensitivity.as_deref()),
+        show_as: show_as(event.show_as.as_deref()),
+        cancelled: event.is_cancelled.unwrap_or(false),
+        is_organizer: event.is_organizer.unwrap_or(false),
         last_modified: event
             .last_modified_date_time
             .as_deref()
@@ -747,7 +703,11 @@ pub(crate) fn from_graph(
             .map(|at| at.with_timezone(&Utc)),
         web_link: event.web_link.clone(),
         time,
-    })
+    };
+    if let Some(master) = master.filter(|_| is_trimmed(event)) {
+        converted.inherit_from(master);
+    }
+    Ok(converted)
 }
 
 /// An occurrence's `RECURRENCE-ID`: its original start as a UTC instant, or

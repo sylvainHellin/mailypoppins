@@ -480,9 +480,8 @@ impl Event {
     /// `RECURRENCE-ID`, change stamp and web link.
     ///
     /// What an occurrence Graph's delta trims to its times shows (PERSO-200):
-    /// the store re-derives such an occurrence whenever its master changes,
-    /// and the Graph adapter falls back on the master field by field for the
-    /// same set, so both agree on what an occurrence inherits.
+    /// the Graph adapter and the store's re-derivation, whenever its master
+    /// changes, both go through here, so they agree on what it inherits.
     pub fn inherit_from(&mut self, master: &Event) {
         self.uid = master.uid.clone();
         self.summary = master.summary.clone();
