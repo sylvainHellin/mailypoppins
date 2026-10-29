@@ -166,32 +166,10 @@ const ADDED_COLUMNS: [(&str, &str, &str); 3] = [
 ];
 
 /// Add [`ADDED_COLUMNS`] to the calendar tables that lack them, after
-/// [`super::schema::ensure_additive_tables`] created the tables. Looked up
-/// before it is written, so an open of a store that has them writes nothing;
-/// a connection that loses the race to add one finds it there, which is the
-/// state it wanted.
+/// [`super::schema::ensure_additive_tables`] created the tables
+/// ([`super::schema::add_columns`]).
 pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
-    let present = |table: &str, column: &str| -> Result<bool> {
-        conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
-            [table, column],
-            |row| row.get(0),
-        )
-        .with_context(|| format!("reading the {table} columns"))
-    };
-    for (table, column, kind) in ADDED_COLUMNS {
-        if present(table, column)? {
-            continue;
-        }
-        if let Err(err) =
-            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))
-        {
-            if !present(table, column)? {
-                return Err(err).with_context(|| format!("adding {table}.{column}"));
-            }
-        }
-    }
-    Ok(())
+    super::schema::add_columns(conn, &ADDED_COLUMNS)
 }
 
 /// A calendar's sync state: the token of its last sync and what it is bound
@@ -972,8 +950,16 @@ mod tests {
         ensure_columns(store.conn()).unwrap();
         let mut result = baseline(vec![timed("e1", "a", 3, 9)]);
         result.inheriting = vec!["e1".into()];
+        result.series = vec![SeriesInfo {
+            master_id: "m".into(),
+            uid: "series@example.com".into(),
+            recurrence: None,
+            master: Some(Box::new(timed("m", "a", 2, 9))),
+            zone: Some("Europe/Berlin".into()),
+        }];
         apply_sync(&store, "evoqs", "a", &result, november(), utc(1, 0)).unwrap();
         assert!(get_event(&store, "evoqs", "e1").unwrap().is_some());
+        assert_eq!(load_series(&store, "evoqs").unwrap(), result.series);
     }
 
     /// An invitation's lookup is remembered under the server id it was made

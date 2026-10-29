@@ -516,15 +516,21 @@ const ADDITIVE_COLUMNS: [(&str, &str, &str); 6] = [
 ];
 
 /// Add the columns created after [`SCHEMA_VERSION`] was last bumped, beside
-/// [`ensure_additive_indexes`] and on its terms: additive, idempotent, looked
-/// up before it is written, so an open of a store that has them writes nothing.
+/// [`ensure_additive_indexes`] and on its terms ([`add_columns`]).
+pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
+    add_columns(conn, &ADDITIVE_COLUMNS)
+}
+
+/// Add each `(table, column, type)` of `columns` that its table lacks:
+/// additive, idempotent, looked up before it is written, so an open of a
+/// store that has them writes nothing.
 ///
 /// Two connections opening one old store at once can both find a column
 /// missing; the one that loses the race fails its `ALTER TABLE` with a
 /// duplicate column, which is the state it wanted, so a failure is checked
 /// against the table before it is reported.
-pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
-    for (table, column, kind) in ADDITIVE_COLUMNS {
+pub fn add_columns(conn: &Connection, columns: &[(&str, &str, &str)]) -> Result<()> {
+    for &(table, column, kind) in columns {
         if column_present(conn, table, column)? {
             continue;
         }
