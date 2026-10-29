@@ -43,11 +43,13 @@ describe("the reader's invitation card", () => {
     expect(await within(reader()).findByText("Accepted", { selector: '[data-slot="event-rsvp"]' })).toBeInTheDocument();
   });
 
-  it("a reply no recipient took yet says it waits in the outbox", async () => {
+  it("a reply the organizer was not told of is a failure that points at the outbox", async () => {
     const { user } = await openInvitation();
     await user.click(button(await replies(), "Decline"));
     act(() => void settleRsvp({ delivered: false }));
-    expect(await screen.findByText("Replied decline to Steering committee; queued in the outbox")).toBeInTheDocument();
+    expect(
+      await screen.findByText("RSVP failed: Replied decline to Steering committee, but the organizer could not be told; the outbox says why"),
+    ).toBeInTheDocument();
   });
 
   it("after rsvp_fail the failure is a notice in the TUI's words and the outbox has the row", async () => {

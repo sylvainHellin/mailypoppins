@@ -744,7 +744,8 @@ It reads them in the capture phase, as the Signatures dialog does, since the pop
 Enter sends even while a button behind the dialog still holds the focus, which the popup takes a moment after it opens.
 
 An answer sends one `event_respond` with the response, the comment (none when blank) and, on a server event only, `send_response`; it is awaited as `rsvp`: `state.rsvps` keeps each one this window started (`{token, account, event, response, summary, operation_id}`) until it settles or is dropped, and `rsvpEarly` holds an end that overtook the start's answer, as `sends` and `sendEarly` do.
-The settle (an `EventRespondResult`) says "Replied <response> to <summary>", with the TUI's ending when the organizer did not hear of it: "; queued in the outbox" for a reply mail no recipient took yet, "; no response sent to the organizer" when the user chose so, and ", but the organizer could not be told" when the server could not.
+The settle (an `EventRespondResult`) says "Replied <response> to <summary>", and "; no response sent to the organizer" after it when the user chose so.
+An answer that should have reached the organizer and did not (`send_response` and not `delivered`) is a failure in the TUI's words, "RSVP failed: Replied <response> to <summary>, but the organizer could not be told", which for a reply mail ends "; the outbox says why": the outbox retries it only after a transient refusal and parks it after a permanent one or a lost answer, and the result does not tell which.
 A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; an answer dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
 While it runs, the activity area's running card can cancel it, and the end then says that the daemon may still send it.
 Every end makes the Calendar view and the account's invitation cards stale, and the daemon's `calendar.changed` does too, so the card and the event show the new answer.

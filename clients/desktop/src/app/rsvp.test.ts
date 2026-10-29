@@ -9,6 +9,7 @@ import {
   ORGANIZER,
   rsvpRefusal,
   rsvpText,
+  rsvpUntold,
   SUPERSEDED,
 } from "@/app/rsvp";
 import { initialState, isStale, readerKey, type AppState, type RsvpRun } from "@/app/state";
@@ -86,14 +87,22 @@ describe("why an invitation cannot be answered", () => {
 });
 
 describe("an RSVP this window started", () => {
-  it("settles with the TUI-style line: a reply mail no one took yet waits in the outbox, an unsent answer and an untold organizer say so", () => {
+  it("settles with the TUI-style line: an unsent answer says so, and a reply the organizer was not told of is a failure", () => {
     const r: RsvpRun = { token: 1, account: "work", event: "imip:1008", response: "tentative", summary: "Steering committee", operation_id: "op" };
     expect(rsvpText(r, settled("tentative"))).toBe("Replied tentative to Steering committee");
-    expect(rsvpText(r, settled("tentative", false))).toBe("Replied tentative to Steering committee; queued in the outbox");
+    expect(rsvpText(r, settled("tentative", false))).toBe(
+      "RSVP failed: Replied tentative to Steering committee, but the organizer could not be told; the outbox says why",
+    );
     expect(rsvpText(r, settled("decline", false, { send_response: false, via: "server" }))).toBe(
       "Replied decline to Steering committee; no response sent to the organizer",
     );
-    expect(rsvpText(r, settled("accept", false, { via: "server" }))).toBe("Replied accept to Steering committee, but the organizer could not be told");
+    expect(rsvpText(r, settled("accept", false, { via: "server" }))).toBe(
+      "RSVP failed: Replied accept to Steering committee, but the organizer could not be told",
+    );
+    expect(rsvpUntold(settled("accept", false))).toBe(true);
+    expect(rsvpUntold(settled("accept", false, { send_response: false }))).toBe(false);
+    expect(rsvpUntold(settled())).toBe(false);
+    expect(rsvpUntold(null)).toBe(false);
   });
 
   it("closes the choice, awaits its id, then says so and reads the agenda and the account's cards again", () => {
@@ -118,7 +127,10 @@ describe("an RSVP this window started", () => {
     s = run(s, { type: "rsvp_started", token: 1, operation_id: "op-early" });
     expect(s.rsvps).toEqual([]);
     expect(s.rsvpEarly).toEqual([]);
-    expect(last(s).text).toBe("Replied accept to Steering committee; queued in the outbox");
+    expect(last(s)).toMatchObject({
+      kind: "send_failed",
+      text: "RSVP failed: Replied accept to Steering committee, but the organizer could not be told; the outbox says why",
+    });
     expect(isStale(s.accounts)).toBe(true);
   });
 

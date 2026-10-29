@@ -296,7 +296,9 @@ describe("V and the respond choice in the Calendar view", () => {
     await user.keyboard("{Enter}");
     expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null }]);
     act(() => void settleRsvp({ delivered: false }));
-    expect(await screen.findByText("Replied accept to Steering committee; queued in the outbox")).toBeInTheDocument();
+    expect(
+      await screen.findByText("RSVP failed: Replied accept to Steering committee, but the organizer could not be told; the outbox says why"),
+    ).toBeInTheDocument();
   });
 
   it("refuses the organizer's event with the TUI's sentence, and the daemon's refusal reaches the notice line", async () => {

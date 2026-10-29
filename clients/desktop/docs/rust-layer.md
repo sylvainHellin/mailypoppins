@@ -381,7 +381,7 @@ A row the account does not hold is `not_found` with `-32602`.
 The event is a server id, which the daemon answers through the account's calendar backend, or `imip:<row_id>`, which it answers with the iMIP reply mail through its durable outbox, so a transport that fails leaves an outbox row the outbox view shows.
 A response other than `accept`, `tentative` or `decline` is a `protocol` refusal before any call; a blank comment is none, and an absent `send_response` is sent as `true`, the daemon's default.
 A daemon refusal of the start comes back as the daemon's own sentence with its code, as `send_invite`'s does: `send_response: false` on an invitation mail's event, a Graph account on the iMIP path, a sign-in without the calendar scope.
-`EventRespondResult` is the settle: the `response` and `comment` taken, `send_response`, `via` (`server` or `imip`), and `delivered`, whether the organizer heard of it; an iMIP reply nobody took yet waits in the outbox.
+`EventRespondResult` is the settle: the `response` and `comment` taken, `send_response`, `via` (`server` or `imip`), and `delivered`, whether the organizer heard of it; an iMIP reply the organizer's server did not take has its outbox row, retried after a transient refusal and parked otherwise.
 The daemon refuses nothing about the event itself: an answer to the user's own or to a cancelled event is the frontend's to prevent, as it is the TUI's; no probe runs ahead of the call.
 
 `invite_refusal` answers whether an account can send invitations at all, for the New invitation form.

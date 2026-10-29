@@ -178,18 +178,30 @@ export function isRsvpOperation(s: AppState, operationId: string): boolean {
 }
 
 /**
+ * Whether a settled answer should have reached the organizer and did not,
+ * the TUI's `rsvp_line` error: a reply mail the organizer's server did not
+ * take is retried by the outbox only after a transient refusal, and parked
+ * for the user after a permanent one or a lost answer, which the result does
+ * not tell apart.
+ */
+export function rsvpUntold(settled: EventRespondResult | null): boolean {
+  return settled !== null && settled.send_response && !settled.delivered;
+}
+
+/**
  * What a settled answer says: "Replied <response> to <summary>", then
- * whether the organizer heard of it, the TUI's `rsvp_line`: a reply mail no
- * recipient took yet waits in the outbox, an answer the user chose not to
- * send says so, and a server answer that should have reached the organizer
- * and did not says that.
+ * whether the organizer heard of it, the TUI's `rsvp_line`: an answer the
+ * user chose not to send says so, and one that should have reached the
+ * organizer and did not is a failure, which for a reply mail points at the
+ * outbox that holds it.
  */
 export function rsvpText(run: RsvpRun, settled: EventRespondResult | null): string {
   const response = settled?.response || run.response;
   const text = `Replied ${response} to ${run.summary}`;
   if (!settled || settled.delivered) return text;
   if (!settled.send_response) return `${text}; no response sent to the organizer`;
-  return settled.via === "imip" ? `${text}; queued in the outbox` : `${text}, but the organizer could not be told`;
+  const outbox = settled.via === "imip" ? "; the outbox says why" : "";
+  return `RSVP failed: ${text}, but the organizer could not be told${outbox}`;
 }
 
 /** An RSVP of this window ended: say how; the agenda and the account's cards read again. */
@@ -212,7 +224,7 @@ function rsvpEnded(s: AppState, run: RsvpRun, end: OperationEnd): AppState {
   const settled = (end.result ?? null) as EventRespondResult | null;
   // A reply mail waiting in the outbox changed its counts.
   if (settled && !settled.delivered && settled.via === "imip") next = { ...next, accounts: markStale(next.accounts) };
-  return pushNotice(next, { kind: "applied", account, text: rsvpText(run, settled) });
+  return pushNotice(next, { kind: rsvpUntold(settled) ? "send_failed" : "applied", account, text: rsvpText(run, settled) });
 }
 
 /** An operation ended: an RSVP this window awaits settles; while one is unanswered an unknown id waits for it. */
