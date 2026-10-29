@@ -995,7 +995,7 @@ async fn submit(
         &account.default_from,
         rsvp,
         comment,
-        Some(request_message_id),
+        request_message_id,
     )?;
     if !commit_point(method, token).await {
         return Ok(None);

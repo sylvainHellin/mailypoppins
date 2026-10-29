@@ -1717,7 +1717,7 @@ mod tests {
             "Accepted: Planning",
             "Accepted.",
             "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
-            None,
+            "",
         )
         .expect("the build accepts a display name it can quote");
         assert_eq!(built.from, "\"Doe, Jane\" <jane@example.com>");
@@ -1744,7 +1744,7 @@ mod tests {
             "Jane Doe <jane@example.com>",
             crate::invite::Rsvp::Tentative,
             None,
-            Some("invite-1@example.com"),
+            "invite-1@example.com",
         )
         .unwrap();
         let raw = String::from_utf8(prepared.built.raw).unwrap();
@@ -2532,15 +2532,15 @@ pub fn build_reply_mime_body(plain: &str, ics: &str) -> MultiPart {
 /// names in `In-Reply-To` and `References`, as Outlook's own reply does.
 /// `Content-Class: urn:content-classes:calendarmessage` marks the message as
 /// a meeting message for Exchange.
-/// The reply is built here and submitted through the durable outbox by
-/// [`send_rsvp`], like any other outgoing message.
+/// The reply is built here by [`prepare_rsvp`] and submitted through the
+/// durable outbox by [`PreparedRsvp::submit`], like any other outgoing message.
 pub fn build_reply_message(
     from: &str,
     organizer: &str,
     subject: &str,
     plain_body: &str,
     reply_ics: &str,
-    request_message_id: Option<&str>,
+    request_message_id: &str,
 ) -> Result<BuiltMessage> {
     // Normalised once and carried on the built message, the twin of what
     // `build_draft_message` does: `submit` parses `BuiltMessage::from` to
@@ -2569,16 +2569,7 @@ pub fn build_reply_message(
             lettre::message::header::HeaderName::new_from_ascii_str("Content-Class"),
             "urn:content-classes:calendarmessage".to_string(),
         ));
-    let parent = request_message_id
-        .map(|id| {
-            id.trim()
-                .trim_start_matches('<')
-                .trim_end_matches('>')
-                .trim()
-        })
-        .filter(|id| !id.is_empty())
-        .map(|id| format!("<{id}>"));
-    if let Some(parent) = parent {
+    if let Some(parent) = bracketed_message_id(request_message_id) {
         builder = builder.in_reply_to(parent.clone()).references(parent);
     }
     let message = builder
@@ -2613,57 +2604,38 @@ pub struct RsvpOutcome {
     pub subject: String,
 }
 
-/// End-to-end attendee RSVP to a received invite (#0029), shared by the CLI
-/// and the TUI so both run identical logic (no subprocess).
+/// An attendee's RSVP reply to a received invite (#0029), built and not yet
+/// submitted, so `calendar.rsvp` can observe its cancel token between the
+/// build and [`PreparedRsvp::submit`]. Dropping it sends nothing.
 ///
-/// Steps: build a `METHOD:REPLY` from the invitation's own iMIP payload (the
-/// source of truth for `UID`/`SEQUENCE`) carrying the account's `PARTSTAT`,
-/// and email it to the `ORGANIZER`. The payload itself is never rewritten.
-///
-/// Nothing local is flipped afterwards, and there is nothing to flip: the
-/// reply goes out through the durable outbox, which appends it to the server
-/// Sent mailbox and ingests that copy into the store during the send, so our
-/// own `PARTSTAT` is derived from that row the next time an invite is
-/// rendered (#0038 scope item 6, `crate::reconcile::own_rsvp`).
-///
-/// `ics` is the invitation's `invite.ics` bytes, read from the message's blob
-/// by the caller; `account_address` is the responding account's primary
-/// address (the REPLY `ATTENDEE`).
-pub async fn send_rsvp(
-    ics: &[u8],
-    account_config: &crate::config::AccountConfig,
-    account_address: &str,
-    rsvp: crate::invite::Rsvp,
-    smtp_config: &SmtpConfig,
-) -> Result<RsvpOutcome> {
-    prepare_rsvp(ics, account_address, rsvp, None, None)?
-        .submit(account_config, smtp_config)
-        .await
-}
-
-/// An RSVP reply built and not yet submitted: the half of [`send_rsvp`] that
-/// touches no transport, split off so `calendar.rsvp` can observe its cancel
-/// token between the two. Dropping it sends nothing.
+/// Nothing local is flipped after the submission, and there is nothing to
+/// flip: the reply goes out through the durable outbox, which appends it to
+/// the server Sent mailbox and ingests that copy into the store during the
+/// send, so our own `PARTSTAT` is derived from that row the next time an
+/// invite is rendered (#0038 scope item 6, `crate::reconcile::own_rsvp`).
 pub struct PreparedRsvp {
     built: BuiltMessage,
     organizer: String,
     subject: String,
 }
 
-/// Build the `METHOD:REPLY` and its message, exactly as [`send_rsvp`] does
-/// before it submits. A `comment` (`event.respond`, PERSO-200) follows the
-/// reply's one-line body after a blank line; the payload carries no `COMMENT`
-/// property, which not every organizer's client shows.
+/// Build the `METHOD:REPLY` from the invitation's own iMIP payload `ics` (the
+/// source of truth for `UID`/`SEQUENCE`, never rewritten), carrying the
+/// account's `PARTSTAT`, and the message that takes it to the `ORGANIZER`. A
+/// `comment` (`event.respond`, PERSO-200) follows the reply's one-line body
+/// after a blank line; the payload carries no `COMMENT` property, which not
+/// every organizer's client shows.
 ///
 /// `account_address` may carry a display name (`Jane Doe <jane@x.com>`), the
 /// fallback `CN` of the reply's `ATTENDEE`; `request_message_id` is the
-/// invitation mail's `Message-ID`, which the reply threads under.
+/// invitation mail's `Message-ID`, which the reply threads under (none when
+/// blank).
 pub fn prepare_rsvp(
     ics: &[u8],
     account_address: &str,
     rsvp: crate::invite::Rsvp,
     comment: Option<&str>,
-    request_message_id: Option<&str>,
+    request_message_id: &str,
 ) -> Result<PreparedRsvp> {
     let display_name = mailparse::addrparse(account_address)
         .ok()
@@ -3707,8 +3679,17 @@ fn refuse_a_finished_draft(draft: &EmailDraft, account: &str, key: &str) -> Resu
 /// header grammar requires. A forward's `forwarded_from:` is not read: a
 /// forward starts a conversation of its own rather than joining its source's.
 fn reply_parent_id(draft: &EmailDraft) -> Option<String> {
-    let id = draft.frontmatter.in_reply_to.as_deref()?.trim();
-    let bare = id.trim_start_matches('<').trim_end_matches('>').trim();
+    bracketed_message_id(draft.frontmatter.in_reply_to.as_deref()?)
+}
+
+/// A `Message-ID` in the angle brackets the header grammar requires, from
+/// one written with or without them; `None` when blank.
+fn bracketed_message_id(id: &str) -> Option<String> {
+    let bare = id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
     (!bare.is_empty()).then(|| format!("<{bare}>"))
 }
 

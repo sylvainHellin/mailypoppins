@@ -1477,7 +1477,7 @@ const ACTION_SOURCES: [&str; 2] = ["clients/tui/src/actions.rs", "clients/tui/sr
 /// `tests/fixtures/tui-engine-imports.txt`, and what that cannot say is which
 /// function still opens a store. A match on the line that declares a function
 /// is ignored, so `fn store_for_mutation(` does not report itself.
-const ENGINE_NEEDLES: [&str; 11] = [
+const ENGINE_NEEDLES: [&str; 10] = [
     "ImapConfig::load",
     "SmtpConfig::load",
     "Store::open(",
@@ -1487,7 +1487,6 @@ const ENGINE_NEEDLES: [&str; 11] = [
     "open_store(",
     "pending_ops::",
     "send_draft(",
-    "send_rsvp(",
     "store_for_mutation(",
 ];
 

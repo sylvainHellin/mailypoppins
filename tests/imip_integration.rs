@@ -738,7 +738,7 @@ fn only_imip_classified_messages_reach_the_calendar_path() {
 }
 
 /// The attendee's round trip, end to end over the store: an Outlook REQUEST is
-/// ingested, the RSVP reply is built exactly as `send_rsvp` builds it, and its
+/// ingested, the RSVP reply is built exactly as `prepare_rsvp` builds it, and its
 /// sent copy is ingested the way the outbox does during the send. Our own
 /// `PARTSTAT` is then derived from that sent REPLY, with nothing written to the
 /// invitation, so a second pass reports the same numbers.
@@ -762,7 +762,7 @@ fn an_rsvp_reply_reconciles_against_the_stored_invite() {
         "Declined: LOC Day planning",
         "Declined: LOC Day planning",
         &reply_ics,
-        None,
+        "",
     )
     .unwrap();
     // What `outbox::ingest_sent_copy` files during the send itself.
