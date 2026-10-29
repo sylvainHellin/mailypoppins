@@ -465,7 +465,19 @@ export function refreshCalendar(s: AppState): AppState {
 export function eventMail(e: CalendarEvent): { account: string; row_id: number; selector: string; mailbox: string | null } | string {
   if (!e.source) return "This event is the server's; no invitation mail stands behind it";
   const parts = e.source.selector.startsWith("mp://") ? e.source.selector.slice("mp://".length).split("/") : [];
-  return { account: e.account, row_id: e.source.row_id, selector: e.source.selector, mailbox: parts.length >= 3 ? parts[1] : null };
+  return { account: e.account, row_id: e.source.row_id, selector: e.source.selector, mailbox: parts.length >= 3 ? selectorSegment(parts[1]) : null };
+}
+
+/**
+ * One percent-encoded selector segment decoded, as `selector::decode` does
+ * (`Sent%20Items` is `Sent Items`); a malformed escape names nothing.
+ */
+function selectorSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
 }
 
 /**

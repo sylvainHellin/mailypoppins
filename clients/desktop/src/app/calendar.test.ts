@@ -5,6 +5,7 @@ import {
   calendarRows,
   cursorEntry,
   dayPart,
+  eventMail,
   gridBlocks,
   layoutDays,
   localInstant,
@@ -124,6 +125,20 @@ describe("events on days, the TUI's day_part", () => {
     expect(statusBadge(byId("AAMkAD-weekly-20991020"))).toBe("accepted");
     expect(statusBadge(byId("AAMkAD-design"))).toBe("no reply");
     expect(statusBadge(byId("AAMkAD-holiday"))).toBeNull();
+  });
+});
+
+describe("an event's invitation mail", () => {
+  it("decodes the selector's mailbox segment, so Sent%20Items opens Sent Items, and a malformed escape names none", () => {
+    const at = (selector: string) => eventMail({ ...byId("AAMkAD-design"), source: { kind: "imip", selector, row_id: 7, subject: "Design" } });
+    expect(at("mp://work/Sent%20Items/abc%40example.org")).toEqual({
+      account: byId("AAMkAD-design").account,
+      row_id: 7,
+      selector: "mp://work/Sent%20Items/abc%40example.org",
+      mailbox: "Sent Items",
+    });
+    expect(at("mp://work/Sent%2/abc@example.org")).toMatchObject({ mailbox: null });
+    expect(eventMail({ ...byId("AAMkAD-design"), source: undefined })).toBe("This event is the server's; no invitation mail stands behind it");
   });
 });
 
