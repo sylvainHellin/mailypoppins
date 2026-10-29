@@ -754,13 +754,15 @@ fn an_rsvp_reply_reconciles_against_the_stored_invite() {
         .expect("the invite.ics blob");
     let ctx = mailypoppins::invite::reply_context_from_ics(&ics).unwrap();
     let reply_ics =
-        mailypoppins::invite::build_reply_ics(&ctx, "me@example.com", Rsvp::Declined).unwrap();
+        mailypoppins::invite::build_reply_ics(&ctx, "me@example.com", None, Rsvp::Declined)
+            .unwrap();
     let built = mailypoppins::send::build_reply_message(
         "me@example.com",
         &ctx.organizer,
         "Declined: LOC Day planning",
-        "Declined the invitation.",
+        "Declined: LOC Day planning",
         &reply_ics,
+        None,
     )
     .unwrap();
     // What `outbox::ingest_sent_copy` files during the send itself.

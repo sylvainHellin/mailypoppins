@@ -382,15 +382,29 @@ pub fn build_invite_ics(spec: &InviteSpec) -> Result<String> {
         event.append_multi_property(prop);
     }
 
-    let mut calendar = Calendar::new();
+    // METHOD:REQUEST at the VCALENDAR level (the iMIP method), which also
+    // drives the `method=REQUEST` MIME parameter in `send.rs`.
+    let mut calendar = itip_calendar("REQUEST");
     calendar.push(event.done());
-    // METHOD:REQUEST at the VCALENDAR level (the iMIP method). Setting it here
-    // also drives the `method=REQUEST` MIME parameter in `send.rs`. The
-    // `icalendar` crate already emits VERSION/PRODID/CALSCALE, so we only add
-    // METHOD (adding a second PRODID would be invalid RFC 5545).
-    calendar.append_property(Property::new("METHOD", "REQUEST"));
 
     Ok(calendar.to_string())
+}
+
+/// The `PRODID` of every calendar mailypoppins sends.
+const PRODID: &str = "-//mailypoppins//mailypoppins//EN";
+
+/// An empty iTIP `VCALENDAR`: `VERSION`, our `PRODID` and `METHOD`.
+///
+/// Built from [`Calendar::empty`] because [`Calendar::new`] prefills
+/// `PRODID:ICALENDAR-RS` and `CALSCALE:GREGORIAN`; the latter is the RFC 5545
+/// default, which Outlook omits too.
+fn itip_calendar(method: &str) -> Calendar {
+    let mut calendar = Calendar::empty();
+    calendar
+        .append_property(Property::new("VERSION", "2.0"))
+        .append_property(Property::new("PRODID", PRODID))
+        .append_property(Property::new("METHOD", method));
+    calendar
 }
 
 /// The three RSVP participation statuses an attendee can reply with (D3/D6).
@@ -430,6 +444,16 @@ impl Rsvp {
             Rsvp::Declined => "Declined",
         }
     }
+
+    /// The REPLY's one-line body prefix (`Accepted:` / `Tentatively
+    /// accepted:` / `Declined:`), the subject's wording as a sentence.
+    pub fn body_verb(self) -> &'static str {
+        match self {
+            Rsvp::Accepted => "Accepted",
+            Rsvp::Tentative => "Tentatively accepted",
+            Rsvp::Declined => "Declined",
+        }
+    }
 }
 
 /// What we extracted from a received invite's sidecar `.ics` in order to build
@@ -442,6 +466,16 @@ pub struct ReplyContext {
     pub summary: Option<String>,
     /// `ORGANIZER` address (bare, no `mailto:`) — the REPLY recipient.
     pub organizer: String,
+    /// The `ORGANIZER`'s `CN`, echoed on the REPLY's `ORGANIZER`.
+    pub organizer_cn: Option<String>,
+    /// Each invited `ATTENDEE`'s address (bare, lowercased) with its `CN`,
+    /// for the attendees that carry one.
+    pub attendee_cns: Vec<(String, String)>,
+    /// The invite's `VTIMEZONE` components that `DTSTART`/`DTEND` name by
+    /// `TZID`, as the source text, folded lines and CRLF endings included.
+    /// MS-OXCICAL requires a `VTIMEZONE` for every `TZID` a calendar uses,
+    /// and Exchange does not process a REPLY whose `TZID` names none.
+    pub timezones: Vec<String>,
     /// The invite's `DTSTART` property, cloned verbatim (value + params such as
     /// `TZID`/`VALUE=DATE`) so the REPLY echoes it exactly. RFC 5546 marks
     /// `DTSTART` optional in a REPLY, but Exchange/Outlook reject a REPLY that
@@ -509,6 +543,19 @@ pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
         .map(|s| s.to_string())
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow!("Invite has no ORGANIZER; cannot address the REPLY"))?;
+    let organizer_cn = event
+        .properties()
+        .get("ORGANIZER")
+        .and_then(|p| p.params().get("CN"))
+        .map(|cn| cn.value().to_string());
+    let attendee_cns = event
+        .get_attendees()
+        .into_iter()
+        .filter_map(|att| {
+            let address = crate::calendar::strip_mailto(&att.cal_address).to_lowercase();
+            Some((address, att.cn?))
+        })
+        .collect();
 
     // Echo the invite's DTSTART/DTEND (or DURATION) into the REPLY. We clone the
     // parsed `Property` verbatim so its value AND parameters (`TZID`,
@@ -518,30 +565,116 @@ pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
     let dtend = event.properties().get("DTEND").cloned();
     let duration = event.properties().get("DURATION").cloned();
 
+    let tzids: Vec<&str> = [&dtstart, &dtend]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.params().get("TZID"))
+        .map(|tzid| tzid.value())
+        .collect();
+    let timezones = if tzids.is_empty() {
+        Vec::new()
+    } else {
+        vtimezone_blocks(text)
+            .into_iter()
+            .filter(|block| vtimezone_tzid(block).is_none_or(|tzid| tzids.contains(&tzid.as_str())))
+            .collect()
+    };
+
     Ok(ReplyContext {
         uid,
         sequence,
         summary,
         organizer,
+        organizer_cn,
+        attendee_cns,
+        timezones,
         dtstart,
         dtend,
         duration,
     })
 }
 
+/// Every `VTIMEZONE` component of a calendar's text, verbatim, each line
+/// ending in CRLF.
+///
+/// Read off the text rather than the parsed calendar because the `icalendar`
+/// crate cannot render a parsed `VTIMEZONE` back faithfully: it sorts the
+/// properties and adds a `DTSTAMP` and a `UID` to it and to each `STANDARD`
+/// and `DAYLIGHT` child.
+fn vtimezone_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if current.is_none() && line.eq_ignore_ascii_case("BEGIN:VTIMEZONE") {
+            current = Some(String::new());
+        }
+        if let Some(block) = current.as_mut() {
+            block.push_str(line);
+            block.push_str("\r\n");
+            if line.eq_ignore_ascii_case("END:VTIMEZONE") {
+                blocks.extend(current.take());
+            }
+        }
+    }
+    blocks
+}
+
+/// The `TZID` a `VTIMEZONE` block declares, or `None` when it names none
+/// readably (such a block is kept rather than guessed about).
+fn vtimezone_tzid(block: &str) -> Option<String> {
+    let unfolded = block.replace("\r\n ", "").replace("\r\n\t", "");
+    unfolded
+        .split("\r\n")
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            let name = name.split(';').next().unwrap_or(name);
+            name.eq_ignore_ascii_case("TZID").then_some(value)
+        })
+        .map(|tzid| tzid.trim().trim_matches('"').to_string())
+        .filter(|tzid| !tzid.is_empty())
+}
+
+/// A `CN` parameter value: double quotes and control characters dropped (a
+/// quoted parameter cannot hold them), the whole quoted when it holds a
+/// comma, a colon or a semicolon (RFC 5545 section 3.1), `None` when blank.
+fn cn_param(name: &str) -> Option<String> {
+    let clean: String = name
+        .chars()
+        .filter(|c| *c != '"' && !c.is_control())
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        None
+    } else if clean.contains([',', ':', ';']) {
+        Some(format!("\"{clean}\""))
+    } else {
+        Some(clean.to_string())
+    }
+}
+
 /// Build a `METHOD:REPLY` `VCALENDAR` for an RSVP.
 ///
 /// Copies `UID` + `SEQUENCE` verbatim from the source invite (`ctx`), echoes
-/// the invite's `DTSTART` (+`DTEND`|`DURATION`) verbatim, sets a single
-/// `ATTENDEE` = the responding account's address with the chosen `PARTSTAT`,
-/// and a fresh `DTSTAMP`. RFC 5546 marks `DTSTART` optional in a REPLY, but
+/// the invite's `DTSTART` (+`DTEND`|`DURATION`) verbatim with the
+/// `VTIMEZONE`s their `TZID`s name, sets a single `ATTENDEE` = the responding
+/// account's address with the chosen `PARTSTAT`, and a fresh `DTSTAMP`.
+/// The `ATTENDEE`'s `CN` is the one the invite gave that address, unless that
+/// is just the address and `attendee_name` (the account's display name) is
+/// known; the `ORGANIZER` keeps the invite's `CN`. RFC 5546 marks `DTSTART` optional in a REPLY, but
 /// Exchange/Outlook reject a REPLY without it ("Invalid ICAL element:
 /// DTSTART"); echoing the invite's value mirrors what Outlook itself sends.
 /// `RECURRENCE-ID` is intentionally absent (v1 answers the whole series only,
 /// D6). No `RSVP` parameter on a REPLY attendee (that lives on the REQUEST).
 /// Renders to `.ics` bytes routed to the `ORGANIZER`.
-pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result<String> {
-    if attendee.trim().is_empty() {
+pub fn build_reply_ics(
+    ctx: &ReplyContext,
+    attendee: &str,
+    attendee_name: Option<&str>,
+    rsvp: Rsvp,
+) -> Result<String> {
+    let attendee = attendee.trim();
+    if attendee.is_empty() {
         return Err(anyhow!("REPLY attendee address is empty"));
     }
 
@@ -555,10 +688,11 @@ pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result
     }
 
     // ORGANIZER echoed back so the reply matches the request thread.
-    event.append_property(Property::new(
-        "ORGANIZER",
-        format!("mailto:{}", ctx.organizer),
-    ));
+    let mut organizer = Property::new("ORGANIZER", format!("mailto:{}", ctx.organizer));
+    if let Some(cn) = ctx.organizer_cn.as_deref().and_then(cn_param) {
+        organizer.add_parameter("CN", &cn);
+    }
+    event.append_property(organizer);
 
     // DTSTART (+DTEND | DURATION) echoed verbatim from the invite. RFC 5546
     // permits omitting DTSTART in a REPLY, but Exchange/Outlook reject such a
@@ -584,15 +718,39 @@ pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result
     }
 
     // The single ATTENDEE line is the RSVP payload: our address + PARTSTAT.
-    let mut prop = Property::new("ATTENDEE", format!("mailto:{}", attendee.trim()));
+    let mut prop = Property::new("ATTENDEE", format!("mailto:{attendee}"));
     prop.add_parameter("PARTSTAT", rsvp.partstat());
+    let invited_cn = ctx
+        .attendee_cns
+        .iter()
+        .find(|(address, _)| address.eq_ignore_ascii_case(attendee))
+        .map(|(_, cn)| cn.as_str());
+    let cn = match (invited_cn, attendee_name) {
+        (Some(cn), Some(name)) if cn.trim().eq_ignore_ascii_case(attendee) => Some(name),
+        (Some(cn), _) => Some(cn),
+        (None, name) => name,
+    };
+    if let Some(cn) = cn.and_then(cn_param) {
+        prop.add_parameter("CN", &cn);
+    }
     event.append_property(prop);
 
-    let mut calendar = Calendar::new();
+    let mut calendar = itip_calendar("REPLY");
     calendar.push(event.done());
-    calendar.append_property(Property::new("METHOD", "REPLY"));
+    let rendered = calendar.to_string();
 
-    Ok(calendar.to_string())
+    // The VTIMEZONEs go in as the invite's own text, ahead of the VEVENT.
+    if ctx.timezones.is_empty() {
+        return Ok(rendered);
+    }
+    let at = rendered
+        .find("BEGIN:VEVENT\r\n")
+        .ok_or_else(|| anyhow!("the rendered REPLY has no VEVENT"))?;
+    let mut ics = String::with_capacity(rendered.len() + ctx.timezones.concat().len());
+    ics.push_str(&rendered[..at]);
+    ics.extend(ctx.timezones.iter().map(String::as_str));
+    ics.push_str(&rendered[at..]);
+    Ok(ics)
 }
 
 /// A bare calendar date, `YYYY-MM-DD`, the form that makes an event all-day.
@@ -937,7 +1095,7 @@ mod tests {
         assert_eq!(parsed.end.as_deref(), Some("2027-01-09T00:00:00"));
         // And the RSVP path echoes it verbatim.
         let ctx = reply_context_from_ics(ics.as_bytes()).unwrap();
-        let reply = unfold(&build_reply_ics(&ctx, "a@example.com", Rsvp::Accepted).unwrap());
+        let reply = unfold(&build_reply_ics(&ctx, "a@example.com", None, Rsvp::Accepted).unwrap());
         assert!(
             reply.contains("DTSTART;VALUE=DATE:20261224"),
             "reply=\n{reply}"
@@ -1134,7 +1292,7 @@ END:VCALENDAR\r
             (Rsvp::Tentative, "TENTATIVE"),
             (Rsvp::Declined, "DECLINED"),
         ] {
-            let ics = unfold(&build_reply_ics(&ctx, "me@example.com", rsvp).unwrap());
+            let ics = unfold(&build_reply_ics(&ctx, "me@example.com", None, rsvp).unwrap());
             // METHOD:REPLY at VCALENDAR level.
             assert!(ics.contains("METHOD:REPLY"), "ics=\n{}", ics);
             // UID + SEQUENCE copied verbatim from the sidecar (not regenerated).
@@ -1151,12 +1309,19 @@ END:VCALENDAR\r
                 partstat,
                 ics
             );
-            // ORGANIZER echoed so the organizer's client threads it correctly.
+            // ORGANIZER echoed, with its CN, so the organizer's client threads
+            // it correctly.
             assert!(
-                ics.contains("ORGANIZER:mailto:chair@tum.de"),
+                ics.contains("ORGANIZER;CN=Chair:mailto:chair@tum.de"),
                 "ics=\n{}",
                 ics
             );
+            // Our PRODID, once, and no CALSCALE (the RFC 5545 default).
+            assert_eq!(ics.matches("PRODID:").count(), 1, "ics=\n{}", ics);
+            assert!(ics.contains(&format!("PRODID:{PRODID}")), "ics=\n{}", ics);
+            assert!(!ics.contains("CALSCALE"), "ics=\n{}", ics);
+            // UTC times name no zone, so the REPLY declares none.
+            assert!(!ics.contains("VTIMEZONE"), "ics=\n{}", ics);
             // Whole-series only: no per-occurrence RECURRENCE-ID (D6).
             assert!(!ics.contains("RECURRENCE-ID"), "ics=\n{}", ics);
             // A REPLY attendee carries no RSVP parameter (that lives on REQUEST).
@@ -1171,7 +1336,7 @@ END:VCALENDAR\r
     #[test]
     fn build_reply_ics_echoes_tzid_dtstart_dtend_verbatim() {
         let ctx = reply_context_from_ics(RECEIVED_REQUEST_TZID.as_bytes()).unwrap();
-        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", Rsvp::Accepted).unwrap());
+        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", None, Rsvp::Accepted).unwrap());
         // TZID param and wall-clock value preserved exactly (no UTC rewrite).
         assert!(
             ics.contains("DTSTART;TZID=Europe/Berlin:20260720T140000"),
@@ -1185,10 +1350,139 @@ END:VCALENDAR\r
         );
     }
 
+    // An Exchange REQUEST: Windows zone names, each declared by a VTIMEZONE,
+    // plus one the event does not use; CNs on the ORGANIZER and ATTENDEEs.
+    const EXCHANGE_TZ: &str = "\
+BEGIN:VTIMEZONE\r
+TZID:W. Europe Standard Time\r
+BEGIN:STANDARD\r
+DTSTART:16010101T030000\r
+TZOFFSETFROM:+0200\r
+TZOFFSETTO:+0100\r
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10\r
+END:STANDARD\r
+BEGIN:DAYLIGHT\r
+DTSTART:16010101T020000\r
+TZOFFSETFROM:+0100\r
+TZOFFSETTO:+0200\r
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3\r
+END:DAYLIGHT\r
+END:VTIMEZONE\r
+";
+    const UNUSED_TZ: &str = "\
+BEGIN:VTIMEZONE\r
+TZID:GMT Standard Time\r
+BEGIN:STANDARD\r
+DTSTART:16010101T000000\r
+TZOFFSETFROM:+0000\r
+TZOFFSETTO:+0000\r
+END:STANDARD\r
+END:VTIMEZONE\r
+";
+
+    fn exchange_request(start: &str, end: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR\r\n\
+             METHOD:REQUEST\r\n\
+             PRODID:Microsoft Exchange Server 2010\r\n\
+             VERSION:2.0\r\n\
+             {EXCHANGE_TZ}{UNUSED_TZ}\
+             BEGIN:VEVENT\r\n\
+             ORGANIZER;CN=\"Hellin, Sylvain\":MAILTO:organizer@tum.de\r\n\
+             ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Other:MAILTO:other@x.com\r\n\
+             ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Sylvain H:MAILTO:Me@Example.com\r\n\
+             UID:exchange-uid\r\n\
+             SUMMARY;LANGUAGE=en-US:test-invitation\r\n\
+             {start}\r\n\
+             {end}\r\n\
+             SEQUENCE:1\r\n\
+             END:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+        )
+    }
+
+    #[test]
+    fn a_reply_to_zoned_times_carries_their_vtimezone_verbatim_and_the_cns() {
+        let request = exchange_request(
+            "DTSTART;TZID=W. Europe Standard Time:20261029T130000",
+            "DTEND;TZID=W. Europe Standard Time:20261029T133000",
+        );
+        let ctx = reply_context_from_ics(request.as_bytes()).unwrap();
+        let ics =
+            build_reply_ics(&ctx, "me@example.com", Some("Fallback"), Rsvp::Tentative).unwrap();
+
+        // The zone the times use, as the invite's own text, ahead of the
+        // VEVENT; the zone they do not use stays out.
+        let at = ics
+            .find(EXCHANGE_TZ)
+            .unwrap_or_else(|| panic!("no VTIMEZONE in\n{ics}"));
+        assert!(at < ics.find("BEGIN:VEVENT").unwrap(), "ics=\n{ics}");
+        assert_eq!(ics.matches("BEGIN:VTIMEZONE").count(), 1, "ics=\n{ics}");
+        assert!(!ics.contains("GMT Standard Time"), "ics=\n{ics}");
+
+        let unfolded = unfold(&ics);
+        assert!(
+            unfolded.contains("DTSTART;TZID=W. Europe Standard Time:20261029T130000"),
+            "ics=\n{unfolded}"
+        );
+        // The invited CN wins over the account's display name; a CN holding
+        // a comma is quoted.
+        assert!(
+            unfolded.contains("ATTENDEE;CN=Sylvain H;PARTSTAT=TENTATIVE:mailto:me@example.com"),
+            "ics=\n{unfolded}"
+        );
+        assert!(
+            unfolded.contains("ORGANIZER;CN=\"Hellin, Sylvain\":mailto:organizer@tum.de"),
+            "ics=\n{unfolded}"
+        );
+
+        // Still one calendar the receive side reads.
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).expect("parses");
+        assert_eq!(parsed.method.as_deref(), Some("REPLY"));
+        assert_eq!(parsed.attendees.len(), 1);
+        assert_eq!(parsed.attendees[0].status, "tentative");
+    }
+
+    #[test]
+    fn a_reply_to_utc_times_declares_no_vtimezone() {
+        let request = exchange_request("DTSTART:20261029T120000Z", "DTEND:20261029T123000Z");
+        let ctx = reply_context_from_ics(request.as_bytes()).unwrap();
+        assert!(ctx.timezones.is_empty());
+        let ics = build_reply_ics(&ctx, "me@example.com", None, Rsvp::Accepted).unwrap();
+        assert!(!ics.contains("VTIMEZONE"), "ics=\n{ics}");
+        assert!(
+            unfold(&ics).contains("DTSTART:20261029T120000Z"),
+            "ics=\n{ics}"
+        );
+    }
+
+    #[test]
+    fn the_reply_cn_falls_back_to_the_display_name_and_is_otherwise_omitted() {
+        // Exchange writes the bare address as the CN of an outside attendee.
+        let request = exchange_request("DTSTART:20261029T120000Z", "DTEND:20261029T123000Z")
+            .replace("CN=Sylvain H:", "CN=me@example.com:");
+        let ctx = reply_context_from_ics(request.as_bytes()).unwrap();
+        let named = unfold(
+            &build_reply_ics(&ctx, "me@example.com", Some("Jane Doe"), Rsvp::Accepted).unwrap(),
+        );
+        assert!(
+            named.contains("ATTENDEE;CN=Jane Doe;PARTSTAT=ACCEPTED:mailto:me@example.com"),
+            "ics=\n{named}"
+        );
+
+        // No CN in the invite and no display name: no CN at all.
+        let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
+        let bare = unfold(&build_reply_ics(&ctx, "me@example.com", None, Rsvp::Accepted).unwrap());
+        assert!(
+            bare.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com"),
+            "ics=\n{bare}"
+        );
+    }
+
     #[test]
     fn build_reply_ics_echoes_date_only_dtstart_dtend_verbatim() {
         let ctx = reply_context_from_ics(RECEIVED_REQUEST_DATE_ONLY.as_bytes()).unwrap();
-        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", Rsvp::Declined).unwrap());
+        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", None, Rsvp::Declined).unwrap());
         // VALUE=DATE param + date-only value preserved verbatim.
         assert!(ics.contains("DTSTART;VALUE=DATE:20260720"), "ics=\n{}", ics);
         assert!(ics.contains("DTEND;VALUE=DATE:20260721"), "ics=\n{}", ics);
@@ -1201,7 +1495,7 @@ END:VCALENDAR\r
         let no_start = RECEIVED_REQUEST.replace("DTSTART:20260720T120000Z\r\n", "");
         let ctx = reply_context_from_ics(no_start.as_bytes()).unwrap();
         assert!(ctx.dtstart.is_none());
-        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", Rsvp::Accepted).unwrap());
+        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", None, Rsvp::Accepted).unwrap());
         assert!(!ics.contains("DTSTART"), "ics=\n{}", ics);
         assert!(!ics.contains("DTEND"), "ics=\n{}", ics);
     }
@@ -1209,7 +1503,7 @@ END:VCALENDAR\r
     #[test]
     fn build_reply_ics_roundtrips_through_receive_parser() {
         let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
-        let ics = build_reply_ics(&ctx, "me@example.com", Rsvp::Accepted).unwrap();
+        let ics = build_reply_ics(&ctx, "me@example.com", None, Rsvp::Accepted).unwrap();
         let parsed = crate::calendar::parse_ics(ics.as_bytes()).expect("parses");
         assert_eq!(parsed.method.as_deref(), Some("REPLY"));
         assert_eq!(

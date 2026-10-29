@@ -420,6 +420,8 @@ struct RsvpWork {
     response: String,
     comment: Option<String>,
     ics: Vec<u8>,
+    /// The invitation mail's `Message-ID`, which the reply threads under.
+    request_message_id: String,
     secrets: crate::secrets::SecretsBackendKind,
     shape: ReplyShape,
 }
@@ -545,7 +547,7 @@ fn plan_rsvp(
     rsvp_work(
         account,
         &store,
-        row.id,
+        &row,
         canonical,
         rsvp,
         response,
@@ -593,7 +595,7 @@ fn plan_respond(
         return rsvp_work(
             account,
             &store,
-            row.id,
+            &row,
             canonical,
             rsvp,
             request.response,
@@ -669,13 +671,13 @@ fn row_by_id(
     Ok((row, canonical))
 }
 
-/// One iMIP reply to the invitation on row `row_id`, whose own payload is
-/// the source of truth for the reply (#0038 item 6).
+/// One iMIP reply to the invitation on `row`, whose own payload is the source
+/// of truth for the reply (#0038 item 6).
 #[allow(clippy::too_many_arguments)]
 fn rsvp_work(
     account: AccountConfig,
     store: &Store,
-    row_id: i64,
+    row: &crate::store::read::MessageRow,
     canonical: crate::selector::Selector,
     rsvp: Rsvp,
     response: String,
@@ -684,7 +686,7 @@ fn rsvp_work(
     shape: ReplyShape,
 ) -> Result<RsvpWork, RpcError> {
     let blobs = BlobStore::for_account(&account.name);
-    let ics = crate::store::read::load_invite_ics(store, &blobs, row_id)
+    let ics = crate::store::read::load_invite_ics(store, &blobs, row.id)
         .ok_or_else(|| invalid_params(format!("{canonical} carries no invitation to reply to")))?;
     Ok(RsvpWork {
         account,
@@ -693,6 +695,7 @@ fn rsvp_work(
         response,
         comment,
         ics,
+        request_message_id: row.message_id.clone(),
         secrets,
         shape,
     })
@@ -904,6 +907,7 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
         response,
         comment,
         ics,
+        request_message_id,
         secrets,
         shape,
     } = work;
@@ -921,6 +925,7 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
         submit(
             &account,
             &ics,
+            &request_message_id,
             rsvp,
             body_comment.as_deref(),
             method,
@@ -978,13 +983,20 @@ fn succeed(handle: &OperationHandle, result: EventRespondResult) {
 async fn submit(
     account: &AccountConfig,
     ics: &[u8],
+    request_message_id: &str,
     rsvp: Rsvp,
     comment: Option<&str>,
     method: &str,
     token: &CancelToken,
 ) -> anyhow::Result<Option<crate::send::RsvpOutcome>> {
     let smtp = super::send::smtp_config(account)?;
-    let prepared = crate::send::prepare_rsvp(ics, &account.default_from, rsvp, comment)?;
+    let prepared = crate::send::prepare_rsvp(
+        ics,
+        &account.default_from,
+        rsvp,
+        comment,
+        Some(request_message_id),
+    )?;
     if !commit_point(method, token).await {
         return Ok(None);
     }
