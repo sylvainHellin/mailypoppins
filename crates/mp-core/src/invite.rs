@@ -622,6 +622,11 @@ fn vtimezone_blocks(text: &str) -> Vec<String> {
 
 /// The `TZID` a `VTIMEZONE` block declares, or `None` when it names none
 /// readably (such a block is kept rather than guessed about).
+///
+/// The property value is a TEXT value, so Exchange writes the comma of
+/// `(UTC+01:00) Amsterdam, Berlin` as `\,` there, while the `TZID` parameter
+/// of `DTSTART` quotes it instead: the escapes are undone before the two are
+/// compared.
 fn vtimezone_tzid(block: &str) -> Option<String> {
     let unfolded = block.replace("\r\n ", "").replace("\r\n\t", "");
     unfolded
@@ -631,8 +636,30 @@ fn vtimezone_tzid(block: &str) -> Option<String> {
             let name = name.split(';').next().unwrap_or(name);
             name.eq_ignore_ascii_case("TZID").then_some(value)
         })
-        .map(|tzid| tzid.trim().trim_matches('"').to_string())
+        .map(|tzid| unescape_text(tzid.trim().trim_matches('"')))
         .filter(|tzid| !tzid.is_empty())
+}
+
+/// A TEXT value with its `\,`, `\;` and `\\` escapes undone (RFC 5545
+/// section 3.3.11); any other backslash stays as written.
+fn unescape_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some(escaped @ (',' | ';' | '\\')) => out.push(escaped),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// A `CN` parameter value: double quotes and control characters dropped (a
@@ -1441,6 +1468,30 @@ END:VTIMEZONE\r
         assert_eq!(parsed.method.as_deref(), Some("REPLY"));
         assert_eq!(parsed.attendees.len(), 1);
         assert_eq!(parsed.attendees[0].status, "tentative");
+    }
+
+    /// Exchange names a zone it has no Windows id for by its display name,
+    /// escaped in the `VTIMEZONE` and quoted on `DTSTART`.
+    #[test]
+    fn a_vtimezone_whose_tzid_is_escaped_matches_the_quoted_parameter() {
+        let zone = EXCHANGE_TZ.replace(
+            "TZID:W. Europe Standard Time",
+            "TZID:(UTC+01:00) Amsterdam\\, Berlin",
+        );
+        let request = exchange_request(
+            "DTSTART;TZID=\"(UTC+01:00) Amsterdam, Berlin\":20261029T130000",
+            "DTEND;TZID=\"(UTC+01:00) Amsterdam, Berlin\":20261029T133000",
+        )
+        .replace(EXCHANGE_TZ, &zone);
+        let ctx = reply_context_from_ics(request.as_bytes()).unwrap();
+        assert_eq!(ctx.timezones, std::slice::from_ref(&zone));
+        let ics = build_reply_ics(&ctx, "me@example.com", None, Rsvp::Accepted).unwrap();
+        assert!(ics.contains(&zone), "ics=\n{ics}");
+    }
+
+    #[test]
+    fn the_text_escapes_of_a_tzid_are_undone() {
+        assert_eq!(unescape_text(r"A\, B\; C\\D\nE\"), r"A, B; C\D\nE\");
     }
 
     #[test]
