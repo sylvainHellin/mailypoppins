@@ -255,7 +255,8 @@ enum Commands {
         #[command(flatten)]
         signature: SignatureFlags,
     },
-    /// RSVP to a received calendar invitation (iMIP REPLY over SMTP)
+    /// Answer a received calendar invitation: through the server when the
+    /// account's server calendar holds its event, else by iMIP reply
     Invite {
         #[command(subcommand)]
         action: InviteAction,
