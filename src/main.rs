@@ -3893,9 +3893,16 @@ async fn routed_event_respond(
         println!("{}", serde_json::to_string_pretty(&settled)?);
         return Ok(());
     }
+    // An iMIP reply that did not leave is a failure, as `mp rsvp` reports it:
+    // no tick line before the error.
+    if settled.via == "imip" && !settled.delivered {
+        return Err(anyhow!(
+            "Failed to send the RSVP for {} to the organizer",
+            settled.event
+        ));
+    }
     let how = match (settled.via.as_str(), settled.delivered) {
-        ("imip", true) => "iMIP reply sent to the organizer",
-        ("imip", false) => "the iMIP reply was not delivered",
+        ("imip", _) => "iMIP reply sent to the organizer",
         (_, true) => "through the server, organizer told",
         (_, false) => "through the server, organizer not told",
     };
@@ -3907,9 +3914,6 @@ async fn routed_event_respond(
     );
     if let Some(comment) = settled.comment.as_deref() {
         println!("  comment: {comment}");
-    }
-    if settled.via == "imip" && !settled.delivered {
-        std::process::exit(1);
     }
     Ok(())
 }
