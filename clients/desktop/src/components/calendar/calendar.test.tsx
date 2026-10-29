@@ -154,6 +154,20 @@ describe("the Calendar view", () => {
     await waitFor(() => expect(within(list).getByRole("option", { name: /Company holiday/ })).toBeInTheDocument());
   });
 
+  it("Space and Enter toggle the focused calendar, not the view's bindings", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("c");
+    const panel = await screen.findByRole("region", { name: "Calendars" });
+    const holidays = await within(panel).findByRole("checkbox", { name: "home/Holidays" });
+    holidays.focus();
+    await user.keyboard(" ");
+    expect(callsOf("calendar_set_visibility")).toEqual([{ account: "home", calendar: "AAMk-cal-holidays", visible: false }]);
+    await waitFor(() => expect(within(panel).getByRole("checkbox", { name: "home/Holidays" })).not.toBeChecked());
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(callsOf("calendar_set_visibility")).toHaveLength(2));
+    expect(callsOf("calendar_set_visibility")[1]).toEqual({ account: "home", calendar: "AAMk-cal-holidays", visible: true });
+  });
+
   it("r reads the events again and says how many it holds", async () => {
     const { user } = await openCalendar();
     const reads = callsOf("calendar_view").length;
