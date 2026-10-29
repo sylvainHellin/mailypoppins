@@ -163,6 +163,8 @@ All notable changes to this project are documented in this file.
 - `mp daemon stop` returns only once the daemon's process has exited, so a `mp daemon start` straight after it no longer races the old daemon's last moments.
 - Daemon: a `state.bootstrap` waiting at the state gate or reading the health checks from disk no longer holds a worker thread other connections need.
 - The daemon tests that failed now and then under load pass reliably: they no longer mistake the daemon's own startup events for theirs, and they wait for the log, the connection count and the event stream to settle instead of reading them once.
+- Recurring events from a Microsoft 365 calendar show their title, free/busy and all-day state on every occurrence and follow a renamed series, instead of appearing as "(no title)" blocks with all-day holidays drawn as 01:00-01:00 timed events (PERSO-200).
+- Calendar replies carry the invitation's time zone, names and threading headers so Exchange records them as meeting responses; `mp event respond --json` exits 1 when the reply was not delivered, and the desktop reports it as a failure (PERSO-200).
 
 ### Removed
 - Microsoft OAuth2 over IMAP and SMTP (`auth_method = "oauth2"`, XOAUTH2): Microsoft 365 accounts sign in through Microsoft Graph (`auth_method = "graph"`), and on-premises Exchange is a password account like any other IMAP server.
