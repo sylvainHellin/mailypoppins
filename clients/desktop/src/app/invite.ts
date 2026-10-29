@@ -29,9 +29,9 @@ export function inviteProblem(fields: cmd.InviteFields): string | null {
   return null;
 }
 
-/** The account a new invitation sends from: the Calendar view's, else the selection's. */
+/** The account a new invitation sends from: the selection's, in the Calendar view too, which shows every account. */
 export function inviteAccount(s: AppState): string | null {
-  return (s.view === "calendar" ? s.calendarView?.account : null) ?? s.selection.account;
+  return s.selection.account;
 }
 
 export function openInviteDialog(s: AppState, account: string): AppState {

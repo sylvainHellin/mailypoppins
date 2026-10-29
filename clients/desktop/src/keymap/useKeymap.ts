@@ -14,6 +14,7 @@ import { accountNames, conversationDraft, draftsShown, liveHolds, screenFor, typ
 import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
+import { CALENDAR_JUMP_ID } from "@/app/calendar";
 import { describeKey, paletteEntries, type ActionId, type Badge } from "@/keymap/catalog";
 import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
 import { setPendingPrefix, type PendingPrefix } from "@/keymap/pendingPrefix";
@@ -247,8 +248,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             // Out of the field, and out of a search: the mailbox list returns.
             dispatch(s.search ? { type: "exit_search" } : { type: "focus", pane: "list" });
           }
-          // Out of the contacts search, which keeps its query: the list takes the keys.
-          if ((e.target as HTMLElement).id === CONTACTS_SEARCH_ID) dispatch({ type: "focus", pane: "list" });
+          // Out of the contacts search, which keeps its query, or the calendar's
+          // date field: the list takes the keys.
+          if ([CONTACTS_SEARCH_ID, CALENDAR_JUMP_ID].includes((e.target as HTMLElement).id)) dispatch({ type: "focus", pane: "list" });
         }
         return;
       }
@@ -293,6 +295,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       // prefixes it names still arm, and what it neither binds nor shares
       // does nothing, as the TUI's views ignore the mail keys.
       if (view) {
+        // A control marked as such (the calendars panel's checkboxes) takes
+        // its own Enter and Space, whatever the view binds them to.
+        if ((e.key === "Enter" || e.key === " ") && e.target instanceof Element && e.target.closest("[data-own-keys]")) return;
         // Enter on a sidebar mailbox brings Mail back with it, whatever the view binds Enter to.
         if (e.key === "Enter" && s.focus === "sidebar") return handled(), run("select_mailbox");
         const id = view.keys[e.key];

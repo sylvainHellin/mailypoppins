@@ -91,7 +91,20 @@ export type ActionId =
   | "open_settings"
   | "add_account"
   | "calendar_open_source"
-  | "calendar_toggle_past"
+  /** The Calendar view's days and layouts (PERSO-200), the TUI's `h`/`l`, `t`, `gt` and `a`/`d`/`w`. */
+  | "calendar_prev"
+  | "calendar_next"
+  | "calendar_today"
+  | "calendar_jump_date"
+  | "calendar_layout_agenda"
+  | "calendar_layout_day"
+  | "calendar_layout_week"
+  /** Enter: the cursor event's card, which the desktop shows beside the days. */
+  | "calendar_open_card"
+  /** `c`: the calendars panel, each calendar shown or hidden. */
+  | "calendar_calendars"
+  /** The event card's Open mail, the TUI card's `m`. */
+  | "calendar_open_mail"
   | "calendar_refresh"
   | "calendar_rsvp"
   | "rsvp"
@@ -224,13 +237,20 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   },
   // The Calendar view's own keys (src/keymap/viewKeys.ts); its moves are
   // the list's, which reach the view's cursor.
+  // The two-way rows (`h/l`, `a/d/w`) run their first action from the
+  // palette; GUI_ENTRIES adds the others.
   CALENDAR: {
     "Navigate events": { badge: "key" },
+    "Previous / next day or week (also [ and ])": { id: "calendar_prev" },
     "Jump to top / bottom": { id: "list_top" },
-    "Open the invite email in $EDITOR": { id: "calendar_open_source" },
-    "RSVP to invitation (Accept/Tentative/Decline)": { id: "calendar_rsvp" },
-    "Show past events / upcoming only": { id: "calendar_toggle_past" },
-    "Refresh events from disk": { id: "calendar_refresh" },
+    "Go to today": { id: "calendar_today" },
+    "Jump to date (e.g. 2026-07-06)": { id: "calendar_jump_date" },
+    "Agenda / day / week layout": { id: "calendar_layout_agenda" },
+    "Open the event card": { id: "calendar_open_card" },
+    "Open the invitation's .ics in $EDITOR": { id: "calendar_open_source" },
+    "Respond (accept / tentative / decline, comment)": { id: "calendar_rsvp" },
+    "Show or hide calendars": { id: "calendar_calendars" },
+    "Read the events again": { id: "calendar_refresh" },
   },
   // The Contacts view's own keys (src/keymap/viewKeys.ts); its moves are
   // the list's, which reach the view's cursor.
@@ -384,6 +404,13 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   // The TUI has no invitation form (the CLI's `mp send --invite`) and no key
   // for one: the palette and the Calendar view's toolbar.
   { section: "CALENDAR", label: "New invitation", keys: [], id: "new_invitation", badge: null },
+  // The second and third actions of the CALENDAR rows `h/l` and `a/d/w`.
+  { section: "CALENDAR", label: "Next day or week", keys: ["l", "]"], id: "calendar_next", badge: null },
+  { section: "CALENDAR", label: "Day layout", keys: ["d"], id: "calendar_layout_day", badge: null },
+  { section: "CALENDAR", label: "Week layout", keys: ["w"], id: "calendar_layout_week", badge: null },
+  // The TUI's event card overlay has `m`; the desktop's card is always shown,
+  // so `m` works in the view.
+  { section: "CALENDAR", label: "Open the invitation mail", keys: ["m"], id: "calendar_open_mail", badge: null },
   { section: "OUTBOX", label: "Open outbox", keys: ["go"], id: "open_outbox", badge: null },
   { section: "OUTBOX", label: "Retry outbox row", keys: ["R"], id: "outbox_retry", badge: null },
   { section: "OUTBOX", label: "Discard outbox row", keys: ["d"], id: "outbox_discard", badge: null },

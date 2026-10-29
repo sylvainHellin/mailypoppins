@@ -1,17 +1,20 @@
 // The invitations (clients/desktop/docs/reader.md, "Invitations"): the
-// reader's invitation cards as Loadables, each account's Graph refusal, the
-// RSVP choice (`tv`, the agenda's `V`, the card's buttons) and the RSVPs this
-// window awaits. Pure functions over the model, which the reducer routes
-// to, and at the bottom the commands they run.
+// reader's invitation cards as Loadables, the respond choice (`tv`, the
+// Calendar view's `V`, the cards' buttons) and the answers this window
+// awaits, all through `event.respond` (PERSO-200). Which answers an account
+// takes is the daemon's call; what is refused here is what no answer could
+// mean. Pure functions over the model, which the reducer routes to, and at
+// the bottom the commands they run. The New invitation form's Graph refusal
+// lives here too, as the cards' did before the daemon answered them.
 
 import type { Dispatch } from "react";
-import type { AgendaEvent, EventFrontmatter } from "@/protocol/types";
-import type { GuiError, RsvpSettled } from "@/lib/gui-types";
+import type { CalendarEvent, EventFrontmatter, EventRespondResult } from "@/protocol/types";
+import type { GuiError, InviteCard } from "@/lib/gui-types";
 import { asGuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
 import { pushNotice } from "@/app/pending";
-import { cursorEvent, staleCalendar } from "@/app/calendar";
+import { cursorEntry, eventTitle, IMIP_PREFIX, isImip, isOrganizer, staleCalendar } from "@/app/calendar";
 import {
   emptyLoadable,
   markStale,
@@ -36,7 +39,9 @@ export const CANCELLED = "This event was cancelled by the organizer; nothing to 
 export const SUPERSEDED = "A newer version of this invitation has arrived; RSVP from that one";
 export const ORGANIZER = "You are the organizer of this invite; nothing to RSVP";
 export const NOT_INVITE = "Not a calendar invite";
+export const NOT_INVITATION = "This event is not an invitation; there is nothing to answer";
 export const SERVER_ONLY = "This search hit has no local copy to RSVP from";
+export const BUSY = "A reply to this invitation is being sent";
 
 function isRequest(event: EventFrontmatter | null): boolean {
   return event?.method?.toUpperCase() === "REQUEST";
@@ -45,25 +50,31 @@ function isRequest(event: EventFrontmatter | null): boolean {
 /**
  * Why the reader's invitation can not be answered, or null when it can: not
  * a `REQUEST`, cancelled, superseded (the TUI's `rsvp_refusal`), then the
- * user's own invitation (the Sent mailbox), then the account's Graph refusal.
+ * user's own invitation (the Sent mailbox).
  */
-export function rsvpRefusal(event: EventFrontmatter | null, organizer: boolean, graph: string | null): string | null {
+export function rsvpRefusal(event: EventFrontmatter | null, organizer: boolean): string | null {
   if (!isRequest(event)) return NOT_REQUEST;
   if (event?.cancelled) return CANCELLED;
   if (event?.superseded) return SUPERSEDED;
   if (organizer) return ORGANIZER;
-  return graph;
+  return null;
 }
 
 /**
- * Why an agenda row can not be answered, the TUI's agenda order: cancelled,
- * the user organizes it, not a `REQUEST`; then the Graph refusal.
+ * Why a calendar event can not be answered, the TUI's
+ * `open_rsvp_overlay_for`: cancelled, the user organizes it, a server event
+ * that invites nobody.
  */
-export function agendaRsvpRefusal(row: AgendaEvent, graph: string | null): string | null {
-  if (row.cancelled || row.event.cancelled) return CANCELLED;
-  if (row.is_organizer) return ORGANIZER;
-  if (!isRequest(row.event)) return NOT_REQUEST;
-  return graph;
+export function eventRsvpRefusal(e: CalendarEvent): string | null {
+  if (e.cancelled) return CANCELLED;
+  if (isOrganizer(e)) return ORGANIZER;
+  if (e.own_response === "none" && !isImip(e)) return NOT_INVITATION;
+  return null;
+}
+
+/** The event an invitation card answers: its server event, else the mail's own. */
+export function cardEventId(card: InviteCard | null, rowId: number): string {
+  return card?.event_id ?? `${IMIP_PREFIX}${rowId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +92,7 @@ export function isSentMailbox(s: AppState, account: string, mailbox: string): bo
 /** The reader shows an invitation: its card is read, once. */
 export function wantInvite(s: AppState, account: string, rowId: number): AppState {
   const key = readerKey(account, rowId);
-  return s.invites[key] ? s : { ...s, invites: { ...s.invites, [key]: emptyLoadable<EventFrontmatter | null>() } };
+  return s.invites[key] ? s : { ...s, invites: { ...s.invites, [key]: emptyLoadable<InviteCard | null>() } };
 }
 
 /** Every card of `account` this window read goes stale with its agenda. */
@@ -96,9 +107,9 @@ export function staleInvites(s: AppState, account: string): AppState {
   return changed ? { ...s, invites } : s;
 }
 
-/** A calendar change: the agenda and every card of the account read again. */
+/** A calendar change: the Calendar view and every card of the account read again. */
 export function staleInvitations(s: AppState, account: string): AppState {
-  return staleInvites(staleCalendar(s, account), account);
+  return staleInvites(staleCalendar(s), account);
 }
 
 /**
@@ -113,13 +124,13 @@ export function bootstrapInvites(s: AppState, sameInstance: boolean): AppState {
   return { ...s, invites };
 }
 
-function inviteOf(s: AppState, key: string): Loadable<EventFrontmatter | null> {
-  return s.invites[key] ?? emptyLoadable<EventFrontmatter | null>();
+function inviteOf(s: AppState, key: string): Loadable<InviteCard | null> {
+  return s.invites[key] ?? emptyLoadable<InviteCard | null>();
 }
 
-export function inviteLoaded(s: AppState, key: string, gen: number, event: EventFrontmatter | null): AppState {
+export function inviteLoaded(s: AppState, key: string, gen: number, card: InviteCard | null): AppState {
   const l = inviteOf(s, key);
-  return { ...s, invites: { ...s.invites, [key]: { ...l, data: event, loadedGen: gen, error: null } } };
+  return { ...s, invites: { ...s.invites, [key]: { ...l, data: card, loadedGen: gen, error: null } } };
 }
 
 export function inviteFailed(s: AppState, key: string, gen: number, error: GuiError): AppState {
@@ -131,15 +142,10 @@ export function inviteRefusalLoaded(s: AppState, account: string, refusal: strin
   return s.inviteRefusals[account] === refusal ? s : { ...s, inviteRefusals: { ...s.inviteRefusals, [account]: refusal } };
 }
 
-/** The accounts whose Graph refusal the window needs: the reader's invitation's, the agenda's, the New invitation form's. */
+/** The account whose Graph refusal the New invitation form needs, while it is open and not asked yet. */
 export function refusalsWanted(s: AppState): string[] {
-  const out = new Set<string>();
-  const meta = s.reader.meta;
-  if (meta?.invite && s.view === "mail") out.add(meta.account);
-  if (s.view === "calendar" && s.calendarView) out.add(s.calendarView.account);
-  if (s.rsvpDialog) out.add(s.rsvpDialog.account);
-  if (s.inviteDialog) out.add(s.inviteDialog.account);
-  return [...out].filter((a) => !(a in s.inviteRefusals));
+  const account = s.inviteDialog?.account;
+  return account && !(account in s.inviteRefusals) ? [account] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -149,9 +155,9 @@ export function refusalsWanted(s: AppState): string[] {
 /** What the notices call a response. */
 export const RESPONSE_LABEL: Record<RsvpResponse, string> = { accept: "Accept", tentative: "Tentative", decline: "Decline" };
 
-/** The RSVP this window is sending for a row, if any. */
-export function rsvpOf(s: AppState, account: string, rowId: number): RsvpRun | null {
-  return s.rsvps.find((r) => r.account === account && r.row_id === rowId) ?? null;
+/** The answer this window is sending for an event, if any. */
+export function rsvpOf(s: AppState, account: string, event: string): RsvpRun | null {
+  return s.rsvps.find((r) => r.account === account && r.event === event) ?? null;
 }
 
 export function openRsvpDialog(s: AppState, dialog: RsvpDialog): AppState {
@@ -172,13 +178,18 @@ export function isRsvpOperation(s: AppState, operationId: string): boolean {
 }
 
 /**
- * What a settled RSVP says: "Replied <response> to <summary>", and when no
- * recipient took it yet, that it waits in the outbox.
+ * What a settled answer says: "Replied <response> to <summary>", then
+ * whether the organizer heard of it, the TUI's `rsvp_line`: a reply mail no
+ * recipient took yet waits in the outbox, an answer the user chose not to
+ * send says so, and a server answer that should have reached the organizer
+ * and did not says that.
  */
-export function rsvpText(run: RsvpRun, settled: RsvpSettled | null): string {
+export function rsvpText(run: RsvpRun, settled: EventRespondResult | null): string {
   const response = settled?.response || run.response;
   const text = `Replied ${response} to ${run.summary}`;
-  return settled && !settled.delivered ? `${text}; queued in the outbox` : text;
+  if (!settled || settled.delivered) return text;
+  if (!settled.send_response) return `${text}; no response sent to the organizer`;
+  return settled.via === "imip" ? `${text}; queued in the outbox` : `${text}, but the organizer could not be told`;
 }
 
 /** An RSVP of this window ended: say how; the agenda and the account's cards read again. */
@@ -198,9 +209,9 @@ function rsvpEnded(s: AppState, run: RsvpRun, end: OperationEnd): AppState {
   if (end.state !== "succeeded") {
     return pushNotice(next, { kind: "send_failed", account, text: `RSVP failed: ${end.error ?? end.state}` });
   }
-  const settled = (end.result ?? null) as RsvpSettled | null;
-  // A reply waiting in the outbox changed its counts.
-  if (settled && !settled.delivered) next = { ...next, accounts: markStale(next.accounts) };
+  const settled = (end.result ?? null) as EventRespondResult | null;
+  // A reply mail waiting in the outbox changed its counts.
+  if (settled && !settled.delivered && settled.via === "imip") next = { ...next, accounts: markStale(next.accounts) };
   return pushNotice(next, { kind: "applied", account, text: rsvpText(run, settled) });
 }
 
@@ -212,7 +223,7 @@ export function rsvpSignal(s: AppState, end: OperationEnd): AppState {
   return s;
 }
 
-/** `calendar_rsvp` answered: await the id, or settle it now if its end came first. */
+/** `event_respond` answered: await the id, or settle it now if its end came first. */
 export function rsvpStarted(s: AppState, token: number, operationId: string): AppState {
   const run = s.rsvps.find((r) => r.token === token);
   if (!run) return s;
@@ -223,7 +234,7 @@ export function rsvpStarted(s: AppState, token: number, operationId: string): Ap
   return early ? rsvpEnded(next, started, early) : next;
 }
 
-/** `calendar_rsvp` was refused: nothing was sent. */
+/** `event_respond` was refused: nothing was sent. */
 export function rsvpStartFailed(s: AppState, token: number, message: string): AppState {
   const run = s.rsvps.find((r) => r.token === token);
   if (!run) return s;
@@ -238,31 +249,43 @@ export function rsvpStartFailed(s: AppState, token: number, message: string): Ap
 
 let nextRsvp = 1;
 
-/** Send `response` to the invitation of a row, awaited as `rsvp`. */
+/** What an answer addresses: the event, and what its notices call it. */
+export type RsvpTarget = { account: string; event: string; summary: string };
+
+/**
+ * Send `response` to an event, awaited as `rsvp`: one `event.respond`, with
+ * the comment (a blank one is none) and, on a server event, whether the
+ * organizer is told; an invitation mail's answer is its reply mail, so it
+ * names no choice.
+ */
 export async function sendRsvp(
   dispatch: Dispatch<Action>,
-  target: { account: string; row_id: number; summary: string },
+  target: RsvpTarget,
   response: RsvpResponse,
+  options: { comment?: string; sendResponse?: boolean | null } = {},
 ): Promise<void> {
   const token = nextRsvp++;
-  dispatch({ type: "rsvp_requested", token, account: target.account, row_id: target.row_id, response, summary: target.summary });
+  dispatch({ type: "rsvp_requested", token, account: target.account, event: target.event, response, summary: target.summary });
+  const comment = options.comment?.trim() || null;
+  const sendResponse = target.event.startsWith(IMIP_PREFIX) ? null : (options.sendResponse ?? null);
   try {
-    const { operation_id } = await cmd.calendarRsvp(target.account, target.row_id, response);
+    const { operation_id } = await cmd.eventRespond(target.account, target.event, response, comment, sendResponse);
     dispatch({ type: "rsvp_started", token, operation_id });
   } catch (e: unknown) {
     dispatch({ type: "rsvp_failed", token, error: asGuiError(e) });
   }
 }
 
-function busy(s: AppState, account: string, rowId: number): string | null {
-  return rsvpOf(s, account, rowId) ? "A reply to this invitation is being sent" : null;
+function busy(s: AppState, account: string, event: string): string | null {
+  return rsvpOf(s, account, event) ? BUSY : null;
 }
 
 /**
- * `tv`: the RSVP choice for the selected email, after the TUI's guards: an
- * email that is no invitation, one in the Sent mailbox, a search hit the
- * store has no copy of, then the card's refusals. The event is the reader's
- * card when it is loaded, else read now.
+ * `tv`: the respond choice for the selected email, after the TUI's guards:
+ * an email that is no invitation, one in the Sent mailbox, a search hit the
+ * store has no copy of, then the card's refusals. The card is the reader's
+ * when it is loaded, else read now; it names the server event the answer
+ * goes to on an account with a calendar backend.
  */
 export async function openRsvp(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
   const say = (text: string) => dispatch({ type: "notice", text });
@@ -281,36 +304,42 @@ export async function openRsvp(s: AppState, dispatch: Dispatch<Action>): Promise
   const mailbox = searchHit?.mailbox ?? meta?.mailbox ?? (s.search ? null : s.selection.mailbox);
   if (mailbox && isSentMailbox(s, account, mailbox)) return say(ORGANIZER);
   const subject = row?.subject ?? searchHit?.subject ?? meta?.subject ?? "";
-  let event: EventFrontmatter | null;
-  const card = s.invites[readerKey(account, m.row_id)];
-  if (card && card.loadedGen > 0 && card.gen === card.loadedGen && !card.error) {
-    event = card.data;
+  let card: InviteCard | null;
+  const loaded = s.invites[readerKey(account, m.row_id)];
+  if (loaded && loaded.loadedGen > 0 && loaded.gen === loaded.loadedGen && !loaded.error) {
+    card = loaded.data;
   } else {
     try {
-      event = await cmd.inviteGet(account, m.row_id);
+      card = await cmd.inviteGet(account, m.row_id);
     } catch (e: unknown) {
       return say(`RSVP failed: ${asGuiError(e).message}`);
     }
   }
-  const refusal = rsvpRefusal(event, false, s.inviteRefusals[account] ?? null) ?? busy(s, account, m.row_id);
+  const event = cardEventId(card, m.row_id);
+  const refusal = rsvpRefusal(card?.event ?? null, false) ?? busy(s, account, event);
   if (refusal) return say(refusal);
-  const summary = event?.summary?.trim() || subject || "(no subject)";
-  dispatch({ type: "open_rsvp", dialog: { account, row_id: m.row_id, summary } });
+  const summary = card?.event.summary?.trim() || subject || "(no subject)";
+  dispatch({ type: "open_rsvp", dialog: { account, event, summary, server: card?.event_id != null } });
 }
 
-/** The agenda's `V`: the RSVP choice for the cursor row, after the TUI's agenda guards. */
-export function openAgendaRsvp(s: AppState, dispatch: Dispatch<Action>): void {
-  const view = s.calendarView;
-  const row = view ? cursorEvent(s) : null;
-  if (!view || !row) {
-    dispatch({ type: "notice", text: "The agenda has no event to answer" });
+/** The respond choice for a calendar event, after the TUI's guards; null when it opened, else why not. */
+export function rsvpDialogFor(s: AppState, e: CalendarEvent): RsvpDialog | string {
+  const refusal = eventRsvpRefusal(e) ?? busy(s, e.account, e.id);
+  if (refusal) return refusal;
+  return { account: e.account, event: e.id, summary: eventTitle(e), server: !isImip(e) };
+}
+
+/** The Calendar view's `V`: the respond choice for the cursor event. */
+export function openEventRsvp(s: AppState, dispatch: Dispatch<Action>): void {
+  const entry = s.calendarView ? cursorEntry(s) : null;
+  if (!entry) {
+    dispatch({ type: "notice", text: "The calendar has no event to answer" });
     return;
   }
-  const refusal = agendaRsvpRefusal(row, s.inviteRefusals[view.account] ?? null) ?? busy(s, view.account, row.row_id);
-  if (refusal) {
-    dispatch({ type: "notice", text: refusal });
+  const dialog = rsvpDialogFor(s, entry.event);
+  if (typeof dialog === "string") {
+    dispatch({ type: "notice", text: dialog });
     return;
   }
-  const summary = row.event.summary?.trim() || row.subject || "(no subject)";
-  dispatch({ type: "open_rsvp", dialog: { account: view.account, row_id: row.row_id, summary } });
+  dispatch({ type: "open_rsvp", dialog });
 }

@@ -28,6 +28,17 @@
 //! and settles a `SendOutcome` after the send delay, the invitation filed
 //! in Sent and added to the agenda as the user's own; `send_fail` fails it.
 //!
+//! The server calendar (PERSO-200) comes from `fixtures/calendar-server.json`:
+//! `calendar.list` answers its calendars, `calendar.set_visibility` flips one
+//! and publishes `calendar.changed`, and `calendar.view` answers the events of
+//! the visible calendars that overlap the range, in start order. `event.get`
+//! answers one event; `event.respond` refuses a word it does not take, an
+//! unknown event and `send_response: false` on an `imip:` event with the
+//! daemon's sentence, then settles after [`RSVP_DELAY`] with the event's own
+//! response changed and `calendar.changed`, or after `rsvp_fail` fails with
+//! the SMTP error. `message.invite` names the server event of a `home`
+//! invitation as `event_id`, as the daemon does on an account with a backend.
+//!
 //! `contact.search` answers each account's ranked contacts from
 //! `fixtures/contacts.json`: a case-insensitive substring match over the
 //! address and the display name, in the file's score order, capped at
@@ -131,7 +142,10 @@ use serde_json::{json, Value};
 use mp_client::events::Incoming;
 use mp_core::draft::{DraftRecipientEdit, SourceMessage};
 use mp_core::selector::{message_key, Selector};
-use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
+use mp_protocol::calendar::{
+    AgendaEvent, CalendarEvent, CalendarEventTime, CalendarInfo, EventFrontmatter,
+    IMIP_EVENT_PREFIX,
+};
 use mp_protocol::draft::{
     DraftCreated, DraftEntry, DraftHtml, DraftKind, DraftListing, DraftLocation, DraftMessage,
     DraftPreview, DraftReport, DraftSkip, DraftSource, DraftValidation,
@@ -159,6 +173,7 @@ const HTML: &str = include_str!("../../fixtures/html.json");
 const DRAFT_BODIES: &str = include_str!("../../fixtures/draft-bodies.json");
 const SIGNATURES: &str = include_str!("../../fixtures/signatures.json");
 const CALENDAR: &str = include_str!("../../fixtures/calendar.json");
+const CALENDAR_SERVER: &str = include_str!("../../fixtures/calendar-server.json");
 const CONTACTS: &str = include_str!("../../fixtures/contacts.json");
 const CONFIG: &str = include_str!("../../fixtures/config.json");
 const CONFIG_TOML: &str = include_str!("../../fixtures/config.toml");
@@ -221,6 +236,15 @@ pub const GRAPH_INVITE_REFUSAL: &str =
 /// The daemon's `GRAPH_RSVP_REFUSAL` (`ANO-4`), word for word.
 pub const GRAPH_RSVP_REFUSAL: &str =
     "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)";
+
+/// The daemon's `IMIP_SILENT_REFUSAL`, word for word: `event.respond` with
+/// `send_response: false` on an invitation mail's event.
+pub const IMIP_SILENT_REFUSAL: &str =
+    "send_response: false needs a calendar backend: an invitation mail is answered by the reply \
+     mail itself, and without one nothing would record the answer";
+
+/// The window `calendar.view` reports the fixture's server cache holds.
+const SERVER_WINDOW: (&str, &str) = ("2099-09-14T00:00:00Z", "2100-10-14T00:00:00Z");
 
 /// Why a `send_partial` send's last recipient was refused.
 pub const SEND_REFUSED_REASON: &str = "550 5.1.1 fixture: no such mailbox";
@@ -347,6 +371,28 @@ struct InviteSend {
     end: Option<String>,
     location: Option<String>,
     recipients: Vec<RecipientOutcome>,
+}
+
+/// `fixtures/calendar-server.json`: the server calendar `calendar.list`,
+/// `calendar.view`, `event.get` and `event.respond` answer from (PERSO-200),
+/// and per account the server event each invitation row stands for, by row
+/// id, which `message.invite` names as `event_id`.
+#[derive(serde::Deserialize)]
+struct ServerCalendarSeed {
+    calendars: Vec<CalendarInfo>,
+    events: Vec<CalendarEvent>,
+    invites: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// An `event.respond` the fixture is answering.
+struct EventAnswer {
+    account: String,
+    event: String,
+    response: String,
+    /// The answer as an attendee status: `accepted`, `tentative`, `declined`.
+    status: &'static str,
+    comment: Option<String>,
+    send_response: bool,
 }
 
 /// An RSVP the fixture is submitting.
@@ -489,7 +535,13 @@ struct State {
     /// row id -> the event of an email no agenda row stands for (the
     /// versions `invite_update` and `invite_cancel` deliver).
     invites: BTreeMap<i64, EventFrontmatter>,
-    /// The next RSVP fails with an SMTP error (`rsvp_fail`).
+    /// The server calendars `calendar.list` answers, visibility included.
+    server_calendars: Vec<CalendarInfo>,
+    /// The events `calendar.view` answers, in start order.
+    server_events: Vec<CalendarEvent>,
+    /// (account, row id) -> the server event `message.invite` names.
+    invite_events: BTreeMap<(String, i64), String>,
+    /// The next RSVP or `event.respond` fails (`rsvp_fail`).
     rsvp_fail: bool,
     rsvp_delay: Duration,
     /// account -> its contact index, ranked, each row as `contact.search`
@@ -720,6 +772,16 @@ impl State {
             (a.start_sort.is_empty(), &a.start_sort).cmp(&(b.start_sort.is_empty(), &b.start_sort))
         });
         Ok(events)
+    }
+
+    /// The server event `id` of `account`, what `event.get` answers; an
+    /// unknown one is refused as the daemon does, `-32602`.
+    fn server_event(&self, method: &str, account: &str, id: &str) -> Result<CalendarEvent> {
+        self.server_events
+            .iter()
+            .find(|e| e.account == account && e.id == id)
+            .cloned()
+            .ok_or_else(|| refused(method, -32602, &format!("{account} has no event {id}")))
     }
 
     /// `account.list`'s `backend` of `account`: `imap` or `graph`.
@@ -2718,6 +2780,60 @@ fn only(method: &str, params: &Value, allowed: &[&str]) -> Result<()> {
 }
 
 /// Now, as the unix timestamp an outbox row's `updated` carries.
+/// One end of a `calendar.view` range: the instant, its UTC spelling, and
+/// the date it falls on in its own offset, which bounds the all-day events.
+struct ViewInstant {
+    at: time::OffsetDateTime,
+    utc: String,
+    date: String,
+}
+
+fn view_instant(method: &str, raw: &str) -> Result<ViewInstant> {
+    use time::format_description::well_known::Rfc3339;
+    let at = time::OffsetDateTime::parse(raw, &Rfc3339).map_err(|_| {
+        refused(
+            method,
+            -32602,
+            &format!("{raw:?} is not an RFC 3339 instant with an offset"),
+        )
+    })?;
+    let utc = at
+        .to_offset(time::UtcOffset::UTC)
+        .format(&Rfc3339)
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(ViewInstant {
+        at,
+        utc,
+        date: at.date().to_string(),
+    })
+}
+
+/// Whether `event` overlaps the half-open range `from` to `to`: a timed one
+/// by its instants, an all-day one by its dates, the end exclusive.
+fn overlaps(event: &CalendarEvent, from: &ViewInstant, to: &ViewInstant) -> bool {
+    use time::format_description::well_known::Rfc3339;
+    match &event.time {
+        CalendarEventTime::Timed { start, end, .. } => {
+            let parse = |raw: &str| time::OffsetDateTime::parse(raw, &Rfc3339).ok();
+            match (parse(start), parse(end)) {
+                (Some(start), Some(end)) => start < to.at && end > from.at,
+                _ => false,
+            }
+        }
+        CalendarEventTime::AllDay { start, end } => {
+            start.as_str() < to.date.as_str() && end.as_str() > from.date.as_str()
+        }
+    }
+}
+
+/// What `calendar.view` sorts by: the start, a date before any instant of
+/// its day.
+fn start_key(event: &CalendarEvent) -> &str {
+    match &event.time {
+        CalendarEventTime::Timed { start, .. } | CalendarEventTime::AllDay { start, .. } => start,
+    }
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2779,6 +2895,17 @@ impl Fixture {
             serde_json::from_str(SIGNATURES).context("fixtures/signatures.json")?;
         let calendar: CalendarSeed =
             serde_json::from_str(CALENDAR).context("fixtures/calendar.json")?;
+        let server: ServerCalendarSeed =
+            serde_json::from_str(CALENDAR_SERVER).context("fixtures/calendar-server.json")?;
+        let mut invite_events = BTreeMap::new();
+        for (account, rows) in &server.invites {
+            for (row, event) in rows {
+                let row: i64 = row
+                    .parse()
+                    .context("fixtures/calendar-server.json's invites keys are row ids")?;
+                invite_events.insert((account.clone(), row), event.clone());
+            }
+        }
         let contacts: BTreeMap<String, Vec<Value>> =
             serde_json::from_str(CONTACTS).context("fixtures/contacts.json")?;
         let config: Value = serde_json::from_str(CONFIG).context("fixtures/config.json")?;
@@ -2845,6 +2972,9 @@ impl Fixture {
             calendar: calendar.events,
             ics,
             invites: BTreeMap::new(),
+            server_calendars: server.calendars,
+            server_events: server.events,
+            invite_events,
             rsvp_fail: false,
             rsvp_delay: RSVP_DELAY,
             contacts,
@@ -3902,7 +4032,14 @@ impl Fixture {
                 let event = s
                     .invite_event(account, row_id)
                     .map_or(Value::Null, |e| serde_json::to_value(e).unwrap_or_default());
-                Ok(json!({"account": account, "row_id": row_id, "event": event}))
+                let event_id = if event.is_null() {
+                    None
+                } else {
+                    s.invite_events.get(&(account.to_string(), row_id)).cloned()
+                };
+                Ok(json!({
+                    "account": account, "row_id": row_id, "event": event, "event_id": event_id
+                }))
             }
             "calendar.rsvp" => {
                 only(
@@ -3983,6 +4120,162 @@ impl Fixture {
                     std::thread::sleep(delay);
                     if fixture.running(&op) {
                         fixture.finish_rsvp(&op, reply, fail);
+                    }
+                });
+                Ok(json!({"operation_id": id}))
+            }
+            "calendar.list" => {
+                only(method, &params, &["account"])?;
+                let account = params["account"].as_str();
+                if let Some(account) = account {
+                    s.account_known(method, account)?;
+                }
+                let calendars: Vec<&CalendarInfo> = s
+                    .server_calendars
+                    .iter()
+                    .filter(|c| account.is_none_or(|a| c.account == a))
+                    .collect();
+                Ok(json!({"calendars": calendars}))
+            }
+            "calendar.set_visibility" => {
+                only(method, &params, &["account", "calendar", "visible"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                let calendar = param_str(method, &params, "calendar")?.to_string();
+                let visible = params["visible"].as_bool().ok_or_else(|| {
+                    refused(method, -32602, "visible is a required boolean parameter")
+                })?;
+                s.account_ready(method, &account)?;
+                let Some(listed) = s
+                    .server_calendars
+                    .iter_mut()
+                    .find(|c| c.account == account && c.id == calendar)
+                else {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("{account} has no calendar {calendar}; calendar.list names them"),
+                    ));
+                };
+                listed.visible = visible;
+                self.emit_locked(&mut s, "calendar.changed", json!({"account": account}));
+                Ok(json!({"account": account, "calendar": calendar, "visible": visible}))
+            }
+            "calendar.view" => {
+                only(
+                    method,
+                    &params,
+                    &[
+                        "accounts",
+                        "calendars",
+                        "end",
+                        "include_hidden",
+                        "start",
+                        "zone",
+                    ],
+                )?;
+                let from = view_instant(method, param_str(method, &params, "start")?)?;
+                let to = view_instant(method, param_str(method, &params, "end")?)?;
+                let names = |key: &str| -> Option<Vec<String>> {
+                    serde_json::from_value(params[key].clone()).ok()
+                };
+                let accounts = names("accounts");
+                let calendars = names("calendars");
+                let include_hidden = params["include_hidden"].as_bool().unwrap_or(false);
+                let zone = params["zone"]
+                    .as_str()
+                    .unwrap_or("Europe/Berlin")
+                    .to_string();
+                let shown = |e: &CalendarEvent| {
+                    accounts.as_ref().is_none_or(|a| a.contains(&e.account))
+                        && calendars.as_ref().is_none_or(|c| c.contains(&e.calendar))
+                        && s.server_calendars.iter().any(|c| {
+                            c.account == e.account
+                                && c.id == e.calendar
+                                && (include_hidden || c.visible)
+                        })
+                        && overlaps(e, &from, &to)
+                };
+                let mut events: Vec<CalendarEvent> = s
+                    .server_events
+                    .iter()
+                    .filter(|e| shown(e))
+                    .cloned()
+                    .collect();
+                events.sort_by(|a, b| start_key(a).cmp(start_key(b)));
+                Ok(json!({
+                    "range": {"start": from.utc, "end": to.utc},
+                    "zone": zone,
+                    "window": {"start": SERVER_WINDOW.0, "end": SERVER_WINDOW.1},
+                    "events": events,
+                }))
+            }
+            "event.get" => {
+                only(method, &params, &["account", "event"])?;
+                let account = param_str(method, &params, "account")?;
+                let id = param_str(method, &params, "event")?;
+                s.account_ready(method, account)?;
+                let event = s.server_event(method, account, id)?;
+                Ok(json!({"account": account, "event": event}))
+            }
+            "event.respond" => {
+                only(
+                    method,
+                    &params,
+                    &["account", "comment", "event", "response", "send_response"],
+                )?;
+                let account = param_str(method, &params, "account")?.to_string();
+                let event = param_str(method, &params, "event")?.to_string();
+                let response = param_str(method, &params, "response")?.to_string();
+                s.account_ready(method, &account)?;
+                let status = match response.as_str() {
+                    "accept" => "accepted",
+                    "tentative" => "tentative",
+                    "decline" => "declined",
+                    other => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            &format!(
+                                "response is one of \"accept\", \"tentative\", \"decline\", not {other:?}"
+                            ),
+                        ))
+                    }
+                };
+                s.server_event(method, &account, &event)?;
+                let send_response = params["send_response"].as_bool().unwrap_or(true);
+                if !send_response && event.starts_with(IMIP_EVENT_PREFIX) {
+                    return Err(refused(method, -32602, IMIP_SILENT_REFUSAL));
+                }
+                let comment = params["comment"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_string);
+                let id = s.next_operation_id("fixture-respond");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                let fail = std::mem::take(&mut s.rsvp_fail);
+                let delay = s.rsvp_delay;
+                drop(s);
+                let answer = EventAnswer {
+                    account,
+                    event,
+                    response,
+                    status,
+                    comment,
+                    send_response,
+                };
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    if fixture.running(&op) {
+                        fixture.finish_respond(&op, answer, fail);
                     }
                 });
                 Ok(json!({"operation_id": id}))
@@ -4493,6 +4786,65 @@ impl Fixture {
             "organizer": organizer,
             "message_id": message_id,
             "delivered": true,
+        });
+        self.settle(op, "succeeded", Some(result));
+    }
+
+    /// An `event.respond` is over: after `rsvp_fail` the SMTP error fails
+    /// the operation; else the event carries the answer, and on an `imip:`
+    /// event its agenda row too, `calendar.changed` says so, and the
+    /// operation settles with an `EventRespondResult`.
+    fn finish_respond(&self, op: &str, answer: EventAnswer, fail: bool) {
+        if fail {
+            self.fail(op, SEND_FAIL_REASON);
+            return;
+        }
+        let EventAnswer {
+            account,
+            event,
+            response,
+            status,
+            comment,
+            send_response,
+        } = answer;
+        let mut s = self.state();
+        if let Some(e) = s
+            .server_events
+            .iter_mut()
+            .find(|e| e.account == account && e.id == event)
+        {
+            e.own_response = status.to_string();
+            for attendee in &mut e.attendees {
+                if attendee.email == "me@example.com" {
+                    attendee.status = status.to_string();
+                }
+            }
+        }
+        let imip = event.strip_prefix(IMIP_EVENT_PREFIX);
+        if let Some(row_id) = imip.and_then(|row| row.parse::<i64>().ok()) {
+            if let Some(row) = s
+                .calendar
+                .get_mut(&account)
+                .and_then(|events| events.iter_mut().find(|e| e.row_id == row_id))
+            {
+                row.event.rsvp = status.to_string();
+                for attendee in &mut row.event.attendees {
+                    if attendee.address == "me@example.com" {
+                        attendee.status = status.to_string();
+                    }
+                }
+            }
+        }
+        self.emit_locked(&mut s, "calendar.changed", json!({"account": account}));
+        drop(s);
+        let result = json!({
+            "account": account,
+            "event": event,
+            "response": response,
+            "comment": comment,
+            "send_response": send_response,
+            "via": if imip.is_some() { "imip" } else { "server" },
+            "delivered": send_response,
         });
         self.settle(op, "succeeded", Some(result));
     }
@@ -6089,6 +6441,135 @@ mod tests {
             )
             .expect("the original");
         assert_eq!(card["event"]["cancelled"], true, "row 1008's card follows");
+        assert!(card["event_id"].is_null(), "work has no calendar backend");
+        let server = f
+            .call("message.invite", json!({"account": "home", "row_id": 9201}))
+            .expect("home's invitation");
+        assert_eq!(server["event_id"], "AAMkAD-dentist");
+    }
+
+    #[test]
+    fn the_server_calendar_lists_views_a_range_and_hides_a_calendar() {
+        let (f, rx) = fixture();
+        let listed = f.call("calendar.list", json!({})).expect("list");
+        let ids: Vec<&str> = listed["calendars"]
+            .as_array()
+            .expect("calendars")
+            .iter()
+            .filter_map(|c| c["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["AAMk-cal-home", "AAMk-cal-holidays", "imip"]);
+        let work = f
+            .call("calendar.list", json!({"account": "work"}))
+            .expect("work");
+        assert_eq!(work["calendars"].as_array().map(Vec::len), Some(1));
+        let week =
+            json!({"start": "2099-10-12T00:00:00+02:00", "end": "2099-10-19T00:00:00+02:00"});
+        let view = |params: &Value| -> Vec<String> {
+            let answer = f.call("calendar.view", params.clone()).expect("view");
+            answer["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .filter_map(|e| e["id"].as_str().map(str::to_string))
+                .collect()
+        };
+        assert_eq!(
+            view(&week),
+            [
+                "AAMkAD-weekly-20991013",
+                "AAMkAD-design",
+                "imip:1008",
+                "AAMkAD-robin",
+                "AAMkAD-holiday"
+            ]
+        );
+        let answer = f.call("calendar.view", week.clone()).expect("view");
+        assert_eq!(answer["range"]["start"], "2099-10-11T22:00:00Z");
+        let day = json!({"start": "2099-10-16T00:00:00+02:00", "end": "2099-10-17T00:00:00+02:00"});
+        assert_eq!(view(&day), ["AAMkAD-holiday"]);
+        f.call(
+            "calendar.set_visibility",
+            json!({"account": "home", "calendar": "AAMk-cal-holidays", "visible": false}),
+        )
+        .expect("hidden");
+        let changed = next_event(&rx);
+        assert_eq!(changed.kind, "calendar.changed");
+        assert_eq!(changed.payload["account"], "home");
+        assert!(view(&day).is_empty());
+        let mut hidden = day.clone();
+        hidden["include_hidden"] = json!(true);
+        assert_eq!(view(&hidden), ["AAMkAD-holiday"]);
+        let e = f
+            .call(
+                "calendar.set_visibility",
+                json!({"account": "home", "calendar": "nope", "visible": true}),
+            )
+            .expect_err("unknown");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
+        let got = f
+            .call(
+                "event.get",
+                json!({"account": "work", "event": "imip:1008"}),
+            )
+            .expect("get");
+        assert_eq!(got["event"]["source"]["row_id"], INVITE_ROW);
+    }
+
+    #[test]
+    fn event_respond_refuses_a_silent_imip_answer_then_settles_with_the_answer() {
+        let (f, rx) = fixture();
+        f.set_rsvp_delay(Duration::ZERO);
+        let sentence = |params: Value| {
+            let e = f.call("event.respond", params).expect_err("refused");
+            crate::error::refusal_sentence(&format!("{e:#}"))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(sentence(
+            json!({"account": "home", "event": "AAMkAD-design", "response": "maybe"})
+        )
+        .contains("not \"maybe\""));
+        assert_eq!(
+            sentence(json!({"account": "home", "event": "nope", "response": "accept"})),
+            "home has no event nope"
+        );
+        assert_eq!(
+            sentence(json!({
+                "account": "work", "event": "imip:1008", "response": "accept",
+                "send_response": false
+            })),
+            IMIP_SILENT_REFUSAL
+        );
+        assert_eq!(f.operation_count(), 0);
+        let started = f
+            .call(
+                "event.respond",
+                json!({
+                    "account": "home", "event": "AAMkAD-design", "response": "decline",
+                    "comment": "On leave", "send_response": false
+                }),
+            )
+            .expect("started");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+        let changed = next_event(&rx);
+        assert_eq!(changed.kind, "calendar.changed");
+        let finished = next_event(&rx);
+        assert_eq!(finished.kind, KIND_OPERATION_FINISHED);
+        assert_eq!(finished.payload["operation_id"], id.as_str());
+        let result: mp_protocol::calendar::EventRespondResult =
+            serde_json::from_value(finished.payload["result"].clone()).expect("a result");
+        assert_eq!(result.response, "decline");
+        assert_eq!(result.comment.as_deref(), Some("On leave"));
+        assert!(!result.send_response && !result.delivered);
+        assert_eq!(result.via, "server");
+        let got = f
+            .call(
+                "event.get",
+                json!({"account": "home", "event": "AAMkAD-design"}),
+            )
+            .expect("get");
+        assert_eq!(got["event"]["own_response"], "declined");
     }
 
     #[test]
@@ -6134,14 +6615,13 @@ mod tests {
         let finished = next_event(&rx);
         assert_eq!(finished.kind, KIND_OPERATION_FINISHED);
         assert_eq!(finished.payload["operation_id"], id.as_str());
-        let result: crate::calendar::RsvpSettled =
-            serde_json::from_value(finished.payload["result"].clone()).expect("RsvpSettled");
-        assert_eq!(result.response, "tentative");
-        assert_eq!(result.subject, "Tentative: Steering committee");
-        assert_eq!(result.organizer, "chair@example.com");
-        assert!(result.delivered);
+        let result = &finished.payload["result"];
+        assert_eq!(result["response"], "tentative");
+        assert_eq!(result["subject"], "Tentative: Steering committee");
+        assert_eq!(result["organizer"], "chair@example.com");
+        assert_eq!(result["delivered"], true);
         assert_eq!(
-            result.selector,
+            result["selector"],
             "mp://work/inbox/invitation-steering-comm-1008@fixture.example"
         );
         let events = f.state().agenda("calendar.events", "work").expect("work");

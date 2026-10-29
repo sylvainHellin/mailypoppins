@@ -1,5 +1,8 @@
 import { useId, type ReactNode } from "react";
-import type { EventFrontmatter } from "@/protocol/types";
+import { ExternalLink, Mail } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import type { CalendarEvent, CalendarInfo, EventFrontmatter } from "@/protocol/types";
+import { addDays, calendarTag, dayLabel, dayOf, eventTitle, isOrganizer, viewerZone } from "@/app/calendar";
 
 /** A status word as a person reads it, the TUI's `humanize_status`. */
 export function humanStatus(status: string): string {
@@ -119,6 +122,128 @@ export function EventCard({ event, organizer = false, label = "Event", children 
             {attendees.map((a) => (
               <li key={a.address} data-slot="event-attendee" className="flex min-w-0 justify-between gap-3">
                 <span className="truncate">{a.address}</span>
+                <span className={`shrink-0 ${STATUS_TONE[a.status] ?? "text-muted-foreground"}`}>{humanStatus(a.status)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {children}
+    </section>
+  );
+}
+
+const hhmm = (at: Date) => `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+
+/**
+ * A neutral event's time in the viewer's zone: `Wed 14 Oct 2099, 09:00 to
+ * 10:30`, the end's date only when it is another day, the event's own zone
+ * named when it is not the viewer's; an all-day event's dates, the
+ * exclusive end made inclusive.
+ */
+export function neutralWhen(e: CalendarEvent, zone: string | null = viewerZone()): string {
+  const t = e.time;
+  if (t.kind === "all-day") {
+    const last = t.end > t.start ? addDays(t.end, -1) : t.start;
+    return last === t.start ? `${dayLabel(t.start)}, all day` : `${dayLabel(t.start)} to ${dayLabel(last)}, all day`;
+  }
+  const start = new Date(t.start);
+  const end = new Date(t.end);
+  const from = `${dayLabel(dayOf(start))}, ${hhmm(start)}`;
+  const to = dayOf(end) === dayOf(start) ? hhmm(end) : `${dayLabel(dayOf(end))}, ${hhmm(end)}`;
+  const own = t.zone && zone && t.zone !== zone ? ` (the event's zone: ${t.zone})` : "";
+  return `${from} to ${to}${own}`;
+}
+
+const person = (p: { name?: string; email: string }) => (p.name ? `${p.name} <${p.email}>` : p.email);
+
+export type CalendarEventCardProps = {
+  event: CalendarEvent;
+  /** The listed calendars, which name the event's. */
+  calendars: readonly CalendarInfo[] | null;
+  /** The element id Enter focuses. */
+  id?: string;
+  /** The invitation mail behind an `imip:` event, in the Mail view. */
+  onOpenMail?: () => void;
+  /** The online meeting in the browser. */
+  onJoin?: (url: string) => void;
+  /** What follows the details, such as the respond button. */
+  children?: ReactNode;
+};
+
+/**
+ * One event of the server calendar or of an invitation mail (PERSO-200),
+ * the TUI's event card: the summary, a cancellation first, when with its
+ * zone, the series, where, the calendar, the organizer, the user's own
+ * answer, the join link, the description and every attendee's status; an
+ * event that came from an invitation mail offers that mail.
+ */
+export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, children }: CalendarEventCardProps) {
+  const attendeesId = useId();
+  const rows: [string, ReactNode][] = [["When", neutralWhen(event)]];
+  if (event.recurrence) rows.push(["Repeats", event.recurrence]);
+  else if (event.recurrence_id) rows.push(["Repeats", "An occurrence of a series"]);
+  if (event.location) rows.push(["Where", event.location]);
+  rows.push(["Calendar", calendarTag(calendars, event)]);
+  if (event.organizer) rows.push(["Organizer", person(event.organizer)]);
+  if (!isOrganizer(event) && event.own_response !== "none") {
+    rows.push([
+      "Your response",
+      <span key="response" data-slot="event-rsvp" className={STATUS_TONE[event.own_response] ?? "text-muted-foreground"}>
+        {humanStatus(event.own_response)}
+      </span>,
+    ]);
+  }
+  const url = event.online_meeting_url;
+  return (
+    <section id={id} tabIndex={-1} aria-label="Event" data-slot="event-card" className="flex flex-col gap-2 text-sm outline-none">
+      <h3 className={`text-base font-semibold ${event.cancelled ? "text-muted-foreground line-through" : ""}`}>{eventTitle(event)}</h3>
+      {event.cancelled ? (
+        <p data-slot="event-state" className="font-medium text-destructive">
+          Cancelled by the organizer.
+        </p>
+      ) : null}
+      <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
+        {rows.map(([term, value]) => (
+          <div key={term} className="contents">
+            <dt className="text-muted-foreground">{term}</dt>
+            <dd className="min-w-0 break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {url || event.source ? (
+        <div className="flex flex-wrap gap-1.5">
+          {url ? (
+            <Button size="sm" variant="outline" onClick={() => onJoin?.(url)} title={url}>
+              <ExternalLink aria-hidden="true" />
+              Join the meeting
+            </Button>
+          ) : null}
+          {event.source ? (
+            <Button size="sm" variant="outline" onClick={onOpenMail} title="Open the invitation mail (m)">
+              <Mail aria-hidden="true" />
+              Open mail
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {event.body?.trim() ? (
+        <p data-slot="event-body" className="whitespace-pre-wrap break-words text-muted-foreground">
+          {event.body.trim()}
+        </p>
+      ) : null}
+      {event.attendees.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <h4 id={attendeesId} className="text-muted-foreground">
+            Attendees
+          </h4>
+          <ul aria-labelledby={attendeesId} className="flex flex-col gap-0.5">
+            {event.attendees.map((a) => (
+              <li key={a.email} data-slot="event-attendee" className="flex min-w-0 justify-between gap-3">
+                <span className="truncate">
+                  {person(a)}
+                  {a.role === "optional" ? <span className="text-muted-foreground"> (optional)</span> : null}
+                </span>
                 <span className={`shrink-0 ${STATUS_TONE[a.status] ?? "text-muted-foreground"}`}>{humanStatus(a.status)}</span>
               </li>
             ))}

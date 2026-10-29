@@ -23,15 +23,24 @@ export const VIEW_ACTIONS: Record<View, ActionId> = {
 
 export const BACK_TO_MAIL_FIRST = "Go back to Mail first (Escape): this acts on the mailbox selection";
 
-/** The Calendar view's own actions, which act on its cursor and scope only. */
+/** The Calendar view's own actions, which act on its cursor, days and layout only. */
 export const CALENDAR_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   "calendar_open_source",
-  "calendar_toggle_past",
+  "calendar_prev",
+  "calendar_next",
+  "calendar_today",
+  "calendar_jump_date",
+  "calendar_layout_agenda",
+  "calendar_layout_day",
+  "calendar_layout_week",
+  "calendar_open_card",
+  "calendar_calendars",
+  "calendar_open_mail",
   "calendar_refresh",
   "calendar_rsvp",
 ]);
 
-export const OPEN_CALENDAR_FIRST = "Switch to the Calendar view first (Space a): this acts on the agenda";
+export const OPEN_CALENDAR_FIRST = "Switch to the Calendar view first (Space a): this acts on the calendar";
 
 /** The Contacts view's own actions, which act on its list and its cursor only. */
 export const CONTACTS_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
@@ -55,7 +64,7 @@ export function hiddenByView(s: AppState, id: ActionId): boolean {
 
 /**
  * Why `id` cannot run over what the window shows, or null when it can: an
- * agenda action outside the Calendar view, a contact action outside the
+ * calendar action outside the Calendar view, a contact action outside the
  * Contacts view, a full-pane view, then the
  * outbox view inside Mail. Keys drop such an
  * action silently, and the palette and the menu say this.

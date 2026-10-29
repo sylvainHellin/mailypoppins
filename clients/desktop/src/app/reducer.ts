@@ -22,6 +22,7 @@ import type {
   GuiError,
   GuiEvent,
   InterceptedUrl,
+  InviteCard,
   LocalSearchHit,
   MailboxListing,
   MessageList,
@@ -109,6 +110,7 @@ import {
   type ActivityKind,
   type ActivityLevel,
   type AttachmentDialog,
+  type CalendarLayout,
   type ComposeDialog,
   type ComposeSession,
   type Layout,
@@ -144,17 +146,22 @@ import {
   staleAllOutboxes,
   staleOutbox,
 } from "@/app/outbox";
-import type { AgendaEvent, EventFrontmatter, OutboxListing } from "@/protocol/types";
+import type { CalendarInfo, OutboxListing } from "@/protocol/types";
 import {
   calendarFailed,
+  calendarGoTo,
   calendarLoaded,
-  dropCalendar,
-  followCalendar,
+  calendarsFailed,
+  calendarSetLayout,
+  calendarShift,
+  calendarsLoaded,
   moveCalendarCursor,
+  openCalendar,
   refreshCalendar,
-  selectCalendarRow,
-  staleAllCalendars,
-  toggleCalendarPast,
+  selectCalendarEntry,
+  staleCalendar,
+  toggleCalendarsPanel,
+  type CalendarLoad,
 } from "@/app/calendar";
 import {
   bootstrapInvites,
@@ -408,17 +415,24 @@ export type Action =
   | { type: "outbox_discarded"; token: number; message_id: string }
   | { type: "outbox_action_failed"; token: number; error: GuiError }
   // The Calendar view (app/calendar.ts).
-  | { type: "calendar_loaded"; account: string; gen: number; events: AgendaEvent[] }
-  | { type: "calendar_failed"; account: string; gen: number; error: GuiError }
-  | { type: "calendar_select"; row_id: number }
-  | { type: "calendar_toggle_past" }
+  | { type: "calendar_loaded"; gen: number; load: CalendarLoad }
+  | { type: "calendar_failed"; gen: number; error: GuiError }
+  | { type: "calendars_loaded"; gen: number; calendars: CalendarInfo[] }
+  | { type: "calendars_failed"; gen: number; error: GuiError }
+  | { type: "calendar_select"; key: string }
+  | { type: "calendar_go_to"; day: string }
+  | { type: "calendar_shift"; forward: boolean }
+  | { type: "calendar_layout"; layout: CalendarLayout }
+  | { type: "calendar_toggle_calendars" }
   | { type: "calendar_refresh" }
-  // The invitations (app/rsvp.ts): the reader's cards, the Graph refusals, the RSVPs.
-  | { type: "invite_loaded"; key: string; gen: number; event: EventFrontmatter | null }
+  /** The event card's "Open mail": the invitation mail in the Mail view. */
+  | { type: "open_event_mail"; account: string; mailbox: string; row_id: number; selector: string }
+  // The invitations (app/rsvp.ts): the reader's cards, the New invitation form's Graph refusal, the answers.
+  | { type: "invite_loaded"; key: string; gen: number; card: InviteCard | null }
   | { type: "invite_failed"; key: string; gen: number; error: GuiError }
   | { type: "invite_refusal_loaded"; account: string; refusal: string | null }
   | { type: "open_rsvp"; dialog: RsvpDialog }
-  | { type: "rsvp_requested"; token: number; account: string; row_id: number; response: RsvpResponse; summary: string }
+  | { type: "rsvp_requested"; token: number; account: string; event: string; response: RsvpResponse; summary: string }
   | { type: "rsvp_started"; token: number; operation_id: string }
   | { type: "rsvp_failed"; token: number; error: GuiError }
   // A new invitation (app/invite.ts).
@@ -981,7 +995,7 @@ function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): A
 function removeAccount(s: AppState, name: string): AppState {
   if (s.search?.account === name) s = endSearch(s);
   if (s.outboxView?.account === name) s = closeOutbox(s);
-  s = dropSignatures(dropContacts(dropCalendar(s, name), name), name);
+  s = dropSignatures(dropContacts(staleCalendar(s), name), name);
   const mailboxes = { ...s.mailboxes };
   delete mailboxes[name];
   let next: AppState = {
@@ -1135,6 +1149,7 @@ const LEAVES_EDITOR: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_run",
   "exit_search",
   "switch_view",
+  "open_event_mail",
   "open_outbox",
   "close_outbox",
   "compose_show",
@@ -1378,6 +1393,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     // An account's contact index was written: by a rebuild, a sync's or a
     // send's bump, from any client. Its list is read again when the view
     // shows it.
+    // An account's calendars or events moved: a sync, an answer or a
+    // visibility change, from any client. The view and the account's
+    // invitation cards are read again.
+    case "calendar.changed": {
+      const account = (payload as { account?: unknown }).account;
+      return typeof account === "string" ? staleInvitations(s, account) : staleCalendar(s);
+    }
     case "contact.changed": {
       const account = (payload as { account?: unknown }).account;
       return typeof account === "string" ? staleContacts(s, account) : s;
@@ -1458,7 +1480,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
       const next = staleAllSignatures(
-        staleAllContacts(bootstrapInvites(staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance)),
+        staleAllContacts(bootstrapInvites(staleCalendar(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance)),
       );
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
@@ -1558,7 +1580,7 @@ function reverify(s: AppState, list: MessageList): AppState {
     const next = setListSelection(s, { ...sel, message: null });
     return s.search ? next : { ...next, reader: emptyReader() };
   }
-  return setListSelection(s, { ...sel, message: { ...want, row_id: row.id, verified: true } });
+  return setListSelection(s, { ...sel, message: { ...want, row_id: row.id, message_id: row.message_id, verified: true } });
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1602,7 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_server",
   "search_run",
   "exit_search",
+  "open_event_mail",
 ]);
 
 /**
@@ -1616,9 +1639,9 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_run",
 ]);
 
-/** The reducer; the Calendar and Contacts views and the sidebar follow the selection's account after every action. */
+/** The reducer; the Contacts view and the sidebar follow the selection's account after every action. */
 export function reducer(s: AppState, a: Action): AppState {
-  const next = followExpansion(s, followContacts(followCalendar(reduce(s, a))));
+  const next = followExpansion(s, followContacts(reduce(s, a)));
   return LEAVES_EDITOR.has(a.type) ? composeFollow(s, next, a) : next;
 }
 
@@ -1877,7 +1900,8 @@ function reduce(s: AppState, a: Action): AppState {
       // No event says a contact index changed: the list is read on every open.
       // The configuration is read on every open too, in case config.toml was
       // edited and reloaded by another client with no event this window saw.
-      const opened = a.view === "contacts" ? reopenContacts(next) : a.view === "settings" ? openSettings(next) : next;
+      const opened =
+        a.view === "contacts" ? reopenContacts(next) : a.view === "settings" ? openSettings(next) : a.view === "calendar" ? openCalendar(next) : next;
       return withFocus(opened, "list");
     }
     case "overlay":
@@ -2113,17 +2137,36 @@ function reduce(s: AppState, a: Action): AppState {
     case "outbox_action_failed":
       return outboxActionFailed(s, a.token, a.error.message);
     case "calendar_loaded":
-      return calendarLoaded(s, a.account, a.gen, a.events);
+      return calendarLoaded(s, a.gen, a.load);
     case "calendar_failed":
-      return calendarFailed(s, a.account, a.gen, a.error);
+      return calendarFailed(s, a.gen, a.error);
+    case "calendars_loaded":
+      return calendarsLoaded(s, a.gen, a.calendars);
+    case "calendars_failed":
+      return calendarsFailed(s, a.gen, a.error);
     case "calendar_select":
-      return selectCalendarRow(s, a.row_id);
-    case "calendar_toggle_past":
-      return toggleCalendarPast(s);
+      return selectCalendarEntry(s, a.key);
+    case "calendar_go_to":
+      return calendarGoTo(s, a.day);
+    case "calendar_shift":
+      return calendarShift(s, a.forward);
+    case "calendar_layout":
+      return calendarSetLayout(s, a.layout);
+    case "calendar_toggle_calendars":
+      return toggleCalendarsPanel(s);
     case "calendar_refresh":
       return refreshCalendar(s);
+    case "open_event_mail": {
+      // The view switch first, so Mail's own return runs; then the mailbox
+      // and the message, which the list confirms by its selector once read.
+      const mail = reduce(s, { type: "switch_view", view: "mail" });
+      const message = { row_id: a.row_id, message_id: "", selector: a.selector, verified: false };
+      const next = retarget(mail, { ...listSelection(mail), account: a.account, mailbox: a.mailbox, message, draft: null, hit: null, conversation: null });
+      // The list is read again even when it is the one shown, which is what confirms the message.
+      return { ...next, messages: { ...next.messages, gen: next.messages.gen + 1 }, reader: emptyReader() };
+    }
     case "invite_loaded":
-      return inviteLoaded(s, a.key, a.gen, a.event);
+      return inviteLoaded(s, a.key, a.gen, a.card);
     case "invite_failed":
       return inviteFailed(s, a.key, a.gen, a.error);
     case "invite_refusal_loaded":
@@ -2131,7 +2174,7 @@ function reduce(s: AppState, a: Action): AppState {
     case "open_rsvp":
       return openRsvpDialog(s, a.dialog);
     case "rsvp_requested":
-      return rsvpRequested(s, { token: a.token, account: a.account, row_id: a.row_id, response: a.response, summary: a.summary });
+      return rsvpRequested(s, { token: a.token, account: a.account, event: a.event, response: a.response, summary: a.summary });
     case "rsvp_started":
       return rsvpStarted(s, a.token, a.operation_id);
     case "rsvp_failed":

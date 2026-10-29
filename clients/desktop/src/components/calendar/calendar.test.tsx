@@ -1,183 +1,305 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { INVITE_ROW, mock, simulateInvite } from "@/test/tauri-mock";
+import { emitEnvelope, IMIP_SILENT_REFUSAL, INVITE_ROW, mock, settleRsvp, simulateInvite } from "@/test/tauri-mock";
+import { ORGANIZER } from "@/app/rsvp";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
-const agenda = () => screen.findByRole("listbox", { name: "Agenda" });
-const cursorRow = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-row-id");
-const rowIds = (list: HTMLElement) => within(list).getAllByRole("option").map((o) => Number(o.getAttribute("data-row-id")));
+const lastView = () => callsOf("calendar_view").slice(-1)[0];
+const region = () => screen.getByRole("region", { name: "Calendar" });
 const card = () => screen.getByRole("region", { name: "Event" });
+const cursorEvent = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-event-id");
+const optionNames = (list: HTMLElement) => within(list).getAllByRole("option").map((o) => o.getAttribute("aria-label"));
+const idsOn = (list: HTMLElement, day: string) =>
+  [...list.querySelectorAll<HTMLElement>(`[role="option"][data-day="${day}"]`)].map((o) => o.getAttribute("data-event-id"));
+/** A transient notice of the status line says `text`. */
+const noticed = (text: string) =>
+  waitFor(() => expect([...document.querySelectorAll('[role="status"]')].some((e) => e.textContent?.includes(text))).toBe(true));
 
-async function openCalendar() {
-  const r = renderApp();
+type User = ReturnType<typeof renderApp>["user"];
+
+/** `gt`, a date, Enter: the view anchored on that day. */
+async function jumpTo(user: User, day: string) {
+  await user.keyboard("gt");
+  await waitFor(() => expect(document.activeElement).toHaveAttribute("aria-label", "Jump to date"));
+  await user.keyboard(`${day}{Enter}`);
+}
+
+/** The Calendar view on the fixture's week, the agenda from Wednesday 2099-10-14. */
+async function openCalendar(before?: () => void) {
+  const r = renderApp(1400, before);
   await shellReady();
   await r.user.keyboard(" a");
-  const list = await agenda();
+  await screen.findByRole("region", { name: "Calendar" });
+  await jumpTo(r.user, "2099-10-14");
+  const list = await screen.findByRole("listbox", { name: "Agenda" });
+  await within(list).findByRole("option", { name: /Design review/ });
   return { ...r, list };
 }
 
 describe("the Calendar view", () => {
-  it("lists the upcoming agenda of the selected account with its badges, and the card of the cursor row", async () => {
+  it("lists every account's events from calendar_view by day, all-day first, each with its account and calendar", async () => {
     const { list } = await openCalendar();
-    const region = screen.getByRole("region", { name: "Calendar" });
-    expect(within(region).getByRole("heading", { name: "Calendar" })).toBeInTheDocument();
-    expect(callsOf("calendar_events")).toEqual([{ account: "work" }]);
-    expect(rowIds(list)).toEqual([INVITE_ROW, 9103, 9102, 9104]);
-    expect(within(list).getByRole("option", { name: "2099-11-20 14:00, Budget review, cancelled" })).toHaveAttribute("data-cancelled", "true");
-    expect(within(list).getByRole("option", { name: "2099-11-02 09:00, Team sync, organizer" })).toBeInTheDocument();
-    expect(within(list).getByRole("option", { name: "undated, Offsite planning, tentative" })).toBeInTheDocument();
-    expect(within(list).getByRole("option", { name: "2099-10-14 10:00, Steering committee, no reply" })).toHaveAttribute("aria-selected", "true");
-    expect(region.querySelector('[data-slot="calendar-scope"]')).toHaveTextContent("work: 4 upcoming events");
+    expect(lastView()).toEqual({ start: "2099-10-14T00:00:00+02:00", end: "2099-10-29T00:00:00+01:00", zone: "Europe/Berlin" });
+    expect(callsOf("calendar_events")).toEqual([]);
+    expect(within(list).getAllByRole("group").map((g) => g.getAttribute("aria-label"))).toEqual(["Wed 14 Oct 2099", "Fri 16 Oct 2099", "Tue 20 Oct 2099"]);
+    expect(optionNames(list)).toEqual([
+      "09:00-10:30, Design review, home/Calendar, no reply",
+      "10:00-11:00, Steering committee, work/Invitations, no reply",
+      "10:00-10:30, 1:1 with Robin, home/Calendar, organizer",
+      "all day, Company holiday, home/Holidays",
+      "08:30-09:00, Weekly planning, home/Calendar, accepted",
+    ]);
+    expect(region().querySelector('[data-slot="calendar-scope"]')).toHaveTextContent("Wed 14 Oct 2099 to Wed 28 Oct 2099: 5 events");
+    expect(cursorEvent()).toBe("AAMkAD-design");
     const c = card();
-    expect(within(c).getByRole("heading", { name: "Steering committee" })).toBeInTheDocument();
-    expect(c).toHaveTextContent("2099-10-14 10:00 +02:00 to 11:00 +02:00");
-    expect(c).toHaveTextContent("Room 2.14");
-    expect(c).toHaveTextContent("chair@example.com");
-    expect(c).toHaveTextContent("Your RSVPNo response yet");
+    expect(within(c).getByRole("heading", { name: "Design review" })).toBeInTheDocument();
+    expect(c).toHaveTextContent("WhenWed 14 Oct 2099, 09:00 to 10:30");
+    expect(c).toHaveTextContent("WhereTeams");
+    expect(c).toHaveTextContent("Calendarhome/Calendar");
+    expect(c).toHaveTextContent("OrganizerKim Lee <kim@example.com>");
+    expect(c).toHaveTextContent("Your responseNo response yet");
+    expect(c).toHaveTextContent("Walk through the new reader layout before the release.");
+    expect(within(c).getByRole("button", { name: "Join the meeting" })).toBeInTheDocument();
+    expect(within(c).queryByRole("button", { name: "Open mail" })).toBeNull();
     const attendees = within(c).getByRole("list", { name: "Attendees" });
     expect(within(attendees).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
-      "chair@example.comAccepted",
-      "me@example.comNo response yet",
-      "finance@example.comDeclined",
+      "Kim Lee <kim@example.com>Accepted",
+      "Me <me@example.com>No response yet",
+      "Robin Roe <robin@example.com> (optional)Tentative",
     ]);
   });
 
-  it("j, k, G and gg move the cursor and the card follows; the organizer's card has no RSVP and names its cancelled occurrence", async () => {
+  it("j and k move the cursor and the card follows; the occurrence of a series says so", async () => {
     const { user } = await openCalendar();
     await user.keyboard("j");
-    expect(cursorRow()).toBe("9103");
-    const c = card();
-    expect(c).toHaveTextContent("Weekly on Monday");
-    expect(c).not.toHaveTextContent("Your RSVP");
-    expect(c).toHaveTextContent("1 occurrence cancelled: 2099-11-16 09:00 +01:00");
-    await user.keyboard("j");
-    expect(within(card()).getByText("Cancelled by the organizer.")).toBeInTheDocument();
+    expect(cursorEvent()).toBe(`imip:${INVITE_ROW}`);
+    expect(within(card()).getByRole("button", { name: "Open mail" })).toBeInTheDocument();
+    expect(card()).toHaveTextContent("Calendarwork/Invitations");
     await user.keyboard("G");
-    expect(cursorRow()).toBe("9104");
+    expect(cursorEvent()).toBe("AAMkAD-weekly-20991020");
+    expect(card()).toHaveTextContent("RepeatsFREQ=WEEKLY;BYDAY=TU");
     await user.keyboard("k");
-    expect(cursorRow()).toBe("9102");
+    expect(cursorEvent()).toBe("AAMkAD-holiday");
+    expect(card()).toHaveTextContent("WhenFri 16 Oct 2099, all day");
+    expect(card()).not.toHaveTextContent("Your response");
     await user.keyboard("gg");
-    expect(cursorRow()).toBe(String(INVITE_ROW));
-    expect(document.activeElement).toHaveAttribute("data-row-id", String(INVITE_ROW));
+    expect(cursorEvent()).toBe("AAMkAD-design");
   });
 
-  it("t shows the past events with the TUI's status line and arms no t family key", async () => {
+  it("the week grid shows Monday to Sunday, the all-day band on top and overlapping events side by side", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("w");
+    expect(await screen.findByText("Calendar: week layout")).toBeInTheDocument();
+    const week = await screen.findByRole("listbox", { name: "Week" });
+    expect(lastView()).toMatchObject({ start: "2099-10-12T00:00:00+02:00", end: "2099-10-19T00:00:00+02:00" });
+    const columns = within(week)
+      .getAllByRole("group")
+      .filter((g) => !g.hasAttribute("data-band"))
+      .map((g) => g.getAttribute("aria-label"));
+    expect(columns).toEqual(["Mon 12 Oct 2099", "Tue 13 Oct 2099", "Wed 14 Oct 2099", "Thu 15 Oct 2099", "Fri 16 Oct 2099", "Sat 17 Oct 2099", "Sun 18 Oct 2099"]);
+    await waitFor(() => expect(idsOn(week, "2099-10-14")).toEqual(["AAMkAD-design", `imip:${INVITE_ROW}`, "AAMkAD-robin"]));
+    expect(idsOn(week, "2099-10-13")).toEqual(["AAMkAD-weekly-20991013"]);
+    const band = within(week).getByRole("group", { name: "Fri 16 Oct 2099, all day" });
+    expect(within(band).getByRole("option", { name: /Company holiday/ })).toBeInTheDocument();
+    // The three of Wednesday overlap: three columns, each a third wide.
+    const wednesday = within(week).getByRole("group", { name: "Wed 14 Oct 2099" });
+    const blocks = within(wednesday).getAllByRole("option");
+    expect(blocks.map((b) => b.getAttribute("data-column"))).toEqual(["1/3", "2/3", "3/3"]);
+    expect(blocks[0].style.top).toBe(`${9 * 44}px`);
+    // The cursor stays on the event it was on.
+    expect(cursorEvent()).toBe("AAMkAD-design");
+    expect(document.querySelector('[aria-current="date"]')).toBeNull();
+    await user.keyboard("t");
+    await waitFor(() => expect(document.querySelector('[aria-current="date"]')).toHaveAttribute("data-today", "true"));
+  });
+
+  it("the day grid shows one day, and h and l move it by a day", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("d");
+    const day = await screen.findByRole("listbox", { name: "Day" });
+    expect(region().querySelector('[data-slot="calendar-scope"]')).toHaveTextContent("Wed 14 Oct 2099: 3 events");
+    expect(idsOn(day, "2099-10-14")).toEqual(["AAMkAD-design", `imip:${INVITE_ROW}`, "AAMkAD-robin"]);
+    await user.keyboard("ll");
+    await waitFor(() => expect(region().querySelector('[data-slot="calendar-scope"]')).toHaveTextContent("Fri 16 Oct 2099: 1 event"));
+    const band = within(screen.getByRole("listbox", { name: "Day" })).getByRole("group", { name: "Fri 16 Oct 2099, all day" });
+    expect(within(band).getByRole("option", { name: /Company holiday/ })).toBeInTheDocument();
+    await user.keyboard("h");
+    await waitFor(() => expect(region().querySelector('[data-slot="calendar-scope"]')).toHaveTextContent("Thu 15 Oct 2099: 0 events"));
+  });
+
+  it("l and h move the agenda by a week, reading the new days", async () => {
     const { user, list } = await openCalendar();
-    await user.keyboard("t");
-    expect(await screen.findByText("Calendar: showing all events")).toBeInTheDocument();
-    await waitFor(() => expect(rowIds(list)).toEqual([9101, INVITE_ROW, 9103, 9102, 9104]));
-    expect(cursorRow()).toBe("9101");
-    // `to` in Mail opens an attachment; here `t` toggled and `o` does nothing.
-    await user.keyboard("o");
-    expect(callsOf("attachment_open")).toEqual([]);
-    await user.keyboard("t");
-    expect(await screen.findByText("Calendar: showing upcoming events")).toBeInTheDocument();
-    await waitFor(() => expect(rowIds(list)).toHaveLength(4));
-    expect(screen.queryByText(/arrives in/)).toBeNull();
+    const reads = callsOf("calendar_view").length;
+    await user.keyboard("]");
+    await waitFor(() => expect(callsOf("calendar_view")).toHaveLength(reads + 1));
+    expect(lastView()).toMatchObject({ start: "2099-10-21T00:00:00+02:00" });
+    await waitFor(() => expect(region().querySelector('[data-slot="calendar-scope"]')).toHaveTextContent("Wed 21 Oct 2099 to Wed 4 Nov 2099: 0 events"));
+    await user.keyboard("h");
+    await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(5));
   });
 
-  it("Enter and e open the cursor row's invite.ics in the editor", async () => {
-    const { user } = await openCalendar();
-    await user.keyboard("{Enter}");
-    await waitFor(() => expect(callsOf("invite_source_open")).toEqual([{ account: "work", row_id: INVITE_ROW }]));
-    expect(mock.editorOpens).toEqual(["/fixture/cache/renditions/invite-work-1008.ics"]);
-    expect(await screen.findByText(/Opened the invite.ics of Steering committee in code --wait/)).toBeInTheDocument();
-    await user.keyboard("je");
-    await waitFor(() => expect(callsOf("invite_source_open")).toHaveLength(2));
-    expect(callsOf("invite_source_open")[1]).toEqual({ account: "work", row_id: 9103 });
-    expect(callsOf("editor_open")).toEqual([]);
+  it("hiding a calendar takes its events out, and showing it brings them back", async () => {
+    const { user, list } = await openCalendar();
+    await user.keyboard("c");
+    const panel = await screen.findByRole("region", { name: "Calendars" });
+    const holidays = await within(panel).findByRole("checkbox", { name: "home/Holidays" });
+    expect(holidays).toBeChecked();
+    expect(within(panel).getByRole("checkbox", { name: "work/Invitations" })).toBeChecked();
+    await user.click(holidays);
+    expect(callsOf("calendar_set_visibility")).toEqual([{ account: "home", calendar: "AAMk-cal-holidays", visible: false }]);
+    await waitFor(() => expect(within(list).queryByRole("option", { name: /Company holiday/ })).toBeNull());
+    await waitFor(() => expect(within(panel).getByRole("checkbox", { name: "home/Holidays" })).not.toBeChecked());
+    expect(await screen.findByText("Hiding home/Holidays")).toBeInTheDocument();
+    await user.click(within(panel).getByRole("checkbox", { name: "home/Holidays" }));
+    await waitFor(() => expect(within(list).getByRole("option", { name: /Company holiday/ })).toBeInTheDocument());
   });
 
-  it("a row with no ics says so in the TUI's words, and a failed editor names why", async () => {
+  it("r reads the events again and says how many it holds", async () => {
     const { user } = await openCalendar();
-    await user.keyboard("G");
-    await user.keyboard("e");
-    expect(await screen.findByText("That event has no ics source in the store")).toBeInTheDocument();
-    expect(mock.editorOpens).toEqual([]);
-    mock.editorFailure = { kind: "setup", message: "The editor did not start: `zed` exited with 1; check the editor setting." };
-    await user.keyboard("gg");
-    await user.keyboard("e");
-    expect(await screen.findByText(/Open failed: The editor did not start/)).toBeInTheDocument();
-  });
-
-  it("Enter on a sidebar mailbox still brings Mail back with it", async () => {
-    const { user } = await openCalendar();
-    await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(document.activeElement?.closest("[data-pane]")).toHaveAttribute("data-pane", "sidebar");
-    await user.keyboard("j{Enter}");
-    expect(await screen.findByRole("listbox", { name: "Drafts messages" })).toBeInTheDocument();
-    expect(callsOf("invite_source_open")).toEqual([]);
-  });
-
-  it("r reads the agenda again and says how many events it shows, without replying", async () => {
-    const { user } = await openCalendar();
+    const reads = callsOf("calendar_view").length;
     await user.keyboard("r");
-    await waitFor(() => expect(callsOf("calendar_events")).toHaveLength(2));
-    expect(await screen.findByText("Calendar refreshed (4 events)")).toBeInTheDocument();
-    expect(callsOf("draft_reply")).toEqual([]);
+    await waitFor(() => expect(callsOf("calendar_view")).toHaveLength(reads + 1));
+    expect(await screen.findByText("Calendar refreshed (5 events)")).toBeInTheDocument();
   });
 
-  it("follows a cancellation and an update without a manual refresh", async () => {
-    const { list } = await openCalendar();
-    await act(async () => simulateInvite(true));
-    await waitFor(() =>
-      expect(within(list).getByRole("option", { name: "2099-10-14 10:00, Steering committee, cancelled" })).toBeInTheDocument(),
-    );
-    expect(within(card()).getByText("Cancelled by the organizer.")).toBeInTheDocument();
-    await act(async () => simulateInvite(false));
-    await waitFor(() => expect(within(list).getByRole("option", { name: /^2099-10-15 10:00, Steering committee/ })).toBeInTheDocument());
-    expect(callsOf("calendar_events")).toHaveLength(3);
-  });
-
-  it("reads nothing while another view shows, and reads a stale agenda when it comes back", async () => {
-    const { user } = await openCalendar();
+  it("reads again on calendar.changed, and only while it shows", async () => {
+    const { user, list } = await openCalendar();
     await user.keyboard("{Escape}");
     await screen.findByRole("listbox", { name: "Inbox messages" });
-    await act(async () => simulateInvite(true));
+    const reads = callsOf("calendar_view").length;
+    act(() => {
+      mock.events = mock.events.filter((e) => e.id !== "AAMkAD-robin");
+      emitEnvelope("calendar.changed", { account: "home" });
+    });
     await new Promise((r) => setTimeout(r, 20));
-    expect(callsOf("calendar_events")).toHaveLength(1);
+    expect(callsOf("calendar_view")).toHaveLength(reads);
     await user.keyboard(" a");
-    const list = await agenda();
-    await waitFor(() => expect(within(list).getByRole("option", { name: /Steering committee, cancelled/ })).toBeInTheDocument());
-    expect(callsOf("calendar_events")).toHaveLength(2);
+    const again = await screen.findByRole("listbox", { name: "Agenda" });
+    await waitFor(() => expect(callsOf("calendar_view")).toHaveLength(reads + 1));
+    await waitFor(() => expect(within(again).queryByRole("option", { name: /1:1 with Robin/ })).toBeNull());
+    expect(list.isConnected).toBe(false);
   });
 
-  it("shows an account with no store yet as such, not as an error", async () => {
+  it("follows an invitation's cancellation without a manual refresh", async () => {
+    const { list } = await openCalendar();
+    act(() => simulateInvite(true));
+    await waitFor(() => expect(within(list).getByRole("option", { name: "10:00-11:00, Steering committee, work/Invitations, cancelled" })).toBeInTheDocument());
+  });
+
+  it("e opens an invitation's invite.ics, and a server event says it has none", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("e");
+    await noticed("This event is the server's; no invitation mail stands behind it");
+    expect(callsOf("invite_source_open")).toEqual([]);
+    await user.keyboard("j");
+    await user.keyboard("e");
+    await waitFor(() => expect(callsOf("invite_source_open")).toEqual([{ account: "work", row_id: INVITE_ROW }]));
+    expect(mock.editorOpens).toEqual([`/fixture/cache/renditions/invite-work-${INVITE_ROW}.ics`]);
+  });
+
+  it("Open mail shows the invitation mail in Mail", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("j");
+    await user.click(within(card()).getByRole("button", { name: "Open mail" }));
+    await screen.findByRole("listbox", { name: "Inbox messages" });
+    await waitFor(() => expect(callsOf("message_html_meta")).toContainEqual({ account: "work", row_id: INVITE_ROW }));
+    const inbox = screen.getByRole("listbox", { name: "Inbox messages" });
+    await waitFor(() => expect(inbox.querySelector('[data-cursor="true"]')).toHaveAttribute("data-row-id", String(INVITE_ROW)));
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    const invitation = await within(reader).findByRole("region", { name: "Invitation" });
+    expect(within(invitation).getByRole("heading", { name: "Steering committee" })).toBeInTheDocument();
+  });
+
+  it("an event that fails to load says so", async () => {
     const { user } = renderApp(1400, () =>
-      mock.failing.set("calendar_events", {
-        kind: "protocol",
-        code: -32006,
-        message: "calendar.events: the daemon refused the call: work has no local store to read yet; run `mp sync -A work` (-32006)",
-      }),
+      mock.failing.set("calendar_view", { kind: "protocol", code: -32602, message: "calendar.view: the daemon refused the call: bad range (-32602)" }),
     );
     await shellReady();
     await user.keyboard(" a");
-    expect(await screen.findByText(/work has no local store yet, so it has no agenda/)).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(await screen.findByRole("alert")).toHaveTextContent("The calendar did not load:");
   });
 
-  it("an agenda action from the palette outside the Calendar view says where it works", async () => {
+  it("a calendar action from the palette outside the Calendar view says where it works", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.keyboard(":");
-    await user.keyboard("Show past events");
+    await user.keyboard("Go to today");
     await user.keyboard("{Enter}");
-    expect(await screen.findByText("Switch to the Calendar view first (Space a): this acts on the agenda")).toBeInTheDocument();
+    expect(await screen.findByText("Switch to the Calendar view first (Space a): this acts on the calendar")).toBeInTheDocument();
   });
 
-  it("key help lists every agenda key as runnable, RSVP included", async () => {
+  it("key help lists every calendar key as runnable", async () => {
     const { user } = await openCalendar();
     await user.keyboard("?");
     const help = await screen.findByRole("dialog", { name: "Keys" });
     const section = within(help).getByRole("group", { name: "CALENDAR" });
     for (const label of [
-      "Open the invite email in $EDITOR",
-      "RSVP to invitation (Accept/Tentative/Decline)",
-      "Show past events / upcoming only",
-      "Refresh events from disk",
+      "Previous / next day or week (also [ and ])",
+      "Go to today",
+      "Jump to date (e.g. 2026-07-06)",
+      "Agenda / day / week layout",
+      "Open the event card",
+      "Open the invitation's .ics in $EDITOR",
+      "Respond (accept / tentative / decline, comment)",
+      "Show or hide calendars",
+      "Read the events again",
     ]) {
-      expect(within(section).getByText(label).closest("[cmdk-item]")).not.toHaveTextContent("M4");
+      expect(within(section).getByText(label).closest("[cmdk-item]")).not.toHaveTextContent(/later|soon/);
     }
+  });
+});
+
+describe("V and the respond choice in the Calendar view", () => {
+  it("sends one event.respond with the comment and send_response on a server event", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("V");
+    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
+    expect(dialog).toHaveTextContent("Design review");
+    await user.keyboard("d");
+    const toggle = within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await user.click(within(dialog).getByRole("textbox", { name: "Comment" }));
+    await user.keyboard("On leave that week{Enter}");
+    expect(callsOf("event_respond")).toEqual([
+      { account: "home", event: "AAMkAD-design", response: "decline", comment: "On leave that week", send_response: false },
+    ]);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
+    act(() => void settleRsvp());
+    expect(await screen.findByText("Replied decline to Design review; no response sent to the organizer")).toBeInTheDocument();
+    await waitFor(() => expect(card()).toHaveTextContent("Your responseDeclined"));
+    expect(callsOf("event_respond")).toHaveLength(1);
+  });
+
+  it("an invitation mail's event offers no send-response choice and sends the daemon's default", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("j");
+    await user.click(within(card()).getByRole("button", { name: "Respond" }));
+    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
+    expect(dialog).toHaveTextContent("Steering committee");
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(dialog).toHaveTextContent("The answer goes to the organizer as a reply mail.");
+    await user.keyboard("{Enter}");
+    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null }]);
+    act(() => void settleRsvp({ delivered: false }));
+    expect(await screen.findByText("Replied accept to Steering committee; queued in the outbox")).toBeInTheDocument();
+  });
+
+  it("refuses the organizer's event with the TUI's sentence, and the daemon's refusal reaches the notice line", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("jj");
+    expect(cursorEvent()).toBe("AAMkAD-robin");
+    expect(within(card()).getByRole("button", { name: "Respond" })).toBeDisabled();
+    expect(within(card()).getByText(ORGANIZER)).toBeInTheDocument();
+    await user.keyboard("V");
+    await noticed(ORGANIZER);
+    expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull();
+    mock.failing.set("event_respond", { kind: "protocol", code: -32602, message: IMIP_SILENT_REFUSAL });
+    await user.keyboard("k");
+    await user.keyboard("V");
+    await screen.findByRole("dialog", { name: "RSVP" });
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText(`RSVP failed: ${IMIP_SILENT_REFUSAL}`)).toBeInTheDocument();
   });
 });

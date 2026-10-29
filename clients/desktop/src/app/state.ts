@@ -5,13 +5,13 @@ import type { Theme } from "@/app/theme";
 import type { Dismissal } from "@/app/health";
 import type { ReaderMode } from "@/app/readerMode";
 import type { Action } from "@/app/reducer";
+import type { CalendarLoad } from "@/app/calendar";
 import type {
   AccountCredentials,
-  AgendaEvent,
   Bootstrap,
+  CalendarInfo,
   ConfigInvalid,
   ConversationRow,
-  EventFrontmatter,
   DraftEntry,
   DraftMessage,
   HealthCheck,
@@ -30,6 +30,7 @@ import type {
   ContactSearch,
   GuiError,
   InterceptedUrl,
+  InviteCard,
   MailboxListing,
   MessageList,
   MessageMeta,
@@ -634,29 +635,35 @@ export type OutboxView = { account: string; cursor: number | null };
  */
 export type OutboxAction = { token: number; kind: "retry" | "discard"; account: string; row_id: number; operation_id: string | null };
 
-/**
- * The Calendar view: the account whose agenda it shows (the selection's),
- * the row under its cursor by `row_id`, whether past events show (the TUI's
- * `t`), and whether an `r` waits for its answer to say how many events came.
- */
-export type CalendarView = { account: string; cursor: number | null; showPast: boolean; refreshing: boolean };
+/** The Calendar view's layouts, the TUI's `CalendarLayout`. */
+export type CalendarLayout = "agenda" | "day" | "week";
 
-/** The three answers to an invitation, `calendar.rsvp`'s words. */
+/**
+ * The Calendar view (PERSO-200): its layout and the local day it is
+ * anchored on (`YYYY-MM-DD`), the entry under its cursor by key (account,
+ * event id and day), whether an `r` waits for its answer to say how many
+ * events came, and whether the calendars panel shows.
+ */
+export type CalendarView = { layout: CalendarLayout; anchor: string; cursor: string | null; refreshing: boolean; calendarsOpen: boolean };
+
+/** The three answers to an invitation, `event.respond`'s words. */
 export type RsvpResponse = "accept" | "tentative" | "decline";
 export const RSVP_RESPONSES: readonly RsvpResponse[] = ["accept", "tentative", "decline"];
 
 /**
- * The RSVP choice (`tv`, the agenda's `V`): the invitation's row and what
- * the dialog calls it, the event's summary or the email's subject.
+ * The respond choice (`tv`, the Calendar view's `V`): the event it answers
+ * (a server id, or `imip:<row_id>` for an invitation mail's), what the
+ * dialog calls it, the event's summary or the email's subject, and whether
+ * it is a server event, which alone may answer without telling the organizer.
  */
-export type RsvpDialog = { account: string; row_id: number; summary: string };
+export type RsvpDialog = { account: string; event: string; summary: string; server: boolean };
 
 /**
- * An RSVP this window started, from the choice until it settles or is
- * dropped; `operation_id` is null until `calendar_rsvp` answers. `summary`
- * names the invitation in its notice.
+ * An answer this window started, from the choice until it settles or is
+ * dropped; `operation_id` is null until `event_respond` answers. `summary`
+ * names the event in its notice.
  */
-export type RsvpRun = { token: number; account: string; row_id: number; response: RsvpResponse; summary: string; operation_id: string | null };
+export type RsvpRun = { token: number; account: string; event: string; response: RsvpResponse; summary: string; operation_id: string | null };
 
 /** The New invitation form: the account it sends from. */
 export type InviteDialog = { account: string };
@@ -861,29 +868,33 @@ export type AppState = {
   /** Operation ends that arrived while an `outbox_retry` was unanswered, for its id. */
   outboxEarly: OperationEnd[];
   /**
-   * Each account's agenda (`calendar_events`), created on the first open of
-   * the Calendar view for it, stale again on every change to its mail and
-   * every bootstrap; only the shown one is read.
+   * The events of the Calendar view's days (`calendar_view`), every account
+   * merged, stale again on `calendar.changed`, on every change to an
+   * account's mail, on a move to other days and on every bootstrap; read
+   * only while the view shows.
    */
-  calendar: Record<string, Loadable<AgendaEvent[]>>;
-  /** The Calendar view's account, cursor and scope, kept while another view shows. */
+  calendar: Loadable<CalendarLoad>;
+  /** The calendars and their visibility (`calendar_list`), read with the events. */
+  calendars: Loadable<CalendarInfo[]>;
+  /** The Calendar view's layout, days and cursor, kept while another view shows. */
   calendarView: CalendarView | null;
   /**
    * The reader's invitation cards (`invite_get`), by `readerKey`: created
    * when the reader shows an invitation, stale again with the account's
-   * agenda; only the shown one is read.
+   * calendar; only the shown one is read.
    */
-  invites: Record<string, Loadable<EventFrontmatter | null>>;
+  invites: Record<string, Loadable<InviteCard | null>>;
   /**
-   * Why an account cannot reply to or send invitations (`invite_refusal`):
-   * the daemon's Graph sentence, null when it can; absent until asked.
+   * Why an account cannot send invitations (`invite_refusal`), for the New
+   * invitation form: the daemon's Graph sentence, null when it can; absent
+   * until asked.
    */
   inviteRefusals: Record<string, string | null>;
   /** What the `rsvp` overlay shows; null whenever another overlay or none is open. */
   rsvpDialog: RsvpDialog | null;
   /** RSVPs this window started, in start order. */
   rsvps: RsvpRun[];
-  /** Operation ends that arrived while a `calendar_rsvp` was unanswered, for its id. */
+  /** Operation ends that arrived while an `event_respond` was unanswered, for its id. */
   rsvpEarly: OperationEnd[];
   /** What the `invite` overlay shows; null whenever another overlay or none is open. */
   inviteDialog: InviteDialog | null;
@@ -1027,7 +1038,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     outboxView: null,
     outboxActions: [],
     outboxEarly: [],
-    calendar: {},
+    calendar: emptyLoadable<CalendarLoad>(),
+    calendars: emptyLoadable<CalendarInfo[]>(),
     calendarView: null,
     invites: {},
     inviteRefusals: {},

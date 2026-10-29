@@ -5,15 +5,16 @@
 import { invoke, type Channel } from "@/lib/tauri";
 import type {
   AccountCredentials,
-  AgendaEvent,
   Bootstrap,
+  CalendarEvent,
+  CalendarInfo,
+  CalendarViewResult,
   DraftCreated,
   DraftKind,
   DraftLocation,
   DraftMessage,
   DraftPreview,
   DraftValidation,
-  EventFrontmatter,
   HoldListing,
   OutboxListing,
   ThreadListing,
@@ -40,6 +41,7 @@ import type {
   GuiEvent,
   HoldCancelled,
   InterceptedUrl,
+  InviteCard,
   InviteRefusal,
   LocalSearchHit,
   LocalSearchParams,
@@ -386,28 +388,50 @@ export const outboxRetry = (account: string, row_id: number): Promise<OperationS
 export const outboxDiscard = (account: string, row_id: number): Promise<OutboxDiscarded> =>
   invoke<OutboxDiscarded>("outbox_discard", { account, row_id });
 
-// The agenda (docs/rust-layer.md, "The calendar").
+// The calendar (docs/rust-layer.md, "The calendar").
 
-/** Every row, past ones included: the past/upcoming filter is the frontend's. Rejects with code -32006 for a store not ready yet. */
-export const calendarEvents = (account: string): Promise<AgendaEvent[]> =>
-  invoke<AgendaEvent[]>("calendar_events", { account });
+/** The calendars of every account, or of `account`, with their visibility. */
+export const calendarList = (account?: string): Promise<CalendarInfo[]> =>
+  invoke<CalendarInfo[]>("calendar_list", { account: account ?? null });
 
-/** Open an agenda row's `invite.ics` in the editor; `not_found` when the row has none. */
+/** Show or hide one calendar; the daemon's `calendar.changed` reads the view again. */
+export const calendarSetVisibility = (account: string, calendar: string, visible: boolean): Promise<void> =>
+  invoke<void>("calendar_set_visibility", { account, calendar, visible });
+
+/** The events of the visible calendars from `start` to `end` (RFC 3339 with an offset, `end` exclusive), every account merged. */
+export const calendarView = (start: string, end: string, zone: string | null): Promise<CalendarViewResult> =>
+  invoke<CalendarViewResult>("calendar_view", { start, end, zone });
+
+/** One event, by its server id or `imip:<row_id>`. */
+export const eventGet = (account: string, event: string): Promise<CalendarEvent> =>
+  invoke<CalendarEvent>("event_get", { account, event });
+
+/** Open an invitation mail's `invite.ics` in the editor; `not_found` when the row has none. */
 export const inviteSourceOpen = (account: string, row_id: number): Promise<EditorLaunch> =>
   invoke<EditorLaunch>("invite_source_open", { account, row_id });
 
 // The invitations (docs/rust-layer.md, "The calendar"): a message's event,
-// an RSVP the Rust layer awaits as `rsvp`, and the Graph probe.
+// an answer the Rust layer awaits as `rsvp`, and the Graph probe of the
+// New invitation form.
 
-/** The event a message carries, or null for one with no invitation. */
-export const inviteGet = (account: string, row_id: number): Promise<EventFrontmatter | null> =>
-  invoke<EventFrontmatter | null>("invite_get", { account, row_id });
+/** The event a message carries and its server event, or null for one with no invitation. */
+export const inviteGet = (account: string, row_id: number): Promise<InviteCard | null> =>
+  invoke<InviteCard | null>("invite_get", { account, row_id });
 
-/** Reply to an invitation; the end arrives as `rsvp`, its result an `RsvpSettled`. */
-export const calendarRsvp = (account: string, row_id: number, response: "accept" | "tentative" | "decline"): Promise<OperationStarted> =>
-  invoke<OperationStarted>("calendar_rsvp", { account, row_id, response });
+/**
+ * Answer an event; the end arrives as `rsvp`, its result an
+ * `EventRespondResult`. `send_response` is null on an invitation mail's
+ * event, whose answer is the reply mail itself.
+ */
+export const eventRespond = (
+  account: string,
+  event: string,
+  response: "accept" | "tentative" | "decline",
+  comment: string | null,
+  send_response: boolean | null,
+): Promise<OperationStarted> => invoke<OperationStarted>("event_respond", { account, event, response, comment, send_response });
 
-/** The daemon's Graph sentence for a Graph account, null for one that can reply and send. */
+/** The daemon's Graph sentence for a Graph account, null for one that can send invitations. */
 export const inviteRefusal = (account: string): Promise<InviteRefusal> =>
   invoke<InviteRefusal>("invite_refusal", { account });
 

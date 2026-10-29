@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { GRAPH_RSVP_REFUSAL, INVITE_ROW, mock, SEND_FAIL_REASON, settleRsvp, simulateInvite } from "@/test/tauri-mock";
+import { INVITE_ROW, mock, SEND_FAIL_REASON, settleRsvp, simulateInvite } from "@/test/tauri-mock";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const reader = () => screen.getByRole("complementary", { name: "Reader" });
@@ -28,10 +28,12 @@ describe("the reader's invitation card", () => {
     expect(within(c).getByRole("heading", { name: "Steering committee" })).toBeInTheDocument();
     expect(c).toHaveTextContent("Your RSVPNo response yet");
     expect(callsOf("invite_get")).toEqual([{ account: "work", row_id: INVITE_ROW }]);
+    // An account with no calendar backend answers with a reply mail, and the card says so.
+    expect(within(c).getByText(/The answer is a reply mail to the organizer/)).toBeInTheDocument();
     const group = await replies();
     for (const name of ["Accept", "Tentative", "Decline"]) expect(button(group, name)).toBeEnabled();
     await user.click(button(group, "Accept"));
-    expect(callsOf("calendar_rsvp")).toEqual([{ account: "work", row_id: INVITE_ROW, response: "accept" }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null }]);
     await waitFor(() => expect(button(group, "Accept")).toBeDisabled());
     expect(await within(c).findByText("Sending Accept…")).toBeInTheDocument();
     act(() => void settleRsvp());
@@ -63,7 +65,7 @@ describe("the reader's invitation card", () => {
     const activity = screen.getByRole("region", { name: "Activity" });
     const running = await within(activity).findByRole("group", { name: "Sending Accept to Steering committee…" });
     await user.click(within(running).getByRole("button", { name: "Cancel the RSVP" }));
-    await waitFor(() => expect(callsOf("operation_cancel")).toEqual([{ operation_id: "fixture-rsvp-1" }]));
+    await waitFor(() => expect(callsOf("operation_cancel")).toEqual([{ operation_id: "fixture-respond-1" }]));
     expect(
       await screen.findByText("Stopped waiting for the RSVP to Steering committee; the daemon may still send it, check the outbox"),
     ).toBeInTheDocument();
@@ -149,7 +151,7 @@ describe("tv and the RSVP choice", () => {
     await user.keyboard("{Shift>}{Tab}{/Shift}");
     expect(selected()).toBe("tentative");
     await user.keyboard("{Enter}");
-    expect(callsOf("calendar_rsvp")).toEqual([{ account: "work", row_id: INVITE_ROW, response: "tentative" }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "tentative", comment: null, send_response: null }]);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
   });
 
@@ -163,7 +165,7 @@ describe("tv and the RSVP choice", () => {
     await screen.findByRole("dialog", { name: "RSVP" });
     await user.keyboard("q");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
-    expect(callsOf("calendar_rsvp")).toEqual([]);
+    expect(callsOf("event_respond")).toEqual([]);
   });
 
   it("tv on a cancelled invitation says why instead of opening", async () => {
@@ -176,58 +178,57 @@ describe("tv and the RSVP choice", () => {
   });
 });
 
-describe("V in the Calendar view", () => {
-  async function openCalendar() {
-    const r = renderApp();
+describe("an invitation on an account with a calendar backend", () => {
+  /** `home`'s inbox holds the dentist's invitation, row 9201, whose server event message.invite names. */
+  function withHomeInvitation() {
+    const row = structuredClone(mock.rows.work.inbox.find((r) => r.id === INVITE_ROW)!);
+    Object.assign(row, {
+      id: 9201,
+      uid: 9201,
+      message_id: "<dentist-9201@fixture.example>",
+      subject: "Termin: Dentist",
+      selector: "mp://home/inbox/dentist-9201@fixture.example",
+      date_sort: "2026-09-30T23:00:00",
+    });
+    mock.rows.home.inbox.unshift(row);
+  }
+
+  async function openHomeInvitation() {
+    const r = renderApp(1400, withHomeInvitation);
     await shellReady();
-    await r.user.keyboard(" a");
-    await screen.findByRole("listbox", { name: "Agenda" });
+    await r.user.keyboard("ga");
+    await screen.findByRole("dialog", { name: "Switch account" });
+    await r.user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Inbox messages" });
+    await r.user.keyboard("gg");
     return r;
   }
 
-  it("opens the choice for the cursor row and sends it; the agenda row follows", async () => {
-    const { user } = await openCalendar();
-    await user.keyboard("V");
-    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
-    expect(dialog).toHaveTextContent("Steering committee");
-    await user.keyboard("d");
-    await user.keyboard("{Enter}");
-    expect(callsOf("calendar_rsvp")).toEqual([{ account: "work", row_id: INVITE_ROW, response: "decline" }]);
+  it("answers the server event message.invite names, and says the server calendar tells the organizer", async () => {
+    const { user } = await openHomeInvitation();
+    const c = await card();
+    expect(within(c).getByRole("heading", { name: "Dentist" })).toBeInTheDocument();
+    expect(callsOf("invite_get")).toContainEqual({ account: "home", row_id: 9201 });
+    expect(within(c).getByText(/The answer goes to the server calendar/)).toBeInTheDocument();
+    expect(within(c).queryByText(/RSVP is not supported/)).toBeNull();
+    expect(callsOf("invite_refusal")).toEqual([]);
+    await user.click(button(await replies(), "Tentative"));
+    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "tentative", comment: null, send_response: null }]);
     act(() => void settleRsvp());
-    expect(await screen.findByText("Replied decline to Steering committee")).toBeInTheDocument();
-    const agenda = screen.getByRole("listbox", { name: "Agenda" });
-    expect(await within(agenda).findByRole("option", { name: "2099-10-14 10:00, Steering committee, declined" })).toBeInTheDocument();
+    expect(await screen.findByText("Replied tentative to Dentist")).toBeInTheDocument();
   });
 
-  it("refuses the organizer's row and a cancelled one with the TUI's sentences", async () => {
-    const { user } = await openCalendar();
-    await user.keyboard("j");
-    const region = screen.getByRole("region", { name: "Event" });
-    expect(within(region).getByRole("button", { name: "RSVP" })).toBeDisabled();
-    await user.keyboard("V");
-    await noticed("You are the organizer of this invite; nothing to RSVP");
-    await user.keyboard("j");
-    await user.keyboard("V");
-    await noticed("This event was cancelled by the organizer; nothing to RSVP");
-    expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull();
-  });
-
-  it("a Graph account's row shows the daemon's sentence, from the probe", async () => {
-    const { user } = renderApp();
-    await shellReady();
-    await user.keyboard("ga");
-    await screen.findByRole("dialog", { name: "Switch account" });
-    await user.keyboard("2");
-    await user.keyboard(" a");
-    const agenda = await screen.findByRole("listbox", { name: "Agenda" });
-    await within(agenda).findByRole("option", { name: /Dentist/ });
-    expect(callsOf("invite_refusal")).toContainEqual({ account: "home" });
-    const region = screen.getByRole("region", { name: "Event" });
-    expect(await within(region).findByText(GRAPH_RSVP_REFUSAL)).toBeInTheDocument();
-    expect(within(region).getByRole("button", { name: "RSVP" })).toBeDisabled();
-    await user.keyboard("V");
-    await noticed(GRAPH_RSVP_REFUSAL);
-    expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull();
-    expect(callsOf("calendar_rsvp")).toEqual([]);
+  it("tv offers the comment and the send-response choice, and sends them", async () => {
+    const { user } = await openHomeInvitation();
+    await card();
+    await user.keyboard("tv");
+    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
+    expect(dialog).toHaveTextContent("Dentist");
+    await user.keyboard("jj{Tab}");
+    await waitFor(() => expect(document.activeElement).toHaveAttribute("aria-label", "Comment"));
+    await user.keyboard("Running late");
+    await user.click(within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" }));
+    await user.click(within(dialog).getByRole("button", { name: /^Send Decline/ }));
+    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "decline", comment: "Running late", send_response: false }]);
   });
 });

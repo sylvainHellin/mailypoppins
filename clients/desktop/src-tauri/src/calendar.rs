@@ -1,27 +1,35 @@
-//! The calendar agenda (CAL-02, CAL-03, #0131).
+//! The calendar (CAL-02, CAL-03, #0131, PERSO-200).
 //!
-//! `calendar.events` answers an account's agenda already deduped, folded and
-//! sorted, so this layer passes it through; the past/upcoming filter is the
-//! frontend's, as it is the TUI's. An entry's source is its `invite.ics`
-//! blob, which `message.ics` answers as bytes: the TUI writes it to a temp
-//! file and hands that to `$EDITOR` (`Action::OpenEventSource`), and this
-//! writes it under the app's cache directory, readable by its owner only,
-//! before the external editor opens it. Edits to that copy reach nothing:
-//! the file is an artifact to read, not a draft.
+//! `calendar.view` answers the events of a range, every account merged and
+//! the hidden calendars left out, and `calendar.list` the calendars with
+//! their visibility, which `calendar.set_visibility` changes; this layer
+//! passes them through, and the layouts (agenda, day, week) are the
+//! frontend's, as they are the TUI's. `event.get` answers one event. An
+//! invitation mail's event (`imip:<row_id>`) has the mail's `invite.ics` as
+//! its source, which `message.ics` answers as bytes: the TUI writes it to a
+//! temp file and hands that to `$EDITOR` (`Action::OpenEventSource`), and
+//! this writes it under the app's cache directory, readable by its owner
+//! only, before the external editor opens it. Edits to that copy reach
+//! nothing: the file is an artifact to read, not a draft.
 //!
-//! The invitations (CAL-01, CAL-05, #0131): `message.invite` answers the
-//! event a message carries, which the reader's invitation card shows;
-//! `calendar.rsvp` is an operation the GUI awaits as `rsvp`. The daemon
-//! refuses an RSVP from a Graph account before it reads anything else, so
-//! [`invite_refusal_on`] asks it with `{account}` alone and shows its
-//! sentence without a message in hand; an IMAP account is never asked.
+//! The answers (CAL-01, CAL-05, #0131, PERSO-200): `message.invite` answers
+//! the event a message carries, which the reader's invitation card shows,
+//! and on an account with a calendar backend the server event it stands for
+//! (`event_id`); `event.respond` answers a server event through the backend
+//! or an `imip:` event with the iMIP reply, an operation the GUI awaits as
+//! `rsvp`. Which answers an account takes is the daemon's call: a refusal
+//! comes back as its sentence, and nothing is probed ahead of it.
 //!
 //! A new invitation (SND-05) is `send.invite`, awaited as `send_invite`: the
 //! daemon builds the `VEVENT` and the iMIP message and submits it through
 //! its outbox. Its refusals are the CLI's (`--invite requires --subject`),
 //! so the three a form can check (a subject, a start, one recipient) are
 //! checked here before the call, in the form's words; any other refusal is
-//! passed on as the daemon's sentence.
+//! passed on as the daemon's sentence. The daemon refuses `send.invite` from
+//! a Graph account before it reads anything else, so [`invite_refusal_on`]
+//! asks `calendar.rsvp` with `{account}` alone, which is refused in the same
+//! breath, and the form shows that sentence without a message in hand; an
+//! IMAP account is never asked.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,7 +39,9 @@ use serde_json::json;
 use tauri::{AppHandle, State};
 
 use mp_client::queries;
-use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
+use mp_protocol::calendar::{
+    CalendarEvent, CalendarInfo, CalendarViewParams, CalendarViewResult, EventFrontmatter,
+};
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
 use crate::commands::{list_accounts_on, with_door, OperationStarted};
@@ -39,8 +49,12 @@ use crate::editor::{self, EditorLaunch, Lookup};
 use crate::error::{refusal_sentence, Addressing, GuiError};
 use crate::session::{Budgeted, Door, PendingKind, SessionHandle};
 
-/// One agenda read: a store scan and the reply fold, daemon-side.
-const AGENDA_BUDGET: Duration = Duration::from_secs(15);
+/// One `calendar.view` or `calendar.list` read: the server cache and the
+/// invitation fold, daemon-side, which never reach a server.
+const VIEW_BUDGET: Duration = Duration::from_secs(15);
+
+/// One `event.get` or `calendar.set_visibility`.
+const EVENT_BUDGET: Duration = Duration::from_secs(10);
 
 /// One `invite.ics` blob read.
 const ICS_BUDGET: Duration = Duration::from_secs(10);
@@ -51,8 +65,9 @@ pub const NO_ICS: &str = "That event has no ics source in the store";
 /// One invitation card read: a blob read and an ics parse.
 const INVITE_BUDGET: Duration = Duration::from_secs(10);
 
-/// Starting an RSVP: its plan reads the row and its `invite.ics` first.
-const RSVP_START_BUDGET: Duration = Duration::from_secs(10);
+/// Starting `event.respond`: its plan reads the event, and on an `imip:`
+/// event the row and its `invite.ics`, first.
+const RESPOND_START_BUDGET: Duration = Duration::from_secs(10);
 
 /// The Graph probe: a refusal before any read.
 const PROBE_BUDGET: Duration = Duration::from_secs(5);
@@ -65,28 +80,22 @@ pub const NO_SUBJECT: &str = "An invitation needs a subject";
 pub const NO_START: &str = "An invitation needs a start";
 pub const NO_RECIPIENT: &str = "An invitation needs at least one recipient in To or Cc";
 
-/// The three answers `calendar.rsvp` takes.
-pub const RSVP_RESPONSES: [&str; 3] = ["accept", "tentative", "decline"];
+/// The three answers `event.respond` takes.
+pub const RESPONSES: [&str; 3] = ["accept", "tentative", "decline"];
 
-/// What `calendar.rsvp` settles with, the daemon's inline `json!`
-/// (`src/daemon/methods/calendar.rs`): `subject` is the reply's
-/// (`Accepted: <summary>`), `delivered` whether any recipient took it; a
-/// reply that reached nobody waits in the outbox.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The reader's invitation card: the event a message carries, and on an
+/// account with a calendar backend the server event it stands for, which
+/// `event.respond` answers in its place (`imip:<row_id>` otherwise).
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
-pub struct RsvpSettled {
-    pub account: String,
-    pub selector: String,
-    pub response: String,
-    pub subject: String,
-    pub organizer: String,
-    pub message_id: String,
-    pub delivered: bool,
+pub struct InviteCard {
+    pub event: EventFrontmatter,
+    pub event_id: Option<String>,
 }
 
-/// Why `account` cannot answer or send an invitation at all, as the daemon
-/// says it: the Graph sentence, or null for an account that can.
+/// Why `account` cannot send an invitation at all, as the daemon says it:
+/// the Graph sentence, or null for an account that can.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -95,14 +104,103 @@ pub struct InviteRefusal {
     pub refusal: Option<String>,
 }
 
-/// `account`'s agenda, every row: past events included, the filter is the
-/// frontend's.
-pub fn calendar_events_on(door: &Door, account: &str) -> Result<Vec<AgendaEvent>, GuiError> {
+/// The calendars of every account, or of `account`, with their visibility.
+pub fn calendar_list_on(door: &Door, account: Option<&str>) -> Result<Vec<CalendarInfo>, GuiError> {
     let q = Budgeted {
         door,
-        budget: AGENDA_BUDGET,
+        budget: VIEW_BUDGET,
     };
-    queries::calendar_events(&q, account).map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+    queries::calendar_list(&q, account).map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+}
+
+/// Show or hide one calendar; the daemon publishes `calendar.changed`, which
+/// is what reads the view again.
+pub fn calendar_set_visibility_on(
+    door: &Door,
+    account: &str,
+    calendar: &str,
+    visible: bool,
+) -> Result<(), GuiError> {
+    let q = Budgeted {
+        door,
+        budget: EVENT_BUDGET,
+    };
+    queries::calendar_set_visibility(&q, account, calendar, visible)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+        .map_err(daemon_sentence)
+}
+
+/// The events from `start` to `end` (RFC 3339 with an offset, `end`
+/// exclusive) of every account's visible calendars, in start order;
+/// `zone` places the all-day events' midnights.
+pub fn calendar_view_on(
+    door: &Door,
+    start: &str,
+    end: &str,
+    zone: Option<&str>,
+) -> Result<CalendarViewResult, GuiError> {
+    let q = Budgeted {
+        door,
+        budget: VIEW_BUDGET,
+    };
+    let params = CalendarViewParams {
+        start: start.to_string(),
+        end: end.to_string(),
+        zone: zone.map(str::to_string),
+        ..CalendarViewParams::default()
+    };
+    queries::calendar_view(&q, &params).map_err(|e| GuiError::from_call(&e, Addressing::Params))
+}
+
+/// One event by its id, a server id or `imip:<row_id>`.
+pub fn event_get_on(door: &Door, account: &str, event: &str) -> Result<CalendarEvent, GuiError> {
+    let q = Budgeted {
+        door,
+        budget: EVENT_BUDGET,
+    };
+    queries::event_get(&q, account, event)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+}
+
+/// Answer `event` with `response`, the TUI's respond overlay: an operation
+/// awaited as `rsvp`, whose `result` is an `EventRespondResult`. A blank
+/// comment is no comment, and `send_response` is the daemon's default (tell
+/// the organizer) when absent. A response word the daemon does not take is
+/// refused here, before any call; a daemon refusal (`send_response: false`
+/// on an invitation mail, a Graph account on the iMIP path) comes back as
+/// its own sentence.
+pub fn event_respond_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    event: &str,
+    response: &str,
+    comment: Option<&str>,
+    send_response: Option<bool>,
+) -> Result<OperationStarted, GuiError> {
+    if !RESPONSES.contains(&response) {
+        return Err(GuiError::protocol(format!(
+            "An answer is accept, tentative or decline, not {response:?}"
+        )));
+    }
+    let comment = comment.map(str::trim).filter(|c| !c.is_empty());
+    let params = queries::event_respond_params(
+        account,
+        event,
+        response,
+        comment,
+        send_response.unwrap_or(true),
+    );
+    let operation_id = session
+        .start_operation(
+            door,
+            "event.respond",
+            params,
+            PendingKind::Rsvp,
+            RESPOND_START_BUDGET,
+        )
+        .map_err(daemon_sentence)?;
+    Ok(OperationStarted { operation_id })
 }
 
 /// Where row `row_id`'s `invite.ics` is written: one file per row, so the
@@ -161,50 +259,27 @@ pub fn invite_source_open_on(
     editor::open_on(fixture, lookup, &path.to_string_lossy(), window)
 }
 
-/// The event row `row_id` of `account` carries, the reader's invitation
-/// card; `None` for a row with no iMIP payload or one that does not parse.
+/// The invitation card of row `row_id` of `account`: its event and the
+/// server event it stands for; `None` for a row with no iMIP payload or one
+/// that does not parse.
 pub fn invite_get_on(
     door: &Door,
     account: &str,
     row_id: i64,
-) -> Result<Option<EventFrontmatter>, GuiError> {
+) -> Result<Option<InviteCard>, GuiError> {
     let q = Budgeted {
         door,
         budget: INVITE_BUDGET,
     };
-    queries::message_invite(&q, account, row_id)
-        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+    let card = queries::message_invite_card(&q, account, row_id)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))?;
+    Ok(card.map(|card| InviteCard {
+        event: card.event,
+        event_id: card.event_id,
+    }))
 }
 
-/// Reply `response` to the invitation of row `row_id`, the TUI's RSVP
-/// overlay: an operation awaited as `rsvp`, whose `result` is an
-/// [`RsvpSettled`]. A response word the daemon does not take is refused
-/// here, before any call; a daemon refusal comes back as its own sentence.
-pub fn calendar_rsvp_on(
-    session: &SessionHandle,
-    door: &Door,
-    account: &str,
-    row_id: i64,
-    response: &str,
-) -> Result<OperationStarted, GuiError> {
-    if !RSVP_RESPONSES.contains(&response) {
-        return Err(GuiError::protocol(format!(
-            "An RSVP is accept, tentative or decline, not {response:?}"
-        )));
-    }
-    let operation_id = session
-        .start_operation(
-            door,
-            "calendar.rsvp",
-            json!({"account": account, "row_id": row_id, "response": response}),
-            PendingKind::Rsvp,
-            RSVP_START_BUDGET,
-        )
-        .map_err(daemon_sentence)?;
-    Ok(OperationStarted { operation_id })
-}
-
-/// Whether `account` can reply to or send invitations: a Graph account
+/// Whether `account` can send invitations: a Graph account
 /// (`account.list`'s `backend`) is asked `calendar.rsvp {account}` alone,
 /// which the daemon refuses with its Graph sentence before it looks at
 /// anything else, so no operation starts; an IMAP account answers null
@@ -376,29 +451,92 @@ pub async fn send_invite(
     .await
 }
 
-/// The invitation card of a row: its event, or null.
+/// The invitation card of a row: its event and its server event, or null.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn invite_get(
     session: State<'_, SessionHandle>,
     account: String,
     row_id: i64,
-) -> Result<Option<EventFrontmatter>, GuiError> {
+) -> Result<Option<InviteCard>, GuiError> {
     with_door(&session, move |_, door| {
         invite_get_on(door, &account, row_id)
     })
     .await
 }
 
-/// Start an RSVP, awaited as `rsvp`.
+/// Answer an event, awaited as `rsvp`.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn calendar_rsvp(
+pub async fn event_respond(
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    event: String,
     response: String,
+    comment: Option<String>,
+    send_response: Option<bool>,
 ) -> Result<OperationStarted, GuiError> {
     with_door(&session, move |session, door| {
-        calendar_rsvp_on(session, door, &account, row_id, &response)
+        event_respond_on(
+            session,
+            door,
+            &account,
+            &event,
+            &response,
+            comment.as_deref(),
+            send_response,
+        )
+    })
+    .await
+}
+
+/// The calendars, of every account or of `account`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn calendar_list(
+    session: State<'_, SessionHandle>,
+    account: Option<String>,
+) -> Result<Vec<CalendarInfo>, GuiError> {
+    with_door(&session, move |_, door| {
+        calendar_list_on(door, account.as_deref())
+    })
+    .await
+}
+
+/// Show or hide one calendar.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn calendar_set_visibility(
+    session: State<'_, SessionHandle>,
+    account: String,
+    calendar: String,
+    visible: bool,
+) -> Result<(), GuiError> {
+    with_door(&session, move |_, door| {
+        calendar_set_visibility_on(door, &account, &calendar, visible)
+    })
+    .await
+}
+
+/// The events of a range.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn calendar_view(
+    session: State<'_, SessionHandle>,
+    start: String,
+    end: String,
+    zone: Option<String>,
+) -> Result<CalendarViewResult, GuiError> {
+    with_door(&session, move |_, door| {
+        calendar_view_on(door, &start, &end, zone.as_deref())
+    })
+    .await
+}
+
+/// One event.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn event_get(
+    session: State<'_, SessionHandle>,
+    account: String,
+    event: String,
+) -> Result<CalendarEvent, GuiError> {
+    with_door(&session, move |_, door| {
+        event_get_on(door, &account, &event)
     })
     .await
 }
@@ -410,14 +548,6 @@ pub async fn invite_refusal(
     account: String,
 ) -> Result<InviteRefusal, GuiError> {
     with_door(&session, move |_, door| invite_refusal_on(door, &account)).await
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub async fn calendar_events(
-    session: State<'_, SessionHandle>,
-    account: String,
-) -> Result<Vec<AgendaEvent>, GuiError> {
-    with_door(&session, move |_, door| calendar_events_on(door, &account)).await
 }
 
 /// `not_found` when the row has no `invite.ics`.
@@ -474,25 +604,37 @@ mod tests {
     }
 
     #[test]
-    fn calendar_events_on_decodes_the_fixture_agenda() {
-        let (door, _f) = fixture_door();
-        let work = calendar_events_on(&door, "work").expect("work");
-        assert_eq!(work.len(), 5);
-        let steering = work
+    fn calendar_view_on_decodes_the_fixture_week_and_follows_a_hidden_calendar() {
+        let (door, f) = fixture_door();
+        let (start, end) = ("2099-10-12T00:00:00+02:00", "2099-10-19T00:00:00+02:00");
+        let week = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("week");
+        assert_eq!(week.zone, "Europe/Berlin");
+        assert_eq!(week.events.len(), 5);
+        let steering = week
+            .events
             .iter()
-            .find(|e| e.row_id == INVITE_ROW)
-            .expect("row 1008");
+            .find(|e| e.id == format!("imip:{INVITE_ROW}"))
+            .expect("the invitation's event");
+        assert_eq!(steering.summary, "Steering committee");
+        assert_eq!(steering.source.as_ref().map(|s| s.row_id), Some(INVITE_ROW));
+        let calendars = calendar_list_on(&door, None).expect("list");
+        assert_eq!(calendars.len(), 3);
+        calendar_set_visibility_on(&door, "home", "AAMk-cal-holidays", false).expect("hidden");
+        let week = calendar_view_on(&door, start, end, None).expect("week");
+        assert!(week
+            .events
+            .iter()
+            .all(|e| e.calendar != "AAMk-cal-holidays"));
         assert_eq!(
-            steering.event.summary.as_deref(),
-            Some("Steering committee")
+            f.calls().last().map(|(m, _)| m.as_str()),
+            Some("calendar.view")
         );
-        assert_eq!(steering.event.method.as_deref(), Some("REQUEST"));
-        assert_eq!(steering.event.attendees.len(), 3);
-        assert_eq!(steering.start_display, "2099-10-14 10:00");
         assert!(matches!(
-            calendar_events_on(&door, "nobody"),
-            Err(GuiError::NotFound { .. })
+            calendar_set_visibility_on(&door, "home", "nope", true),
+            Err(GuiError::NotFound { .. } | GuiError::Protocol { .. })
         ));
+        let design = event_get_on(&door, "home", "AAMkAD-design").expect("get");
+        assert!(design.online_meeting_url.is_some());
     }
 
     #[cfg(unix)]
@@ -562,11 +704,16 @@ mod tests {
     #[test]
     fn invite_get_on_answers_the_card_of_an_invitation_and_null_for_a_plain_email() {
         let (door, _f) = fixture_door();
-        let event = invite_get_on(&door, "work", INVITE_ROW)
+        let card = invite_get_on(&door, "work", INVITE_ROW)
             .expect("read")
             .expect("an event");
-        assert_eq!(event.summary.as_deref(), Some("Steering committee"));
-        assert_eq!(event.rsvp, "needs-action");
+        assert_eq!(card.event.summary.as_deref(), Some("Steering committee"));
+        assert_eq!(card.event.rsvp, "needs-action");
+        assert_eq!(card.event_id, None, "work has no calendar backend");
+        let server = invite_get_on(&door, "home", 9201)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(server.event_id.as_deref(), Some("AAMkAD-dentist"));
         assert_eq!(invite_get_on(&door, "work", 1009).expect("read"), None);
         assert!(matches!(
             invite_get_on(&door, "work", 424_242),
@@ -608,23 +755,44 @@ mod tests {
     }
 
     #[test]
-    fn an_rsvp_word_the_daemon_does_not_take_is_refused_before_any_call() {
+    fn an_answer_word_the_daemon_does_not_take_is_refused_before_any_call() {
         let (door, f) = fixture_door();
         let session = SessionHandle::new(true);
-        let err =
-            calendar_rsvp_on(&session, &door, "work", INVITE_ROW, "maybe").expect_err("refused");
+        let imip = format!("imip:{INVITE_ROW}");
+        let err = event_respond_on(&session, &door, "work", &imip, "maybe", None, None)
+            .expect_err("refused");
         assert!(matches!(err, GuiError::Protocol { .. }), "{err:?}");
         assert!(f.calls().is_empty());
-        let started =
-            calendar_rsvp_on(&session, &door, "work", INVITE_ROW, "decline").expect("started");
+        let started = event_respond_on(
+            &session,
+            &door,
+            "home",
+            "AAMkAD-design",
+            "decline",
+            Some("  On leave "),
+            Some(false),
+        )
+        .expect("started");
         assert_eq!(
             session.pending_kind(&started.operation_id),
             Some(PendingKind::Rsvp)
         );
+        let (method, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(method, "event.respond");
+        assert_eq!(params["comment"], "On leave");
+        assert_eq!(params["send_response"], false);
         assert_eq!(
-            calendar_rsvp_on(&session, &door, "home", 9201, "accept"),
+            event_respond_on(
+                &session,
+                &door,
+                "work",
+                &imip,
+                "accept",
+                Some(" "),
+                Some(false)
+            ),
             Err(GuiError::Protocol {
-                message: crate::fixture::GRAPH_RSVP_REFUSAL.to_string(),
+                message: crate::fixture::IMIP_SILENT_REFUSAL.to_string(),
                 code: Some(-32602)
             })
         );

@@ -94,7 +94,7 @@ fn export_into(dir: &Path) -> usize {
         attachments::MessageSource,
         attachments::DraftAttachment,
         attachments::DraftAttachments,
-        calendar::RsvpSettled,
+        calendar::InviteCard,
         calendar::InviteRefusal,
         contacts::ContactRow,
         contacts::ContactSearch,

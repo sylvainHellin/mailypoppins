@@ -11,7 +11,7 @@ async function openForm() {
   const r = renderApp();
   await shellReady();
   await r.user.keyboard(" a");
-  await screen.findByRole("listbox", { name: "Agenda" });
+  await screen.findByRole("region", { name: "Calendar" });
   await r.user.click(screen.getByRole("button", { name: "New invitation" }));
   const dialog = await form();
   return { ...r, dialog };

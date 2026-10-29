@@ -8,6 +8,7 @@
 import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
 import calendarFx from "../../fixtures/calendar.json";
+import calendarServerFx from "../../fixtures/calendar-server.json";
 import configFx from "../../fixtures/config.json";
 import contactsFx from "../../fixtures/contacts.json";
 import draftBodiesFx from "../../fixtures/draft-bodies.json";
@@ -20,6 +21,8 @@ import type {
   RefusedRebuild,
   AgendaEvent,
   Bootstrap,
+  CalendarEvent,
+  CalendarInfo,
   DraftCreated,
   DraftEntry,
   DraftInvalid,
@@ -72,6 +75,12 @@ export const fixtures = {
   html: htmlFx as Record<string, string>,
   signatures: signaturesFx as { signatures: Record<string, string>; defaults: Record<string, string> },
   calendar: calendarFx as unknown as { events: Record<string, AgendaEvent[]>; ics: Record<string, string> },
+  /** The server calendar (PERSO-200): calendars, events, and per account the server event of an invitation row. */
+  calendarServer: calendarServerFx as unknown as {
+    calendars: CalendarInfo[];
+    events: CalendarEvent[];
+    invites: Record<string, Record<string, string>>;
+  },
   contacts: contactsFx as unknown as Record<string, Omit<ContactRow, "recipient">[]>,
   config: configFx as unknown as ConfigSnapshot["config"],
 };
@@ -217,14 +226,18 @@ export const mock = {
   savedIn: {} as Record<string, string[]>,
   /** The next materialised handle's counter. */
   nextHandle: 1,
-  /** Each account's agenda, what `calendar_events` answers once sorted. */
+  /** Each account's invitation agenda, which `invite_get`, `invite_source_open` and the answers read. */
   calendar: clone(fixtures.calendar.events),
   /** The `invite.ics` of a row, by row id. */
   ics: clone(fixtures.calendar.ics),
   /** The event an email no agenda row stands for carries, by row id (`simulateInvite`'s emails). */
   invites: {} as Record<string, EventFrontmatter>,
-  /** The RSVPs `calendar_rsvp` started and no test settled yet, oldest first. */
-  rsvps: [] as { operation_id: string; account: string; row_id: number; response: string }[],
+  /** The server calendars `calendar_list` answers, visibility included. */
+  calendars: clone(fixtures.calendarServer.calendars),
+  /** The events `calendar_view` answers. */
+  events: clone(fixtures.calendarServer.events),
+  /** The answers `event_respond` started and no test settled yet, oldest first. */
+  rsvps: [] as { operation_id: string; account: string; event: string; response: string; comment: string | null; send_response: boolean }[],
   /** The next RSVP's operation id counter. */
   nextRsvp: 1,
   /** The invitations `send_invite` started and no test settled yet, oldest first. */
@@ -489,6 +502,8 @@ export function resetMock(): void {
   mock.calendar = clone(fixtures.calendar.events);
   mock.ics = clone(fixtures.calendar.ics);
   mock.invites = {};
+  mock.calendars = clone(fixtures.calendarServer.calendars);
+  mock.events = clone(fixtures.calendarServer.events);
   mock.rsvps = [];
   mock.nextRsvp = 1;
   mock.invitesSent = [];
@@ -597,17 +612,19 @@ function inviteEvent(account: string, rowId: number): EventFrontmatter | null {
 }
 
 /**
- * fixture.rs's RSVP end: the oldest RSVP not settled yet (or `operationId`)
- * settles with the agenda row's reply changed and `state.invalidate` of the
- * account's Sent mailbox, or with `fail`, fails with an SMTP error after a
- * `failed` outbox row, as after `rsvp_fail`. `delivered: false` settles a
- * reply no recipient took yet.
+ * fixture.rs's `event.respond` end: the oldest answer not settled yet (or
+ * `operationId`) settles with the event's own response changed (and on an
+ * `imip:` event its agenda row's) and `calendar.changed`, or with `fail`,
+ * fails with an SMTP error after a `failed` outbox row, as after
+ * `rsvp_fail`. `delivered: false` settles a reply no recipient took yet.
  */
 export function settleRsvp(opts: { fail?: boolean; delivered?: boolean; operationId?: string } = {}): string {
   const at = opts.operationId ? mock.rsvps.findIndex((r) => r.operation_id === opts.operationId) : 0;
   const [run] = mock.rsvps.splice(at, 1);
-  if (!run) throw new Error("no RSVP is waiting to settle");
-  const e = (mock.calendar[run.account] ?? []).find((x) => x.row_id === run.row_id)?.event ?? mock.invites[String(run.row_id)];
+  if (!run) throw new Error("no answer is waiting to settle");
+  const rowId = run.event.startsWith("imip:") ? Number(run.event.slice("imip:".length)) : null;
+  const e = rowId === null ? undefined : ((mock.calendar[run.account] ?? []).find((x) => x.row_id === rowId)?.event ?? mock.invites[String(rowId)]);
+  const server = mock.events.find((x) => x.account === run.account && x.id === run.event);
   if (opts.fail) {
     const o = (mock.outbox[run.account] ??= { ever_used: true, rows: [] });
     o.rows.push({
@@ -620,7 +637,7 @@ export function settleRsvp(opts: { fail?: boolean; delivered?: boolean; operatio
       updated: 1_790_000_000,
       last_error: SEND_FAIL_REASON,
       rejected: [],
-      outstanding: [e?.organizer ?? ""],
+      outstanding: [e?.organizer ?? server?.organizer?.email ?? ""],
     });
     emitEnvelope("state.invalidate", { resource: `outbox:${run.account}`, scope: { query: "counts" } });
     emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: SEND_FAIL_REASON } });
@@ -631,32 +648,54 @@ export function settleRsvp(opts: { fail?: boolean; delivered?: boolean; operatio
     e.rsvp = status;
     for (const a of e.attendees ?? []) if (a.address === "me@example.com") a.status = status;
   }
-  emitEnvelope("state.invalidate", { resource: `mailbox:${run.account}/sent`, scope: { query: "counts" } });
-  const verb = status === "accepted" ? "Accepted" : status === "declined" ? "Declined" : "Tentative";
+  if (server) {
+    server.own_response = status;
+    for (const a of server.attendees) if (a.email === "me@example.com") a.status = status;
+  }
+  if (rowId !== null) emitEnvelope("state.invalidate", { resource: `mailbox:${run.account}/sent`, scope: { query: "counts" } });
+  emitEnvelope("calendar.changed", { account: run.account });
   emitEnvelope("operation.finished", {
     operation_id: run.operation_id,
     state: "succeeded",
     result: {
       account: run.account,
-      selector: findRow(run.account, run.row_id)?.[1].selector ?? `mp://${run.account}/inbox/fixture-row-${run.row_id}`,
+      event: run.event,
       response: run.response,
-      subject: `${verb}: ${e?.summary ?? ""}`,
-      organizer: e?.organizer ?? "",
-      message_id: `<fixture-rsvp-${run.operation_id}@fixture.example>`,
-      delivered: opts.delivered ?? true,
+      comment: run.comment,
+      send_response: run.send_response,
+      via: rowId === null ? "server" : "imip",
+      delivered: run.send_response && (opts.delivered ?? true),
     },
   });
   return run.operation_id;
 }
 
+/** fixture.rs's `IMIP_SILENT_REFUSAL`: `send_response: false` on an invitation mail's event. */
+export const IMIP_SILENT_REFUSAL =
+  "send_response: false needs a calendar backend: an invitation mail is answered by the reply mail itself, and without one nothing would record the answer";
+
+/** Whether `e` overlaps the half-open range: a timed one by its instants, an all-day one by its dates in the range's own offset. */
+function overlaps(e: CalendarEvent, start: string, end: string): boolean {
+  if (e.time.kind === "timed") return Date.parse(e.time.start) < Date.parse(end) && Date.parse(e.time.end) > Date.parse(start);
+  return e.time.start < end.slice(0, 10) && e.time.end > start.slice(0, 10);
+}
+
+/** fixture.rs's `calendar.view`: the visible calendars' events overlapping the range, in start order. */
+function calendarViewOf(start: string, end: string, zone: string | null) {
+  const visible = (e: CalendarEvent) => mock.calendars.some((c) => c.account === e.account && c.id === e.calendar && c.visible);
+  const key = (e: CalendarEvent) => e.time.start;
+  const events = clone(mock.events.filter((e) => visible(e) && overlaps(e, start, end))).sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  const utc = (s: string) => new Date(s).toISOString().replace(".000Z", "Z");
+  return {
+    range: { start: utc(start), end: utc(end) },
+    zone: zone ?? "Europe/Berlin",
+    window: { start: "2099-09-14T00:00:00Z", end: "2100-10-14T00:00:00Z" },
+    events,
+  };
+}
+
 /** The agenda row `invite_update` and `invite_cancel` change, as fixture.rs's `INVITE_ROW`. */
 export const INVITE_ROW = 1008;
-
-/** `account`'s agenda in the daemon's order: by start, undated last. */
-function agendaOf(account: string): AgendaEvent[] {
-  const key = (e: AgendaEvent) => `${e.start_sort === "" ? 1 : 0}${e.start_sort}`;
-  return clone(mock.calendar[account] ?? []).sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
-}
 
 /**
  * fixture.rs's `invite_update` and `invite_cancel`: row 1008 of `work`'s
@@ -665,12 +704,16 @@ function agendaOf(account: string): AgendaEvent[] {
  */
 export function simulateInvite(cancel: boolean): void {
   const e = mock.calendar.work.find((x) => x.row_id === INVITE_ROW)!;
+  // The calendar's event of the invitation follows, as `calendar.view` folds the mails.
+  const server = mock.events.find((x) => x.account === "work" && x.id === `imip:${INVITE_ROW}`);
   if (cancel) {
     e.cancelled = true;
     e.event.cancelled = true;
+    if (server) server.cancelled = true;
   } else {
     e.event.sequence += 1;
     const day = String(Math.min(14 + e.event.sequence, 28)).padStart(2, "0");
+    if (server) server.time = { kind: "timed", start: `2099-10-${day}T08:00:00Z`, end: `2099-10-${day}T09:00:00Z`, zone: "UTC" };
     e.event.start = `2099-10-${day}T10:00:00+02:00`;
     e.event.end = `2099-10-${day}T11:00:00+02:00`;
     e.start_sort = `2099-10-${day}T08:00:00`;
@@ -1971,9 +2014,49 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "outbox_list":
       knownAccount(cmd, account);
       return outboxListing(account);
-    case "calendar_events":
+    case "calendar_list": {
+      const only = args.account == null ? null : String(args.account);
+      if (only !== null) knownAccount(cmd, only);
+      return clone(mock.calendars.filter((c) => only === null || c.account === only));
+    }
+    case "calendar_set_visibility": {
       knownAccount(cmd, account);
-      return agendaOf(account);
+      const c = mock.calendars.find((x) => x.account === account && x.id === String(args.calendar));
+      if (!c) {
+        throw {
+          kind: "not_found",
+          code: -32602,
+          message: `calendar.set_visibility: the daemon refused the call: ${account} has no calendar ${String(args.calendar)}; calendar.list names them (-32602)`,
+        };
+      }
+      c.visible = Boolean(args.visible);
+      emitEnvelope("calendar.changed", { account });
+      return null;
+    }
+    case "calendar_view":
+      return calendarViewOf(String(args.start), String(args.end), args.zone == null ? null : String(args.zone));
+    case "event_get": {
+      knownAccount(cmd, account);
+      const e = mock.events.find((x) => x.account === account && x.id === String(args.event));
+      if (!e) throw { kind: "not_found", code: -32602, message: `event.get: the daemon refused the call: ${account} has no event ${String(args.event)} (-32602)` };
+      return clone(e);
+    }
+    case "event_respond": {
+      knownAccount(cmd, account);
+      const response = String(args.response);
+      const event = String(args.event);
+      const refuse = (message: string) => ({ kind: "protocol", code: -32602, message });
+      if (!["accept", "tentative", "decline"].includes(response)) {
+        throw { kind: "protocol", code: null, message: `An answer is accept, tentative or decline, not "${response}"` };
+      }
+      if (!mock.events.some((x) => x.account === account && x.id === event)) throw refuse(`${account} has no event ${event}`);
+      const sendResponse = args.send_response == null ? true : Boolean(args.send_response);
+      if (!sendResponse && event.startsWith("imip:")) throw refuse(IMIP_SILENT_REFUSAL);
+      const comment = typeof args.comment === "string" && args.comment.trim() ? args.comment.trim() : null;
+      const operation_id = `fixture-respond-${mock.nextRsvp++}`;
+      mock.rsvps.push({ operation_id, account, event, response, comment, send_response: sendResponse });
+      return { operation_id };
+    }
     case "invite_source_open": {
       knownAccount(cmd, account);
       const rowId = Number(args.row_id);
@@ -1994,29 +2077,14 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (!findRow(account, rowId) && !(mock.calendar[account] ?? []).some((e) => e.row_id === rowId)) {
         throw refusedRow("message.invite", `no message has row_id ${rowId}`);
       }
-      return inviteEvent(account, rowId);
+      const event = inviteEvent(account, rowId);
+      const eventId = fixtures.calendarServer.invites[account]?.[String(rowId)] ?? null;
+      return event ? { event, event_id: eventId } : null;
     }
     case "invite_refusal": {
       const a = fixtures.accounts.find((x) => x.name === account);
       if (!a) throw { kind: "not_found", message: `account_unknown: ${account}`, code: null };
       return { account, refusal: a.backend === "graph" ? GRAPH_RSVP_REFUSAL : null };
-    }
-    case "calendar_rsvp": {
-      knownAccount(cmd, account);
-      const response = String(args.response);
-      if (!["accept", "tentative", "decline"].includes(response)) {
-        throw { kind: "protocol", code: null, message: `An RSVP is accept, tentative or decline, not "${response}"` };
-      }
-      if (fixtures.accounts.find((x) => x.name === account)?.backend === "graph") {
-        throw { kind: "protocol", code: -32602, message: `calendar.rsvp: the daemon refused the call: ${GRAPH_RSVP_REFUSAL} (-32602)` };
-      }
-      const rowId = Number(args.row_id);
-      if (!inviteEvent(account, rowId)) {
-        throw { kind: "protocol", code: -32602, message: `calendar.rsvp: the daemon refused the call: row ${rowId} carries no invitation to reply to (-32602)` };
-      }
-      const operation_id = `fixture-rsvp-${mock.nextRsvp++}`;
-      mock.rsvps.push({ operation_id, account, row_id: rowId, response });
-      return { operation_id };
     }
     case "send_invite": {
       knownAccount(cmd, account);

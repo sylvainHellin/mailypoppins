@@ -9,6 +9,7 @@ import { onMenu, subscribe } from "@/lib/events";
 import type { Action } from "@/app/reducer";
 import { accountNames, isStale, listsConversations, readerKey, type AppState } from "@/app/state";
 import { refusalsWanted } from "@/app/rsvp";
+import { viewerZone, viewRange } from "@/app/calendar";
 import { CONTACT_LIMIT } from "@/app/contacts";
 import { signaturesWanted } from "@/app/signatures";
 import { EMPTY_SEARCH_FORM } from "@/app/search";
@@ -113,21 +114,37 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     }
   }, [hasBootstrap, outbox, dispatch]);
 
-  // The agenda the Calendar view shows, and only while it shows: an agenda
-  // that went stale behind another view is read when the view comes back.
-  const calendarAccount = state.view === "calendar" ? (state.calendarView?.account ?? null) : null;
-  const agenda = calendarAccount ? state.calendar[calendarAccount] : undefined;
+  // The events of the days the Calendar view shows, and the calendars, only
+  // while it shows: what went stale behind another view is read when the
+  // view comes back. A move to other days is a new generation, so the
+  // answer carries the days it was asked for.
+  const calendarView = state.view === "calendar" ? state.calendarView : null;
+  const range = calendarView ? viewRange(calendarView) : null;
+  const calendar = state.calendar;
   useEffect(() => {
-    if (!hasBootstrap || !calendarAccount || !agenda || !isStale(agenda)) return;
-    const gen = agenda.gen;
-    const account = calendarAccount;
-    run(`calendar:${account}@${gen}`, () =>
+    if (!hasBootstrap || !range || !isStale(calendar)) return;
+    const gen = calendar.gen;
+    const { start, end, days } = range;
+    run(`calendar:${days}@${gen}`, () =>
       cmd
-        .calendarEvents(account)
-        .then((events) => dispatch({ type: "calendar_loaded", account, gen, events }))
-        .catch((e: unknown) => dispatch({ type: "calendar_failed", account, gen, error: asGuiError(e) })),
+        .calendarView(start, end, viewerZone())
+        .then((result) => dispatch({ type: "calendar_loaded", gen, load: { days, result } }))
+        .catch((e: unknown) => dispatch({ type: "calendar_failed", gen, error: asGuiError(e) })),
     );
-  }, [hasBootstrap, calendarAccount, agenda, dispatch]);
+    // `range` is keyed by its days.
+  }, [hasBootstrap, range?.days, calendar, dispatch]);
+  const calendars = state.calendars;
+  const calendarShown = calendarView !== null;
+  useEffect(() => {
+    if (!hasBootstrap || !calendarShown || !isStale(calendars)) return;
+    const gen = calendars.gen;
+    run(`calendars@${gen}`, () =>
+      cmd
+        .calendarList()
+        .then((list) => dispatch({ type: "calendars_loaded", gen, calendars: list }))
+        .catch((e: unknown) => dispatch({ type: "calendars_failed", gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, calendarShown, calendars, dispatch]);
 
   // The contacts the Contacts view shows, and only while it shows, for the
   // view's query; a list that went stale behind another view is read when
@@ -279,7 +296,7 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
   }, [hasBootstrap, account, message, reader, dispatch]);
 
   // The reader's invitation card, while the reader shows that invitation:
-  // created by `reader_loaded`, stale again with the account's agenda.
+  // created by `reader_loaded`, stale again with the account's calendar.
   const meta = state.view === "mail" && state.reader.meta?.invite ? state.reader.meta : null;
   const inviteKey = meta ? readerKey(meta.account, meta.row_id) : null;
   const invite = inviteKey ? state.invites[inviteKey] : undefined;
@@ -291,12 +308,12 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     run(`invite:${key}@${gen}`, () =>
       cmd
         .inviteGet(account, rowId)
-        .then((event) => dispatch({ type: "invite_loaded", key, gen, event }))
+        .then((card) => dispatch({ type: "invite_loaded", key, gen, card }))
         .catch((e: unknown) => dispatch({ type: "invite_failed", key, gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, meta, inviteKey, invite, dispatch]);
 
-  // Each account whose Graph refusal a shown invitation or agenda needs, once.
+  // The account whose Graph refusal the New invitation form needs, once.
   const refusals = refusalsWanted(state).join("\u0000");
   useEffect(() => {
     if (!hasBootstrap || !refusals) return;
@@ -305,7 +322,7 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         cmd
           .inviteRefusal(account)
           .then((answer) => dispatch({ type: "invite_refusal_loaded", account, refusal: answer.refusal }))
-          // A probe that failed says nothing: the daemon still refuses the RSVP itself.
+          // A probe that failed says nothing: the daemon still refuses the send itself.
           .catch(() => dispatch({ type: "invite_refusal_loaded", account, refusal: null })),
       );
     }

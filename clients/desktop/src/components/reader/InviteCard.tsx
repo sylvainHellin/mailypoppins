@@ -3,7 +3,7 @@ import { Check, CircleHelp, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EventCard } from "@/components/calendar/EventCard";
-import { isSentMailbox, RESPONSE_LABEL, rsvpOf, rsvpRefusal, sendRsvp } from "@/app/rsvp";
+import { cardEventId, isSentMailbox, RESPONSE_LABEL, rsvpOf, rsvpRefusal, sendRsvp } from "@/app/rsvp";
 import { useAppState, useDispatch } from "@/app/store";
 import { readerKey, RSVP_RESPONSES, type RsvpResponse } from "@/app/state";
 import type { MessageMeta } from "@/lib/gui-types";
@@ -13,8 +13,12 @@ const ICON: Record<RsvpResponse, typeof Check> = { accept: Check, tentative: Cir
 /**
  * The invitation an email carries, under the reader's header
  * (clients/desktop/docs/reader.md, "Invitations"): the shared event card and
- * the three replies. A reply the TUI would refuse is disabled, with the
- * TUI's sentence below the buttons; a Graph account shows the daemon's.
+ * the three replies, through `event.respond` (PERSO-200). On an account with
+ * a calendar backend the card names its server event, which the replies
+ * answer, so the server calendar and the organizer both hear of it; else the
+ * reply is a mail to the organizer. A reply the TUI would refuse is
+ * disabled, with the TUI's sentence below the buttons; any other refusal is
+ * the daemon's, in the notice line. `t v` opens the choice with a comment.
  */
 export function InviteCard({ meta }: { meta: MessageMeta }) {
   const s = useAppState();
@@ -36,12 +40,13 @@ export function InviteCard({ meta }: { meta: MessageMeta }) {
       </p>
     );
   }
-  const event = l.data;
+  const card = l.data;
+  const event = card.event;
+  const server = card.event_id !== null;
   const organizer = isSentMailbox(s, meta.account, meta.mailbox);
-  const refusal = rsvpRefusal(event, organizer, s.inviteRefusals[meta.account] ?? null);
-  const running = rsvpOf(s, meta.account, meta.row_id);
-  const summary = event.summary?.trim() || meta.subject || "(no subject)";
-  const target = { account: meta.account, row_id: meta.row_id, summary };
+  const refusal = rsvpRefusal(event, organizer);
+  const target = { account: meta.account, event: cardEventId(card, meta.row_id), summary: event.summary?.trim() || meta.subject || "(no subject)" };
+  const running = rsvpOf(s, meta.account, target.event);
   return (
     <div data-slot="invite-card" className="border-b border-border px-5 py-4">
       <EventCard event={event} organizer={organizer} label="Invitation">
@@ -73,7 +78,11 @@ export function InviteCard({ meta }: { meta: MessageMeta }) {
             Sending {RESPONSE_LABEL[running.response]}…
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground">t v opens the reply from the keyboard.</p>
+          <p data-slot="rsvp-route" className="text-xs text-muted-foreground">
+            {server
+              ? "The answer goes to the server calendar, which tells the organizer; t v adds a comment or keeps it from the organizer."
+              : "The answer is a reply mail to the organizer; t v adds a comment."}
+          </p>
         )}
       </EventCard>
     </div>
