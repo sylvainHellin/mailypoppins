@@ -16,7 +16,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `terminal.rs` | The embedded terminal editor: one PTY session per draft, its reader and pump threads, and the session table |
 | `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme, the reader mode and the editor's colours |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
-| `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
+| `calendar.rs` | The calendar view, the calendars and their visibility, one event, an invitation's `invite.ics` in the editor, a message's invitation, the answer, the Graph probe and a new invitation |
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
 | `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
 | `daemon_files.rs` | The daemon's `config.toml` and its log file in the editor |
@@ -152,10 +152,13 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_attach` | `account`, `id`, `path` (absolute or `~`) | `DraftAttachments` |
 | `draft_attachment_remove` | `account`, `id`, `index` | `DraftAttachments` |
 | `draft_attachment_open` | `account`, `id`, `index` | `OpenedFile` |
-| `calendar_events` | `account` | `AgendaEvent[]`, every row, past ones included |
-| `invite_source_open` | `account`, `row_id` (an agenda row's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
-| `invite_get` | `account`, `row_id` | `EventFrontmatter`, or `null` for a message with no invitation |
-| `calendar_rsvp` | `account`, `row_id`, `response: "accept" \| "tentative" \| "decline"` | `{ operation_id }` |
+| `calendar_list` | `account?` | `CalendarInfo[]`, every account's when absent |
+| `calendar_set_visibility` | `account`, `calendar`, `visible` | nothing; the daemon publishes `calendar.changed` |
+| `calendar_view` | `start`, `end` (RFC 3339 with an offset, `end` exclusive), `zone?` | `CalendarViewResult`, every account's visible calendars |
+| `event_get` | `account`, `event` (a server id or `imip:<row_id>`) | `CalendarEvent` |
+| `event_respond` | `account`, `event`, `response: "accept" \| "tentative" \| "decline"`, `comment?`, `send_response?` | `{ operation_id }` |
+| `invite_source_open` | `account`, `row_id` (an invitation mail's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
+| `invite_get` | `account`, `row_id` | `InviteCard` (the event and its server `event_id`), or `null` for a message with no invitation |
 | `invite_refusal` | `account` | `InviteRefusal` |
 | `send_invite` | `account`, `subject`, `start`, `to?`, `cc?`, `end?`, `duration?`, `location?`, `description?` | `{ operation_id }` |
 | `contact_search` | `account`, `query` (empty for the whole index), `limit` | `ContactSearch` |
@@ -247,10 +250,7 @@ type EditorSetting = {
   effective: string; effective_source: EditorSource; route: EditorRoute;
 };
 type SyncMode = "quick" | "full";
-type RsvpSettled = {
-  account: string; selector: string; response: string; subject: string;
-  organizer: string; message_id: string; delivered: boolean;
-};
+type InviteCard = { event: EventFrontmatter; event_id: string | null };
 type InviteRefusal = { account: string; refusal: string | null };
 type ContactRow = {
   address: string; display_name: string; sent_to: number; sent_cc: number; received: number;
@@ -321,7 +321,7 @@ A cancelled hold cancels the operation too, which then ends `cancelled`.
 | `send` | `send_draft` | `send.draft` | `SendOutcome` |
 | `send_approved` | `send_approved` | `send.approved` | `ApprovedOutcome` |
 | `outbox_retry` | `outbox_retry` | `send.outbox_retry` | `OutboxRetryOutcome` |
-| `rsvp` | `calendar_rsvp` | `calendar.rsvp` | `RsvpSettled` |
+| `rsvp` | `event_respond` | `event.respond` | `EventRespondResult` |
 | `send_invite` | `send_invite` | `send.invite` | `SendOutcome` |
 | `contact_rebuild` | `contact_rebuild` | `contact.rebuild` | `ContactRebuilt` |
 
@@ -335,7 +335,7 @@ The operation stays awaited, so its `operation.finished` with `state: "cancelled
 An id the daemon refuses with `-32602`, one that already ended or that it forgot, answers `already_settled`: its own end has come or will come, and says how it went.
 `search_server_cancel` is the same call followed by `forget_operation`, since the search view ends the search itself on the answer; a held send is cancelled with `send_cancel_hold`, not with this.
 
-The daemon settles a cancelled operation at once, and `contact.rebuild`, `calendar.rsvp` and `send.invite` look at their token only up to their commit point, the cache write or the SMTP submission ([daemon-protocol.md](../../../docs/daemon-protocol.md), "Long-running operations"): a cancel after it cannot stop the rebuild writing its index or a reply or an invitation already on its way going out.
+The daemon settles a cancelled operation at once, and `contact.rebuild`, `event.respond` and `send.invite` look at their token only up to their commit point, the cache write or the SMTP submission ([daemon-protocol.md](../../../docs/daemon-protocol.md), "Long-running operations"): a cancel after it cannot stop the rebuild writing its index or a reply or an invitation already on its way going out.
 The frontend therefore words a cancelled end as having stopped waiting, never as undone (shell.md, "Actions, dialogs and the activity area").
 
 ## The outbox
@@ -361,28 +361,32 @@ Neither command publishes anything of its own: the daemon's `state.invalidate` o
 
 ## The calendar
 
-`calendar_events` is `calendar.events {account}`, read through `mp_client::queries::calendar_events`: the account's agenda, deduped, reply-folded and sorted by the daemon, undated rows last.
-An `AgendaEvent` is the protocol's own type: `row_id` (the winning copy's), the `event` block (`EventFrontmatter`: method, sequence, summary, start and end in RFC3339, location, organizer, the user's own `rsvp`, `recurrence`, `attendees`, and the derived `cancelled`, `superseded` and `cancelled_instances`), `subject`, the UTC sort keys `start_sort` and `end_sort` (empty when unknown), `start_display` in the daemon's local time, `is_organizer` and `cancelled`.
-The layer passes every row: the past/upcoming filter is the frontend's, as it is the TUI's.
-An account whose store is not ready is refused with `protocol` code `-32006`, and an unknown one is `not_found` with `-32005`.
+`calendar_view` is `calendar.view {start, end, zone?}` through `mp_client::queries::calendar_view` (PERSO-200): the events of every account's visible calendars in the range, the server cache and the invitation mails merged and deduped by the daemon, sorted by start.
+The frontend asks for the days its layout shows, from local midnight to local midnight, with the viewer's IANA zone, which places the all-day events; the layouts are the frontend's, as they are the TUI's.
+A `CalendarEvent` is the protocol's neutral event: `account`, `calendar`, `id` (the server id, or `imip:<row_id>` for an invitation mail's), `time` (`timed` with UTC instants and the event's IANA zone, or `all-day` with dates and an exclusive end), `summary`, `location`, `body`, `organizer`, `attendees` with their status, `own_response`, `recurrence` and `recurrence_id`, `online_meeting_url`, `cancelled`, `is_organizer`, and for a mail's event the `source` (`row_id`, `selector`, `subject`) that opens it.
+A range the daemon cannot read is a `protocol` error with its code.
 
-`invite_source_open` is the TUI's agenda Enter and `e` (`Action::OpenEventSource`).
+`calendar_list` is `calendar.list {account?}`: every account's calendars (`CalendarInfo`: `account`, `id`, `name`, `color`, `is_default`, `can_edit`, `visible`, `backend`), the invitation mails of an account as its `imip` calendar.
+`calendar_set_visibility` is `calendar.set_visibility {account, calendar, visible}`, a command that answers at once: the daemon keeps the preference across a cache rebuild and publishes `calendar.changed {account}`, which is what reads the view again; an unknown calendar is the daemon's `-32602` sentence.
+`event_get` is `event.get {account, event}`: one event by its id.
+
+`invite_source_open` is the TUI's `e` on an invitation mail's event (`Action::OpenEventSource`), with the event's `source.row_id`.
 It reads the row's `invite.ics` with `message.ics {account, row_id}` (`mp_client::queries::message_ics`, which decodes the base64 the wire carries), writes it to `renditions/invite-<account>-<row_id>.ics` under the app's cache directory, the directory 0700 and the file 0600, and opens that file with the external editor as `editor_open` does.
 The file is a copy to read: an edit to it reaches nothing.
 A row with no `invite.ics` is `not_found` with the TUI's sentence, "That event has no ics source in the store", and nothing is written or opened.
 
-`invite_get` is `message.invite {account, row_id}` through `mp_client::queries::message_invite`: the `EventFrontmatter` a message carries, the reader's invitation card, or `null` for a row with no iMIP payload or one that does not parse.
+`invite_get` is `message.invite {account, row_id}` through `mp_client::queries::message_invite_card`: an `InviteCard` with the `EventFrontmatter` a message carries, the reader's invitation card, and on an account with a calendar backend the server event it stands for as `event_id`; `null` for a row with no iMIP payload or one that does not parse.
 A row the account does not hold is `not_found` with `-32602`.
 
-`calendar_rsvp` starts `calendar.rsvp {account, row_id, response}` and awaits it as `kind: "rsvp"`.
-A response other than `accept`, `tentative` or `decline` is a `protocol` refusal before any call.
-A daemon refusal of the start comes back as the daemon's own sentence with its code, as `send_invite`'s does.
-The reply goes through the daemon's durable outbox, so a transport that fails leaves an outbox row the outbox view shows.
-`RsvpSettled` is the daemon's inline settle: `subject` is the reply's own (`Accepted: <summary>`), `organizer` whom it went to, and `delivered` whether any recipient took it; a reply nobody took yet waits in the outbox.
-The daemon refuses nothing about the invitation itself: an RSVP to the user's own, a cancelled or a superseded invitation is the frontend's to prevent, as it is the TUI's.
+`event_respond` starts `event.respond {account, event, response, comment?, send_response}` and awaits it as `kind: "rsvp"`.
+The event is a server id, which the daemon answers through the account's calendar backend, or `imip:<row_id>`, which it answers with the iMIP reply mail through its durable outbox, so a transport that fails leaves an outbox row the outbox view shows.
+A response other than `accept`, `tentative` or `decline` is a `protocol` refusal before any call; a blank comment is none, and an absent `send_response` is sent as `true`, the daemon's default.
+A daemon refusal of the start comes back as the daemon's own sentence with its code, as `send_invite`'s does: `send_response: false` on an invitation mail's event, a Graph account on the iMIP path, a sign-in without the calendar scope.
+`EventRespondResult` is the settle: the `response` and `comment` taken, `send_response`, `via` (`server` or `imip`), and `delivered`, whether the organizer heard of it; an iMIP reply nobody took yet waits in the outbox.
+The daemon refuses nothing about the event itself: an answer to the user's own or to a cancelled event is the frontend's to prevent, as it is the TUI's; no probe runs ahead of the call.
 
-`invite_refusal` answers whether an account can reply to or send invitations at all.
-The daemon refuses both on a Graph account (`ANO-4`) before it looks at anything else, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.
+`invite_refusal` answers whether an account can send invitations at all, for the New invitation form.
+The daemon refuses `send.invite` on a Graph account (`ANO-4`) before it looks at anything else, and `calendar.rsvp` too, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.
 That call is refused before an operation id exists, and `refusal` is the daemon's sentence, taken off the refusal text by `error::refusal_sentence` (the session keeps a refusal's `data` too, behind `mp_client::session::refusal`, and this one carries none a client needs).
 An `imap` account answers `refusal: null` without that call, and an unknown one is `not_found`.
 
@@ -1000,7 +1004,7 @@ The picker hands back a path, and since no `fs:` permission is granted the webvi
 
 ## Fixture mode
 
-The fixtures hold 2 accounts, 6 mailboxes, 22 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts.
+The fixtures hold 2 accounts, 6 mailboxes, 22 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events, 3 calendars with 7 events and 28 contacts.
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 `message.list_conversations` answers the collected `ConversationListing` in one call, and `message.thread` its `prefer_mailbox` and `include_drafts` (#0142, `src/fixture/conversations.rs`): every message is its own conversation but one canned thread, `work`'s offsite question (row 1007, inbox), the agenda and the reply in Sent (rows 1010 and 1000) and the draft `offsite-note`, listed in the inbox as one row of three with the draft marker and four members on expansion.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
@@ -1080,9 +1084,17 @@ Both change the agenda row in place, where a daemon would fold the new email int
 The reader's card of row 1008 follows, since `message.invite` reads the agenda row.
 
 `message.invite` answers a row's `event` from the agenda row of the same id, else from the version an `invite_update` or `invite_cancel` email carried (the cancellation's is a `CANCEL`), else `null`; a row the account holds neither in a mailbox nor in its agenda is `-32602`.
+Its `event_id` names the server event of a `home` invitation (row 9201's is `AAMkAD-dentist`), as the daemon does on an account with a calendar backend, and is `null` on `work`.
 `calendar.rsvp` refuses what the daemon refuses, in its order: an unknown parameter, an unknown account, the Graph account `home` with the daemon's sentence before anything else (so the probe's `{account}` alone gets it), a response word it does not take, a row it does not hold, and a row with no invitation.
 Otherwise the operation runs 0.5 s: the agenda row's `rsvp` and the user's own attendee status become the reply, `state.invalidate` of `mailbox:<account>/sent` says a copy was filed, and it settles with the daemon's shape, `delivered: true`.
 `rsvp_fail` fails the next RSVP instead with the transport error `send_fail` uses, after a `failed` outbox row naming the organizer and its `state.invalidate` of `outbox:<account>`; the agenda row keeps its reply.
+
+The server calendar (PERSO-200) comes from `calendar-server.json`: `home` has a Graph calendar "Calendar" and a calendar "Holidays", and `work` its invitation mails as "Invitations" (`imip`).
+The week of Monday 12 October 2099 holds the first occurrence of a weekly planning on Tuesday (its second on Tuesday the 20th), on Wednesday a design review with a Teams link, the steering committee of row 1008 as `imip:1008` and a one-to-one the user organizes, the three overlapping, and on Friday an all-day company holiday; the dentist of row 9201 is on 1 December.
+`calendar.list` answers the calendars, of one account with `account`; `calendar.set_visibility` flips one, refuses an unknown one with `-32602`, and publishes `calendar.changed`.
+`calendar.view` answers the events of the visible calendars (every calendar with `include_hidden`) that overlap the range, a timed one by its instants and an all-day one by its dates in the range's own offset, in start order, with the range in UTC and a fixed window.
+`event.get` answers one event, and an unknown one is `-32602`.
+`event.respond` refuses a word it does not take, an unknown event, and `send_response: false` on an `imip:` event with the daemon's sentence; otherwise the operation runs for the RSVP delay, the event's `own_response` and the user's attendee status (and an `imip:` event's agenda row) become the answer, `calendar.changed` says so, and it settles with an `EventRespondResult`, `delivered` as `send_response`; `rsvp_fail` fails the next one with the transport error.
 
 `send.invite` refuses in `plan_invite`'s order with the daemon's words: `home` with the Graph sentence, then a missing subject, a missing start, both or neither of `end` and `duration`, and no recipient in `to` or `cc`; it does not parse the times.
 Otherwise the operation runs for the send delay: the invitation joins the account's agenda as a row the user organizes (a wall-clock start read as its UTC sort key, every recipient `needs-action`), `state.invalidate` of `mailbox:<account>/sent` says its copy was filed, and it settles with a `SendOutcome` every recipient took.

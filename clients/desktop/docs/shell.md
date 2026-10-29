@@ -21,8 +21,8 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/send.ts` | `x` and `cX`: the send confirmations and what their OK runs |
 | `src/app/outbox.ts` | The outbox listings, the outbox view, retry and discard, and the queue depth |
 | `src/app/views.ts` | The full-pane views' titles and actions, and what a view hides |
-| `src/app/calendar.ts` | The agendas, the past/upcoming rule, the Calendar view's cursor and scope, and the source open |
-| `src/app/rsvp.ts` | The reader's invitation cards, the Graph refusals, the RSVP refusals in the TUI's words, the RSVP choice and the RSVPs this window awaits |
+| `src/app/calendar.ts` | The Calendar view's events and calendars, its layouts and days, the part of a day an event covers, the cursor's entries, the grid's columns, the source and mail open |
+| `src/app/rsvp.ts` | The reader's invitation cards, the New invitation form's Graph refusal, the answer refusals in the TUI's words, the respond choice and the answers this window awaits |
 | `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
@@ -51,7 +51,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host, and `EmptyView.tsx`, the placeholder no view uses any more |
 | `src/components/contacts` | The Contacts view, its list and rows |
-| `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, the RSVP choice and the New invitation form |
+| `src/components/calendar` | The Calendar view, its agenda list and rows, its day and week grid, the calendars panel, the event cards (the reader's invitation card reuses one), the respond choice and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 | `src/components/signatures` | The Signatures dialog |
 | `src/components/activity` | The activity log dialog |
@@ -90,8 +90,8 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale, and the health banner set to the snapshot's `diagnostics` |
-| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended unless its embedded editor still runs; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
-| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards and a line in the activity log |
+| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended unless its embedded editor still runs; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes the Calendar view and that account's invitation cards stale |
+| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` the Calendar view, its invitation cards and a line in the activity log |
 | `event` `config.changed` | a line in the activity log, the config.toml banner cleared, the configuration and the account list stale, each added or updated account's counts and list stale, and a removed account the window still knows removed (see Settings) |
 | `event` `config.invalid` | a line in the activity log, and the config.toml banner |
 | `event` `diagnostic.check_changed` | a line in the activity log, and the check's health banner line replaced, added, or on `ok` removed (see Health checks) |
@@ -99,11 +99,12 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `signature.changed`, `signature.removed` | every account's signature listing stale, read again while the Signatures dialog or a new-draft or forward wizard is open |
 | `event` `contact.changed` | that account's contact list stale, read again when the Contacts view shows it (see Contacts, "Staleness") |
+| `event` `calendar.changed` | the Calendar view's events and calendars and that account's invitation cards stale, read again when they show (see Calendar, "Staleness") |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds`, and a line in the activity log when it fires or is cancelled |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
-| `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
-| `event` `operation.finished` of an invitation | the invitation settles: a notice says how, and the account's agenda, invitation cards and outbox counts are read again |
+| `event` `operation.finished` of an answer | the answer settles: a notice says how, and the Calendar view and the account's invitation cards are read again |
+| `event` `operation.finished` of an invitation | the invitation settles: a notice says how, and the Calendar view, the account's invitation cards and the outbox counts are read again |
 | `event` `operation.finished` of a contact rebuild | the rebuild settles: a notice says how, and a written index is read again |
 | `event` `operation.finished` of a sign-in | the sign-in settles: the device-code dialog and a notice say how, or for the account wizard's candidate sign-in the wizard alone (see Account wizard) |
 | `event` `daemon.shutting_down` | the shutting-down banner |
@@ -600,10 +601,10 @@ Their palette rows and menu items answer "Go back to Mail first (Escape): this a
 The keymap reads a view's table (`VIEW_KEYS` in `src/keymap/viewKeys.ts`) after the Ctrl keys and before any family prefix arms, the TUI's view rule (`clients/tui/src/app/keys.rs`, `is_view_agnostic`):
 
 - A key the table binds runs at once, so a view can take `c`, `t`, `a` or `r` without arming the mail families.
-- `s` and Space still arm; `g` arms in Contacts and Calendar only for their own `gg`; `c`, `t` and `f` never arm.
+- `s` and Space still arm; `g` arms in Contacts and Calendar only for their own `gg` (and the Calendar's `gt`); `c`, `t` and `f` never arm.
 - Under an armed prefix only the view's combos and the view-agnostic ones run: `ss`, `sS`, `sl`, `sc`, `sf`, `Space m`, `Space c`, `Space a` (`VIEW_AGNOSTIC_COMBOS`, which Mail reads too).
-- Tab, `:`, `Ctrl+p`, `?`, `X`, `!`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it, before a view's own Enter.
-- Every other printable key does nothing, silently, as the TUI's views ignore the mail keys: the MESSAGE keys, `v`, `x`, `y`, `F`, `z`, `/` and the digits, unless the view binds them (Contacts takes `/`, `n`, `v`, `c` and `r`).
+- Tab, `:`, `Ctrl+p`, `?`, `X`, `!`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it, before a view's own Enter, and Enter and Space on a control marked `data-own-keys` (the calendars panel's checkboxes) are that control's.
+- Every other printable key does nothing, silently, as the TUI's views ignore the mail keys: the MESSAGE keys, `v`, `x`, `y`, `F`, `z`, `/` and the digits, unless the view binds them (Contacts takes `/`, `n`, `v`, `c` and `r`; Calendar `h`, `l`, `[`, `]`, `t`, `a`, `d`, `w`, `e`, `m`, `V`, `c` and `r`).
 
 Each unit that fills a view adds its keys to that view's table: the table's keys are `ActionId`s, so a palette row runs the same action.
 
@@ -670,67 +671,88 @@ Only the shown list is read: one that went stale behind another view is read whe
 
 ## Calendar
 
-The Calendar view lists the agenda of the selection's account, the TUI's Calendar view (CAL-02, CAL-03).
-It follows the selection's account: an account picked with `ga` or the palette's "Switch account" shows its agenda, and the scope stays.
+The Calendar view shows the events of every account, the server calendars and the invitation mails merged by the daemon, the TUI's Calendar view (CAL-02, CAL-03, PERSO-200).
+It has three layouts, as the TUI does: the agenda, the day grid and the week grid (D10 of docs/plans/calendar.md).
 
-### The agenda
+### The days and the events
 
-`calendar_events` answers every row, deduped, folded and sorted by the daemon; `state.calendar` keeps each account's answer as a `Loadable`, created on the first open for that account.
-The view shows upcoming events only until `t` shows the past ones, the TUI's rule (`visibleEvents` in `src/app/calendar.ts`, a port of `recompute_calendar_visible`):
+`state.calendarView` is `{layout, anchor, cursor, refreshing, calendarsOpen}`: the layout, the local day the view is anchored on (`YYYY-MM-DD`), the entry under the cursor by key, whether an `r` waits for its answer, and whether the calendars panel shows.
+The view opens once on today's agenda and keeps its layout and days while another view shows.
+A layout's days are the TUI's `CalendarLayout::days` (`layoutDays` in `src/app/calendar.ts`): the agenda the anchor and the 14 days after it, the day grid the anchor alone, the week grid Monday to Sunday around the anchor.
+`calendar_view` asks for those days from the local midnight of the first to the local midnight after the last, as RFC 3339 with the local offset, with the viewer's IANA zone, which places the all-day events.
+`state.calendar` keeps the answer as a `Loadable` with the days it was asked for, so a move to other days is a new generation and the header says "loading" until its own answer lands; `state.calendars` keeps `calendar_list`'s answer, read with it.
+Both are read only while the view shows: what went stale behind Mail or another view is read when the Calendar view comes back.
 
-- an undated row (empty `start_sort`) is always listed, since it has no place on the timeline;
-- a dated row is listed while its end, or its start when the end is unknown, is not before now, so a running event stays until it ends;
-- now is `new Date().toISOString().slice(0, 19)`, the UTC `YYYY-MM-DDTHH:MM:SS` form the sort keys use.
+An event falls on every shown day its time touches (`dayPart`, a port of the TUI's `day_part`): an all-day event on its dates up to the exclusive end, a timed one on every local day its half-open interval touches, clamped to the day's midnights, a zero-length one on the day of its start.
+The cursor's entries (`calendarEntries`, the TUI's `calendar_entries`) are each event under every shown day it covers, day by day, the all-day ones first on their day and the rest in the daemon's order.
+The cursor names an entry by account, event id and day, and falls back to the first entry on or after the anchor, else the last.
 
-`state.calendarView` is `{account, cursor, showPast, refreshing}`: the cursor is an agenda `row_id`, the first shown row while it is `null`.
-`t` flips `showPast`, puts the cursor back on the first row and says "Calendar: showing all events" or "Calendar: showing upcoming events", the TUI's status line.
+### The layouts
 
-### Rows and the card
+The agenda (`AgendaList.tsx`) is a single-select `listbox` named "Agenda", one `group` per day named after it ("Wed 14 Oct 2099", today marked "(today)").
+A row (`AgendaRow.tsx`, an `option` named "<when>, <title>, <account>/<calendar>, <badge>") shows the part of the day the event covers ("all day", "09:00-10:30", "24:00" where it runs past midnight), the summary or else the invitation mail's subject, the account and the calendar it sits in with the calendar's colour, and one badge in the TUI's order: cancelled, organizer, else the user's own answer (accepted, tentative, declined, or "no reply"); an event that invites nobody has none.
+A cancelled event's title is struck through.
 
-The agenda is a single-select `listbox` named "Agenda" beside the event card; in the narrow layout the card sits under the list.
-A row (`AgendaRow.tsx`, an `option` named "<when>, <title>, <badge>") shows the daemon's `start_display` verbatim ("undated" when it is empty), the event's summary or else the email's subject, and one badge in the TUI's order: cancelled, organizer, else the user's own reply (accepted, tentative, declined, or "no reply").
-A cancelled row's title is struck through.
-The card (`EventCard.tsx`, a region named "Event") is the TUI's shared event card: the summary; "Cancelled by the organizer." or "Superseded: a newer version of this invitation has arrived."; the cancelled occurrences of a series, three named and the rest counted; When, Repeats, Where, Organizer; "Your RSVP" unless the user organizes it; and every attendee with their status.
-It takes the `EventFrontmatter`, an `organizer` flag, a region name and children, so the reader's invitation card can reuse it with its reply buttons.
-The header says "<account>: N upcoming events" or "N events, past included", and a line under the list says that only events that arrived by email are listed.
+The day and week grids (`CalendarGrid.tsx`) are one `listbox`, named "Day" or "Week", with a column per day, Monday to Sunday on the week, and today's column marked (`aria-current="date"`).
+On top, a band per day (a `group` named "<day>, all day") holds the all-day events; under it an hour grid from 0 to 24, scrolled to 07:00 when it opens, holds the timed events, each a block from its start to its end (20 minutes at least).
+Events of one day that overlap one another share the column's width side by side, each in the first sub-column free at its start (`gridBlocks`).
+Every event is an `option` with the agenda row's name, so the cursor, a click and a double-click work as on the agenda.
+
+### The card
+
+The event card (`CalendarEventCard` in `EventCard.tsx`, a region named "Event") is the TUI's event card for the cursor event, beside the days, or under them in the narrow layout: the summary; "Cancelled by the organizer."; When in the viewer's zone, with the event's own zone when it differs ("Wed 14 Oct 2099, 09:00 to 10:30"; an all-day event's dates, the exclusive end made inclusive); Repeats, the rule of a series or "An occurrence of a series"; Where; Calendar; Organizer; "Your response" unless the user organizes it or it invites nobody; the description; and every attendee with their status, an optional one marked.
+"Join the meeting" opens the online meeting link through `open_external`, and an event that came from an invitation mail has "Open mail", which shows that mail in Mail, its mailbox opened and the mail selected (the TUI card's `m`).
+The card's "Respond" button runs `V`, disabled with the refusal under it.
 
 ### Keys and actions
 
 The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
 
-- `j`/`k`, the arrows, `gg`/`G`, `Home`/`End` and the pages move the agenda's cursor through `move_selection`.
-- Enter and `e` open the cursor row's `invite.ics` in the external editor through `invite_source_open`; a double-click opens the row clicked.
-  The notice names the editor, or says "That event has no ics source in the store" for a row with none, or "Open failed: <why>".
-- `t` shows or hides the past events and never arms the `t` family.
-- `r` reads the agenda again and says "Calendar refreshed (N events)" once it lands.
-  A read that fails says "Calendar refresh failed: <why>" and keeps the rows it had.
-- `V` opens the RSVP choice for the cursor row (see RSVP).
+- `j`/`k`, the arrows, `gg`/`G`, `Home`/`End` and the pages move the cursor through the entries with `move_selection`.
+- `h`/`l` and `[`/`]` show the previous or the next day on the day grid, the previous or the next week otherwise.
+- `t` comes back to today and never arms the `t` family; `gt` focuses the header's "Jump to date" field, which takes `YYYY-MM-DD` and Enter, and says "Not a date: <text>; type YYYY-MM-DD" otherwise; Escape in it gives the keys back to the view.
+- `a`, `d` and `w` switch to the agenda, the day grid or the week grid, anchored on the cursor's day, with the TUI's line "Calendar: <layout> layout".
+- Enter, or a double-click, takes the focus to the event card.
+- `e` opens an invitation mail's `invite.ics` in the external editor through `invite_source_open`; a server event says "This event is the server's; no invitation mail stands behind it", and the notice otherwise names the editor, or says "That event has no ics source in the store", or "Open failed: <why>".
+- `m` shows the invitation mail of the cursor event in Mail, as the card's "Open mail" does.
+- `V` opens the respond choice for the cursor event (see Respond).
+- `c` shows or hides the calendars panel (see Calendars).
+- `r` reads the events and the calendars again and says "Calendar refreshed (N events)" once they land; a read that fails says "Calendar refresh failed: <why>" and keeps the events it had.
 
-The palette's "Open the invite email in $EDITOR", "RSVP to invitation (Accept/Tentative/Decline)", "Show past events / upcoming only" and "Refresh events from disk" run the same actions, and outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the agenda".
-The header's "Past events" (`aria-pressed`) and "Refresh" buttons run `t` and `r`, its "New invitation" button opens the form (see New invitation), and the card's RSVP button runs `V`.
+The palette runs the same actions from the CALENDAR rows ("Previous / next day or week (also [ and ])", "Go to today", "Jump to date (e.g. 2026-07-06)", "Agenda / day / week layout", "Open the event card", "Open the invitation's .ics in $EDITOR", "Respond (accept / tentative / decline, comment)", "Show or hide calendars", "Read the events again"), plus its own "Next day or week", "Day layout", "Week layout" and "Open the invitation mail"; outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the calendar".
+The header's buttons run the same: Previous, Today, Next, the "Jump to date" field, the Agenda, Day and Week layout buttons (`aria-pressed`), Calendars, New invitation (see New invitation), Refresh and Mail.
+When no event is under the cursor the view's body takes the focus, so the keys reach the view and not a header button.
 
-### RSVP
+### Calendars
 
-Three roads lead to a reply: the reader's invitation card ([reader.md](reader.md), "Invitations"), `tv` on the cursor email in Mail, and `V` or the card's RSVP button in the Calendar view.
-`V` refuses the cursor row in the TUI's agenda order and words: a cancelled row ("This event was cancelled by the organizer; nothing to RSVP"), a row the user organizes ("You are the organizer of this invite; nothing to RSVP"), a row that is not a `REQUEST` ("Only received invitations (REQUEST) can be RSVP'd"), then a Graph account with the daemon's sentence.
-The card's RSVP button is disabled with the same sentence under it, and both refuse a row whose reply is still sending.
+The calendars panel (`CalendarsPanel.tsx`, a region named "Calendars", `c` or the header's "Calendars") is the TUI's calendars overlay: every account's calendars from `calendar_list`, one checkbox each named "<account>/<calendar>", with its colour and "(default)" on the account's default calendar.
+A checkbox calls `calendar_set_visibility` and says "Showing <account>/<calendar>" or "Hiding <account>/<calendar>"; the daemon's `calendar.changed` then reads the events and the calendars again, so a hidden calendar's events leave the view.
+The preference is the daemon's and survives a cache rebuild; the panel keeps nothing of its own.
+Enter and Space on a checkbox are the checkbox's (`data-own-keys`), not the view's.
 
-`tv` and `V` open the RSVP choice, the overlay `rsvp` (`RsvpDialog.tsx`, a dialog named "RSVP" with the invitation's summary): a listbox named "Response" with Accept, Tentative and Decline, Accept selected.
-Its keys are the TUI's RSVP overlay: `a`, `t` and `d` pick an answer, `j`, Down and Tab move down, `k`, Up and Shift+Tab move up, Enter sends the selected answer, Escape and `q` close without sending.
-The dialog owns every key while it is open, and Tab moves the selection, so the focus stays inside it.
+### Respond
+
+Three roads lead to an answer: the reader's invitation card ([reader.md](reader.md), "Invitations"), `tv` on the cursor email in Mail, and `V` or the card's "Respond" in the Calendar view.
+Every one is `event_respond`, the daemon's `event.respond`: a server event is answered by its id through the account's calendar backend, an invitation mail's event by `imip:<row_id>` with the iMIP reply mail.
+`V` refuses the cursor event in the TUI's order and words (`eventRsvpRefusal` in `src/app/rsvp.ts`): a cancelled event ("This event was cancelled by the organizer; nothing to RSVP"), one the user organizes ("You are the organizer of this invite; nothing to RSVP"), a server event that invites nobody ("This event is not an invitation; there is nothing to answer"); and one whose answer is still sending.
+Which answers an account takes is the daemon's call: no probe runs ahead of it, and a refusal comes back as "RSVP failed: <the daemon's sentence>".
+
+`tv` and `V` open the respond choice, the overlay `rsvp` (`RsvpDialog.tsx`, a dialog named "RSVP" with the event's summary): a listbox named "Response" with Accept, Tentative and Decline, Accept selected, a Comment field, and on a server event the checkbox "Send a response to the organizer", checked; on an invitation mail's event a line says the answer goes to the organizer as a reply mail, which always goes out.
+Its keys are the TUI's respond overlay: `a`, `t` and `d` pick an answer, `j`, Down and Tab move down, `k`, Up and Shift+Tab move up, Tab from Decline goes on to the comment, Enter sends the selected answer from anywhere in the dialog, Escape and `q` close without sending.
+The dialog owns every key while it is open, the comment's typing and the checkbox's Space aside.
 It reads them in the capture phase, as the Signatures dialog does, since the popup stops the arrow keys on their way up.
 Enter sends even while a button behind the dialog still holds the focus, which the popup takes a moment after it opens.
 
-A reply is `calendar_rsvp`, awaited as `rsvp`: `state.rsvps` keeps each one this window started (`{token, account, row_id, response, summary, operation_id}`) until it settles or is dropped, and `rsvpEarly` holds an end that overtook the start's answer, as `sends` and `sendEarly` do.
-The settle says "Replied <response> to <summary>", with the response word the daemon took and the invitation's summary, and adds "; queued in the outbox" when no recipient took the reply yet.
-A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; a reply dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
+An answer sends one `event_respond` with the response, the comment (none when blank) and, on a server event only, `send_response`; it is awaited as `rsvp`: `state.rsvps` keeps each one this window started (`{token, account, event, response, summary, operation_id}`) until it settles or is dropped, and `rsvpEarly` holds an end that overtook the start's answer, as `sends` and `sendEarly` do.
+The settle (an `EventRespondResult`) says "Replied <response> to <summary>", with the TUI's ending when the organizer did not hear of it: "; queued in the outbox" for a reply mail no recipient took yet, "; no response sent to the organizer" when the user chose so, and ", but the organizer could not be told" when the server could not.
+A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; an answer dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
 While it runs, the activity area's running card can cancel it, and the end then says that the daemon may still send it.
-Every end makes the account's agenda and invitation cards stale, so the card and the agenda row show the new reply once the daemon folded it in.
+Every end makes the Calendar view and the account's invitation cards stale, and the daemon's `calendar.changed` does too, so the card and the event show the new answer.
 
 ### New invitation
 
 The TUI has no form for a new invitation, only the CLI's `mp send --invite`; the desktop has a minimal one (SND-05), with no preview and no UID of its own, since the daemon mints one.
-The Calendar view's "New invitation" button and the palette's "New invitation" (CALENDAR, no key) open it, the overlay `invite` (`NewInvitationDialog.tsx`, a dialog named "New invitation"), for the Calendar view's account, else the selection's.
+The Calendar view's "New invitation" button and the palette's "New invitation" (CALENDAR, no key) open it, the overlay `invite` (`NewInvitationDialog.tsx`, a dialog named "New invitation"), for the selection's account.
 Its fields are To, Cc, Subject, Start, the choice "Ends at" or "Lasts" with an End or a Duration field, Location and Description.
 Start and End are `datetime-local` fields, which send a local wall-clock time such as `2099-12-01T10:00`, one of the forms the daemon reads; Duration takes `1h30m` or `PT1H30M`.
 Only the End or the Duration shown is sent.
@@ -738,21 +760,18 @@ The focus starts in To; Enter in a one-line field moves to the next field, Cmd+E
 
 The form asks before any call for a subject, a start and a recipient in To or Cc, in that order and with the Rust layer's sentences, and keeps what was typed.
 Every other refusal shows verbatim in the form's alert, which keeps it open: the daemon's words, such as "An invite needs --end or --duration".
-On a Graph account the form takes no input, its Send is disabled, and it shows the probe's sentence, the same one the reader's card shows (`invite_refusal`).
+On a Graph account the form takes no input, its Send is disabled, and it shows the daemon's sentence from `invite_refusal`, read once per account while the form is open.
 
 A send is `send_invite`, awaited as `send_invite`: `state.inviteSends` keeps each one (`{token, account, subject, operation_id}`) and `inviteSendEarly` an end that overtook the answer.
 The form closes once the send started, and the activity area's running card then shows the send, with Cancel.
 The settle says "Sent the invitation <subject>"; one some recipients refused says "The invitation <subject> reached N of M recipients; the outbox names who never got it", one no recipient took that the outbox says why, a failure "The invitation <subject> failed: <why>", and a drop that it was interrupted.
-Every end makes the account's agenda, invitation cards and outbox counts stale, so the invitation appears in the agenda as the user's own once the daemon filed it.
+Every end makes the Calendar view, the account's invitation cards and the outbox counts stale, so the invitation appears in the calendar once the daemon filed it.
 
 ### Staleness
 
-No daemon resource names the agenda: it is a fold over the account's invitation mail.
-So an account's agenda goes stale on a `state.invalidate` or `state.remove` of `mailbox:<account>/...` or `message:<account>/...`, on that account's `sync.completed`, and on every bootstrap, which also drops the agendas of accounts that are gone.
-Only the shown agenda is read: one that went stale behind Mail or another view is read when the Calendar view comes back.
-A new, updated or cancelled invitation therefore reaches the agenda with the invalidation of the mailbox it lands in, without an `r`.
-The reader's invitation cards go stale on the same events, and a settled RSVP makes both stale.
-An account whose store is not ready (`-32006`) shows "<account> has no local store yet, so it has no agenda; it appears after the account's first sync", not an error; its first sync makes the agenda stale.
+The events and the calendars go stale on the daemon's `calendar.changed` of any account (a sync that moved the server cache, an answer, a visibility change, from any client), on a `state.invalidate` or `state.remove` of any account's `mailbox:` or `message:` resources and on its `sync.completed`, since the invitation mails fold into the view, on an account's removal, and on every bootstrap.
+A new, updated or cancelled invitation therefore reaches the view with the invalidation of the mailbox it lands in, without an `r`.
+The reader's invitation cards of the account go stale on the same events, and a settled answer makes both stale.
 
 ## Signatures
 
@@ -765,7 +784,7 @@ The commands behind it are in [rust-layer.md](rust-layer.md), "Signatures".
 - `cs`, the TUI's GLOBAL key, in Mail from any pane, the outbox view included; it opens on the outbox's or the search's account when one shows, else the selection's.
 - The palette's "Manage signatures", from any view.
 
-In Contacts and Calendar `cs` is not reachable, as in the TUI: `c` copies in Contacts and does nothing in Calendar, and neither arms the `c` family.
+In Contacts and Calendar `cs` is not reachable, as in the TUI: `c` copies in Contacts and shows or hides the calendars in Calendar, and neither arms the `c` family.
 
 ### The dialog
 
@@ -1154,13 +1173,13 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
-- `tv`: the RSVP choice for the cursor email, from the list or the reader (the TUI's MESSAGE key); in the Calendar view `V` does it for the cursor row (see Calendar, "RSVP").
+- `tv`: the respond choice for the cursor email, from the list or the reader (the TUI's MESSAGE key); in the Calendar view `V` does it for the cursor event (see Calendar, "Respond").
 - `X`: dismiss the newest activity notice, a desktop key.
 - `!`: hide or show the activity notices, never a hold card or the update card; `sl`: the activity log; `sc`, `sf`: config.toml and the daemon log in the editor; all four from every view (see Activity log).
 - `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
-- In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
+- In the Calendar view: `j`/`k`, `gg`/`G` move, `h`/`l` and `[`/`]` the previous and next day or week, `t` today, `gt` a date, `a`/`d`/`w` the layouts, Enter the event card, `e` an invitation's `invite.ics`, `m` its mail, `V` respond, `c` the calendars, `r` a fresh read (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `cF`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
   On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it opens the daemon's rendition of the server's copy, with no fetch first (PERSO-155) (see Compose, "A message's rendition").
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
