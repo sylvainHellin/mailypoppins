@@ -224,8 +224,20 @@ impl App {
     /// `calendar.changed` (PERSO-200): a sync, an answer or a visibility
     /// change moved an account's calendar, here or in another client. The
     /// view reads its days again when it holds them, and an open calendars
-    /// overlay its list.
+    /// overlay its list. An account the re-login banner names asks
+    /// `account.credentials` again, since a sign-in with the calendar scope
+    /// is what lets its sync move the calendar.
     pub fn on_calendar_changed(&mut self) {
+        let missing: Vec<usize> = (0..self.accounts.len())
+            .filter(|&index| {
+                self.accounts[index]
+                    .credentials
+                    .is_some_and(|credentials| credentials.calendar_scope_missing)
+            })
+            .collect();
+        for index in missing {
+            self.refresh_credentials(index);
+        }
         self.rebuild_calendar_if_loaded();
         if matches!(self.overlay, Overlay::Calendars(_)) {
             let calendars = self.calendar_view.calendars.clone();

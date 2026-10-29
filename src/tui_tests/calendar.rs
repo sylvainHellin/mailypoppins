@@ -416,6 +416,39 @@ fn a_calendar_changed_event_reloads_the_view() {
     assert_eq!(summaries(&app), ["Project review"]);
 }
 
+/// The re-login banner reads `account.credentials` again on the
+/// `calendar.changed` a sign-in's sync publishes, so it leaves once the
+/// calendar scope is granted instead of holding the startup answer.
+#[test]
+fn a_calendar_changed_event_asks_the_credentials_again() {
+    let _data = seeded();
+    let mut app = app_over(CallLog::default());
+    app.apply_bootstrap(&mp_protocol::state::Bootstrap {
+        instance_id: "tui-test".to_string(),
+        revision: 1,
+        ..Default::default()
+    });
+    let mut evoqs = AccountState::for_tests(ACCOUNT);
+    evoqs.credentials = Some(Credentials {
+        calendar_scope_missing: true,
+        ..Credentials::default()
+    });
+    app.accounts = vec![evoqs];
+    assert_eq!(app.calendar_scope_missing(), [ACCOUNT]);
+
+    let applied = app.apply_event(&mp_protocol::EventEnvelope {
+        instance_id: "tui-test".to_string(),
+        revision: 2,
+        kind: mp_protocol::events::KIND_CALENDAR_CHANGED.to_string(),
+        payload: json!({"account": ACCOUNT}),
+    });
+    assert_eq!(applied, Applied::Ignored);
+    assert!(
+        app.calendar_scope_missing().is_empty(),
+        "the daemon reports no missing scope"
+    );
+}
+
 /// The respond overlay's answer is one `event.respond` with the comment and
 /// the send-response choice, on the event's own account; no client-side
 /// refusal stands before it, Graph account or not.

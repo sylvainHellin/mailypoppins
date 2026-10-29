@@ -624,7 +624,8 @@ impl App {
     /// mailbox, the desktop's `staleListIf`. A resync bootstrap that caught
     /// the runtime opening (a daemon restart) sets `opening`, and the startup
     /// open that would clear it ran long ago, so this event is the only thing
-    /// left that tells the client the account serves.
+    /// left that tells the client the account serves. It asks the account's
+    /// `account.credentials` again too, which a sign-in may have changed.
     ///
     /// Any other state is [`Applied::Ignored`] for the reason
     /// [`Self::apply_shutting_down`] gives: nothing is reloaded and nothing is
@@ -645,6 +646,9 @@ impl App {
             return Applied::Ignored;
         }
         self.accounts[index].opening = false;
+        // A sign-in again ends in `ready`, and may have granted the calendar
+        // scope the re-login banner asks for (PERSO-200).
+        self.refresh_credentials(index);
         if index == self.active_account {
             self.recount_all_mailboxes();
             self.accounts[index].mailbox_counts = self.mailbox_counts.clone();

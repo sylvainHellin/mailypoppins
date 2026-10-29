@@ -895,6 +895,27 @@ impl App {
             .and_then(|acct| acct.credentials)
     }
 
+    /// Ask `account.credentials` again for the account at `index`: a sign-in
+    /// since the startup answer may have granted the calendar scope, whose
+    /// absence the Calendar view's banner reads (PERSO-200). A failed read
+    /// keeps the answer already held.
+    pub fn refresh_credentials(&mut self, index: usize) {
+        let Some(name) = self
+            .accounts
+            .get(index)
+            .map(|acct| acct.account_config.name.clone())
+        else {
+            return;
+        };
+        let Some(queries) = self.queries() else {
+            return;
+        };
+        match super::queries::account_credentials(queries, &name) {
+            Ok(credentials) => self.accounts[index].credentials = Some(credentials),
+            Err(e) => log::warn!("[queries] the credentials of {name}: {e:#}"),
+        }
+    }
+
     /// [`AccountState::has_imap`] for the active account.
     pub fn has_imap(&self) -> bool {
         self.account_config.auth_method != mp_core::config::AuthMethod::Graph
