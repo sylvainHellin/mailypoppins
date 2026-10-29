@@ -146,7 +146,7 @@ import {
   staleAllOutboxes,
   staleOutbox,
 } from "@/app/outbox";
-import type { CalendarInfo, OutboxListing } from "@/protocol/types";
+import type { CalendarInfo, MessageListRow, OutboxListing } from "@/protocol/types";
 import {
   calendarFailed,
   calendarGoTo,
@@ -1561,6 +1561,24 @@ function failed<T>(l: Loadable<T>, gen: number, error: GuiError): Loadable<T> {
   return { ...l, loadedGen: gen, error };
 }
 
+/** A selector without the `/<uid>` a listed twin row carries (`Selector::for_listed`, PERSO-244). */
+function selectorBase(selector: string): string {
+  if (!selector.startsWith("mp://")) return selector;
+  const parts = selector.slice("mp://".length).split("/");
+  return parts.length > 3 ? `mp://${parts.slice(0, 3).join("/")}` : selector;
+}
+
+/**
+ * A selection known only by its selector (`open_event_mail`): the row whose
+ * selector matches once the twin's UID is set aside, the one with its row id
+ * first, since twins share the selector's message id.
+ */
+function twinByBase(rows: readonly MessageListRow[], want: { row_id: number; selector: string }): MessageListRow | undefined {
+  const base = selectorBase(want.selector);
+  const same = rows.filter((r) => selectorBase(r.selector) === base);
+  return same.find((r) => r.id === want.row_id) ?? same[0];
+}
+
 /** After a listing reload, confirm the list's selected message by message_id or drop it. */
 function reverify(s: AppState, list: MessageList): AppState {
   const sel = listSelection(s);
@@ -1575,12 +1593,16 @@ function reverify(s: AppState, list: MessageList): AppState {
   const want = sel.message;
   const row =
     list.rows.find((r) => r.message_id === want.message_id && r.selector === want.selector) ??
-    list.rows.find((r) => r.selector === want.selector);
+    list.rows.find((r) => r.selector === want.selector) ??
+    (want.message_id === "" ? twinByBase(list.rows, want) : undefined);
   if (!row) {
     const next = setListSelection(s, { ...sel, message: null });
     return s.search ? next : { ...next, reader: emptyReader() };
   }
-  return setListSelection(s, { ...sel, message: { ...want, row_id: row.id, message_id: row.message_id, verified: true } });
+  return setListSelection(s, {
+    ...sel,
+    message: { ...want, row_id: row.id, message_id: row.message_id, selector: row.selector, verified: true },
+  });
 }
 
 // ---------------------------------------------------------------------------
