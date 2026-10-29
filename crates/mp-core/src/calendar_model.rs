@@ -473,6 +473,31 @@ impl Event {
     pub fn overlaps(&self, window: &CalendarWindow, viewer: Tz) -> bool {
         self.time.overlaps(window, viewer)
     }
+
+    /// Take the details of an occurrence from its series `master`: the
+    /// `UID` and everything that describes the meeting rather than this
+    /// occurrence's place in time. The occurrence keeps its own ids, time,
+    /// `RECURRENCE-ID`, change stamp and web link.
+    ///
+    /// What an occurrence Graph's delta trims to its times shows (PERSO-200):
+    /// the store re-derives such an occurrence whenever its master changes,
+    /// and the Graph adapter falls back on the master field by field for the
+    /// same set, so both agree on what an occurrence inherits.
+    pub fn inherit_from(&mut self, master: &Event) {
+        self.uid = master.uid.clone();
+        self.summary = master.summary.clone();
+        self.location = master.location.clone();
+        self.body = master.body.clone();
+        self.organizer = master.organizer.clone();
+        self.attendees = master.attendees.clone();
+        self.own_response = master.own_response;
+        self.reminder = master.reminder;
+        self.online_meeting_url = master.online_meeting_url.clone();
+        self.sensitivity = master.sensitivity;
+        self.show_as = master.show_as;
+        self.cancelled = master.cancelled;
+        self.is_organizer = master.is_organizer;
+    }
 }
 
 /// `UID` plus `RECURRENCE-ID`, the identity "Events are deduplicated across

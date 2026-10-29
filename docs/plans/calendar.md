@@ -138,6 +138,7 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
   When it answers 400 or 404 the default calendar falls back to `GET /me/calendarView/delta` and any other calendar to a plain `GET /me/calendars/{id}/calendarView` read in full each sync, the fallback remembered until the next baseline.
   A calendar whose ACL refuses the read fails on its own and the others still sync.
 - Series: Graph gives each occurrence its own `iCalUId`, so an occurrence's `UID` is read once per series from its master (`GET /me/events/{seriesMasterId}`) and cached.
+  The delta routes also trim an occurrence to its ids and times, so the master is cached whole and an occurrence takes every property it lacks from it, again whenever the master changes.
 - Delta tokens: each token is bound to the window of its first request, so the scheduled re-baseline of the rolling window (see "Sync") starts a new delta round.
 - Ids: every request sends `Prefer: IdType="ImmutableId"`, so an occurrence or an event moved between folders keeps its id.
 - Respond: `POST /me/events/{id}/accept|tentativelyAccept|decline` with `comment` and `sendResponse`; `tentativelyAccept` and `decline` take `proposedNewTime` for proposing a new time.

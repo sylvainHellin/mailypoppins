@@ -582,7 +582,8 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 ///
 /// The calendar tables ([`super::calendar`], PERSO-200) are a disposable cache
 /// of the server calendar; losing them costs one baseline sync, and a hidden
-/// calendar shows again.
+/// calendar shows again. Tables an earlier build created gain their later
+/// columns here too ([`super::calendar::ensure_columns`]).
 fn additive_tables() -> Vec<(&'static str, String)> {
     let mut tables = vec![
         (
@@ -640,7 +641,8 @@ pub fn ensure_additive_tables(conn: &Connection) -> Result<()> {
         }
     }
     crate::catalogue::listing::ensure_columns(conn)?;
-    super::draft_sync::ensure_columns(conn)
+    super::draft_sync::ensure_columns(conn)?;
+    super::calendar::ensure_columns(conn)
 }
 
 /// Clear the arrival marks of `0` a pre-fix build persisted, once per file.

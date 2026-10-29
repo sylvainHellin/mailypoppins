@@ -43,7 +43,12 @@ pub enum Response {
 /// Graph gives every occurrence an `iCalUId` of its own, so the `UID` the
 /// series shares (and the invitation mails about it carry) is only on the
 /// series master, which one extra request per series reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Graph's delta also trims an occurrence to its ids and times, so the master
+/// itself is kept too: the details such an occurrence takes from it
+/// ([`Event::inherit_from`]), and the zone it places the occurrence's times
+/// in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesInfo {
     /// The server id of the series master.
     pub master_id: EventId,
@@ -52,6 +57,17 @@ pub struct SeriesInfo {
     /// The series rule as `RRULE` text, when the backend could express it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recurrence: Option<String>,
+    /// The series master as an event, when the backend read one: its
+    /// summary, all-day flag, people and free/busy are what a trimmed
+    /// occurrence shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<Box<Event>>,
+    /// The IANA zone the series is held in (Graph's `originalStartTimeZone`),
+    /// when known; an all-day master's [`EventTime`] carries none.
+    ///
+    /// [`EventTime`]: crate::calendar_model::EventTime
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
 }
 
 /// What one sync of a calendar's window brought.
@@ -76,6 +92,12 @@ pub struct SyncResult {
     /// Series the backend resolved during this sync, for the store's series
     /// cache ([`CalendarBackend::remember_series`] hands them back).
     pub series: Vec<SeriesInfo>,
+    /// The upserts that carry their series master's details rather than
+    /// their own (a Graph delta occurrence, trimmed to its ids and times):
+    /// the store re-derives them from each master a later sync brings, since
+    /// the server need not send the occurrences again when only the master
+    /// changed.
+    pub inheriting: Vec<EventId>,
 }
 
 /// Why a backend call failed.

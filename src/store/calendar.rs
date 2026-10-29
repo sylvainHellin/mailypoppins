@@ -14,13 +14,16 @@
 //!   the whole store does carry it (`super::rebuild`).
 //! - [`EVENTS_TABLE`]: the expanded occurrences of the window, one row per
 //!   server id, with the serialised [`Event`] in `event_json` and the columns
-//!   a range query filters on beside it.
+//!   a range query filters on beside it. `inherits` marks an occurrence whose
+//!   details are its series master's ([`SyncResult::inheriting`]), which
+//!   [`apply_sync`] re-derives from each master a sync brings.
 //! - [`SYNC_TABLE`]: each calendar's sync token, with the window it was minted
 //!   for (a Graph delta token is bound to it), when the last baseline ran,
 //!   and the path the backend synced through.
 //! - [`SERIES_TABLE`]: what a backend resolved about a recurring series
 //!   ([`SeriesInfo`]), so Graph asks for a series master once rather than at
-//!   every poll.
+//!   every poll: its `UID`, rule and zone, and the master itself as an event
+//!   in `master_json`, whose details a trimmed occurrence shows.
 //! - [`INVITES_TABLE`]: the server event an invitation mail stands for, by
 //!   its `messages.id` and the server id it was looked up under, so
 //!   `message.invite` asks the server once per invitation mail (a mail that
@@ -96,6 +99,7 @@ pub fn create_sql() -> [(&'static str, String); 6] {
                     zone          TEXT,
                     last_modified INTEGER,
                     event_json    TEXT NOT NULL,
+                    inherits      INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (account, calendar_id, event_id)
                 );
                 CREATE INDEX IF NOT EXISTS calendar_events_event
@@ -127,9 +131,11 @@ pub fn create_sql() -> [(&'static str, String); 6] {
             format!(
                 "CREATE TABLE IF NOT EXISTS {SERIES_TABLE} (
                     account    TEXT NOT NULL,
-                    master_id  TEXT NOT NULL,
-                    uid        TEXT NOT NULL,
-                    recurrence TEXT,
+                    master_id   TEXT NOT NULL,
+                    uid         TEXT NOT NULL,
+                    recurrence  TEXT,
+                    master_json TEXT,
+                    zone        TEXT,
                     PRIMARY KEY (account, master_id)
                 )"
             ),
@@ -147,6 +153,45 @@ pub fn create_sql() -> [(&'static str, String); 6] {
             ),
         ),
     ]
+}
+
+/// The columns added to a calendar table after a build created it, as
+/// `(table, column, type)`: the series master's details and the mark of an
+/// occurrence that inherits them (PERSO-200). A table an older build created
+/// gains them here; its rows fill at the next baseline.
+const ADDED_COLUMNS: [(&str, &str, &str); 3] = [
+    (EVENTS_TABLE, "inherits", "INTEGER NOT NULL DEFAULT 0"),
+    (SERIES_TABLE, "master_json", "TEXT"),
+    (SERIES_TABLE, "zone", "TEXT"),
+];
+
+/// Add [`ADDED_COLUMNS`] to the calendar tables that lack them, after
+/// [`super::schema::ensure_additive_tables`] created the tables. Looked up
+/// before it is written, so an open of a store that has them writes nothing;
+/// a connection that loses the race to add one finds it there, which is the
+/// state it wanted.
+pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
+    let present = |table: &str, column: &str| -> Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            [table, column],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("reading the {table} columns"))
+    };
+    for (table, column, kind) in ADDED_COLUMNS {
+        if present(table, column)? {
+            continue;
+        }
+        if let Err(err) =
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))
+        {
+            if !present(table, column)? {
+                return Err(err).with_context(|| format!("adding {table}.{column}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A calendar's sync state: the token of its last sync and what it is bound
@@ -336,6 +381,10 @@ pub fn list_calendars(store: &Store, account: &str) -> Result<Vec<Calendar>> {
 /// anything else merges its upserts and removals. A baseline stamps
 /// `baselined_at` with `now`; an incremental sync keeps the stamp it had.
 ///
+/// Each series master the sync brings is handed on to the cached occurrences
+/// that inherit from it ([`Event::inherit_from`]), so a renamed series shows
+/// its new name on every occurrence the server did not send again.
+///
 /// `true` when the calendar's rows moved: an event added, removed, or written
 /// with a stored form that differs from the cached one. A baseline that reads
 /// back what the cache holds moves nothing, which keeps a calendar read in
@@ -380,17 +429,44 @@ pub fn apply_sync(
         }
         cached.remove(id);
     }
+    let inheriting: HashSet<&str> = result.inheriting.iter().map(String::as_str).collect();
     for event in &result.upserts {
         let json = serde_json::to_string(event).context("serialising a calendar event")?;
-        if cached.get(&event.id) == Some(&json) {
+        let row = (json, inheriting.contains(event.id.as_str()));
+        if cached.get(&event.id) == Some(&row) {
             continue;
         }
-        write_event(&tx, account, calendar_id, event, &json)?;
-        cached.insert(event.id.clone(), json);
+        write_event(&tx, account, calendar_id, event, &row.0, row.1)?;
+        cached.insert(event.id.clone(), row);
         changed = true;
     }
     for series in &result.series {
         write_series(&tx, account, series)?;
+    }
+    let masters: HashMap<&str, &Event> = result
+        .series
+        .iter()
+        .filter_map(|series| Some((series.master_id.as_str(), series.master.as_deref()?)))
+        .collect();
+    if !masters.is_empty() {
+        for (json, _) in cached.values().filter(|(_, inherits)| *inherits) {
+            let Some(mut event) = parse_event(json) else {
+                continue;
+            };
+            let master = event
+                .series_master_id
+                .as_deref()
+                .and_then(|id| masters.get(id));
+            let Some(master) = master else {
+                continue;
+            };
+            event.inherit_from(master);
+            let fresh = serde_json::to_string(&event).context("serialising a calendar event")?;
+            if &fresh != json {
+                write_event(&tx, account, calendar_id, &event, &fresh, true)?;
+                changed = true;
+            }
+        }
     }
     let baselined_at = if result.full_resync {
         Some(now)
@@ -415,30 +491,35 @@ pub fn apply_sync(
     Ok(changed)
 }
 
-/// The cached events of one calendar, as their stored JSON by event id.
+/// The cached events of one calendar, as their stored JSON and whether they
+/// inherit from their series master, by event id.
 fn cached_rows(
     conn: &rusqlite::Connection,
     account: &str,
     calendar_id: &str,
-) -> Result<HashMap<String, String>> {
+) -> Result<HashMap<String, (String, bool)>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT event_id, event_json FROM {EVENTS_TABLE}
+        "SELECT event_id, event_json, inherits FROM {EVENTS_TABLE}
          WHERE account = ?1 AND calendar_id = ?2"
     ))?;
     let rows = stmt
-        .query_map([account, calendar_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map([account, calendar_id], |row| {
+            Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+        })?
         .collect::<rusqlite::Result<HashMap<_, _>>>()
         .context("reading a calendar's cached events")?;
     Ok(rows)
 }
 
-/// Write `event`, whose stored form is `json`, into the cache.
+/// Write `event`, whose stored form is `json`, into the cache; `inherits`
+/// when its details are its series master's.
 fn write_event(
     conn: &rusqlite::Connection,
     account: &str,
     calendar_id: &str,
     event: &Event,
     json: &str,
+    inherits: bool,
 ) -> Result<()> {
     let (start_utc, end_utc, start_date, end_date, zone) = match &event.time {
         EventTime::Timed { start, end, zone } => (*start, *end, None, None, Some(zone.as_str())),
@@ -457,14 +538,15 @@ fn write_event(
         &format!(
             "INSERT INTO {EVENTS_TABLE}
                 (account, calendar_id, event_id, uid, recurrence_id, start_utc, end_utc,
-                 all_day, start_date, end_date, zone, last_modified, event_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 all_day, start_date, end_date, zone, last_modified, event_json, inherits)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT (account, calendar_id, event_id) DO UPDATE SET
                 uid = excluded.uid, recurrence_id = excluded.recurrence_id,
                 start_utc = excluded.start_utc, end_utc = excluded.end_utc,
                 all_day = excluded.all_day, start_date = excluded.start_date,
                 end_date = excluded.end_date, zone = excluded.zone,
-                last_modified = excluded.last_modified, event_json = excluded.event_json"
+                last_modified = excluded.last_modified, event_json = excluded.event_json,
+                inherits = excluded.inherits"
         ),
         params![
             account,
@@ -480,6 +562,7 @@ fn write_event(
             zone,
             event.last_modified.map(|at| at.timestamp()),
             json,
+            inherits,
         ],
     )
     .with_context(|| format!("writing calendar event {}", event.id))?;
@@ -692,8 +775,8 @@ fn save_sync_state_in(
 /// The series of `account` the store has resolved.
 pub fn load_series(store: &Store, account: &str) -> Result<Vec<SeriesInfo>> {
     let mut stmt = store.conn().prepare(&format!(
-        "SELECT master_id, uid, recurrence FROM {SERIES_TABLE} WHERE account = ?1
-         ORDER BY master_id"
+        "SELECT master_id, uid, recurrence, master_json, zone FROM {SERIES_TABLE}
+         WHERE account = ?1 ORDER BY master_id"
     ))?;
     let series = stmt
         .query_map([account], |row| {
@@ -701,6 +784,12 @@ pub fn load_series(store: &Store, account: &str) -> Result<Vec<SeriesInfo>> {
                 master_id: row.get(0)?,
                 uid: row.get(1)?,
                 recurrence: row.get(2)?,
+                master: row
+                    .get::<_, Option<String>>(3)?
+                    .as_deref()
+                    .and_then(parse_event)
+                    .map(Box::new),
+                zone: row.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -709,14 +798,28 @@ pub fn load_series(store: &Store, account: &str) -> Result<Vec<SeriesInfo>> {
 }
 
 fn write_series(conn: &rusqlite::Connection, account: &str, series: &SeriesInfo) -> Result<()> {
+    let master = series
+        .master
+        .as_deref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serialising a series master")?;
     conn.execute(
         &format!(
-            "INSERT INTO {SERIES_TABLE} (account, master_id, uid, recurrence)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO {SERIES_TABLE} (account, master_id, uid, recurrence, master_json, zone)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (account, master_id) DO UPDATE SET
-                uid = excluded.uid, recurrence = excluded.recurrence"
+                uid = excluded.uid, recurrence = excluded.recurrence,
+                master_json = excluded.master_json, zone = excluded.zone"
         ),
-        params![account, series.master_id, series.uid, series.recurrence],
+        params![
+            account,
+            series.master_id,
+            series.uid,
+            series.recurrence,
+            master,
+            series.zone
+        ],
     )
     .context("writing a calendar series")?;
     Ok(())
@@ -850,6 +953,27 @@ mod tests {
                 .unwrap();
             assert!(present, "{table}");
         }
+    }
+
+    /// A store whose calendar tables an older build created gains the later
+    /// columns, and a second pass writes nothing.
+    #[test]
+    fn the_later_columns_reach_tables_an_older_build_created() {
+        let (_dir, store) = open();
+        store
+            .conn()
+            .execute_batch(&format!(
+                "ALTER TABLE {EVENTS_TABLE} DROP COLUMN inherits;
+                 ALTER TABLE {SERIES_TABLE} DROP COLUMN master_json;
+                 ALTER TABLE {SERIES_TABLE} DROP COLUMN zone;"
+            ))
+            .unwrap();
+        ensure_columns(store.conn()).unwrap();
+        ensure_columns(store.conn()).unwrap();
+        let mut result = baseline(vec![timed("e1", "a", 3, 9)]);
+        result.inheriting = vec!["e1".into()];
+        apply_sync(&store, "evoqs", "a", &result, november(), utc(1, 0)).unwrap();
+        assert!(get_event(&store, "evoqs", "e1").unwrap().is_some());
     }
 
     /// An invitation's lookup is remembered under the server id it was made
@@ -1038,6 +1162,8 @@ mod tests {
             master_id: "m".into(),
             uid: "series@example.com".into(),
             recurrence: Some("FREQ=WEEKLY".into()),
+            master: Some(Box::new(timed("m", "a", 2, 9))),
+            zone: Some("Europe/Berlin".into()),
         }];
         apply_sync(&store, "evoqs", "a", &result, november(), utc(1, 0)).unwrap();
         assert_eq!(load_series(&store, "evoqs").unwrap(), result.series);

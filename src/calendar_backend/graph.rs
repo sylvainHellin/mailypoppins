@@ -27,6 +27,15 @@
 //! [`Event::recurrence`], as the model asks; the series rule stays in the
 //! series cache.
 //!
+//! Both delta routes trim an `occurrence` to its `id`, `seriesMasterId`,
+//! `type`, `start` and `end`, while the series master in the same feed
+//! carries the subject, the all-day flag, the people and the free/busy (the
+//! plain `calendarView` answers every occurrence in full). An occurrence
+//! takes each property it lacks from its master, kept with the series
+//! ([`SeriesInfo::master`]); one trimmed to its times is listed in
+//! [`SyncResult::inheriting`], so the store re-derives it when only the
+//! master changes ([`Event::inherit_from`]).
+//!
 //! Every request sends `Prefer: IdType="ImmutableId"`. No
 //! `Prefer: outlook.timezone` is sent, so times come back in UTC and the
 //! event's own zone is read from `originalStartTimeZone`, a Windows name
@@ -318,9 +327,20 @@ mod wire {
         pub range: Option<RecurrenceRange>,
     }
 
+    /// A property that may be absent, `null`, or a value: `None` when the
+    /// key is absent, `Some(None)` for `null`.
+    fn present<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::<T>::deserialize(de).map(Some)
+    }
+
     /// An event as `calendarView` and its delta return it. Every field but
     /// the id is optional, so an event Graph trims is converted on what it
-    /// has rather than failing the page.
+    /// has rather than failing the page; `None` is an absent property, which
+    /// an occurrence takes from its series master ([`super::from_graph`]).
     #[derive(Debug, Clone, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Event {
@@ -332,12 +352,10 @@ mod wire {
         pub body: Option<Body>,
         pub start: Option<DateTimeZone>,
         pub end: Option<DateTimeZone>,
-        #[serde(default)]
-        pub is_all_day: bool,
+        pub is_all_day: Option<bool>,
         pub location: Option<Location>,
         pub organizer: Option<Recipient>,
-        #[serde(default)]
-        pub attendees: Vec<Attendee>,
+        pub attendees: Option<Vec<Attendee>>,
         pub response_status: Option<Status>,
         pub recurrence: Option<Recurrence>,
         pub series_master_id: Option<String>,
@@ -346,28 +364,17 @@ mod wire {
         pub original_start: Option<String>,
         pub original_start_time_zone: Option<String>,
         pub reminder_minutes_before_start: Option<i64>,
-        #[serde(default)]
-        pub is_reminder_on: bool,
-        pub online_meeting: Option<OnlineMeeting>,
-        pub online_meeting_url: Option<String>,
+        pub is_reminder_on: Option<bool>,
+        #[serde(default, deserialize_with = "present")]
+        pub online_meeting: Option<Option<OnlineMeeting>>,
+        #[serde(default, deserialize_with = "present")]
+        pub online_meeting_url: Option<Option<String>>,
         pub sensitivity: Option<String>,
         pub show_as: Option<String>,
-        #[serde(default)]
-        pub is_cancelled: bool,
-        #[serde(default)]
-        pub is_organizer: bool,
+        pub is_cancelled: Option<bool>,
+        pub is_organizer: Option<bool>,
         pub web_link: Option<String>,
         pub last_modified_date_time: Option<String>,
-    }
-
-    /// A series master as `GET /me/events/{id}?$select=...` returns it.
-    #[derive(Debug, Clone, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Master {
-        pub id: Option<String>,
-        #[serde(rename = "iCalUId")]
-        pub ical_uid: Option<String>,
-        pub recurrence: Option<Recurrence>,
     }
 }
 
@@ -603,33 +610,54 @@ fn is_instance(kind: Option<&str>) -> bool {
     matches!(kind, Some("occurrence") | Some("exception"))
 }
 
+/// Whether `event` is an occurrence Graph's delta trimmed to its ids and
+/// times, which takes every detail from its series master
+/// ([`SyncResult::inheriting`]).
+fn is_trimmed(event: &wire::Event) -> bool {
+    is_instance(event.kind.as_deref()) && event.subject.is_none() && event.is_all_day.is_none()
+}
+
 /// A Graph event as the neutral model has it. `series` is the event's series
-/// master, for an occurrence: its `UID` is the one the series shares.
+/// master, for an occurrence: its `UID` is the one the series shares, and
+/// each property the occurrence lacks (a delta trims an occurrence to its
+/// times) is the master's, on the same set [`Event::inherit_from`] copies.
 pub(crate) fn from_graph(
     account: &str,
     calendar: &str,
     event: &wire::Event,
     series: Option<&SeriesInfo>,
 ) -> Result<Event, String> {
+    let instance = is_instance(event.kind.as_deref());
+    let series = series.filter(|_| instance);
+    let master = series.and_then(|s| s.master.as_deref());
+    // The master's value of a property the occurrence lacks.
+    let inherited = |pick: fn(&Event) -> Option<String>| master.and_then(pick);
+
     let start = event.start.as_ref().ok_or("no start")?;
     let end = event.end.as_ref().ok_or("no end")?;
-    let own_zone = zone_of(event.original_start_time_zone.as_deref());
-    let time = if event.is_all_day {
+    let own_zone = match event.original_start_time_zone.as_deref() {
+        Some(name) => zone_of(Some(name)),
+        None => zone_of(series.and_then(|s| s.zone.as_deref())),
+    };
+    let is_all_day = event
+        .is_all_day
+        .or(master.map(Event::is_all_day))
+        .unwrap_or(false);
+    let time = if is_all_day {
         all_day_time(start, end, own_zone)?
     } else {
         let zone = own_zone.map_or("UTC", |tz| tz.name());
         EventTime::timed(instant_of(start)?, instant_of(end)?, zone).map_err(|e| e.to_string())?
     };
 
-    let instance = is_instance(event.kind.as_deref());
     let own_uid = event
         .ical_uid
         .clone()
         .filter(|uid| !uid.trim().is_empty())
         .unwrap_or_else(|| event.id.clone());
     let uid = match series {
-        Some(series) if instance => series.uid.clone(),
-        _ => own_uid,
+        Some(series) => series.uid.clone(),
+        None => own_uid,
     };
     let recurrence_id = if instance {
         Some(recurrence_id(event, &time, own_zone)?)
@@ -644,38 +672,74 @@ pub(crate) fn from_graph(
         uid,
         recurrence_id,
         series_master_id: event.series_master_id.clone().filter(|_| instance),
-        summary: event.subject.clone().unwrap_or_default(),
-        location: event
-            .location
-            .as_ref()
-            .and_then(|l| l.display_name.as_deref())
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string),
-        body: plain_body(event),
-        organizer: person(event.organizer.as_ref()),
-        attendees: event.attendees.iter().filter_map(attendee).collect(),
-        own_response: own_response(
-            event
-                .response_status
-                .as_ref()
-                .and_then(|s| s.response.as_deref()),
-        ),
+        summary: match &event.subject {
+            Some(subject) => subject.clone(),
+            None => inherited(|m| Some(m.summary.clone())).unwrap_or_default(),
+        },
+        location: match &event.location {
+            Some(location) => location
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string),
+            None => inherited(|m| m.location.clone()),
+        },
+        body: if event.body.is_none() && event.body_preview.is_none() {
+            inherited(|m| m.body.clone())
+        } else {
+            plain_body(event)
+        },
+        organizer: match &event.organizer {
+            Some(organizer) => person(Some(organizer)),
+            None => master.and_then(|m| m.organizer.clone()),
+        },
+        attendees: match &event.attendees {
+            Some(attendees) => attendees.iter().filter_map(attendee).collect(),
+            None => master.map(|m| m.attendees.clone()).unwrap_or_default(),
+        },
+        own_response: match (&event.response_status, master) {
+            (None, Some(master)) => master.own_response,
+            (status, _) => own_response(status.as_ref().and_then(|s| s.response.as_deref())),
+        },
         recurrence: None,
-        reminder: event
-            .reminder_minutes_before_start
-            .filter(|_| event.is_reminder_on)
-            .and_then(|minutes| u32::try_from(minutes).ok()),
-        online_meeting_url: event
-            .online_meeting
-            .as_ref()
-            .and_then(|m| m.join_url.clone())
-            .or_else(|| event.online_meeting_url.clone())
-            .filter(|url| !url.trim().is_empty()),
-        sensitivity: sensitivity(event.sensitivity.as_deref()),
-        show_as: show_as(event.show_as.as_deref()),
-        cancelled: event.is_cancelled,
-        is_organizer: event.is_organizer,
+        reminder: match (event.is_reminder_on, master) {
+            (None, Some(master)) if event.reminder_minutes_before_start.is_none() => {
+                master.reminder
+            }
+            (on, _) => event
+                .reminder_minutes_before_start
+                .filter(|_| on.unwrap_or(false))
+                .and_then(|minutes| u32::try_from(minutes).ok()),
+        },
+        online_meeting_url: if event.online_meeting.is_none() && event.online_meeting_url.is_none()
+        {
+            inherited(|m| m.online_meeting_url.clone())
+        } else {
+            event
+                .online_meeting
+                .clone()
+                .flatten()
+                .and_then(|m| m.join_url)
+                .or_else(|| event.online_meeting_url.clone().flatten())
+                .filter(|url| !url.trim().is_empty())
+        },
+        sensitivity: match (&event.sensitivity, master) {
+            (None, Some(master)) => master.sensitivity,
+            (raw, _) => sensitivity(raw.as_deref()),
+        },
+        show_as: match (&event.show_as, master) {
+            (None, Some(master)) => master.show_as,
+            (raw, _) => show_as(raw.as_deref()),
+        },
+        cancelled: event
+            .is_cancelled
+            .or(master.map(|m| m.cancelled))
+            .unwrap_or(false),
+        is_organizer: event
+            .is_organizer
+            .or(master.map(|m| m.is_organizer))
+            .unwrap_or(false),
         last_modified: event
             .last_modified_date_time
             .as_deref()
@@ -1034,27 +1098,21 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         }
     }
 
-    /// The series master `master_id`, read from the server.
-    async fn fetch_series(&self, master_id: &str) -> anyhow::Result<SeriesInfo> {
+    /// The series master `master_id` of `calendar`, read from the server with
+    /// the properties a trimmed occurrence takes from it.
+    async fn fetch_series(&self, calendar: &str, master_id: &str) -> anyhow::Result<SeriesInfo> {
         let url = format!(
-            "{GRAPH_BASE}/me/events/{}?$select=iCalUId,recurrence,originalStartTimeZone",
+            "{GRAPH_BASE}/me/events/{}?$select={MASTER_SELECT}",
             encode_id(master_id)
         );
         let answer = self.fetch.get(&url, &[]).await?;
         if !(200..300).contains(&answer.status) {
             return Err(anyhow!("{}", error_text(&answer)));
         }
-        let master: wire::Master =
+        let master: wire::Event =
             serde_json::from_str(&answer.body).context("unreadable series master")?;
-        let uid = master
-            .ical_uid
-            .filter(|uid| !uid.trim().is_empty())
-            .ok_or_else(|| anyhow!("series master without iCalUId"))?;
-        Ok(SeriesInfo {
-            master_id: master.id.unwrap_or_else(|| master_id.to_string()),
-            uid,
-            recurrence: master.recurrence.as_ref().and_then(rrule_of),
-        })
+        series_of(&self.account, calendar, &master)
+            .ok_or_else(|| anyhow!("series master without iCalUId"))
     }
 
     /// Fold a walked chain into a [`SyncResult`]: the last word on each id
@@ -1077,20 +1135,16 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
             full_resync,
             ..Default::default()
         };
-        // calendarView returns no series master; should one come anyway, it
-        // is a free answer to the lookup below rather than an event to show.
+        // A delta brings the series masters of the window beside their
+        // occurrences, and calendarView none: a master is the answer to the
+        // lookup below and the details of its trimmed occurrences, never an
+        // event to show.
         for id in &order {
             if let Some(Item::Upsert(event)) = last.get(id) {
-                let uid = event
-                    .ical_uid
-                    .as_deref()
-                    .filter(|uid| !uid.trim().is_empty());
-                if let (Some("seriesMaster"), Some(uid)) = (event.kind.as_deref(), uid) {
-                    let series = SeriesInfo {
-                        master_id: event.id.clone(),
-                        uid: uid.to_string(),
-                        recurrence: event.recurrence.as_ref().and_then(rrule_of),
-                    };
+                if event.kind.as_deref() != Some("seriesMaster") {
+                    continue;
+                }
+                if let Some(series) = series_of(&self.account, &calendar.id, event) {
                     self.remember_series(vec![series.clone()]);
                     result.series.push(series);
                 }
@@ -1099,20 +1153,25 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         let mut wanted: Vec<String> = Vec::new();
         for id in &order {
             if let Some(Item::Upsert(event)) = last.get(id) {
-                if event.kind.as_deref() == Some("seriesMaster") {
+                if !is_instance(event.kind.as_deref()) {
                     continue;
                 }
                 if let Some(master) = event.series_master_id.as_ref() {
                     let seen_now = result.series.iter().any(|s| &s.master_id == master);
-                    let stale = !seen_now && (full_resync || self.known_series(master).is_none());
-                    if is_instance(event.kind.as_deref()) && stale && !wanted.contains(master) {
+                    let known = self.known_series(master);
+                    // A trimmed occurrence needs the master's details, which a
+                    // series cached by an older build lacks.
+                    let detailless = is_trimmed(event)
+                        && known.as_ref().is_some_and(|series| series.master.is_none());
+                    let stale = !seen_now && (full_resync || known.is_none() || detailless);
+                    if stale && !wanted.contains(master) {
                         wanted.push(master.clone());
                     }
                 }
             }
         }
         for master in wanted {
-            match self.fetch_series(&master).await {
+            match self.fetch_series(&calendar.id, &master).await {
                 Ok(series) => {
                     self.series
                         .lock()
@@ -1140,7 +1199,12 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                         .as_deref()
                         .and_then(|master| self.known_series(master));
                     match from_graph(&self.account, &calendar.id, &event, series.as_ref()) {
-                        Ok(converted) => result.upserts.push(converted),
+                        Ok(converted) => {
+                            if is_trimmed(&event) {
+                                result.inheriting.push(converted.id.clone());
+                            }
+                            result.upserts.push(converted);
+                        }
                         Err(why) => warn!(
                             "[calendar] {}: skipping Graph event {}: {why}",
                             self.account, event.id
@@ -1152,6 +1216,40 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         }
         result
     }
+}
+
+/// The properties [`GraphCalendarBackend::fetch_series`] reads of a series
+/// master: its `UID`, rule and zone, and the details a trimmed occurrence
+/// takes from it.
+const MASTER_SELECT: &str = "iCalUId,recurrence,originalStartTimeZone,type,start,end,isAllDay,\
+    subject,body,bodyPreview,location,organizer,attendees,responseStatus,isOrganizer,\
+    isCancelled,isReminderOn,reminderMinutesBeforeStart,onlineMeeting,onlineMeetingUrl,\
+    sensitivity,showAs";
+
+/// What a series master tells about its series: its `UID` (`None` without
+/// one), its rule, its zone and its details as an event.
+fn series_of(account: &str, calendar: &str, master: &wire::Event) -> Option<SeriesInfo> {
+    let uid = master
+        .ical_uid
+        .as_deref()
+        .filter(|uid| !uid.trim().is_empty())?;
+    let details = match from_graph(account, calendar, master, None) {
+        Ok(details) => Some(Box::new(details)),
+        Err(why) => {
+            debug!(
+                "[calendar] {account}: series master {} gives no details: {why}",
+                master.id
+            );
+            None
+        }
+    };
+    Some(SeriesInfo {
+        master_id: master.id.clone(),
+        uid: uid.to_string(),
+        recurrence: master.recurrence.as_ref().and_then(rrule_of),
+        master: details,
+        zone: zone_of(master.original_start_time_zone.as_deref()).map(|tz| tz.name().to_string()),
+    })
 }
 
 /// The `startDateTime` and `endDateTime` query of `window`.

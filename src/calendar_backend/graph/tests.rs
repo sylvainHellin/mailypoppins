@@ -334,6 +334,9 @@ async fn a_baseline_follows_next_link_then_delta_link_and_converts_every_kind() 
             master_id: "AAMkEv-weekly".into(),
             uid: MASTER_UID.into(),
             recurrence: Some("FREQ=WEEKLY;BYDAY=TU;WKST=MO;UNTIL=20270629".into()),
+            // The fixture's master carries no times, so no details either.
+            master: None,
+            zone: Some("Europe/Berlin".into()),
         }]
     );
     let sent = backend.fetch.sent();
@@ -343,9 +346,7 @@ async fn a_baseline_follows_next_link_then_delta_link_and_converts_every_kind() 
         [
             delta_url("AAMkCal-default").as_str(),
             &format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?$skiptoken=page2"),
-            &format!(
-                "{BASE}/me/events/AAMkEv-weekly?$select=iCalUId,recurrence,originalStartTimeZone"
-            ),
+            &format!("{BASE}/me/events/AAMkEv-weekly?$select={MASTER_SELECT}"),
         ]
     );
     assert_eq!(
@@ -366,6 +367,8 @@ async fn an_incremental_sync_follows_the_link_verbatim_and_reuses_known_series()
         master_id: "AAMkEv-weekly".into(),
         uid: MASTER_UID.into(),
         recurrence: None,
+        master: None,
+        zone: None,
     }]);
     let token = GraphToken {
         path: SyncPath::CalendarDelta,
@@ -730,6 +733,8 @@ fn an_all_day_occurrence_is_keyed_by_its_original_date() {
         master_id: "master".into(),
         uid: "series-uid".into(),
         recurrence: None,
+        master: None,
+        zone: None,
     };
     let converted = from_graph("evoqs", "cal", &event, Some(&series)).unwrap();
     assert_eq!(converted.uid, "series-uid");
@@ -778,4 +783,298 @@ fn a_token_round_trips_and_garbage_is_no_token() {
     };
     assert_eq!(GraphToken::decode(&token.encode()), Some(token));
     assert_eq!(GraphToken::decode("fake-calendar-token:0:0"), None);
+}
+
+/// A series master as a delta brings it, in the shape of the evoqs dump
+/// (`.agents/research/2026-10-29-graph-calendar-delta-dump.md`): the timed
+/// weekly "CMS Team Meeting" or the all-day yearly "Reformation Day".
+fn delta_master(all_day: bool, subject: &str) -> serde_json::Value {
+    if all_day {
+        serde_json::json!({
+            "@odata.type": "#microsoft.graph.event",
+            "id": "master-ref",
+            "iCalUId": "REF-UID",
+            "type": "seriesMaster",
+            "subject": subject,
+            "isAllDay": true,
+            "showAs": "free",
+            "sensitivity": "normal",
+            "isOrganizer": true,
+            "isCancelled": false,
+            "isReminderOn": false,
+            "reminderMinutesBeforeStart": 15,
+            "responseStatus": {"response": "organizer"},
+            "organizer": {"emailAddress": {"address": "s.hellin@evoqs.com", "name": "Sylvain Hellin"}},
+            "attendees": [],
+            "location": {"displayName": "Germany"},
+            "body": {"contentType": "html", "content": "<html><body></body></html>"},
+            "bodyPreview": "",
+            "onlineMeeting": null,
+            "onlineMeetingUrl": null,
+            "originalStartTimeZone": "UTC",
+            "start": {"dateTime": "2012-10-31T00:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2012-11-01T00:00:00.0000000", "timeZone": "UTC"},
+            "recurrence": {
+                "pattern": {"type": "absoluteYearly", "interval": 1, "month": 10, "dayOfMonth": 31},
+                "range": {"type": "noEnd", "startDate": "2012-10-31"}
+            }
+        })
+    } else {
+        serde_json::json!({
+            "@odata.type": "#microsoft.graph.event",
+            "id": "master-cms",
+            "iCalUId": "CMS-UID",
+            "type": "seriesMaster",
+            "subject": subject,
+            "isAllDay": false,
+            "showAs": "busy",
+            "sensitivity": "normal",
+            "isOrganizer": true,
+            "isCancelled": false,
+            "isReminderOn": true,
+            "reminderMinutesBeforeStart": 15,
+            "responseStatus": {"response": "organizer"},
+            "organizer": {"emailAddress": {"address": "s.hellin@evoqs.com", "name": "Sylvain Hellin"}},
+            "attendees": [{
+                "type": "required",
+                "status": {"response": "none"},
+                "emailAddress": {"address": "colleague@evoqs.com", "name": "Colleague"}
+            }],
+            "location": {"displayName": "Room 1"},
+            "body": {"contentType": "text", "content": "Weekly agenda"},
+            "bodyPreview": "Weekly agenda",
+            "onlineMeeting": null,
+            "onlineMeetingUrl": null,
+            "originalStartTimeZone": "W. Europe Standard Time",
+            "start": {"dateTime": "2024-10-23T07:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2024-10-23T09:00:00.0000000", "timeZone": "UTC"},
+            "recurrence": {
+                "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["wednesday"], "firstDayOfWeek": "sunday"},
+                "range": {"type": "noEnd", "startDate": "2024-10-23"}
+            }
+        })
+    }
+}
+
+/// An occurrence as both delta routes trim it: ids, type and times only.
+fn trimmed(id: &str, master: &str, start: &str, end: &str) -> serde_json::Value {
+    serde_json::json!({
+        "@odata.etag": "W/\"trimmed\"",
+        "@odata.type": "#microsoft.graph.event",
+        "id": id,
+        "seriesMasterId": master,
+        "type": "occurrence",
+        "start": {"dateTime": start, "timeZone": "UTC"},
+        "end": {"dateTime": end, "timeZone": "UTC"}
+    })
+}
+
+fn trimmed_cms() -> serde_json::Value {
+    trimmed(
+        "occ-cms",
+        "master-cms",
+        "2026-10-28T08:00:00.0000000",
+        "2026-10-28T10:00:00.0000000",
+    )
+}
+
+fn trimmed_ref() -> serde_json::Value {
+    trimmed(
+        "occ-ref",
+        "master-ref",
+        "2026-10-31T00:00:00.0000000",
+        "2026-11-01T00:00:00.0000000",
+    )
+}
+
+/// The delta link of the default calendar, short of its token.
+const DELTA: &str = "me/calendars/AAMkCal-default/calendarView/delta?$deltatoken=";
+
+fn delta_page(link: &str, value: Vec<serde_json::Value>) -> String {
+    serde_json::json!({"@odata.deltaLink": format!("{BASE}/{link}"), "value": value}).to_string()
+}
+
+/// The two trimmed occurrences of [`trimmed_page`], with their masters'
+/// details.
+fn assert_inherited(result: &SyncResult) {
+    let ids: Vec<&str> = result.upserts.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["occ-cms", "occ-ref"], "a master is never an event");
+    assert_eq!(result.inheriting, ["occ-cms", "occ-ref"]);
+
+    let cms = find(result, "occ-cms");
+    assert_eq!(cms.summary, "CMS Team Meeting");
+    assert_eq!(cms.show_as, ShowAs::Busy);
+    assert_eq!(
+        cms.time,
+        EventTime::timed(
+            Utc.with_ymd_and_hms(2026, 10, 28, 8, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 0).unwrap(),
+            "Europe/Berlin"
+        )
+        .unwrap()
+    );
+    assert_eq!(cms.uid, "CMS-UID");
+    assert_eq!(cms.recurrence_id.as_deref(), Some("2026-10-28T08:00:00Z"));
+    assert_eq!(cms.series_master_id.as_deref(), Some("master-cms"));
+    assert_eq!(cms.location.as_deref(), Some("Room 1"));
+    assert_eq!(cms.body.as_deref(), Some("Weekly agenda"));
+    assert_eq!(
+        cms.organizer.as_ref().map(|p| p.email.as_str()),
+        Some("s.hellin@evoqs.com")
+    );
+    assert_eq!(cms.attendees.len(), 1);
+    assert_eq!(cms.own_response, OwnResponse::Organizer);
+    assert!(cms.is_organizer);
+    assert_eq!(cms.reminder, Some(15));
+
+    let holiday = find(result, "occ-ref");
+    assert_eq!(holiday.summary, "Reformation Day");
+    assert_eq!(holiday.show_as, ShowAs::Free);
+    let october = |d| NaiveDate::from_ymd_opt(2026, 10, d).unwrap();
+    assert_eq!(
+        holiday.time,
+        EventTime::all_day(october(31), day(1)).unwrap()
+    );
+    assert_eq!(holiday.uid, "REF-UID");
+    assert_eq!(holiday.recurrence_id.as_deref(), Some("2026-10-31"));
+
+    // The store's re-derivation from the master agrees with the conversion,
+    // so a sync that reads the same feed again moves nothing.
+    for event in &result.upserts {
+        let series = result
+            .series
+            .iter()
+            .find(|s| Some(&s.master_id) == event.series_master_id.as_ref())
+            .unwrap();
+        let mut again = event.clone();
+        again.inherit_from(series.master.as_deref().unwrap());
+        assert_eq!(&again, event);
+    }
+}
+
+fn trimmed_page() -> String {
+    delta_page(
+        &format!("{DELTA}round1"),
+        vec![
+            delta_master(false, "CMS Team Meeting"),
+            trimmed_cms(),
+            delta_master(true, "Reformation Day"),
+            trimmed_ref(),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn a_trimmed_delta_occurrence_takes_its_details_from_its_master() {
+    let fetch = ScriptedFetch::default().route(&delta_url("AAMkCal-default"), ok(&trimmed_page()));
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let result = backend
+        .sync_window(&calendar("AAMkCal-default", true), window(), None)
+        .await
+        .unwrap();
+    assert_eq!(result.path.as_deref(), Some("calendar-delta"));
+    assert_inherited(&result);
+    assert_eq!(result.series.len(), 2);
+    assert_eq!(result.series[0].zone.as_deref(), Some("Europe/Berlin"));
+    assert_eq!(backend.fetch.sent().len(), 1, "no master lookup");
+}
+
+#[tokio::test]
+async fn the_default_delta_fallback_inherits_the_same_way() {
+    let fetch = ScriptedFetch::default()
+        .route(
+            &delta_url("AAMkCal-default"),
+            status(400, r#"{"error":{"code":"BadRequest"}}"#),
+        )
+        .route(
+            &format!("{BASE}/me/calendarView/delta?{RANGE}"),
+            ok(&trimmed_page()),
+        );
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let result = backend
+        .sync_window(&calendar("AAMkCal-default", true), window(), None)
+        .await
+        .unwrap();
+    assert_eq!(result.path.as_deref(), Some("default-delta"));
+    assert_inherited(&result);
+}
+
+#[tokio::test]
+async fn a_master_change_reaches_the_cached_occurrences_it_trimmed() {
+    use crate::calendar_sync::sync_account;
+    use crate::store::{calendar as cache, Store};
+
+    const ONE_CALENDAR: &str =
+        r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
+    let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    let backend = |page: String| {
+        GraphCalendarBackend::with_fetch(
+            "evoqs",
+            ScriptedFetch::default()
+                .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
+                .route(&delta, ok(&page)),
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let hour = |h| now + chrono::Duration::hours(h);
+    let summary = |id: &str| {
+        cache::get_event(&store, "evoqs", id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no cached {id}"))
+            .summary
+    };
+
+    let first = sync_account(&store, &backend(trimmed_page()), "evoqs", now)
+        .await
+        .unwrap();
+    assert!(first.changed());
+    assert_eq!(summary("occ-cms"), "CMS Team Meeting");
+    let holiday = cache::get_event(&store, "evoqs", "occ-ref")
+        .unwrap()
+        .unwrap();
+    assert!(holiday.is_all_day());
+
+    // The incremental delta brings the renamed master alone.
+    let mut renamed = delta_master(false, "CMS Weekly");
+    renamed["showAs"] = "tentative".into();
+    let page = delta_page(&format!("{DELTA}round2"), vec![renamed]);
+    let second = sync_account(&store, &backend(page), "evoqs", hour(1))
+        .await
+        .unwrap();
+    assert!(second.changed());
+    assert_eq!(second.upserts, 0);
+    let cms = cache::get_event(&store, "evoqs", "occ-cms")
+        .unwrap()
+        .unwrap();
+    assert_eq!(cms.summary, "CMS Weekly");
+    assert_eq!(cms.show_as, ShowAs::Tentative);
+    assert_eq!(summary("occ-ref"), "Reformation Day");
+
+    // A trimmed occurrence that comes without its master takes the details
+    // the store kept, through a backend that has seen no master yet.
+    let next = trimmed(
+        "occ-cms-2",
+        "master-cms",
+        "2026-11-04T08:00:00.0000000",
+        "2026-11-04T10:00:00.0000000",
+    );
+    let page = delta_page(&format!("{DELTA}round3"), vec![next]);
+    let third = sync_account(&store, &backend(page), "evoqs", hour(2))
+        .await
+        .unwrap();
+    assert!(third.changed());
+    assert_eq!(summary("occ-cms-2"), "CMS Weekly");
+
+    // Reading nothing new moves nothing.
+    let quiet = sync_account(
+        &store,
+        &backend(delta_page(&format!("{DELTA}round4"), vec![])),
+        "evoqs",
+        hour(3),
+    )
+    .await
+    .unwrap();
+    assert!(!quiet.changed(), "{quiet:?}");
 }
