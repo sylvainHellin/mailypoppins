@@ -355,3 +355,36 @@ calcure (<https://github.com/anufrievroman/calcure>), a Python terminal calendar
 Rejected: agenda and day view only in the TUI, with the week grid in the desktop app only (cheaper, but the TUI loses the week overview).
 Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
 Status: accepted
+
+## 2026-10-29 - The Graph calendar sync tries each calendar's calendarView delta first, then falls back by calendar
+
+Why: Graph v1.0 routes `GET /me/calendars/{id}/calendarView/delta` but documents only the default calendar's `GET /me/calendarView/delta`, and the plan left phase 1 to find out which works.
+Each calendar tries its own delta route; on a 400 or 404 the default calendar falls back to the documented delta and any other calendar to a plain `calendarView` read in full at each sync, the fallback kept until the next daily baseline, and a calendar whose ACL refuses the read fails alone while the others sync.
+Rejected: syncing the default calendar only (shared and secondary calendars stay invisible); reading every calendar in full each tick (no delta even where Graph offers it).
+Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, for Sylvain to veto.
+Status: accepted
+
+## 2026-10-29 - An invitation mail's event is answered through the iMIP mail path, and a server event through the server
+
+Why: `event.respond` routes on the event id: a server event goes to the backend (Graph's accept, tentatively accept or decline with the comment and `sendResponse`), an invitation mail's event (`imip:<row_id>`) to the iMIP reply `calendar.rsvp` already sends through the durable outbox.
+`send_response: false` is refused on the iMIP path, because the reply mail is the answer and the only record of it; a Graph account's invitation mail answers through the server event `message.invite` names, and its iMIP path keeps the `ANO-4` refusal.
+`calendar.rsvp` stays as the iMIP path's own address; every client answers through `event.respond`.
+Rejected: a second iMIP implementation inside `event.respond`; answering a Graph account's invitation by iMIP reply (the server calendar would not see the answer).
+Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, for Sylvain to veto.
+Status: accepted
+
+## 2026-10-29 - The calendar re-login prompt goes through account.credentials and a health check, with no new method
+
+Why: every client already reads `account.credentials` and the health checks, so `missing_scopes` on the former and a `calendar:<name>` check on the latter reach the CLI, the TUI and the desktop app without a new call.
+The calendar scope is asked for only on an account whose calendar is Graph's, and a refresh whose scopes Entra refuses is retried once without it, so mail survives a tenant that has not consented; the tick's calendar sync skips such an account quietly, and `event.respond` refuses with the same prompt before any server call.
+Rejected: a dedicated calendar scope method; failing the calendar calls at the server and showing Graph's 403.
+Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, for Sylvain to veto.
+Status: accepted
+
+## 2026-10-29 - The setup wizards do not ask for calendar_backend until a second backend exists
+
+Why: with Graph the only backend phase 1 builds, the default (`graph` on a Graph account, `none` elsewhere) is the only useful value, so the plan's wizard question would offer a choice with one answer; `mp config show` prints the resolved value, and `ews` and `caldav` are refused as not supported yet.
+The wizards ask once phase 3 brings EWS.
+Rejected: asking in phase 1 as the plan said (a question whose other answers all fail).
+Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, for Sylvain to veto.
+Status: accepted
