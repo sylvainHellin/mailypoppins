@@ -60,7 +60,7 @@ After phase 1:
 
 - A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
 - Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
-- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events`, `calendar.rsvp` and `send.invite` stay as they were.
+- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
 - The CLI has `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, and `mp invite` answers through `event.respond`.
 - The TUI and the desktop app show agenda, day and week layouts with an event card, a calendars panel and a respond dialog with a comment and the send-response choice.
 - `GRAPH_SCOPES` holds `Calendars.ReadWrite`; a token without it gets a re-login prompt in every client, and mail keeps working.
@@ -174,7 +174,7 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 ## Protocol sketch
 
 Phase 1's methods are final and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", holds their shapes: `calendar.list {account?}`, `calendar.set_visibility {account, calendar, visible}`, `calendar.view {start, end, accounts?, calendars?, include_hidden?, zone?}`, `event.get {account, event}`, `event.respond {account, event, response, comment?, send_response?}` and the `calendar.changed {account}` event; `calendar.rebuild {account}` also drops and resyncs an account's server cache.
-An invitation mail's event has the id `imip:<row_id>`, and `event.respond` answers it with the iMIP reply `calendar.rsvp` sends; `calendar.events`, `calendar.rsvp` and `send.invite` stay until the later phases fold them in.
+An invitation mail's event has the id `imip:<row_id>`, and `event.respond` answers it with the iMIP reply `calendar.rsvp` sends; `calendar.rsvp` and `send.invite` stay until the later phases fold them in.
 The later phases' methods are provisional:
 
 - `event.respond` gains `proposed_time` for proposing a new time (phase 2).

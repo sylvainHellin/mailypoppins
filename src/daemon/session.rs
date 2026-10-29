@@ -492,7 +492,6 @@ mod tests {
                 "daemon.stop".to_string(),
                 "account.credentials".to_string(),
                 "account.list".to_string(),
-                "calendar.events".to_string(),
                 "calendar.list".to_string(),
                 "calendar.rebuild".to_string(),
                 "calendar.rsvp".to_string(),

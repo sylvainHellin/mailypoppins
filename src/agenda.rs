@@ -1,13 +1,12 @@
-//! The local agenda (#0034): the rows `calendar.events` serves, built from the
-//! iMIP messages the store already holds.
+//! The local agenda (#0034): one row per invitation, built from the iMIP
+//! messages the store already holds.
 //!
 //! It was `tui::app::calendar_view` until #0126 (P5-U10c-I2), which is what a
 //! daemon method reaching into the TUI for its own answer looked like. It
 //! reads a store and a blob store, so it is the engine's; what it produces is
-//! [`mp_protocol::calendar::AgendaEvent`], the wire row, which is what both
-//! ends already spoke. The TUI decodes one into its own `CalendarEvent`
-//! whether it came off the socket or off this function, so there is one
-//! agenda and one dedup.
+//! [`mp_protocol::calendar::AgendaEvent`], which [`crate::calendar_view`]
+//! turns into the events of the account's invitation calendar that
+//! `calendar.view` answers, so there is one agenda and one dedup.
 //!
 //! This is deliberately local-first and **blind to Outlook-created events**:
 //! only invitations that arrived (or were sent) by email exist locally, so an
@@ -1031,10 +1030,10 @@ mod tests {
     /// always shows, because it cannot be placed on the timeline.
     ///
     /// The two rows above it are about the sort keys this module mints for
-    /// that filter. The TUI applied it to `calendar.events` until PERSO-200
-    /// moved its Calendar view onto `calendar.view`, which answers a range;
-    /// the rule is kept here, beside the keys it reads, for the clients that
-    /// still list this agenda.
+    /// that filter. The TUI applied it to the agenda until PERSO-200 moved
+    /// its Calendar view onto `calendar.view`, which answers a range; the
+    /// rule is kept here, beside the keys it reads, as the check on the end
+    /// keys this module still mints.
     fn upcoming(fx: &Fixture) -> Vec<String> {
         let now = crate::calendar::now_sort_key();
         agenda(fx)

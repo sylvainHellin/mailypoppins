@@ -302,16 +302,6 @@ pub(crate) mod tests {
             .row_id
         }
 
-        /// The store-backed agenda, the oracle `calendar.events` answers.
-        pub(crate) fn agenda(&self, self_address: &str) -> Vec<mp_protocol::calendar::AgendaEvent> {
-            crate::agenda::load_events_for_account(
-                &self.store,
-                &self.blobs,
-                &self.account,
-                self_address,
-            )
-        }
-
         /// The store-backed invitation card, the oracle `message.invite`
         /// answers.
         pub(crate) fn card(&self, row_id: i64, self_address: &str) -> Option<EventFrontmatter> {

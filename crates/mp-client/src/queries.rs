@@ -16,7 +16,7 @@
 //! Over it sit the reads a client needs, typed in the protocol's own
 //! vocabulary ([`mp_protocol`]) rather than in any client's model: a listing
 //! is `Vec<MessageListRow>`, the sidebar is `Vec<MailboxRow>`, a conversation
-//! is a [`ThreadListing`], the agenda is `Vec<AgendaEvent>`. What a row
+//! is a [`ThreadListing`], a calendar range is a [`CalendarViewResult`]. What a row
 //! becomes on screen is each client's own mapping; the TUI's lives in
 //! `mp_tui::queries` and `mp_tui::app::entry_from_row`.
 //!
@@ -63,8 +63,8 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 
 use mp_protocol::calendar::{
-    AgendaEvent, CalendarEvent, CalendarInfo, CalendarListResult, CalendarViewParams,
-    CalendarViewResult, EventFrontmatter, EventGetResult, EventRespondParams,
+    CalendarEvent, CalendarInfo, CalendarListResult, CalendarViewParams, CalendarViewResult,
+    EventFrontmatter, EventGetResult, EventRespondParams,
 };
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
@@ -457,18 +457,6 @@ pub fn message_ics(q: &dyn Queries, account: &str, row_id: i64) -> Result<Option
 pub fn draft_path(q: &dyn Queries, account: &str, id: &str) -> Result<DraftLocation> {
     let params = json!({"account": account, "id": id});
     Ok(serde_json::from_value(q.call("draft.path", params)?)?)
-}
-
-// ---------------------------------------------------------------------------
-// The agenda
-// ---------------------------------------------------------------------------
-
-/// One account's agenda, through `calendar.events`: deduped, reply-folded and
-/// sorted daemon-side, because every derived column is a fold over the
-/// account's other rows.
-pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<AgendaEvent>> {
-    let answer = q.call("calendar.events", json!({"account": account}))?;
-    Ok(serde_json::from_value(answer["events"].clone())?)
 }
 
 // ---------------------------------------------------------------------------

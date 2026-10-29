@@ -41,7 +41,6 @@ describe("the Calendar view", () => {
   it("lists every account's events from calendar_view by day, all-day first, each with its account and calendar", async () => {
     const { list } = await openCalendar();
     expect(lastView()).toEqual({ start: "2099-10-14T00:00:00+02:00", end: "2099-10-29T00:00:00+01:00", zone: "Europe/Berlin" });
-    expect(callsOf("calendar_events")).toEqual([]);
     expect(within(list).getAllByRole("group").map((g) => g.getAttribute("aria-label"))).toEqual(["Wed 14 Oct 2099", "Fri 16 Oct 2099", "Tue 20 Oct 2099"]);
     expect(optionNames(list)).toEqual([
       "09:00-10:30, Design review, home/Calendar, no reply",

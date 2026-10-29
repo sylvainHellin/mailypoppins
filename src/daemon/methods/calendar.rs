@@ -1,9 +1,7 @@
-//! The `calendar.*` and `event.*` families: the iMIP agenda and its fold, the
+//! The `calendar.*` and `event.*` families: the iMIP agenda's rebuild, the
 //! attendee's reply (P4-U14), and the server calendar (PERSO-200).
 //!
 //! ```text
-//! calendar.events         {account}
-//!                             -> {account, events:[AgendaEvent]}
 //! calendar.list           {account?}
 //!                             -> {calendars:[CalendarInfo]}
 //! calendar.view           {start, end, accounts?, calendars?, include_hidden?, zone?}
@@ -122,18 +120,14 @@ pub const CALENDAR_METHOD_SPECS: [MethodSpec; 2] = [
     MethodSpec::new("calendar.rsvp", MethodKind::Operation, 1),
 ];
 
-/// The family's queries, an array of their own for the reason
+/// The server calendar's reads and its one preference (PERSO-200), in
+/// method-name order, an array of their own for the reason
 /// [`super::message::MESSAGE_QUEUE_METHOD_SPECS`] is one (P5-U6):
 /// `tests/daemon_admin_slice.rs` holds
 /// `const _: () = assert!(CALENDAR_METHOD_SPECS.len() == CALENDAR_METHODS.len());`
 /// over a two-name list, and growing that array would edit a pinned test to say
 /// something it was not written to say. The split is a Rust-side fact: the
 /// wire, the capability list and the dispatcher see one family.
-pub const CALENDAR_QUERY_METHOD_SPECS: [MethodSpec; 1] =
-    [MethodSpec::new("calendar.events", MethodKind::Query, 1)];
-
-/// The server calendar's reads and its one preference (PERSO-200), in
-/// method-name order; their own array for the reason the queries have theirs.
 pub const CALENDAR_VIEW_METHOD_SPECS: [MethodSpec; 3] = [
     MethodSpec::new("calendar.list", MethodKind::Query, 1),
     MethodSpec::new("calendar.set_visibility", MethodKind::Command, 1),
@@ -164,9 +158,8 @@ pub fn register(
             operations: Arc::clone(&operations),
         }));
     }
-    let read_specs = CALENDAR_QUERY_METHOD_SPECS
+    let read_specs = CALENDAR_VIEW_METHOD_SPECS
         .into_iter()
-        .chain(CALENDAR_VIEW_METHOD_SPECS)
         .chain(EVENT_METHOD_SPECS)
         .filter(|spec| spec.kind != MethodKind::Operation);
     for spec in read_specs {
@@ -189,13 +182,11 @@ pub fn calendar_changed(account: &str) -> Event {
     }
 }
 
-/// The reads (`calendar.events`, `calendar.list`, `calendar.view`,
-/// `event.get`) and the visibility command, selected by their own
-/// [`MethodSpec`].
+/// The reads (`calendar.list`, `calendar.view`, `event.get`) and the
+/// visibility command, selected by their own [`MethodSpec`].
 ///
 /// The reads are one indexed query per account plus one blob read per
-/// invitation row, the cost `calendar.events` has always paid on the
-/// connection's task. What they are *not* is a rebuild: none writes, because
+/// invitation row, paid on the connection's task. What they are *not* is a rebuild: none writes, because
 /// attendee statuses are derived where they are displayed and the server
 /// cache is written by the syncs alone.
 pub struct CalendarQueryMethod {
@@ -224,31 +215,11 @@ impl Method for CalendarQueryMethod {
                     return set_visibility(&params, &accounts, &self.canonical)
                         .map_err(DomainError::from)
                 }
-                "event.get" => event_get(&params, &accounts),
-                _ => events(&params, &accounts),
+                _ => event_get(&params, &accounts),
             };
             answer.map(Outcome::query).map_err(DomainError::from)
         })
     }
-}
-
-/// The `result` of `calendar.events`.
-///
-/// The agenda rows are built by [`crate::agenda`], the one place that owns the
-/// dedup, the tiebreak and the sort; a second copy here would be a second
-/// answer to "which copy of this event is the row". It was
-/// `crate::tui::app::calendar_view` until #0126 (P5-U10c-I2), which is a
-/// daemon method reading its answer out of a client.
-pub fn events(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
-    only_params("calendar.events", params, &["account"])?;
-    let name = string_param(params, "account")?;
-    let account = super::account::ready_account(accounts, &name)?;
-    let self_address = crate::parse::extract_email_address(&account.default_from);
-
-    let store = open_store(&name)?;
-    let blobs = BlobStore::for_account(&name);
-    let events = crate::agenda::load_events_for_account(&store, &blobs, &name, &self_address);
-    Ok(json!({"account": name, "events": events}))
 }
 
 /// The `result` of `calendar.list`: the server calendars of every account

@@ -13,9 +13,9 @@
 //! frontend's connection and resync screens are testable, plus a rolled-back
 //! drain (`rollback`) and a send hold another client armed (`hold`).
 //!
-//! `calendar.events` answers each account's agenda from
-//! `fixtures/calendar.json`, and `message.ics` a row's `invite.ics` from the
-//! same file; `invite_update` and `invite_cancel` change `work`'s steering
+//! `fixtures/calendar.json` holds each account's invitation rows, and
+//! `message.ics` answers a row's `invite.ics` from the same file;
+//! `invite_update` and `invite_cancel` change `work`'s steering
 //! committee the way a new version or a cancellation of it arriving would.
 //! `message.invite` answers a row's event from the same agenda (or, for the
 //! emails those two deliver, from the version they carried);
@@ -528,7 +528,7 @@ struct State {
     /// The sends waiting out their hold, by operation id.
     held_sends: BTreeMap<String, SendWork>,
     send_delay: Duration,
-    /// account -> the agenda `calendar.events` answers, before its sort.
+    /// account -> its invitation rows, unsorted.
     calendar: BTreeMap<String, Vec<AgendaEvent>>,
     /// row id -> the `invite.ics` `message.ics` answers for it.
     ics: BTreeMap<i64, String>,
@@ -762,16 +762,6 @@ impl State {
             -32006,
             &format!("{account} has no local store to read yet; run `mp sync -A {account}`"),
         ))
-    }
-
-    /// `account`'s agenda in the daemon's order: by start, undated last.
-    fn agenda(&self, method: &str, account: &str) -> Result<Vec<AgendaEvent>> {
-        self.account_ready(method, account)?;
-        let mut events = self.calendar.get(account).cloned().unwrap_or_default();
-        events.sort_by(|a, b| {
-            (a.start_sort.is_empty(), &a.start_sort).cmp(&(b.start_sort.is_empty(), &b.start_sort))
-        });
-        Ok(events)
     }
 
     /// The server event `id` of `account`, what `event.get` answers; an
@@ -3986,12 +3976,6 @@ impl Fixture {
                 let (op, held) = s.start_send(method, what, &account, work.clone());
                 self.answer_send(s, op, held, work)
             }
-            "calendar.events" => {
-                only(method, &params, &["account"])?;
-                let account = param_str(method, &params, "account")?;
-                let events = s.agenda(method, account)?;
-                Ok(json!({"account": account, "events": events}))
-            }
             "message.ics" => {
                 let account = param_str(method, &params, "account")?;
                 s.account_ready(method, account)?;
@@ -6290,33 +6274,6 @@ mod tests {
     }
 
     #[test]
-    fn the_agenda_decodes_sorted_with_the_undated_row_last() {
-        let (f, _rx) = fixture();
-        let q = crate::session::Budgeted {
-            door: &crate::session::Door::Fixture(Arc::clone(&f)),
-            budget: Duration::from_secs(1),
-        };
-        let work = mp_client::queries::calendar_events(&q, "work").expect("work");
-        let ids: Vec<i64> = work.iter().map(|e| e.row_id).collect();
-        assert_eq!(ids, [9101, INVITE_ROW, 9103, 9102, 9104]);
-        assert!(work[0].start_sort.starts_with("2020-"), "a past event");
-        assert!(work[3].cancelled && work[3].event.cancelled);
-        assert!(work[2].is_organizer);
-        assert!(work[4].start_sort.is_empty() && work[4].start_display.is_empty());
-        let home = mp_client::queries::calendar_events(&q, "home").expect("home");
-        assert_eq!(home.len(), 1);
-        let e = f
-            .call("calendar.events", json!({"account": "nobody"}))
-            .expect_err("unknown");
-        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32005));
-        f.state().accounts["accounts"][1]["state"] = json!("blocked");
-        let e = f
-            .call("calendar.events", json!({"account": "home"}))
-            .expect_err("blocked");
-        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32006));
-    }
-
-    #[test]
     fn message_ics_answers_the_source_in_base64_or_null() {
         let (f, _rx) = fixture();
         let door = crate::session::Door::Fixture(Arc::clone(&f));
@@ -6357,18 +6314,13 @@ mod tests {
         let event = next_event(&rx);
         assert_eq!(event.kind, "state.invalidate");
         assert_eq!(event.payload["resource"], "mailbox:work/inbox");
-        let answer = f
-            .call("calendar.events", json!({"account": "work"}))
-            .expect("events");
-        let row = answer["events"]
-            .as_array()
-            .expect("events")
+        let row = f.state().calendar["work"]
             .iter()
-            .find(|e| e["row_id"] == INVITE_ROW)
+            .find(|e| e.row_id == INVITE_ROW)
             .expect("the steering committee")
             .clone();
-        assert_eq!(row["cancelled"], true);
-        assert_eq!(row["event"]["cancelled"], true);
+        assert!(row.cancelled);
+        assert!(row.event.cancelled);
         let after = inbox_ids(&f, "work", "inbox");
         assert_eq!(after.len(), before.len() + 1);
         let (_, mail) = {
@@ -6387,7 +6339,7 @@ mod tests {
         let (f, rx) = fixture();
         f.simulate("invite_update").expect("update");
         assert_eq!(next_event(&rx).payload["resource"], "mailbox:work/inbox");
-        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let events = f.state().calendar["work"].clone();
         let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
         assert_eq!(row.event.sequence, 1);
         assert_eq!(row.start_display, "2099-10-15 10:00");
@@ -6624,7 +6576,7 @@ mod tests {
             result["selector"],
             "mp://work/inbox/invitation-steering-comm-1008@fixture.example"
         );
-        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let events = f.state().calendar["work"].clone();
         let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
         assert_eq!(row.event.rsvp, "tentative");
     }
@@ -6683,7 +6635,7 @@ mod tests {
             .map(|r| r.address.as_str())
             .collect();
         assert_eq!(to, ["robin@example.com", "kim@example.com"]);
-        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let events = f.state().calendar["work"].clone();
         let mine = events
             .iter()
             .find(|e| e.subject == "Kick-off")
@@ -6741,7 +6693,7 @@ mod tests {
         let parked = rows.last().expect("a row");
         assert_eq!(parked.state, "failed");
         assert_eq!(parked.outstanding, vec!["chair@example.com".to_string()]);
-        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let events = f.state().calendar["work"].clone();
         let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
         assert_eq!(
             row.event.rsvp, "needs-action",

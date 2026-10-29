@@ -2,16 +2,17 @@
 import type { EventFrontmatter } from "./EventFrontmatter";
 
 /**
- * One row of `calendar.events`: an agenda entry, already deduped, folded and
- * sorted by the daemon.
+ * One row of the local agenda: an invitation, already deduped, folded and
+ * sorted by the daemon, which `calendar.view` answers as an event of the
+ * account's invitation calendar.
  *
- * The derived columns travel rather than being recomputed client-side because
- * every one of them is a fold over the account's *other* rows (the reply
- * statuses, the cancellation chain, the sent-copy tiebreak), which is exactly
- * what a client without a store cannot do.
+ * The derived columns are computed where the store is because every one of
+ * them is a fold over the account's *other* rows (the reply statuses, the
+ * cancellation chain, the sent-copy tiebreak), which is exactly what a client
+ * without a store cannot do.
  *
- * No field is skipped when empty: an agenda row is one object per event and a
- * client decodes it whole, so a stable key set is worth more than the bytes.
+ * No field is skipped when empty: a row is one object per event and is
+ * decoded whole, so a stable key set is worth more than the bytes.
  */
 export type AgendaEvent = {
 /**

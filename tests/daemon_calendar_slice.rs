@@ -37,7 +37,7 @@ use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::RpcError;
 
 use support::calendar_fixture::{
-    day, fake_spec_with, seed, seed_series, series_occurrences, IMIP, LOCAL_UID, MEETING_UID,
+    at, day, fake_spec_with, seed, seed_series, series_occurrences, IMIP, LOCAL_UID, MEETING_UID,
     SERIES_UID, SERVER,
 };
 use support::parity::{socket_path, DaemonFixture};
@@ -383,35 +383,32 @@ async fn a_series_invitation_gives_way_to_the_servers_occurrences() {
     assert!(series.iter().all(|e| e.get("source").is_none()));
 }
 
-/// An account without a backend views exactly its agenda: the rows of
-/// `calendar.events`, at the same instants, addressed `imip:<row_id>`.
+/// An account without a backend views exactly its agenda: the one invitation
+/// it holds, at its own instant, addressed `imip:<row_id>`.
 #[tokio::test]
 async fn a_none_accounts_view_is_its_imip_agenda() {
     let slice = Slice::start();
     let mut conn = slice.connect().await;
-    let agenda = call(&mut conn, "calendar.events", json!({"account": IMIP})).await;
-    let agenda = agenda["events"].as_array().unwrap().clone();
+    let row_id = row_of(slice.root(), IMIP);
     let events = view(&mut conn, json!({"accounts": [IMIP]})).await;
-    assert_eq!(agenda.len(), 1);
-    assert_eq!(events.len(), agenda.len());
-    for (row, event) in agenda.iter().zip(&events) {
-        assert_eq!(event["id"], format!("imip:{}", row["row_id"]));
-        assert_eq!(event["calendar"], "imip");
-        assert_eq!(event["uid"], row["event"]["uid"]);
-        assert_eq!(event["summary"], row["event"]["summary"]);
-        assert_eq!(event["location"], row["event"]["location"]);
-        assert_eq!(
-            event["time"]["start"],
-            format!("{}Z", row["start_sort"].as_str().unwrap())
-        );
-        assert_eq!(event["own_response"], "needs-action");
-        assert_eq!(event["source"]["row_id"], row["row_id"]);
-        assert_eq!(event["source"]["subject"], row["subject"]);
-        assert_eq!(
-            event["source"]["selector"],
-            "mp://perso/inbox/loc-day@example.com"
-        );
-    }
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event["id"], format!("imip:{row_id}"));
+    assert_eq!(event["calendar"], "imip");
+    assert_eq!(event["uid"], LOCAL_UID);
+    assert_eq!(event["summary"], "LOC Day planning");
+    assert_eq!(event["location"], "Room 4.12");
+    assert_eq!(
+        event["time"]["start"],
+        at(4, 12).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    );
+    assert_eq!(event["own_response"], "needs-action");
+    assert_eq!(event["source"]["row_id"], row_id);
+    assert_eq!(event["source"]["subject"], "Invitation: LOC Day planning");
+    assert_eq!(
+        event["source"]["selector"],
+        "mp://perso/inbox/loc-day@example.com"
+    );
 
     let id = events[0]["id"].as_str().unwrap();
     let got = call(

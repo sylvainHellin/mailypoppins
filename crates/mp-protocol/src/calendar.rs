@@ -7,9 +7,11 @@
 //! they also serialise changed: the field names, the `#[serde]` attributes and
 //! the skip rules are the ones `docs/plans/calendar-invites.md` D2 fixed.
 //!
-//! [`AgendaEvent`] is new, and is the wire form of the TUI's Calendar row: one
+//! [`AgendaEvent`] is one invitation row of the local agenda: one
 //! `messages.id`, the frontmatter block the shared event card renders, and the
-//! five derived columns the agenda list sorts and paints by.
+//! five derived columns the agenda sorts by. The daemon turns it into the
+//! events of an account's invitation calendar, and the desktop fixtures hold
+//! their invitations in this shape.
 //!
 //! The server calendar (PERSO-200) adds [`CalendarInfo`], the row of
 //! `calendar.list`, and [`CalendarEvent`], the event of `calendar.view` and
@@ -86,16 +88,17 @@ pub struct EventFrontmatter {
     pub cancelled_instances: Vec<String>,
 }
 
-/// One row of `calendar.events`: an agenda entry, already deduped, folded and
-/// sorted by the daemon.
+/// One row of the local agenda: an invitation, already deduped, folded and
+/// sorted by the daemon, which `calendar.view` answers as an event of the
+/// account's invitation calendar.
 ///
-/// The derived columns travel rather than being recomputed client-side because
-/// every one of them is a fold over the account's *other* rows (the reply
-/// statuses, the cancellation chain, the sent-copy tiebreak), which is exactly
-/// what a client without a store cannot do.
+/// The derived columns are computed where the store is because every one of
+/// them is a fold over the account's *other* rows (the reply statuses, the
+/// cancellation chain, the sent-copy tiebreak), which is exactly what a client
+/// without a store cannot do.
 ///
-/// No field is skipped when empty: an agenda row is one object per event and a
-/// client decodes it whole, so a stable key set is worth more than the bytes.
+/// No field is skipped when empty: a row is one object per event and is
+/// decoded whole, so a stable key set is worth more than the bytes.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgendaEvent {

@@ -1073,7 +1073,7 @@ Each write publishes `draft.changed`, and a file that does not parse is listed u
 `editor_invalid` breaks that file's frontmatter and publishes `draft.invalid`.
 Either is an error before any `editor_open`.
 
-`calendar.events` answers each account's agenda from `calendar.json`, sorted as the daemon sorts it, and refuses an unknown account with `-32005` and one whose `account.list` state is not `ready` with `-32006`.
+`calendar.json` holds each account's invitation rows.
 `work` has five rows: a past kick-off in 2020 (row 9101), the steering committee of the inbox invitation (row 1008, `REQUEST` in 2099 with an accepted, a pending and a declined attendee), a weekly team sync the user organizes (row 9103, `is_organizer`, one cancelled occurrence), a cancelled budget review (row 9102) and an undated offsite planning (row 9104); `home` has one upcoming appointment (row 9201).
 The dates are 2020 and 2099 because the frontend filters on the real clock.
 `message.ics` answers the base64 of the row's `invite.ics` from the same file, `null` for row 9104, and `-32602` for a row the account has neither in a mailbox nor in its agenda.
