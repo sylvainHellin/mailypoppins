@@ -61,20 +61,21 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
         lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
     }
 
+    // While typing, the row shows the comment's tail so the caret stays in
+    // view; otherwise its start, cut with an ellipsis.
     let typing = overlay.row == RsvpRow::Comment;
-    let caret = if typing { "\u{258f}" } else { "" };
-    let comment = if overlay.comment.is_empty() && !typing {
+    let prefix = "  Comment: ";
+    let avail = inner_width.saturating_sub(prefix.len());
+    let comment = if typing {
+        super::util::scrolled_input_value(&format!("{}\u{258f}", overlay.comment), avail)
+    } else if overlay.comment.is_empty() {
         "(none)".to_string()
     } else {
-        format!("{}{caret}", overlay.comment)
+        truncate(&overlay.comment, avail)
     };
-    let prefix = "  Comment: ";
     lines.push(Line::from(vec![
         Span::styled(prefix, if typing { focused } else { muted }),
-        Span::styled(
-            truncate(&comment, inner_width.saturating_sub(prefix.len())),
-            if typing { focused } else { normal },
-        ),
+        Span::styled(comment, if typing { focused } else { normal }),
     ]));
     if overlay.server {
         let toggle = if overlay.send_response {

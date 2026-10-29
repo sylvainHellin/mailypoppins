@@ -159,6 +159,28 @@ fn golden_calendar_respond_overlay() {
     assert_snapshot!("respond_imip", frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
+/// A comment longer than its row shows its tail while it is typed, after an
+/// ellipsis, so the last characters and the caret stay in view.
+#[test]
+fn a_long_comment_being_typed_shows_its_tail_and_caret() {
+    let mut app = calendar_fixture();
+    let mut overlay = RsvpOverlay::new(
+        "evoqs".to_string(),
+        "ev-jour-1".to_string(),
+        "Jour fixe".to_string(),
+    );
+    overlay.row = RsvpRow::Comment;
+    overlay.comment = format!("{}the end", "x".repeat(80));
+    app.overlay = Overlay::Rsvp(overlay);
+    let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
+    let row = frame
+        .lines()
+        .find(|line| line.contains("Comment: "))
+        .expect("the comment row");
+    assert!(row.contains("Comment: \u{2026}x"), "{row}");
+    assert!(row.contains("the end\u{258f}"), "{row}");
+}
+
 // ---------------------------------------------------------------------------
 // Through the daemon
 // ---------------------------------------------------------------------------
