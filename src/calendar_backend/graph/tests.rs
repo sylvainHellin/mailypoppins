@@ -1078,3 +1078,133 @@ async fn a_master_change_reaches_the_cached_occurrences_it_trimmed() {
     .unwrap();
     assert!(!quiet.changed(), "{quiet:?}");
 }
+
+/// A backend that knows `master-cms` by its `UID` alone, as an older build
+/// cached it, and syncs the default calendar on from `round1`.
+fn detailless_sync(master_answer: HttpAnswer) -> (GraphCalendarBackend<ScriptedFetch>, String) {
+    let link = format!("{BASE}/{DELTA}round1");
+    let fetch = ScriptedFetch::default()
+        .route(
+            &link,
+            ok(&delta_page(&format!("{DELTA}round2"), vec![trimmed_cms()])),
+        )
+        .route(&format!("{BASE}/me/events/master-cms?"), master_answer);
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    backend.remember_series(vec![SeriesInfo {
+        master_id: "master-cms".into(),
+        uid: "CMS-UID".into(),
+        recurrence: None,
+        master: None,
+        zone: None,
+    }]);
+    let token = GraphToken {
+        path: SyncPath::CalendarDelta,
+        link: Some(link),
+    }
+    .encode();
+    (backend, token)
+}
+
+#[tokio::test]
+async fn a_trimmed_occurrence_of_a_detailless_series_reads_its_master_again() {
+    let master = delta_master(false, "CMS Team Meeting").to_string();
+    let (backend, token) = detailless_sync(ok(&master));
+    let result = backend
+        .sync_window(&calendar("AAMkCal-default", true), window(), Some(token))
+        .await
+        .unwrap();
+    assert!(!result.full_resync);
+    let sent = backend.fetch.sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(
+        sent[1].url,
+        format!("{BASE}/me/events/master-cms?$select={MASTER_SELECT}")
+    );
+    assert_eq!(result.series.len(), 1);
+    assert!(result.series[0].master.is_some());
+    assert_eq!(result.inheriting, ["occ-cms"]);
+    let cms = find(&result, "occ-cms");
+    assert_eq!(cms.summary, "CMS Team Meeting");
+    assert_eq!(cms.show_as, ShowAs::Busy);
+    assert!(result.token.is_some());
+}
+
+#[tokio::test]
+async fn a_trimmed_occurrence_whose_master_cannot_be_read_asks_for_a_baseline() {
+    let (backend, token) =
+        detailless_sync(status(404, r#"{"error":{"code":"ErrorItemNotFound"}}"#));
+    let result = backend
+        .sync_window(&calendar("AAMkCal-default", true), window(), Some(token))
+        .await
+        .unwrap();
+    // The occurrence is kept as Graph sent it, but not as inheriting: a later
+    // master could not fix its time, so no token is handed back and the next
+    // sync is a baseline that reads every master and occurrence anew.
+    let cms = find(&result, "occ-cms");
+    assert_eq!(cms.summary, "");
+    assert!(result.inheriting.is_empty());
+    assert_eq!(result.token, None);
+}
+
+#[tokio::test]
+async fn an_occurrence_sent_in_full_after_a_trimmed_one_keeps_its_own_details() {
+    use crate::calendar_sync::sync_account;
+    use crate::store::{calendar as cache, Store};
+
+    const ONE_CALENDAR: &str =
+        r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
+    let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    let backend = |page: String| {
+        GraphCalendarBackend::with_fetch(
+            "evoqs",
+            ScriptedFetch::default()
+                .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
+                .route(&delta, ok(&page)),
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let hour = |h| now + chrono::Duration::hours(h);
+    let cms = || {
+        cache::get_event(&store, "evoqs", "occ-cms")
+            .unwrap()
+            .expect("occ-cms cached")
+    };
+
+    sync_account(&store, &backend(trimmed_page()), "evoqs", now)
+        .await
+        .unwrap();
+    assert_eq!(cms().summary, "CMS Team Meeting");
+
+    // The occurrence is edited on its own and comes back in full.
+    let mut full = trimmed_cms();
+    for (key, value) in [
+        ("iCalUId", "OCC-UID".into()),
+        ("subject", "CMS kickoff".into()),
+        ("isAllDay", false.into()),
+        ("showAs", "oof".into()),
+        ("type", "exception".into()),
+        ("originalStartTimeZone", "W. Europe Standard Time".into()),
+    ] {
+        full[key] = value;
+    }
+    let page = delta_page(&format!("{DELTA}round2"), vec![full]);
+    sync_account(&store, &backend(page), "evoqs", hour(1))
+        .await
+        .unwrap();
+    assert_eq!(cms().summary, "CMS kickoff");
+
+    // A later rename of the series leaves the exception alone.
+    let page = delta_page(
+        &format!("{DELTA}round3"),
+        vec![delta_master(false, "CMS Weekly")],
+    );
+    sync_account(&store, &backend(page), "evoqs", hour(2))
+        .await
+        .unwrap();
+    let cms = cms();
+    assert_eq!(cms.summary, "CMS kickoff");
+    assert_eq!(cms.show_as, ShowAs::Oof);
+    assert_eq!(cms.uid, "CMS-UID");
+}

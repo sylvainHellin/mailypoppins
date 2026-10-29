@@ -1078,7 +1078,18 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
     /// Fold a walked chain into a [`SyncResult`]: the last word on each id
     /// wins, series masters are resolved (afresh on a baseline, else only
     /// the ones not known yet), and each event converted.
-    async fn collect(&self, calendar: &Calendar, walked: Walked, full_resync: bool) -> SyncResult {
+    ///
+    /// The flag is `true` when a trimmed occurrence found no master to take
+    /// its details from: it is stored as Graph sent it (untitled, timed in
+    /// UTC) and not as inheriting, since a later master could fix its details
+    /// but not its time, and the caller hands back no token, so the next sync
+    /// is a baseline that reads every master again and the occurrence anew.
+    async fn collect(
+        &self,
+        calendar: &Calendar,
+        walked: Walked,
+        full_resync: bool,
+    ) -> (SyncResult, bool) {
         let mut order: Vec<String> = Vec::new();
         let mut last: HashMap<String, Item> = HashMap::new();
         for item in walked.items {
@@ -1147,6 +1158,7 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
             }
         }
 
+        let mut orphaned = false;
         for id in order {
             match last.remove(&id) {
                 Some(Item::Removed(id)) => result.removed.push(id),
@@ -1161,7 +1173,11 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                     match from_graph(&self.account, &calendar.id, &event, series.as_ref()) {
                         Ok(converted) => {
                             if is_trimmed(&event) {
-                                result.inheriting.push(converted.id.clone());
+                                if series.as_ref().is_some_and(|s| s.master.is_some()) {
+                                    result.inheriting.push(converted.id.clone());
+                                } else {
+                                    orphaned = true;
+                                }
                             }
                             result.upserts.push(converted);
                         }
@@ -1174,7 +1190,7 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                 None => {}
             }
         }
-        result
+        (result, orphaned)
     }
 }
 
@@ -1277,9 +1293,17 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
             path.as_str()
         );
         let link = walked.delta_link.clone();
-        let mut result = self.collect(calendar, walked, full_resync).await;
+        let (mut result, orphaned) = self.collect(calendar, walked, full_resync).await;
         result.path = Some(path.as_str().to_string());
-        result.token = Some(GraphToken { path, link }.encode());
+        if orphaned {
+            warn!(
+                "[calendar] {}: an occurrence of {} came without its series master; \
+                 the next sync reads the window afresh",
+                self.account, calendar.name
+            );
+        } else {
+            result.token = Some(GraphToken { path, link }.encode());
+        }
         Ok(result)
     }
 
