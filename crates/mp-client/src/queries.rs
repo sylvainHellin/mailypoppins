@@ -63,8 +63,8 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 
 use mp_protocol::calendar::{
-    CalendarEvent, CalendarInfo, CalendarListResult, CalendarViewParams, CalendarViewResult,
-    EventFrontmatter, EventGetResult, EventRespondParams,
+    CalendarInfo, CalendarListResult, CalendarViewParams, CalendarViewResult, EventFrontmatter,
+    EventRespondParams,
 };
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
@@ -494,13 +494,6 @@ pub fn calendar_view(q: &dyn Queries, params: &CalendarViewParams) -> Result<Cal
     Ok(serde_json::from_value(answer)?)
 }
 
-/// One event, through `event.get`.
-pub fn event_get(q: &dyn Queries, account: &str, event: &str) -> Result<CalendarEvent> {
-    let answer = q.call("event.get", json!({"account": account, "event": event}))?;
-    let answer: EventGetResult = serde_json::from_value(answer)?;
-    Ok(answer.event)
-}
-
 /// The `params` of `event.respond`, an operation a client starts through its
 /// own operation path and watches to its `EventRespondResult`.
 pub fn event_respond_params(
@@ -720,12 +713,6 @@ mod tests {
         let view = calendar_view(&door, &params).expect("a view");
         assert_eq!(view.events.len(), 2);
         assert_eq!(door.seen.borrow()[0].1, request["params"]);
-
-        let door = Canned::new(fixture_result(include_str!(
-            "../../mp-protocol/fixtures/event.get.response.json"
-        )));
-        let event = event_get(&door, "evoqs", "AAMkADev2").expect("an event");
-        assert_eq!(event.summary, "Holiday");
 
         let request: Value = serde_json::from_str(include_str!(
             "../../mp-protocol/fixtures/event.respond.request.json"
