@@ -21,7 +21,8 @@
 //!
 //! Graph gives each occurrence of a series an `iCalUId` of its own, so an
 //! occurrence's `UID` is read from its series master
-//! (`GET /me/events/{seriesMasterId}`), once per series: the store caches it
+//! (`GET /me/calendars/{id}/events/{seriesMasterId}`, which a calendar shared
+//! with the account answers too), once per series: the store caches it
 //! ([`SeriesInfo`], [`CalendarBackend::remember_series`]) and a baseline
 //! reads it again to refresh the rule. An occurrence carries no
 //! [`Event::recurrence`], as the model asks; the series rule stays in the
@@ -1060,19 +1061,32 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
 
     /// The series master `master_id` of `calendar`, read from the server with
     /// the properties a trimmed occurrence takes from it.
-    async fn fetch_series(&self, calendar: &str, master_id: &str) -> anyhow::Result<SeriesInfo> {
+    async fn fetch_series(
+        &self,
+        calendar: &str,
+        master_id: &str,
+    ) -> Result<SeriesInfo, MasterError> {
         let url = format!(
-            "{GRAPH_BASE}/me/events/{}?$select={MASTER_SELECT}",
+            "{GRAPH_BASE}/me/calendars/{}/events/{}?$select={MASTER_SELECT}",
+            encode_id(calendar),
             encode_id(master_id)
         );
-        let answer = self.fetch.get(&url, &[]).await?;
-        if !(200..300).contains(&answer.status) {
-            return Err(anyhow!("{}", error_text(&answer)));
+        let answer = self
+            .fetch
+            .get(&url, &[])
+            .await
+            .map_err(MasterError::Other)?;
+        if answer.status == 404 {
+            return Err(MasterError::Gone(error_text(&answer)));
         }
-        let master: wire::Event =
-            serde_json::from_str(&answer.body).context("unreadable series master")?;
+        if !(200..300).contains(&answer.status) {
+            return Err(MasterError::Other(anyhow!("{}", error_text(&answer))));
+        }
+        let master: wire::Event = serde_json::from_str(&answer.body)
+            .context("unreadable series master")
+            .map_err(MasterError::Other)?;
         series_of(&self.account, calendar, &master)
-            .ok_or_else(|| anyhow!("series master without iCalUId"))
+            .ok_or_else(|| MasterError::Other(anyhow!("series master without iCalUId")))
     }
 
     /// Fold a walked chain into a [`SyncResult`]: the last word on each id
@@ -1084,6 +1098,9 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
     /// UTC) and not as inheriting, since a later master could fix its details
     /// but not its time, and the caller hands back no token, so the next sync
     /// is a baseline that reads every master again and the occurrence anew.
+    /// A master Graph answers 404 for is gone or unreadable to the account,
+    /// which a baseline would only meet again at every poll: its occurrences
+    /// are stored the same way, but the token is kept.
     async fn collect(
         &self,
         calendar: &Calendar,
@@ -1141,6 +1158,7 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                 }
             }
         }
+        let mut gone: Vec<String> = Vec::new();
         for master in wanted {
             match self.fetch_series(&calendar.id, &master).await {
                 Ok(series) => {
@@ -1150,7 +1168,15 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                         .insert(master.clone(), series.clone());
                     result.series.push(series);
                 }
-                Err(err) => warn!(
+                Err(MasterError::Gone(why)) => {
+                    warn!(
+                        "[calendar] {}: series master {master} of {} is gone or unreadable \
+                         ({why}); its occurrences keep what Graph sent of them",
+                        self.account, calendar.name
+                    );
+                    gone.push(master);
+                }
+                Err(MasterError::Other(err)) => warn!(
                     "[calendar] {}: could not read series master {master}: {err:#}; its \
                      occurrences keep their own iCalUId until the next sync",
                     self.account
@@ -1175,7 +1201,11 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                             if is_trimmed(&event) {
                                 if series.as_ref().is_some_and(|s| s.master.is_some()) {
                                     result.inheriting.push(converted.id.clone());
-                                } else {
+                                } else if !event
+                                    .series_master_id
+                                    .as_ref()
+                                    .is_some_and(|master| gone.contains(master))
+                                {
                                     orphaned = true;
                                 }
                             }
@@ -1192,6 +1222,16 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         }
         (result, orphaned)
     }
+}
+
+/// Why [`GraphCalendarBackend::fetch_series`] read no series master.
+enum MasterError {
+    /// Graph answered 404: the master is gone or the account cannot read it,
+    /// which no later sync changes.
+    Gone(String),
+    /// Anything else (the network, a 5xx, a 429, an unreadable answer),
+    /// which a later sync may get past.
+    Other(anyhow::Error),
 }
 
 /// The properties [`GraphCalendarBackend::fetch_series`] reads of a series

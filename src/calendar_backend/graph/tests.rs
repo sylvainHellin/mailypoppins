@@ -147,7 +147,10 @@ fn baseline_fetch() -> ScriptedFetch {
             &format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?$skiptoken=page2"),
             ok(PAGE2),
         )
-        .route(&format!("{BASE}/me/events/AAMkEv-weekly?"), ok(MASTER))
+        .route(
+            &format!("{BASE}/me/calendars/AAMkCal-default/events/AAMkEv-weekly?"),
+            ok(MASTER),
+        )
 }
 
 #[tokio::test]
@@ -346,7 +349,9 @@ async fn a_baseline_follows_next_link_then_delta_link_and_converts_every_kind() 
         [
             delta_url("AAMkCal-default").as_str(),
             &format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?$skiptoken=page2"),
-            &format!("{BASE}/me/events/AAMkEv-weekly?$select={MASTER_SELECT}"),
+            &format!(
+                "{BASE}/me/calendars/AAMkCal-default/events/AAMkEv-weekly?$select={MASTER_SELECT}"
+            ),
         ]
     );
     assert_eq!(
@@ -452,7 +457,10 @@ async fn a_default_calendar_without_its_own_delta_falls_back_to_the_documented_o
             ),
         )
         .route(&default_delta, ok(PAGE2))
-        .route(&format!("{BASE}/me/events/AAMkEv-weekly?"), ok(MASTER));
+        .route(
+            &format!("{BASE}/me/calendars/AAMkCal-default/events/AAMkEv-weekly?"),
+            ok(MASTER),
+        );
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
     let result = backend
         .sync_window(&calendar("AAMkCal-default", true), window(), None)
@@ -478,8 +486,14 @@ async fn another_calendar_without_its_own_delta_is_read_in_full_every_sync() {
         )
         .route(&view, ok(&view_page))
         .route(&view, ok(&view_page))
-        .route(&format!("{BASE}/me/events/AAMkEv-weekly?"), ok(MASTER))
-        .route(&format!("{BASE}/me/events/AAMkEv-weekly?"), ok(MASTER));
+        .route(
+            &format!("{BASE}/me/calendars/{id}/events/AAMkEv-weekly?"),
+            ok(MASTER),
+        )
+        .route(
+            &format!("{BASE}/me/calendars/{id}/events/AAMkEv-weekly?"),
+            ok(MASTER),
+        );
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
     let holidays = calendar("AAMkCal/holidays+1=", false);
     let first = backend
@@ -1088,7 +1102,10 @@ fn detailless_sync(master_answer: HttpAnswer) -> (GraphCalendarBackend<ScriptedF
             &link,
             ok(&delta_page(&format!("{DELTA}round2"), vec![trimmed_cms()])),
         )
-        .route(&format!("{BASE}/me/events/master-cms?"), master_answer);
+        .route(
+            &format!("{BASE}/me/calendars/AAMkCal-default/events/master-cms?"),
+            master_answer,
+        );
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
     backend.remember_series(vec![SeriesInfo {
         master_id: "master-cms".into(),
@@ -1118,7 +1135,7 @@ async fn a_trimmed_occurrence_of_a_detailless_series_reads_its_master_again() {
     assert_eq!(sent.len(), 2, "{sent:?}");
     assert_eq!(
         sent[1].url,
-        format!("{BASE}/me/events/master-cms?$select={MASTER_SELECT}")
+        format!("{BASE}/me/calendars/AAMkCal-default/events/master-cms?$select={MASTER_SELECT}")
     );
     assert_eq!(result.series.len(), 1);
     assert!(result.series[0].master.is_some());
@@ -1130,20 +1147,35 @@ async fn a_trimmed_occurrence_of_a_detailless_series_reads_its_master_again() {
 }
 
 #[tokio::test]
-async fn a_trimmed_occurrence_whose_master_cannot_be_read_asks_for_a_baseline() {
-    let (backend, token) =
-        detailless_sync(status(404, r#"{"error":{"code":"ErrorItemNotFound"}}"#));
-    let result = backend
-        .sync_window(&calendar("AAMkCal-default", true), window(), Some(token))
-        .await
-        .unwrap();
+async fn a_trimmed_occurrence_whose_master_cannot_be_read_asks_for_a_baseline_unless_it_is_gone() {
     // The occurrence is kept as Graph sent it, but not as inheriting: a later
-    // master could not fix its time, so no token is handed back and the next
-    // sync is a baseline that reads every master and occurrence anew.
-    let cms = find(&result, "occ-cms");
-    assert_eq!(cms.summary, "");
-    assert!(result.inheriting.is_empty());
-    assert_eq!(result.token, None);
+    // master could not fix its time. A transient failure hands back no token,
+    // so the next sync is a baseline that reads every master and occurrence
+    // anew; a 404 keeps it, since every baseline would meet the 404 again.
+    for (answer, keeps_token) in [
+        (
+            status(503, r#"{"error":{"code":"ServiceUnavailable"}}"#),
+            false,
+        ),
+        (
+            status(429, r#"{"error":{"code":"TooManyRequests"}}"#),
+            false,
+        ),
+        (
+            status(404, r#"{"error":{"code":"ErrorItemNotFound"}}"#),
+            true,
+        ),
+    ] {
+        let (backend, token) = detailless_sync(answer);
+        let result = backend
+            .sync_window(&calendar("AAMkCal-default", true), window(), Some(token))
+            .await
+            .unwrap();
+        let cms = find(&result, "occ-cms");
+        assert_eq!(cms.summary, "");
+        assert!(result.inheriting.is_empty());
+        assert_eq!(result.token.is_some(), keeps_token);
+    }
 }
 
 #[tokio::test]
