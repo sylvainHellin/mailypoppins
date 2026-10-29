@@ -19,7 +19,7 @@ Commands:
   edit            Open a draft in $EDITOR
   reply           Create a reply draft from a received email
   forward         Forward an email to new recipients
-  invite          RSVP to a received calendar invitation (iMIP REPLY over SMTP)
+  invite          Answer a received calendar invitation: through the server when the account's server calendar holds its event, else by iMIP reply
   list-mailboxes  List every folder on the server with its sync policy and role
   sync            Sync mailboxes from the server into the local store
   watch           Watch a mailbox for changes using IMAP IDLE
@@ -211,7 +211,7 @@ Options:
   -h, --help                   Print help
 
 $ mp invite --help
-RSVP to a received calendar invitation (iMIP REPLY over SMTP)
+Answer a received calendar invitation: through the server when the account's server calendar holds its event, else by iMIP reply
 
 Usage: mp invite [OPTIONS] <COMMAND>
 
