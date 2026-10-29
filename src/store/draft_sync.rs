@@ -50,23 +50,11 @@ pub fn create_sql() -> String {
 }
 
 /// Add the `message_id` column to a table an earlier build created without
-/// it. A read when nothing is missing, as [`create_sql`]'s caller requires;
-/// the rows it leaves `NULL` are filled by the next reconcile.
+/// it ([`super::schema::add_columns`]). A read when nothing is missing, as
+/// [`create_sql`]'s caller requires; the rows it leaves `NULL` are filled by
+/// the next reconcile.
 pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
-    let has_message_id: bool = conn
-        .query_row(
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM pragma_table_info('{TABLE}') WHERE name = 'message_id')"
-            ),
-            [],
-            |row| row.get(0),
-        )
-        .context("reading the draft_sync columns")?;
-    if !has_message_id {
-        conn.execute_batch(&format!("ALTER TABLE {TABLE} ADD COLUMN message_id TEXT"))
-            .context("adding the draft_sync message_id column")?;
-    }
-    Ok(())
+    super::schema::add_columns(conn, &[(TABLE, "message_id", "TEXT")])
 }
 
 /// One draft's server copy and the convergence it was recorded at.

@@ -41,20 +41,10 @@ pub fn create_sql() -> String {
 }
 
 /// Add the columns a table created by an earlier build of this table lacks.
-/// A read when nothing is missing, as [`create_sql`]'s caller requires.
+/// A read when nothing is missing, as [`create_sql`]'s caller requires
+/// ([`crate::store::schema::add_columns`]).
 pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
-    let has_folder_id: bool = conn
-        .query_row(
-            &format!("SELECT EXISTS (SELECT 1 FROM pragma_table_info('{TABLE}') WHERE name = 'folder_id')"),
-            [],
-            |row| row.get(0),
-        )
-        .context("reading the folder list's columns")?;
-    if !has_folder_id {
-        conn.execute_batch(&format!("ALTER TABLE {TABLE} ADD COLUMN folder_id TEXT"))
-            .context("adding the folder id column")?;
-    }
-    Ok(())
+    crate::store::schema::add_columns(conn, &[(TABLE, "folder_id", "TEXT")])
 }
 
 /// One folder as the server listed it.
