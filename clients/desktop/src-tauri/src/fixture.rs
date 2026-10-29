@@ -31,8 +31,8 @@
 //! The server calendar (PERSO-200) comes from `fixtures/calendar-server.json`:
 //! `calendar.list` answers its calendars, `calendar.set_visibility` flips one
 //! and publishes `calendar.changed`, and `calendar.view` answers the events of
-//! the visible calendars that overlap the range, in start order. `event.get`
-//! answers one event; `event.respond` refuses a word it does not take, an
+//! the visible calendars that overlap the range, in start order;
+//! `event.respond` refuses a word it does not take, an
 //! unknown event and `send_response: false` on an `imip:` event with the
 //! daemon's sentence, then settles after [`RSVP_DELAY`] with the event's own
 //! response changed and `calendar.changed`, or after `rsvp_fail` fails with
@@ -374,7 +374,7 @@ struct InviteSend {
 }
 
 /// `fixtures/calendar-server.json`: the server calendar `calendar.list`,
-/// `calendar.view`, `event.get` and `event.respond` answer from (PERSO-200),
+/// `calendar.view` and `event.respond` answer from (PERSO-200),
 /// and per account the server event each invitation row stands for, by row
 /// id, which `message.invite` names as `event_id`.
 #[derive(serde::Deserialize)]
@@ -764,7 +764,7 @@ impl State {
         ))
     }
 
-    /// The server event `id` of `account`, what `event.get` answers; an
+    /// The server event `id` of `account`, what `event.respond` answers; an
     /// unknown one is refused as the daemon does, `-32602`.
     fn server_event(&self, method: &str, account: &str, id: &str) -> Result<CalendarEvent> {
         self.server_events
@@ -4193,14 +4193,6 @@ impl Fixture {
                     "events": events,
                 }))
             }
-            "event.get" => {
-                only(method, &params, &["account", "event"])?;
-                let account = param_str(method, &params, "account")?;
-                let id = param_str(method, &params, "event")?;
-                s.account_ready(method, account)?;
-                let event = s.server_event(method, account, id)?;
-                Ok(json!({"account": account, "event": event}))
-            }
             "event.respond" => {
                 only(
                     method,
@@ -6438,6 +6430,14 @@ mod tests {
         );
         let answer = f.call("calendar.view", week.clone()).expect("view");
         assert_eq!(answer["range"]["start"], "2099-10-11T22:00:00Z");
+        let steering = answer["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|e| e["id"] == "imip:1008")
+            .expect("the invitation's event")
+            .clone();
+        assert_eq!(steering["source"]["row_id"], INVITE_ROW);
         let day = json!({"start": "2099-10-16T00:00:00+02:00", "end": "2099-10-17T00:00:00+02:00"});
         assert_eq!(view(&day), ["AAMkAD-holiday"]);
         f.call(
@@ -6459,13 +6459,6 @@ mod tests {
             )
             .expect_err("unknown");
         assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
-        let got = f
-            .call(
-                "event.get",
-                json!({"account": "work", "event": "imip:1008"}),
-            )
-            .expect("get");
-        assert_eq!(got["event"]["source"]["row_id"], INVITE_ROW);
     }
 
     #[test]
@@ -6515,13 +6508,11 @@ mod tests {
         assert_eq!(result.comment.as_deref(), Some("On leave"));
         assert!(!result.send_response && !result.delivered);
         assert_eq!(result.via, "server");
-        let got = f
-            .call(
-                "event.get",
-                json!({"account": "home", "event": "AAMkAD-design"}),
-            )
-            .expect("get");
-        assert_eq!(got["event"]["own_response"], "declined");
+        let design = f
+            .state()
+            .server_event("event.respond", "home", "AAMkAD-design")
+            .expect("the event");
+        assert_eq!(design.own_response, "declined");
     }
 
     #[test]

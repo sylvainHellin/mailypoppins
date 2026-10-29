@@ -155,7 +155,6 @@ The type blocks in this document are for reading, and the generated files are th
 | `calendar_list` | `account?` | `CalendarInfo[]`, every account's when absent |
 | `calendar_set_visibility` | `account`, `calendar`, `visible` | nothing; the daemon publishes `calendar.changed` |
 | `calendar_view` | `start`, `end` (RFC 3339 with an offset, `end` exclusive), `zone?` | `CalendarViewResult`, every account's visible calendars |
-| `event_get` | `account`, `event` (a server id or `imip:<row_id>`) | `CalendarEvent` |
 | `event_respond` | `account`, `event`, `response: "accept" \| "tentative" \| "decline"`, `comment?`, `send_response?` | `{ operation_id }` |
 | `invite_source_open` | `account`, `row_id` (an invitation mail's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
 | `invite_get` | `account`, `row_id` | `InviteCard` (the event and its server `event_id`), or `null` for a message with no invitation |
@@ -368,7 +367,6 @@ A range the daemon cannot read is a `protocol` error with its code.
 
 `calendar_list` is `calendar.list {account?}`: every account's calendars (`CalendarInfo`: `account`, `id`, `name`, `color`, `is_default`, `can_edit`, `visible`, `backend`), the invitation mails of an account as its `imip` calendar.
 `calendar_set_visibility` is `calendar.set_visibility {account, calendar, visible}`, a command that answers at once: the daemon keeps the preference across a cache rebuild and publishes `calendar.changed {account}`, which is what reads the view again; an unknown calendar is the daemon's `-32602` sentence.
-`event_get` is `event.get {account, event}`: one event by its id.
 
 `invite_source_open` is the TUI's `e` on an invitation mail's event (`Action::OpenEventSource`), with the event's `source.row_id`.
 It reads the row's `invite.ics` with `message.ics {account, row_id}` (`mp_client::queries::message_ics`, which decodes the base64 the wire carries), writes it to `renditions/invite-<account>-<row_id>.ics` under the app's cache directory, the directory 0700 and the file 0600, and opens that file with the external editor as `editor_open` does.
@@ -1093,7 +1091,6 @@ The server calendar (PERSO-200) comes from `calendar-server.json`: `home` has a 
 The week of Monday 12 October 2099 holds the first occurrence of a weekly planning on Tuesday (its second on Tuesday the 20th), on Wednesday a design review with a Teams link, the steering committee of row 1008 as `imip:1008` and a one-to-one the user organizes, the three overlapping, and on Friday an all-day company holiday; the dentist of row 9201 is on 1 December.
 `calendar.list` answers the calendars, of one account with `account`; `calendar.set_visibility` flips one, refuses an unknown one with `-32602`, and publishes `calendar.changed`.
 `calendar.view` answers the events of the visible calendars (every calendar with `include_hidden`) that overlap the range, a timed one by its instants and an all-day one by its dates in the range's own offset, in start order, with the range in UTC and a fixed window.
-`event.get` answers one event, and an unknown one is `-32602`.
 `event.respond` refuses a word it does not take, an unknown event, and `send_response: false` on an `imip:` event with the daemon's sentence; otherwise the operation runs for the RSVP delay, the event's `own_response` and the user's attendee status (and an `imip:` event's agenda row) become the answer, `calendar.changed` says so, and it settles with an `EventRespondResult`, `delivered` as `send_response`; `rsvp_fail` fails the next one with the transport error.
 
 `send.invite` refuses in `plan_invite`'s order with the daemon's words: `home` with the Graph sentence, then a missing subject, a missing start, both or neither of `end` and `duration`, and no recipient in `to` or `cc`; it does not parse the times.

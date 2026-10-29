@@ -1288,7 +1288,6 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: clients/desktop: the event card beside the days, or under them in the narrow layout, always shows the cursor event, and Enter or a double-click takes the focus to it; "Join the meeting" opens the online meeting link through `open_external` (M4, #0131, PERSO-200; shell.md, "Calendar", "The card")
 - Validation: `tests/cli_calendar.rs` (`event_show_and_respond_through_the_cli`), `src/calendar_cmd.rs` (`the_event_card_reads_the_times_in_the_viewers_zone`), `src/calendar_view.rs` (`an_imip_id_names_its_row`), `src/tui_tests/calendar.rs` (`golden_calendar_event_card`); `clients/desktop/src/components/calendar/calendar.test.tsx` (`j and k move the cursor and the card follows; the occurrence of a series says so`)
 - Status: shipped in the CLI, the TUI and the desktop (PERSO-200)
-- Note: the desktop registers an `event_get` command, which no view calls yet.
 
 ### CAL-10 Answer an event of the calendar
 

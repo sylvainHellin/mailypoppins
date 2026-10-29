@@ -2035,12 +2035,6 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "calendar_view":
       return calendarViewOf(String(args.start), String(args.end), args.zone == null ? null : String(args.zone));
-    case "event_get": {
-      knownAccount(cmd, account);
-      const e = mock.events.find((x) => x.account === account && x.id === String(args.event));
-      if (!e) throw { kind: "not_found", code: -32602, message: `event.get: the daemon refused the call: ${account} has no event ${String(args.event)} (-32602)` };
-      return clone(e);
-    }
     case "event_respond": {
       knownAccount(cmd, account);
       const response = String(args.response);

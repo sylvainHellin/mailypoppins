@@ -6,7 +6,6 @@ import { invoke, type Channel } from "@/lib/tauri";
 import type {
   AccountCredentials,
   Bootstrap,
-  CalendarEvent,
   CalendarInfo,
   CalendarViewResult,
   DraftCreated,
@@ -401,10 +400,6 @@ export const calendarSetVisibility = (account: string, calendar: string, visible
 /** The events of the visible calendars from `start` to `end` (RFC 3339 with an offset, `end` exclusive), every account merged. */
 export const calendarView = (start: string, end: string, zone: string | null): Promise<CalendarViewResult> =>
   invoke<CalendarViewResult>("calendar_view", { start, end, zone });
-
-/** One event, by its server id or `imip:<row_id>`. */
-export const eventGet = (account: string, event: string): Promise<CalendarEvent> =>
-  invoke<CalendarEvent>("event_get", { account, event });
 
 /** Open an invitation mail's `invite.ics` in the editor; `not_found` when the row has none. */
 export const inviteSourceOpen = (account: string, row_id: number): Promise<EditorLaunch> =>

@@ -4,8 +4,7 @@
 //! the hidden calendars left out, and `calendar.list` the calendars with
 //! their visibility, which `calendar.set_visibility` changes; this layer
 //! passes them through, and the layouts (agenda, day, week) are the
-//! frontend's, as they are the TUI's. `event.get` answers one event. An
-//! invitation mail's event (`imip:<row_id>`) has the mail's `invite.ics` as
+//! frontend's, as they are the TUI's. An invitation mail's event (`imip:<row_id>`) has the mail's `invite.ics` as
 //! its source, which `message.ics` answers as bytes: the TUI writes it to a
 //! temp file and hands that to `$EDITOR` (`Action::OpenEventSource`), and
 //! this writes it under the app's cache directory, readable by its owner
@@ -40,7 +39,7 @@ use tauri::{AppHandle, State};
 
 use mp_client::queries;
 use mp_protocol::calendar::{
-    CalendarEvent, CalendarInfo, CalendarViewParams, CalendarViewResult, EventFrontmatter,
+    CalendarInfo, CalendarViewParams, CalendarViewResult, EventFrontmatter,
 };
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
@@ -53,7 +52,7 @@ use crate::session::{Budgeted, Door, PendingKind, SessionHandle};
 /// invitation fold, daemon-side, which never reach a server.
 const VIEW_BUDGET: Duration = Duration::from_secs(15);
 
-/// One `event.get` or `calendar.set_visibility`.
+/// One `calendar.set_visibility`.
 const EVENT_BUDGET: Duration = Duration::from_secs(10);
 
 /// One `invite.ics` blob read.
@@ -150,16 +149,6 @@ pub fn calendar_view_on(
         ..CalendarViewParams::default()
     };
     queries::calendar_view(&q, &params).map_err(|e| GuiError::from_call(&e, Addressing::Params))
-}
-
-/// One event by its id, a server id or `imip:<row_id>`.
-pub fn event_get_on(door: &Door, account: &str, event: &str) -> Result<CalendarEvent, GuiError> {
-    let q = Budgeted {
-        door,
-        budget: EVENT_BUDGET,
-    };
-    queries::event_get(&q, account, event)
-        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
 }
 
 /// Answer `event` with `response`, the TUI's respond overlay: an operation
@@ -528,19 +517,6 @@ pub async fn calendar_view(
     .await
 }
 
-/// One event.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn event_get(
-    session: State<'_, SessionHandle>,
-    account: String,
-    event: String,
-) -> Result<CalendarEvent, GuiError> {
-    with_door(&session, move |_, door| {
-        event_get_on(door, &account, &event)
-    })
-    .await
-}
-
 /// The Graph probe; see [`invite_refusal_on`].
 #[tauri::command(rename_all = "snake_case")]
 pub async fn invite_refusal(
@@ -633,8 +609,6 @@ mod tests {
             calendar_set_visibility_on(&door, "home", "nope", true),
             Err(GuiError::NotFound { .. } | GuiError::Protocol { .. })
         ));
-        let design = event_get_on(&door, "home", "AAMkAD-design").expect("get");
-        assert!(design.online_meeting_url.is_some());
     }
 
     #[cfg(unix)]
