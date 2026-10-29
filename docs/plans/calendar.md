@@ -1,8 +1,9 @@
 # Design: server-side calendar
 
-> Status: design, nothing implemented (2026-10-28). Implementer-facing.
+> Status: phase 1 built (2026-10-29, branch `calendar-phase-1`); phases 2 to 4 are design. Implementer-facing.
+> Built: [architecture.md](../architecture.md), "Server calendar", and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", describe what phase 1 shipped.
 > Scoping: `.sync/calendar-scoping/index.html` and Sylvain's comment export of 2026-10-28.
-> Decisions: `decision-log.md`, entries of 2026-10-28.
+> Decisions: `decision-log.md`, entries of 2026-10-28 (the plan) and 2026-10-29 (phase 1).
 > Issues: PERSO-200 (phase 1), PERSO-255 (phase 2), PERSO-256 (phase 3), PERSO-257 (phase 4), PERSO-254 (CalDAV provider choice, Sylvain's task).
 > Predecessor: [calendar-invites.md](calendar-invites.md), the iMIP path, which stays for accounts without a calendar backend.
 
@@ -13,7 +14,7 @@ Each account reaches its server calendar through one backend: Microsoft Graph, E
 ## Decision summary
 
 Sylvain settled D1 to D5, D9 and D10, and the decision log carries their why and their rejected options.
-The other entries are design choices of this plan and stay open to revision during implementation.
+The other entries are design choices of this plan; phase 1 built D6, D7, D8 and D11 as written, and the decision log's entries of 2026-10-29 carry the choices phase 1 made on top of them.
 
 - D1, backend order.
   Graph comes first, then EWS for TUM, then CalDAV.
@@ -45,7 +46,7 @@ The other entries are design choices of this plan and stay open to revision duri
   The first release is phases 1 and 2 on Graph accounts.
   EWS reaches the same cut in phase 3 and CalDAV in phase 4; on CalDAV, proposing a new time (an iTIP `COUNTER`) ships only if the chosen server supports it.
 - D10, the TUI and the desktop app both get a week grid.
-  Both show agenda, day and week views; the desktop Calendar view has no week grid yet.
+  Both show agenda, day and week views, the week grid built in phase 1 in both clients.
   calcure (<https://github.com/anufrievroman/calcure>, a Python terminal calendar) is the layout reference for the TUI.
 - D11, sync by polling on every backend to start with.
   Graph webhooks need a public HTTPS endpoint for Microsoft to call, which a local daemon does not have.
@@ -55,16 +56,15 @@ The other entries are design choices of this plan and stay open to revision duri
 
 ## Current state
 
-- The iMIP path of [calendar-invites.md](calendar-invites.md) is built: the daemon parses the `.ics` of a mail and keeps it as a sidecar.
-- `mp invite accept|tentative|decline` sends a `METHOD:REPLY` mail, and `mp send --invite` sends a `REQUEST` for a timed or all-day event, with updates through `--uid` and `--sequence`; `CANCEL` and `SEQUENCE` are handled.
-- Attendee status is folded from `REPLY` mails.
-- The agenda (`calendar.events`) is derived from invitation mails only.
-  An event created in Outlook or on the phone, or accepted elsewhere without a mail, never appears.
-- A recurring event shows as a text summary, with no expanded occurrences.
-- The TUI has a calendar view and an RSVP overlay; the desktop app has a Calendar view, an invite card and a "New invitation" form.
-- Graph accounts are refused for RSVP and for sending invitations.
-- `GRAPH_SCOPES` (`crates/mp-core/src/oauth2.rs`) holds `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` and `offline_access`, with no calendar scope, and the token code does not detect a missing scope.
-- The daemon serves `calendar.events`, `calendar.rsvp`, `calendar.rebuild` and `send.invite`.
+After phase 1:
+
+- A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
+- Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
+- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events`, `calendar.rsvp` and `send.invite` stay as they were.
+- The CLI has `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, and `mp invite` answers through `event.respond`.
+- The TUI and the desktop app show agenda, day and week layouts with an event card, a calendars panel and a respond dialog with a comment and the send-response choice.
+- `GRAPH_SCOPES` holds `Calendars.ReadWrite`; a token without it gets a re-login prompt in every client, and mail keeps working.
+- Graph accounts are still refused for iMIP answers and for sending invitations; creating events waits for phase 2.
 - cal-cli (`~/code/side-projects/cal-cli`, Python) reads and writes the TUM calendar through EWS (exchangelib, password) and Gmail through the Google Calendar API, with free/busy and configured rooms.
 
 ## Accounts and backends
@@ -79,10 +79,11 @@ The other entries are design choices of this plan and stay open to revision duri
 
 ### Account setting
 
-Each account gains a calendar backend setting next to its mail settings, provisional name `calendar_backend`, with the values `graph`, `ews`, `caldav` and `none`.
+Each account has a calendar backend setting next to its mail settings, `calendar_backend`, with the values `graph`, `ews`, `caldav` and `none`.
 An account with `auth_method = "graph"` defaults to `graph`; every other account defaults to `none`.
-`ews` reuses the account's stored password and takes an endpoint (`https://xmail.mwn.de/EWS/Exchange.asmx` for TUM, or autodiscovery); `caldav` takes a server URL and its own credential in the secrets store when it differs from the mail one.
-The setup wizards and `mp config` ask for it in all three clients.
+Phase 1 reads the key and shows the resolved value in `mp config show`; `ews` and `caldav` are refused as not supported yet and read as no backend.
+`ews` will reuse the account's stored password and take an endpoint (`https://xmail.mwn.de/EWS/Exchange.asmx` for TUM, or autodiscovery); `caldav` will take a server URL and its own credential in the secrets store when it differs from the mail one.
+The setup wizards ask for it once a second backend exists, in phase 3; with Graph alone the default is the only useful value.
 
 ### Neutral event model
 
@@ -92,15 +93,16 @@ All-day events keep a date range with an exclusive end, as in iCalendar; the Gra
 
 ### Event store
 
-Each account gets a set of tables in the existing sqlite store, holding calendars (name, colour, visibility, permissions) and the expanded occurrences of the rolling window, plus each backend's sync token.
-Visibility per calendar is a local preference and survives a cache rebuild.
-`calendar.rebuild` drops the cache of an account and resyncs it from the server; on an iMIP account it keeps its current meaning, refolding the invitation mails.
+Each account has six tables in its sqlite store (`src/store/calendar.rs`): the calendars (name, colour, permissions), the visibility preferences, the expanded occurrences of the rolling window, each calendar's sync token with the window it was minted for, what a backend resolved about a series, and the server event each invitation mail stands for.
+Visibility per calendar is a local preference in a table of its own, which a cache drop leaves alone and a store rebuild carries over.
+`calendar.rebuild` drops the cache of an account and resyncs it from the server; on every account it keeps its iMIP meaning, refolding the invitation mails.
 
 ### Sync
 
-- Polling on the daemon's tick, plus an immediate refresh after every write.
-- Graph: `calendarView/delta` over the window, with a full resync on HTTP 410.
-  A delta token is bound to the start and end of the window its first request named, so as the rolling window moves the daemon re-baselines on a schedule, daily to start with, with a fresh full delta over the new window.
+- Polling after the mail pass of the daemon's tick, plus an immediate sync after every answer, both under one lock per account.
+- Graph: `calendarView/delta` over the window, with a full resync on HTTP 410, `syncStateNotFound` or `resyncRequired`.
+  A delta token is bound to the start and end of the window its first request named, so the daemon passes a token only for the window it was minted for and re-baselines daily, with a fresh full delta over the moved window.
+- `calendar.changed` goes out only when a sync moved the cached rows.
 - EWS: `SyncFolderItems` on each calendar folder, then `FindItem` with a `CalendarView` over the window to get the expanded occurrences.
 - CalDAV: `sync-collection` (RFC 6578) where the server supports it, else a ctag check and an etag comparison.
 - Graph and EWS expand recurring events on the server; CalDAV needs client-side `RRULE` expansion.
@@ -116,12 +118,15 @@ Visibility per calendar is a local preference and survives a cache rebuild.
 ### Time zones
 
 Graph and EWS name Windows time zones (`W. Europe Standard Time`), so the engine carries the CLDR Windows-to-IANA table.
-Graph accepts a `Prefer: outlook.timezone` header, which fixes the zone of the times it returns, but the event's own zone fields still come as Windows names.
+The table is generated from CLDR's `windowsZones.xml` into `crates/mp-core/src/windows_zones.rs` by `scripts/gen-windows-zones.py`, with no new dependency.
+The Graph backend sends no `Prefer: outlook.timezone`, so times come back in UTC, and reads the event's own zone from `originalStartTimeZone`; a zone the table lacks (`tzone://Microsoft/Custom`) is labelled UTC with the instants exact.
+An all-day event's `RECURRENCE-ID` is keyed on its date both from a mail and from the server, so the two sources dedup.
 
 ### Credentials and scopes
 
-`GRAPH_SCOPES` gains `Calendars.ReadWrite`.
-The daemon records the scopes a token was granted, and a Graph account whose token lacks the calendar scope gets a re-login prompt in every client instead of a failing call.
+`GRAPH_SCOPES` holds `Calendars.ReadWrite`, and an account asks for it only when its calendar backend is Graph.
+The token cache records the scopes Entra granted, and a refresh whose scopes are refused is retried once without the calendar scope, so mail survives a tenant that has not consented.
+A Graph calendar account whose token lacks the scope reports it through the existing `account.credentials` (`missing_scopes`) and a `calendar:<name>` health check, which every client shows as the re-login prompt `calendar needs a re-login (mp config oauth2-login -A <name>)`; the calendar calls refuse with the same prompt instead of failing at the server.
 EWS reuses the IMAP password; nothing new is stored for TUM.
 
 ## Backend notes
@@ -129,7 +134,10 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 ### Graph
 
 - A hand-rolled client on reqwest and serde, about a dozen endpoints; the auth already exists.
-- Read: `GET /me/calendars`, then `GET /me/calendars/{id}/calendarView/delta` per calendar if v1.0 offers it, else `GET /me/calendarView/delta`; phase 1 checks which.
+- Read: `GET /me/calendars`, then `GET /me/calendars/{id}/calendarView/delta` per calendar, which v1.0 routes but documents only for the default calendar.
+  When it answers 400 or 404 the default calendar falls back to `GET /me/calendarView/delta` and any other calendar to a plain `GET /me/calendars/{id}/calendarView` read in full each sync, the fallback remembered until the next baseline.
+  A calendar whose ACL refuses the read fails on its own and the others still sync.
+- Series: Graph gives each occurrence its own `iCalUId`, so an occurrence's `UID` is read once per series from its master (`GET /me/events/{seriesMasterId}`) and cached.
 - Delta tokens: each token is bound to the window of its first request, so the scheduled re-baseline of the rolling window (see "Sync") starts a new delta round.
 - Ids: every request sends `Prefer: IdType="ImmutableId"`, so an occurrence or an event moved between folders keeps its id.
 - Respond: `POST /me/events/{id}/accept|tentativelyAccept|decline` with `comment` and `sendResponse`; `tentativelyAccept` and `decline` take `proposedNewTime` for proposing a new time.
@@ -165,33 +173,30 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 
 ## Protocol sketch
 
-Method names are provisional; `calendar.events`, `calendar.rsvp` and `send.invite` fold into them, and `docs/daemon-protocol.md` gets the final shapes when phase 1 lands.
+Phase 1's methods are final and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", holds their shapes: `calendar.list {account?}`, `calendar.set_visibility {account, calendar, visible}`, `calendar.view {start, end, accounts?, calendars?, include_hidden?, zone?}`, `event.get {account, event}`, `event.respond {account, event, response, comment?, send_response?}` and the `calendar.changed {account}` event; `calendar.rebuild {account}` also drops and resyncs an account's server cache.
+An invitation mail's event has the id `imip:<row_id>`, and `event.respond` answers it with the iMIP reply `calendar.rsvp` sends; `calendar.events`, `calendar.rsvp` and `send.invite` stay until the later phases fold them in.
+The later phases' methods are provisional:
 
-- `calendar.list {account?}`: calendars per account, with colour, visibility and permissions.
-- `calendar.set_visibility {calendar, visible}`: shows or hides a calendar.
-- `calendar.view {range, calendars?}`: the expanded occurrences in a range, merged across accounts.
-- `event.get {event}`: one event with its attendees and their status.
-- `event.respond {event, response, comment?, send_response, proposed_time?}`: accept, tentative or decline, optionally proposing a new time.
+- `event.respond` gains `proposed_time` for proposing a new time (phase 2).
 - `event.create {calendar, fields, attendees, recurrence?, online_meeting?, reminder?}`: a new event; with attendees the server sends the invitations.
 - `event.update {event, scope, fields}` and `event.cancel {event, scope, comment?}`: the organizer's operations, with `scope` naming the occurrence or the series.
 - `calendar.freebusy {addresses, range}`: availability of attendees and rooms when picking a time.
-- `calendar.rebuild {account}`: drops and resyncs an account's cache.
 - Reminders reach the clients as daemon events, and the desktop notification follows the existing notification path.
 
 Every write is an `operation.*` with the existing journal, so an interrupted create or respond reports where it stopped.
 
 ## Client surfaces
 
-- CLI: provisional `mp calendar list|view|show`, `mp event respond|create|update|cancel` and `mp calendar freebusy`, with `--json` for agents; `mp invite` and `mp send --invite` keep working on iMIP accounts.
-- TUI: agenda, day and week views on the calcure layout model, an event card, a respond overlay that adds the comment, the send-response choice and the proposed time to today's RSVP overlay, and an event form for create and update.
-- Desktop: the Calendar view gains day and week grids beside the agenda, and the "New invitation" form becomes the event form.
+- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; `mp event create|update|cancel` and `mp calendar freebusy` are provisional names for phase 2, and `mp send --invite` keeps working on iMIP accounts.
+- TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; the proposed time and an event form for create and update come in phase 2.
+- Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; the "New invitation" form becomes the event form in phase 2.
 - Every new capability gets its row in [parity-matrix.md](../parity-matrix.md) with its CLI, TUI and desktop location, and the website pages follow the CLI.
 
 ## Phases
 
-### Phase 1, Graph read, views and server-side responses (PERSO-200)
+### Phase 1, Graph read, views and server-side responses (PERSO-200), built
 
-- Check first whether Graph v1.0 offers the per-calendar `/me/calendars/{id}/calendarView/delta` or only `/me/calendarView/delta`; the sync of calendars beyond the default one follows from the answer.
+- The per-calendar `/me/calendars/{id}/calendarView/delta` is tried first, with the fallbacks of "Backend notes", Graph, since the route is undocumented beyond the default calendar; which path the EVOQS tenant takes is recorded per calendar in the store.
 - Event store as a disposable cache of the rolling window, rebuilt from the server.
 - `CalendarBackend` trait over the neutral event model, and the per-account `calendar_backend` setting.
 - `calendar.list` and `calendar.view` over Graph.
@@ -241,9 +246,8 @@ Candidates, each needing Sylvain's approval when its phase starts:
 - libdav, and calcard or icalendar, for CalDAV and iCalendar.
 - rrule, for client-side recurrence expansion.
 - ews (Thunderbird) or quick-xml, for EWS.
-- A Windows-to-IANA zone table from CLDR, as a crate or as a generated file.
 
-Graph needs nothing new beyond reqwest and serde.
+Phase 1 needed nothing new: Graph runs on reqwest and serde, and the Windows-to-IANA table is a file generated from CLDR.
 
 ## Risks
 

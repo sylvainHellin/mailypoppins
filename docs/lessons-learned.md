@@ -3342,3 +3342,20 @@ The daemon's sync tick never fed the contacts cache, so a correspondent seen onl
 Each observation is now numbered from a process-wide sequence drawn where its row commits, and a rebuild takes a window mark before its walk reads the store; a number drawn at merge time is always newer than any past mark and can never be recognised as already counted.
 A rebuild that replaces the cache carries over what every concurrent writer merged meanwhile, sends included, through that window.
 Only data actually in the stored row can be "already counted": the Sent copy has no Bcc header, so a send's Bcc recipients are always merged.
+
+## A Mail selection found again by selector takes the row's message ID too (2026-10-29, PERSO-200)
+
+The desktop app opens an event's invitation mail with a selection that knows only the selector (`message_id: ""`), and the list cursor matches a row on message ID and selector together.
+Confirming the selection while keeping the empty message ID, or the selector the event carried, leaves the cursor on no row and Mail shows nothing.
+A listed twin row adds `/<uid>` to its selector (`Selector::for_listed`, PERSO-244), so the exact selector match fails as well; the re-check now compares selectors with the UID set aside, prefers the row with the event's row id, and copies the row's message ID and selector into the selection.
+
+## A hand-edited ts-rs binding has to follow the Rust doc comment too (2026-10-29, PERSO-200)
+
+ts-rs copies a type's Rust doc comment word for word into the `.ts` binding, and `generated_bindings_are_current` compares the whole file text, comments included.
+Rewording a doc comment on an exported type is therefore a binding change: a TS file edited by hand on a machine that cannot run the desktop crate's tests has to carry the new wording exactly, in ts-rs's ` * ` block layout, or the Mac's test run fails on a comment.
+
+## TestDaemon's data-dir override does not reach a bare thread (2026-10-29, PERSO-200)
+
+`TestDaemon` carries the test thread's data and config overrides onto its runtime and session threads, but not onto a bare `std::thread::spawn` or the daemon's `HOOK_RUNTIME` threads, which start with no override (see "The data-root override is thread-local" above).
+A daemon path that reaches the store from such a thread resolves the developer's real data directory and writes there from a test.
+A test of that path runs a real `mp daemon run` process with the data directory in its environment, as `tests/cli_calendar.rs` does, instead of the in-process fixture.

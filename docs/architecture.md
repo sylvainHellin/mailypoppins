@@ -459,6 +459,60 @@ After every tick that ran a body, an account with `[[accounts.hooks]]` also runs
 The watcher, the scheduler and the drainer publish through `src/daemon/runtime/publish.rs`, which commits the tick's `sync.completed` and one count change per mailbox whose counts differ from the canonical state's.
 Changes on a non-active account set `has_unseen` in the TUI, which is the badge in the status bar.
 
+## Server calendar
+
+PERSO-200 gives every account a calendar view over two sources: the server calendar of an account with a calendar backend, and the iMIP invitation mails every account holds ([plans/calendar.md](plans/calendar.md) carries the design, [daemon-protocol.md](daemon-protocol.md#the-server-calendar) the wire shapes).
+Phase 1 builds the engine against Microsoft Graph; EWS and CalDAV are later phases.
+
+### Event model and backends
+
+`mp-core/calendar_model.rs` is the neutral model every backend converts into: `Calendar` and `Event`, an event's times as UTC instants plus its IANA zone, an all-day event as a date range with an exclusive end, and `EventKey`, the `UID` plus `RECURRENCE-ID` that identifies an event across sources.
+Graph names zones the Windows way, which `mp-core/windows_zones.rs` maps to IANA through the CLDR table `scripts/gen-windows-zones.py` generates; a zone the table lacks is labelled UTC with the instants exact.
+
+`src/calendar_backend/mod.rs` holds the `CalendarBackend` trait: `list_calendars`, `sync_window` (one calendar's events of the window from a token, expanded into occurrences), `respond` (accept, tentative or decline with a comment and the send-response choice), `remember_series` and `event_for_message` (the server event an invitation mail stands for).
+Its futures are `Send`, and `AccountBackend` is the closed set `backend_for` returns, dispatched statically.
+Which backend serves an account is the `calendar_backend` setting (`graph`, `ews`, `caldav`, `none`), defaulting to `graph` on an `auth_method = "graph"` account and to `none` elsewhere, independent of the mail transport; `ews` and `caldav` are refused as not supported yet and read as no backend.
+`fake.rs` is a server calendar in memory, which a daemon slice or CLI test arms through `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`.
+
+`src/calendar_backend/graph.rs` reads each calendar through `GET /me/calendars/{id}/calendarView/delta` over the window, falls back to the documented `GET /me/calendarView/delta` for the default calendar when that route answers 400 or 404, and to a plain `calendarView` read in full at every sync for any other calendar.
+Every request sends `Prefer: IdType="ImmutableId"`; HTTP 410, `syncStateNotFound` and `resyncRequired` drop the delta link for a fresh baseline; an occurrence's `UID` is read once per series from its master and cached; a calendar whose ACL refuses the read fails on its own, and the account's other calendars still sync.
+The HTTP layer is the `GraphFetch` seam over the mail client's `GraphClient`, so the paging, the fallbacks and the 410 handling are tested without a tenant.
+
+### Store tables
+
+`src/store/calendar.rs` keeps a disposable cache of the rolling window, one month back and twelve months ahead, in six additive tables of the account's store: `calendars` (as the server last listed them, in its order), `calendar_prefs` (the local visibility, a calendar with no row being visible), `calendar_events` (one row per occurrence, the serialised `Event` beside the columns a range query filters on), `calendar_sync` (each calendar's token with the window it was minted for, the last baseline and the read path), `calendar_series` (what a backend resolved about a series) and `calendar_invite_events` (the server event an invitation mail stands for, a mail standing for none included).
+Dropping the cache is a `DELETE` of every table but `calendar_prefs`, so a hidden calendar stays hidden across `calendar.rebuild`, and the schema-version rebuild of the whole store carries the preferences over (`store/rebuild.rs`).
+
+### Sync
+
+`src/calendar_sync.rs` syncs one account: it lists the calendars, stores them, and syncs each calendar's window from its stored token.
+A token is passed only while it is good for the window, since a Graph delta link is bound to the window its first request named, so a moved window or a baseline older than a day starts a fresh baseline.
+The daemon runs `poll_account` after the mail pass of every tick and `sync_account` right after an answer, both under `account_lock`, the per-account lock `calendar.rebuild` takes too, so two syncs never run one account from the same token.
+A sync publishes `calendar.changed` only when it moved the cached rows, so a calendar read in full every tick stays quiet; a sign-in without the calendar scope is skipped quietly there, since the health check already prompts.
+
+### The merged view
+
+`src/calendar_view.rs` serves `calendar.view` and `event.get`.
+The server events come from the cache and the invitation mails from the iMIP agenda (`src/agenda.rs`), each converted into an `Event` under the virtual calendar `imip` with the mail as its source (`imip:<row_id>`).
+An invitation mail whose `EventKey` a cached server event of the accounts in view carries is dropped, wherever the server copy sits in time and whether or not its calendar is shown, so hiding a calendar never brings the mail's copy back; server events are never deduplicated against one another, and a server series' occurrences replace its invitation mail.
+Visibility is filtered here, from `calendar_prefs`, for server calendars and `imip` alike.
+
+### Respond routing
+
+`event.respond` (`src/daemon/methods/calendar.rs`) routes on the event id.
+A server event is answered through the account's backend, Graph's `accept`, `tentativelyAccept` or `decline` with the comment and `sendResponse`, and the account's calendar is synced at once.
+An invitation mail's event (`imip:<row_id>`) is answered with the iMIP reply `calendar.rsvp` sends, over SMTP through the durable outbox, the comment following the reply's body; `send_response: false` is refused there, because the iMIP path reads the user's answer back from the reply mail it sent.
+`message.invite` names an invitation mail's server event (`event_id`) on an account with a backend, so the reader's invitation card answers the server event in its place.
+The CLI's `mp event respond` and `mp invite`, the TUI's respond overlay and the desktop app's event card all answer through `event.respond`; `calendar.rsvp` stays as the iMIP path's own address.
+
+### Calendar scope prompt
+
+`Calendars.ReadWrite` is in `GRAPH_SCOPES`, and `oauth2::scopes_for` asks for it only on an account whose calendar is Graph's.
+The token cache records the scopes Entra granted; a cache written before PERSO-200 records none and counts as lacking the scope.
+A refresh whose scopes Entra refuses is retried once without the calendar scope, so mail keeps working on a tenant that has not consented, and only a scope refusal is retried that way.
+A Graph calendar account whose token lacks the scope reports it as `missing_scopes` in the existing `account.credentials` answer and as a `calendar:<name>` health check with the line `calendar needs a re-login (mp config oauth2-login -A <name>)`; `event.respond` refuses with the same prompt as a `-32603` with `{account, missing_scopes}` without reaching the server, and `calendar.rebuild` reports it as its server resync's error.
+No new method carries the prompt: `mp config show` prints the line, the desktop Settings view says the account needs a new sign-in, and the TUI shows a banner over the Calendar view, asking `account.credentials` again on `calendar.changed` and on an account's ready so the banner leaves after a sign-in; `config.oauth2_login` re-evaluates the health check once a sign-in succeeds.
+
 ## Module map
 
 | File | Responsibility |
@@ -468,7 +522,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/signatures.rs` | App-managed signature files (#0107): one Markdown file per signature at `config_dir()/signatures/<name>.md`, the file stem being both key and display name. Name validation, list/read/write/create/rename/delete, the per-account default via `app_state`, and `migrate_config_signatures`, the one-time copy out of the legacy `[accounts.*.signatures]` tables. |
 | `mp-core/app_state.rs` | App-owned state that is not user-edited config (#0107): `<data_dir>/state.json`, pretty-printed JSON, load/save modelled on `contacts::cache`. Holds the per-account default signature; a missing or corrupt file means "nothing recorded" and is never fatal. |
 | `mp-core/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in). See [secrets.md](secrets.md). |
-| `mp-core/oauth2.rs` | OAuth2 device-code flow of a Graph account, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, `GRAPH_SCOPES`. |
+| `mp-core/oauth2.rs` | OAuth2 device-code flow of a Graph account, encrypted token cache at `tokens_dir()/<account>.enc` with the granted scopes, refresh with its mail-only retry on a scope refusal, `GRAPH_SCOPES`, `scopes_for` and the calendar re-login prompt (PERSO-200). |
 | `src/ingest.rs` | The receive-path writer: fetched message to one `messages` row plus blobs, FTS maintenance, cursors, `prune_vanished`, `apply_seen_flags`, `graph_uid` |
 | `mp-core/search.rs` | The unified search grammar (#0086a): one parser (`parse`) to one AST (`Query`/`Clause`/`Term`, plus the `in:`/`message-id:` directives), the CLI-flag builder (`from_cli`), and four renderers (`to_imap` with a `has:attachment` post-filter split, `to_gmail`/`to_gmail_search_command` for `X-GM-RAW`, `to_graph` for one Graph request, a KQL `$search` or the Message-ID `$filter`, never both, `to_fts` for the local index). Malformed queries return a caret-pointed `ParseError`. `fts_expression` survives as a thin renderer wrapper. `mp-core/imap_query.rs` beside it holds the three pure IMAP string helpers it shares with `imap_client::search` (`normalize_message_id`, `bracketed_message_id`, `parse_date_to_imap`). |
 | `mp-core/selector.rs` + `src/selector.rs` | The `mp://account/mailbox/key` grammar: parse, resolve, format. Namespace fixed by the command, never sniffed. Split at the resolvers: the grammar is in `mp-core`, the two indexed lookups stay beside the store. |
@@ -494,6 +548,11 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/contacts/` + `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json` stamped with the `EXTRACTOR_VERSION` that built it. The rebuild, the sync hook (guarded pass, first sync and runtime tick) and the send hook fold a message in through one rule, `observe_message`, so an incrementally kept index equals a rebuild; a read (`contact.search`, `contact.stats`) rebuilds a missing or differently stamped cache before it answers, on a blocking thread and once per account however many reads wait (PERSO-234). Every load-merge-save and every rebuild commit holds the cache's per-account lock (`with_cache_lock`), saves replace the file atomically, and which sync and send observations a rebuild already counted is decided by when each was made, not by row id, which SQLite reuses (`contacts::window`): every observation is numbered from one process-wide counter right after its insert (a send's Sent copy as the outbox stores it, for the send that claimed it), a rebuild opens a window before its walk lists the store, merges during the window log what they saw for the commit to fold in, and once the index is written a merge drops observations numbered before the window, so a rebuild racing a sync or a send loses no correspondent. CLI: `mp contacts {search,rebuild,stats}`, rendering only. Split at the store read: the cache, the filter, the ranker, the matcher, the vCard writer and the observation rule are in `mp-core`, the rebuild and the send/sync hooks stay. |
 | `src/config_cmd/` | Config subcommands: init wizard, add-account, show, set-password, oauth2-login, reset-secrets, path |
 | `src/calendar_cmd.rs` | What `mp calendar` and `mp event` print (PERSO-200): the `mp calendar rebuild` report (the invite fold, which writes nothing, and the server resync), the date grammar and day ranges of `mp calendar view`, and the agenda, day and week layouts, the calendar list and the event card, pure functions over the `mp_protocol::calendar` wire types and the viewer's zone |
+| `mp-core/calendar_model.rs` + `mp-core/windows_zones.rs` | The neutral calendar model every backend converts into (PERSO-200), and the generated CLDR Windows-to-IANA zone table ([Server calendar](#server-calendar)) |
+| `src/calendar_backend/` | The `CalendarBackend` trait, `backend_for` and the statically dispatched `AccountBackend`, the Graph backend over the `GraphFetch` seam, and the in-memory fake tests arm (PERSO-200) |
+| `src/store/calendar.rs` | The account's calendar cache: the six calendar tables, the window queries, the visibility preferences and `drop_calendar_cache` (PERSO-200) |
+| `src/calendar_sync.rs` | One account's calendar sync from its stored tokens, the daily re-baseline, the per-account lock, and the invitation mail to server event lookup (PERSO-200) |
+| `src/calendar_view.rs` | The merged view `calendar.view` and `event.get` serve: the cached server events and the invitation mails' events, deduplicated on `UID` plus `RECURRENCE-ID`, filtered by visibility (PERSO-200) |
 | `mp-core/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
 | `mp-core/sync_health.rs` | `SyncHealth`, the per-account outcome of the last sync, plus the `mp sync` failure summary and exit code (#0071) |
 | `mp-core/timing.rs` | `TimingSpan`, which emits `[TIMING]` log lines with millisecond precision. Filter logs with `rg '\[TIMING\]'`. |

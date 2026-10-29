@@ -45,7 +45,7 @@
 //! `event.respond` answers through the account's calendar backend when the
 //! event is a server event, and through the iMIP reply of `calendar.rsvp` when
 //! it is an invitation mail's (`imip:<row_id>`); `calendar.rsvp` stays as the
-//! iMIP path's own address until the clients have moved to `event.respond`.
+//! iMIP path's own address, though every client answers through `event.respond`.
 //! An answer through the backend is followed by an immediate calendar sync,
 //! and every answer that went through announces `calendar.changed`.
 //!
