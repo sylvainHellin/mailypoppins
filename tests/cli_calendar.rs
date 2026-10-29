@@ -115,11 +115,17 @@ struct Slice {
 
 impl Slice {
     fn start() -> Slice {
+        Slice::start_rejecting(&[])
+    }
+
+    /// A slice whose SMTP fake refuses `rejected` for good.
+    fn start_rejecting(rejected: &[(&str, &str)]) -> Slice {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tempfile::tempdir().unwrap();
         seed_outlook(tmp.path());
         let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, weekly());
-        let transport = send_fixture::fake_transport(&ledger.path().join("transport.log"));
+        let transport =
+            send_fixture::fake_transport_rejecting(&ledger.path().join("transport.log"), rejected);
         let env = [
             (FAKE_CALENDAR_ENV, spec.as_str()),
             (send_fixture::FAKE_TRANSPORT_ENV, transport.as_str()),
@@ -587,4 +593,24 @@ fn mp_invite_still_answers_an_imip_invitation() {
         graph.contains("RSVP is not supported for Graph accounts yet"),
         "{graph}"
     );
+}
+
+/// An iMIP reply the organizer's server refused is a failure on both paths:
+/// `--json` still prints the object, `"delivered": false`, and exits 1 with
+/// the same error on stderr (PERSO-200).
+#[test]
+fn an_undelivered_imip_reply_fails_with_and_without_json() {
+    let slice = Slice::start_rejecting(&[("chair@tum.de", "550 5.1.1 no such mailbox")]);
+    let event = format!("imip:{}", row_of(slice.root(), IMIP));
+
+    let out = slice.run(&["event", "respond", &event, "accept", "-A", IMIP, "--json"]);
+    assert!(!out.status.success(), "--json exited 0");
+    let result: Value = serde_json::from_slice(&out.stdout).expect("the object on stdout");
+    assert_eq!(result["via"], "imip", "{result}");
+    assert_eq!(result["delivered"], false, "{result}");
+    let stderr = plain(&String::from_utf8_lossy(&out.stderr));
+    assert!(stderr.contains("Failed to send the RSVP"), "{stderr}");
+
+    let plain_err = slice.err(&["event", "respond", &event, "decline", "-A", IMIP]);
+    assert!(plain_err.contains("Failed to send the RSVP"), "{plain_err}");
 }

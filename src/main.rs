@@ -3890,17 +3890,21 @@ async fn routed_event_respond(
 ) -> Result<()> {
     let mut connection = operation_session().await;
     let settled = respond(&mut connection, account, event, response, answer).await?;
+    // An iMIP reply that did not leave is a failure, as `mp rsvp` reports it:
+    // no tick line before the error, and with `--json` the object still
+    // printed, so a script reads `"delivered": false` and exit status 1.
+    let undelivered = settled.via == "imip" && !settled.delivered;
     if json {
         println!("{}", serde_json::to_string_pretty(&settled)?);
-        return Ok(());
     }
-    // An iMIP reply that did not leave is a failure, as `mp rsvp` reports it:
-    // no tick line before the error.
-    if settled.via == "imip" && !settled.delivered {
+    if undelivered {
         return Err(anyhow!(
             "Failed to send the RSVP for {} to the organizer",
             settled.event
         ));
+    }
+    if json {
+        return Ok(());
     }
     let how = match (settled.via.as_str(), settled.delivered) {
         ("imip", _) => "iMIP reply sent to the organizer",
