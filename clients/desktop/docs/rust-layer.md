@@ -367,6 +367,7 @@ A range the daemon cannot read is a `protocol` error with its code.
 
 `calendar_list` is `calendar.list {account?}`: every account's calendars (`CalendarInfo`: `account`, `id`, `name`, `color`, `is_default`, `can_edit`, `visible`, `backend`), the invitation mails of an account as its `imip` calendar.
 `calendar_set_visibility` is `calendar.set_visibility {account, calendar, visible}`, a command that answers at once: the daemon keeps the preference across a cache rebuild and publishes `calendar.changed {account}`, which is what reads the view again; an unknown calendar is the daemon's `-32602` sentence.
+`calendar.list`, `calendar.view`, `calendar.set_visibility` and `event.respond` are in `REQUIRED_CAPABILITIES`, so a daemon from before the calendar is a `capability_missing` at the handshake.
 
 `invite_source_open` is the TUI's `e` on an invitation mail's event (`Action::OpenEventSource`), with the event's `source.row_id`.
 It reads the row's `invite.ics` with `message.ics {account, row_id}` (`mp_client::queries::message_ics`, which decodes the base64 the wire carries), writes it to `renditions/invite-<account>-<row_id>.ics` under the app's cache directory, the directory 0700 and the file 0600, and opens that file with the external editor as `editor_open` does.

@@ -143,6 +143,10 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "message.ics",
     "message.invite",
     "calendar.rsvp",
+    "calendar.list",
+    "calendar.view",
+    "calendar.set_visibility",
+    "event.respond",
     "send.invite",
     "contact.search",
     "contact.rebuild",
@@ -1281,6 +1285,22 @@ mod tests {
     fn the_required_capabilities_cover_the_conversation_list() {
         assert!(REQUIRED_CAPABILITIES.contains(&"message.list_conversations"));
         assert!(REQUIRED_CAPABILITIES.contains(&"message.thread"));
+    }
+
+    /// The calendar view, its calendar list and visibility, and an event's
+    /// answer (PERSO-200) are required, so a daemon from before the calendar
+    /// is a `capability_missing` at the handshake rather than a calendar
+    /// that will not open.
+    #[test]
+    fn the_required_capabilities_cover_the_calendar() {
+        for method in [
+            "calendar.list",
+            "calendar.view",
+            "calendar.set_visibility",
+            "event.respond",
+        ] {
+            assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
+        }
     }
 
     #[test]
