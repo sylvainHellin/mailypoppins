@@ -18,7 +18,7 @@ Each entry then holds the remaining columns of the matrix:
 - Validation: the coverage that exists today.
 - Status: implementation and validation state.
 
-The matrix is a list rather than a table because eight columns over 133 rows is unreadable in an editor; the field names are the columns.
+The matrix is a list rather than a table because eight columns over 140 rows is unreadable in an editor; the field names are the columns.
 
 ### Classification vocabulary
 
@@ -366,7 +366,6 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6; `f` and the three rendition keys joined them in P5-U10c-I1.
   `f` is `message.fetch` `{account, mailbox, message_id}`, a durable operation that is idempotent over a message the store already holds: it answers with that row and `already_present: true` and opens no session, so the overlay keeps its "Already in the local store" line by branching on a boolean rather than matching a refusal.
   `Enter` / `e` / `y` are `RD-06`'s `message.materialise_markdown`.
-  One key still reads the store inline, and it is not this row's: `Action::OpenEventSource` on the agenda hands `$EDITOR` a row's `invite.ics` blob, which no `message.*` method serves.
 
 ### LST-10 Show the conversation a message belongs to
 
@@ -1200,64 +1199,106 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: routed (P4-U14); GUI shipped (M4, #0131); the index-changed event and the refused-build notice since the daemon leftovers (2026-10-22); `mp contacts search` says the notice on stderr, and the TUI, whose Contacts view reads the cache file, reads it again on `contact.changed`
 - Note: implicit workflow that keeps the index current as mail arrives.
 
-### CAL-01 RSVP to a received invitation
+### CAL-01 Answer a received invitation mail
 
 - Classification: GUI parity
-- Source anchor: `mp invite accept|tentative|decline <selector> [--mailbox]` (`src/main.rs`), TUI `tv` in the message context and `V` in the calendar view, `src/invite.rs`, `tests/imip_integration.rs`
-- Daemon surface: `calendar.rsvp` as an `operation.*`
-- GUI location: clients/desktop: the reader's invitation card has Accept, Tentative and Decline, disabled with the TUI's sentence for an invitation that cannot be answered; `tv` from the list or the reader, and `V` or the card's RSVP button in the Calendar view, open the RSVP choice (`a`, `t`, `d`, Enter), which calls `calendar_rsvp`, awaited as `rsvp`, and the settle says "Replied <response> to <summary>" (M4, #0131; reader.md, "Invitations", shell.md, "RSVP")
-- Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, and the successful reply through the daemon's fake transport); `clients/desktop/src/components/reader/invite.test.tsx` (`shows the event under the header with three enabled replies, and Accept sends and settles`, `tv opens the choice: a, t, d pick, j, k and Tab move, Enter sends the choice`, `opens the choice for the cursor row and sends it; the agenda row follows`, `a Graph account's row shows the daemon's sentence, from the probe`), `clients/desktop/src/app/rsvp.test.ts` (`names the reasons in the TUI's order and words: not a REQUEST, cancelled, superseded, the user's own, then Graph`), `clients/desktop/src-tauri/src/fixture.rs` (`calendar_rsvp_refuses_graph_first_then_settles_with_the_reply`, `rsvp_fail_fails_the_next_rsvp_and_parks_a_failed_outbox_row`), `clients/desktop/src-tauri/src/session.rs` (`an_rsvp_settled_by_the_requery_carries_its_kind_and_reply`)
-- Status: routed (P5-U6); GUI shipped (M4, #0131)
-- Note: whole-series only in v1, the reply travels as iMIP over SMTP, and the target message must carry an `invite.ics` blob.
-  The Graph refusal (`ANO-4`) is made before anything about the selector is examined, so a surface that shows the RSVP buttons disabled can say why without naming a resolvable message.
-  P5-U6 routed the TUI's `V` through it and gave the method a `row_id` address beside the selector, because an agenda row carries a `messages.id` and nothing else (#0050).
-  Three client-side checks stay ahead of the call, all three to keep the sentence the key has always printed: the row carries no invitation, the account is Graph, SMTP is not configured.
+- Source anchor: `mp invite accept|tentative|decline <selector> [--mailbox] [--comment TEXT] [--no-send-response]` (`src/main.rs`), TUI `tv` in the message context (`open_rsvp_overlay` in `clients/tui/src/app/keys.rs`), `src/invite.rs`
+- Daemon surface: `message.invite`, whose `event_id` names the server event an invitation mail stands for on an account with a calendar backend, then `event.respond` as an `operation.*` on that id, else on `imip:<row_id>`; `calendar.rsvp` stays as the iMIP path's own address, and no client calls it
+- GUI location: clients/desktop: the reader's invitation card from `invite_get` has Accept, Tentative and Decline, disabled with the TUI's sentence for an invitation that cannot be answered, and says where the answer goes; `tv` from the list or the reader opens the respond choice with a comment and, on a server event, "Send a response to the organizer"; every road calls `event_respond`, awaited as `rsvp`, and the settle says "Replied <response> to <summary>" (M4, #0131, PERSO-200; reader.md, "Invitations", shell.md, "Calendar", "Respond")
+- Validation: `tests/cli_calendar.rs` (`mp_invite_still_answers_an_imip_invitation`), `tests/daemon_calendar_slice.rs` (`message_invite_names_the_server_event`, `event_respond_on_an_invitation_mail_sends_the_imip_reply`), `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, `calendar_rsvp_refuses_a_graph_account_before_it_looks_at_anything_else`), `tests/imip_integration.rs`; `clients/desktop/src/components/reader/invite.test.tsx` (`shows the event under the header with three enabled replies, and Accept sends and settles`, `answers the server event message.invite names, and says the server calendar tells the organizer`, `tv offers the comment and the send-response choice, and sends them`, `tv opens the choice: a, t, d pick, j, k and Tab move, Enter sends the choice`), `clients/desktop/src/app/rsvp.test.ts` (`answers a card's server event, else the invitation mail's own`, `names the reasons in the TUI's order and words: not a REQUEST, cancelled, superseded, the user's own; the account is the daemon's call`), `clients/desktop/src-tauri/src/fixture.rs` (`event_respond_refuses_a_silent_imip_answer_then_settles_with_the_answer`, `rsvp_fail_fails_the_next_rsvp_and_parks_a_failed_outbox_row`), `clients/desktop/src-tauri/src/session.rs` (`an_rsvp_settled_by_the_requery_carries_its_kind_and_reply`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-200), on `event.respond` since then; routed (P5-U6) and GUI shipped (M4, #0131) on `calendar.rsvp` before
+- Note: whole-series only in v1, and the target message must carry an `invite.ics` blob.
+  On a Graph account whose server calendar holds the invitation's event the answer goes through the server, as Outlook sends it, and `--no-send-response` records it without telling the organizer; every other answer is the iMIP reply over SMTP through the durable outbox, where `send_response: false` is refused because the reply mail is the answer.
+  The iMIP path still refuses a Graph account (`ANO-4`) before it examines anything about the selector, so an invitation mail the server calendar does not hold is answered nowhere on Graph.
+  The TUI and the desktop keep the client-side guards ahead of the call, to keep the sentences the key has always printed: no invitation, the Sent mailbox's organizer, a server-only hit, then the card's refusal.
 
-### CAL-02 Agenda view with an upcoming and past toggle and a refresh
-
-- Classification: GUI parity
-- Source anchor: TUI `t` and `r` in the calendar view, `src/agenda.rs`, `clients/tui/src/ui/calendar.rs`
-- Daemon surface: `calendar.events` (the name `calendar.agenda` this row carried until P5-U10; the served method is `calendar.events`)
-- GUI location: clients/desktop: `Space a`, the sidebar's Calendar entry and the palette show the Calendar view, the selection account's agenda from `calendar_events` in a listbox named "Agenda" beside the event card; `t` or "Past events" shows the past events by the TUI's rule, client-side, and `r` or "Refresh" reads the agenda again (M4, #0131; shell.md, "Calendar")
-- Validation: unit tests in `src/agenda.rs`, TUI golden frames, `src/tui_tests/invites.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`lists the upcoming agenda of the selected account with its badges, and the card of the cursor row`, `t shows the past events with the TUI's status line and arms no t family key`, `r reads the agenda again and says how many events it shows, without replying`), `clients/desktop/src/app/calendar.test.ts` (`hides past events by default, keeps a running one until its end and an undated one always`, `r that fails with rows shown keeps them and says so in the notice line`), `clients/desktop/src-tauri/src/calendar.rs` (`calendar_events_on_decodes_the_fixture_agenda`), `clients/desktop/src-tauri/src/fixture.rs` (`the_agenda_decodes_sorted_with_the_undated_row_last`)
-- Status: routed (P5-U10) - the TUI's agenda is built by the daemon; GUI shipped (M4, #0131)
-
-### CAL-03 Open the source email of an agenda entry
+### CAL-02 Calendar view in agenda, day and week layouts
 
 - Classification: GUI parity
-- Source anchor: TUI `Enter` and `e` in the calendar view
-- Daemon surface: `message.ics`, whose bytes the client writes to a temp file for the editor session
-- GUI location: clients/desktop: Enter, `e` or a double-click on an agenda row calls `invite_source_open`, which writes the row's `invite.ics` from `message.ics` into an owner-only file and opens it in the external editor (M4, #0131; shell.md, "Calendar", "Keys and actions")
-- Validation: TUI golden frames, `src/tui_tests/invites.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`Enter and e open the cursor row's invite.ics in the editor`, `a row with no ics says so in the TUI's words, and a failed editor names why`), `clients/desktop/src-tauri/src/calendar.rs` (`invite_source_open_writes_a_private_file_and_journals_the_editor`, `a_row_without_an_ics_is_not_found_and_opens_nothing`), `clients/desktop/src-tauri/src/fixture.rs` (`message_ics_answers_the_source_in_base64_or_null`)
-- Status: routed (P5-U10c-I2) - what `$EDITOR` gets is the row's `invite.ics` blob and not the message (#0052 scope item 10), so the method is the invitation read rather than a rendition; GUI shipped (M4, #0131)
+- Source anchor: `mp calendar view [agenda|day|week] [--on DATE | --from DATE --to DATE] [-A NAME]... [--calendar ID]... [--hidden] [--zone ZONE] [--json]` (`routed_calendar_view` in `src/main.rs`, `src/calendar_cmd.rs`); TUI `a`, `d`, `w`, `h`/`l`, `[`/`]`, `t`, `gt` and `r` in the calendar view (`clients/tui/src/app/calendar.rs`, `clients/tui/src/ui/calendar.rs`)
+- Daemon surface: `calendar.view` over a range and a zone, the server cache and the invitation mails merged and deduplicated by `EventKey` (`src/calendar_view.rs`), with `calendar.list` for the calendars' names and colours
+- GUI location: clients/desktop: `Space a`, the sidebar's Calendar entry and the palette show the Calendar view, every account's events from `calendar_view` as the agenda (a listbox named "Agenda", the anchor and the 14 days after it), the day grid or the week grid (a listbox named "Day" or "Week", an all-day band over an hour grid, overlapping events side by side), beside the event card; `a`, `d` and `w` or the header's Agenda, Day and Week buttons switch the layout, `h`/`l`, `[`/`]` and Previous and Next move by a day or a week, `t` or Today comes back to today, `gt` focuses "Jump to date", and `r` or Refresh reads the events again (M4, #0131, PERSO-200; shell.md, "Calendar")
+- Validation: `tests/cli_calendar.rs` (`calendar_list_view_hide_and_show_through_the_cli`), `tests/daemon_calendar_slice.rs` (`calendar_view_merges_dedups_and_hides`, `a_series_invitation_gives_way_to_the_servers_occurrences`, `a_none_accounts_view_is_its_imip_agenda`, `an_all_day_event_is_placed_in_the_viewers_zone`), unit tests in `src/calendar_view.rs`, `src/calendar_cmd.rs` (`an_agenda_lists_each_event_under_every_day_it_covers`, `a_week_lists_every_day_and_a_day_says_when_it_is_empty`) and `clients/tui/src/app/calendar.rs`, `src/tui_tests/calendar.rs` (`golden_calendar_agenda_two_line_rows`, `golden_calendar_day`, `golden_calendar_week`, `golden_calendar_week_narrow_falls_back_to_the_day`, `the_layouts_ask_calendar_view_for_their_days`); `clients/desktop/src/components/calendar/calendar.test.tsx` (`lists every account's events from calendar_view by day, all-day first, each with its account and calendar`, `the week grid shows Monday to Sunday, the all-day band on top and overlapping events side by side`, `the day grid shows one day, and h and l move it by a day`, `l and h move the agenda by a week, reading the new days`, `r reads the events again and says how many it holds`, `an event that fails to load says so`), `clients/desktop/src/app/calendar.test.ts` (the "days and layouts" and "events on days, the TUI's day_part" blocks), `clients/desktop/src-tauri/src/calendar.rs` (`calendar_view_on_decodes_the_fixture_week_and_follows_a_hidden_calendar`), `clients/desktop/src-tauri/src/fixture.rs` (`the_server_calendar_lists_views_a_range_and_hides_a_calendar`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-200); the agenda's upcoming and past toggle is gone, since the view shows the days it is moved to, and `t` is today
+- Note: the TUI's week falls back to the day grid on a narrow terminal; `calendar.events`, the one-account iMIP agenda this row was built on until PERSO-200, is still served and no client calls it.
 
-### CAL-04 Report what stored attendee replies resolve on stored invitations
+### CAL-03 Open an event's invitation source and its mail
+
+- Classification: GUI parity
+- Source anchor: TUI `e` in the calendar view and on the event card (`Action::OpenEventSource`), `m` on the event card (`open_event_mail` in `clients/tui/src/app/calendar.rs`)
+- Daemon surface: `message.ics` for the invitation mail's `invite.ics` blob, which the client writes to a temp file for the editor session; the event's `source` selector for the mail
+- GUI location: clients/desktop: `e` or the palette calls `invite_source_open`, which writes the event's `invite.ics` from `message.ics` into an owner-only file and opens it in the external editor; `m`, the palette's "Open the invitation mail" and the card's "Open mail" show the mail in Mail, its mailbox opened and the mail selected; a server event with no invitation mail says "This event is the server's; no invitation mail stands behind it" (M4, #0131, PERSO-200; shell.md, "Calendar", "The card", "Keys and actions")
+- Validation: TUI golden frames, `src/tui_tests/invites.rs` (`the_app_reads_the_card_and_the_blob_through_the_daemon`); `clients/desktop/src/components/calendar/calendar.test.tsx` (`e opens an invitation's invite.ics, and a server event says it has none`, `Open mail shows the invitation mail in Mail`), `clients/desktop/src/app/calendar.test.ts` (`decodes the selector's mailbox segment, so Sent%20Items opens Sent Items, and a malformed escape names none`), `clients/desktop/src-tauri/src/calendar.rs` (`invite_source_open_writes_a_private_file_and_journals_the_editor`, `a_row_without_an_ics_is_not_found_and_opens_nothing`), `clients/desktop/src-tauri/src/fixture.rs` (`message_ics_answers_the_source_in_base64_or_null`)
+- Status: routed (P5-U10c-I2) - what `$EDITOR` gets is the row's `invite.ics` blob and not the message (#0052 scope item 10), so the method is the invitation read rather than a rendition; GUI shipped (M4, #0131); Open mail since PERSO-200
+- Note: the CLI has no counterpart: `mp event show` prints an invitation mail's event with its `source` selector, which `mp show` opens.
+
+### CAL-04 Rebuild the calendar: the reply fold and the server resync
 
 - Classification: diagnostics and maintenance
-- Source anchor: `mp calendar rebuild [--account]`, `src/main.rs`, `src/calendar_cmd.rs`
-- Daemon surface: `calendar.rebuild`, which reports and writes nothing
+- Source anchor: `mp calendar rebuild [-A NAME]`, `src/main.rs`, `src/calendar_cmd.rs`, `rebuild_account` in `src/calendar_sync.rs`
+- Daemon surface: `calendar.rebuild` as an `operation.*`: it reports what the stored attendee replies resolve on the stored invitations, which writes nothing, and on an account with a calendar backend drops the server cache and resyncs it, the visibility kept
 - GUI location: not required (diagnostics and maintenance)
-- Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_calendar_rebuild_matches_the_oracle`)
-- Status: routed (P4-U14)
-- Note: attendee status is derived from the `invite.ics` payloads wherever it is displayed, so there is no cached copy to rebuild.
+- Validation: `tests/daemon_admin_slice.rs` (`mp_calendar_rebuild_matches_the_oracle`), `tests/daemon_calendar_slice.rs` (`calendar_list_shows_the_fake_calendars_and_the_invitation_calendars`, which syncs through it), `src/calendar_sync.rs` (`a_rebuild_keeps_the_hidden_calendars_hidden`), `src/store/calendar.rs` (`dropping_the_cache_keeps_the_visibility`), `src/calendar_cmd.rs` (`the_server_report_names_each_failed_calendar_or_the_error`), `tests/imip_integration.rs`
+- Status: routed (P4-U14); the server resync since PERSO-200
+- Note: attendee status is derived from the `invite.ics` payloads wherever it is displayed, so the iMIP half has no cached copy to rebuild; a Graph account without the calendar scope reports the re-login prompt as its resync's error.
 
 ### CAL-05 Invitation rendering with derived attendee statuses
 
 - Classification: GUI parity
-- Source anchor: `src/invite.rs`
-- Daemon surface: `calendar.events` and `message.invite` carry the derived statuses; `message.ics` hands out the raw payload an RSVP is built from
-- GUI location: clients/desktop: an agenda row carries one badge in the TUI's order (cancelled, organizer, else the user's reply), and the shared event card shows When, Repeats, Where, Organizer, "Your RSVP", every attendee with their status, the cancelled occurrences and a cancelled or superseded version, in the Calendar view and as the reader's invitation card from `invite_get` (M4, #0131; shell.md, "Rows and the card", reader.md, "Invitations")
-- Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`, `src/tui_tests/invites.rs`; `clients/desktop/src/app/calendar.test.ts` (`badges cancelled first, then organizer, then the user's reply`), `clients/desktop/src/components/calendar/calendar.test.tsx` (`j, k, G and gg move the cursor and the card follows; the organizer's card has no RSVP and names its cancelled occurrence`), `clients/desktop/src/components/reader/invite.test.tsx` (`shows the event under the header with three enabled replies, and Accept sends and settles`), `clients/desktop/src-tauri/src/calendar.rs` (`invite_get_on_answers_the_card_of_an_invitation_and_null_for_a_plain_email`), `clients/desktop/src-tauri/src/fixture.rs` (`message_invite_answers_the_agenda_event_and_the_version_an_email_carried`)
-- Status: routed (P5-U10) - the fold crosses the socket; GUI shipped (M4, #0131)
+- Source anchor: `src/invite.rs`, `mp event show` (`src/calendar_cmd.rs`), the TUI's event card and invitation card
+- Daemon surface: `calendar.view`, `event.get` and `message.invite` carry the derived statuses; `message.ics` hands out the raw payload an iMIP reply is built from
+- GUI location: clients/desktop: an event carries one badge in the TUI's order (cancelled, organizer, else the user's answer, none on an event that invites nobody), and the shared event card shows When in the viewer's zone, Repeats, Where, Calendar, Organizer, "Your response", the description and every attendee with their status, in the Calendar view and as the reader's invitation card from `invite_get` (M4, #0131, PERSO-200; shell.md, "Calendar", "The card", reader.md, "Invitations")
+- Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`, `src/tui_tests/invites.rs`, `src/tui_tests/calendar.rs` (`golden_calendar_event_card`); `clients/desktop/src/app/calendar.test.ts` (`badges cancelled first, then organizer, then the user's answer, and an event that invites nobody none`), `clients/desktop/src/components/calendar/calendar.test.tsx` (`j and k move the cursor and the card follows; the occurrence of a series says so`), `clients/desktop/src/components/reader/invite.test.tsx` (`shows the event under the header with three enabled replies, and Accept sends and settles`), `clients/desktop/src-tauri/src/calendar.rs` (`invite_get_on_answers_the_card_of_an_invitation_and_null_for_a_plain_email`), `clients/desktop/src-tauri/src/fixture.rs` (`message_invite_answers_the_agenda_event_and_the_version_an_email_carried`)
+- Status: routed (P5-U10) - the fold crosses the socket; GUI shipped (M4, #0131); the server events' attendees since PERSO-200
 
-### CAL-06 Invitation updates and cancellations reflected in the agenda and the reader
+### CAL-06 Calendar changes reflected in every view without a refresh
 
 - Classification: GUI parity
-- Source anchor: implicit workflow driven by newly synced iMIP messages
-- Daemon surface: `state.event`
-- GUI location: clients/desktop: an account's agenda and invitation cards go stale on a `state.invalidate` or `state.remove` of its mail and on its `sync.completed`, so an update or a cancellation reaches the agenda and an open card without a refresh (M4, #0131; shell.md, "Calendar", "Staleness")
-- Validation: `tests/imip_integration.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`follows a cancellation and an update without a manual refresh`), `clients/desktop/src/components/reader/invite.test.tsx` (`follows invite_cancel: the card says cancelled and the replies are disabled with the TUI's sentence`, `follows invite_update: the card shows the new time`), `clients/desktop/src/app/calendar.test.ts` (`goes stale with its own account's mail and syncs only`), `clients/desktop/src-tauri/src/fixture.rs` (`invite_update_moves_the_start_and_raises_the_sequence`, `invite_cancel_flips_the_agenda_row_and_delivers_the_cancellation`)
-- Status: GUI shipped (M4, #0131) against the fixture's `invite_update` and `invite_cancel`, which change the agenda row in place where the daemon folds the new email in
+- Source anchor: implicit workflow driven by the daemon's calendar sync after each mail tick (`poll_account` in `src/calendar_sync.rs`) and by newly synced iMIP messages
+- Daemon surface: `calendar.changed`, which a sync publishes only when the cached events moved, and an answer or a visibility change publishes too; `state.event` for the invitation mails
+- GUI location: clients/desktop: the events and the calendars go stale on any account's `calendar.changed`, on a `state.invalidate` or `state.remove` of its mail, on its `sync.completed` and on every bootstrap, and are read again while the view shows, so a server change, an update or a cancellation reaches the view and an open invitation card without an `r` (M4, #0131, PERSO-200; shell.md, "Calendar", "Staleness")
+- Validation: `tests/daemon_calendar_slice.rs` (`a_tick_syncs_the_calendar_and_announces_it`), `src/calendar_sync.rs` (`a_second_sync_brings_the_additions_changes_and_deletions`, `a_sync_that_reads_back_the_cache_changes_nothing`), `src/tui_tests/calendar.rs` (`a_calendar_changed_event_reloads_the_view`), `tests/imip_integration.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`reads again on calendar.changed, and only while it shows`, `follows an invitation's cancellation without a manual refresh`), `clients/desktop/src/components/reader/invite.test.tsx` (`follows invite_cancel: the card says cancelled and the replies are disabled with the TUI's sentence`, `follows invite_update: the card shows the new time`), `clients/desktop/src/app/calendar.test.ts` (`goes stale on calendar.changed, on any account's mail, and on a bootstrap`), `clients/desktop/src/app/rsvp.test.ts` (`calendar.changed reads the view again, and the cards of its own account only`), `clients/desktop/src-tauri/src/fixture.rs` (`invite_update_moves_the_start_and_raises_the_sequence`, `invite_cancel_flips_the_agenda_row_and_delivers_the_cancellation`)
+- Status: shipped in the TUI and the desktop (PERSO-200); the desktop's invitation half since M4 (#0131), against the fixture's `invite_update` and `invite_cancel`
+- Note: the CLI reads once per command and needs no event.
+
+### CAL-07 List the calendars
+
+- Classification: GUI parity
+- Source anchor: `mp calendar list [-A NAME] [--json]` (`routed_calendar_list` in `src/main.rs`, `src/calendar_cmd.rs`), TUI `c` in the calendar view (the calendars overlay)
+- Daemon surface: `calendar.list {account?}`: every calendar of the account's last sync in the server's order, with its backend, visibility, colour and default flag, and the `imip` calendar of an account holding invitation mails
+- GUI location: clients/desktop: `c`, the palette's "Show or hide calendars" and the header's Calendars open the calendars panel (a region named "Calendars"), every account's calendars from `calendar_list` with their colour and "(default)" on the account's default (M4, #0131, PERSO-200; shell.md, "Calendar", "Calendars")
+- Validation: `tests/cli_calendar.rs` (`calendar_list_view_hide_and_show_through_the_cli`), `tests/daemon_calendar_slice.rs` (`calendar_list_shows_the_fake_calendars_and_the_invitation_calendars`), `src/calendar_cmd.rs` (`the_calendar_list_aligns_its_columns`), `src/store/calendar.rs` (`calendars_keep_the_server_order_and_their_visibility`), `src/tui_tests/calendar.rs` (`golden_calendar_calendars_overlay`); `clients/desktop/src/app/calendar.test.ts` (`c opens the calendars panel and reads them again`), `clients/desktop/src-tauri/src/fixture.rs` (`the_server_calendar_lists_views_a_range_and_hides_a_calendar`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-200)
+
+### CAL-08 Show or hide a calendar
+
+- Classification: GUI parity
+- Source anchor: `mp calendar show|hide <calendar> [-A NAME]` (`src/main.rs`), TUI `Space` or `Enter` on a calendar in the calendars overlay (`toggle_calendar_visibility` in `clients/tui/src/app/calendar.rs`)
+- Daemon surface: `calendar.set_visibility {account, calendar, visible}`, a local preference in `calendar_prefs` that a cache drop leaves alone and a store rebuild carries over, then `calendar.changed`; `calendar.view` filters on it unless `hidden` is asked for
+- GUI location: clients/desktop: a checkbox in the calendars panel, named "<account>/<calendar>", calls `calendar_set_visibility` and says "Showing <account>/<calendar>" or "Hiding <account>/<calendar>"; the `calendar.changed` that follows reads the events and the calendars again (M4, #0131, PERSO-200; shell.md, "Calendar", "Calendars")
+- Validation: `tests/cli_calendar.rs` (`calendar_list_view_hide_and_show_through_the_cli`), `tests/daemon_calendar_slice.rs` (`calendar_view_merges_dedups_and_hides`), `src/store/calendar.rs` (`a_range_query_is_half_open_and_honours_visibility_and_accounts`, `dropping_the_cache_keeps_the_visibility`), `src/tui_tests/calendar.rs` (`hiding_a_calendar_in_the_overlay_removes_its_events`); `clients/desktop/src/components/calendar/calendar.test.tsx` (`hiding a calendar takes its events out, and showing it brings them back`), `clients/desktop/src-tauri/src/calendar.rs` (`calendar_view_on_decodes_the_fixture_week_and_follows_a_hidden_calendar`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-200)
+- Note: hiding a calendar never brings back the invitation mail its server event replaced, and the `imip` calendar hides like any other; `mp calendar view --hidden` shows the hidden calendars' events anyway.
+
+### CAL-09 Show one event
+
+- Classification: GUI parity
+- Source anchor: `mp event show <event> [-A NAME] [--json]` (`src/main.rs`, `src/calendar_cmd.rs`), TUI `Enter` in the calendar view (the event card overlay, `CalendarOpenCard`)
+- Daemon surface: `event.get {account, event}` on a server id or `imip:<row_id>`; the TUI's and the desktop's cards read the event `calendar.view` answered, and call no `event.get`
+- GUI location: clients/desktop: the event card beside the days, or under them in the narrow layout, always shows the cursor event, and Enter or a double-click takes the focus to it; "Join the meeting" opens the online meeting link through `open_external` (M4, #0131, PERSO-200; shell.md, "Calendar", "The card")
+- Validation: `tests/cli_calendar.rs` (`event_show_and_respond_through_the_cli`), `src/calendar_cmd.rs` (`the_event_card_reads_the_times_in_the_viewers_zone`), `src/calendar_view.rs` (`an_imip_id_names_its_row`), `src/tui_tests/calendar.rs` (`golden_calendar_event_card`); `clients/desktop/src/components/calendar/calendar.test.tsx` (`j and k move the cursor and the card follows; the occurrence of a series says so`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-200)
+- Note: the desktop registers an `event_get` command, which no view calls yet.
+
+### CAL-10 Answer an event of the calendar
+
+- Classification: GUI parity
+- Source anchor: `mp event respond <event> accept|tentative|decline [-A NAME] [--comment TEXT] [--no-send-response] [--json]` (`src/main.rs`), TUI `V` in the calendar view and on the event card (the respond overlay: Accept, Tentative, Decline, a comment and a send-response toggle)
+- Daemon surface: `event.respond {account, event, response, comment?, send_response?}` as an `operation.*`: a server event through the account's backend (Graph's `accept`, `tentativelyAccept` and `decline`) and an at-once sync of its calendar, an invitation mail's event (`imip:<row_id>`) by the iMIP reply; a Graph account without the calendar scope is refused with the re-login prompt before the server is reached
+- GUI location: clients/desktop: `V`, the palette's "Respond (accept / tentative / decline, comment)" and the card's Respond open the respond choice, a dialog named "RSVP" with the "Response" listbox, a Comment field and on a server event "Send a response to the organizer"; the card's Respond is disabled with the refusal under it for a cancelled event, the user's own and one that invites nobody; an answer is one `event_respond`, awaited as `rsvp` (M4, #0131, PERSO-200; shell.md, "Calendar", "Respond")
+- Validation: `tests/cli_calendar.rs` (`event_show_and_respond_through_the_cli`), `tests/daemon_calendar_slice.rs` (`event_respond_records_every_answer_on_the_fake`, `event_respond_without_the_scope_is_the_relogin_prompt`, `event_respond_on_an_invitation_mail_sends_the_imip_reply`), `src/tui_tests/calendar.rs` (`golden_calendar_respond_overlay`, `an_answer_is_one_event_respond_with_its_comment_and_choice`); `clients/desktop/src/components/calendar/calendar.test.tsx` (`sends one event.respond with the comment and send_response on a server event`, `an invitation mail's event offers no send-response choice and sends the daemon's default`, `refuses the organizer's event with the TUI's sentence, and the daemon's refusal reaches the notice line`), `clients/desktop/src/app/rsvp.test.ts` (`reads a calendar event in the TUI's order: cancelled, organizer, a server event that invites nobody`, `settles with the TUI-style line: a reply mail no one took yet waits in the outbox, an unsent answer and an untold organizer say so`), `clients/desktop/src-tauri/src/calendar.rs` (`an_answer_word_the_daemon_does_not_take_is_refused_before_any_call`), `clients/desktop/src-tauri/src/fixture.rs` (`event_respond_refuses_a_silent_imip_answer_then_settles_with_the_answer`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-200)
+- Note: `--no-send-response` applies to a server event only, since an iMIP reply is the answer itself; `CAL-01` is the same method reached from the invitation mail.
 
 ## Client-side integrations
 
