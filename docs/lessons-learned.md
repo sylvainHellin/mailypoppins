@@ -3379,3 +3379,8 @@ mp cannot fix this from its side: the workaround is to answer from a non-Proton 
 Graph names an event's zone by its Windows name, and CLDR's windowZones maps each Windows zone to one IANA name on its territory 001 row and to more on the other territory rows.
 A reverse lookup built from the 001 rows alone misses the system's own zone for many users (Europe/Vienna, Europe/Zurich, America/Toronto), and CLDR spells some zones by their old names (Asia/Calcutta, Europe/Kiev) while macOS reports the new ones.
 Such a zone falls back to UTC, which keeps a single event's instants exact but makes a series drift an hour across each DST change, so the reverse table takes every territory row plus the aliases of `bcp47/timezone.xml`, and the generator asserts no IANA name maps to two Windows zones.
+
+## Graph's patternedRecurrence fills every pattern field whatever the pattern type (2026-11-03, PERSO-255)
+
+A weekly rule arrives with `dayOfMonth` 0, `month` 0 and `index` "first", and an open range with `endDate` 0001-01-01.
+Each pattern type reads only the fields it names, and a zero or year one reads as no value.

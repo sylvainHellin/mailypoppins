@@ -64,6 +64,8 @@ All notable changes to this project are documented in this file.
 - Daemon: `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, and the `calendar.changed` event, which a sync sends only when the cached events moved (PERSO-200).
   `event.respond` answers a server event through Graph's accept, tentatively accept and decline with the comment and the send-response choice, then syncs the calendar at once; `message.invite` names an invitation mail's server event, so the invitation card answers the server event in its place.
 - Microsoft Graph sign-in asks for `Calendars.ReadWrite` on an account whose calendar is Graph's; a token from before the calendar keeps mail working, reports the missing scope through `account.credentials` and a `calendar:<name>` health check, and every client shows `calendar needs a re-login (mp config oauth2-login -A <name>)` (PERSO-200).
+- Event cards in the CLI, the TUI and the desktop app show a series' rule in words and whether an occurrence was changed, the Teams meeting, each attendee's proposed time, and whether the organizer accepts new times or asks for an answer; an invitation mail's series reads in the same words as the server's (PERSO-255).
+  `mp event show --json` adds the occurrence kind, the meeting flags and the occurrence's series with its structured rule, and `calendar.list` reports each calendar's features.
 - Calendar backend: a Graph calendar can create, update, cancel and delete events and dismiss or snooze their reminders on the server, sending each time in its Windows zone, looked up for any IANA zone in a table built from every CLDR territory row and alias; no client calls it yet (PERSO-255).
 
 ### Changed
