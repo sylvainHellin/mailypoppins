@@ -1,9 +1,10 @@
 # Design: server-side calendar
 
-> Status: phase 1 built (2026-10-29, branch `calendar-phase-1`); phases 2 to 4 are design. Implementer-facing.
+> Status: phase 1 merged (2026-11-03); phase 2 designed (2026-11-03), phases 3 and 4 are design. Implementer-facing.
 > Built: [architecture.md](../architecture.md), "Server calendar", and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", describe what phase 1 shipped.
 > Scoping: `.sync/calendar-scoping/index.html` and Sylvain's comment export of 2026-10-28.
-> Decisions: `decision-log.md`, entries of 2026-10-28 (the plan) and 2026-10-29 (phase 1).
+> Phase 2 design: `.sync/reports/calendar-phase-2-design/2026-11-03_calendar-phase-2-design.html`.
+> Decisions: `decision-log.md`, entries of 2026-10-28 (the plan), 2026-10-29 (phase 1) and 2026-11-03 (phase 2).
 > Issues: PERSO-200 (phase 1), PERSO-255 (phase 2), PERSO-256 (phase 3), PERSO-257 (phase 4), PERSO-254 (CalDAV provider choice, Sylvain's task).
 > Predecessor: [calendar-invites.md](calendar-invites.md), the iMIP path, which stays for accounts without a calendar backend.
 
@@ -184,7 +185,7 @@ The later phases' methods are provisional:
 - `calendar.freebusy {addresses, range}`: availability of attendees and rooms when picking a time.
 - Reminders reach the clients as daemon events, and the desktop notification follows the existing notification path.
 
-Every write is an `operation.*` with the existing journal, so an interrupted create or respond reports where it stopped.
+Every write is an `operation.*` in the daemon's in-memory operation registry, and `event.create` carries a Graph `transactionId`, so a retry after an interruption cannot create the event twice.
 
 ## Client surfaces
 
@@ -214,6 +215,27 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 - Teams link toggle, attendee status, free/busy through `getSchedule` when picking a time.
 - Reminders as desktop notifications.
 
+Sylvain settled three of the design's questions on 2026-11-03, and the decision log carries their why and their rejected options:
+
+- A write stays an in-memory operation; `event.create` carries a Graph `transactionId`, so a retry cannot duplicate the event, and a client whose operation vanished keeps the form open with a Retry button.
+- No calendar journal is added, and the calendar store stays a disposable cache (D6); what the user typed is lost when the client closes as well.
+- The TUI event editor is an overlay form built like the compose wizard and the respond dialog, with field checks, the attendees' free/busy, the repeat settings and the occurrence-or-series choice; the description opens in `$EDITOR`.
+- Editing or cancelling an occurrence offers two choices, this occurrence or the whole series; the following occurrences wait under "Later".
+- Still open: whether a reminder dismissed or snoozed in mp is also dismissed or snoozed in Outlook through Graph.
+
+Each slice is one branch merged to `main` with its docs, parity rows, website pages and CHANGELOG line:
+
+1. Model and read-side fields: the Teams flag, the occurrence kind, attendee proposals, the structured recurrence and `calendar.list`'s `features`, read from Graph and shown on the three clients' cards; needs no other slice.
+2. The write seam: `GraphFetch::patch` and `delete`, the new `CalendarBackend` methods on Graph and on the fake, and the reverse Windows zone lookup, with the request bodies pinned by tests; needs no other slice.
+3. Create single events: `event.create` with attendees, rooms, Teams, reminder, the write-through and the transaction id, in `mp event create`, the TUI event form on `n` and the desktop event form; needs slices 1 and 2.
+4. Update, cancel and delete single events: `event.update`, `event.cancel` and `event.delete` with their refusals, in the three clients; needs slice 3.
+5. Recurrence and scopes: `recurrence` on create, `scope` on update, cancel and delete, and the scope chooser in the TUI and the desktop app; needs slices 1 and 4.
+6. Propose a new time: `proposed_time` on `event.respond`, the respond dialog's field and the organizer's "Use this time"; needs slices 1, 3 and 4.
+7. Free/busy: `calendar.freebusy`, `mp calendar freebusy` and the availability rows in both forms; needs slice 3.
+8. Reminders: the daemon's reminder task, the `calendar_reminders` table, its events and commands, and the presentation in the three clients; needs no other slice, and dismissing on the server, if chosen, also needs slice 2.
+
+Slices 1 and 2 can run side by side; once slice 4 has merged, slices 5, 6 and 7 can run in parallel, and slice 8 can run at any time.
+
 ### Phase 3, EWS for on-prem Exchange, TUM (PERSO-256, after phase 1)
 
 - Spike first: probe EWS auth on `xmail.mwn.de` (Basic or NTLM), check the calendar coverage of the `ews` crate against hand-rolled SOAP on quick-xml, and check whether `AcceptItem` with `SaveOnly` leaves a response item in Drafts; the spike's outcome picks the client.
@@ -235,6 +257,7 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 - Shared and delegated calendars beyond TUM rooms.
 - A room finder (`GetRoomLists` and `GetRooms`, Graph `findRooms`).
 - A month view.
+- "This and all following occurrences" when editing or cancelling an occurrence: Graph has no call for it, so mp would end the series and start a new one, which mails every attendee twice.
 - ICS subscription feeds.
 - EWS streaming notifications for TUM in place of polling (D11).
 - Server contacts as an additional contact source: Graph `Contacts.Read` and `/me/contacts` (the contacts part of PERSO-200 before its reshape), EWS contacts for TUM, CardDAV for the personal account.

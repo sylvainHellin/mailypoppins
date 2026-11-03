@@ -396,3 +396,29 @@ The wizards ask once phase 3 brings EWS.
 Rejected: asking in phase 1 as the plan said (a question whose other answers all fail).
 Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, confirmed by Sylvain in chat 2026-11-03.
 Status: accepted
+
+## 2026-11-03 - A calendar write stays an in-memory operation, and a create carries a Graph transactionId so a retry cannot duplicate the event
+
+Why: a write takes seconds while the user watches the form, and Graph ignores a second create carrying the same `transactionId`, so a safe manual retry covers the failure that happens in practice.
+`event.create` mints a `transaction_id` (or takes the client's) and answers it with the `operation_id` before any server call; a client whose operation vanished in a daemon restart keeps the form open with a Retry button that sends the same id.
+No calendar journal is added, and the calendar store stays a disposable cache that holds nothing the user typed.
+Sylvain accepted the trade-off that what the user typed is lost when the client closes as well.
+Rejected: recording every change in a durable table before the server call, like the mail outbox, and matching it against the next sync after a restart (a second durable state machine and a "Calendar changes" list in the CLI, the TUI and the desktop app).
+Source: report comment export of 2026-11-03 on `.sync/reports/calendar-phase-2-design`.
+Status: accepted
+
+## 2026-11-03 - The TUI edits events in an overlay form built like the compose wizard and the respond dialog, with the description in $EDITOR
+
+Why: the first release includes free/busy when picking a time (entry of 2026-10-28), and only a form can show it while the user picks the time.
+The form checks each field as it is typed, shows the attendees' free/busy, and holds the repeat settings and the occurrence-or-series choice.
+Rejected: `$EDITOR` on a YAML frontmatter template, the way mp edits a mail draft (cheap and scriptable, but it shows no free/busy while the user picks a time and reports mistakes only once the file is saved).
+Source: report comment export of 2026-11-03 on `.sync/reports/calendar-phase-2-design`.
+Status: accepted
+
+## 2026-11-03 - Editing or cancelling an occurrence offers two choices in phase 2, this occurrence or the whole series
+
+Why: Graph has no call for "this and all following occurrences", so mp would have to end the series before the chosen occurrence and create a new series from there, which sends every attendee a cancellation and a new invitation.
+The change is rare enough that Outlook covers it, and the plan lists it under "Later".
+Rejected: a third choice "This and all following occurrences" in phase 2 (a series split touching the create and the cancel paths at once, with its own live test against Outlook).
+Source: report comment export of 2026-11-03 on `.sync/reports/calendar-phase-2-design`.
+Status: accepted
