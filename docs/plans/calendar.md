@@ -195,7 +195,7 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 
 ## Phases
 
-### Phase 1, Graph read, views and server-side responses (PERSO-200), built
+### Phase 1, Graph read, views and server-side responses (PERSO-200), merged 2026-11-03
 
 - The per-calendar `/me/calendars/{id}/calendarView/delta` is tried first, with the fallbacks of "Backend notes", Graph, since the route is undocumented beyond the default calendar; which path the EVOQS tenant takes is recorded per calendar in the store.
 - Event store as a disposable cache of the rolling window, rebuilt from the server.
@@ -204,7 +204,7 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 - `Calendars.ReadWrite` in `GRAPH_SCOPES`, with a re-login prompt when a stored token lacks it.
 - Agenda, day and week views in the CLI, the TUI and the desktop app, with calendars shown or hidden per account; the week grid is new in both the TUI and the desktop app.
 - The invite card on a Graph mail wired to its server event (`eventMessage` to `event`), with accept, tentative and decline, an optional comment and the send-response option.
-- Done when the EVOQS account shows the events created in Outlook in all three clients, and an answer from mp shows in Outlook.
+- Done: the EVOQS account shows the events created in Outlook in all three clients, an answer from mp through Graph shows in Outlook, and an iMIP answer from the OVH account registers at the TUM organizer; one sent through Proton does not, since Proton turns the calendar part into an attachment (lessons-learned).
 
 ### Phase 2, Graph write (PERSO-255, after phase 1)
 
