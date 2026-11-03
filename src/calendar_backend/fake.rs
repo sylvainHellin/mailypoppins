@@ -5,17 +5,25 @@
 //! [`FakeCalendarBackend::responses`]. A daemon slice test cannot reach into
 //! the daemon's memory, so the daemon arms the fake from [`FAKE_CALENDAR_ENV`]
 //! instead, the way [`crate::daemon::fake_transport`] arms the SMTP fake, and
-//! the test reads the answers from the log, one JSON line per `respond`:
+//! the test reads the answers from the log, one JSON line per `respond`, and
+//! the writes from the write log, one [`RecordedWrite`] line per create,
+//! update, cancel, delete, dismiss or snooze:
 //!
 //! ```json
 //! {
 //!   "calendars": [<Calendar>...],
 //!   "events": [<Event>...],
 //!   "log": "<path>",
+//!   "write_log": "<path>",
 //!   "missing_scope": false,
 //!   "message_events": {"<server message id>": "<event id>"}
 //! }
 //! ```
+//!
+//! The writes change the fake's events the way a server does: a create adds
+//! one (or answers the one an earlier create with the same transaction id
+//! made), an update patches it, a cancel or a delete removes it, and the next
+//! incremental sync reports each change.
 //!
 //! The daemon serves every account whose `calendar_backend` is not `none`
 //! from the fake, each through [`FakeCalendarBackend::serving`], which
@@ -28,14 +36,19 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{BackendResult, CalendarBackend, CalendarBackendError, Response, SyncResult};
+use super::{BackendResult, CalendarBackend, CalendarBackendError, Response, SyncResult, Written};
 use crate::calendar_model::{
     Attendee, AttendeeRole, Calendar, CalendarWindow, Event, EventTime, OwnResponse, Person,
     ResponseStatus, Sensitivity, ShowAs,
 };
+use crate::calendar_write::{AttendeeInput, EventInput, EventPatch};
+
+/// The reminder a created event gets when its input leaves it to the
+/// mailbox default, Outlook's own default.
+pub const FAKE_DEFAULT_REMINDER: u32 = 15;
 
 /// The hook. Set on the daemon, never on a client.
 pub const FAKE_CALENDAR_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_CALENDAR";
@@ -60,6 +73,11 @@ struct FakeState {
     /// Bumped by [`FakeCalendarBackend::expire_tokens`]; a token of an
     /// earlier epoch is refused, as a server's expired sync state.
     epoch: u64,
+    /// The event each create's transaction id made, as Graph keeps the
+    /// `transactionId` to answer a repeated create with the same event.
+    transactions: HashMap<String, String>,
+    /// How many events the creates made, for their ids.
+    created: u64,
 }
 
 impl FakeState {
@@ -77,6 +95,38 @@ pub struct RecordedResponse {
     pub send_response: bool,
 }
 
+/// One recorded write, in the order the calls came.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "call", rename_all = "snake_case")]
+pub enum RecordedWrite {
+    Create {
+        calendar: String,
+        transaction_id: String,
+        input: EventInput,
+        /// The id of the event the create made or found.
+        event: String,
+    },
+    Update {
+        calendar: String,
+        event: String,
+        patch: EventPatch,
+    },
+    Cancel {
+        event: String,
+        comment: Option<String>,
+    },
+    Delete {
+        event: String,
+    },
+    DismissReminder {
+        event: String,
+    },
+    SnoozeReminder {
+        event: String,
+        until: DateTime<Utc>,
+    },
+}
+
 /// What [`FAKE_CALENDAR_ENV`] holds.
 #[derive(Deserialize)]
 struct FakeSpec {
@@ -86,6 +136,8 @@ struct FakeSpec {
     events: Vec<Event>,
     #[serde(default)]
     log: Option<PathBuf>,
+    #[serde(default)]
+    write_log: Option<PathBuf>,
     #[serde(default)]
     missing_scope: bool,
     #[serde(default)]
@@ -103,7 +155,9 @@ pub struct FakeCalendarBackend {
     state: Arc<Mutex<FakeState>>,
     missing_scope: bool,
     log: Option<PathBuf>,
+    write_log: Option<PathBuf>,
     responses: Arc<Mutex<Vec<RecordedResponse>>>,
+    writes: Arc<Mutex<Vec<RecordedWrite>>>,
     /// The invitation mails the fake knows the event of, by server message
     /// id ([`CalendarBackend::event_for_message`]).
     message_events: HashMap<String, String>,
@@ -166,6 +220,7 @@ impl FakeCalendarBackend {
         let mut fake = FakeCalendarBackend::new(spec.calendars, spec.events);
         fake.missing_scope = spec.missing_scope;
         fake.log = spec.log;
+        fake.write_log = spec.write_log;
         fake.message_events = spec.message_events;
         Some(fake)
     }
@@ -204,9 +259,23 @@ impl FakeCalendarBackend {
         self
     }
 
+    /// Append each write to `path` as a JSON line, besides keeping it.
+    pub fn with_write_log(mut self, path: PathBuf) -> Self {
+        self.write_log = Some(path);
+        self
+    }
+
     /// The answers given so far, in order.
     pub fn responses(&self) -> Vec<RecordedResponse> {
         self.responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The writes made so far, in order.
+    pub fn writes(&self) -> Vec<RecordedWrite> {
+        self.writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -313,21 +382,128 @@ impl FakeCalendarBackend {
     }
 
     fn record(&self, recorded: RecordedResponse) -> BackendResult<()> {
-        if let Some(path) = &self.log {
-            let mut line = serde_json::to_string(&recorded).map_err(anyhow::Error::from)?;
-            line.push('\n');
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut file| file.write_all(line.as_bytes()))
-                .map_err(anyhow::Error::from)?;
-        }
+        append_line(self.log.as_ref(), &recorded)?;
         self.responses
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(recorded);
         Ok(())
+    }
+
+    fn record_write(&self, recorded: RecordedWrite) -> BackendResult<()> {
+        append_line(self.write_log.as_ref(), &recorded)?;
+        self.writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(recorded);
+        Ok(())
+    }
+}
+
+/// Append `value` to the log at `path`, if any, as one JSON line.
+fn append_line(path: Option<&PathBuf>, value: &impl Serialize) -> BackendResult<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let mut line = serde_json::to_string(value).map_err(anyhow::Error::from)?;
+    line.push('\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()))
+        .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+/// An attendee of a written event: one already invited keeps their answer,
+/// a new one has not answered yet.
+fn written_attendee(input: &AttendeeInput, before: &[Attendee]) -> Attendee {
+    let status = before
+        .iter()
+        .find(|known| known.email.eq_ignore_ascii_case(&input.email))
+        .map_or(ResponseStatus::NeedsAction, |known| known.status);
+    Attendee {
+        name: input.name.clone(),
+        email: input.email.clone(),
+        role: input.role,
+        status,
+    }
+}
+
+/// The join link the fake provisions for an online meeting.
+fn join_link(id: &str) -> String {
+    format!("https://teams.example.com/join/{id}")
+}
+
+/// The event a create of `input` makes in `calendar` under `id`, the user
+/// its organizer.
+fn created_event(calendar: &Calendar, id: &str, input: &EventInput) -> Event {
+    Event {
+        account: calendar.account.clone(),
+        calendar: calendar.id.clone(),
+        id: id.to_string(),
+        uid: format!("{id}@fake.example.com"),
+        recurrence_id: None,
+        series_master_id: None,
+        summary: input.summary.clone(),
+        time: input.time.clone(),
+        location: input.location.clone(),
+        body: input.body.clone(),
+        organizer: None,
+        attendees: input
+            .attendees
+            .iter()
+            .map(|a| written_attendee(a, &[]))
+            .collect(),
+        own_response: OwnResponse::Organizer,
+        recurrence: None,
+        reminder: input.reminder.unwrap_or(Some(FAKE_DEFAULT_REMINDER)),
+        online_meeting_url: input.online_meeting.then(|| join_link(id)),
+        sensitivity: input.sensitivity.unwrap_or(Sensitivity::Normal),
+        show_as: input.show_as.unwrap_or(ShowAs::Busy),
+        cancelled: false,
+        is_organizer: true,
+        last_modified: None,
+        web_link: None,
+    }
+}
+
+/// `event` with the fields `patch` names changed.
+fn apply_patch(event: &mut Event, patch: &EventPatch) {
+    if let Some(summary) = &patch.summary {
+        event.summary = summary.clone();
+    }
+    if let Some(time) = &patch.time {
+        event.time = time.clone();
+    }
+    if let Some(location) = &patch.location {
+        event.location = location.clone();
+    }
+    if let Some(body) = &patch.body {
+        event.body = body.clone();
+    }
+    if let Some(attendees) = &patch.attendees {
+        event.attendees = attendees
+            .iter()
+            .map(|a| written_attendee(a, &event.attendees))
+            .collect();
+    }
+    match patch.online_meeting {
+        Some(true) if event.online_meeting_url.is_none() => {
+            event.online_meeting_url = Some(join_link(&event.id));
+        }
+        Some(false) => event.online_meeting_url = None,
+        _ => {}
+    }
+    if let Some(reminder) = patch.reminder {
+        event.reminder = reminder;
+    }
+    if let Some(show_as) = patch.show_as {
+        event.show_as = show_as;
+    }
+    if let Some(sensitivity) = patch.sensitivity {
+        event.sensitivity = sensitivity;
     }
 }
 
@@ -416,6 +592,120 @@ impl CalendarBackend for FakeCalendarBackend {
             response,
             comment,
             send_response,
+        })
+    }
+
+    /// A read-only calendar refuses the create, as a server does; a create
+    /// whose transaction id made an event already answers with that event.
+    async fn create_event(
+        &self,
+        calendar: &Calendar,
+        input: &EventInput,
+        transaction_id: &str,
+    ) -> BackendResult<Written> {
+        self.check_scope()?;
+        if !calendar.can_edit {
+            return Err(anyhow!("the calendar {} is read-only", calendar.name).into());
+        }
+        let event = {
+            let mut state = self.state();
+            let earlier = state
+                .transactions
+                .get(transaction_id)
+                .and_then(|id| state.events.iter().find(|e| &e.id == id))
+                .cloned();
+            match earlier {
+                Some(event) => event,
+                None => {
+                    state.created += 1;
+                    let id = format!("fake-created-{}", state.created);
+                    let event = created_event(calendar, &id, input);
+                    state
+                        .transactions
+                        .insert(transaction_id.to_string(), id.clone());
+                    state.changes.push(id);
+                    state.events.push(event.clone());
+                    event
+                }
+            }
+        };
+        self.record_write(RecordedWrite::Create {
+            calendar: calendar.id.clone(),
+            transaction_id: transaction_id.to_string(),
+            input: input.clone(),
+            event: event.id.clone(),
+        })?;
+        Ok(Written::Event(Box::new(event)))
+    }
+
+    async fn update_event(
+        &self,
+        calendar: &str,
+        event: &str,
+        patch: &EventPatch,
+    ) -> BackendResult<Written> {
+        self.check_scope()?;
+        let mut updated = self
+            .state()
+            .events
+            .iter()
+            .find(|known| known.id == event)
+            .cloned()
+            .ok_or_else(|| anyhow!("no event with id {event}"))?;
+        apply_patch(&mut updated, patch);
+        self.put_event(updated.clone());
+        self.record_write(RecordedWrite::Update {
+            calendar: calendar.to_string(),
+            event: event.to_string(),
+            patch: patch.clone(),
+        })?;
+        Ok(Written::Event(Box::new(updated)))
+    }
+
+    /// Only the organizer cancels, as Graph answers 400 to anyone else; the
+    /// cancelled event leaves the calendar.
+    async fn cancel_event(&self, event: &str, comment: Option<String>) -> BackendResult<()> {
+        self.check_scope()?;
+        let organizer = self
+            .state()
+            .events
+            .iter()
+            .find(|known| known.id == event)
+            .map(|known| known.is_organizer);
+        if organizer == Some(false) {
+            return Err(anyhow!("only the organizer can cancel {event}").into());
+        }
+        if organizer.is_some() {
+            self.remove_event(event);
+        }
+        self.record_write(RecordedWrite::Cancel {
+            event: event.to_string(),
+            comment,
+        })
+    }
+
+    async fn delete_event(&self, event: &str) -> BackendResult<()> {
+        self.check_scope()?;
+        if self.state().events.iter().any(|known| known.id == event) {
+            self.remove_event(event);
+        }
+        self.record_write(RecordedWrite::Delete {
+            event: event.to_string(),
+        })
+    }
+
+    async fn dismiss_reminder(&self, event: &str) -> BackendResult<()> {
+        self.check_scope()?;
+        self.record_write(RecordedWrite::DismissReminder {
+            event: event.to_string(),
+        })
+    }
+
+    async fn snooze_reminder(&self, event: &str, until: DateTime<Utc>) -> BackendResult<()> {
+        self.check_scope()?;
+        self.record_write(RecordedWrite::SnoozeReminder {
+            event: event.to_string(),
+            until,
         })
     }
 
@@ -541,6 +831,170 @@ mod tests {
             .await
             .is_err());
         assert!(fake.responses().is_empty());
+    }
+
+    fn written(written: Written) -> Event {
+        match written {
+            Written::Event(event) => *event,
+            Written::Series(series) => panic!("expected an event, got {series:?}"),
+        }
+    }
+
+    fn input() -> EventInput {
+        let at = |h| Utc.with_ymd_and_hms(2026, 11, 4, h, 0, 0).unwrap();
+        let mut input = EventInput::new(
+            "Planning",
+            EventTime::timed(at(9), at(10), "Europe/Berlin").unwrap(),
+        );
+        input.attendees = vec![AttendeeInput {
+            email: "ada@example.com".into(),
+            name: None,
+            role: AttendeeRole::Required,
+        }];
+        input.online_meeting = true;
+        input
+    }
+
+    /// A create adds an event the next sync reports, the user its organizer
+    /// with the mailbox's default reminder; a retry with the same transaction
+    /// id finds it instead of adding a second; a read-only calendar refuses.
+    #[tokio::test]
+    async fn a_create_adds_one_event_per_transaction_id() {
+        let fake = FakeCalendarBackend::canned();
+        let main = fake.list_calendars().await.unwrap().remove(0);
+        let baseline = fake.sync_window(&main, november(), None).await.unwrap();
+
+        let event = written(fake.create_event(&main, &input(), "tx-1").await.unwrap());
+        assert_eq!(event.calendar, "cal-main");
+        assert!(event.is_organizer);
+        assert_eq!(event.own_response, OwnResponse::Organizer);
+        assert_eq!(event.attendees[0].status, ResponseStatus::NeedsAction);
+        assert_eq!(event.reminder, Some(FAKE_DEFAULT_REMINDER));
+        assert!(event.online_meeting_url.is_some());
+
+        let again = written(fake.create_event(&main, &input(), "tx-1").await.unwrap());
+        assert_eq!(again, event);
+        assert_eq!(fake.events().len(), 4);
+
+        let delta = fake
+            .sync_window(&main, november(), baseline.token)
+            .await
+            .unwrap();
+        assert_eq!(delta.upserts, std::slice::from_ref(&event));
+
+        let mut read_only = main.clone();
+        read_only.can_edit = false;
+        assert!(fake
+            .create_event(&read_only, &input(), "tx-2")
+            .await
+            .is_err());
+        assert_eq!(fake.writes().len(), 2);
+    }
+
+    /// An update changes only what the patch names, a re-invited attendee
+    /// keeps their answer, and an unknown event fails.
+    #[tokio::test]
+    async fn an_update_patches_the_event() {
+        let fake = FakeCalendarBackend::canned();
+        let patch = EventPatch {
+            summary: Some("Project review, moved".into()),
+            location: Some(None),
+            reminder: Some(None),
+            attendees: Some(vec![AttendeeInput {
+                email: "Sylvain@example.com".into(),
+                name: None,
+                role: AttendeeRole::Optional,
+            }]),
+            ..Default::default()
+        };
+        let event = written(
+            fake.update_event("cal-main", "ev-meeting", &patch)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(event.summary, "Project review, moved");
+        assert_eq!(event.location, None);
+        assert_eq!(event.reminder, None);
+        assert_eq!(event.attendees[0].role, AttendeeRole::Optional);
+        assert_eq!(event.attendees[0].status, ResponseStatus::NeedsAction);
+        assert_eq!(event.organizer.as_ref().unwrap().email, "ada@example.com");
+        assert_eq!(
+            fake.events().iter().find(|e| e.id == "ev-meeting"),
+            Some(&event)
+        );
+
+        assert!(fake.update_event("cal-main", "nope", &patch).await.is_err());
+        assert_eq!(fake.writes().len(), 1);
+    }
+
+    /// A cancel by the organizer and a delete remove the event; a cancel by
+    /// an attendee is refused; an event already gone counts as done; every
+    /// write lands in the write log.
+    #[tokio::test]
+    async fn cancel_delete_and_reminders_are_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("writes.jsonl");
+        let fake = FakeCalendarBackend::canned().with_write_log(log.clone());
+        assert!(fake.cancel_event("ev-meeting", None).await.is_err());
+        fake.cancel_event("ev-weekly-2", Some("Off this week".into()))
+            .await
+            .unwrap();
+        fake.cancel_event("ev-weekly-2", None).await.unwrap();
+        fake.delete_event("ev-holiday").await.unwrap();
+        fake.delete_event("ev-holiday").await.unwrap();
+        let until = Utc.with_ymd_and_hms(2026, 11, 3, 8, 50, 0).unwrap();
+        fake.dismiss_reminder("ev-meeting").await.unwrap();
+        fake.snooze_reminder("ev-meeting", until).await.unwrap();
+
+        let ids: Vec<String> = fake.events().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["ev-meeting"]);
+        let expected = vec![
+            RecordedWrite::Cancel {
+                event: "ev-weekly-2".into(),
+                comment: Some("Off this week".into()),
+            },
+            RecordedWrite::Cancel {
+                event: "ev-weekly-2".into(),
+                comment: None,
+            },
+            RecordedWrite::Delete {
+                event: "ev-holiday".into(),
+            },
+            RecordedWrite::Delete {
+                event: "ev-holiday".into(),
+            },
+            RecordedWrite::DismissReminder {
+                event: "ev-meeting".into(),
+            },
+            RecordedWrite::SnoozeReminder {
+                event: "ev-meeting".into(),
+                until,
+            },
+        ];
+        assert_eq!(fake.writes(), expected);
+        let logged: Vec<RecordedWrite> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(logged, expected);
+        assert!(fake.responses().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fake_without_the_scope_refuses_every_write() {
+        let fake = FakeCalendarBackend::canned().missing_scope();
+        let main = FakeCalendarBackend::canned().calendars.remove(0);
+        assert!(fake.create_event(&main, &input(), "tx").await.is_err());
+        assert!(fake
+            .update_event("cal-main", "ev-meeting", &EventPatch::default())
+            .await
+            .is_err());
+        assert!(fake.cancel_event("ev-weekly-2", None).await.is_err());
+        assert!(fake.delete_event("ev-holiday").await.is_err());
+        assert!(fake.dismiss_reminder("ev-meeting").await.is_err());
+        assert!(fake.writes().is_empty());
+        assert_eq!(fake.events().len(), 3);
     }
 
     #[test]

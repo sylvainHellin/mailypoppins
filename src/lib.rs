@@ -3,8 +3,8 @@
 // crate, so that `crate::config::…` / `mailypoppins::parse::…` keep resolving
 // everywhere: the CLI, the daemon, the TUI and the integration tests.
 pub use mp_core::{
-    app_state, calendar, calendar_model, config, notify, oauth2, parse, search, secrets,
-    signatures, sync_health, timing, types, windows_zones,
+    app_state, calendar, calendar_model, calendar_write, config, notify, oauth2, parse, search,
+    secrets, signatures, sync_health, timing, types, windows_zones,
 };
 
 pub mod agenda;
