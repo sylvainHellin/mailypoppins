@@ -48,10 +48,11 @@ use serde_json::json;
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
     AccountStateChanged, Arrival, MutationsRolledBack, SyncCompleted, KIND_ACCOUNT_STATE_CHANGED,
-    KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
-    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
-    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
-    KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
+    KIND_CALENDAR_CHANGED, KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN,
+    KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
+    KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED,
+    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
+    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -178,7 +179,7 @@ pub enum Awaited {
         /// The account whose drafts went.
         account_index: usize,
     },
-    /// `calendar.rsvp`.
+    /// `event.respond`, the respond overlay's answer (PERSO-200).
     Rsvp {
         /// The account the reply was sent from.
         account_index: usize,
@@ -378,6 +379,13 @@ impl App {
                 if event.payload["account"].as_str() == Some(self.account_config.name.as_str()) {
                     self.reload_contacts();
                 }
+                Applied::Ignored
+            }
+            // An account's calendar moved (a sync, an answer, a visibility
+            // change, from any client, PERSO-200): the Calendar view shows
+            // every account, so it reads its days again whichever it was.
+            KIND_CALENDAR_CHANGED => {
+                self.on_calendar_changed();
                 Applied::Ignored
             }
             _ => match MessageRowDelta::decode(event) {
@@ -616,7 +624,8 @@ impl App {
     /// mailbox, the desktop's `staleListIf`. A resync bootstrap that caught
     /// the runtime opening (a daemon restart) sets `opening`, and the startup
     /// open that would clear it ran long ago, so this event is the only thing
-    /// left that tells the client the account serves.
+    /// left that tells the client the account serves. It asks the account's
+    /// `account.credentials` again too, which a sign-in may have changed.
     ///
     /// Any other state is [`Applied::Ignored`] for the reason
     /// [`Self::apply_shutting_down`] gives: nothing is reloaded and nothing is
@@ -637,6 +646,9 @@ impl App {
             return Applied::Ignored;
         }
         self.accounts[index].opening = false;
+        // A sign-in again ends in `ready`, and may have granted the calendar
+        // scope the re-login banner asks for (PERSO-200).
+        self.refresh_credentials(index);
         if index == self.active_account {
             self.recount_all_mailboxes();
             self.accounts[index].mailbox_counts = self.mailbox_counts.clone();
@@ -740,7 +752,8 @@ impl App {
 
 /// One `diagnostic.check_changed` payload, landed in the activity ring (P6-U8).
 ///
-/// One entry, `"{name}: {detail}"`, at the level the status maps to, and
+/// One entry, `"{name}: {detail}"` (`"{account}: {detail}"` for a
+/// `calendar:<account>` check), at the level the status maps to, and
 /// nothing else. `status_message` is deliberately **not** set: a check the user
 /// did not ask about may not overwrite the sentence his own last action put on
 /// the status line, which is why `apply_event` answers [`Applied::Ignored`] for
@@ -768,7 +781,10 @@ pub(super) fn land_check(app: &mut App, check: &HealthCheck) {
         // a warning the user keeps believing.
         CheckStatus::Ok => StatusLevel::Success,
     };
-    app.push_status(format!("{}: {}", check.name, check.detail), level);
+    // `calendar:<account>`'s detail already says it is the calendar, so its
+    // line opens on the account alone (PERSO-200).
+    let subject = check.name.strip_prefix("calendar:").unwrap_or(&check.name);
+    app.push_status(format!("{subject}: {}", check.detail), level);
 }
 
 /// The account of a `draft:<account>/<id>` resource, or `None` for a resource

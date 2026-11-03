@@ -23,14 +23,22 @@ export function checkLevel(status: CheckStatus): ActivityLevel {
   return status === "fail" ? "error" : status === "warn" ? "warning" : "info";
 }
 
-/** A check's activity log line, the TUI's `"{name}: {detail}"`. */
+/**
+ * A check's activity log line, the TUI's `"{name}: {detail}"`; a
+ * `calendar:<account>` check, whose detail already names the calendar, opens on
+ * the account alone.
+ */
 export function checkLine(check: HealthCheck): string {
-  return `${check.name}: ${check.detail}`;
+  const subject = check.name.startsWith("calendar:") ? check.name.slice("calendar:".length) : check.name;
+  return `${subject}: ${check.detail}`;
 }
 
 /** The check's name as the banner shows it: `config_loaded` is the file the user edits. */
 export function checkLabel(name: string): string {
   if (name.startsWith("account:")) return `Account ${name.slice("account:".length)}`;
+  // PERSO-200: the account whose sign-in lacks the calendar scope; the
+  // detail is the re-login prompt.
+  if (name.startsWith("calendar:")) return `Account ${name.slice("calendar:".length)}`;
   switch (name) {
     case "config_loaded":
       return "config.toml";

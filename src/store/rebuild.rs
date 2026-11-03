@@ -24,6 +24,11 @@
 //! #0063) are carried the same way, for the same reason: each names drafts on
 //! the server that nothing else does ([`salvage_cleanups`]).
 //!
+//! The calendar visibility choices (`calendar_prefs`, PERSO-200) are carried
+//! too ([`salvage_calendar_prefs`]): the calendar cache beside them refills
+//! from the server, but a calendar the user hid is a local choice no sync can
+//! restate, and losing it shows every hidden calendar again.
+//!
 //! `pending_ops` (#0039) is deliberately **not** carried, unlike the outbox it
 //! otherwise mirrors. A pending mutation is a flag, move or delete of a message
 //! the server still holds, so a queued-but-undrained row that a rebuild drops
@@ -138,6 +143,15 @@ pub(super) struct SalvagedCleanup {
     created: Option<i64>,
 }
 
+/// One calendar visibility choice read out of the old file
+/// ([`crate::store::calendar::PREFS_TABLE`]).
+#[derive(Debug, Clone)]
+pub(super) struct SalvagedCalendarPref {
+    account: String,
+    calendar_id: String,
+    visible: bool,
+}
+
 /// What the pre-drop read got out of the old file.
 #[derive(Debug, Default)]
 pub(super) struct Salvage {
@@ -145,6 +159,8 @@ pub(super) struct Salvage {
     pub rows: Vec<SalvagedRow>,
     /// The Graph server cleanups still owed ([`salvage_cleanups`]).
     pub cleanups: Vec<SalvagedCleanup>,
+    /// The calendar visibility choices ([`salvage_calendar_prefs`]).
+    pub calendar_prefs: Vec<SalvagedCalendarPref>,
     /// What the read itself could not get, in the shape
     /// [`RebuildReport::lost`] carries: a damaged page that ended the scan, a
     /// row that would not come back, a table too big to read in full. These
@@ -159,6 +175,8 @@ pub(super) struct RebuildReport {
     pub carried: Vec<String>,
     /// Graph server cleanups carried into the fresh store.
     pub carried_cleanups: usize,
+    /// Calendar visibility choices carried into the fresh store.
+    pub carried_calendar_prefs: usize,
     /// Outbox rows that could not be carried, each with its reason.
     pub lost: Vec<(String, String)>,
     pub swept_files: u64,
@@ -324,6 +342,56 @@ pub(super) fn salvage_cleanups(path: &Path) -> Vec<SalvagedCleanup> {
             Err(e) => {
                 warn!(
                     "[store] a Graph cleanup in {} could not be read: {e}",
+                    path.display()
+                );
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Read the calendar visibility choices out of a store that failed validation
+/// (PERSO-200).
+///
+/// Best effort and small, like [`salvage_cleanups`]: one row per calendar the
+/// user ever showed or hid, and a row that cannot be read ends the read with a
+/// warning, since the cost of losing one is a calendar shown again.
+pub(super) fn salvage_calendar_prefs(path: &Path) -> Vec<SalvagedCalendarPref> {
+    let Ok(conn) = Connection::open(path) else {
+        return Vec::new();
+    };
+    let table = crate::store::calendar::PREFS_TABLE;
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT account, calendar_id, visible FROM {table} LIMIT {SALVAGE_LIMIT}"
+    )) {
+        Ok(stmt) => stmt,
+        // A file from before the calendar, or not one of ours.
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map([], |r| {
+        Ok(SalvagedCalendarPref {
+            account: r.get(0)?,
+            calendar_id: r.get(1)?,
+            visible: r.get(2)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                "[store] no calendar visibility salvaged from {}: {e}",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok(pref) => out.push(pref),
+            Err(e) => {
+                warn!(
+                    "[store] a calendar visibility in {} could not be read: {e}",
                     path.display()
                 );
                 break;
@@ -733,6 +801,25 @@ pub(super) fn finish(conn: &Connection, path: &Path, salvaged: Salvage) -> Rebui
                      from the Drafts folder by hand"
                 ),
             )),
+        }
+    }
+    // A visibility choice holds no bytes either. One the fresh store refuses
+    // is logged rather than noted: it costs a calendar shown again, which the
+    // user undoes in the view itself.
+    for pref in &salvaged.calendar_prefs {
+        match conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO {} (account, calendar_id, visible) VALUES (?1, ?2, ?3)",
+                crate::store::calendar::PREFS_TABLE
+            ),
+            rusqlite::params![pref.account, pref.calendar_id, pref.visible],
+        ) {
+            Ok(_) => report.carried_calendar_prefs += 1,
+            Err(e) => warn!(
+                "[store] the visibility of calendar {} of {} did not survive the rebuild: {e}",
+                clip(&pref.calendar_id),
+                clip(&pref.account)
+            ),
         }
     }
     let Some(root) = blobs_root(path) else {
@@ -1242,6 +1329,54 @@ mod tests {
                 message_id: "<gone@example.com>".to_string(),
                 graph_draft: Some("draft-7".to_string()),
             }]
+        );
+    }
+
+    /// A calendar the user hid stays hidden across a schema-version rebuild:
+    /// the calendar list refills from the server, the choice is carried
+    /// (PERSO-200).
+    #[test]
+    fn a_rebuild_carries_the_calendar_visibility() {
+        use crate::calendar_model::Calendar;
+        use crate::store::calendar::{list_calendars, set_calendar_visible, upsert_calendars};
+
+        let calendar = |id: &str| Calendar {
+            account: "alice".into(),
+            id: id.into(),
+            name: id.into(),
+            color: None,
+            is_default: false,
+            can_edit: true,
+            visible: true,
+        };
+        let (_dir, path, _blobs) = account_dir();
+        {
+            let store = Store::open(&path).unwrap();
+            upsert_calendars(&store, "alice", &[calendar("work"), calendar("birthdays")]).unwrap();
+            set_calendar_visible(&store, "alice", "birthdays", false).unwrap();
+            set_calendar_visible(&store, "alice", "work", true).unwrap();
+        }
+        stamp_a_wrong_version(&path);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
+        assert!(
+            list_calendars(&store, "alice").unwrap().is_empty(),
+            "the calendar list is a cache and goes"
+        );
+        // The next sync lists the calendars again.
+        upsert_calendars(&store, "alice", &[calendar("work"), calendar("birthdays")]).unwrap();
+        let visible: Vec<(String, bool)> = list_calendars(&store, "alice")
+            .unwrap()
+            .into_iter()
+            .map(|cal| (cal.id, cal.visible))
+            .collect();
+        assert_eq!(
+            visible,
+            vec![("work".into(), true), ("birthdays".into(), false)]
         );
     }
 

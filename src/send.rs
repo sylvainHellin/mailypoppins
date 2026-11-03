@@ -1717,6 +1717,7 @@ mod tests {
             "Accepted: Planning",
             "Accepted.",
             "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+            "",
         )
         .expect("the build accepts a display name it can quote");
         assert_eq!(built.from, "\"Doe, Jane\" <jane@example.com>");
@@ -1725,6 +1726,54 @@ mod tests {
             .parse()
             .expect("the stored from address parses on the submission path");
         assert_eq!(mailbox.email.to_string(), "jane@example.com");
+    }
+
+    /// An RSVP threads under the invitation mail and says it is a meeting
+    /// message, the way Outlook's own reply does, and its one-line body uses
+    /// the subject's wording (PERSO-200).
+    #[test]
+    fn an_rsvp_reply_threads_under_the_invitation_and_marks_itself_a_meeting_message() {
+        let request = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n\
+                       UID:u@x\r\nSEQUENCE:0\r\nSUMMARY:Planning\r\n\
+                       DTSTART:20260720T120000Z\r\nDTEND:20260720T130000Z\r\n\
+                       ORGANIZER:mailto:organizer@example.com\r\n\
+                       ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:jane@example.com\r\n\
+                       END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let prepared = prepare_rsvp(
+            request.as_bytes(),
+            "Jane Doe <jane@example.com>",
+            crate::invite::Rsvp::Tentative,
+            None,
+            "invite-1@example.com",
+        )
+        .unwrap();
+        let raw = String::from_utf8(prepared.built.raw).unwrap();
+        let header = |name: &str| {
+            raw.lines()
+                .take_while(|line| !line.is_empty())
+                .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+                .map(str::to_string)
+        };
+        assert_eq!(
+            header("In-Reply-To").as_deref(),
+            Some("<invite-1@example.com>")
+        );
+        assert_eq!(
+            header("References").as_deref(),
+            Some("<invite-1@example.com>")
+        );
+        assert_eq!(
+            header("Content-Class").as_deref(),
+            Some("urn:content-classes:calendarmessage")
+        );
+        assert_eq!(header("Subject").as_deref(), Some("Tentative: Planning"));
+        assert!(raw.contains("Tentatively accepted: Planning"), "{raw}");
+        assert!(!raw.contains("the invitation"), "{raw}");
+        // The account's display name is the ATTENDEE's CN, the invite giving none.
+        assert!(
+            raw.contains("ATTENDEE;CN=Jane Doe;PARTSTAT=TENTATIVE"),
+            "{raw}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2479,14 +2528,19 @@ pub fn build_reply_mime_body(plain: &str, ics: &str) -> MultiPart {
 /// `ATTENDEE`); `organizer` is the single recipient. `reply_ics` is the
 /// `METHOD:REPLY` payload from [`crate::invite::build_reply_ics`]. `subject`
 /// follows the Outlook convention (`Accepted:`/`Tentative:`/`Declined: <summary>`).
-/// The reply is built here and submitted through the durable outbox by
-/// [`send_rsvp`], like any other outgoing message.
+/// `request_message_id` is the invitation mail's `Message-ID`, which the reply
+/// names in `In-Reply-To` and `References`, as Outlook's own reply does.
+/// `Content-Class: urn:content-classes:calendarmessage` marks the message as
+/// a meeting message for Exchange.
+/// The reply is built here by [`prepare_rsvp`] and submitted through the
+/// durable outbox by [`PreparedRsvp::submit`], like any other outgoing message.
 pub fn build_reply_message(
     from: &str,
     organizer: &str,
     subject: &str,
     plain_body: &str,
     reply_ics: &str,
+    request_message_id: &str,
 ) -> Result<BuiltMessage> {
     // Normalised once and carried on the built message, the twin of what
     // `build_draft_message` does: `submit` parses `BuiltMessage::from` to
@@ -2506,11 +2560,19 @@ pub fn build_reply_message(
         subject, from, organizer
     );
 
-    let message = Message::builder()
+    let mut builder = Message::builder()
         .from(from_mailbox.clone())
         .to(organizer_mailbox.clone())
         .subject(subject)
         .message_id(None)
+        .raw_header(lettre::message::header::HeaderValue::new(
+            lettre::message::header::HeaderName::new_from_ascii_str("Content-Class"),
+            "urn:content-classes:calendarmessage".to_string(),
+        ));
+    if let Some(parent) = bracketed_message_id(request_message_id) {
+        builder = builder.in_reply_to(parent.clone()).references(parent);
+    }
+    let message = builder
         .multipart(build_reply_mime_body(plain_body, reply_ics))
         .context("Failed to build RSVP reply message")?;
 
@@ -2542,61 +2604,61 @@ pub struct RsvpOutcome {
     pub subject: String,
 }
 
-/// End-to-end attendee RSVP to a received invite (#0029), shared by the CLI
-/// and the TUI so both run identical logic (no subprocess).
+/// An attendee's RSVP reply to a received invite (#0029), built and not yet
+/// submitted, so `calendar.rsvp` can observe its cancel token between the
+/// build and [`PreparedRsvp::submit`]. Dropping it sends nothing.
 ///
-/// Steps: build a `METHOD:REPLY` from the invitation's own iMIP payload (the
-/// source of truth for `UID`/`SEQUENCE`) carrying the account's `PARTSTAT`,
-/// and email it to the `ORGANIZER`. The payload itself is never rewritten.
-///
-/// Nothing local is flipped afterwards, and there is nothing to flip: the
-/// reply goes out through the durable outbox, which appends it to the server
-/// Sent mailbox and ingests that copy into the store during the send, so our
-/// own `PARTSTAT` is derived from that row the next time an invite is
-/// rendered (#0038 scope item 6, `crate::reconcile::own_rsvp`).
-///
-/// `ics` is the invitation's `invite.ics` bytes, read from the message's blob
-/// by the caller; `account_address` is the responding account's primary
-/// address (the REPLY `ATTENDEE`).
-pub async fn send_rsvp(
-    ics: &[u8],
-    account_config: &crate::config::AccountConfig,
-    account_address: &str,
-    rsvp: crate::invite::Rsvp,
-    smtp_config: &SmtpConfig,
-) -> Result<RsvpOutcome> {
-    prepare_rsvp(ics, account_address, rsvp)?
-        .submit(account_config, smtp_config)
-        .await
-}
-
-/// An RSVP reply built and not yet submitted: the half of [`send_rsvp`] that
-/// touches no transport, split off so `calendar.rsvp` can observe its cancel
-/// token between the two. Dropping it sends nothing.
+/// Nothing local is flipped after the submission, and there is nothing to
+/// flip: the reply goes out through the durable outbox, which appends it to
+/// the server Sent mailbox and ingests that copy into the store during the
+/// send, so our own `PARTSTAT` is derived from that row the next time an
+/// invite is rendered (#0038 scope item 6, `crate::reconcile::own_rsvp`).
 pub struct PreparedRsvp {
     built: BuiltMessage,
     organizer: String,
     subject: String,
 }
 
-/// Build the `METHOD:REPLY` and its message, exactly as [`send_rsvp`] does
-/// before it submits.
+/// Build the `METHOD:REPLY` from the invitation's own iMIP payload `ics` (the
+/// source of truth for `UID`/`SEQUENCE`, never rewritten), carrying the
+/// account's `PARTSTAT`, and the message that takes it to the `ORGANIZER`. A
+/// `comment` (`event.respond`, PERSO-200) follows the reply's one-line body
+/// after a blank line; the payload carries no `COMMENT` property, which not
+/// every organizer's client shows.
+///
+/// `account_address` may carry a display name (`Jane Doe <jane@x.com>`), the
+/// fallback `CN` of the reply's `ATTENDEE`; `request_message_id` is the
+/// invitation mail's `Message-ID`, which the reply threads under (none when
+/// blank).
 pub fn prepare_rsvp(
     ics: &[u8],
     account_address: &str,
     rsvp: crate::invite::Rsvp,
+    comment: Option<&str>,
+    request_message_id: &str,
 ) -> Result<PreparedRsvp> {
+    let display_name = mailparse::addrparse(account_address)
+        .ok()
+        .and_then(|addrs| match addrs.first() {
+            Some(mailparse::MailAddr::Single(info)) => info.display_name.clone(),
+            _ => None,
+        });
     let account_address = crate::parse::extract_email_address(account_address);
     if account_address.is_empty() {
         return Err(anyhow!("Account has no usable address to RSVP as"));
     }
 
     let ctx = crate::invite::reply_context_from_ics(ics)?;
-    let reply_ics = crate::invite::build_reply_ics(&ctx, &account_address, rsvp)?;
+    let reply_ics =
+        crate::invite::build_reply_ics(&ctx, &account_address, display_name.as_deref(), rsvp)?;
 
     let summary = ctx.summary.as_deref().unwrap_or("(no subject)");
     let subject = format!("{}: {}", rsvp.subject_verb(), summary);
-    let plain_body = format!("{} the invitation: {}", rsvp.subject_verb(), summary);
+    let mut plain_body = format!("{}: {}", rsvp.body_verb(), summary);
+    if let Some(comment) = comment.map(str::trim).filter(|c| !c.is_empty()) {
+        plain_body.push_str("\n\n");
+        plain_body.push_str(comment);
+    }
 
     let built = build_reply_message(
         &account_address,
@@ -2604,6 +2666,7 @@ pub fn prepare_rsvp(
         &subject,
         &plain_body,
         &reply_ics,
+        request_message_id,
     )?;
 
     Ok(PreparedRsvp {
@@ -3616,8 +3679,17 @@ fn refuse_a_finished_draft(draft: &EmailDraft, account: &str, key: &str) -> Resu
 /// header grammar requires. A forward's `forwarded_from:` is not read: a
 /// forward starts a conversation of its own rather than joining its source's.
 fn reply_parent_id(draft: &EmailDraft) -> Option<String> {
-    let id = draft.frontmatter.in_reply_to.as_deref()?.trim();
-    let bare = id.trim_start_matches('<').trim_end_matches('>').trim();
+    bracketed_message_id(draft.frontmatter.in_reply_to.as_deref()?)
+}
+
+/// A `Message-ID` in the angle brackets the header grammar requires, from
+/// one written with or without them; `None` when blank.
+fn bracketed_message_id(id: &str) -> Option<String> {
+    let bare = id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
     (!bare.is_empty()).then(|| format!("<{bare}>"))
 }
 

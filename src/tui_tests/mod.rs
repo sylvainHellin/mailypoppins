@@ -25,6 +25,7 @@
 
 mod actions;
 mod actions_store;
+mod calendar;
 mod commands;
 mod conversations;
 mod daemon;

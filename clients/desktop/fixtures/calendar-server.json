@@ -1,0 +1,296 @@
+{
+  "_comment": "The server calendar the fixture serves (PERSO-200): calendar.list, calendar.view, event.get and event.respond. The week of 2099-10-12 holds a timed event, overlapping ones, an all-day one and the first occurrence of a weekly series whose second falls on 2099-10-20; imip:1008 is work's steering committee, the invitation mail of messages.json. invites names the server event message.invite answers as event_id on an account with a backend.",
+  "calendars": [
+    {
+      "account": "home",
+      "id": "AAMk-cal-home",
+      "name": "Calendar",
+      "color": "#2563eb",
+      "is_default": true,
+      "can_edit": true,
+      "visible": true,
+      "backend": "graph"
+    },
+    {
+      "account": "home",
+      "id": "AAMk-cal-holidays",
+      "name": "Holidays",
+      "color": "#16a34a",
+      "is_default": false,
+      "can_edit": false,
+      "visible": true,
+      "backend": "graph"
+    },
+    {
+      "account": "work",
+      "id": "imip",
+      "name": "Invitations",
+      "color": null,
+      "is_default": false,
+      "can_edit": false,
+      "visible": true,
+      "backend": "none"
+    }
+  ],
+  "events": [
+    {
+      "account": "home",
+      "calendar": "AAMk-cal-home",
+      "id": "AAMkAD-weekly-20991013",
+      "uid": "weekly-planning@fixture.example",
+      "summary": "Weekly planning",
+      "time": {
+        "kind": "timed",
+        "start": "2099-10-13T06:30:00Z",
+        "end": "2099-10-13T07:00:00Z",
+        "zone": "Europe/Berlin"
+      },
+      "attendees": [
+        {
+          "name": "Kim Lee",
+          "email": "kim@example.com",
+          "role": "required",
+          "status": "accepted"
+        },
+        {
+          "name": "Me",
+          "email": "me@example.com",
+          "role": "required",
+          "status": "accepted"
+        }
+      ],
+      "own_response": "accepted",
+      "sensitivity": "normal",
+      "show_as": "busy",
+      "cancelled": false,
+      "is_organizer": false,
+      "recurrence_id": "2099-10-13T06:30:00Z",
+      "series_master_id": "AAMkAD-weekly",
+      "organizer": {
+        "name": "Kim Lee",
+        "email": "kim@example.com"
+      },
+      "location": "Room 1.02",
+      "recurrence": "FREQ=WEEKLY;BYDAY=TU"
+    },
+    {
+      "account": "home",
+      "calendar": "AAMk-cal-home",
+      "id": "AAMkAD-design",
+      "uid": "design-review@fixture.example",
+      "summary": "Design review",
+      "time": {
+        "kind": "timed",
+        "start": "2099-10-14T07:00:00Z",
+        "end": "2099-10-14T08:30:00Z",
+        "zone": "Europe/Berlin"
+      },
+      "attendees": [
+        {
+          "name": "Kim Lee",
+          "email": "kim@example.com",
+          "role": "required",
+          "status": "accepted"
+        },
+        {
+          "name": "Me",
+          "email": "me@example.com",
+          "role": "required",
+          "status": "needs-action"
+        },
+        {
+          "name": "Robin Roe",
+          "email": "robin@example.com",
+          "role": "optional",
+          "status": "tentative"
+        }
+      ],
+      "own_response": "needs-action",
+      "sensitivity": "normal",
+      "show_as": "busy",
+      "cancelled": false,
+      "is_organizer": false,
+      "location": "Teams",
+      "body": "Walk through the new reader layout before the release.",
+      "organizer": {
+        "name": "Kim Lee",
+        "email": "kim@example.com"
+      },
+      "online_meeting_url": "https://teams.microsoft.com/l/meetup-join/fixture-design-review",
+      "reminder": 15
+    },
+    {
+      "account": "work",
+      "calendar": "imip",
+      "id": "imip:1008",
+      "uid": "steering-committee@fixture.example",
+      "summary": "Steering committee",
+      "time": {
+        "kind": "timed",
+        "start": "2099-10-14T08:00:00Z",
+        "end": "2099-10-14T09:00:00Z",
+        "zone": "UTC"
+      },
+      "attendees": [
+        {
+          "email": "chair@example.com",
+          "role": "required",
+          "status": "accepted"
+        },
+        {
+          "email": "me@example.com",
+          "role": "required",
+          "status": "needs-action"
+        },
+        {
+          "email": "finance@example.com",
+          "role": "required",
+          "status": "declined"
+        }
+      ],
+      "own_response": "needs-action",
+      "sensitivity": "normal",
+      "show_as": "busy",
+      "cancelled": false,
+      "is_organizer": false,
+      "location": "Room 2.14",
+      "organizer": {
+        "email": "chair@example.com"
+      },
+      "source": {
+        "kind": "imip",
+        "row_id": 1008,
+        "selector": "mp://work/inbox/invitation-steering-comm-1008@fixture.example",
+        "subject": "Invitation: Steering committee"
+      }
+    },
+    {
+      "account": "home",
+      "calendar": "AAMk-cal-home",
+      "id": "AAMkAD-robin",
+      "uid": "one-on-one@fixture.example",
+      "summary": "1:1 with Robin",
+      "time": {
+        "kind": "timed",
+        "start": "2099-10-14T08:00:00Z",
+        "end": "2099-10-14T08:30:00Z",
+        "zone": "Europe/Berlin"
+      },
+      "attendees": [
+        {
+          "name": "Robin Roe",
+          "email": "robin@example.com",
+          "role": "required",
+          "status": "accepted"
+        }
+      ],
+      "own_response": "organizer",
+      "sensitivity": "normal",
+      "show_as": "busy",
+      "cancelled": false,
+      "is_organizer": true,
+      "organizer": {
+        "name": "Me",
+        "email": "me@example.com"
+      }
+    },
+    {
+      "account": "home",
+      "calendar": "AAMk-cal-holidays",
+      "id": "AAMkAD-holiday",
+      "uid": "company-holiday@fixture.example",
+      "summary": "Company holiday",
+      "time": {
+        "kind": "all-day",
+        "start": "2099-10-16",
+        "end": "2099-10-17"
+      },
+      "attendees": [],
+      "own_response": "none",
+      "sensitivity": "normal",
+      "show_as": "oof",
+      "cancelled": false,
+      "is_organizer": false
+    },
+    {
+      "account": "home",
+      "calendar": "AAMk-cal-home",
+      "id": "AAMkAD-weekly-20991020",
+      "uid": "weekly-planning@fixture.example",
+      "summary": "Weekly planning",
+      "time": {
+        "kind": "timed",
+        "start": "2099-10-20T06:30:00Z",
+        "end": "2099-10-20T07:00:00Z",
+        "zone": "Europe/Berlin"
+      },
+      "attendees": [
+        {
+          "name": "Kim Lee",
+          "email": "kim@example.com",
+          "role": "required",
+          "status": "accepted"
+        },
+        {
+          "name": "Me",
+          "email": "me@example.com",
+          "role": "required",
+          "status": "accepted"
+        }
+      ],
+      "own_response": "accepted",
+      "sensitivity": "normal",
+      "show_as": "busy",
+      "cancelled": false,
+      "is_organizer": false,
+      "recurrence_id": "2099-10-20T06:30:00Z",
+      "series_master_id": "AAMkAD-weekly",
+      "organizer": {
+        "name": "Kim Lee",
+        "email": "kim@example.com"
+      },
+      "location": "Room 1.02",
+      "recurrence": "FREQ=WEEKLY;BYDAY=TU"
+    },
+    {
+      "account": "home",
+      "calendar": "AAMk-cal-home",
+      "id": "AAMkAD-dentist",
+      "uid": "dentist@fixture.example",
+      "summary": "Dentist",
+      "time": {
+        "kind": "timed",
+        "start": "2099-12-01T07:30:00Z",
+        "end": "2099-12-01T08:30:00Z",
+        "zone": "Europe/Berlin"
+      },
+      "attendees": [
+        {
+          "email": "praxis@example.com",
+          "role": "required",
+          "status": "accepted"
+        },
+        {
+          "name": "Me",
+          "email": "me@example.com",
+          "role": "required",
+          "status": "needs-action"
+        }
+      ],
+      "own_response": "needs-action",
+      "sensitivity": "normal",
+      "show_as": "busy",
+      "cancelled": false,
+      "is_organizer": false,
+      "organizer": {
+        "email": "praxis@example.com"
+      },
+      "location": "Praxis Dr. Weiss"
+    }
+  ],
+  "invites": {
+    "home": {
+      "9201": "AAMkAD-dentist"
+    }
+  }
+}

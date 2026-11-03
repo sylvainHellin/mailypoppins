@@ -22,7 +22,9 @@
 //! `error.*` is an `ErrorResponse`, `event.*` a bare `EventEnvelope`,
 //! `notification.*` a `Notification`, `*.request.json` a `Request`, and
 //! `*.response.json` a `Response`. A new fixture whose name matches none of
-//! these fails rather than being skipped.
+//! these fails rather than being skipped. The two suffixes are read first, so
+//! a call of the `event.*` method family (PERSO-200), `event.get.request.json`,
+//! is a `Request` rather than an envelope.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -107,6 +109,25 @@ const CONVERSATION_FIXTURES: &[&str] = &[
     "message.thread.drafts.response.json",
 ];
 
+/// The fixtures PERSO-200 adds for the server calendar: a pair per method,
+/// the answer `event.respond` starts with, and one `calendar.changed`.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const CALENDAR_FIXTURES: &[&str] = &[
+    "calendar.list.request.json",
+    "calendar.list.response.json",
+    "calendar.set_visibility.request.json",
+    "calendar.set_visibility.response.json",
+    "calendar.view.request.json",
+    "calendar.view.response.json",
+    "event.get.request.json",
+    "event.get.response.json",
+    "event.respond.request.json",
+    "event.respond.response.json",
+    "notification.calendar_changed.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -174,6 +195,7 @@ fn every_required_fixture_is_committed() {
         .chain(P5_U10D_FIXTURES)
         .chain(LIST_STREAM_FIXTURES)
         .chain(CONVERSATION_FIXTURES)
+        .chain(CALENDAR_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
@@ -203,16 +225,16 @@ enum Kind {
 }
 
 fn kind_of(name: &str) -> Kind {
-    if name.starts_with("error.") {
+    if name.ends_with(".request.json") {
+        Kind::Request
+    } else if name.ends_with(".response.json") {
+        Kind::Response
+    } else if name.starts_with("error.") {
         Kind::Error
     } else if name.starts_with("event.") {
         Kind::Event
     } else if name.starts_with("notification.") {
         Kind::Notification
-    } else if name.ends_with(".request.json") {
-        Kind::Request
-    } else if name.ends_with(".response.json") {
-        Kind::Response
     } else {
         panic!(
             "fixture {name} matches no naming rule; name it `error.*`, `event.*`, \

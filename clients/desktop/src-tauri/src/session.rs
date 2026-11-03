@@ -164,7 +164,7 @@ pub enum PendingKind {
     SendApproved,
     /// `send.outbox_retry`: its `result` is an `OutboxRetryOutcome`.
     OutboxRetry,
-    /// `calendar.rsvp`: its `result` is an `RsvpSettled`.
+    /// `event.respond`: its `result` is an `EventRespondResult`.
     Rsvp,
     /// `send.invite`: its `result` is a `SendOutcome`.
     SendInvite,
@@ -1413,12 +1413,14 @@ mod tests {
     fn an_rsvp_settled_by_the_requery_carries_its_kind_and_reply() {
         let (session, door, fixture, rx, seen) = harness();
         fixture.set_rsvp_delay(Duration::ZERO);
-        let started = crate::calendar::calendar_rsvp_on(
+        let started = crate::calendar::event_respond_on(
             &session,
             &door,
             "work",
-            crate::fixture::INVITE_ROW,
+            &format!("imip:{}", crate::fixture::INVITE_ROW),
             "accept",
+            None,
+            None,
         )
         .expect("started");
         let id = started.operation_id;
@@ -1438,9 +1440,11 @@ mod tests {
             .expect("settled by the requery");
         assert_eq!(settled["kind"], "rsvp");
         assert_eq!(settled["operation_id"], id.as_str());
-        let reply: crate::calendar::RsvpSettled =
-            serde_json::from_value(settled["status"]["result"].clone()).expect("an RsvpSettled");
+        let reply: mp_protocol::calendar::EventRespondResult =
+            serde_json::from_value(settled["status"]["result"].clone())
+                .expect("an EventRespondResult");
         assert_eq!(reply.response, "accept");
+        assert_eq!(reply.via, "imip");
         assert!(reply.delivered);
         assert!(session.pending().is_empty());
     }
@@ -1449,12 +1453,14 @@ mod tests {
     fn a_restart_drops_an_rsvp_as_rsvp() {
         let (session, door, fixture, rx, seen) = harness();
         fixture.set_rsvp_delay(Duration::from_secs(5));
-        let started = crate::calendar::calendar_rsvp_on(
+        let started = crate::calendar::event_respond_on(
             &session,
             &door,
-            "work",
-            crate::fixture::INVITE_ROW,
+            "home",
+            "AAMkAD-design",
             "decline",
+            None,
+            Some(false),
         )
         .expect("started");
         fixture.simulate("restart").expect("restart");
@@ -1620,12 +1626,14 @@ mod tests {
                 PendingKind::ContactRebuild,
             ),
             (
-                crate::calendar::calendar_rsvp_on(
+                crate::calendar::event_respond_on(
                     &session,
                     &door,
                     "work",
-                    crate::fixture::INVITE_ROW,
+                    &format!("imip:{}", crate::fixture::INVITE_ROW),
                     "accept",
+                    None,
+                    None,
                 )
                 .expect("rsvp")
                 .operation_id,

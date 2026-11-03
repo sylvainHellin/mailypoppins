@@ -12,7 +12,7 @@
 //!
 //! `true` means the action was daemon-routed here and `handle_action` owes it
 //! nothing. `false` means "not mine": a client-only or local action, or one of
-//! the operation-kind actions (`sync.*`, `send.*`, `calendar.rsvp`,
+//! the operation-kind actions (`sync.*`, `send.*`, `event.respond`,
 //! `message.search_server`) that still owns a background thread and a
 //! [`BgResult`](crate::app::BgResult) channel in `handle_action`,
 //! because an operation answers `{operation_id}` at once and finishes later.
@@ -174,7 +174,7 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::ComposeEditSignature => {
             ActionRoute::Daemon(&["signature.read", "signature.create"])
         }
-        Action::Rsvp { .. } => ActionRoute::Daemon(&["calendar.rsvp"]),
+        Action::Rsvp { .. } => ActionRoute::Daemon(&["event.respond"]),
         Action::ComposeToContact { .. } => ActionRoute::Local,
         Action::SendContactVcard { .. } => ActionRoute::Daemon(&["contact.vcard_draft"]),
         Action::CopyContactEmail { .. } => ActionRoute::ClientOnly("the system clipboard"),
@@ -340,8 +340,22 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             cancel_hold(app, commands);
             true
         }
-        Action::Rsvp { msg, choice } => {
-            rsvp(app, commands, *msg, *choice);
+        Action::Rsvp {
+            account,
+            event,
+            choice,
+            comment,
+            send_response,
+        } => {
+            respond(
+                app,
+                commands,
+                account,
+                event,
+                *choice,
+                comment.as_deref(),
+                *send_response,
+            );
             true
         }
         Action::RefreshContacts => {
@@ -701,46 +715,42 @@ fn send_approved(app: &mut App, commands: &dyn Queries) {
     );
 }
 
-/// `calendar.rsvp` for the row under the cursor.
+/// `event.respond` for the respond overlay's answer (PERSO-200).
 ///
-/// The invitation's own iMIP payload is the source of truth for the reply and
-/// the daemon reads it itself; what stays here are the three refusals whose
-/// wording belongs to this key, the first of them the read
-/// `TUI_APP_STORE_RESIDUE` keeps in `app/mod.rs`.
-fn rsvp(app: &mut App, commands: &dyn Queries, msg: MessageRef, choice: RsvpChoice) {
-    if app.load_message_ics(msg).is_none() {
-        return app.set_status_level(
-            "That message carries no invitation to reply to".to_string(),
-            StatusLevel::Error,
-        );
-    }
-    if app.is_graph() {
-        return app.set_status_level(
-            "RSVP is not supported for Graph accounts yet (#0036)".to_string(),
-            StatusLevel::Error,
-        );
-    }
-    if !app.has_smtp() {
-        return app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
-    }
-    // The three words `calendar.rsvp` takes, which are `mp invite
-    // accept|tentative|decline`'s own subcommand names.
-    let response = match choice {
-        RsvpChoice::Accept => "accept",
-        RsvpChoice::Tentative => "tentative",
-        RsvpChoice::Decline => "decline",
-    };
-    let account = app.account_config.name.clone();
-    let account_index = app.active_account;
+/// The overlay names the event: a server event's id, or the invitation mail's
+/// `imip:<row_id>`. Which accounts can answer and how is the daemon's call,
+/// so nothing is refused here: a Graph account answers through its server
+/// calendar, an iMIP account by reply mail, and the daemon words its own
+/// refusal for anything else.
+fn respond(
+    app: &mut App,
+    commands: &dyn Queries,
+    account: &str,
+    event: &str,
+    choice: RsvpChoice,
+    comment: Option<&str>,
+    send_response: bool,
+) {
+    let account_index = app
+        .accounts
+        .iter()
+        .position(|state| state.account_config.name == account)
+        .unwrap_or(app.active_account);
     app.set_status_level(
-        format!("Sending {} reply...", choice.label().to_lowercase()),
+        format!("Sending {} answer...", choice.label().to_lowercase()),
         StatusLevel::Progress,
     );
     start_operation(
         app,
         commands,
-        "calendar.rsvp",
-        json!({"account": account, "row_id": msg.row_id(), "response": response}),
+        "event.respond",
+        mp_client::queries::event_respond_params(
+            account,
+            event,
+            choice.wire(),
+            comment,
+            send_response,
+        ),
         Awaited::Rsvp { account_index },
     );
 }
@@ -853,19 +863,25 @@ fn approved_line(settled: &Value) -> String {
     format!("{sent} sent, {failed} failed")
 }
 
-/// `calendar.rsvp`'s settled outcome, as the line the arm has always posted.
+/// `event.respond`'s settled outcome as the status line: the answer, and
+/// whether the organizer was told.
 ///
-/// A reply that reached nobody is a failure and not a green line, which is the
-/// `any_succeeded` check the arm made on the outcome it had in hand.
+/// An answer that was to be sent and reached nobody is a failure and not a
+/// green line; one the user chose not to send says so.
 fn rsvp_line(settled: &Value) -> Result<String, String> {
-    let organizer = settled["organizer"].as_str().unwrap_or_default();
-    if !settled["delivered"].as_bool().unwrap_or(false) {
-        return Err(format!("Failed to send RSVP to {organizer}"));
+    let outcome: mp_protocol::calendar::EventRespondResult =
+        serde_json::from_value(settled.clone())
+            .map_err(|e| format!("the answer's outcome did not decode: {e}"))?;
+    let answer = match outcome.response.as_str() {
+        "accept" => "Accepted",
+        "tentative" => "Tentatively accepted",
+        _ => "Declined",
+    };
+    match (outcome.send_response, outcome.delivered) {
+        (_, true) => Ok(format!("{answer}; the organizer was told")),
+        (false, false) => Ok(format!("{answer}; no response sent to the organizer")),
+        (true, false) => Err(format!("{answer}, but the organizer could not be told")),
     }
-    Ok(format!(
-        "{} — replied to {organizer}",
-        settled["subject"].as_str().unwrap_or_default()
-    ))
 }
 
 // ---------------------------------------------------------------------------

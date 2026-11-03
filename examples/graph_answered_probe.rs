@@ -87,7 +87,7 @@ async fn listing_cost(config: &GraphConfig, folder: &str) -> Result<()> {
         &config.account_name,
         &config.client_id,
         &config.tenant_id,
-        mailypoppins::oauth2::GRAPH_SCOPES,
+        &config.scopes,
     )
     .await?;
     let http = reqwest::Client::new();
@@ -148,7 +148,7 @@ async fn probe(config: &GraphConfig, message_id: &str, patch_folder: Option<&str
         &config.account_name,
         &config.client_id,
         &config.tenant_id,
-        mailypoppins::oauth2::GRAPH_SCOPES,
+        &config.scopes,
     )
     .await?;
     let http = reqwest::Client::new();

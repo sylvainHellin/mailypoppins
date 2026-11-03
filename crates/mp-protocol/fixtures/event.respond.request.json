@@ -1,0 +1,12 @@
+{
+  "id": 75,
+  "jsonrpc": "2.0",
+  "method": "event.respond",
+  "params": {
+    "account": "evoqs",
+    "comment": "I may be late",
+    "event": "AAMkADev1",
+    "response": "tentative",
+    "send_response": false
+  }
+}

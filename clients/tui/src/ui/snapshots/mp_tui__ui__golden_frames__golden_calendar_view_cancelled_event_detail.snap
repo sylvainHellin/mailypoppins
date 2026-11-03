@@ -4,51 +4,52 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 ---
 == text 120x40 (trailing spaces trimmed) ==
 00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-01 |│╭ Calendar (3 upcoming) ────────────────╮╭ Event ────────────────────────────────────────────────────────────────────╮│
-02 |││2026-08-03 09:00 Bauste…   accepted    ││Abgesagter Jour fixe                                                       ││
-03 |││2026-08-04 10:00 Abgesa…   cancelled   ││Cancelled by the organizer.                                                ││
-04 |││2026-08-06 15:00 PhD Ko…   organizer   ││When: 2026-08-04T08:00:00+02:00                                            ││
-05 |││                                       ││Where: Raum 2.14                                                           ││
-06 |││                                       ││Organizer: planung@example.org                                             ││
-07 |││                                       ││Your RSVP: Accepted                                                        ││
-08 |││                                       ││Cancelled invitations take no response; nothing was sent to Exchange (no   ││
-09 |││                                       ││Graph in v1).                                                              ││
-10 |││                                       ││                                                                           ││
+01 |│╭ Agenda: Mon 03 Aug to Mon 17 Aug ─────╮╭ Event ────────────────────────────────────────────────────────────────────╮│
+02 |││Mon 2026-08-03                         ││Abgesagter Termin  cancelled by the organizer                              ││
+03 |││  09:00-10:00 ✓ Baustellenübergabe     ││                                                                           ││
+04 |││                [evoqs/Calendar]  @ Ra…││When        Fri 2026-08-07 14:00-15:00                                     ││
+05 |││                                       ││Calendar    evoqs/Calendar                                                 ││
+06 |││Tue 2026-08-04  (today)                ││Response    ✓ accepted                                                     ││
+07 |││  10:00-11:00 ? Jour fixe              ││                                                                           ││
+08 |││                [evoqs/Calendar]       ││                                                                           ││
+09 |││  10:30-12:00 ? PhD Kolloquium         ││                                                                           ││
+10 |││                [perso/Invitations]  @…││                                                                           ││
 11 |││                                       ││                                                                           ││
-12 |││                                       ││                                                                           ││
-13 |││                                       ││                                                                           ││
-14 |││                                       ││                                                                           ││
+12 |││Wed 2026-08-05                         ││                                                                           ││
+13 |││  all day       Sommerfest             ││                                                                           ││
+14 |││                [evoqs/Holidays]       ││                                                                           ││
 15 |││                                       ││                                                                           ││
-16 |││                                       ││                                                                           ││
-17 |││                                       ││                                                                           ││
-18 |││                                       ││                                                                           ││
-19 |││                                       ││                                                                           ││
-20 |││                                       ││                                                                           ││
+16 |││Thu 2026-08-06                         ││                                                                           ││
+17 |││  all day       Sommerfest             ││                                                                           ││
+18 |││                [evoqs/Holidays]       ││                                                                           ││
+19 |││  10:00-11:00 ? Jour fixe              ││                                                                           ││
+20 |││                [evoqs/Calendar]       ││                                                                           ││
 21 |││                                       ││                                                                           ││
-22 |││                                       ││                                                                           ││
-23 |││                                       ││                                                                           ││
-24 |││                                       ││                                                                           ││
+22 |││Fri 2026-08-07                         ││                                                                           ││
+23 |││  14:00-15:00 ✓ Abgesagter Termin (can…││                                                                           ││
+24 |││                [evoqs/Calendar]       ││                                                                           ││
 25 |││                                       ││                                                                           ││
 26 |││                                       ││                                                                           ││
 27 |││                                       ││                                                                           ││
 28 |││                                       ││                                                                           ││
-29 |││Only events that arrived by email are  ││                                                                           ││
-30 |││shown; Outlook-created events need     ││                                                                           ││
-31 |││Graph sync (#0036).                    ││                                                                           ││
+29 |││                                       ││                                                                           ││
+30 |││                                       ││                                                                           ││
+31 |││                                       ││                                                                           ││
 32 |│╰───────────────────────────────────────╯│                                                                           ││
 33 |│╭ View ─────────────────────────────────╮│                                                                           ││
 34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
 35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
 36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
-37 |││ CALENDAR   j/k Navigate events  Enter / e Open invite email  V RSVP  t Past / upcoming  r Refresh                  ││
+37 |││ CALENDAR   j/k Events  h/l Day/week  t Today  a/d/w Layout  Enter Card  V Respond  c Calendars                     ││
 38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
-02 |bold@43..63
-03 |bg:surface+fg:selection+bold+strike@2..18 bg:surface+fg:selection+bold@18..19 bg:surface+fg:selection+bold+strike@19..26 bg:surface+fg:selection+bold@26..41 fg:error+bold@43..70
-04 |bold@43..49
-05 |bold@43..50
-06 |bold@43..54
-07 |bold@43..54
+02 |bold@2..16 bold@43..60 fg:error@60..88
+06 |bold@2..25
+12 |bold@2..16
+16 |bold@2..16
+22 |bold@2..16
+23 |bg:surface+fg:selection+bold@2..41
+24 |bg:surface+fg:selection+bold@2..41
 34 |bold@27..37
-37 |bold@2..12 bold@14..17 bold@35..44 bold@64..65 bold@72..73 bold@91..92
+37 |bold@2..12 bold@14..17 bold@26..29 bold@40..41 bold@49..54 bold@63..68 bold@75..76 bold@86..87

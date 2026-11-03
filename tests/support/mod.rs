@@ -23,6 +23,9 @@
 //! [`admin_fixture`] is the send fixture plus two invitations and a reply, a
 //! file-era mailstore, an id-less draft, a secrets file, a token cache and a
 //! prebuilt contact index, for the admin slice (plan unit P4-U13).
+//! [`calendar_fixture`] is two accounts, one served by the calendar fake and
+//! one without a calendar backend, and an invitation mail on each, for the
+//! server calendar (PERSO-200).
 //! [`readiness`] waits for a spawned daemon to answer `daemon.status`, and
 //! [`events`] reads `state.event` notifications past the daemon's own startup
 //! events; daemon suites that do not declare `mod support;` include either
@@ -31,6 +34,7 @@
 #![allow(dead_code)]
 
 pub mod admin_fixture;
+pub mod calendar_fixture;
 pub mod draft_fixture;
 pub mod events;
 pub mod mutation_fixture;

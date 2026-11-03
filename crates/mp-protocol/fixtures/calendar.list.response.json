@@ -1,0 +1,38 @@
+{
+  "id": 71,
+  "jsonrpc": "2.0",
+  "result": {
+    "calendars": [
+      {
+        "account": "evoqs",
+        "backend": "graph",
+        "can_edit": true,
+        "color": "#3b82f6",
+        "id": "AAMkADcal1",
+        "is_default": true,
+        "name": "Calendar",
+        "visible": true
+      },
+      {
+        "account": "evoqs",
+        "backend": "graph",
+        "can_edit": false,
+        "color": null,
+        "id": "AAMkADcal2",
+        "is_default": false,
+        "name": "Holidays",
+        "visible": false
+      },
+      {
+        "account": "perso",
+        "backend": "none",
+        "can_edit": false,
+        "color": null,
+        "id": "imip",
+        "is_default": false,
+        "name": "Invitations",
+        "visible": true
+      }
+    ]
+  }
+}

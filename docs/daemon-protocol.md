@@ -104,7 +104,8 @@ The families, all of them reserved here and served over the phases of the migrat
 - `contact.*` for listing, ranking, rebuilding, statistics, and the vCard draft.
   This build serves `contact.rebuild`, `contact.search`, `contact.stats` and `contact.vcard_draft`; the rows are `{address, display_name, sent_to, sent_cc, received, first_seen, last_seen, score}`, `contact.search` answers `rebuild`, the `mp_protocol::contact::RefusedRebuild` of a build of a missing or stale index the cache guard refused (`null` otherwise), and `contact.vcard_draft` `{account, name, address, display_name}` writes a draft addressed to the contact, subject `Contact: <name>`, no signature, with the contact's vCard under the drafts directory's `_vcards/` attached, answering `mp_protocol::contact::VcardDraft` `{draft, vcf}`.
   Every write of an index is announced as `contact.changed`.
-- `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.events`, `calendar.rebuild` and `calendar.rsvp`.
+- `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.list`, `calendar.rebuild`, `calendar.rsvp`, `calendar.set_visibility` and `calendar.view` ([The server calendar](#the-server-calendar)).
+- `event.*` for one event of the server calendar: `event.get` and `event.respond` ([The server calendar](#the-server-calendar)).
 - `signature.*` for list, read, create, rename, delete, and per-account default selection. This build serves six methods (`mp_protocol::signature`): `signature.list` `{account}` -> `{account, names, default}`, a query any configured account answers, store or not, the sorted names under `<config>/signatures/` and the account's default, `null` when it has none or its file is gone; `signature.read` `{name}` -> `{name, path, content}`, a query; and four commands, `signature.create` `{name}` -> `{name, path, content: ""}`, `signature.rename` `{account, old, new}`, `signature.delete` `{account, name}` and `signature.set_default` `{account, name|null}`, the last three answering `account`'s listing after the change. A refusal is `-32602` with `mp_core::signatures`' sentence; no method writes a signature's content, which is the editor's, on `path`.
 - `hook.*` for the mail hooks of `[[accounts.hooks]]` (#0135). This build serves `hook.list`, `hook.replay` and `hook.test`.
 - `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes. This build serves ten methods: `config.add_account`, `config.cutover`, `config.get`, `config.init`, `config.oauth2_login`, `config.probe`, `config.reload`, `config.reset_secrets`, `config.set_password` and `config.validate`.
@@ -119,9 +120,9 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.list`, `calendar.view`, `event.get`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft`, `calendar.set_visibility` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `event.respond`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
 A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
@@ -273,14 +274,15 @@ Asking which accounts exist may not create or destroy a cache, so a file that fa
 
 ```json
 {"accounts": [
-  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null},
-  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired"}
+  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null, "missing_scopes": []},
+  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired", "missing_scopes": ["Calendars.ReadWrite"]}
 ]}
 ```
 
 It lists every configured account in the file's order, or the one `account` names; an unknown name is `-32005`.
 `smtp_password` and `imap_password` say whether `smtp-password-<account>` and `imap-password-<account>` are in the secrets backend, `null` for any account but a password one; `imap_password` is the IMAP key alone, and a client says "falls back to smtp" itself from the two booleans.
 `token` is `valid`, `expired`, `invalid` (a cache file that does not decrypt or parse) or `not_cached` for a `graph` account, and `null` for any other.
+`missing_scopes` lists, by short name, the scopes the account's server calendar needs and its token was not granted: `["Calendars.ReadWrite"]` for a `graph` account whose calendar is Graph's and whose token predates the calendar scope (PERSO-200), which a new sign-in fixes; it is `[]` for every other account and for one with no readable token, whose `token` already asks for a sign-in.
 An account whose config still names the retired `auth_method = "oauth2"` reports that word and `null` for all three.
 No value, length, prefix or key name travels.
 It is a query of its own rather than a field of `config.get`, which stays contracted never to look a secret up: a settings screen asks this question, and every configuration read would otherwise be a secret read.
@@ -1104,6 +1106,46 @@ A draft never makes a conversation appear: a conversation is listed in a mailbox
 The sidebar counts stay per message and this method moves none of them.
 A conversation's expansion is `message.thread` with `prefer_mailbox` and `include_drafts` ([Read-only methods](#read-only-methods)).
 
+### The server calendar
+
+PERSO-200 gives every account a calendar view over two sources: the server calendar of an account whose `calendar_backend` is `graph` (`ews` and `caldav` are refused as not supported yet and read as having no backend), cached by the daemon over a rolling window of one month back and twelve months ahead, and the iMIP invitation mails every account holds.
+The wire types are `mp_protocol::calendar`; an event is `CalendarEvent`, the neutral model `mp_core::calendar_model::Event` key for key plus an optional `source`.
+
+`calendar.list` `{account?}` -> `{calendars: [CalendarInfo]}` is a query.
+A row is `{account, id, name, color, is_default, can_edit, visible, backend}`, `color` `null` when the server names none and `backend` the account's `calendar_backend` as the configuration spells it.
+An account with a backend lists its server calendars in the server's order, as the last sync stored them, so an account that never synced lists none.
+Every account holding an invitation mail lists one more, the virtual invitation calendar `{id: "imip", name: "Invitations", backend: "none"}`, so its events can be hidden like a server calendar's.
+Without `account` it answers every account with a store, in configuration order; a named account is refused as `message.list` refuses one.
+
+`calendar.set_visibility` `{account, calendar, visible}` -> `{account, calendar, visible}` is a command: it shows or hides one calendar of `calendar.list`, `imip` included, affects `calendar:<account>/<id>` and publishes `calendar.changed`.
+The preference is local, kept apart from the cache, and survives `calendar.rebuild` and a store rebuild; a calendar `calendar.list` does not name is `-32602`.
+
+`calendar.view` `{start, end, accounts?, calendars?, include_hidden?, zone?}` -> `{range, zone, window, events: [CalendarEvent]}` is a query (`CalendarViewParams`, `CalendarViewResult`).
+`start` and `end` are RFC 3339 with an offset, `end` exclusive and at most 400 days after `start`; `range` answers them as UTC instants.
+`accounts` defaults to every account with a store, `calendars` filters on calendar ids, `include_hidden` adds the hidden calendars' events, and `zone`, an IANA zone defaulting to the daemon's own, places an all-day event's midnights and reads an invitation's floating times.
+`window` is the range the server cache holds today; a range beyond it answers what the cache still has there, which is nothing once the window has moved past it, and an invitation mail's event is answered wherever it falls.
+The events are sorted by start, an all-day event first on its day, then by summary, account and id.
+An invitation mail's event has the id `imip:<row_id>`, the calendar `imip`, the `UID` `row:<row_id>` when the invitation carries none, the instants of a zoned time labelled `UTC`, the human-readable recurrence summary of the agenda row as its `recurrence`, and `source` `{kind: "imip", row_id, selector, subject}`, the message a client opens; an invitation with no start is left out.
+An invitation mail's event whose `UID` and `RECURRENCE-ID` a cached server event of the accounts in view also carries is left out: the server copy wins, whether or not its calendar is shown and wherever it sits in time; server events are never deduplicated against one another.
+
+`event.get` `{account, event}` -> `{account, event: CalendarEvent}` (`EventGetResult`) is a query answering one cached server event, or an invitation mail's (`imip:<row_id>`), whose floating times are read in the daemon's zone; an id neither knows is `-32602`.
+
+`event.respond` `{account, event, response, comment?, send_response?}` (`EventRespondParams`) is an operation that answers an invitation, `response` being exactly `accept`, `tentative` or `decline` and `send_response` `true` when absent.
+A server event is answered through the account's backend, Graph's `accept`, `tentativelyAccept` or `decline` with `comment` and `sendResponse`, after which the daemon syncs the account's calendar at once.
+An invitation mail's event (`imip:<row_id>`) is answered with the iMIP reply `calendar.rsvp` sends, the comment following the reply's one-line body; `send_response: false` is `-32602` there, because the iMIP path keeps no answer of its own and reads the user's answer back from the reply mail it sent.
+The refusals come before the operation starts: the `ANO-4` sentence on an invitation mail's event of a Graph account, `-32602` for a server id on an account without a backend, and, on an account whose sign-in lacks the calendar scope, `-32603` with the re-login prompt `calendar needs a re-login (mp config oauth2-login -A <name>)` and `data` `{account, missing_scopes}`, without a call to the server.
+It settles `EventRespondResult` `{account, event, response, comment, send_response, via, delivered}`, `via` `server` or `imip` and `delivered` whether the organizer was told: `send_response` through the server, the reply's delivery through iMIP; every settled answer publishes `calendar.changed`.
+`calendar.rsvp` stays as the iMIP path's own address, unchanged, and no client answers through it any more: `mp invite`, `mp event respond`, the TUI's respond overlay and the desktop app's event card answer through `event.respond` (PERSO-200), and the desktop app asks `calendar.rsvp` with `{account}` alone only to read the refusal its new invitation form shows on a Graph account.
+
+`calendar.rebuild` `{account}` keeps its iMIP meaning, the fold of the stored replies, on every account, since every account's invitation mails feed its view.
+On an account with a backend it also drops the account's server cache, keeping the visibility preferences, syncs it afresh and publishes `calendar.changed`, and the settled fold gains `server`: `{calendars, upserts, removed, baselines, failed: [{calendar, error}]}`, or `{error: {code, message, data?}}` when the resync failed, the re-login prompt for a sign-in without the scope.
+The fold settles the operation either way, so `mp calendar rebuild` over every account still reports each account's fold.
+
+`message.invite` gained `event_id` on an account with a backend: the server event an invitation mail stands for, read from Graph's `eventMessage` once per mail and remembered, or `null` when the server names none or the mail has no Graph id.
+An account without a backend gets no such key.
+
+The daemon syncs an account's calendar after the mail pass of each of its ticks, under one lock per account it shares with `calendar.rebuild` and `event.respond`, and publishes `calendar.changed` when the sync moved the cache; a sign-in without the calendar scope is skipped quietly there, since the `calendar:<name>` health check already prompts for the re-login.
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
@@ -1144,7 +1186,7 @@ The worker observes its token whenever it next looks, and its later result is th
 The answer is therefore a fact and not a promise.
 
 Where a worker looks is part of its method's contract, and a method whose work ends in a write looks immediately before that write, its commit point.
-`contact.rebuild` looks every 256 rows of its walk and once more before the contacts cache write; `calendar.rsvp` and `send.invite` look once the reply or the invitation is built, before the durable submission.
+`contact.rebuild` looks every 256 rows of its walk and once more before the contacts cache write; `calendar.rsvp` and `send.invite` look once the reply or the invitation is built, before the durable submission; `event.respond` looks once the account's calendar backend is connected, before it sends the answer to the server, and on an invitation mail's event where `calendar.rsvp` does.
 A cancel that lands before the commit point drops what was prepared: the cache stays as it was, nothing is submitted and no outbox row is minted.
 A cancel that lands after it cannot recall the write or the submission, which then completes under an operation that already reads `cancelled`.
 A client therefore words a cancelled end of these three as having stopped waiting rather than undone.
@@ -1250,6 +1292,8 @@ It is a lifecycle event and reduces into no snapshot: signatures are global rath
 `signature.removed` says that a signature file the watcher had announced is gone, deleted or renamed away, with a payload of `{name}`; a rename publishes it for the old name and `signature.changed` for the new one. It is a lifecycle event too, `mp_protocol::events::SignatureRemoved`.
 
 `contact.changed` says that an account's contact index was written, with a payload of `{account, contacts}`, the count the index holds now (`mp_protocol::events::ContactChanged`): a `contact.rebuild` the cache guard let through, the build a `contact.search` or `contact.stats` ran because the account had no current index, and the bump a sync (the runtime's tick included) or a send gives the addresses it saw. It is a lifecycle event, and a client showing the contacts reads them again with `contact.search`.
+
+`calendar.changed` says that an account's calendars or events moved, with a payload of `{account}` (`mp_protocol::calendar::CalendarChanged`): a calendar sync that changed the cache (a tick's, a `calendar.rebuild`'s, or the one after an `event.respond`), an answer to an invitation, or a `calendar.set_visibility`. It is a lifecycle event, and a client showing the calendar reads it again with `calendar.list` and `calendar.view`.
 
 `message.server_hit` carries one hit of a live `message.search_server`, with a payload of `{operation_id, hit}`.
 It is a lifecycle event: a hit is a fact about a moment in one search, two hits never merge, and no snapshot brings one back, exactly as an `operation.progress` report does not.
@@ -1406,7 +1450,7 @@ It is a method of its own rather than a second row shape under `message.rows`, s
 A fixture is stored canonically, which means `serde_json::to_string_pretty` of its own content plus a trailing newline: two-space indentation and alphabetically sorted keys.
 A diff on a fixture is therefore a protocol change and never a reformat.
 
-The file name selects the type a fixture must parse into: `error.*` is an error response, `event.*` a bare event envelope, `notification.*` a notification, `*.request.json` a request, and `*.response.json` a response.
+The file name selects the type a fixture must parse into: `*.request.json` is a request and `*.response.json` a response, read first so a call of the `event.*` family is one, then `error.*` an error response, `event.*` a bare event envelope and `notification.*` a notification.
 Parsing a fixture and serialising it back must reproduce the file's JSON exactly, which is what catches a field the type forgot or invented.
 A new fixture whose name matches no rule fails the suite rather than being skipped.
 
@@ -1414,6 +1458,8 @@ A new fixture whose name matches no rule fails the suite rather than being skipp
 Both have their member set pinned down to one account and one check entry, and both decode as `mp_protocol::state::Bootstrap`; the second is in its current shape throughout, so it also survives that typed decode unchanged.
 
 The conversation listing has five: `message.list_conversations.request.json`, `message.list_conversations.response.json`, which decodes as `MessageListStreamStarted`, `notification.message_conversations.json`, which decodes as `ConversationRowsChunk` and whose rows' `latest` are the rows of `message.list.response.json` unchanged, and `message.thread.drafts.{request,response}.json`, the expansion with its two parameters and a draft member.
+
+The server calendar has eleven: a request and a response for each of `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, and `notification.calendar_changed.json`; `mp_protocol::calendar`'s own test decodes them into their types, and `calendar.view.response.json` re-encodes to itself, so the wire event cannot drift from the daemon's serialisation.
 
 The streamed listing has three fixtures: `message.list_stream.request.json`, `message.list_stream.response.json`, which decodes as `mp_protocol::listing::MessageListStreamStarted`, and `notification.message_rows.json`, which decodes as `MessageRowsChunk` and carries the rows of `message.list.response.json` unchanged, so the two row shapes cannot drift apart.
 
@@ -1505,11 +1551,10 @@ No method, parameter or existing payload moved, and a client that does not know 
 `crates/mp-protocol/fixtures/notification.mutations_rolled_back.json` is its fixture.
 
 P5-U10 added three queries, all additive; no field was renamed, none was dropped, and no command's output moved.
-`calendar.events` `{account}` -> `{account, events}` answers one account's agenda: the rows are already deduped by `(UID, RECURRENCE-ID)`, folded with the account's stored `METHOD:REPLY` and `METHOD:CANCEL` rows, and sorted by start instant with undated events last, because every one of those is a fold over the account's *other* rows and is exactly what a client with no store cannot do.
-A row is `mp_protocol::calendar::AgendaEvent` `{row_id, event, subject, start_sort, end_sort, start_display, is_organizer, cancelled}`, and no key is skipped when empty.
+The first, `calendar.events` `{account}` -> `{account, events}`, answered one account's agenda as `mp_protocol::calendar::AgendaEvent` rows until PERSO-200 removed it.
 `message.invite` `{account, id|row_id|selector, mailbox?}` -> `{account, row_id, event}` answers one message's invitation card, the same fold over one payload; `message.ics` with the same address -> `{account, row_id, ics}` answers the row's raw `invite.ics` blob, base64 in the standard alphabet with padding, because a blob is bytes and a JSON string is not.
 Both answer `null` for a row that carries no iMIP payload rather than refusing: a non-invite is the ordinary case, and the preview shows no card for one exactly as it always did.
-`calendar.events` is declared in `CALENDAR_QUERY_METHOD_SPECS` and the two `message.*` reads in `MESSAGE_INVITE_METHOD_SPECS`, arrays of their own for the reason `MESSAGE_QUEUE_METHOD_SPECS` is one: the existing arrays are pinned by tests written about the slices that created them, and the split is a Rust-side fact the wire never sees.
+The two `message.*` reads are declared in `MESSAGE_INVITE_METHOD_SPECS`, an array of their own for the reason `MESSAGE_QUEUE_METHOD_SPECS` is one: the existing arrays are pinned by tests written about the slices that created them, and the split is a Rust-side fact the wire never sees.
 The capability list a handshake advertises grew by those three names, which is the derivation working rather than a change to it.
 `mp_protocol::calendar` also now owns `EventFrontmatter` and `EventAttendee`, which were `mailypoppins::types`': pure serde structs both ends of the socket need, re-exported from the root crate under their old paths, so nothing about the YAML frontmatter they also serialise moved.
 
@@ -1551,7 +1596,8 @@ P6-U8 added four methods to the `diagnostic.*` family, one event kind and one fi
 `version` and `protocol_version` are deliberately not `app_version` and `protocol`: `daemon.status` is the pre-handshake lifecycle probe and answers the daemon's *range*, while health is a support document and what a support case needs is the single integer this connection negotiated.
 An `accounts` entry is `{name, runtime, watcher, last_sync: {finished_at, outcome}}`, `runtime` being `daemon.status`'s `opening`/`ready`/`blocked` and `watcher` being `running` or `stopped`; `last_sync` is `{null, null}` until a tick lands.
 `store` is one entry and not one per account, because the only question a health report is asked about the store is whether the cache is large.
-`checks` is four fixed checks in this order - `config_loaded`, `store_open`, `socket_owner`, `log_writable` - then one `account:<name>` per configured account in configuration order, each `{name, status, detail}` with a `status` of `ok`, `warn` or `fail` and a `detail` that is never empty.
+`checks` is four fixed checks in this order - `config_loaded`, `store_open`, `socket_owner`, `log_writable` - then one `account:<name>` per configured account in configuration order, each followed by a `calendar:<name>` when the account is a `graph` one whose calendar is Graph's, each `{name, status, detail}` with a `status` of `ok`, `warn` or `fail` and a `detail` that is never empty.
+`calendar:<name>` is `warn` with the detail `calendar needs a re-login (mp config oauth2-login -A <name>)` while the account's token lacks `Calendars.ReadWrite` (PERSO-200), the prompt every client shows as `<name>: <detail>`, and `ok` otherwise; `config.oauth2_login` re-evaluates it once a sign-in succeeds, so the recovery reaches the clients without waiting for the sweep.
 An account blocked because another engine holds its lock is `warn` and one whose runtime never came up at all is `fail`: a second `mp` holding a lock is a normal state of a developer's machine, and a daemon that called it a failure would cry wolf.
 An account whose start is still in flight is `ok` ("opening its store") for its first 30 seconds and `warn` ("still opening its store after Ns") past them, so a normal start with several accounts publishes no warning and no recovery.
 `diagnostic.log_path` `{}` -> `{path}` names the file the daemon is writing, `<data_dir>/logs/mailypoppins-<date>.log`, which is the surface `docs/parity-matrix.md` `INT-02` and `OBS-05` reach the log through.
@@ -1626,7 +1672,7 @@ The method took `message.search`'s field filters, `from`, `to`, `cc`, `subject`,
 The key list in `tests/daemon_server_leg_slice.rs` is nine names.
 
 The daemon leftovers (2026-10-22) added nine methods, three optional parameters, one answer member and two event kinds, and retired one method; no field of a shape that stayed was renamed or dropped.
-`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`.
+`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token, missing_scopes}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`.
 `config.probe` `{account, check, password?}` -> `{ok, mailboxes?}` or `{ok: false, error}` is a query that dials a candidate account for the setup wizards; `config.init` gained `replace`, and `config.oauth2_login` gained `candidate`.
 `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default` complete the `signature.*` family, with `mp_protocol::signature::SignatureFile`; the watcher publishes `signature.removed` `{name}` (`mp_protocol::events::SignatureRemoved`) for a signature file deleted or renamed away.
 `contact.vcard_draft` `{account, name, address, display_name}` -> `{draft, vcf}` (`mp_protocol::contact::VcardDraft`) is a command; `contact.search` gained `rebuild`, `null` or the `mp_protocol::contact::RefusedRebuild` of a build the cache guard refused; and every write of a contact index publishes `contact.changed` `{account, contacts}` (`mp_protocol::events::ContactChanged`).
@@ -1651,3 +1697,10 @@ It replaces the TUI's `ce` and the desktop's recipients dialog writing the file 
 A draft row of the snapshot, a `draft.changed` payload and a `draft.list` row gained `server`, `mp_protocol::state::DraftServer` `{state, synced_at}` with `state` a `DraftSyncState` (`local`, `pending`, `synced`, `conflict`, `failed`); it is absent until the account's runtime has read its mirror state, so a row from an older daemon, or from an account whose runtime has not come up, decodes as before.
 A draft file may carry `server_message_id`, the `Message-ID` of its server copies, and `conflict_of`, the id of the draft a conflict copy was split from; both are optional, and a draft without them parses unchanged.
 The bootstrap fixture's round-trip snapshot carries a `server` member; the committed fixture's draft row still predates it and decodes with none.
+
+PERSO-200 (the server calendar, phase 1) added five methods, one lifecycle kind and one member, all additively; no field was renamed, none was dropped, and no command's output moved.
+`calendar.list`, `calendar.view` and `event.get` are queries, `calendar.set_visibility` a command and `event.respond` an operation, with the shapes of [The server calendar](#the-server-calendar) and the types of `mp_protocol::calendar`; `calendar.changed` `{account}` (`mp_protocol::calendar::CalendarChanged`) is the lifecycle kind, and `message.invite` gained `event_id` on an account with a calendar backend.
+`calendar.rebuild` on an account with a backend also resyncs its server cache and reports it under the new `server` member; on any other account it is unchanged, and so is `calendar.rsvp`.
+It also removed `calendar.events`, the one-account iMIP agenda, once neither the TUI nor the desktop called it: `calendar.view` answers the same invitations as the events of each account's `imip` calendar.
+The capability list lost the name and the desktop no longer requires it, so a client that still calls it is answered `-32601`.
+The fixtures of the `event.*` family are named `event.<method>.request.json` and `.response.json`, which the fixture suite reads as a call and its answer before it reads the `event.` prefix as a bare envelope.

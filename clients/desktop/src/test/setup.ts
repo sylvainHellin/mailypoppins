@@ -1,4 +1,10 @@
 import "@testing-library/jest-dom/vitest";
+
+// The Calendar view lays the events out in the local zone, which the
+// fixture's calendar.view answers in: one zone for every run, whatever the
+// machine's.
+process.env.TZ = "Europe/Berlin";
+
 import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { PREFS_KEY } from "@/app/prefs";

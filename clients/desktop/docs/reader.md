@@ -85,27 +85,28 @@ While the menu is open it owns the keys, as a dialog does.
 
 ## Invitations
 
-An email the store marks as an invitation (`MessageMeta.invite`) shows its invitation card under the header block (`InviteCard.tsx`, a region named "Invitation"), the Calendar view's event card with the reply buttons as its children ([shell.md](shell.md), "Calendar").
-The card reads `invite_get` once the reader shows the email, and a skeleton stands in until it lands.
+An email the store marks as an invitation (`MessageMeta.invite`) shows its invitation card under the header block (`InviteCard.tsx`, a region named "Invitation"), the shared event card with the reply buttons as its children ([shell.md](shell.md), "Calendar").
+The card reads `invite_get` once the reader shows the email, and a skeleton stands in until it lands: the event the email carries, and on an account with a calendar backend the server event it stands for (`event_id`, which `message.invite` names).
 An email whose calendar data the store could not read says "This email carries no invitation the store could read".
-`state.invites` keeps each card by `readerKey`, and a card goes stale with its account's agenda: a `state.invalidate` or `state.remove` of the account's mailboxes or messages, its `sync.completed`, a bootstrap, and a settled RSVP.
+`state.invites` keeps each card by `readerKey`, and a card goes stale with its account's calendar: a `state.invalidate` or `state.remove` of the account's mailboxes or messages, its `sync.completed`, its `calendar.changed`, a bootstrap, and a settled answer.
 So an update or a cancellation that lands in the inbox, and the fixture's `invite_update` and `invite_cancel`, reach an open card without a reload.
 
 Below the details, the group "Reply to the invitation" holds Accept, Tentative and Decline.
-A button sends `calendar_rsvp` with its answer at once, and the three stay disabled while the reply is sending ("Sending Accept…").
+A button sends one `event_respond` with its answer at once (PERSO-200): to the server event when the card names one, so the server calendar records the answer and tells the organizer, else to `imip:<row_id>`, which the daemon answers with a reply mail.
+The three stay disabled while the answer is sending ("Sending Accept…").
 The TUI refuses some invitations, and the card disables the three with the TUI's sentence under them, `aria-describedby` from each button, checked in this order (`rsvpRefusal` in `src/app/rsvp.ts`):
 
 1. not a `REQUEST`: "Only received invitations (REQUEST) can be RSVP'd";
 2. cancelled: "This event was cancelled by the organizer; nothing to RSVP";
 3. superseded: "A newer version of this invitation has arrived; RSVP from that one";
-4. an email in the Sent mailbox, the user's own: "You are the organizer of this invite; nothing to RSVP";
-5. a Graph account: the daemon's sentence, from `invite_refusal`, read once per account and forgotten when another daemon instance answers.
+4. an email in the Sent mailbox, the user's own: "You are the organizer of this invite; nothing to RSVP".
 
 The TUI's sentences carry an em-dash where the desktop has a semicolon.
-With none of these, the line under the buttons says that `t v` opens the reply from the keyboard.
+Which answers an account takes is the daemon's call, with no probe ahead of it: its refusal is the notice "RSVP failed: <the daemon's sentence>".
+With none of these, the line under the buttons says where the answer goes: on a server event "The answer goes to the server calendar, which tells the organizer; t v adds a comment or keeps it from the organizer", else "The answer is a reply mail to the organizer; t v adds a comment".
 
-`tv`, from the list or the reader, opens the RSVP choice for the cursor email after the TUI's guards: "Not a calendar invite" for an email that is none, the organizer sentence for one in the Sent mailbox, "This search hit has no local copy to RSVP from" for a server-only hit, then the card's reasons, read with `invite_get` when the card is not loaded.
-The choice and what a settled reply says are in [shell.md](shell.md), "Calendar".
+`tv`, from the list or the reader, opens the respond choice for the cursor email after the TUI's guards: "Not a calendar invite" for an email that is none, the organizer sentence for one in the Sent mailbox, "This search hit has no local copy to RSVP from" for a server-only hit, then the card's reasons, read with `invite_get` when the card is not loaded.
+The choice adds a comment, and on a server event the "Send a response to the organizer" checkbox; it and what a settled answer says are in [shell.md](shell.md), "Calendar", "Respond".
 
 ## Attachments
 

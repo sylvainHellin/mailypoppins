@@ -760,8 +760,9 @@ fn a_reconnect_re_bootstraps_before_it_accepts_the_new_instance() {
 
 /// `account.state_changed` marks an account blocked and a later `ready` clears
 /// it, which is what the account picker reads to say `blocked` rather than
-/// `opening`. `blocked` calls nothing; `ready` reads the counts again, as the
-/// desktop's `staleMailboxes` does.
+/// `opening`. `blocked` calls nothing; `ready` asks the credentials, which a
+/// sign-in may have changed, and reads the counts again, as the desktop's
+/// `staleMailboxes` does.
 #[test]
 fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
     let fixture = Fixture::new();
@@ -791,7 +792,7 @@ fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
         json!({"account": ACCOUNT, "state": "ready"}),
     ));
     assert!(!app.accounts[0].blocked);
-    assert_eq!(called(&log), vec!["mailbox.list".to_string()]);
+    assert_eq!(called(&log), ["account.credentials", "mailbox.list"]);
 }
 
 /// The methods a recording session forwarded, in order.
@@ -846,7 +847,7 @@ fn a_ready_after_an_opening_resync_ends_the_opening_and_recounts() {
     assert_eq!(applied, Applied::Rows);
     assert!(!app.accounts[0].opening, "ready ends the opening");
     assert!(!app.accounts[0].blocked);
-    assert_eq!(called(&log), vec!["mailbox.list".to_string()]);
+    assert_eq!(called(&log), ["account.credentials", "mailbox.list"]);
     let inbox = app
         .find_mailbox_by_kind(MailboxKind::Inbox)
         .expect("the Inbox mailbox is one of the four roles");
@@ -921,7 +922,7 @@ fn the_watcher_threads_are_gone_from_the_tui() {
 ///
 /// The behavioural half is `a_quick_sync_starts_an_operation_and_polls_nothing`,
 /// which pins the one arm a test can drive; this pins the other three
-/// (`sync.full`, `send.approved`, `calendar.rsvp`) and every arm a later unit
+/// (`sync.full`, `send.approved`, `event.respond`) and every arm a later unit
 /// adds, because they all go through one helper and the string appears once.
 ///
 /// The one call site allowed is the re-query rule of #0121 in `events.rs`:

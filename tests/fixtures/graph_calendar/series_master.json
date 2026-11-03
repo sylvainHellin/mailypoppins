@@ -1,0 +1,25 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('sylvain%40evoqs.de')/events(iCalUId,recurrence,originalStartTimeZone)/$entity",
+  "@odata.etag": "W/\"weekly\"",
+  "id": "AAMkEv-weekly",
+  "iCalUId": "040000008200E00074C5B7101A82E00800000000WEEKLY",
+  "originalStartTimeZone": "W. Europe Standard Time",
+  "recurrence": {
+    "pattern": {
+      "type": "weekly",
+      "interval": 1,
+      "month": 0,
+      "dayOfMonth": 0,
+      "daysOfWeek": ["tuesday"],
+      "firstDayOfWeek": "monday",
+      "index": "first"
+    },
+    "range": {
+      "type": "endDate",
+      "startDate": "2026-11-03",
+      "endDate": "2027-06-29",
+      "recurrenceTimeZone": "W. Europe Standard Time",
+      "numberOfOccurrences": 0
+    }
+  }
+}

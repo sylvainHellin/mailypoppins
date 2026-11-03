@@ -30,7 +30,7 @@ use crate::store::open_store;
 use crate::store::read;
 use crate::tui::app::{
     entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, resolve_date,
-    status_for_mailbox, CalendarEvent, EmailEntry, MailboxInfo, MessageRef,
+    status_for_mailbox, EmailEntry, MailboxInfo, MessageRef,
 };
 
 /// Load one mailbox of one account from the store, newest first.
@@ -189,23 +189,6 @@ fn row_to_wire(account: &str, row: &crate::store::read::MessageRow) -> MessageLi
 // ---------------------------------------------------------------------------
 // The three readers that were methods on `App`
 // ---------------------------------------------------------------------------
-
-/// The agenda of one account, as the Calendar view holds it.
-///
-/// The wire rows [`crate::agenda`] builds, decoded the way the client decodes
-/// the ones that come off the socket: `calendar.events` is the same builder
-/// over the same store, which is what makes the method a move rather than a
-/// second implementation.
-pub(super) fn calendar_events(account: &str, self_address: &str) -> Vec<CalendarEvent> {
-    let Some(store) = open_store(account) else {
-        return Vec::new();
-    };
-    let blobs = crate::store::BlobStore::for_account(account);
-    crate::agenda::load_events_for_account(&store, &blobs, account, self_address)
-        .into_iter()
-        .map(CalendarEvent::from_wire)
-        .collect()
-}
 
 /// One message's ics blob parsed into the event the card renders, with the
 /// store's REPLY rows folded in, which is what `message.invite` answers.

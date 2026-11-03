@@ -41,3 +41,4 @@ pub mod signatures;
 pub mod sync_health;
 pub mod timing;
 pub mod types;
+pub mod windows_zones;

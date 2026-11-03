@@ -1,16 +1,19 @@
-//! The agenda and the invitation card, through the daemon (P5-U10, #0124).
+//! The invitation card and its raw blob, through the daemon (P5-U10, #0124).
 //!
-//! `calendar.events`, `message.invite` and `message.ics` are the three methods
-//! the `TUI_APP_STORE_RESIDUE` sites of [`super`] were waiting for: until this
-//! unit `load_calendar_events`, `load_message_invite` and `load_message_ics`
-//! opened the account's store themselves, because no registered method answered
-//! an agenda row, a folded card or a raw iMIP blob.
+//! The TUI's Calendar view reads `calendar.view` since PERSO-200
+//! ([`super::calendar`]).
+//!
+//! `message.invite` and `message.ics` are the methods the
+//! `TUI_APP_STORE_RESIDUE` sites of [`super`] were waiting for: until this
+//! unit `load_message_invite` and `load_message_ics` opened the account's store
+//! themselves, because no registered method answered a folded card or a raw
+//! iMIP blob.
 //!
 //! Every row here is an **equality oracle** in the shape
 //! [`super::queries_tests`] established: the daemon-backed answer is compared
 //! against the store-backed one, over one seeded store, in one process. That is
-//! what makes the three methods a *move* rather than a second implementation
-//! whose drift nobody would notice until a pty six months later.
+//! what makes the methods a *move* rather than a second implementation whose
+//! drift nobody would notice until a pty six months later.
 //!
 //! The fixture and both oracles come from [`crate::reconcile::tests`] rather
 //! than being built here, and that is not tidiness: a `use crate::store::…` in
@@ -18,16 +21,13 @@
 //! `tests/architecture_boundaries.rs` drives to zero, which is the very thing
 //! this unit exists to shrink.
 
-use serde_json::json;
-
 use super::daemon::TestDaemon;
 use super::oracle;
 use crate::config::AccountConfig;
 use crate::reconcile::tests::{invite_ics, reply_ics, AmbientFixture};
 use crate::tui::app::App;
-use crate::tui::queries::{calendar_events, message_ics, message_invite, Queries};
-
-use crate::tui::app::{CalendarEvent, MessageRef};
+use crate::tui::app::MessageRef;
+use crate::tui::queries::{message_ics, message_invite, Queries};
 
 /// The one account every fixture configures, and the one every call names.
 const ACCOUNT: &str = "alice";
@@ -74,71 +74,6 @@ fn seed_invited_and_answered(fx: &AmbientFixture) -> i64 {
         )),
     );
     row
-}
-
-// ---------------------------------------------------------------------------
-// calendar.events
-// ---------------------------------------------------------------------------
-
-/// The agenda the daemon builds is the agenda the store-backed loader builds,
-/// row for row and column for column.
-#[test]
-fn a_daemon_backed_agenda_matches_the_store_backed_one() {
-    let fx = AmbientFixture::new(ACCOUNT);
-    seed_invited_and_answered(&fx);
-    fx.ingest("inbox", 3, "Just mail", None);
-
-    // The oracle is the wire rows `crate::agenda` builds, decoded the way the
-    // client decodes the ones that come off the socket (#0126): one agenda,
-    // one dedup, and the comparison is over what the view holds.
-    let expected: Vec<CalendarEvent> = fx
-        .agenda(&self_address())
-        .into_iter()
-        .map(CalendarEvent::from_wire)
-        .collect();
-    let daemon = daemon();
-    let actual = calendar_events(&daemon as &dyn Queries, ACCOUNT).expect("the agenda");
-
-    assert_eq!(actual.len(), 1, "one REQUEST is one agenda row: {actual:?}");
-    assert_eq!(
-        format!("{actual:?}"),
-        format!("{expected:?}"),
-        "the daemon-backed agenda differs from the store-backed one"
-    );
-    assert_eq!(
-        actual[0].event.attendees[0].status, "accepted",
-        "the REPLY beside the REQUEST is folded into the row the daemon answers"
-    );
-}
-
-/// An account with no invitations answers an empty agenda rather than
-/// refusing: an empty calendar is the ordinary case.
-#[test]
-fn an_account_with_no_invites_has_an_empty_agenda() {
-    let fx = AmbientFixture::new(ACCOUNT);
-    fx.ingest("inbox", 1, "Just mail", None);
-    let daemon = daemon();
-    assert!(calendar_events(&daemon as &dyn Queries, ACCOUNT)
-        .expect("the agenda")
-        .is_empty());
-}
-
-/// The method takes `account` and nothing else, so a typo is `-32602` rather
-/// than a silently ignored narrowing.
-#[test]
-fn the_agenda_method_refuses_a_parameter_it_does_not_know() {
-    let _fx = AmbientFixture::new(ACCOUNT);
-    let daemon = daemon();
-    let refusal = daemon
-        .call(
-            "calendar.events",
-            json!({"account": ACCOUNT, "mailbox": "inbox"}),
-        )
-        .expect_err("an unknown parameter is refused");
-    assert!(
-        format!("{refusal:#}").contains("mailbox"),
-        "the refusal names the parameter it did not know: {refusal:#}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -217,9 +152,10 @@ fn a_message_without_an_invitation_answers_no_ics() {
 // The three App call sites
 // ---------------------------------------------------------------------------
 
-/// An `App` with a session reads all three through the daemon, and the three
-/// answers are the store's own: the agenda the loader builds, the card the
-/// fold produces and the bytes the blob holds.
+/// An `App` with a session reads the card and the blob through the daemon,
+/// and the answers are the store's own: the card the fold produces and the
+/// bytes the blob holds. Its Calendar view reads `calendar.view`, which
+/// [`super::calendar`] pins.
 ///
 /// The `App` had a store-backed branch of its own until P5-U10e, and this row
 /// compared the two branches against each other. It compares the served answer
@@ -227,24 +163,26 @@ fn a_message_without_an_invitation_answers_no_ics() {
 /// an `App` with no session reads nothing at all, because
 /// [`crate::tui`](crate::tui) is a crate that may not open a store.
 #[test]
-fn the_app_reads_all_three_through_the_daemon() {
+fn the_app_reads_the_card_and_the_blob_through_the_daemon() {
     let fx = AmbientFixture::new(ACCOUNT);
     let row = seed_invited_and_answered(&fx);
     let msg = MessageRef::new(row);
 
-    let store_agenda = format!("{:?}", oracle::calendar_events(ACCOUNT, &self_address()));
     let store_card = oracle::message_invite(ACCOUNT, msg, &self_address());
     let store_ics = oracle::message_ics(ACCOUNT, msg);
 
     let mut daemon_app = app_without_session();
     daemon_app.session = Some(daemon().session());
-    assert_eq!(
-        format!("{:?}", daemon_app.load_calendar_events()),
-        store_agenda
-    );
     assert_eq!(daemon_app.load_message_invite(msg), store_card);
     assert_eq!(daemon_app.load_message_ics(msg), store_ics);
     assert!(store_ics.is_some(), "the fixture really carries a payload");
+    // An account without a calendar backend names no server event, so the
+    // respond overlay answers the mail itself.
+    let card = daemon_app
+        .load_message_invite_card(msg)
+        .expect("the card with its event id");
+    assert_eq!(Some(card.event), store_card);
+    assert_eq!(card.event_id, None);
 }
 
 /// An `App` with no session answers nothing rather than reading the store
@@ -255,8 +193,10 @@ fn an_app_without_a_session_reads_none_of_them() {
     let fx = AmbientFixture::new(ACCOUNT);
     let msg = MessageRef::new(seed_invited_and_answered(&fx));
 
-    let app = app_without_session();
-    assert!(app.load_calendar_events().is_empty());
+    let mut app = app_without_session();
+    app.ensure_calendar_loaded();
+    assert!(app.calendar_view.events.is_empty());
+    assert!(app.calendar_view.loaded);
     assert_eq!(app.load_message_invite(msg), None);
     assert_eq!(app.load_message_ics(msg), None);
     assert_eq!(app.draft_body("d1"), None);

@@ -120,7 +120,12 @@ The table is what routes and through what:
 | `mp contacts stats [--account]` | `contact.stats` | P4-U14 |
 | `mp contacts rebuild [--account]` | one `contact.rebuild` per account, in configuration order | P4-U14 |
 | `mp calendar rebuild [--account]` | one `calendar.rebuild` per account, in configuration order | P4-U14 |
-| `mp invite accept\|tentative\|decline <selector> [--mailbox]` | `calendar.rsvp` | P4-U14 |
+| `mp calendar list [--account] [--json]` | `calendar.list` | PERSO-200 |
+| `mp calendar view [agenda\|day\|week] [--on\|--from --to] [-A ...] [--calendar ...] [--hidden] [--zone] [--json]` | `calendar.view` over the days read in the client, then `calendar.list` for the calendar names | PERSO-200 |
+| `mp calendar show\|hide <calendar> [--account]` | `calendar.set_visibility` | PERSO-200 |
+| `mp event show <event> [--account] [--json]` | `event.get`, then `calendar.list` for the calendar name | PERSO-200 |
+| `mp event respond <event> <accept\|tentative\|decline> [--comment] [--no-send-response] [--json]` | `event.respond` | PERSO-200 |
+| `mp invite accept\|tentative\|decline <selector> [--mailbox] [--comment] [--no-send-response]` | `message.invite`, then `event.get` and `event.respond` on its `event_id`, else on `imip:<row_id>` | P4-U14, PERSO-200 |
 | `mp store gc [--dry-run] [--force] [--all-accounts]` | one `diagnostic.store_gc` per account | P4-U14 |
 | `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
 | `mp config show` | `config.get`, `account.credentials` | P4-U14, 2026-10-22 |
@@ -445,6 +450,23 @@ Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailb
 A runtime ticks when its watcher sees the mailbox move, when a client asks, and when its scheduler finds it has gone `sync_interval_secs` without a tick (see the scheduler above).
 The queues do not wait for a tick any more: the drainer above empties them after an interactive mutation without one.
 
+### The calendar sync
+
+After the tail drain, whatever the mail pass did, and once it has released the runtime's turn so a drain does not wait behind it, a tick syncs the account's server calendar (PERSO-200, `calendar_sync::poll_account`) when its `calendar_backend` is one this build runs, Graph in phase 1: the calendar list, then each calendar's window by its delta token, re-baselined once a day.
+It runs off the reactor, as the mail body does, and under one lock per account that `calendar.rebuild` and `event.respond` take too, so two syncs of one account never read the same token side by side.
+A sync that moved the cache publishes `calendar.changed` `{account}` beside the tick's `sync.completed`; a joiner carries none, as it carries no `sync.completed`.
+A token without the calendar scope is skipped with a debug line, because the `calendar:<name>` health check already prompts for the re-login, and any other failure is a warning in the log: the tick reports the mail pass, never the calendar.
+An `ews` or `caldav` account is refused as not supported yet and syncs nothing; an account without a server ticks never, so its calendar is polled by nothing either.
+The calendar is polled at the tick's own pace, the scheduler's `sync_interval_secs`, the watcher's arrivals and the clients' syncs; Graph webhooks would need a public endpoint (`docs/plans/calendar.md`, D11).
+
+### Answering an invitation
+
+`event.respond` is the one calendar write of phase 1, an operation in the same journal as `calendar.rsvp`: `operation.status` and `operation.finished` say where an interrupted answer stopped.
+On a server event it connects the account's backend, looks at its cancel token, sends the answer (Graph's `accept`, `tentativelyAccept` or `decline`, with the comment and `sendResponse`), then syncs the account's calendar at once under the account's calendar lock, so the answer is in the cache before the operation settles; a failure of that sync is logged and leaves the answer standing.
+On an invitation mail's event (`imip:<row_id>`) it is `calendar.rsvp`'s iMIP reply through the durable outbox, with the comment after the reply's body; `send_response: false` is refused there, because nothing but the reply mail records an iMIP answer.
+A sign-in without the calendar scope is refused before the operation starts, with the re-login prompt and no call to the server.
+Every answer that went through publishes `calendar.changed`.
+
 ## Mail hooks
 
 A hook runs a command once for every message that arrives in a mailbox after the hook was first seen and passes the hook's `match` table (#0135).
@@ -564,7 +586,7 @@ All three print the two lines `mp daemon status` prints when nothing answers, an
 
 `mp daemon health [--json]` prints a verdict line, a labelled block, one line per account and one line per check prefixed `✓`, `⚠` or `✗`.
 Every check `ok` is `✓ daemon healthy` and exit 0; a warning is `✓ daemon healthy, 1 check needs attention` and still exit 0, because a lock held elsewhere is a normal state of this machine; any failure is `✗ daemon unhealthy, 1 check failing` and exit 1, so a script running this as a probe learns something.
-The checks are `config_loaded`, `store_open`, `socket_owner`, `log_writable` and one `account:<name>` per configured account; `docs/daemon-protocol.md` fixes what each one means.
+The checks are `config_loaded`, `store_open`, `socket_owner`, `log_writable`, one `account:<name>` per configured account and one `calendar:<name>` per Graph calendar account; `docs/daemon-protocol.md` fixes what each one means.
 `config_loaded` re-reads the file on disk rather than reporting the live snapshot, which is why a `config.reload` refused with `-32007` leaves it failing while the daemon keeps serving the configuration it has.
 A file that loads but carries a key the load ignores, anywhere in it, makes `config_loaded` a warning whose detail names each key and its account (PERSO-118).
 
@@ -614,7 +636,7 @@ A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the g
 
 ## Test-only environment hooks
 
-Fifteen environment variables exist for the contract tests and for the migration.
+Sixteen environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
@@ -668,6 +690,12 @@ An account with no credentials sends through it all the same: the fake *is* the 
 It is read by whichever process submits, which after P4-U12 is the daemon and only the daemon, so the pre-daemon oracle cannot see it and no row that uses it is a parity row.
 Unset, empty or unparseable it does nothing.
 It is what pins the successful sends in `tests/daemon_send_slice.rs`, and its name is `mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV`.
+
+`MAILYPOPPINS_DAEMON_FAKE_CALENDAR=<json>` serves every account whose `calendar_backend` is not `none` from an in-memory calendar server (PERSO-200), so the calendar sync, the views and `event.respond` run without a tenant.
+Its value is a JSON object, every key optional: `calendars` and `events` are the server's contents in the model's serialisation, each rewritten to the account it serves, `log` a file the fake appends one JSON line `{event, response, comment, send_response}` to per answer, `missing_scope` makes every call fail as a token without `Calendars.ReadWrite` does, and `message_events` maps a mail's Graph id to the event `message.invite` names.
+A daemon reads it at every calendar call, so each sync starts from the spec's contents and the cache does the remembering.
+Unset, empty or unparseable it does nothing.
+It is what pins `tests/daemon_calendar_slice.rs`, and its name is `mailypoppins::calendar_backend::fake::FAKE_CALENDAR_ENV`.
 
 `MAILYPOPPINS_DAEMON_FAKE_OPERATIONS=1` registers one extra method, `test.operation`, so a client can start, watch and cancel a long-running operation.
 Its params are `{"steps": u64, "step_ms": u64, "scope": "durable"|"client_scoped", "fail_at": u64|null}`; it answers immediately with `{"operation_id": str}` and reports `steps` times, `step_ms` apart, before succeeding with `{"steps": steps}`.
@@ -729,7 +757,7 @@ The run that landed the file, its ceilings and the leak it found are in [baselin
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
 `DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the twelve environment hooks its own `HOOKS` list carries so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
-Three of the fifteen are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, and `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way.
+Four of the sixteen are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
 The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than three times.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.

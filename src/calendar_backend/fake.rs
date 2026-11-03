@@ -12,9 +12,16 @@
 //!   "calendars": [<Calendar>...],
 //!   "events": [<Event>...],
 //!   "log": "<path>",
-//!   "missing_scope": false
+//!   "missing_scope": false,
+//!   "message_events": {"<server message id>": "<event id>"}
 //! }
 //! ```
+//!
+//! The daemon serves every account whose `calendar_backend` is not `none`
+//! from the fake, each through [`FakeCalendarBackend::serving`], which
+//! rewrites the calendars' and the events' `account` to that account's name.
+
+use std::collections::HashMap;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -36,8 +43,30 @@ pub const FAKE_CALENDAR_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_CALENDAR";
 /// The scope a [`FakeCalendarBackend::missing_scope`] fake reports missing.
 pub const FAKE_MISSING_SCOPE: &str = "Calendars.ReadWrite";
 
-/// The token a fake hands out; a sync that passes it back gets no changes.
-const FAKE_TOKEN: &str = "fake-calendar-token";
+/// The prefix of the tokens a fake hands out: `fake-calendar-token:<e>:<n>`,
+/// where `e` counts the [`FakeCalendarBackend::expire_tokens`] calls and `n`
+/// the changes made to the fake so far. A sync that passes one of the current
+/// `e` back gets the changes made since; any other token is refused the way
+/// Graph answers 410.
+const FAKE_TOKEN_PREFIX: &str = "fake-calendar-token:";
+
+/// The server side of a fake: its events and the log of what changed.
+#[derive(Debug, Default)]
+struct FakeState {
+    events: Vec<Event>,
+    /// The id of each event put or removed, in order; the index plus one is
+    /// the generation the change made.
+    changes: Vec<String>,
+    /// Bumped by [`FakeCalendarBackend::expire_tokens`]; a token of an
+    /// earlier epoch is refused, as a server's expired sync state.
+    epoch: u64,
+}
+
+impl FakeState {
+    fn generation(&self) -> u64 {
+        self.changes.len() as u64
+    }
+}
 
 /// One recorded `respond` call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,25 +88,70 @@ struct FakeSpec {
     log: Option<PathBuf>,
     #[serde(default)]
     missing_scope: bool,
+    #[serde(default)]
+    message_events: HashMap<String, String>,
 }
 
 /// A calendar server with fixed contents that records every answer.
+///
+/// A clone shares the server side, so a test keeps one handle to change the
+/// events ([`FakeCalendarBackend::put_event`], [`FakeCalendarBackend::remove_event`])
+/// while the engine syncs through another.
 #[derive(Debug, Clone, Default)]
 pub struct FakeCalendarBackend {
     calendars: Vec<Calendar>,
-    events: Vec<Event>,
+    state: Arc<Mutex<FakeState>>,
     missing_scope: bool,
     log: Option<PathBuf>,
     responses: Arc<Mutex<Vec<RecordedResponse>>>,
+    /// The invitation mails the fake knows the event of, by server message
+    /// id ([`CalendarBackend::event_for_message`]).
+    message_events: HashMap<String, String>,
 }
 
 impl FakeCalendarBackend {
     pub fn new(calendars: Vec<Calendar>, events: Vec<Event>) -> Self {
         FakeCalendarBackend {
             calendars,
-            events,
+            state: Arc::new(Mutex::new(FakeState {
+                events,
+                ..Default::default()
+            })),
             ..Default::default()
         }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Add `event`, or replace the one with its id, as a server-side change
+    /// the next incremental sync reports.
+    pub fn put_event(&self, event: Event) {
+        let mut state = self.state();
+        state.events.retain(|known| known.id != event.id);
+        state.changes.push(event.id.clone());
+        state.events.push(event);
+    }
+
+    /// Delete the event with `id`, as a server-side change.
+    pub fn remove_event(&self, id: &str) {
+        let mut state = self.state();
+        state.events.retain(|known| known.id != id);
+        state.changes.push(id.to_string());
+    }
+
+    /// Refuse every token handed out so far, as a server whose sync state
+    /// expired (Graph's 410): the next sync is a fresh baseline.
+    pub fn expire_tokens(&self) {
+        self.state().epoch += 1;
+    }
+
+    /// The events the fake holds now.
+    pub fn events(&self) -> Vec<Event> {
+        self.state().events.clone()
     }
 
     /// The fake this process runs under, or `None` when the hook is unset or
@@ -89,13 +163,32 @@ impl FakeCalendarBackend {
             return None;
         }
         let spec: FakeSpec = serde_json::from_str(&raw).ok()?;
-        Some(FakeCalendarBackend {
-            calendars: spec.calendars,
-            events: spec.events,
-            missing_scope: spec.missing_scope,
-            log: spec.log,
-            responses: Arc::default(),
-        })
+        let mut fake = FakeCalendarBackend::new(spec.calendars, spec.events);
+        fake.missing_scope = spec.missing_scope;
+        fake.log = spec.log;
+        fake.message_events = spec.message_events;
+        Some(fake)
+    }
+
+    /// The same server, serving `account`: every calendar and event names it,
+    /// whatever account the spec wrote, so one armed spec serves every
+    /// account with a backend.
+    pub fn serving(mut self, account: &str) -> Self {
+        for calendar in &mut self.calendars {
+            calendar.account = account.to_string();
+        }
+        for event in &mut self.state().events {
+            event.account = account.to_string();
+        }
+        self
+    }
+
+    /// Answer [`CalendarBackend::event_for_message`] for `message_id` with
+    /// `event`.
+    pub fn with_message_event(mut self, message_id: &str, event: &str) -> Self {
+        self.message_events
+            .insert(message_id.to_string(), event.to_string());
+        self
     }
 
     /// Every call fails with [`CalendarBackendError::MissingScope`], the way
@@ -208,7 +301,9 @@ impl FakeCalendarBackend {
         )
     }
 
-    fn check_scope(&self) -> BackendResult<()> {
+    /// [`CalendarBackendError::MissingScope`] for a fake armed without the
+    /// scope, the check a write runs before its operation starts.
+    pub fn check_scope(&self) -> BackendResult<()> {
         if self.missing_scope {
             return Err(CalendarBackendError::MissingScope {
                 scope: FAKE_MISSING_SCOPE.into(),
@@ -243,8 +338,11 @@ impl CalendarBackend for FakeCalendarBackend {
     }
 
     /// A baseline (no token) returns the calendar's events in the window, all
-    /// day ones seen from UTC; the fake's own token returns no changes; any
-    /// other token is refused the way Graph answers 410, with a baseline.
+    /// day ones seen from UTC; one of the fake's own tokens returns what
+    /// changed since it was handed out, an event changed out of the calendar
+    /// or the window as removed; any other token, or one from before
+    /// [`FakeCalendarBackend::expire_tokens`], is refused the way Graph
+    /// answers 410, with a baseline.
     async fn sync_window(
         &self,
         calendar: &Calendar,
@@ -252,26 +350,54 @@ impl CalendarBackend for FakeCalendarBackend {
         token: Option<String>,
     ) -> BackendResult<SyncResult> {
         self.check_scope()?;
-        if token.as_deref() == Some(FAKE_TOKEN) {
+        let state = self.state();
+        let belongs = |event: &Event| {
+            event.calendar == calendar.id && event.overlaps(&window, chrono_tz::UTC)
+        };
+        let next_token = Some(format!(
+            "{FAKE_TOKEN_PREFIX}{}:{}",
+            state.epoch,
+            state.generation()
+        ));
+        let since = token
+            .as_deref()
+            .and_then(|token| token.strip_prefix(FAKE_TOKEN_PREFIX))
+            .and_then(|rest| rest.split_once(':'))
+            .filter(|(epoch, _)| epoch.parse::<u64>().ok() == Some(state.epoch))
+            .and_then(|(_, generation)| generation.parse::<u64>().ok())
+            .filter(|generation| *generation <= state.generation());
+        let Some(since) = since else {
             return Ok(SyncResult {
-                token,
+                upserts: state
+                    .events
+                    .iter()
+                    .filter(|e| belongs(e))
+                    .cloned()
+                    .collect(),
+                token: next_token,
+                full_resync: true,
+                path: Some("fake".into()),
                 ..Default::default()
             });
+        };
+        let mut changed: Vec<&str> = Vec::new();
+        for id in &state.changes[since as usize..] {
+            if !changed.contains(&id.as_str()) {
+                changed.push(id);
+            }
         }
-        let upserts = self
-            .events
-            .iter()
-            .filter(|event| {
-                event.calendar == calendar.id && event.overlaps(&window, chrono_tz::UTC)
-            })
-            .cloned()
-            .collect();
-        Ok(SyncResult {
-            upserts,
-            removed: Vec::new(),
-            token: Some(FAKE_TOKEN.into()),
-            full_resync: true,
-        })
+        let mut result = SyncResult {
+            token: next_token,
+            path: Some("fake".into()),
+            ..Default::default()
+        };
+        for id in changed {
+            match state.events.iter().find(|e| e.id == id && belongs(e)) {
+                Some(event) => result.upserts.push(event.clone()),
+                None => result.removed.push(id.to_string()),
+            }
+        }
+        Ok(result)
     }
 
     async fn respond(
@@ -282,7 +408,7 @@ impl CalendarBackend for FakeCalendarBackend {
         send_response: bool,
     ) -> BackendResult<()> {
         self.check_scope()?;
-        if !self.events.iter().any(|known| known.id == event) {
+        if !self.state().events.iter().any(|known| known.id == event) {
             return Err(anyhow!("no event with id {event}").into());
         }
         self.record(RecordedResponse {
@@ -291,6 +417,11 @@ impl CalendarBackend for FakeCalendarBackend {
             comment,
             send_response,
         })
+    }
+
+    async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<String>> {
+        self.check_scope()?;
+        Ok(self.message_events.get(message_id).cloned())
     }
 }
 
@@ -328,6 +459,34 @@ mod tests {
             .unwrap();
         assert!(stale.full_resync);
         assert_eq!(stale.upserts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_token_returns_the_changes_since_and_an_expired_one_a_baseline() {
+        let fake = FakeCalendarBackend::canned();
+        let main = fake.list_calendars().await.unwrap().remove(0);
+        let baseline = fake.sync_window(&main, november(), None).await.unwrap();
+
+        let mut moved = fake.events()[0].clone();
+        moved.summary = "Project review, moved".into();
+        fake.put_event(moved.clone());
+        fake.remove_event("ev-weekly-2");
+        let delta = fake
+            .sync_window(&main, november(), baseline.token.clone())
+            .await
+            .unwrap();
+        assert!(!delta.full_resync);
+        assert_eq!(delta.upserts, [moved]);
+        assert_eq!(delta.removed, ["ev-weekly-2"]);
+        assert_ne!(delta.token, baseline.token);
+
+        fake.expire_tokens();
+        let expired = fake
+            .sync_window(&main, november(), delta.token.clone())
+            .await
+            .unwrap();
+        assert!(expired.full_resync);
+        assert_eq!(expired.upserts.len(), 1);
     }
 
     #[tokio::test]
@@ -389,12 +548,12 @@ mod tests {
         let canned = FakeCalendarBackend::canned();
         let spec = serde_json::json!({
             "calendars": canned.calendars,
-            "events": canned.events,
+            "events": canned.events(),
             "missing_scope": true,
         });
         let parsed: FakeSpec = serde_json::from_value(spec).unwrap();
         assert_eq!(parsed.calendars, canned.calendars);
-        assert_eq!(parsed.events, canned.events);
+        assert_eq!(parsed.events, canned.events());
         assert!(parsed.missing_scope && parsed.log.is_none());
     }
 }

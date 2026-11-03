@@ -7,8 +7,9 @@ use super::{
     AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
     ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog,
     DirPicker, DirPickerMode, EmailEntry, EntryKey, Focus, MailboxKind, MailboxPicker, Message,
-    MessageRef, Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus,
-    SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
+    MessageRef, Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, RsvpRow, SearchField,
+    SearchOverlayFocus, SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry,
+    ThreadOverlay,
 };
 
 impl App {
@@ -26,6 +27,8 @@ impl App {
             Overlay::Mailbox(_) => return self.handle_mailbox_picker_key(key),
             Overlay::Signatures(_) => return self.handle_signatures_key(key),
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
+            Overlay::Calendars(_) => return self.handle_calendars_overlay_key(key),
+            Overlay::EventCard(_) => return self.handle_event_card_key(key),
             Overlay::Thread(_) => return self.handle_thread_overlay_key(key),
             Overlay::Palette(_) => return self.handle_command_palette_key(key),
             Overlay::Attachment(_) => return self.handle_attachment_picker_key(key),
@@ -467,10 +470,10 @@ impl App {
                 self.pending_prefix = None;
                 self.push_action(Action::RefreshContacts);
             }
-            // -- Calendar view (#0034) ---------------------------------------
+            // -- Calendar view (#0034, PERSO-200) ---------------------------
             A::CalendarDown => {
                 self.pending_prefix = None;
-                let len = self.calendar_view.visible.len();
+                let len = self.calendar_view.entries.len();
                 if len > 0 && self.calendar_view.list_index < len - 1 {
                     self.calendar_view.list_index += 1;
                 }
@@ -486,30 +489,49 @@ impl App {
             }
             A::CalendarBottom => {
                 self.pending_prefix = None;
-                self.calendar_view.list_index = self.calendar_view.visible.len().saturating_sub(1);
+                self.calendar_view.list_index = self.calendar_view.entries.len().saturating_sub(1);
+            }
+            A::CalendarPrev | A::CalendarNext => {
+                self.pending_prefix = None;
+                self.calendar_shift(action == A::CalendarNext);
+            }
+            A::CalendarToday => {
+                self.pending_prefix = None;
+                let today = chrono::Utc::now()
+                    .with_timezone(&self.calendar_view.zone)
+                    .date_naive();
+                self.calendar_go_to(today);
+            }
+            A::CalendarJumpToDate => {
+                // Reached only with `g` pending (the leader continuation).
+                self.pending_prefix = None;
+                self.jump_date_input = Some(String::new());
+            }
+            A::CalendarAgenda | A::CalendarDay | A::CalendarWeek => {
+                self.pending_prefix = None;
+                self.calendar_set_layout(match action {
+                    A::CalendarDay => super::CalendarLayout::Day,
+                    A::CalendarWeek => super::CalendarLayout::Week,
+                    _ => super::CalendarLayout::Agenda,
+                });
+            }
+            A::CalendarOpenCard => {
+                self.pending_prefix = None;
+                self.open_event_card();
             }
             A::CalendarOpenSource => {
                 self.pending_prefix = None;
-                if let Some(event) = self.selected_event() {
-                    let msg = event.msg;
-                    self.push_action(Action::OpenEventSource { msg });
+                if let Some(event) = self.selected_event().cloned() {
+                    self.open_event_ics(&event);
                 }
             }
             A::CalendarRsvp => {
                 self.pending_prefix = None;
                 self.open_rsvp_overlay_for_event();
             }
-            A::CalendarToggleScope => {
+            A::CalendarCalendars => {
                 self.pending_prefix = None;
-                self.calendar_view.show_past = !self.calendar_view.show_past;
-                self.calendar_view.list_index = 0;
-                self.recompute_calendar_visible();
-                let scope = if self.calendar_view.show_past {
-                    "all events"
-                } else {
-                    "upcoming events"
-                };
-                self.set_status(format!("Calendar: showing {scope}"));
+                self.open_calendars_overlay();
             }
             A::CalendarRefresh => {
                 self.pending_prefix = None;
@@ -1715,61 +1737,25 @@ impl App {
             return;
         };
         // The method and the summary live in the ics blob, which is parsed for
-        // the selected message only (#0038 item 6). The cursor is on it, so
-        // this is the memo the render pass already filled in the common case.
-        let event = self.load_message_invite(msg);
-        if let Some(refusal) = rsvp_refusal(event.as_ref()) {
+        // the selected message only (#0038 item 6); `message.invite` names the
+        // server event beside it on an account with a calendar backend
+        // (PERSO-200), which is what the answer goes to.
+        let card = self.load_message_invite_card(msg);
+        let event = card.as_ref().map(|card| &card.event);
+        if let Some(refusal) = rsvp_refusal(event) {
             self.set_status(refusal);
             return;
         }
-        let summary = event.and_then(|e| e.summary).unwrap_or(subject);
-        self.overlay = Overlay::Rsvp(RsvpOverlay {
-            msg,
-            summary,
-            selected: 0,
+        let summary = event.and_then(|e| e.summary.clone()).unwrap_or(subject);
+        let event_id = card.and_then(|card| card.event_id).unwrap_or_else(|| {
+            format!(
+                "{}{}",
+                mp_protocol::calendar::IMIP_EVENT_PREFIX,
+                msg.row_id()
+            )
         });
-    }
-
-    /// Calendar-view sibling of [`Self::open_rsvp_overlay`] (#0034): the same
-    /// guards (not our own / must be a REQUEST), plus one the mail path cannot
-    /// need, since cancelled rows exist only here: RSVP'ing to a meeting the
-    /// organizer already cancelled would mail a reply about a dead event. Read
-    /// from the selected agenda row instead of the mail cursor; organizer-ness
-    /// comes from the row (the winning copy's mailbox), not the active mailbox.
-    fn open_rsvp_overlay_for_event(&mut self) {
-        let Some(event) = self.selected_event() else {
-            return;
-        };
-        if event.cancelled {
-            self.set_status(
-                "This event was cancelled by the organizer — nothing to RSVP".to_string(),
-            );
-            return;
-        }
-        if event.is_organizer {
-            self.set_status("You are the organizer of this invite — nothing to RSVP".to_string());
-            return;
-        }
-        let is_request = event
-            .event
-            .method
-            .as_deref()
-            .is_some_and(|m| m.eq_ignore_ascii_case("REQUEST"));
-        if !is_request {
-            self.set_status("Only received invitations (REQUEST) can be RSVP'd".to_string());
-            return;
-        }
-        let summary = event
-            .event
-            .summary
-            .clone()
-            .unwrap_or_else(|| event.subject.clone());
-        let msg = event.msg;
-        self.overlay = Overlay::Rsvp(RsvpOverlay {
-            msg,
-            summary,
-            selected: 0,
-        });
+        let account = self.account_config.name.clone();
+        self.overlay = Overlay::Rsvp(RsvpOverlay::new(account, event_id, summary));
     }
 
     /// Build and open the conversation overlay for the cursor message (#0008).
@@ -1889,40 +1875,128 @@ impl App {
         None
     }
 
+    /// The respond overlay's keys (#0029, PERSO-200). The arrows walk every
+    /// row (the answers, the comment, the send-response toggle), `Tab` and
+    /// `Shift+Tab` jump between those three sections keeping the answer; off
+    /// the comment `j`/`k` walk too and `a`/`t`/`d` pick an answer; on the
+    /// comment every character is typed; `Space` flips the toggle; `Enter`
+    /// answers from any row and `Esc` cancels.
     fn handle_rsvp_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
         let overlay = self.rsvp_overlay_mut()?;
+        let rows = overlay.rows();
+        let at = rows.iter().position(|row| *row == overlay.row).unwrap_or(0);
+        let typing = overlay.row == RsvpRow::Comment;
+        let step = |overlay: &mut RsvpOverlay, to: usize| {
+            overlay.row = rows[to];
+            if let RsvpRow::Choice(choice) = overlay.row {
+                overlay.selected = choice;
+            }
+        };
+        // `Tab` jumps between the three sections (the answers, the comment,
+        // the toggle) and keeps the answer; the arrows walk every row.
+        let section = |row: RsvpRow| match row {
+            RsvpRow::Choice(_) => 0,
+            RsvpRow::Comment => 1,
+            RsvpRow::SendResponse => 2,
+        };
+        let current = section(overlay.row);
+        let last = section(rows[rows.len() - 1]);
+        let jump = |overlay: &mut RsvpOverlay, to: usize| {
+            overlay.row = match to {
+                0 => RsvpRow::Choice(overlay.selected),
+                1 => RsvpRow::Comment,
+                _ => RsvpRow::SendResponse,
+            };
+        };
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
-                if overlay.selected < 2 {
-                    overlay.selected += 1;
-                }
+            KeyCode::Tab => jump(overlay, (current + 1).min(last)),
+            KeyCode::BackTab => jump(overlay, current.saturating_sub(1)),
+            KeyCode::Down => step(overlay, (at + 1).min(rows.len() - 1)),
+            KeyCode::Up => step(overlay, at.saturating_sub(1)),
+            KeyCode::Char('j') if !typing => step(overlay, (at + 1).min(rows.len() - 1)),
+            KeyCode::Char('k') if !typing => step(overlay, at.saturating_sub(1)),
+            KeyCode::Char('a') if !typing => step(overlay, 0),
+            KeyCode::Char('t') if !typing => step(overlay, 1),
+            KeyCode::Char('d') if !typing => step(overlay, 2),
+            KeyCode::Char(' ') if overlay.row == RsvpRow::SendResponse => {
+                overlay.send_response = !overlay.send_response;
             }
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
-                overlay.selected = overlay.selected.saturating_sub(1);
+            KeyCode::Char(c) if typing => overlay.comment.push(c),
+            KeyCode::Backspace if typing => {
+                overlay.comment.pop();
             }
-            KeyCode::Char('a') => overlay.selected = 0,
-            KeyCode::Char('t') => overlay.selected = 1,
-            KeyCode::Char('d') => overlay.selected = 2,
             KeyCode::Enter => {
-                let choice = match overlay.selected {
-                    0 => RsvpChoice::Accept,
-                    1 => RsvpChoice::Tentative,
-                    _ => RsvpChoice::Decline,
-                };
                 let Overlay::Rsvp(overlay) = std::mem::replace(&mut self.overlay, Overlay::None)
                 else {
                     return None;
                 };
+                let comment = overlay.comment.trim();
                 self.push_action(Action::Rsvp {
-                    msg: overlay.msg,
-                    choice,
+                    account: overlay.account,
+                    event: overlay.event,
+                    choice: RsvpChoice::at(overlay.selected),
+                    comment: (!comment.is_empty()).then(|| comment.to_string()),
+                    send_response: !overlay.server || overlay.send_response,
                 });
                 // Consume-and-close: promote any error queued behind it.
                 self.promote_pending_error();
             }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.close_overlay();
+            KeyCode::Esc => self.close_overlay(),
+            KeyCode::Char('q') if !typing => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// The calendars overlay's keys (PERSO-200): `j`/`k` move, `Space`
+    /// shows or hides the calendar under the cursor, `Esc`, `q` and `c`
+    /// close it.
+    fn handle_calendars_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::Calendars(overlay) = &mut self.overlay else {
+            return None;
+        };
+        let len = overlay.calendars.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if overlay.selected + 1 < len {
+                    overlay.selected += 1;
+                }
             }
+            KeyCode::Char('k') | KeyCode::Up => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => self.toggle_calendar_visibility(),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// The event card's keys (PERSO-200): `j`/`k` scroll, `V` answers,
+    /// `m` opens the invitation mail and `e` its `.ics`, `Esc`, `q` and
+    /// `Enter` close it.
+    fn handle_event_card_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::EventCard(card) = &mut self.overlay else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => card.scroll = card.scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => card.scroll = card.scroll.saturating_sub(1),
+            KeyCode::Char('V') => {
+                let event = card.event.clone();
+                self.close_overlay();
+                self.open_rsvp_overlay_for(&event);
+            }
+            KeyCode::Char('m') => {
+                let event = card.event.clone();
+                self.open_event_mail(&event);
+            }
+            KeyCode::Char('e') => {
+                let event = card.event.clone();
+                self.close_overlay();
+                self.open_event_ics(&event);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.close_overlay(),
             _ => {}
         }
         None
@@ -2883,7 +2957,11 @@ impl App {
                 match super::jump_date::parse_jump_date(&input, today) {
                     Ok(target) => {
                         self.jump_date_input = None;
-                        self.jump_to_date(target);
+                        if self.view == super::View::Calendar {
+                            self.calendar_go_to(target);
+                        } else {
+                            self.jump_to_date(target);
+                        }
                     }
                     Err(reason) => {
                         self.set_status_level(reason, crate::app::StatusLevel::Warning);
@@ -5744,76 +5822,50 @@ mod tests {
         );
     }
 
-    // -- Calendar view (#0034) -------------------------------------------
+    // -- Calendar view (#0034, PERSO-200) ---------------------------------
 
-    fn cal_event(
-        summary: &str,
-        start: &str,
-        is_organizer: bool,
-        method: &str,
-    ) -> super::super::CalendarEvent {
-        super::super::CalendarEvent {
-            msg: ref_for(summary),
-            event: mp_core::types::EventFrontmatter {
-                uid: Some(format!("uid-{summary}")),
-                method: Some(method.to_string()),
-                sequence: 0,
-                summary: Some(summary.to_string()),
-                start: Some(start.to_string()),
-                end: None,
-                location: None,
-                organizer: Some("org@example.com".into()),
-                rsvp: "needs-action".into(),
-                recurrence: String::new(),
-                attendees: Vec::new(),
-                ..Default::default()
-            },
-            subject: format!("Invitation: {summary}"),
-            start_sort: start.to_string(),
-            end_sort: String::new(),
-            start_display: start.to_string(),
-            is_organizer,
-            cancelled: false,
-        }
-    }
-
-    /// Build an app already in the Calendar view with a seeded agenda. Events
-    /// are far-future so the default upcoming-only scope keeps them all.
+    /// The frozen calendar fixture: a week of events from Mon 2026-08-03,
+    /// today Tue 2026-08-04, in the agenda layout with the cursor on the
+    /// first event. It has no session, so a key that reads the daemon again
+    /// leaves the view empty; the daemon-backed half is in the root crate.
     fn app_in_calendar() -> App {
-        let mut app = app_with_mailboxes();
-        app.calendar_view.events = vec![
-            cal_event("Standup", "2099-08-01T09:00:00", false, "REQUEST"),
-            cal_event("Retro", "2099-08-02T09:00:00", true, "REQUEST"),
-            cal_event("Review", "2099-08-03T09:00:00", false, "REQUEST"),
-        ];
-        app.calendar_view.loaded = true;
-        app.view = View::Calendar;
-        app.recompute_calendar_visible();
-        app
+        crate::ui::golden_frames::calendar_fixture()
     }
 
-    /// Calendar navigation keys move the cursor and drive the selection.
+    fn summary_under_cursor(app: &App) -> String {
+        app.selected_event()
+            .map(|event| event.summary.clone())
+            .unwrap_or_default()
+    }
+
+    /// `j`/`k` and the arrows walk the events day by day, the same event
+    /// once per day it covers.
     #[test]
     fn calendar_navigation_moves_cursor() {
         let mut app = app_in_calendar();
-        assert_eq!(app.calendar_view.visible.len(), 3);
-        assert_eq!(app.calendar_view.list_index, 0);
+        assert_eq!(app.calendar_view.entries.len(), 7);
+        assert_eq!(summary_under_cursor(&app), "Baustellen\u{fc}bergabe");
         app.handle_key(KeyEvent::from(KeyCode::Char('j')));
-        assert_eq!(app.calendar_view.list_index, 1);
-        assert_eq!(
-            app.selected_event().unwrap().event.summary.as_deref(),
-            Some("Retro")
-        );
+        assert_eq!(summary_under_cursor(&app), "Jour fixe");
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(summary_under_cursor(&app), "PhD Kolloquium");
+        app.handle_key(KeyEvent::from(KeyCode::Up));
         app.handle_key(KeyEvent::from(KeyCode::Char('k')));
         assert_eq!(app.calendar_view.list_index, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(
+            app.calendar_view.list_index, 0,
+            "the cursor stops at the top"
+        );
     }
 
-    /// `gg` / `G` jump to the ends of the agenda.
+    /// `gg` / `G` jump to the ends of the view.
     #[test]
     fn calendar_top_bottom_jumps() {
         let mut app = app_in_calendar();
         app.handle_key(KeyEvent::from(KeyCode::Char('G')));
-        assert_eq!(app.calendar_view.list_index, 2);
+        assert_eq!(app.calendar_view.list_index, 6);
+        assert_eq!(summary_under_cursor(&app), "Abgesagter Termin");
         app.handle_key(KeyEvent::from(KeyCode::Char('g')));
         assert_eq!(app.pending_prefix, Some('g'));
         app.handle_key(KeyEvent::from(KeyCode::Char('g')));
@@ -5821,30 +5873,131 @@ mod tests {
         assert_eq!(app.pending_prefix, None);
     }
 
-    /// `V` on a received agenda invite opens the RSVP overlay against that
-    /// row's own message, not the mail cursor's: the agenda carries a
-    /// `MessageRef` since the calendar moved onto the store (#0038 item 6).
+    /// `h`/`l` and `[`/`]` move the anchor by the layout's step: a week on
+    /// the agenda and the week grid, a day on the day grid.
     #[test]
-    fn calendar_rsvp_opens_against_the_agenda_rows_message() {
+    fn calendar_h_and_l_move_by_the_layouts_step() {
+        let day = |raw: &str| chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").unwrap();
         let mut app = app_in_calendar();
-        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
-        let Overlay::Rsvp(overlay) = &app.overlay else {
-            panic!("V on a received agenda invite must open the RSVP overlay");
-        };
-        assert_eq!(
-            overlay.msg,
-            ref_for("Standup"),
-            "the agenda row's own message"
-        );
-        assert_eq!(overlay.summary, "Standup");
-        assert_eq!(overlay.selected, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        assert_eq!(app.calendar_view.anchor, day("2026-08-10"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('[')));
+        assert_eq!(app.calendar_view.anchor, day("2026-08-03"));
+        app.calendar_view.layout = super::super::CalendarLayout::Day;
+        app.handle_key(KeyEvent::from(KeyCode::Char(']')));
+        assert_eq!(app.calendar_view.anchor, day("2026-08-04"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('h')));
+        assert_eq!(app.calendar_view.anchor, day("2026-08-03"));
     }
 
-    /// `V` on an invite we sent refuses with a hint (we are the organizer).
+    /// `a`, `d` and `w` switch the layout, anchored on the day under the
+    /// cursor; `t` goes back to today.
+    #[test]
+    fn calendar_layout_keys_and_today() {
+        use super::super::CalendarLayout;
+        let day = |raw: &str| chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").unwrap();
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // Tue 2026-08-04
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.calendar_view.layout, CalendarLayout::Day);
+        assert_eq!(app.calendar_view.anchor, day("2026-08-04"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('w')));
+        assert_eq!(app.calendar_view.layout, CalendarLayout::Week);
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.calendar_view.layout, CalendarLayout::Agenda);
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        let today = chrono::Utc::now()
+            .with_timezone(&app.calendar_view.zone)
+            .date_naive();
+        assert_eq!(app.calendar_view.anchor, today);
+    }
+
+    /// `gt` arms the jump-to-date prompt, and Enter moves the view rather
+    /// than the mail list.
+    #[test]
+    fn calendar_gt_jumps_the_view_to_a_date() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert_eq!(app.jump_date_input.as_deref(), Some(""));
+        for c in "2026-09-14".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.jump_date_input.is_none());
+        assert_eq!(
+            app.calendar_view.anchor,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 14).unwrap()
+        );
+        assert_eq!(app.view, View::Calendar);
+    }
+
+    /// `Enter` opens the event card; `Esc` closes it.
+    #[test]
+    fn calendar_enter_opens_the_event_card() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Overlay::EventCard(card) = &app.overlay else {
+            panic!("Enter must open the event card");
+        };
+        assert_eq!(card.event.summary, "Baustellen\u{fc}bergabe");
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// `e` on an invitation mail's event queues its `.ics` for `$EDITOR`;
+    /// on a server event there is no mail to open.
+    #[test]
+    fn calendar_e_opens_the_invitations_ics_only_for_a_mail() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.pending_actions.is_empty(), "a server event has no mail");
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // PhD Kolloquium, imip
+        app.account_config.name = "perso".to_string();
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        match app.pending_actions.pop_front() {
+            Some(Action::OpenEventSource { msg }) => assert_eq!(msg, MessageRef::new(3)),
+            other => panic!("expected OpenEventSource, got {other:?}"),
+        }
+    }
+
+    /// `V` on a server invitation opens the respond overlay against the
+    /// event's own account and id, with the send-response toggle.
+    #[test]
+    fn calendar_rsvp_opens_against_the_events_id() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // Jour fixe
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        let Overlay::Rsvp(overlay) = &app.overlay else {
+            panic!("V on an invitation must open the respond overlay");
+        };
+        assert_eq!(overlay.account, "evoqs");
+        assert_eq!(overlay.event, "ev-jour-1");
+        assert_eq!(overlay.summary, "Jour fixe");
+        assert!(overlay.server, "a server event offers the toggle");
+        assert!(overlay.send_response);
+    }
+
+    /// `V` on an invitation mail's event offers no send-response toggle.
+    #[test]
+    fn calendar_rsvp_on_an_imip_event_has_no_toggle() {
+        let mut app = app_in_calendar();
+        app.calendar_view.list_index = 2; // PhD Kolloquium
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        let Overlay::Rsvp(overlay) = &app.overlay else {
+            panic!("V on an invitation mail's event must open the respond overlay");
+        };
+        assert_eq!(overlay.event, "imip:3");
+        assert!(!overlay.server);
+        assert!(!overlay.rows().contains(&RsvpRow::SendResponse));
+    }
+
+    /// `V` on an event we organise refuses with a hint.
     #[test]
     fn calendar_rsvp_refused_for_organizer_event() {
         let mut app = app_in_calendar();
-        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // Retro (organizer)
+        app.calendar_view.events[0].own_response = "organizer".to_string();
         app.handle_key(KeyEvent::from(KeyCode::Char('V')));
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app
@@ -5879,12 +6032,12 @@ mod tests {
             .is_some_and(|m| m.contains("newer version")),);
     }
 
-    /// `V` on a cancelled row refuses: the organizer already called the
-    /// meeting off, so an RSVP would be mailed about a dead event.
+    /// `V` on a cancelled event refuses: the organizer already called the
+    /// meeting off.
     #[test]
     fn calendar_rsvp_refused_for_cancelled_event() {
         let mut app = app_in_calendar();
-        app.calendar_view.events[0].cancelled = true;
+        app.calendar_view.list_index = 6;
         app.handle_key(KeyEvent::from(KeyCode::Char('V')));
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app
@@ -5893,104 +6046,72 @@ mod tests {
             .is_some_and(|m| m.contains("cancelled")));
     }
 
-    /// `V` on a non-REQUEST row refuses: only a received invitation can be
-    /// RSVP'd, the same guard the mail path applies.
+    /// `V` on a server event that is no invitation refuses.
     #[test]
-    fn calendar_rsvp_refused_for_non_request_event() {
+    fn calendar_rsvp_refused_for_an_event_without_attendance() {
         let mut app = app_in_calendar();
-        app.calendar_view.events[0].event.method = Some("PUBLISH".to_string());
+        app.calendar_view.list_index = 3; // Holiday
         app.handle_key(KeyEvent::from(KeyCode::Char('V')));
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app
             .status_message
             .as_deref()
-            .is_some_and(|m| m.contains("REQUEST")));
+            .is_some_and(|m| m.contains("not an invitation")));
     }
 
-    /// With the RSVP overlay open, `t` selects Tentative rather than toggling
-    /// the Calendar scope: overlays intercept before normal-mode dispatch.
+    /// The respond overlay: `t` picks Tentative on an answer row rather than
+    /// moving the Calendar to today, the comment row takes typed text, Space
+    /// flips the toggle, and Enter queues `event.respond`'s answer.
     #[test]
-    fn calendar_rsvp_overlay_t_selects_tentative_not_scope_toggle() {
+    fn the_respond_overlay_takes_an_answer_a_comment_and_the_toggle() {
         let mut app = app_in_calendar();
-        // Opened directly rather than with `V`: what this test is about is
-        // key precedence with the overlay already up, not how it got there.
-        app.overlay = Overlay::Rsvp(RsvpOverlay {
-            msg: MessageRef::new(1),
-            summary: "Standup".to_string(),
-            selected: 0,
-        });
-        let scope_before = app.calendar_view.show_past;
+        app.overlay = Overlay::Rsvp(RsvpOverlay::new(
+            "evoqs".to_string(),
+            "ev-jour-1".to_string(),
+            "Jour fixe".to_string(),
+        ));
+        let anchor = app.calendar_view.anchor;
         app.handle_key(KeyEvent::from(KeyCode::Char('t')));
-        let Overlay::Rsvp(overlay) = &app.overlay else {
-            panic!("t must not close the RSVP overlay");
-        };
-        assert_eq!(overlay.selected, 1, "t selects Tentative");
-        assert_eq!(app.calendar_view.show_past, scope_before);
-    }
-
-    /// An in-progress meeting (started, not yet ended) stays in the upcoming
-    /// scope until its `end_sort` passes, rather than vanishing at its start.
-    #[test]
-    fn in_progress_meeting_stays_upcoming_until_it_ends() {
-        let mut app = app_with_mailboxes();
-        let now = chrono::Utc::now();
-        let fmt = |dt: chrono::DateTime<chrono::Utc>| dt.format("%Y-%m-%dT%H:%M:%S").to_string();
-        let mut running = cal_event(
-            "Running",
-            &fmt(now - chrono::Duration::minutes(30)),
-            false,
-            "REQUEST",
-        );
-        running.end_sort = fmt(now + chrono::Duration::minutes(30));
-        let mut finished = cal_event(
-            "Finished",
-            &fmt(now - chrono::Duration::hours(3)),
-            false,
-            "REQUEST",
-        );
-        finished.end_sort = fmt(now - chrono::Duration::hours(2));
-        app.calendar_view.events = vec![running, finished];
-        app.calendar_view.loaded = true;
-        app.recompute_calendar_visible();
-        let visible: Vec<&str> = app
-            .calendar_view
-            .visible
-            .iter()
-            .map(|&i| app.calendar_view.events[i].subject.as_str())
-            .collect();
-        assert_eq!(visible, vec!["Invitation: Running"]);
-    }
-
-    /// `Enter` queues opening the source invite email, carrying the agenda
-    /// row's own message reference (the invite may live in any mailbox).
-    #[test]
-    fn calendar_enter_opens_the_source_invite() {
-        let mut app = app_in_calendar();
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-        match app.pending_actions.pop_front() {
-            Some(Action::OpenEventSource { msg }) => {
-                assert_eq!(msg, ref_for("Standup"));
-            }
-            other => panic!("expected OpenEventSource, got {other:?}"),
+        assert_eq!(app.calendar_view.anchor, anchor, "t is the overlay's");
+        // The arrows walk the answers and on past Decline to the comment.
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        {
+            let Overlay::Rsvp(overlay) = &app.overlay else {
+                panic!("the overlay stays open");
+            };
+            assert_eq!(overlay.row, RsvpRow::Comment);
+            assert_eq!(overlay.selected, 2, "walking over Decline chose it");
         }
-    }
-
-    /// `t` toggles the upcoming-only scope; past events appear only when on.
-    #[test]
-    fn calendar_scope_toggle_reveals_past_events() {
-        let mut app = app_in_calendar();
-        app.calendar_view
-            .events
-            .push(cal_event("Old", "2000-01-01T09:00:00", false, "REQUEST"));
-        app.recompute_calendar_visible();
-        assert_eq!(app.calendar_view.visible.len(), 3, "past event hidden");
-
-        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
-        assert!(app.calendar_view.show_past);
-        assert_eq!(app.calendar_view.visible.len(), 4);
-
-        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
-        assert_eq!(app.calendar_view.visible.len(), 3);
+        // Tab and Shift+Tab jump between sections and keep the answer.
+        app.handle_key(KeyEvent::from(KeyCode::BackTab));
+        app.handle_key(KeyEvent::from(KeyCode::Char('k'))); // Tentative
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the comment
+        for c in "late, sorry".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the toggle
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.overlay, Overlay::None));
+        match app.pending_actions.pop_front() {
+            Some(Action::Rsvp {
+                account,
+                event,
+                choice,
+                comment,
+                send_response,
+            }) => {
+                assert_eq!(account, "evoqs");
+                assert_eq!(event, "ev-jour-1");
+                assert_eq!(choice, RsvpChoice::Tentative);
+                assert_eq!(comment.as_deref(), Some("late, sorry"));
+                assert!(!send_response);
+            }
+            other => panic!("expected Rsvp, got {other:?}"),
+        }
     }
 
     /// Calendar keys must not fire in Mail: `V` there is the mail-list RSVP
@@ -5998,26 +6119,18 @@ mod tests {
     /// one, and `t` is not a Mail binding at all.
     #[test]
     fn calendar_keys_do_not_fire_in_mail() {
-        let mut app = app_with_mailboxes();
-        app.calendar_view.events = vec![cal_event(
-            "Standup",
-            "2099-08-01T09:00:00",
-            false,
-            "REQUEST",
-        )];
-        app.calendar_view.loaded = true;
-        app.recompute_calendar_visible();
-        assert_eq!(app.view, View::Mail);
-
-        // The cursor email is not an invite, so `V` hints instead of opening.
+        let mut app = app_in_calendar();
+        app.view = View::Mail;
         app.handle_key(KeyEvent::from(KeyCode::Char('V')));
-        assert!(matches!(app.overlay, Overlay::None));
-
-        // `t` (calendar scope toggle) does nothing in Mail.
-        let before = app.calendar_view.show_past;
-        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
-        assert_eq!(app.calendar_view.show_past, before);
-        assert!(app.pending_actions.is_empty());
+        assert!(!matches!(app.overlay, Overlay::Rsvp(_)));
+        let anchor = app.calendar_view.anchor;
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('w')));
+        assert_eq!(app.calendar_view.anchor, anchor);
+        assert_eq!(
+            app.calendar_view.layout,
+            super::super::CalendarLayout::Agenda
+        );
     }
 
     /// Mail-specific Global keys stay swallowed in Calendar even though it now

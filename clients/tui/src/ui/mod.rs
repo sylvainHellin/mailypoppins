@@ -316,6 +316,8 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::Mailbox(picker) => overlays::render_mailbox_picker(picker, frame, area),
         Overlay::Signatures(overlay) => overlays::render_signatures_overlay(overlay, frame, area),
         Overlay::Rsvp(overlay) => overlays::render_rsvp_overlay(overlay, frame, area),
+        Overlay::Calendars(overlay) => calendar::render_calendars_overlay(overlay, frame, area),
+        Overlay::EventCard(card) => calendar::render_event_card(app, card, frame, area),
         Overlay::Thread(overlay) => overlays::render_thread_overlay(overlay, frame, area),
         Overlay::Palette(palette) => overlays::render_command_palette(palette, frame, area),
         Overlay::Error(error) => overlays::render_persistent_error(error, frame, area),

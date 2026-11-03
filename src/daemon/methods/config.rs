@@ -280,7 +280,8 @@ impl Method for ConfigMethod {
                 }
                 "config.oauth2_login" => {
                     let work = plan_oauth2(&family.store.snapshot().accounts, &params)?;
-                    Ok(self.operation(ctx, move |handle| oauth2_login(work, handle)))
+                    let diagnostics = Arc::clone(&family.diagnostics);
+                    Ok(self.operation(ctx, move |handle| oauth2_login(work, diagnostics, handle)))
                 }
                 other => Err(DomainError::method_not_found(other)),
             }
@@ -945,6 +946,9 @@ struct OAuth2Work {
     staged: bool,
     client_id: String,
     tenant_id: String,
+    /// What the sign-in asks for ([`crate::oauth2::scopes_for`]): no calendar
+    /// for an account that opted out of it.
+    scopes: String,
 }
 
 /// Validate `config.oauth2_login`, in the three refusals `src/config_cmd/oauth2.rs`
@@ -1030,6 +1034,7 @@ fn plan_oauth2(
             name.clone()
         },
         staged,
+        scopes: crate::oauth2::scopes_for(account),
         account: name,
         client_id: settings.client_id.clone(),
         tenant_id: settings.tenant_id.clone(),
@@ -1039,7 +1044,11 @@ fn plan_oauth2(
 /// `ACC-06`: the device-code flow, with the verification URL and the user code
 /// reported as the operation's first progress so the client can render them and
 /// open a browser (`INT-04`).
-async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::OperationHandle) {
+async fn oauth2_login(
+    work: OAuth2Work,
+    diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>,
+    handle: crate::daemon::operations::OperationHandle,
+) {
     handle.set_running();
     // A candidate sign-in is a wizard starting: the sign-ins wizards staged
     // and abandoned more than a day ago go, so `candidates/` does not keep
@@ -1061,10 +1070,16 @@ async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::Opera
         &work.client_id,
         &work.tenant_id,
         &work.token,
-        crate::oauth2::GRAPH_SCOPES,
+        &work.scopes,
         &report,
     )
     .await;
+    // A new sign-in may have granted the calendar scope a stale token lacked
+    // (PERSO-200): its check is re-read now, so the prompt clears without
+    // waiting for the periodic sweep.
+    if acquired.is_ok() && !work.staged {
+        diagnostics.refresh();
+    }
     match acquired {
         Ok(_) => handle.succeed(json!({
             "stored": true,
@@ -1209,6 +1224,35 @@ mod tests {
             .expect("the configured account signs in");
         assert_eq!(login.token, "work");
         assert!(!login.staged);
+    }
+
+    /// A Graph account that opted out of the calendar
+    /// (`calendar_backend = "none"`) signs in with the mail scopes only; one
+    /// that keeps the default asks for the calendar too (PERSO-200).
+    #[test]
+    fn a_sign_in_asks_for_the_calendar_only_where_the_account_uses_it() {
+        let config: GlobalConfig = toml::from_str(
+            "[[accounts]]\nname = \"work\"\nauth_method = \"graph\"\n\
+             calendar_backend = \"none\"\n\n\
+             [accounts.oauth2]\nclient_id = \"c\"\ntenant_id = \"common\"\n\n\
+             [[accounts]]\nname = \"office\"\nauth_method = \"graph\"\n\n\
+             [accounts.oauth2]\nclient_id = \"c\"\ntenant_id = \"common\"\n",
+        )
+        .expect("the config loads");
+        let calendar = crate::oauth2::scope_name(crate::oauth2::CALENDAR_SCOPE);
+        let asks_for_calendar = |work: &OAuth2Work| {
+            work.scopes
+                .split_whitespace()
+                .any(|s| crate::oauth2::scope_name(s) == calendar)
+        };
+
+        let login = plan_oauth2(&config.accounts, &json!({"account": "work"})).expect("signs in");
+        assert!(!asks_for_calendar(&login), "{}", login.scopes);
+        assert!(login.scopes.contains("Mail.ReadWrite"), "{}", login.scopes);
+
+        let login = plan_oauth2(&config.accounts, &json!({"account": "office"})).expect("signs in");
+        assert!(asks_for_calendar(&login), "{}", login.scopes);
+        assert_eq!(login.scopes, crate::oauth2::GRAPH_SCOPES);
     }
 
     /// Only a Graph block promotes a staged sign-in.

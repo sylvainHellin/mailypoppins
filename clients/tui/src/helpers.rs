@@ -377,6 +377,7 @@ mod tests {
         known.credentials = Some(Credentials {
             imap: true,
             smtp: false,
+            calendar_scope_missing: false,
         });
         let unknown = account("perso", "me@perso.example");
         let mut graph = account("graph", "me@graph.example");

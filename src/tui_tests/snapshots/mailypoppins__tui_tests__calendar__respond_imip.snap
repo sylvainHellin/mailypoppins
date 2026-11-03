@@ -1,0 +1,57 @@
+---
+source: src/tui_tests/calendar.rs
+expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
+---
+== text 120x40 (trailing spaces trimmed) ==
+00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Agenda: Mon 03 Aug to Mon 17 Aug ─────╮╭ Event ────────────────────────────────────────────────────────────────────╮│
+02 |││Mon 2026-08-03                         ││Baustellenübergabe                                                         ││
+03 |││  09:00-10:00 ✓ Baustellenübergabe     ││                                                                           ││
+04 |││                [evoqs/Calendar]  @ Ra…││When        Mon 2026-08-03 09:00-10:00                                     ││
+05 |││                                       ││Where       Raum 2.14                                                      ││
+06 |││Tue 2026-08-04  (today)                ││Calendar    evoqs/Calendar                                                 ││
+07 |││  10:00-11:00 ? Jour fixe              ││Organizer   planung@example.org                                            ││
+08 |││                [evoqs/Calendar]       ││Attendees   Sylvain <sylvain@example.org>  accepted                        ││
+09 |││  10:30-12:00 ? PhD Kolloquium         ││            Ada <ada@example.org>  tentative                               ││
+10 |││                [perso/Invitations]  @…││Response    ✓ accepted                                                     ││
+11 |││                                       ││Link        https://outlook.office.com/calendar/item/ev-handover           ││
+12 |││Wed 2026-08-05                         ││                                                                           ││
+13 |││  all day       Sommerfest             ││Bitte Helm mitbringen.                                                     ││
+14 |││                [evoqs/Holidays]       ││                                                                           ││
+15 |││                            ╭──────────────────────────────────────────────────────────╮                            ││
+16 |││Thu 2026-08-06              │PhD Kolloquium                                            │                            ││
+17 |││  all day       Sommerfest  │                                                          │                            ││
+18 |││                [evoqs/Holid│▶ Accept                                                  │                            ││
+19 |││  10:00-11:00 ? Jour fixe   │  Tentative                                               │                            ││
+20 |││                [evoqs/Calen│  Decline                                                 │                            ││
+21 |││                            │  Comment: (none)                                         │                            ││
+22 |││Fri 2026-08-07              │                                                          │                            ││
+23 |││  14:00-15:00 ✓ Abgesagter T│  Enter answer · Tab next · Esc cancel                    │                            ││
+24 |││                [evoqs/Calen╰──────────────────────────────────────────────────────────╯                            ││
+25 |││                                       ││                                                                           ││
+26 |││                                       ││                                                                           ││
+27 |││                                       ││                                                                           ││
+28 |││                                       ││                                                                           ││
+29 |││                                       ││                                                                           ││
+30 |││                                       ││                                                                           ││
+31 |││                                       ││                                                                           ││
+32 |│╰───────────────────────────────────────╯│                                                                           ││
+33 |│╭ View ─────────────────────────────────╮│                                                                           ││
+34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
+35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
+37 |││                                                                                                                    ││
+38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
+39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+== style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
+02 |bold@2..16 bold@43..61
+03 |bg:surface+fg:selection+bold@2..41
+04 |bg:surface+fg:selection+bold@2..41
+06 |bold@2..25
+12 |bold@2..16
+16 |bold@2..16 bold@31..45
+18 |fg:selection+bold@31..39
+22 |bold@2..16
+23 |strike@2..30
+24 |strike@2..18
+34 |bold@27..37

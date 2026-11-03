@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import {
   Dialog,
@@ -12,41 +13,67 @@ import {
 } from "@/components/ui/dialog";
 import { RESPONSE_LABEL, sendRsvp } from "@/app/rsvp";
 import { useDispatch } from "@/app/store";
-import { RSVP_RESPONSES, type RsvpDialog as RsvpDialogState } from "@/app/state";
+import { RSVP_RESPONSES, type RsvpDialog as RsvpDialogState, type RsvpResponse } from "@/app/state";
 
 const KEY: Record<string, number> = { a: 0, t: 1, d: 2 };
 
 export type RsvpDialogProps = { dialog: RsvpDialogState | null; onOpenChange: (open: boolean) => void };
 
 /**
- * The RSVP choice (`tv` in Mail, `V` in the Calendar view), the TUI's RSVP
- * overlay: `a`, `t` and `d` pick Accept, Tentative and Decline, `j`, Down or
- * Tab move down, `k`, Up or Shift+Tab move up, Enter sends the choice,
- * Escape or `q` closes. The dialog owns every key while it is open.
+ * The respond choice (`tv` in Mail, `V` in the Calendar view), the TUI's
+ * respond overlay (PERSO-200): `a`, `t` and `d` pick Accept, Tentative and
+ * Decline, `j`, Down or Tab move down, `k`, Up or Shift+Tab move up, Enter
+ * sends the choice, Escape or `q` closes. Tab from Decline goes on to the
+ * comment, sent with the answer, and on a server event to "Send a response
+ * to the organizer", which an invitation mail's answer, a reply mail, does
+ * not offer. The dialog owns every key while it is open, the comment's own
+ * typing aside.
  */
 export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const dispatch = useDispatch();
   const id = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(0);
+  const [comment, setComment] = useState("");
+  const [sendResponse, setSendResponse] = useState(true);
   const open = dialog !== null;
 
-  useEffect(() => setSelected(0), [dialog]);
+  useEffect(() => {
+    setSelected(0);
+    setComment("");
+    setSendResponse(true);
+  }, [dialog]);
 
-  const latest = useRef({ dialog, selected });
-  latest.current = { dialog, selected };
+  const latest = useRef({ dialog, selected, comment, sendResponse });
+  latest.current = { dialog, selected, comment, sendResponse };
+
+  const sendNow = (response: RsvpResponse) => {
+    const { dialog: d, comment: c, sendResponse: tell } = latest.current;
+    if (d) void sendRsvp(dispatch, d, response, { comment: c, sendResponse: d.server ? tell : null });
+  };
 
   // On the window, so the keys work before the popup has taken focus, and in
   // the capture phase, since the popup stops the arrow keys on their way up.
   useEffect(() => {
     if (!open) return;
     const send = () => {
-      const { dialog: d, selected: i } = latest.current;
-      if (d) void sendRsvp(dispatch, d, RSVP_RESPONSES[i]);
+      const { dialog: d, selected: i, comment: c, sendResponse: tell } = latest.current;
+      if (d) void sendRsvp(dispatch, d, RSVP_RESPONSES[i], { comment: c, sendResponse: d.server ? tell : null });
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+      // The comment and the toggle take their own keys; Enter still sends,
+      // and Tab moves on from them as a field's Tab does.
+      if (e.target instanceof Element && e.target.closest("[data-rsvp-field]")) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          send();
+        }
+        return;
+      }
       const move = (by: number) => setSelected((i) => Math.max(0, Math.min(RSVP_RESPONSES.length - 1, i + by)));
+      // Tab from the last answer leaves the list for the comment.
+      if (e.key === "Tab" && !e.shiftKey && latest.current.selected === RSVP_RESPONSES.length - 1) return;
       if (e.key === "j" || e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
         e.preventDefault();
         move(1);
@@ -98,7 +125,7 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
               aria-selected={i === selected}
               data-response={response}
               onClick={() => setSelected(i)}
-              onDoubleClick={() => dialog && void sendRsvp(dispatch, dialog, response)}
+              onDoubleClick={() => sendNow(response)}
               className="flex cursor-default items-center justify-between rounded-md px-3 py-1.5 text-sm aria-selected:bg-accent aria-selected:text-accent-foreground"
             >
               {RESPONSE_LABEL[response]}
@@ -106,11 +133,36 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
             </div>
           ))}
         </div>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted-foreground">Comment (optional)</span>
+          <Input
+            data-rsvp-field
+            data-slot="rsvp-comment"
+            aria-label="Comment"
+            value={comment}
+            onChange={(e) => setComment(e.currentTarget.value)}
+            placeholder="Sent with the answer"
+          />
+        </label>
+        {dialog?.server ? (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              data-rsvp-field
+              data-slot="rsvp-send-response"
+              checked={sendResponse}
+              onChange={(e) => setSendResponse(e.currentTarget.checked)}
+            />
+            Send a response to the organizer
+          </label>
+        ) : (
+          <p className="text-xs text-muted-foreground">The answer goes to the organizer as a reply mail.</p>
+        )}
         <DialogFooter>
           <DialogClose render={<Button variant="outline" />}>
             Cancel <Kbd aria-hidden="true">q</Kbd>
           </DialogClose>
-          <Button onClick={() => dialog && void sendRsvp(dispatch, dialog, RSVP_RESPONSES[selected])}>
+          <Button onClick={() => sendNow(RSVP_RESPONSES[selected])}>
             Send {RESPONSE_LABEL[RSVP_RESPONSES[selected]]} <Kbd aria-hidden="true">↵</Kbd>
           </Button>
         </DialogFooter>

@@ -47,9 +47,10 @@ use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use crate::app::{
-    AccountPicker, AccountState, App, CalendarEvent, CommandPalette, ComposeField, ComposeMode,
-    ComposeWizard, EmailEntry, EntryKey, MailboxInfo, MailboxKind, MessageRef, Overlay,
-    SearchField, SearchOverlayFocus, SignaturesMode, SignaturesOverlay, View,
+    AccountPicker, AccountState, App, CalendarEvent, CalendarEventTime, CalendarInfo,
+    CalendarLayout, CommandPalette, ComposeField, ComposeMode, ComposeWizard, EmailEntry, EntryKey,
+    MailboxInfo, MailboxKind, MessageRef, Overlay, SearchField, SearchOverlayFocus, SignaturesMode,
+    SignaturesOverlay, View,
 };
 use crate::theme::{self, Theme};
 use mp_core::types::EventFrontmatter;
@@ -357,81 +358,195 @@ pub fn mail_fixture() -> App {
     app
 }
 
-/// The frozen calendar agenda: an accepted event, a cancelled one, and a
-/// pending invitation, cursor on the first row.
+/// One event of the calendar fixture: a server event of `account` in
+/// `calendar`, nobody's invitation until a field below says otherwise.
+pub fn calendar_event(
+    account: &str,
+    calendar: &str,
+    id: &str,
+    summary: &str,
+    time: CalendarEventTime,
+) -> CalendarEvent {
+    CalendarEvent {
+        account: account.into(),
+        calendar: calendar.into(),
+        id: id.into(),
+        uid: format!("{id}@example.org"),
+        recurrence_id: None,
+        series_master_id: None,
+        summary: summary.into(),
+        time,
+        location: None,
+        body: None,
+        organizer: None,
+        attendees: Vec::new(),
+        own_response: "none".into(),
+        recurrence: None,
+        reminder: None,
+        online_meeting_url: None,
+        sensitivity: "normal".into(),
+        show_as: "busy".into(),
+        cancelled: false,
+        is_organizer: false,
+        last_modified: None,
+        web_link: None,
+        source: None,
+    }
+}
+
+/// A timed event's time, its instants in UTC as the daemon sends them.
+pub fn timed(start: &str, end: &str) -> CalendarEventTime {
+    CalendarEventTime::Timed {
+        start: start.into(),
+        end: end.into(),
+        zone: "Europe/Berlin".into(),
+    }
+}
+
+/// The frozen calendar: the week of Mon 2026-08-03 with today on the
+/// Tuesday, in Europe/Berlin. A timed meeting with attendees, two occurrences
+/// of a recurring jour fixe, an invitation mail's event overlapping the first
+/// of them, a two-day all-day holiday and a cancelled meeting, over the
+/// calendars of two accounts, one of them hidden. The agenda layout, cursor
+/// on the first row.
 pub fn calendar_fixture() -> App {
+    use mp_protocol::calendar::{
+        CalendarAttendee, CalendarEventSource, CalendarPerson, IMIP_CALENDAR_ID,
+    };
     let mut app = mail_fixture();
     app.view = View::Calendar;
-
-    let event = |row: i64,
-                 uid: &str,
-                 summary: &str,
-                 start: &str,
-                 display: &str,
-                 rsvp: &str,
-                 cancelled: bool,
-                 is_organizer: bool| CalendarEvent {
-        msg: MessageRef::new(row),
-        event: EventFrontmatter {
-            uid: Some(uid.into()),
-            method: Some("REQUEST".into()),
-            sequence: 0,
-            summary: Some(summary.into()),
-            start: Some(format!("{start}+02:00")),
-            end: None,
-            location: Some("Raum 2.14".into()),
-            organizer: Some("planung@example.org".into()),
-            rsvp: rsvp.into(),
-            recurrence: String::new(),
-            attendees: Vec::new(),
-            // The loader sets both (#0031): the row flag drives the agenda
-            // badge, the frontmatter flag drives the shared card's banner.
-            cancelled,
-            ..Default::default()
-        },
-        subject: format!("Invitation: {summary}"),
-        start_sort: start.to_string(),
-        end_sort: String::new(),
-        start_display: display.to_string(),
-        is_organizer,
-        cancelled,
+    let day = |raw: &str| chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").unwrap();
+    let person = |email: &str| CalendarPerson {
+        name: None,
+        email: email.into(),
+    };
+    let attendee = |name: &str, email: &str, status: &str| CalendarAttendee {
+        name: Some(name.into()),
+        email: email.into(),
+        role: "required".into(),
+        status: status.into(),
     };
 
-    app.calendar_view.loaded = true;
-    app.calendar_view.events = vec![
-        event(
-            1,
-            "cal-1",
-            "Baustellen\u{fc}bergabe",
-            "2026-08-03T07:00:00",
-            "2026-08-03 09:00",
-            "accepted",
-            false,
-            false,
-        ),
-        event(
-            2,
-            "cal-2",
-            "Abgesagter Jour fixe",
-            "2026-08-04T08:00:00",
-            "2026-08-04 10:00",
-            "accepted",
-            true,
-            false,
-        ),
-        event(
-            3,
-            "cal-3",
-            "PhD Kolloquium",
-            "2026-08-06T13:00:00",
-            "2026-08-06 15:00",
-            "needs-action",
-            false,
-            true,
-        ),
+    let mut handover = calendar_event(
+        "evoqs",
+        "cal-main",
+        "ev-handover",
+        "Baustellen\u{fc}bergabe",
+        timed("2026-08-03T07:00:00Z", "2026-08-03T08:00:00Z"),
+    );
+    handover.location = Some("Raum 2.14".into());
+    handover.organizer = Some(person("planung@example.org"));
+    handover.attendees = vec![
+        attendee("Sylvain", "sylvain@example.org", "accepted"),
+        attendee("Ada", "ada@example.org", "tentative"),
     ];
-    app.calendar_view.visible = vec![0, 1, 2];
-    app.calendar_view.list_index = 0;
+    handover.own_response = "accepted".into();
+    handover.body = Some("Bitte Helm mitbringen.".into());
+    handover.web_link = Some("https://outlook.office.com/calendar/item/ev-handover".into());
+
+    let jour = |id: &str, start: &str, end: &str, recurrence_id: &str| {
+        let mut occurrence =
+            calendar_event("evoqs", "cal-main", id, "Jour fixe", timed(start, end));
+        occurrence.recurrence_id = Some(recurrence_id.into());
+        occurrence.series_master_id = Some("ev-jour".into());
+        occurrence.organizer = Some(person("chef@example.org"));
+        occurrence.own_response = "needs-action".into();
+        occurrence.online_meeting_url = Some("https://teams.example.org/l/jour-fixe".into());
+        occurrence
+    };
+    let jour_tuesday = jour(
+        "ev-jour-1",
+        "2026-08-04T08:00:00Z",
+        "2026-08-04T09:00:00Z",
+        "2026-08-04T08:00:00Z",
+    );
+    let jour_thursday = jour(
+        "ev-jour-2",
+        "2026-08-06T08:00:00Z",
+        "2026-08-06T09:00:00Z",
+        "2026-08-06T08:00:00Z",
+    );
+
+    let mut colloquium = calendar_event(
+        "perso",
+        IMIP_CALENDAR_ID,
+        "imip:3",
+        "PhD Kolloquium",
+        timed("2026-08-04T08:30:00Z", "2026-08-04T10:00:00Z"),
+    );
+    colloquium.location = Some("Hörsaal 1".into());
+    colloquium.organizer = Some(person("chair@tum.de"));
+    colloquium.own_response = "needs-action".into();
+    colloquium.recurrence = None;
+    colloquium.source = Some(CalendarEventSource {
+        kind: "imip".into(),
+        row_id: 3,
+        selector: "mp://perso/inbox/kolloquium%40tum.de".into(),
+        subject: "Invitation: PhD Kolloquium".into(),
+    });
+
+    let holiday = calendar_event(
+        "evoqs",
+        "cal-holidays",
+        "ev-holiday",
+        "Sommerfest",
+        CalendarEventTime::AllDay {
+            start: "2026-08-05".into(),
+            end: "2026-08-07".into(),
+        },
+    );
+
+    let mut cancelled = calendar_event(
+        "evoqs",
+        "cal-main",
+        "ev-cancelled",
+        "Abgesagter Termin",
+        timed("2026-08-07T12:00:00Z", "2026-08-07T13:00:00Z"),
+    );
+    cancelled.cancelled = true;
+    cancelled.own_response = "accepted".into();
+
+    let calendar =
+        |account: &str, id: &str, name: &str, is_default: bool, visible: bool| CalendarInfo {
+            account: account.into(),
+            id: id.into(),
+            name: name.into(),
+            color: None,
+            is_default,
+            can_edit: id != IMIP_CALENDAR_ID,
+            visible,
+            backend: if id == IMIP_CALENDAR_ID {
+                "none"
+            } else {
+                "graph"
+            }
+            .into(),
+        };
+
+    let cv = &mut app.calendar_view;
+    cv.loaded = true;
+    cv.zone = "Europe/Berlin".parse().unwrap();
+    cv.today = day("2026-08-04");
+    cv.anchor = day("2026-08-03");
+    cv.layout = CalendarLayout::Agenda;
+    cv.error = None;
+    // `calendar.view`'s order: by start, an all-day event first on its day.
+    cv.events = vec![
+        handover,
+        jour_tuesday,
+        colloquium,
+        holiday,
+        jour_thursday,
+        cancelled,
+    ];
+    cv.calendars = vec![
+        calendar("evoqs", "cal-main", "Calendar", true, true),
+        calendar("evoqs", "cal-holidays", "Holidays", false, true),
+        calendar("evoqs", "cal-birthdays", "Birthdays", false, false),
+        calendar("perso", IMIP_CALENDAR_ID, "Invitations", false, true),
+    ];
+    cv.list_index = 0;
+    app.recompute_calendar_entries(None);
     app
 }
 
@@ -705,7 +820,7 @@ pub fn golden_calendar_view() {
 /// user can still read, never a deleted event.
 pub fn calendar_view_cancelled_event_detail_app() -> App {
     let mut app = calendar_fixture();
-    app.calendar_view.list_index = 1;
+    app.calendar_view.list_index = 6;
     app
 }
 

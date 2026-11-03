@@ -405,24 +405,44 @@
         "action": "Navigate events"
       },
       {
+        "key": "h/l",
+        "action": "Previous / next day or week (also [ and ])"
+      },
+      {
         "key": "gg / G",
         "action": "Jump to top / bottom"
       },
       {
-        "key": "Enter / e",
-        "action": "Open the invite email in $EDITOR"
+        "key": "t",
+        "action": "Go to today"
+      },
+      {
+        "key": "gt",
+        "action": "Jump to date (e.g. 2026-07-06)"
+      },
+      {
+        "key": "a/d/w",
+        "action": "Agenda / day / week layout"
+      },
+      {
+        "key": "Enter",
+        "action": "Open the event card"
+      },
+      {
+        "key": "e",
+        "action": "Open the invitation's .ics in $EDITOR"
       },
       {
         "key": "V",
-        "action": "RSVP to invitation (Accept/Tentative/Decline)"
+        "action": "Respond (accept / tentative / decline, comment)"
       },
       {
-        "key": "t",
-        "action": "Show past events / upcoming only"
+        "key": "c",
+        "action": "Show or hide calendars"
       },
       {
         "key": "r",
-        "action": "Refresh events from disk"
+        "action": "Read the events again"
       }
     ]
   },

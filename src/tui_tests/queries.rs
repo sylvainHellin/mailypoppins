@@ -725,7 +725,7 @@ fn a_preview_walk_leaves_no_handle_behind() {
 /// It read three rows from P5-U4 until this unit: the agenda, the invitation
 /// card and the raw iMIP blob, each a sessionless branch beside the routed
 /// one, and all three are gone with the fallback. What answers them is
-/// `calendar.events`, `message.invite` and `message.ics`; what compares the
+/// `calendar.view`, `message.invite` and `message.ics`; what compares the
 /// answers is [`super::oracle`], in the crate that owns the store.
 ///
 /// The table is a record as much as a gate: a residue that comes back must be

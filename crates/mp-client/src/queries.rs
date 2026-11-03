@@ -16,7 +16,7 @@
 //! Over it sit the reads a client needs, typed in the protocol's own
 //! vocabulary ([`mp_protocol`]) rather than in any client's model: a listing
 //! is `Vec<MessageListRow>`, the sidebar is `Vec<MailboxRow>`, a conversation
-//! is a [`ThreadListing`], the agenda is `Vec<AgendaEvent>`. What a row
+//! is a [`ThreadListing`], a calendar range is a [`CalendarViewResult`]. What a row
 //! becomes on screen is each client's own mapping; the TUI's lives in
 //! `mp_tui::queries` and `mp_tui::app::entry_from_row`.
 //!
@@ -62,7 +62,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
+use mp_protocol::calendar::{
+    CalendarInfo, CalendarListResult, CalendarViewParams, CalendarViewResult, EventFrontmatter,
+    EventRespondParams,
+};
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
 use mp_protocol::listing::{
@@ -397,11 +400,40 @@ pub fn message_invite(
     account: &str,
     row_id: i64,
 ) -> Result<Option<EventFrontmatter>> {
+    Ok(message_invite_card(q, account, row_id)?.map(|card| card.event))
+}
+
+/// One message's invitation card and the server event it stands for, through
+/// `message.invite`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InviteCard {
+    /// The folded card.
+    pub event: EventFrontmatter,
+    /// The server event the invitation names on an account with a calendar
+    /// backend (PERSO-200), `None` when the server names none or the account
+    /// has no backend.
+    pub event_id: Option<String>,
+}
+
+/// [`message_invite`] with the `event_id` the daemon names beside the card,
+/// which is what an answer goes to: the server event when there is one, else
+/// the invitation mail's own `imip:<row_id>`.
+pub fn message_invite_card(
+    q: &dyn Queries,
+    account: &str,
+    row_id: i64,
+) -> Result<Option<InviteCard>> {
     let params = json!({"account": account, "row_id": row_id});
     let answer = q.call("message.invite", params)?;
     match answer.get("event") {
         None | Some(Value::Null) => Ok(None),
-        Some(event) => Ok(Some(serde_json::from_value(event.clone())?)),
+        Some(event) => Ok(Some(InviteCard {
+            event: serde_json::from_value(event.clone())?,
+            event_id: answer
+                .get("event_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })),
     }
 }
 
@@ -428,15 +460,57 @@ pub fn draft_path(q: &dyn Queries, account: &str, id: &str) -> Result<DraftLocat
 }
 
 // ---------------------------------------------------------------------------
-// The agenda
+// The server calendar (PERSO-200)
 // ---------------------------------------------------------------------------
 
-/// One account's agenda, through `calendar.events`: deduped, reply-folded and
-/// sorted daemon-side, because every derived column is a fold over the
-/// account's other rows.
-pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<AgendaEvent>> {
-    let answer = q.call("calendar.events", json!({"account": account}))?;
-    Ok(serde_json::from_value(answer["events"].clone())?)
+/// The calendars of every account, or of `account`, through
+/// `calendar.list`: the server calendars of an account with a backend, and
+/// the virtual `imip` calendar of an account with invitation mails.
+pub fn calendar_list(q: &dyn Queries, account: Option<&str>) -> Result<Vec<CalendarInfo>> {
+    let params = match account {
+        Some(account) => json!({"account": account}),
+        None => json!({}),
+    };
+    let answer: CalendarListResult = serde_json::from_value(q.call("calendar.list", params)?)?;
+    Ok(answer.calendars)
+}
+
+/// Show or hide one calendar, through `calendar.set_visibility`.
+pub fn calendar_set_visibility(
+    q: &dyn Queries,
+    account: &str,
+    calendar: &str,
+    visible: bool,
+) -> Result<()> {
+    let params = json!({"account": account, "calendar": calendar, "visible": visible});
+    q.call("calendar.set_visibility", params)?;
+    Ok(())
+}
+
+/// The events in a range, merged across accounts and sorted by start, through
+/// `calendar.view`.
+pub fn calendar_view(q: &dyn Queries, params: &CalendarViewParams) -> Result<CalendarViewResult> {
+    let answer = q.call("calendar.view", serde_json::to_value(params)?)?;
+    Ok(serde_json::from_value(answer)?)
+}
+
+/// The `params` of `event.respond`, an operation a client starts through its
+/// own operation path and watches to its `EventRespondResult`.
+pub fn event_respond_params(
+    account: &str,
+    event: &str,
+    response: &str,
+    comment: Option<&str>,
+    send_response: bool,
+) -> Value {
+    serde_json::to_value(EventRespondParams {
+        account: account.to_string(),
+        event: event.to_string(),
+        response: response.to_string(),
+        comment: comment.map(str::to_string),
+        send_response: Some(send_response),
+    })
+    .unwrap_or_else(|_| json!({"account": account, "event": event, "response": response}))
 }
 
 // ---------------------------------------------------------------------------
@@ -614,6 +688,45 @@ mod tests {
         assert_eq!(
             rows[1].selector,
             "mp://work/inbox/Invoice-2025-114@example.com"
+        );
+    }
+
+    /// The server-calendar reads ask with the committed request shapes and
+    /// decode the committed answers.
+    #[test]
+    fn the_calendar_reads_decode_the_committed_answers() {
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.list.response.json"
+        )));
+        let calendars = calendar_list(&door, None).expect("calendars");
+        assert_eq!(calendars.len(), 3);
+        assert_eq!(door.seen.borrow()[0], ("calendar.list".into(), json!({})));
+
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.view.response.json"
+        )));
+        let request: Value = serde_json::from_str(include_str!(
+            "../../mp-protocol/fixtures/calendar.view.request.json"
+        ))
+        .unwrap();
+        let params: CalendarViewParams = serde_json::from_value(request["params"].clone()).unwrap();
+        let view = calendar_view(&door, &params).expect("a view");
+        assert_eq!(view.events.len(), 2);
+        assert_eq!(door.seen.borrow()[0].1, request["params"]);
+
+        let request: Value = serde_json::from_str(include_str!(
+            "../../mp-protocol/fixtures/event.respond.request.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            event_respond_params(
+                "evoqs",
+                "AAMkADev1",
+                "tentative",
+                Some("I may be late"),
+                false
+            ),
+            request["params"]
         );
     }
 

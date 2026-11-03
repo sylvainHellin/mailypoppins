@@ -491,6 +491,46 @@ pub fn oauth2_stored_line(account: &str) -> String {
     format!("\u{2713} OAuth2 token acquired and cached for account '{account}'")
 }
 
+// ---------------------------------------------------------------------------
+// The server calendar (PERSO-200)
+// ---------------------------------------------------------------------------
+
+use mp_protocol::calendar::{CalendarEvent, CalendarInfo};
+
+/// The calendars' names by account and id, for the tag an event line
+/// carries in `mp calendar view` and in the TUI's agenda.
+pub type CalendarNames = std::collections::HashMap<(String, String), String>;
+
+/// [`CalendarNames`] from a `calendar.list` answer.
+pub fn calendar_names(calendars: &[CalendarInfo]) -> CalendarNames {
+    calendars
+        .iter()
+        .map(|c| ((c.account.clone(), c.id.clone()), c.name.clone()))
+        .collect()
+}
+
+/// The `account/calendar` tag of an event, the calendar by name when the
+/// list names it.
+pub fn calendar_tag(event: &CalendarEvent, names: &CalendarNames) -> String {
+    let name = names
+        .get(&(event.account.clone(), event.calendar.clone()))
+        .map(String::as_str)
+        .unwrap_or(&event.calendar);
+    format!("{}/{}", event.account, name)
+}
+
+/// The one-character mark of the user's own answer to an event.
+pub fn response_mark(own_response: &str) -> char {
+    match own_response {
+        "accepted" => '\u{2713}',
+        "tentative" => '~',
+        "declined" => '\u{2717}',
+        "needs-action" => '?',
+        "organizer" => '\u{2605}',
+        _ => ' ',
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::refused_rebuild_line;

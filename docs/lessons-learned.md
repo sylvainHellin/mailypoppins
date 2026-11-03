@@ -162,7 +162,7 @@ Reconciling attendee RSVPs into a sent invite (`set_event_attendee_status`, `src
 
 ## iMIP REPLY must carry DTSTART for Exchange, and cloning the parsed Property preserves the datetime form (2026-07-12)
 
-RFC 5546 lists `DTSTART` as OPTIONAL in a `METHOD:REPLY`, but Exchange/Outlook reject a reply that omits it: the RSVP arrives as an unusable `not supported calendar message.ics` with "Invalid ICAL element: DTSTART" (live smoke-test failure on ticket #0029, shipped in e058e46). Outlook itself echoes the invite's `DTSTART`/`DTEND` back in its own replies, so `build_reply_ics` (`src/invite.rs`) now does the same. The form-preservation trick: rather than re-parse the invite datetime into a `chrono` value and re-emit it (which would flatten a `TZID`/wall-clock invite to UTC `Z` and drop `VALUE=DATE`), read the already-parsed `icalendar::Property` straight out of the source event's `properties()` map (`event.properties().get("DTSTART").cloned()`) and `append_property` it verbatim into the reply. `Property` is `Clone` and carries both the value and its parameters (`TZID`, `VALUE=DATE`, ...), so a UTC-`Z`, a `TZID=Europe/Berlin` wall-clock, and an all-day `VALUE=DATE` invite all round-trip byte-identically with zero datetime math on our side. Carry `DTEND` when present, else `DURATION` (mutually exclusive in a well-formed invite). Defensive: if the invite genuinely has no `DTSTART`, build the reply without it and `log::warn!` rather than failing — a start-less REPLY is still better than no RSVP. The crate serializes VEVENT properties alphabetically, so assert on unfolded substring presence, not order. Everything else about the reply (single ATTENDEE + PARTSTAT, fresh DTSTAMP, verbatim UID/SEQUENCE, echoed ORGANIZER/SUMMARY) is unchanged; PRODID stays the crate default `ICALENDAR-RS` (a single valid PRODID, fine for Exchange).
+RFC 5546 lists `DTSTART` as OPTIONAL in a `METHOD:REPLY`, but Exchange/Outlook reject a reply that omits it: the RSVP arrives as an unusable `not supported calendar message.ics` with "Invalid ICAL element: DTSTART" (live smoke-test failure on ticket #0029, shipped in e058e46). Outlook itself echoes the invite's `DTSTART`/`DTEND` back in its own replies, so `build_reply_ics` (`src/invite.rs`) now does the same. The form-preservation trick: rather than re-parse the invite datetime into a `chrono` value and re-emit it (which would flatten a `TZID`/wall-clock invite to UTC `Z` and drop `VALUE=DATE`), read the already-parsed `icalendar::Property` straight out of the source event's `properties()` map (`event.properties().get("DTSTART").cloned()`) and `append_property` it verbatim into the reply. `Property` is `Clone` and carries both the value and its parameters (`TZID`, `VALUE=DATE`, ...), so a UTC-`Z`, a `TZID=Europe/Berlin` wall-clock, and an all-day `VALUE=DATE` invite all round-trip byte-identically with zero datetime math on our side. Carry `DTEND` when present, else `DURATION` (mutually exclusive in a well-formed invite). Defensive: if the invite genuinely has no `DTSTART`, build the reply without it and `log::warn!` rather than failing — a start-less REPLY is still better than no RSVP. The crate serializes VEVENT properties alphabetically, so assert on unfolded substring presence, not order. Everything else about the reply (single ATTENDEE + PARTSTAT, fresh DTSTAMP, verbatim UID/SEQUENCE, echoed ORGANIZER/SUMMARY) is unchanged; the PRODID is mailypoppins' own (`-//mailypoppins//mailypoppins//EN`) and the reply carries no `CALSCALE`, as Outlook's own reply does (PERSO-200, "Exchange ignores an iMIP REPLY whose TZID has no VTIMEZONE" below).
 
 ## Off-Mail pane keys must beat swallowed Global keys, not lose to them (2026-07-20)
 
@@ -3344,3 +3344,32 @@ The daemon's sync tick never fed the contacts cache, so a correspondent seen onl
 Each observation is now numbered from a process-wide sequence drawn where its row commits, and a rebuild takes a window mark before its walk reads the store; a number drawn at merge time is always newer than any past mark and can never be recognised as already counted.
 A rebuild that replaces the cache carries over what every concurrent writer merged meanwhile, sends included, through that window.
 Only data actually in the stored row can be "already counted": the Sent copy has no Bcc header, so a send's Bcc recipients are always merged.
+
+## A Mail selection found again by selector takes the row's message ID too (2026-10-29, PERSO-200)
+
+The desktop app opens an event's invitation mail with a selection that knows only the selector (`message_id: ""`), and the list cursor matches a row on message ID and selector together.
+Confirming the selection while keeping the empty message ID, or the selector the event carried, leaves the cursor on no row and Mail shows nothing.
+A listed twin row adds `/<uid>` to its selector (`Selector::for_listed`, PERSO-244), so the exact selector match fails as well; the re-check now compares selectors with the UID set aside, prefers the row with the event's row id, and copies the row's message ID and selector into the selection.
+
+## A hand-edited ts-rs binding has to follow the Rust doc comment too (2026-10-29, PERSO-200)
+
+ts-rs copies a type's Rust doc comment word for word into the `.ts` binding, and `generated_bindings_are_current` compares the whole file text, comments included.
+Rewording a doc comment on an exported type is therefore a binding change: a TS file edited by hand on a machine that cannot run the desktop crate's tests has to carry the new wording exactly, in ts-rs's ` * ` block layout, or the Mac's test run fails on a comment.
+
+## TestDaemon's data-dir override does not reach a bare thread (2026-10-29, PERSO-200)
+
+`TestDaemon` carries the test thread's data and config overrides onto its runtime and session threads, but not onto a bare `std::thread::spawn` or the daemon's `HOOK_RUNTIME` threads, which start with no override (see "The data-root override is thread-local" above).
+A daemon path that reaches the store from such a thread resolves the developer's real data directory and writes there from a test.
+A test of that path runs a real `mp daemon run` process with the data directory in its environment, as `tests/cli_calendar.rs` does, instead of the in-process fixture.
+
+## Graph calendar delta trims an occurrence to its ids and times (2026-10-29, PERSO-200)
+
+Graph calendarView/delta, per-calendar and default, trims an occurrence to id, seriesMasterId, type, start and end, while the windowed calendarView returns it in full; keep the series master and inherit the missing fields from it, never default them.
+Without the master's all-day flag and zone an all-day holiday reads as a timed 01:00-01:00 block, so the adapter places the times with those two before converting, and hands the rest to `Event::inherit_from`, the same call the store re-derives a cached occurrence with when only its master changes.
+A trimmed occurrence whose master cannot be read is stored as sent and not marked inheriting, since a later master could fix its details but not its time, and the sync hands back no token, so the next one is a baseline that reads every master again.
+
+## Exchange ignores an iMIP REPLY whose TZID has no VTIMEZONE (2026-10-29, PERSO-200)
+
+Exchange ignores an iMIP REPLY whose TZID has no VTIMEZONE; copy the request's VTIMEZONE text verbatim, because icalendar 0.17 adds DTSTAMP and UID to every block it renders and re-sorts its lines.
+Proton's outbound processing (Bridge and Proton SMTP) rewrites an iMIP REPLY from multipart/alternative with an inline text/calendar method=REPLY part into multipart/mixed with the calendar as `attachment.ics`, and drops Content-Class; an Exchange organizer (TUM on-prem) then does not register the answer, while the identical reply sent from a plain IMAP/SMTP account (OVH Zimbra) registers.
+mp cannot fix this from its side: the workaround is to answer from a non-Proton account or in the Proton web client.

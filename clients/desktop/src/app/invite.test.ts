@@ -42,10 +42,11 @@ function outcome(delivered: boolean[]): SendOutcome {
   };
 }
 
-/** The Calendar view over `work` with its agenda read, and the form open. */
+/** The Calendar view with its events read, and the form open. */
 function formOpen(): AppState {
   let s = run(booted(), { type: "switch_view", view: "calendar" });
-  s = run(s, { type: "calendar_loaded", account: "work", gen: s.calendar.work.gen, events: fixtures.calendar.events.work });
+  const result = { range: { start: "", end: "" }, zone: "Europe/Berlin", window: { start: "", end: "" }, events: fixtures.calendarServer.events };
+  s = run(s, { type: "calendar_loaded", gen: s.calendar.gen, load: { days: "x", result } });
   return run(s, { type: "open_invite", account: "work" });
 }
 
@@ -60,16 +61,15 @@ describe("the New invitation form's own checks", () => {
     expect(inviteProblem({ ...f, subject: "Kick-off", start: "2099-12-01T10:00", cc: "kim@example.com" })).toBeNull();
   });
 
-  it("sends from the Calendar view's account, else the selection's", () => {
+  it("sends from the selection's account, in the Calendar view too, which shows every account", () => {
     const s = booted();
     expect(inviteAccount(s)).toBe(s.selection.account);
-    const calendar = { ...formOpen(), calendarView: { account: "home", cursor: null, showPast: false, refreshing: false } };
-    expect(inviteAccount(calendar)).toBe("home");
+    expect(inviteAccount(formOpen())).toBe(s.selection.account);
   });
 });
 
 describe("an invitation this window sent", () => {
-  it("closes the form once started, then says so and reads the agenda and the outbox counts again", () => {
+  it("closes the form once started, then says so and reads the calendar and the outbox counts again", () => {
     let s = formOpen();
     expect(s.overlay).toBe("invite");
     s = run(s, requested());
@@ -80,7 +80,7 @@ describe("an invitation this window sent", () => {
     s = run(s, finished("op-i", "succeeded", outcome([true, true])));
     expect(s.inviteSends).toEqual([]);
     expect(last(s)).toMatchObject({ kind: "applied", account: "work", text: "Sent the invitation Kick-off" });
-    expect(isStale(s.calendar.work)).toBe(true);
+    expect(isStale(s.calendar)).toBe(true);
     expect(isStale(s.accounts)).toBe(true);
   });
 

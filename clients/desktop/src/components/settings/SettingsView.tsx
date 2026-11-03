@@ -47,6 +47,14 @@ const TOKEN_LABELS: Record<TokenState, string> = {
   not_cached: "not signed in on this machine",
 };
 
+/**
+ * The calendar line of an account whose sign-in lacks a scope its calendar
+ * needs (PERSO-200), `null` when nothing is missing: a new sign-in grants it.
+ */
+export function calendarScopeLine(c: AccountCredential | undefined): string | null {
+  return c?.missing_scopes?.length ? "needs a new sign-in to grant calendar access" : null;
+}
+
 /** The SMTP password line: stored or not, never the value. */
 export function smtpPasswordLine(c: AccountCredential | undefined): string {
   if (!c || c.smtp_password === null) return "not reported";
@@ -147,6 +155,7 @@ function AccountCard({
           <Field label="App registration">{`client ${account.oauth2.client_id}, tenant ${account.oauth2.tenant_id}`}</Field>
         ) : null}
         {credential?.token ? <Field label="Token">{TOKEN_LABELS[credential.token]}</Field> : null}
+        {calendarScopeLine(credential) ? <Field label="Calendar">{calendarScopeLine(credential)}</Field> : null}
       </dl>
       {retired ? <p className="mt-1 text-xs text-destructive">{RETIRED_OAUTH2_LINE}</p> : null}
       <ConversationViewSwitch account={account.name} on={conversations} onChange={onConversations} />

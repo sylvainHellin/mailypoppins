@@ -941,23 +941,31 @@ pub struct Credentials {
     pub imap: bool,
     /// The account can submit over SMTP: an SMTP password.
     pub smtp: bool,
+    /// The account's server calendar needs a scope its sign-in was not
+    /// granted (`missing_scopes`, PERSO-200): the Calendar view's banner.
+    pub calendar_scope_missing: bool,
 }
 
 impl Credentials {
     /// What one `account.credentials` entry says the account can use.
     pub fn from_wire(entry: &mp_protocol::account::AccountCredential) -> Self {
+        let calendar_scope_missing = !entry.missing_scopes.is_empty();
         match entry.auth_method.as_str() {
             "password" => {
                 let smtp = entry.smtp_password.unwrap_or(false);
                 Self {
                     imap: entry.imap_password.unwrap_or(false) || smtp,
                     smtp,
+                    calendar_scope_missing,
                 }
             }
             // A Graph account has neither transport; `graph_configured` is
             // its question. An account naming the retired `oauth2` mode has
             // none left at all.
-            _ => Self::default(),
+            _ => Self {
+                calendar_scope_missing,
+                ..Self::default()
+            },
         }
     }
 }
@@ -1778,103 +1786,141 @@ pub struct ContactsView {
     pub list_index: usize,
 }
 
-/// One agenda row of the Calendar view (#0034): a single logical event
-/// derived from the local iMIP files on disk.
+/// One event of the Calendar view, as `calendar.view` answers it (PERSO-200):
+/// the neutral model, a server event or an invitation mail's, with its
+/// account, calendar, times, attendees and own response.
+pub use mp_protocol::calendar::{CalendarEvent, CalendarEventTime, CalendarInfo};
+
+/// The zone the Calendar view lays its days out in.
+pub use mp_core::calendar_model::Tz;
+
+/// How many days an agenda shows after its first one, `mp calendar view`'s
+/// default range.
+pub const AGENDA_DAYS: u64 = 14;
+
+/// The three layouts of the Calendar view (PERSO-200, D10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CalendarLayout {
+    /// Day by day, only the days with events, all-day rows first.
+    #[default]
+    Agenda,
+    /// One day on an hour grid.
+    Day,
+    /// The ISO week, Monday to Sunday, one column per day (calcure's model).
+    Week,
+}
+
+impl CalendarLayout {
+    /// The word the view's title and the status line use.
+    pub fn label(self) -> &'static str {
+        match self {
+            CalendarLayout::Agenda => "agenda",
+            CalendarLayout::Day => "day",
+            CalendarLayout::Week => "week",
+        }
+    }
+
+    /// The first and the last day, both included, this layout shows for the
+    /// view anchored on `anchor`.
+    pub fn days(self, anchor: chrono::NaiveDate) -> (chrono::NaiveDate, chrono::NaiveDate) {
+        use chrono::{Datelike, Days};
+        match self {
+            CalendarLayout::Agenda => (anchor, anchor + Days::new(AGENDA_DAYS)),
+            CalendarLayout::Day => (anchor, anchor),
+            CalendarLayout::Week => {
+                let monday = anchor - Days::new(u64::from(anchor.weekday().num_days_from_monday()));
+                (monday, monday + Days::new(6))
+            }
+        }
+    }
+
+    /// How many days `h`/`l` move the anchor: a day on the day grid, a week
+    /// on the week grid and on the agenda.
+    pub fn step(self) -> u64 {
+        match self {
+            CalendarLayout::Day => 1,
+            CalendarLayout::Agenda | CalendarLayout::Week => 7,
+        }
+    }
+}
+
+/// One selectable row of the Calendar view: an event on one of the days it
+/// covers. An event over several days is an entry under each, which is how
+/// the agenda lists it and the week grid draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarEntry {
+    pub day: chrono::NaiveDate,
+    /// Index into [`CalendarView::events`].
+    pub event: usize,
+}
+
+/// State for the Calendar view (#0034, PERSO-200).
 ///
-/// Plain data (no borrows, `Send`) so the loader is unit-testable and could be
-/// moved off the UI thread later. `event` is the frontmatter block the shared
-/// event card (`ui::preview::event_card_lines`) renders; the derived fields
-/// carry what the agenda list itself needs.
+/// The events of the days the layout shows, read through `calendar.view`
+/// across every account, so the view is not scoped to the active account and
+/// survives an account switch. `entries` is the cursor's list, recomputed by
+/// `App::recompute_calendar_entries` from the events, the layout and the
+/// anchor; `list_index` indexes it.
 #[derive(Debug, Clone)]
-pub struct CalendarEvent {
-    /// The store row the winning copy of this event came from, so an RSVP
-    /// from the agenda addresses the same message the mail list would
-    /// (#0038 scope item 6 replaced the `.md` path with it).
-    pub msg: MessageRef,
-    /// The `event:` frontmatter block, rendered by the shared event card.
-    pub event: mp_core::types::EventFrontmatter,
-    /// Email subject, used as the row title when the event has no `summary`.
-    pub subject: String,
-    /// UTC-normalised `YYYY-MM-DDTHH:MM:SS` sort key, empty when the start is
-    /// missing or unparseable (those rows sort last). Display stays local, the
-    /// sort key is always UTC -- same rule as `resolve_date` (#0024).
-    pub start_sort: String,
-    /// UTC-normalised end key (same format), empty when unknown. Used to keep
-    /// an in-progress event in the "upcoming" view until it actually ends; an
-    /// all-day event with no explicit end gets the start of the next local day.
-    pub end_sort: String,
-    /// Local, human-readable start (`YYYY-MM-DD HH:MM`, or the date alone for
-    /// all-day events). Empty when the start is unknown.
-    pub start_display: String,
-    /// True when the winning copy came from the Sent mailbox, i.e. we are the
-    /// organizer (no own-RSVP, and RSVP is refused).
-    pub is_organizer: bool,
-    /// True when a `METHOD:CANCEL` for this event's `(UID, RECURRENCE-ID)`
-    /// exists in the store with a sequence at least as high as this event's
-    /// (#0031). The row stays listed and readable: a cancellation tombstones
-    /// the event, it never deletes it. Mirrors `event.cancelled`, which the
-    /// shared card renders.
-    pub cancelled: bool,
-}
-
-impl CalendarEvent {
-    /// The wire form of this row, for `calendar.events` (P5-U10).
-    ///
-    /// The whole row travels: every derived column is a fold over the
-    /// account's *other* rows, which is exactly what a client without a store
-    /// cannot recompute.
-    pub fn to_wire(self) -> mp_protocol::calendar::AgendaEvent {
-        mp_protocol::calendar::AgendaEvent {
-            row_id: self.msg.row_id(),
-            event: self.event,
-            subject: self.subject,
-            start_sort: self.start_sort,
-            end_sort: self.end_sort,
-            start_display: self.start_display,
-            is_organizer: self.is_organizer,
-            cancelled: self.cancelled,
-        }
-    }
-
-    /// The inverse of [`Self::to_wire`]: one decoded `calendar.events` row.
-    pub fn from_wire(row: mp_protocol::calendar::AgendaEvent) -> Self {
-        Self {
-            msg: MessageRef::new(row.row_id),
-            event: row.event,
-            subject: row.subject,
-            start_sort: row.start_sort,
-            end_sort: row.end_sort,
-            start_display: row.start_display,
-            is_organizer: row.is_organizer,
-            cancelled: row.cancelled,
-        }
-    }
-}
-
-/// State for the Calendar view (#0034).
-///
-/// Sibling of [`ContactsView`]: a read-only agenda over the events the local
-/// iMIP traffic already produced (received invites, our own sent invites),
-/// loaded lazily on the first switch to the view (`App::ensure_calendar_loaded`)
-/// and rebuilt by the manual refresh key. Scoped to the active account and
-/// reset on `switch_account`.
-///
-/// `events` holds every event found on disk, sorted by start instant with
-/// undated ones last; `visible` is the subset currently shown (upcoming only
-/// unless `show_past`), recomputed by `App::recompute_calendar_visible`.
-/// `list_index` indexes into `visible`, exactly like the mail list.
-#[derive(Debug, Clone, Default)]
 pub struct CalendarView {
-    /// True once the on-disk walk has been attempted. Gates the lazy load.
+    /// True once the view has asked the daemon. Gates the lazy load.
     pub loaded: bool,
-    /// Every event found for the active account, sorted (undated last).
+    pub layout: CalendarLayout,
+    /// The day the view is about: the agenda's first day, the day of the day
+    /// grid, a day of the week grid's week.
+    pub anchor: chrono::NaiveDate,
+    /// Today in [`Self::zone`], highlighted by every layout.
+    pub today: chrono::NaiveDate,
+    /// The zone the days run midnight to midnight in: the local one, which a
+    /// test pins.
+    pub zone: Tz,
+    /// The events of the shown days, in `calendar.view`'s order.
     pub events: Vec<CalendarEvent>,
-    /// Indices into `events` forming the current agenda view.
-    pub visible: Vec<usize>,
-    /// Cursor into `visible`.
+    /// Every calendar `calendar.list` names, for the tags and the calendars
+    /// overlay.
+    pub calendars: Vec<CalendarInfo>,
+    /// The cursor's rows, see [`CalendarEntry`].
+    pub entries: Vec<CalendarEntry>,
+    /// Cursor into `entries`.
     pub list_index: usize,
-    /// When true, past events are listed too (toggled with `t`).
-    pub show_past: bool,
+    /// Why the last `calendar.view` failed, shown in place of the events.
+    pub error: Option<String>,
+}
+
+impl Default for CalendarView {
+    fn default() -> Self {
+        let zone = mp_core::calendar_model::local_zone();
+        let today = chrono::Utc::now().with_timezone(&zone).date_naive();
+        Self {
+            loaded: false,
+            layout: CalendarLayout::default(),
+            anchor: today,
+            today,
+            zone,
+            events: Vec::new(),
+            calendars: Vec::new(),
+            entries: Vec::new(),
+            list_index: 0,
+            error: None,
+        }
+    }
+}
+
+/// The calendars overlay (`c` in the Calendar view, PERSO-200): every
+/// calendar of every account with its visibility, which `Space` flips through
+/// `calendar.set_visibility`.
+#[derive(Debug, Clone)]
+pub struct CalendarsOverlay {
+    pub calendars: Vec<CalendarInfo>,
+    pub selected: usize,
+}
+
+/// The event card (`Enter` in the Calendar view, PERSO-200): the whole event,
+/// scrollable, with the answer and the mail it came from one key away.
+#[derive(Debug, Clone)]
+pub struct EventCardOverlay {
+    pub event: CalendarEvent,
+    pub scroll: u16,
 }
 
 /// Messages that drive state transitions (TEA pattern).
@@ -2045,11 +2091,15 @@ pub enum Action {
     /// `path` signature is edited in place, an inline `text` one on a temp copy
     /// applied to this draft only.
     ComposeEditSignature,
-    /// RSVP to a received invite (#0029): send a METHOD:REPLY to the
-    /// organizer on a background thread and flip local `event.rsvp`.
+    /// Answer an invitation (#0029, PERSO-200) through `event.respond`: the
+    /// server event on an account with a calendar backend, else the
+    /// invitation mail's iMIP reply.
     Rsvp {
-        msg: MessageRef,
+        account: String,
+        event: String,
         choice: RsvpChoice,
+        comment: Option<String>,
+        send_response: bool,
     },
     /// Compose a new draft to a contact (#0033). Opens the compose wizard
     /// (Overlay) seeded with `to`; the overlay floats above whatever view is
@@ -2244,25 +2294,90 @@ impl RsvpChoice {
         }
     }
 
-    /// Map to the library RSVP status enum.
-    pub fn to_rsvp(self) -> mp_core::invite::Rsvp {
+    /// The word `event.respond` takes, `mp invite`'s own subcommand name.
+    pub fn wire(self) -> &'static str {
         match self {
-            RsvpChoice::Accept => mp_core::invite::Rsvp::Accepted,
-            RsvpChoice::Tentative => mp_core::invite::Rsvp::Tentative,
-            RsvpChoice::Decline => mp_core::invite::Rsvp::Declined,
+            RsvpChoice::Accept => "accept",
+            RsvpChoice::Tentative => "tentative",
+            RsvpChoice::Decline => "decline",
+        }
+    }
+
+    /// The answer at `index` of the overlay's three rows.
+    pub fn at(index: usize) -> Self {
+        match index {
+            0 => RsvpChoice::Accept,
+            1 => RsvpChoice::Tentative,
+            _ => RsvpChoice::Decline,
         }
     }
 }
 
-/// State for the small RSVP overlay opened with `V` on a received invite.
-/// Three choices (Accept / Tentative / Decline) plus Esc to cancel.
+/// The rows of the respond overlay (PERSO-200), in the order `Tab` walks
+/// them: the three answers, the comment line, and the send-response toggle
+/// on a server event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RsvpRow {
+    Choice(usize),
+    Comment,
+    SendResponse,
+}
+
+/// State for the respond overlay opened with `V` on a received invite or an
+/// event of the Calendar view (#0029, PERSO-200): an answer, an optional
+/// comment, and on a server event whether the organizer is told. `Enter`
+/// starts `event.respond`.
+#[derive(Debug, Clone)]
 pub struct RsvpOverlay {
-    /// The invite email being answered.
-    pub msg: MessageRef,
+    /// The account the event belongs to.
+    pub account: String,
+    /// What `event.respond` answers: the server event's id, or the invitation
+    /// mail's `imip:<row_id>`.
+    pub event: String,
     /// Event summary, shown in the overlay title.
     pub summary: String,
-    /// Cursor over the three choices.
+    /// The answer: 0 accept, 1 tentative, 2 decline.
     pub selected: usize,
+    /// Where the cursor is; typing goes into the comment while it is there.
+    pub row: RsvpRow,
+    /// The comment sent with the answer, empty for none.
+    pub comment: String,
+    /// Tell the organizer; only a server event can answer without.
+    pub send_response: bool,
+    /// The event is a server event, so the send-response toggle is shown;
+    /// an invitation mail's answer is a reply mail and always goes out.
+    pub server: bool,
+}
+
+impl RsvpOverlay {
+    /// A fresh overlay on Accept, with no comment and the response sent.
+    pub fn new(account: String, event: String, summary: String) -> Self {
+        let server = !event.starts_with(mp_protocol::calendar::IMIP_EVENT_PREFIX);
+        Self {
+            account,
+            event,
+            summary,
+            selected: 0,
+            row: RsvpRow::Choice(0),
+            comment: String::new(),
+            send_response: true,
+            server,
+        }
+    }
+
+    /// The rows `Tab` walks, the toggle only on a server event.
+    pub fn rows(&self) -> Vec<RsvpRow> {
+        let mut rows = vec![
+            RsvpRow::Choice(0),
+            RsvpRow::Choice(1),
+            RsvpRow::Choice(2),
+            RsvpRow::Comment,
+        ];
+        if self.server {
+            rows.push(RsvpRow::SendResponse);
+        }
+        rows
+    }
 }
 
 /// One message of the conversation shown in the thread overlay (#0008).
@@ -2423,6 +2538,10 @@ pub enum Overlay {
     Signatures(SignaturesOverlay),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
+    /// The calendars shown or hidden in the Calendar view (`c`, PERSO-200).
+    Calendars(CalendarsOverlay),
+    /// One event of the Calendar view in full (`Enter`, PERSO-200).
+    EventCard(Box<EventCardOverlay>),
     /// Conversation / threading overlay (`T`, #0008).
     Thread(ThreadOverlay),
     /// Command palette (`:` / `Ctrl+p`, #0100): a fuzzy finder over the

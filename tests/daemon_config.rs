@@ -2366,6 +2366,25 @@ async fn account_credentials_reports_presence_and_never_a_value() {
          \n\
          [accounts.oauth2]\n\
          client_id = \"cid\"\n\
+         tenant_id = \"common\"\n\
+         \n\
+         [[accounts]]\n\
+         name = \"outlook\"\n\
+         default_from = \"me@example.com\"\n\
+         auth_method = \"graph\"\n\
+         \n\
+         [accounts.oauth2]\n\
+         client_id = \"cid\"\n\
+         tenant_id = \"common\"\n\
+         \n\
+         [[accounts]]\n\
+         name = \"nocal\"\n\
+         default_from = \"me@example.com\"\n\
+         auth_method = \"graph\"\n\
+         calendar_backend = \"none\"\n\
+         \n\
+         [accounts.oauth2]\n\
+         client_id = \"cid\"\n\
          tenant_id = \"common\"\n"
     ));
     // A cache file that does not decrypt is `invalid`, a missing one
@@ -2373,6 +2392,15 @@ async fn account_credentials_reports_presence_and_never_a_value() {
     let tokens = sandbox.data_dir().join("tokens");
     fs::create_dir_all(&tokens).expect("tokens dir");
     fs::write(tokens.join("teams.enc"), b"not a token cache").expect("garbage cache");
+    // A cache written before PERSO-200 records no scope: the Graph calendar
+    // account lacks `Calendars.ReadWrite`, and the one whose calendar_backend
+    // is `none` is not asked (PERSO-200).
+    let old_cache = mailypoppins::secrets::encrypt_blob(
+        br#"{"access_token":"a","refresh_token":"r","expires_at":4102444800}"#,
+    )
+    .expect("encrypt the cache");
+    fs::write(tokens.join("outlook.enc"), &old_cache).expect("old cache");
+    fs::write(tokens.join("nocal.enc"), &old_cache).expect("old cache");
     let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
@@ -2381,15 +2409,51 @@ async fn account_credentials_reports_presence_and_never_a_value() {
         before,
         json!({"accounts": [
             {"account": "alpha", "auth_method": "password",
-             "smtp_password": false, "imap_password": false, "token": null},
+             "smtp_password": false, "imap_password": false, "token": null,
+             "missing_scopes": []},
             {"account": "exchange", "auth_method": "graph",
-             "smtp_password": null, "imap_password": null, "token": "not_cached"},
+             "smtp_password": null, "imap_password": null, "token": "not_cached",
+             "missing_scopes": []},
             {"account": "teams", "auth_method": "graph",
-             "smtp_password": null, "imap_password": null, "token": "invalid"},
+             "smtp_password": null, "imap_password": null, "token": "invalid",
+             "missing_scopes": []},
             // The retired `oauth2` mode holds no credential anything reads.
             {"account": "office", "auth_method": "oauth2",
-             "smtp_password": null, "imap_password": null, "token": null},
+             "smtp_password": null, "imap_password": null, "token": null,
+             "missing_scopes": []},
+            {"account": "outlook", "auth_method": "graph",
+             "smtp_password": null, "imap_password": null, "token": "valid",
+             "missing_scopes": ["Calendars.ReadWrite"]},
+            {"account": "nocal", "auth_method": "graph",
+             "smtp_password": null, "imap_password": null, "token": "valid",
+             "missing_scopes": []},
         ]}),
+    );
+
+    // The same verdict reaches every client as the `calendar:<name>` check,
+    // whose detail is the re-login prompt; `nocal` has none.
+    let health = call_ok(&mut conn, "diagnostic.health", json!({})).await;
+    let calendar: Vec<Value> = health["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .filter(|check| {
+            check["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("calendar:"))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        calendar,
+        [
+            json!({"name": "calendar:exchange", "status": "ok",
+                   "detail": "no calendar scope is missing"}),
+            json!({"name": "calendar:teams", "status": "ok",
+                   "detail": "no calendar scope is missing"}),
+            json!({"name": "calendar:outlook", "status": "warn",
+                   "detail": "calendar needs a re-login (mp config oauth2-login -A outlook)"}),
+        ]
     );
 
     call_ok(
@@ -2408,7 +2472,8 @@ async fn account_credentials_reports_presence_and_never_a_value() {
         after,
         json!({"accounts": [
             {"account": "alpha", "auth_method": "password",
-             "smtp_password": true, "imap_password": false, "token": null},
+             "smtp_password": true, "imap_password": false, "token": null,
+             "missing_scopes": []},
         ]}),
         "the account named, and only that one"
     );

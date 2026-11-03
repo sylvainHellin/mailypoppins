@@ -516,15 +516,21 @@ const ADDITIVE_COLUMNS: [(&str, &str, &str); 6] = [
 ];
 
 /// Add the columns created after [`SCHEMA_VERSION`] was last bumped, beside
-/// [`ensure_additive_indexes`] and on its terms: additive, idempotent, looked
-/// up before it is written, so an open of a store that has them writes nothing.
+/// [`ensure_additive_indexes`] and on its terms ([`add_columns`]).
+pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
+    add_columns(conn, &ADDITIVE_COLUMNS)
+}
+
+/// Add each `(table, column, type)` of `columns` that its table lacks:
+/// additive, idempotent, looked up before it is written, so an open of a
+/// store that has them writes nothing.
 ///
 /// Two connections opening one old store at once can both find a column
 /// missing; the one that loses the race fails its `ALTER TABLE` with a
 /// duplicate column, which is the state it wanted, so a failure is checked
 /// against the table before it is reported.
-pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
-    for (table, column, kind) in ADDITIVE_COLUMNS {
+pub fn add_columns(conn: &Connection, columns: &[(&str, &str, &str)]) -> Result<()> {
+    for &(table, column, kind) in columns {
         if column_present(conn, table, column)? {
             continue;
         }
@@ -579,8 +585,13 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 /// build created gains its `message_id` column here too. `draft_absence`
 /// beside it holds what the last reconcile found missing; losing it delays a
 /// retirement by one reconcile.
-fn additive_tables() -> [(&'static str, String); 5] {
-    [
+///
+/// The calendar tables ([`super::calendar`], PERSO-200) are a disposable cache
+/// of the server calendar; losing them costs one baseline sync, and a hidden
+/// calendar shows again. Tables an earlier build created gain their later
+/// columns here too ([`super::calendar::ensure_columns`]).
+fn additive_tables() -> Vec<(&'static str, String)> {
+    let mut tables = vec![
         (
             ATTACHMENT_REPAIRS_TABLE,
             format!(
@@ -613,7 +624,9 @@ fn additive_tables() -> [(&'static str, String); 5] {
             super::draft_sync::ABSENCE_TABLE,
             super::draft_sync::absence_create_sql(),
         ),
-    ]
+    ];
+    tables.extend(super::calendar::create_sql());
+    tables
 }
 
 /// Create the tables added after [`SCHEMA_VERSION`] was last bumped, on the
@@ -634,7 +647,8 @@ pub fn ensure_additive_tables(conn: &Connection) -> Result<()> {
         }
     }
     crate::catalogue::listing::ensure_columns(conn)?;
-    super::draft_sync::ensure_columns(conn)
+    super::draft_sync::ensure_columns(conn)?;
+    super::calendar::ensure_columns(conn)
 }
 
 /// Clear the arrival marks of `0` a pre-fix build persisted, once per file.

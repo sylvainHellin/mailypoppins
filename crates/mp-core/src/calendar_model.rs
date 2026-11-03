@@ -19,9 +19,13 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, Months, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, Utc};
-use chrono_tz::Tz;
+use chrono::{DateTime, Months, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+
+/// The zone type this module's API speaks, re-exported so a client that
+/// reads the model's times (the TUI's calendar grid) names the same type
+/// without a dependency of its own on `chrono-tz`.
+pub use chrono_tz::Tz;
 
 /// A calendar's server id, as its backend names it. Ids are plain strings
 /// across the protocol, and this alias only documents which one is meant.
@@ -262,6 +266,46 @@ pub enum Occupancy {
     },
 }
 
+/// The viewer's own zone: `TZ` when it names an IANA zone, else the zone
+/// `/etc/localtime` links to, else UTC. The daemon's default zone and the
+/// zone the CLI and the TUI lay their calendar views out in.
+pub fn local_zone() -> Tz {
+    if let Some(zone) = std::env::var("TZ")
+        .ok()
+        .and_then(|tz| parse_zone(tz.trim_start_matches(':')))
+    {
+        return zone;
+    }
+    std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|target| {
+            let target = target.to_string_lossy().into_owned();
+            target
+                .split_once("zoneinfo/")
+                .and_then(|(_, name)| parse_zone(name))
+        })
+        .unwrap_or(Tz::UTC)
+}
+
+/// An IANA zone by name.
+pub fn parse_zone(name: &str) -> Option<Tz> {
+    Tz::from_str(name.trim()).ok()
+}
+
+/// The instant `day` starts in `zone`: its midnight, or the first instant
+/// after it when a daylight-saving jump skips midnight there. A view's day
+/// runs from one of these to the next.
+pub fn day_start(zone: Tz, day: NaiveDate) -> DateTime<Utc> {
+    let midnight = day.and_time(NaiveTime::MIN);
+    (0..=3)
+        .find_map(|hour| {
+            zone.from_local_datetime(&(midnight + chrono::Duration::hours(hour)))
+                .earliest()
+        })
+        .map(|instant| instant.with_timezone(&Utc))
+        .unwrap_or_else(|| midnight.and_utc())
+}
+
 /// Midnight of `date` in `zone` as an instant, a midnight lost to a DST gap
 /// resolved the way RFC 5545 resolves any local time.
 fn local_midnight(zone: Tz, date: NaiveDate) -> DateTime<Utc> {
@@ -360,8 +404,9 @@ pub struct Event {
     /// invitation mails about it.
     pub uid: String,
     /// The iCalendar `RECURRENCE-ID` of an occurrence: its original start,
-    /// RFC 3339, or a date for an all-day series. `None` for a single event
-    /// and for a series master.
+    /// RFC 3339 in UTC, or a bare date (`2026-07-20`) for an all-day series.
+    /// `None` for a single event and for a series master. [`EventKey`] reads
+    /// the iMIP parser's spellings of the same values as these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recurrence_id: Option<String>,
     /// The server id of the series master, on an occurrence.
@@ -428,16 +473,51 @@ impl Event {
     pub fn overlaps(&self, window: &CalendarWindow, viewer: Tz) -> bool {
         self.time.overlaps(window, viewer)
     }
+
+    /// Take the details of an occurrence from its series `master`: the
+    /// `UID` and everything that describes the meeting rather than this
+    /// occurrence's place in time. The occurrence keeps its own ids, time,
+    /// `RECURRENCE-ID`, change stamp and web link.
+    ///
+    /// What an occurrence Graph's delta trims to its times shows (PERSO-200):
+    /// the Graph adapter and the store's re-derivation, whenever its master
+    /// changes, both go through here, so they agree on what it inherits.
+    pub fn inherit_from(&mut self, master: &Event) {
+        self.uid = master.uid.clone();
+        self.summary = master.summary.clone();
+        self.location = master.location.clone();
+        self.body = master.body.clone();
+        self.organizer = master.organizer.clone();
+        self.attendees = master.attendees.clone();
+        self.own_response = master.own_response;
+        self.reminder = master.reminder;
+        self.online_meeting_url = master.online_meeting_url.clone();
+        self.sensitivity = master.sensitivity;
+        self.show_as = master.show_as;
+        self.cancelled = master.cancelled;
+        self.is_organizer = master.is_organizer;
+    }
 }
 
 /// `UID` plus `RECURRENCE-ID`, the identity "Events are deduplicated across
 /// sources on" (`docs/plans/calendar.md`, "Invitations on an account with a
 /// backend").
 ///
-/// The `RECURRENCE-ID` is normalised to a UTC instant when it carries an
-/// offset, so `2026-07-20T14:00:00+02:00` from an iMIP mail and
-/// `2026-07-20T12:00:00Z` from a server name the same occurrence; a date or a
-/// floating time is kept as written.
+/// The `RECURRENCE-ID` is normalised to one canonical form per kind of value:
+///
+/// - a time with an offset becomes its UTC instant, so
+///   `2026-07-20T14:00:00+02:00` from an iMIP mail and `2026-07-20T12:00:00Z`
+///   from a server name the same occurrence;
+/// - a date stays the bare date, and so does an offset-less midnight
+///   (`2026-07-20T00:00:00`), which is how [`crate::calendar::parse_ics`]
+///   spells a `VALUE=DATE` `RECURRENCE-ID`: an all-day occurrence from a mail
+///   and from a server (which [`Event::recurrence_id`] names by its date)
+///   meet on `2026-07-20`;
+/// - any other floating time is kept as written.
+///
+/// A midnight with an offset stays an instant: without knowing whether the
+/// series is all-day, `2026-07-20T00:00:00+02:00` is as likely a timed
+/// occurrence at local midnight, which a server names in UTC.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EventKey {
     pub uid: String,
@@ -456,12 +536,17 @@ impl EventKey {
 
 fn normalise_recurrence_id(raw: &str) -> String {
     let raw = raw.trim();
-    match DateTime::parse_from_rfc3339(raw) {
-        Ok(instant) => instant
+    if let Ok(instant) = DateTime::parse_from_rfc3339(raw) {
+        return instant
             .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
-        Err(_) => raw.to_string(),
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
     }
+    if let Ok(floating) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S") {
+        if floating.time() == NaiveTime::MIN {
+            return floating.date().to_string();
+        }
+    }
+    raw.to_string()
 }
 
 /// The rolling window a calendar cache holds, half-open in UTC.
@@ -699,6 +784,32 @@ mod tests {
                 .as_deref(),
             Some("2026-07-20")
         );
+        // An offset-less midnight is the parser's spelling of a date; a
+        // floating time of day and a zoned midnight are not.
+        let key = |rid: &str| EventKey::new("uid-1", Some(rid)).recurrence_id.unwrap();
+        assert_eq!(key("2026-07-20T00:00:00"), "2026-07-20");
+        assert_eq!(key("2026-07-20T09:30:00"), "2026-07-20T09:30:00");
+        assert_eq!(key("2026-07-20T00:00:00+02:00"), "2026-07-19T22:00:00Z");
+    }
+
+    /// An all-day occurrence invitation, read by the real iMIP parser, keys
+    /// to the same occurrence the model names by its date.
+    #[test]
+    fn an_all_day_occurrence_from_a_mail_matches_the_server_copy() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n\
+                   BEGIN:VEVENT\r\nUID:uid-1\r\nSEQUENCE:1\r\nDTSTAMP:20260701T090000Z\r\n\
+                   RECURRENCE-ID;VALUE=DATE:20260720\r\n\
+                   DTSTART;VALUE=DATE:20260721\r\nDTEND;VALUE=DATE:20260722\r\n\
+                   SUMMARY:Offsite (moved)\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).expect("the invitation parses");
+        let from_mail = EventKey::new(
+            parsed.uid.as_deref().unwrap(),
+            parsed.recurrence_id.as_deref(),
+        );
+
+        let mut server = event(EventTime::all_day(date(2026, 7, 21), date(2026, 7, 22)).unwrap());
+        server.recurrence_id = Some("2026-07-20".into());
+        assert_eq!(server.dedup_key(), from_mail);
     }
 
     #[test]

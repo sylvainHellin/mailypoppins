@@ -1,0 +1,25 @@
+{
+  "id": 74,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "evoqs",
+    "event": {
+      "account": "evoqs",
+      "attendees": [],
+      "calendar": "AAMkADcal2",
+      "cancelled": false,
+      "id": "AAMkADev2",
+      "is_organizer": false,
+      "own_response": "none",
+      "sensitivity": "normal",
+      "show_as": "oof",
+      "summary": "Holiday",
+      "time": {
+        "end": "2026-11-07",
+        "kind": "all-day",
+        "start": "2026-11-05"
+      },
+      "uid": "holiday@example.com"
+    }
+  }
+}

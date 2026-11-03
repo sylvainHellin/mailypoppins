@@ -39,13 +39,15 @@ mpFixture.emitEnvelope("state.invalidate", { resource: "mailbox:work/inbox", sco
 mpFixture.emit({ type: "connection", status: { state: "failed", error: { kind: "version_mismatch", why: "...", socket: "", log: "", daemon_version: "0.9.0" } } })
 mpFixture.emitMenu("settings")                   // a native menu item, by its id in src-tauri/src/menu.rs
 mpFixture.settleRebuild()                        // the oldest contact rebuild; { saved: "refused_shrunk" } or { fail: "..." }
-mpFixture.settleRsvp()                           // the oldest RSVP; { fail: true }
+mpFixture.settleRsvp()                           // the oldest event_respond answer; { fail: true } or { delivered: false }
 mpFixture.settleInvite()                         // the oldest invitation sent
 mpFixture.reportDeviceCode(); mpFixture.settleSignIn()
 mpFixture.simulateInvite(false)                  // invite_update; true for invite_cancel
 mpFixture.simulateSignatureChanged()
 mpFixture.mock.picked = "/home/fixture/Documents/report.pdf"   // what the next Browse answers
 ```
+
+The fixture's calendar events sit in the week of 12 October 2099: in the Calendar view, `g t`, `2099-10-14` and Enter go there.
 
 Holds never fire on their own: Cancel ends one, and `mpFixture.mock.holds` lists them.
 An editor open is journaled in `mpFixture.mock.editorOpens` and launches nothing, as fixture mode does.

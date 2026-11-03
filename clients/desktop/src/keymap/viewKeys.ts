@@ -59,9 +59,9 @@ export const VIEW_SHARED_KEYS: ReadonlySet<string> = new Set([
 
 const ARM_ALWAYS = ["s", " "];
 
-/** A list view's table: `g` arms only for its own `gg`, the TUI's CONTACTS and CALENDAR `gg / G`. */
-function listView(keys: Record<string, ActionId> = {}): ViewKeyTable {
-  return { keys, prefixes: new Set([...ARM_ALWAYS, "g"]), combos: { gg: "list_top" } };
+/** A list view's table: `g` arms only for its own `gg` (and the combos it adds), the TUI's CONTACTS and CALENDAR `gg / G`. */
+function listView(keys: Record<string, ActionId> = {}, combos: Record<string, ActionId> = {}): ViewKeyTable {
+  return { keys, prefixes: new Set([...ARM_ALWAYS, "g"]), combos: { gg: "list_top", ...combos } };
 }
 
 /** Each full-pane view's table. Settings owns no letter keys. */
@@ -79,17 +79,31 @@ export const VIEW_KEYS: Readonly<Record<Exclude<View, "mail">, ViewKeyTable>> = 
     c: "contacts_copy",
     r: "contacts_rebuild",
   }),
-  // The TUI's CALENDAR (keymap.rs): Enter and `e` open the entry's
-  // invite.ics, `t` shows or hides past events and never arms the `t`
-  // family, `r` reads the agenda again, `V` opens the RSVP choice for the
-  // cursor row; `j`/`k`, `gg`, `G` move its cursor.
-  calendar: listView({
-    Enter: "calendar_open_source",
-    e: "calendar_open_source",
-    t: "calendar_toggle_past",
-    r: "calendar_refresh",
-    V: "calendar_rsvp",
-  }),
+  // The TUI's CALENDAR (keymap.rs, PERSO-200): `h`/`l` and `[`/`]` the
+  // previous and next day or week, `t` today and never the `t` family, `gt`
+  // a date, `a`, `d`, `w` the layouts, Enter the event card, `e` the
+  // invitation's invite.ics, `V` the respond choice, `c` the calendars, `r`
+  // a fresh read, and `m` the invitation mail (the TUI card's key);
+  // `j`/`k`, `gg`, `G` move its cursor.
+  calendar: listView(
+    {
+      h: "calendar_prev",
+      "[": "calendar_prev",
+      l: "calendar_next",
+      "]": "calendar_next",
+      t: "calendar_today",
+      a: "calendar_layout_agenda",
+      d: "calendar_layout_day",
+      w: "calendar_layout_week",
+      Enter: "calendar_open_card",
+      e: "calendar_open_source",
+      V: "calendar_rsvp",
+      c: "calendar_calendars",
+      r: "calendar_refresh",
+      m: "calendar_open_mail",
+    },
+    { gt: "calendar_jump_date" },
+  ),
   settings: { keys: {}, prefixes: new Set(ARM_ALWAYS), combos: {} },
 };
 

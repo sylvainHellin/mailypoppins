@@ -1482,9 +1482,11 @@ impl Method for MessageInviteMethod {
         Box::pin(async move {
             let accounts = self.config.accounts();
             let folded = self.spec.name == "message.invite";
-            invite(&params, &accounts, folded)
-                .map(Outcome::query)
-                .map_err(DomainError::from)
+            let mut answer = invite(&params, &accounts, folded).map_err(DomainError::from)?;
+            if folded {
+                server_event(&mut answer, &accounts).await;
+            }
+            Ok(Outcome::query(answer))
         })
     }
 }
@@ -1500,6 +1502,39 @@ pub fn register_invites(
             config: Arc::clone(&config),
         }));
     }
+}
+
+/// Add `event_id` to a `message.invite` answer of an account with a calendar
+/// backend (PERSO-200): the server event the invitation mail stands for, which
+/// the invite card answers through `event.respond`, or `null` when the server
+/// names none. An account without a backend gets no key, so its answer is the
+/// one it always was.
+async fn server_event(answer: &mut Value, accounts: &[AccountConfig]) {
+    let Some(account) = answer["account"]
+        .as_str()
+        .and_then(|name| accounts.iter().find(|account| account.name == name))
+    else {
+        return;
+    };
+    if !crate::calendar_backend::has_backend(account) {
+        return;
+    }
+    let event_id = match (answer["event"].is_null(), answer["row_id"].as_i64()) {
+        (false, Some(row_id)) => {
+            let account = account.clone();
+            super::super::runtime::account::off_thread(
+                "the invitation's event lookup",
+                move || async move { crate::calendar_sync::invite_event(&account, row_id).await },
+            )
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("[calendar] {e:#}");
+                None
+            })
+        }
+        _ => None,
+    };
+    answer["event_id"] = event_id.map_or(Value::Null, Value::String);
 }
 
 /// The `result` of `message.invite` (`folded`) and of `message.ics`.

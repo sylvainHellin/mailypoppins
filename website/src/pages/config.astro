@@ -519,6 +519,23 @@ server = "sentitems"          # Not "Sent Items"`} />
         <code>mp config oauth2-login</code>, or remove the line and set a password for
         on-premises Exchange.
       </p>
+      <p>
+        A Graph account also reads its server calendar, which the calendar views
+        show beside the invitation mails. The account key
+        <code>calendar_backend</code> chooses where an account's calendar comes
+        from, independently of its mail: <code>"graph"</code> is the default of a
+        Graph account and <code>"none"</code> the default of every other account,
+        whose invitations are answered by iMIP reply mails. <code>"ews"</code> and
+        <code>"caldav"</code> are reserved for later releases and read as no
+        calendar for now. Setting <code>calendar_backend = "none"</code> on a Graph
+        account keeps its sign-in to the mail permissions.
+      </p>
+      <p>
+        A Graph account signed in before the calendar arrived has a token without
+        the calendar permission (<code>Calendars.ReadWrite</code>). Mail keeps
+        working, and every client shows <code>calendar needs a re-login (mp config
+        oauth2-login -A &lt;name&gt;)</code> until you sign in again.
+      </p>
     </section>
 
     <!-- Azure App Registration -->

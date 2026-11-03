@@ -7,8 +7,8 @@ import { createMutations } from "@/app/mutations";
 import * as compose from "@/app/compose";
 import * as send from "@/app/send";
 import * as attachments from "@/app/attachments";
-import { openEventSource } from "@/app/calendar";
-import { openAgendaRsvp, openRsvp } from "@/app/rsvp";
+import { CALENDAR_CARD_ID, CALENDAR_JUMP_ID, openCursorEventMail, openEventSource, today } from "@/app/calendar";
+import { openEventRsvp, openRsvp } from "@/app/rsvp";
 import { newInvitation } from "@/app/invite";
 import { manageSignatures } from "@/app/signatures";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
@@ -380,12 +380,31 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void restartIntoUpdate(s, dispatch);
     case "calendar_open_source":
       return void openEventSource(s, dispatch);
-    case "calendar_toggle_past":
-      return dispatch({ type: "calendar_toggle_past" });
+    case "calendar_prev":
+    case "calendar_next":
+      return dispatch({ type: "calendar_shift", forward: id === "calendar_next" });
+    case "calendar_today":
+      return dispatch({ type: "calendar_go_to", day: today() });
+    case "calendar_jump_date":
+      document.getElementById(CALENDAR_JUMP_ID)?.focus();
+      return;
+    case "calendar_layout_agenda":
+      return dispatch({ type: "calendar_layout", layout: "agenda" });
+    case "calendar_layout_day":
+      return dispatch({ type: "calendar_layout", layout: "day" });
+    case "calendar_layout_week":
+      return dispatch({ type: "calendar_layout", layout: "week" });
+    case "calendar_open_card":
+      document.getElementById(CALENDAR_CARD_ID)?.focus();
+      return;
+    case "calendar_calendars":
+      return dispatch({ type: "calendar_toggle_calendars" });
+    case "calendar_open_mail":
+      return openCursorEventMail(s, dispatch);
     case "calendar_refresh":
       return dispatch({ type: "calendar_refresh" });
     case "calendar_rsvp":
-      return openAgendaRsvp(s, dispatch);
+      return openEventRsvp(s, dispatch);
     case "rsvp":
       return void openRsvp(s, dispatch);
     case "new_invitation":

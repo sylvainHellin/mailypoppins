@@ -2363,10 +2363,25 @@ fn mp_contacts_rebuild_matches_the_oracle() {
 }
 
 /// `CAL-04`: the organizer-side fold, which writes nothing.
+///
+/// Over every account the routed report adds one line the oracle predates:
+/// the Graph account's server calendar resync (PERSO-200), which fails here
+/// for want of a token; the fold's lines around it are the oracle's.
 #[test]
 fn mp_calendar_rebuild_matches_the_oracle() {
     let slice = Slice::start();
-    slice.both(&["calendar", "rebuild"]);
+    let mut routed = slice.routed(&["calendar", "rebuild"]);
+    let stdout = String::from_utf8_lossy(&routed.stdout).into_owned();
+    let (server, fold): (Vec<&str>, Vec<&str>) = stdout
+        .split_inclusive('\n')
+        .partition(|line| line.contains("server calendar"));
+    assert_eq!(server.len(), 1, "{stdout}");
+    assert!(
+        server[0].contains("server calendar not synced") && server[0].contains("graph"),
+        "{stdout}"
+    );
+    routed.stdout = fold.concat().into_bytes();
+    assert_byte_identical(&routed, &slice.oracle(&["calendar", "rebuild"]));
     slice.both(&["calendar", "rebuild", "--account", fixture::ACCOUNT]);
     slice.both(&[
         "calendar",
@@ -2406,8 +2421,11 @@ fn mp_cutover_matches_the_oracle() {
     });
 }
 
-/// `CAL-01` through the CLI: every refusal, byte for byte, including `ANO-4`,
-/// but for the unknown selector, which is fetched first since PERSO-155.
+/// `CAL-01` through the CLI: every refusal, byte for byte, but for the
+/// unknown selector, which is fetched first since PERSO-155, and for `ANO-4`,
+/// which no longer comes before the selector since PERSO-200: a Graph account
+/// answers an invitation through its server calendar, so its selector
+/// resolves first (the refusal itself is `tests/cli_calendar.rs`'s).
 #[test]
 fn mp_invite_refusals_match_the_oracle() {
     let slice = Slice::start();
@@ -2447,14 +2465,24 @@ fn mp_invite_refusals_match_the_oracle() {
         ),
     );
 
-    let graph = slice.both(&[
+    let graph = slice.routed(&[
         "-A",
         fixture::GRAPH_ACCOUNT,
         "invite",
         "decline",
         &fixture::selector(fixture::GRAPH_ACCOUNT, fixture::INVITATION),
     ]);
-    assert_refused(&graph, fixture::GRAPH_RSVP_REFUSAL);
+    assert_eq!(graph.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&graph.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "no match for {} in the received mail index of {}/{}",
+            fixture::INVITATION,
+            fixture::GRAPH_ACCOUNT,
+            fixture::MAILBOX
+        )),
+        "{stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------

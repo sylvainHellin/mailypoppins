@@ -69,7 +69,7 @@ async fn token(config: &GraphConfig) -> Result<String> {
         &config.account_name,
         &config.client_id,
         &config.tenant_id,
-        mailypoppins::oauth2::GRAPH_SCOPES,
+        &config.scopes,
     )
     .await
 }

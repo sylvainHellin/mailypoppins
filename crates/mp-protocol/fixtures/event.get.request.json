@@ -1,0 +1,9 @@
+{
+  "id": 74,
+  "jsonrpc": "2.0",
+  "method": "event.get",
+  "params": {
+    "account": "evoqs",
+    "event": "AAMkADev2"
+  }
+}

@@ -360,9 +360,24 @@ pub enum KeyAction {
     CalendarUp,
     CalendarTop,
     CalendarBottom,
+    /// `Enter`: the event card (PERSO-200).
+    CalendarOpenCard,
+    /// `e`: the invitation's `.ics` in `$EDITOR`.
     CalendarOpenSource,
     CalendarRsvp,
-    CalendarToggleScope,
+    /// `h` / `[` and `l` / `]`: the previous or next day or week.
+    CalendarPrev,
+    CalendarNext,
+    /// `t`: back to today.
+    CalendarToday,
+    /// Leader `g t`: the jump-to-date prompt, moving the view.
+    CalendarJumpToDate,
+    /// `a` / `d` / `w`: the agenda, day and week layouts.
+    CalendarAgenda,
+    CalendarDay,
+    CalendarWeek,
+    /// `c`: the calendars overlay, to show or hide one.
+    CalendarCalendars,
     CalendarRefresh,
     // -- Headers / Preview scroll ----------------------------------------
     HeadersDown,
@@ -1567,23 +1582,46 @@ pub static KEYMAP: &[KeyBinding] = &[
         ),
         "Refresh",
     ),
-    // -- CALENDAR (#0034) -------------------------------------------------
-    // Local-first agenda over the invites on disk. Live only in the Calendar
-    // view; dispatched via the pane context like the Contacts list. `V` is the
-    // same RSVP mnemonic as the mail list / body panes (separate context row).
-    b(
-        "j/k",
-        Chord::CharOrCode('j', SpecialCode::Down),
-        KeyCtx::Calendar,
-        KeyAction::CalendarDown,
-        "Navigate events",
-        true,
+    // -- CALENDAR (#0034, PERSO-200) --------------------------------------
+    // The events of every account in an agenda, a day grid or a week grid.
+    // Live only in the Calendar view; dispatched via the pane context like the
+    // Contacts list. `V` is the same respond mnemonic as the mail list / body
+    // panes (separate context row), and `gt` the list's jump-to-date.
+    short(
+        b(
+            "j/k",
+            Chord::CharOrCode('j', SpecialCode::Down),
+            KeyCtx::Calendar,
+            KeyAction::CalendarDown,
+            "Navigate events",
+            true,
+        ),
+        "Events",
     ),
     b(
         "",
         Chord::CharOrCode('k', SpecialCode::Up),
         KeyCtx::Calendar,
         KeyAction::CalendarUp,
+        "",
+        false,
+    ),
+    short(
+        b(
+            "h/l",
+            Chord::CharOrChar('h', '['),
+            KeyCtx::Calendar,
+            KeyAction::CalendarPrev,
+            "Previous / next day or week (also [ and ])",
+            true,
+        ),
+        "Day/week",
+    ),
+    b(
+        "",
+        Chord::CharOrChar('l', ']'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarNext,
         "",
         false,
     ),
@@ -1617,14 +1655,70 @@ pub static KEYMAP: &[KeyBinding] = &[
     ),
     short(
         b(
-            "Enter / e",
-            Chord::CharOrCode('e', SpecialCode::Enter),
+            "t",
+            Chord::Char('t'),
             KeyCtx::Calendar,
-            KeyAction::CalendarOpenSource,
-            "Open the invite email in $EDITOR",
+            KeyAction::CalendarToday,
+            "Go to today",
             true,
         ),
-        "Open invite email",
+        "Today",
+    ),
+    row(
+        "gt",
+        Chord::Char('t'),
+        Some('g'),
+        KeyCtx::Calendar,
+        Guard::None,
+        KeyAction::CalendarJumpToDate,
+        "Jump to date (e.g. 2026-07-06)",
+        false,
+    ),
+    short(
+        b(
+            "a/d/w",
+            Chord::Char('a'),
+            KeyCtx::Calendar,
+            KeyAction::CalendarAgenda,
+            "Agenda / day / week layout",
+            true,
+        ),
+        "Layout",
+    ),
+    b(
+        "",
+        Chord::Char('d'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarDay,
+        "",
+        false,
+    ),
+    b(
+        "",
+        Chord::Char('w'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarWeek,
+        "",
+        false,
+    ),
+    short(
+        b(
+            "Enter",
+            Chord::Code(SpecialCode::Enter),
+            KeyCtx::Calendar,
+            KeyAction::CalendarOpenCard,
+            "Open the event card",
+            true,
+        ),
+        "Card",
+    ),
+    b(
+        "e",
+        Chord::Char('e'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarOpenSource,
+        "Open the invitation's .ics in $EDITOR",
+        false,
     ),
     short(
         b(
@@ -1632,32 +1726,29 @@ pub static KEYMAP: &[KeyBinding] = &[
             Chord::Char('V'),
             KeyCtx::Calendar,
             KeyAction::CalendarRsvp,
-            "RSVP to invitation (Accept/Tentative/Decline)",
+            "Respond (accept / tentative / decline, comment)",
             true,
         ),
-        "RSVP",
+        "Respond",
     ),
     short(
         b(
-            "t",
-            Chord::Char('t'),
+            "c",
+            Chord::Char('c'),
             KeyCtx::Calendar,
-            KeyAction::CalendarToggleScope,
-            "Show past events / upcoming only",
+            KeyAction::CalendarCalendars,
+            "Show or hide calendars",
             true,
         ),
-        "Past / upcoming",
+        "Calendars",
     ),
-    short(
-        b(
-            "r",
-            Chord::Char('r'),
-            KeyCtx::Calendar,
-            KeyAction::CalendarRefresh,
-            "Refresh events from disk",
-            true,
-        ),
-        "Refresh",
+    b(
+        "r",
+        Chord::Char('r'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarRefresh,
+        "Read the events again",
+        false,
     ),
     // -- HEADERS ----------------------------------------------------------
     // The headers pane scrolls; every message action (open attachment, browser,

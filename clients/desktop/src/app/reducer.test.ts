@@ -90,6 +90,32 @@ describe("the reducer", () => {
     expect(s.selection.message).toMatchObject({ message_id: row.message_id, row_id: row.id + 500, verified: true });
   });
 
+  it("finds an event's invitation mail on a listed twin row, whose selector carries its UID (PERSO-200)", () => {
+    let s = booted();
+    const rows = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows;
+    const target = rows[1];
+    s = run(s, { type: "open_event_mail", account: "work", mailbox: "inbox", row_id: target.id, selector: target.selector });
+    expect(s.selection.message).toMatchObject({ message_id: "", verified: false });
+    // The reloaded list holds the message as a twin: same message id, two UIDs.
+    const twinned = inbox("work", "inbox");
+    if (twinned.kind !== "messages") throw new Error("unreachable");
+    twinned.rows = twinned.rows.flatMap((r) =>
+      r.id === target.id
+        ? [
+            { ...r, id: r.id + 1000, selector: `${r.selector}/7` },
+            { ...r, selector: `${r.selector}/8` },
+          ]
+        : [r],
+    );
+    s = run(s, { type: "messages_loaded", key: listKey("work", "inbox"), gen: s.messages.gen, list: twinned });
+    expect(s.selection.message).toMatchObject({
+      row_id: target.id,
+      message_id: target.message_id,
+      selector: `${target.selector}/8`,
+      verified: true,
+    });
+  });
+
   it("clears a message the reloaded list no longer has", () => {
     let s = booted();
     const row = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows[0];

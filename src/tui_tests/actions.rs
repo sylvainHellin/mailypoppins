@@ -60,7 +60,7 @@
 //! ## What `dispatch` does *not* handle, and why
 //!
 //! The seven actions whose route names an **operation**-kind method
-//! (`sync.quick`, `sync.full`, `send.draft`, `send.approved`, `calendar.rsvp`,
+//! (`sync.quick`, `sync.full`, `send.draft`, `send.approved`, `event.respond`,
 //! `message.search_server`, `message.fetch`) keep the arm they have in
 //! `handle_action`: each already owns a `std::thread::spawn` and a
 //! `BgResult` reply channel, and an operation answers `{operation_id}` at once
@@ -405,7 +405,7 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         ActionRoute::Daemon(&["signature.read", "signature.create"]),
         true,
     ),
-    ("Rsvp", ActionRoute::Daemon(&["calendar.rsvp"]), false),
+    ("Rsvp", ActionRoute::Daemon(&["event.respond"]), false),
     ("ComposeToContact", ActionRoute::Local, false),
     (
         "SendContactVcard",
@@ -513,8 +513,11 @@ fn one_of_each_action() -> Vec<Action> {
         Action::ComposeWizardCancel,
         Action::ComposeEditSignature,
         Action::Rsvp {
-            msg: MessageRef::new(1),
+            account: ACCOUNT.to_string(),
+            event: "imip:1".to_string(),
             choice: RsvpChoice::Accept,
+            comment: None,
+            send_response: true,
         },
         Action::ComposeToContact {
             to: "a@example.com".to_string(),
@@ -1474,7 +1477,7 @@ const ACTION_SOURCES: [&str; 2] = ["clients/tui/src/actions.rs", "clients/tui/sr
 /// `tests/fixtures/tui-engine-imports.txt`, and what that cannot say is which
 /// function still opens a store. A match on the line that declares a function
 /// is ignored, so `fn store_for_mutation(` does not report itself.
-const ENGINE_NEEDLES: [&str; 11] = [
+const ENGINE_NEEDLES: [&str; 10] = [
     "ImapConfig::load",
     "SmtpConfig::load",
     "Store::open(",
@@ -1484,7 +1487,6 @@ const ENGINE_NEEDLES: [&str; 11] = [
     "open_store(",
     "pending_ops::",
     "send_draft(",
-    "send_rsvp(",
     "store_for_mutation(",
 ];
 
