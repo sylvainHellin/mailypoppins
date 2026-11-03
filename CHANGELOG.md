@@ -64,6 +64,7 @@ All notable changes to this project are documented in this file.
 - Daemon: `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, and the `calendar.changed` event, which a sync sends only when the cached events moved (PERSO-200).
   `event.respond` answers a server event through Graph's accept, tentatively accept and decline with the comment and the send-response choice, then syncs the calendar at once; `message.invite` names an invitation mail's server event, so the invitation card answers the server event in its place.
 - Microsoft Graph sign-in asks for `Calendars.ReadWrite` on an account whose calendar is Graph's; a token from before the calendar keeps mail working, reports the missing scope through `account.credentials` and a `calendar:<name>` health check, and every client shows `calendar needs a re-login (mp config oauth2-login -A <name>)` (PERSO-200).
+- Calendar backend: a Graph calendar can create, update, cancel and delete events and dismiss or snooze their reminders on the server, sending each time in its Windows zone, looked up for any IANA zone in a table built from every CLDR territory row and alias; no client calls it yet (PERSO-255).
 
 ### Changed
 - `mp delete`, and any delete a client asks to settle, of a message another client already moved or deleted before the next sync (the phone, Outlook) now succeeds and the message stays deleted, on IMAP and on Microsoft 365 (Graph) accounts, instead of failing with "not found" (PERSO-245).
