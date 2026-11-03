@@ -11,6 +11,7 @@
 use std::str::FromStr;
 
 use chrono::TimeZone;
+use chrono_tz::Tz;
 use icalendar::{Calendar, CalendarComponent, Component, DatePerhapsTime, EventLike, PartStat};
 
 use crate::types::{EventAttendee, EventFrontmatter};
@@ -116,15 +117,17 @@ pub fn parse_ics(bytes: &[u8]) -> Option<ParsedEvent> {
         .map(strip_mailto)
         .map(|s| s.to_string());
 
-    let start = event.get_start().and_then(format_date_perhaps_time);
+    let dtstart = event.get_start();
+    let start_zone = dtstart.as_ref().and_then(zone_of_start);
+    let start = dtstart.and_then(format_date_perhaps_time);
     let end = event.get_end().and_then(format_date_perhaps_time);
 
-    // The rule in the words a server event's card uses; a rule the model
-    // cannot hold keeps its raw text.
+    // The rule in the words a server event's card uses, its UNTIL read in
+    // the zone of DTSTART; a rule the model cannot hold keeps its raw text.
     let recurrence = event
         .property_value("RRULE")
         .map(|rrule| {
-            crate::calendar_model::Recurrence::from_rrule(rrule)
+            crate::calendar_model::Recurrence::from_rrule(rrule, start_zone.unwrap_or(Tz::UTC))
                 .map_or_else(|| rrule.trim().to_string(), |rule| rule.describe())
         })
         .filter(|s| !s.is_empty());
@@ -241,6 +244,27 @@ pub fn resolve_local(
     Some(tz.from_utc_datetime(&utc))
 }
 
+/// The IANA zone a `TZID` names, read as IANA first and as a Windows name
+/// (`W. Europe Standard Time`) second.
+fn zone_of_tzid(tzid: &str) -> Option<Tz> {
+    tzid.parse::<Tz>().ok().or_else(|| {
+        crate::windows_zones::windows_zone_to_iana(tzid.trim()).and_then(|iana| iana.parse().ok())
+    })
+}
+
+/// The zone a `DTSTART` is written in: its `TZID`'s, UTC for a UTC time, and
+/// none for a floating time or a date.
+fn zone_of_start(start: &DatePerhapsTime) -> Option<Tz> {
+    use icalendar::CalendarDateTime;
+    match start {
+        DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { tzid, .. }) => {
+            zone_of_tzid(tzid)
+        }
+        DatePerhapsTime::DateTime(CalendarDateTime::Utc(_)) => Some(Tz::UTC),
+        _ => None,
+    }
+}
+
 /// Render a `DTSTART`/`DTEND` value as an RFC3339 string.
 ///
 /// - UTC times → `...Z`-equivalent offset (`+00:00`).
@@ -261,11 +285,7 @@ fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
             Some(naive.format("%Y-%m-%dT%H:%M:%S").to_string())
         }
         DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { date_time, tzid }) => {
-            let zone = tzid.parse::<chrono_tz::Tz>().ok().or_else(|| {
-                crate::windows_zones::windows_zone_to_iana(tzid.trim())
-                    .and_then(|iana| iana.parse().ok())
-            });
-            if let Some(tz) = zone {
+            if let Some(tz) = zone_of_tzid(&tzid) {
                 if let Some(zoned) = resolve_local(&tz, &date_time) {
                     return Some(zoned.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
                 }
@@ -540,6 +560,24 @@ END:VCALENDAR\r
             "Yearly on 31 October"
         );
         assert_eq!(rule("FREQ=SECONDLY"), "FREQ=SECONDLY");
+    }
+
+    /// A New York series whose last occurrence is on Tuesday 29 June ends at
+    /// 23:59:59 local, which its UTC `UNTIL` writes on 30 June: the card reads
+    /// it on its New York day.
+    #[test]
+    fn a_utc_until_reads_on_its_day_in_the_zone_of_dtstart() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n\
+                   BEGIN:VEVENT\r\nUID:ny-weekly@example.com\r\nDTSTAMP:20261001T090000Z\r\n\
+                   DTSTART;TZID=America/New_York:20261103T090000\r\n\
+                   DTEND;TZID=America/New_York:20261103T100000\r\n\
+                   RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20270630T035959Z\r\n\
+                   SUMMARY:Standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed = parse_ics(ics.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.recurrence.as_deref(),
+            Some("Weekly on Tuesday until 2027-06-29")
+        );
     }
 
     #[test]

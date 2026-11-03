@@ -427,7 +427,7 @@ async fn an_updated_series_comes_back_as_its_series() {
             start: None,
             ..rule
         }),
-        Recurrence::from_rrule("FREQ=WEEKLY;BYDAY=TU")
+        Recurrence::from_rrule("FREQ=WEEKLY;BYDAY=TU", chrono_tz::UTC)
     );
     let master = series.master.as_deref().unwrap();
     assert_eq!(master.kind, EventKind::SeriesMaster);

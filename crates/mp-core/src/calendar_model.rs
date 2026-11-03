@@ -643,6 +643,22 @@ const MONTH_NAMES: [&str; 12] = [
     "December",
 ];
 
+/// The last day an `UNTIL` value allows, in the event's `zone`: a UTC
+/// date-time on its day there, a floating date-time or a date on its own.
+fn until_date(value: &str, zone: Tz) -> Option<NaiveDate> {
+    let value = value.trim().to_ascii_uppercase();
+    if let Some(utc) = value.strip_suffix('Z') {
+        let at = NaiveDateTime::parse_from_str(utc, "%Y%m%dT%H%M%S").ok()?;
+        return Some(at.and_utc().with_timezone(&zone).date_naive());
+    }
+    if value.len() == 8 {
+        return NaiveDate::parse_from_str(&value, "%Y%m%d").ok();
+    }
+    NaiveDateTime::parse_from_str(&value, "%Y%m%dT%H%M%S")
+        .ok()
+        .map(|at| at.date())
+}
+
 /// The weekday an iCalendar two-letter code (`WE`) names.
 fn weekday_of_code(code: &str) -> Option<Weekday> {
     [
@@ -669,10 +685,12 @@ impl Recurrence {
     /// with different ordinals, both `UNTIL` and `COUNT`, or a part it does
     /// not know.
     ///
-    /// `UNTIL` keeps its date: a `UTC` date-time is read on its UTC day,
-    /// which is the series' last local day for the zones of Europe; the range
-    /// start is `DTSTART`'s, which an `RRULE` does not carry.
-    pub fn from_rrule(rrule: &str) -> Option<Self> {
+    /// `zone` is the zone of the event's `DTSTART`, UTC when it names none:
+    /// a UTC `UNTIL` (`20270630T035959Z`) is read on its day there, the
+    /// series' last local day, while a floating or date-only `UNTIL` keeps its
+    /// own date. The range start is `DTSTART`'s, which an `RRULE` does not
+    /// carry.
+    pub fn from_rrule(rrule: &str, zone: Tz) -> Option<Self> {
         let mut rule = Recurrence {
             frequency: Frequency::Daily,
             interval: 1,
@@ -704,10 +722,7 @@ impl Recurrence {
                 }
                 "INTERVAL" => rule.interval = value.parse().ok().filter(|i| *i > 0)?,
                 "COUNT" => rule.count = Some(value.parse().ok().filter(|c| *c > 0)?),
-                "UNTIL" => {
-                    let digits = value.get(..8)?;
-                    rule.until = Some(NaiveDate::parse_from_str(digits, "%Y%m%d").ok()?);
-                }
+                "UNTIL" => rule.until = Some(until_date(value, zone)?),
                 "BYDAY" => {
                     for day in value.split(',') {
                         let day = day.trim().to_ascii_uppercase();
@@ -1138,7 +1153,7 @@ mod tests {
     /// model is none.
     #[test]
     fn an_rrule_reads_into_the_rule_of_its_pattern() {
-        let read = Recurrence::from_rrule;
+        let read = |rrule: &str| Recurrence::from_rrule(rrule, Tz::UTC);
         assert_eq!(
             read("FREQ=WEEKLY;BYDAY=WE;WKST=SU"),
             Some(Recurrence {
@@ -1222,6 +1237,26 @@ mod tests {
         ] {
             assert_eq!(read(beyond), None, "{beyond}");
         }
+    }
+
+    /// A New York series ending at 23:59:59 local on 29 June has a UTC
+    /// `UNTIL` on 30 June, read back on its New York day; a floating or
+    /// date-only `UNTIL` keeps its own date wherever the event is.
+    #[test]
+    fn a_utc_until_is_read_on_its_day_in_the_events_zone() {
+        let new_york = chrono_tz::America::New_York;
+        let until = |rrule: &str, zone| Recurrence::from_rrule(rrule, zone).unwrap().until;
+        let utc_until = "FREQ=WEEKLY;BYDAY=MO;UNTIL=20270630T035959Z";
+        assert_eq!(until(utc_until, new_york), Some(date(2027, 6, 29)));
+        assert_eq!(until(utc_until, Tz::UTC), Some(date(2027, 6, 30)));
+        assert_eq!(
+            until("FREQ=DAILY;UNTIL=20270630T235959", new_york),
+            Some(date(2027, 6, 30))
+        );
+        assert_eq!(
+            until("FREQ=DAILY;UNTIL=20270630", new_york),
+            Some(date(2027, 6, 30))
+        );
     }
 
     #[test]

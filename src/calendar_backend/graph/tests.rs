@@ -794,7 +794,7 @@ fn recurrence_patterns_become_rules() {
     };
     // A pattern reads as the rule its RRULE states, the range start aside.
     let rrule = |value: serde_json::Value| rule(value).map(|r| Recurrence { start: None, ..r });
-    let from = |text: &str| Recurrence::from_rrule(text);
+    let from = |text: &str| Recurrence::from_rrule(text, chrono_tz::UTC);
     let last_thursday = rule(serde_json::json!({
         "pattern": {"type": "relativeMonthly", "interval": 2, "daysOfWeek": ["thursday"], "index": "last"},
         "range": {"type": "numbered", "numberOfOccurrences": 6, "startDate": "2026-11-26"}
@@ -874,7 +874,7 @@ fn a_series_reads_the_same_from_its_invitation_and_from_graph() {
     ];
     for (rrule, graph) in cases {
         let from_graph = recurrence_of(&serde_json::from_value(graph).unwrap()).unwrap();
-        let from_mail = Recurrence::from_rrule(rrule).unwrap();
+        let from_mail = Recurrence::from_rrule(rrule, chrono_tz::UTC).unwrap();
         assert_eq!(
             Recurrence {
                 start: None,
