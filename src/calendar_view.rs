@@ -318,10 +318,11 @@ pub fn imip_event(row: &AgendaEvent, account: &str, viewer: Tz) -> Option<Event>
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| row.subject.clone());
     let recurrence = Some(fm.recurrence.clone()).filter(|r| !r.is_empty());
-    // A mail about one occurrence names its RECURRENCE-ID, and a mail about
+    // A mail about one occurrence names its RECURRENCE-ID, which iMIP sends
+    // only for an occurrence changed apart from its series, and a mail about
     // the whole series its rule.
     let kind = if fm.recurrence_id.is_some() {
-        EventKind::Occurrence
+        EventKind::Exception
     } else if recurrence.is_some() {
         EventKind::SeriesMaster
     } else {
@@ -503,6 +504,25 @@ mod tests {
         assert_eq!(event.own_response, OwnResponse::Tentative);
         assert_eq!(event.show_as, ShowAs::Tentative);
         assert_eq!(event.attendees[0].status, ResponseStatus::Tentative);
+    }
+
+    /// A mail about one occurrence is a changed one, since iMIP names an
+    /// occurrence only to change it; a mail with a rule is the series, and
+    /// any other a single event.
+    #[test]
+    fn an_invitations_kind_follows_its_recurrence_id_and_rule() {
+        let kind = |recurrence_id: Option<&str>, rule: &str| {
+            let mut row = row(Some("2026-07-20T09:00:00Z"), None);
+            row.event.recurrence_id = recurrence_id.map(str::to_string);
+            row.event.recurrence = rule.to_string();
+            imip_event(&row, "alpha", Tz::UTC).unwrap().kind
+        };
+        assert_eq!(
+            kind(Some("2026-07-20T09:00:00Z"), "Weekly on Monday"),
+            EventKind::Exception
+        );
+        assert_eq!(kind(None, "Weekly on Monday"), EventKind::SeriesMaster);
+        assert_eq!(kind(None, ""), EventKind::Single);
     }
 
     #[test]
