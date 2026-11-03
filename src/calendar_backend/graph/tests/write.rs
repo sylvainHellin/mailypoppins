@@ -214,11 +214,12 @@ async fn times_go_out_in_their_windows_zone_or_in_utc() {
 
 /// A patch sends only what it names: an empty one is `{}`, a cleared
 /// location and description are empty, a cleared reminder is off, a new
-/// time comes with its all-day flag, and turning Teams off names no
-/// provider.
+/// time comes with its all-day flag, turning Teams on names Teams as the
+/// provider, and turning it off sends nothing, since Graph keeps the link.
 #[tokio::test]
 async fn an_update_patches_only_the_fields_it_names() {
     let fetch = ScriptedFetch::default()
+        .route(&format!("{BASE}/me/events/"), ok(&created("AAMk/ev=")))
         .route(&format!("{BASE}/me/events/"), ok(&created("AAMk/ev=")))
         .route(&format!("{BASE}/me/events/"), ok(&created("AAMk/ev=")))
         .route(&format!("{BASE}/me/events/"), ok(&created("AAMk/ev=")));
@@ -262,6 +263,15 @@ async fn an_update_patches_only_the_fields_it_names() {
         .await
         .unwrap();
 
+    let teams = EventPatch {
+        online_meeting: Some(true),
+        ..Default::default()
+    };
+    backend
+        .update_event("cal", "AAMk/ev=", &teams)
+        .await
+        .unwrap();
+
     let sent = backend.fetch.sent();
     assert!(sent.iter().all(|s| s.method == "PATCH"));
     assert!(sent
@@ -274,7 +284,6 @@ async fn an_update_patches_only_the_fields_it_names() {
             "location": {"displayName": ""},
             "body": {"contentType": "text", "content": ""},
             "isReminderOn": false,
-            "isOnlineMeeting": false,
         }))
     );
     assert_eq!(
@@ -291,6 +300,10 @@ async fn an_update_patches_only_the_fields_it_names() {
             "sensitivity": "normal",
             "allowNewTimeProposals": true,
         }))
+    );
+    assert_eq!(
+        sent[3].body,
+        Some(json!({"isOnlineMeeting": true, "onlineMeetingProvider": "teamsForBusiness"}))
     );
 }
 

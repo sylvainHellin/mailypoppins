@@ -142,12 +142,12 @@ fn put_reminder(body: &mut Map<String, Value>, reminder: Option<u32>) {
     }
 }
 
-/// `isOnlineMeeting`, with Teams as the provider when it is turned on.
-fn put_online_meeting(body: &mut Map<String, Value>, on: bool) {
-    body.insert("isOnlineMeeting".into(), on.into());
-    if on {
-        body.insert("onlineMeetingProvider".into(), "teamsForBusiness".into());
-    }
+/// `isOnlineMeeting` with Teams as the provider. Only turning it on is ever
+/// sent: Graph ignores `isOnlineMeeting: false` on an online meeting, whose
+/// Teams link stays, and the daemon refuses that change before it gets here.
+fn put_online_meeting(body: &mut Map<String, Value>) {
+    body.insert("isOnlineMeeting".into(), true.into());
+    body.insert("onlineMeetingProvider".into(), "teamsForBusiness".into());
 }
 
 /// The body of `POST /me/calendars/{id}/events`: what `input` sets, the
@@ -168,7 +168,7 @@ pub(super) fn create_body(input: &EventInput, transaction_id: &str) -> Value {
         body.insert("attendees".into(), Value::Array(attendees));
     }
     if input.online_meeting {
-        put_online_meeting(&mut body, true);
+        put_online_meeting(&mut body);
     }
     if let Some(reminder) = input.reminder {
         put_reminder(&mut body, reminder);
@@ -205,8 +205,8 @@ pub(super) fn patch_body(patch: &EventPatch) -> Value {
         let attendees = attendees.iter().map(attendee_json).collect();
         body.insert("attendees".into(), Value::Array(attendees));
     }
-    if let Some(on) = patch.online_meeting {
-        put_online_meeting(&mut body, on);
+    if patch.online_meeting == Some(true) {
+        put_online_meeting(&mut body);
     }
     if let Some(reminder) = patch.reminder {
         put_reminder(&mut body, reminder);

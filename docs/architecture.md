@@ -521,7 +521,8 @@ A timed event goes out as its wall time plus the Windows name of its zone, which
 That table maps every IANA zone CLDR lists under a Windows zone for any territory, so `Europe/Vienna` and `America/Toronto` resolve as well as each zone's territory 001 entry, plus every alias CLDR's `bcp47/timezone.xml` gives such a zone, so the current spellings a system names (`Asia/Kolkata`, `Europe/Kyiv`) resolve where CLDR maps the legacy ones (`Asia/Calcutta`, `Europe/Kiev`).
 A zone neither lists (`Antarctica/Troll`) goes out as UTC with the instants exact, and an all-day event as its midnights in UTC.
 A cancel, a delete, a dismiss or a snooze of an event Graph answers 404 for counts as done; an update of one fails.
-The fake applies every write to its events, answers a repeated transaction id with the event the first create made, and records each write, appending it to `write_log` when the spec names one.
+Graph keeps an online meeting online and ignores `isOnlineMeeting: false`, so the backend sends only `true` (with `teamsForBusiness`) and drops `online_meeting: false` from a patch; the daemon's `event.update` (slice 4) must refuse `online_meeting: false` on an event that has a Teams link, so the user is told the link stays rather than seeing the change accepted and not applied.
+The fake applies every write to its events, keeps a Teams link once it has provisioned one, answers a repeated transaction id with the event the first create made, and records each write, appending it to `write_log` when the spec names one.
 
 ### Calendar scope prompt
 

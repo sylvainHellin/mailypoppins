@@ -489,12 +489,9 @@ fn apply_patch(event: &mut Event, patch: &EventPatch) {
             .map(|a| written_attendee(a, &event.attendees))
             .collect();
     }
-    match patch.online_meeting {
-        Some(true) if event.online_meeting_url.is_none() => {
-            event.online_meeting_url = Some(join_link(&event.id));
-        }
-        Some(false) => event.online_meeting_url = None,
-        _ => {}
+    // Once on, the link stays, as on Graph, which ignores turning it off.
+    if patch.online_meeting == Some(true) && event.online_meeting_url.is_none() {
+        event.online_meeting_url = Some(join_link(&event.id));
     }
     if let Some(reminder) = patch.reminder {
         event.reminder = reminder;
@@ -889,6 +886,30 @@ mod tests {
             .await
             .is_err());
         assert_eq!(fake.writes().len(), 2);
+    }
+
+    /// Turning Teams on provisions a link, and turning it off again leaves
+    /// it, as Graph does.
+    #[tokio::test]
+    async fn a_teams_link_once_on_stays_on() {
+        let fake = FakeCalendarBackend::canned();
+        let patch = |on| EventPatch {
+            online_meeting: Some(on),
+            ..Default::default()
+        };
+        let on = written(
+            fake.update_event("cal-main", "ev-meeting", &patch(true))
+                .await
+                .unwrap(),
+        );
+        let link = on.online_meeting_url.clone();
+        assert!(link.is_some());
+        let off = written(
+            fake.update_event("cal-main", "ev-meeting", &patch(false))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(off.online_meeting_url, link);
     }
 
     /// An update changes only what the patch names, a re-invited attendee
