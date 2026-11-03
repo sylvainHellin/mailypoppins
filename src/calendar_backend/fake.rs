@@ -169,8 +169,8 @@ pub struct FakeCalendarBackend {
     /// The invitation mails the fake knows the event of, by server message
     /// id ([`CalendarBackend::event_for_message`]).
     message_events: HashMap<String, String>,
-    /// What the fake claims to serve ([`super::features`]); none unless a
-    /// test names some.
+    /// What the fake claims to serve ([`super::features`]): the spec's
+    /// `features`, none unless a test names some.
     features: Vec<CalendarFeature>,
     /// The series masters a baseline reports resolved, as Graph's does
     /// ([`SyncResult::series`]), so the store's series cache fills.
@@ -269,13 +269,8 @@ impl FakeCalendarBackend {
         self
     }
 
-    /// Claim `features` ([`super::features`]).
-    pub fn with_features(mut self, features: Vec<CalendarFeature>) -> Self {
-        self.features = features;
-        self
-    }
-
-    /// What the fake claims to serve.
+    /// What the fake claims to serve ([`super::features`]), as its spec
+    /// names it.
     pub fn features(&self) -> Vec<CalendarFeature> {
         self.features.clone()
     }
