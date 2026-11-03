@@ -792,7 +792,9 @@ fn recurrence_patterns_become_rules() {
     let rule = |value: serde_json::Value| {
         recurrence_of(&serde_json::from_value::<wire::Recurrence>(value).unwrap())
     };
-    let rrule = |value: serde_json::Value| rule(value).map(|r| r.rrule());
+    // A pattern reads as the rule its RRULE states, the range start aside.
+    let rrule = |value: serde_json::Value| rule(value).map(|r| Recurrence { start: None, ..r });
+    let from = |text: &str| Recurrence::from_rrule(text);
     let last_thursday = rule(serde_json::json!({
         "pattern": {"type": "relativeMonthly", "interval": 2, "daysOfWeek": ["thursday"], "index": "last"},
         "range": {"type": "numbered", "numberOfOccurrences": 6, "startDate": "2026-11-26"}
@@ -802,20 +804,22 @@ fn recurrence_patterns_become_rules() {
     assert_eq!(last_thursday.count, Some(6));
     assert_eq!(last_thursday.start, NaiveDate::from_ymd_opt(2026, 11, 26));
     assert_eq!(
-        last_thursday.rrule(),
-        "FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6"
+        Some(Recurrence {
+            start: None,
+            ..last_thursday
+        }),
+        from("FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6")
     );
     assert_eq!(
         rrule(serde_json::json!({
             "pattern": {"type": "absoluteYearly", "interval": 1, "month": 3, "dayOfMonth": 14},
             "range": {"type": "noEnd"}
-        }))
-        .as_deref(),
-        Some("FREQ=YEARLY;BYMONTHDAY=14;BYMONTH=3")
+        })),
+        from("FREQ=YEARLY;BYMONTHDAY=14;BYMONTH=3")
     );
     assert_eq!(
-        rrule(serde_json::json!({"pattern": {"type": "daily", "interval": 1}})).as_deref(),
-        Some("FREQ=DAILY")
+        rrule(serde_json::json!({"pattern": {"type": "daily", "interval": 1}})),
+        from("FREQ=DAILY")
     );
     assert_eq!(
         rule(serde_json::json!({"pattern": {"type": "hourly"}})),

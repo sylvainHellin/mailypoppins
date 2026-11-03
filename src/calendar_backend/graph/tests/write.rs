@@ -423,8 +423,11 @@ async fn an_updated_series_comes_back_as_its_series() {
     assert_eq!(series.master_id, "AAMkEv-weekly");
     assert_eq!(series.uid, MASTER_UID);
     assert_eq!(
-        series.recurrence.as_ref().map(Recurrence::rrule).as_deref(),
-        Some("FREQ=WEEKLY;BYDAY=TU")
+        series.recurrence.clone().map(|rule| Recurrence {
+            start: None,
+            ..rule
+        }),
+        Recurrence::from_rrule("FREQ=WEEKLY;BYDAY=TU")
     );
     let master = series.master.as_deref().unwrap();
     assert_eq!(master.kind, EventKind::SeriesMaster);

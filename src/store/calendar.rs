@@ -22,8 +22,8 @@
 //!   and the path the backend synced through.
 //! - [`SERIES_TABLE`]: what a backend resolved about a recurring series
 //!   ([`SeriesInfo`]), so Graph asks for a series master once rather than at
-//!   every poll: its `UID`, its rule (structured in `recurrence_json`, and as
-//!   `RRULE` text in `recurrence` for a reader of the database) and zone, and
+//!   every poll: its `UID`, its rule (structured, in `recurrence_json`) and
+//!   zone, and
 //!   the master itself as an event in `master_json`, whose details a trimmed
 //!   occurrence shows.
 //! - [`INVITES_TABLE`]: the server event an invitation mail stands for, by
@@ -135,7 +135,6 @@ pub fn create_sql() -> [(&'static str, String); 6] {
                     account    TEXT NOT NULL,
                     master_id   TEXT NOT NULL,
                     uid         TEXT NOT NULL,
-                    recurrence  TEXT,
                     recurrence_json TEXT,
                     master_json TEXT,
                     zone        TEXT,
@@ -821,18 +820,16 @@ fn write_series(conn: &rusqlite::Connection, account: &str, series: &SeriesInfo)
     conn.execute(
         &format!(
             "INSERT INTO {SERIES_TABLE}
-                (account, master_id, uid, recurrence, recurrence_json, master_json, zone)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (account, master_id, uid, recurrence_json, master_json, zone)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (account, master_id) DO UPDATE SET
-                uid = excluded.uid, recurrence = excluded.recurrence,
-                recurrence_json = excluded.recurrence_json,
+                uid = excluded.uid, recurrence_json = excluded.recurrence_json,
                 master_json = excluded.master_json, zone = excluded.zone"
         ),
         params![
             account,
             series.master_id,
             series.uid,
-            series.recurrence.as_ref().map(|rule| rule.rrule()),
             rule,
             master,
             series.zone
@@ -997,7 +994,8 @@ mod tests {
     }
 
     /// A store whose calendar tables an older build created gains the later
-    /// columns, and a second pass writes nothing.
+    /// columns, and a second pass writes nothing; the `RRULE` text column of
+    /// phase 1, which nothing reads any more, stays and is left alone.
     #[test]
     fn the_later_columns_reach_tables_an_older_build_created() {
         let (_dir, store) = open();
@@ -1007,7 +1005,8 @@ mod tests {
                 "ALTER TABLE {EVENTS_TABLE} DROP COLUMN inherits;
                  ALTER TABLE {SERIES_TABLE} DROP COLUMN master_json;
                  ALTER TABLE {SERIES_TABLE} DROP COLUMN zone;
-                 ALTER TABLE {SERIES_TABLE} DROP COLUMN recurrence_json;"
+                 ALTER TABLE {SERIES_TABLE} DROP COLUMN recurrence_json;
+                 ALTER TABLE {SERIES_TABLE} ADD COLUMN recurrence TEXT;"
             ))
             .unwrap();
         ensure_columns(store.conn()).unwrap();
@@ -1222,18 +1221,6 @@ mod tests {
             result.series.first()
         );
         assert_eq!(get_series(&store, "evoqs", "other").unwrap(), None);
-        let rrule: Option<String> = store
-            .conn()
-            .query_row(
-                &format!("SELECT recurrence FROM {SERIES_TABLE} WHERE master_id = 'm'"),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            rrule.as_deref(),
-            Some("FREQ=WEEKLY;BYDAY=WE;WKST=MO;COUNT=10")
-        );
 
         drop_calendar_cache(&store, "evoqs").unwrap();
         assert!(list_calendars(&store, "evoqs").unwrap().is_empty());

@@ -791,52 +791,6 @@ impl Recurrence {
         Some(rule)
     }
 
-    /// The rule as `RRULE` text (`FREQ=WEEKLY;BYDAY=WE;WKST=SU`).
-    pub fn rrule(&self) -> String {
-        let freq = match self.frequency {
-            Frequency::Daily => "DAILY",
-            Frequency::Weekly => "WEEKLY",
-            Frequency::Monthly => "MONTHLY",
-            Frequency::Yearly => "YEARLY",
-        };
-        let mut parts = vec![format!("FREQ={freq}")];
-        if self.interval > 1 {
-            parts.push(format!("INTERVAL={}", self.interval));
-        }
-        if !self.weekdays.is_empty() && self.frequency != Frequency::Daily {
-            let days: Vec<&str> = self.weekdays.iter().map(|d| d.code()).collect();
-            parts.push(format!("BYDAY={}", days.join(",")));
-        }
-        match self.week_index {
-            Some(index) if self.frequency != Frequency::Daily => {
-                parts.push(format!("BYSETPOS={}", index.position()));
-            }
-            _ => {
-                if matches!(self.frequency, Frequency::Monthly | Frequency::Yearly) {
-                    if let Some(day) = self.day_of_month {
-                        parts.push(format!("BYMONTHDAY={day}"));
-                    }
-                }
-            }
-        }
-        if self.frequency == Frequency::Yearly {
-            if let Some(month) = self.month {
-                parts.push(format!("BYMONTH={month}"));
-            }
-        }
-        if self.frequency == Frequency::Weekly {
-            if let Some(first) = self.first_day_of_week {
-                parts.push(format!("WKST={}", first.code()));
-            }
-        }
-        if let Some(until) = self.until {
-            parts.push(format!("UNTIL={}", until.format("%Y%m%d")));
-        } else if let Some(count) = self.count {
-            parts.push(format!("COUNT={count}"));
-        }
-        parts.join(";")
-    }
-
     /// The rule in words, as the event cards print it: `Weekly on
     /// Wednesday`, `Every 2 months on the last Thursday (6 times)`, `Yearly
     /// on 31 October until 2030-10-31`.
@@ -1271,14 +1225,13 @@ mod tests {
     }
 
     #[test]
-    fn every_pattern_reads_as_an_rrule_and_in_words() {
+    fn every_pattern_reads_in_words() {
         let weekly = Recurrence {
             weekdays: vec![Weekday::Wednesday],
             first_day_of_week: Some(Weekday::Sunday),
             start: Some(date(2024, 10, 23)),
             ..rule(Frequency::Weekly)
         };
-        assert_eq!(weekly.rrule(), "FREQ=WEEKLY;BYDAY=WE;WKST=SU");
         assert_eq!(weekly.describe(), "Weekly on Wednesday");
 
         let fortnightly = Recurrence {
@@ -1287,10 +1240,6 @@ mod tests {
             until: Some(date(2027, 6, 29)),
             ..rule(Frequency::Weekly)
         };
-        assert_eq!(
-            fortnightly.rrule(),
-            "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TH;UNTIL=20270629"
-        );
         assert_eq!(
             fortnightly.describe(),
             "Every 2 weeks on Monday, Thursday until 2027-06-29"
@@ -1301,14 +1250,12 @@ mod tests {
             count: Some(5),
             ..rule(Frequency::Daily)
         };
-        assert_eq!(daily.rrule(), "FREQ=DAILY;INTERVAL=3;COUNT=5");
         assert_eq!(daily.describe(), "Every 3 days (5 times)");
 
         let by_date = Recurrence {
             day_of_month: Some(15),
             ..rule(Frequency::Monthly)
         };
-        assert_eq!(by_date.rrule(), "FREQ=MONTHLY;BYMONTHDAY=15");
         assert_eq!(by_date.describe(), "Monthly on day 15");
 
         let last_thursday = Recurrence {
@@ -1319,10 +1266,6 @@ mod tests {
             ..rule(Frequency::Monthly)
         };
         assert_eq!(
-            last_thursday.rrule(),
-            "FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6"
-        );
-        assert_eq!(
             last_thursday.describe(),
             "Every 2 months on the last Thursday (6 times)"
         );
@@ -1332,7 +1275,6 @@ mod tests {
             day_of_month: Some(31),
             ..rule(Frequency::Yearly)
         };
-        assert_eq!(birthday.rrule(), "FREQ=YEARLY;BYMONTHDAY=31;BYMONTH=10");
         assert_eq!(birthday.describe(), "Yearly on 31 October");
 
         let thanksgiving = Recurrence {
@@ -1341,10 +1283,6 @@ mod tests {
             week_index: Some(WeekIndex::Fourth),
             ..rule(Frequency::Yearly)
         };
-        assert_eq!(
-            thanksgiving.rrule(),
-            "FREQ=YEARLY;BYDAY=TH;BYSETPOS=4;BYMONTH=11"
-        );
         assert_eq!(
             thanksgiving.describe(),
             "Yearly on the fourth Thursday of November"
