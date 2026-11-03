@@ -105,6 +105,19 @@ pub fn iana_or_windows(name: &str) -> Option<String> {{
         .map(|tz| tz.name().to_string())
 }}
 
+/// The Windows zone name of an IANA zone, the table read in reverse: the
+/// Windows zone whose territory "001" entry `iana` is. `None` for every
+/// other IANA zone (`Europe/Vienna`, which CLDR lists under
+/// `W. Europe Standard Time` for Austria only), which a calendar write sends
+/// as UTC, with the instants exact.
+pub fn iana_to_windows_zone(iana: &str) -> Option<&'static str> {{
+    let iana = iana.trim();
+    WINDOWS_ZONES
+        .iter()
+        .find(|(_, zone)| *zone == iana)
+        .map(|(windows, _)| *windows)
+}}
+
 #[cfg(test)]
 mod tests {{
     use super::*;
@@ -155,6 +168,21 @@ mod tests {{
             iana_or_windows(" W. Europe Standard Time ").as_deref(),
             Some("Europe/Berlin")
         );
+    }}
+
+    #[test]
+    fn every_iana_zone_of_the_table_maps_back_to_its_windows_name() {{
+        for (windows, iana) in WINDOWS_ZONES {{
+            assert_eq!(iana_to_windows_zone(iana), Some(*windows), "{{iana}}");
+        }}
+        assert_eq!(
+            iana_to_windows_zone(" Europe/Berlin "),
+            Some("W. Europe Standard Time")
+        );
+        assert_eq!(iana_to_windows_zone("Etc/UTC"), Some("UTC"));
+        assert_eq!(iana_to_windows_zone("Europe/Vienna"), None);
+        assert_eq!(iana_to_windows_zone("UTC"), None);
+        assert_eq!(iana_to_windows_zone(""), None);
     }}
 }}
 """
