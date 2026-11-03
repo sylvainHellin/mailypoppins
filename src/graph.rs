@@ -324,6 +324,18 @@ impl GraphClient {
         })
     }
 
+    /// A client with a fixed token, for the tests that build requests
+    /// without sending them.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            client: http_client().unwrap(),
+            access_token: "token".to_string(),
+            username: "me@example.com".to_string(),
+            top_folders: std::sync::Mutex::new(None),
+        }
+    }
+
     fn bearer(&self) -> String {
         self.access_token.clone()
     }

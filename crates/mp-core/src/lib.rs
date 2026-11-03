@@ -24,6 +24,7 @@ pub mod addresses;
 pub mod app_state;
 pub mod calendar;
 pub mod calendar_model;
+pub mod calendar_write;
 pub mod config;
 pub mod contacts;
 pub mod draft;

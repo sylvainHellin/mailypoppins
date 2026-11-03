@@ -20,9 +20,11 @@ use std::fmt;
 use std::future::Future;
 
 use anyhow::anyhow;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::calendar_model::{Calendar, CalendarWindow, Event, EventId};
+use crate::calendar_write::{EventInput, EventPatch};
 use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
 
 use fake::FakeCalendarBackend;
@@ -98,6 +100,17 @@ pub struct SyncResult {
     /// the server need not send the occurrences again when only the master
     /// changed.
     pub inheriting: Vec<EventId>,
+}
+
+/// What the server holds after a create or an update, converted: the event
+/// for a single event, an occurrence or an exception, and the series master
+/// for a write to a whole series, which the store keeps with the series
+/// rather than as an event to show.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Written {
+    /// Boxed: an event is several times the size of the series' handle.
+    Event(Box<Event>),
+    Series(Box<SeriesInfo>),
 }
 
 /// Why a backend call failed.
@@ -210,6 +223,53 @@ pub trait CalendarBackend {
         response: Response,
         comment: Option<String>,
         send_response: bool,
+    ) -> impl Future<Output = BackendResult<()>> + Send;
+
+    /// Create `input` in `calendar`; the server invites its attendees.
+    ///
+    /// `transaction_id` rides along with the event (Graph's
+    /// `transactionId`), so a retry of a create whose answer was lost finds
+    /// the event instead of making a second one.
+    fn create_event(
+        &self,
+        calendar: &Calendar,
+        input: &EventInput,
+        transaction_id: &str,
+    ) -> impl Future<Output = BackendResult<Written>> + Send;
+
+    /// Change the fields `patch` names on `event` of `calendar`, an
+    /// occurrence or a series master included; the server sends the
+    /// attendees an update.
+    fn update_event(
+        &self,
+        calendar: &str,
+        event: &str,
+        patch: &EventPatch,
+    ) -> impl Future<Output = BackendResult<Written>> + Send;
+
+    /// Cancel the meeting `event`, which the user organizes, telling every
+    /// attendee, with an optional comment. An event already gone counts as
+    /// cancelled.
+    fn cancel_event(
+        &self,
+        event: &str,
+        comment: Option<String>,
+    ) -> impl Future<Output = BackendResult<()>> + Send;
+
+    /// Delete `event` without telling anybody. An event already gone counts
+    /// as deleted.
+    fn delete_event(&self, event: &str) -> impl Future<Output = BackendResult<()>> + Send;
+
+    /// Dismiss the reminder of `event` on the server, so the user's other
+    /// devices stop reminding too. An event already gone has none to dismiss.
+    fn dismiss_reminder(&self, event: &str) -> impl Future<Output = BackendResult<()>> + Send;
+
+    /// Snooze the reminder of `event` on the server until `until`. An event
+    /// already gone has none to snooze.
+    fn snooze_reminder(
+        &self,
+        event: &str,
+        until: DateTime<Utc>,
     ) -> impl Future<Output = BackendResult<()>> + Send;
 
     /// The series the store already knows, handed over before a sync so a
@@ -341,6 +401,58 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.respond(event, response, comment, send_response).await,
             AccountBackend::Graph(b) => b.respond(event, response, comment, send_response).await,
+        }
+    }
+
+    async fn create_event(
+        &self,
+        calendar: &Calendar,
+        input: &EventInput,
+        transaction_id: &str,
+    ) -> BackendResult<Written> {
+        match self {
+            AccountBackend::Fake(b) => b.create_event(calendar, input, transaction_id).await,
+            AccountBackend::Graph(b) => b.create_event(calendar, input, transaction_id).await,
+        }
+    }
+
+    async fn update_event(
+        &self,
+        calendar: &str,
+        event: &str,
+        patch: &EventPatch,
+    ) -> BackendResult<Written> {
+        match self {
+            AccountBackend::Fake(b) => b.update_event(calendar, event, patch).await,
+            AccountBackend::Graph(b) => b.update_event(calendar, event, patch).await,
+        }
+    }
+
+    async fn cancel_event(&self, event: &str, comment: Option<String>) -> BackendResult<()> {
+        match self {
+            AccountBackend::Fake(b) => b.cancel_event(event, comment).await,
+            AccountBackend::Graph(b) => b.cancel_event(event, comment).await,
+        }
+    }
+
+    async fn delete_event(&self, event: &str) -> BackendResult<()> {
+        match self {
+            AccountBackend::Fake(b) => b.delete_event(event).await,
+            AccountBackend::Graph(b) => b.delete_event(event).await,
+        }
+    }
+
+    async fn dismiss_reminder(&self, event: &str) -> BackendResult<()> {
+        match self {
+            AccountBackend::Fake(b) => b.dismiss_reminder(event).await,
+            AccountBackend::Graph(b) => b.dismiss_reminder(event).await,
+        }
+    }
+
+    async fn snooze_reminder(&self, event: &str, until: DateTime<Utc>) -> BackendResult<()> {
+        match self {
+            AccountBackend::Fake(b) => b.snooze_reminder(event, until).await,
+            AccountBackend::Graph(b) => b.snooze_reminder(event, until).await,
         }
     }
 
