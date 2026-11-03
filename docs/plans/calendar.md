@@ -215,13 +215,13 @@ Every write is an `operation.*` in the daemon's in-memory operation registry, an
 - Teams link toggle, attendee status, free/busy through `getSchedule` when picking a time.
 - Reminders as desktop notifications.
 
-Sylvain settled three of the design's questions on 2026-11-03, and the decision log carries their why and their rejected options:
+Sylvain settled the design's four questions on 2026-11-03, and the decision log carries their why and their rejected options:
 
 - A write stays an in-memory operation; `event.create` carries a Graph `transactionId`, so a retry cannot duplicate the event, and a client whose operation vanished keeps the form open with a Retry button.
 - No calendar journal is added, and the calendar store stays a disposable cache (D6); what the user typed is lost when the client closes as well.
 - The TUI event editor is an overlay form built like the compose wizard and the respond dialog, with field checks, the attendees' free/busy, the repeat settings and the occurrence-or-series choice; the description opens in `$EDITOR`.
 - Editing or cancelling an occurrence offers two choices, this occurrence or the whole series; the following occurrences wait under "Later".
-- Still open: whether a reminder dismissed or snoozed in mp is also dismissed or snoozed in Outlook through Graph.
+- A reminder dismissed or snoozed in mp is also dismissed or snoozed on the server through Graph's `dismissReminder` and `snoozeReminder`; a CalDAV account keeps reminders local.
 
 Each slice is one branch merged to `main` with its docs, parity rows, website pages and CHANGELOG line:
 
@@ -232,9 +232,9 @@ Each slice is one branch merged to `main` with its docs, parity rows, website pa
 5. Recurrence and scopes: `recurrence` on create, `scope` on update, cancel and delete, and the scope chooser in the TUI and the desktop app; needs slices 1 and 4.
 6. Propose a new time: `proposed_time` on `event.respond`, the respond dialog's field and the organizer's "Use this time"; needs slices 1, 3 and 4.
 7. Free/busy: `calendar.freebusy`, `mp calendar freebusy` and the availability rows in both forms; needs slice 3.
-8. Reminders: the daemon's reminder task, the `calendar_reminders` table, its events and commands, and the presentation in the three clients; needs no other slice, and dismissing on the server, if chosen, also needs slice 2.
+8. Reminders: the daemon's reminder task, the `calendar_reminders` table, its events and commands, and the presentation in the three clients; needs slice 2 for dismissing and snoozing on the server.
 
-Slices 1 and 2 can run side by side; once slice 4 has merged, slices 5, 6 and 7 can run in parallel, and slice 8 can run at any time.
+Slices 1 and 2 can run side by side; once slice 4 has merged, slices 5, 6 and 7 can run in parallel, and slice 8 can run any time after slice 2.
 
 ### Phase 3, EWS for on-prem Exchange, TUM (PERSO-256, after phase 1)
 

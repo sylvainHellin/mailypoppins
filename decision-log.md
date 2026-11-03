@@ -422,3 +422,13 @@ The change is rare enough that Outlook covers it, and the plan lists it under "L
 Rejected: a third choice "This and all following occurrences" in phase 2 (a series split touching the create and the cancel paths at once, with its own live test against Outlook).
 Source: report comment export of 2026-11-03 on `.sync/reports/calendar-phase-2-design`.
 Status: accepted
+
+## 2026-11-03 - A reminder dismissed or snoozed in mp is also dismissed or snoozed on the server
+
+Why: the daily nuisance is a phone and a Mac reminding of the same meeting, and only a server-side dismissal silences Outlook on the phone and the web.
+mp records the dismissal or snooze locally first, then calls Graph's `dismissReminder` or `snoozeReminder` on the event, one call per action; a failed call leaves the local record in place.
+TUM's Exchange gets the same once phase 3 reaches it, and a CalDAV account, whose server has no such call, keeps reminders local.
+Whether a dismissal made in Outlook or by the other mp daemon reaches mp through the sync is unknown until a live test in the reminders slice.
+Rejected: reminders kept local only (simplest and identical on every server, but Outlook and a second mp daemon still remind after a dismissal in mp).
+Source: Sylvain in chat, 2026-11-03, answering the open question of the design page `.sync/reports/calendar-phase-2-design`.
+Status: accepted
