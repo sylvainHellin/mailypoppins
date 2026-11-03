@@ -154,6 +154,12 @@ pub struct CalendarInfo {
     /// The account's calendar backend as the configuration spells it
     /// (`graph`, `ews`, `caldav`, `none`); `none` on the invitation calendar.
     pub backend: String,
+    /// What the backend lets a client do beyond reading and answering, each
+    /// listed once the daemon serves it there: `write`, `online-meeting`,
+    /// `propose-time`, `free-busy`, `server-reminders`. Empty on the
+    /// invitation calendar.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// When an event happens: UTC instants and the event's IANA zone, or local
@@ -182,6 +188,14 @@ pub struct CalendarPerson {
     pub email: String,
 }
 
+/// A span of time, RFC 3339 instants in UTC, the end exclusive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarTimeSlot {
+    pub start: String,
+    pub end: String,
+}
+
 /// One attendee of an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -194,6 +208,70 @@ pub struct CalendarAttendee {
     pub role: String,
     /// `needs-action`, `accepted`, `tentative` or `declined`.
     pub status: String,
+    /// The time the attendee proposed instead, which the server shows the
+    /// organizer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub proposed_time: Option<CalendarTimeSlot>,
+}
+
+/// The rule of a recurring series, mirroring
+/// `mp_core::calendar_model::Recurrence`: which fields a pattern reads is
+/// documented there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarRecurrence {
+    /// `daily`, `weekly`, `monthly` or `yearly`.
+    pub frequency: String,
+    /// Every how many days, weeks, months or years.
+    pub interval: u32,
+    /// `monday` to `sunday`; empty on a pattern that names no weekday.
+    #[serde(default)]
+    pub weekdays: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub day_of_month: Option<u32>,
+    /// `first`, `second`, `third`, `fourth` or `last`, on a rule by weekday.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub week_index: Option<String>,
+    /// 1 to 12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub month: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub first_day_of_week: Option<String>,
+    /// `YYYY-MM-DD`, the day the range starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub start: Option<String>,
+    /// `YYYY-MM-DD`, the last day an occurrence may fall on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub until: Option<String>,
+    /// How many occurrences the series has; with no `until` either, the
+    /// series has no end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub count: Option<u32>,
+}
+
+/// The series an occurrence belongs to, as `event.get` answers it from the
+/// series cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarSeries {
+    /// The server id of the series master.
+    pub master_id: String,
+    /// The series' own summary, when the cache holds its master.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub summary: Option<String>,
+    /// The rule, when the backend could express it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub recurrence: Option<CalendarRecurrence>,
 }
 
 /// Where an event `calendar.view` derived from an invitation mail came from,
@@ -233,6 +311,10 @@ pub struct CalendarEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub series_master_id: Option<String>,
+    /// `single`, `series-master`, `occurrence`, or `exception` for an
+    /// occurrence changed apart from its series.
+    #[serde(default = "single")]
+    pub kind: String,
     pub summary: String,
     pub time: CalendarEventTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,8 +332,9 @@ pub struct CalendarEvent {
     /// `none`, `organizer`, `needs-action`, `accepted`, `tentative` or
     /// `declined`.
     pub own_response: String,
-    /// The `RRULE` of a series master; on an invitation mail's event, the
-    /// human-readable summary the mail's agenda row carried.
+    /// The series rule in words (`Weekly on Wednesday`), on an occurrence and
+    /// a series master; on an invitation mail's event, the summary the mail's
+    /// agenda row carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub recurrence: Option<String>,
@@ -262,6 +345,14 @@ pub struct CalendarEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub online_meeting_url: Option<String>,
+    /// Whether the event is an online meeting, which a server can say before
+    /// its join link exists.
+    #[serde(default)]
+    pub is_online_meeting: bool,
+    /// `teams-for-business`, `skype-for-business` or `skype-for-consumer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub online_meeting_provider: Option<String>,
     /// `normal`, `personal`, `private` or `confidential`.
     pub sensitivity: String,
     /// `free`, `tentative`, `busy`, `oof`, `working-elsewhere` or `unknown`.
@@ -278,10 +369,29 @@ pub struct CalendarEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub web_link: Option<String>,
+    /// Whether the organizer lets attendees propose a new time.
+    #[serde(default = "yes")]
+    pub allow_new_time_proposals: bool,
+    /// Whether the organizer asks for an answer.
+    #[serde(default = "yes")]
+    pub response_requested: bool,
+    /// The id of the create that made the event, when an app created it
+    /// with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub transaction_id: Option<String>,
     /// The invitation mail an `imip:` event was derived from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub source: Option<CalendarEventSource>,
+}
+
+fn single() -> String {
+    "single".to_string()
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// A half-open range of instants, RFC 3339.
@@ -347,6 +457,10 @@ pub struct CalendarViewResult {
 pub struct EventGetResult {
     pub account: String,
     pub event: CalendarEvent,
+    /// The series of an occurrence, when the cache knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub series: Option<CalendarSeries>,
 }
 
 /// The `params` of `event.respond`.
@@ -440,10 +554,28 @@ mod tests {
         let raw = result(include_str!("../fixtures/calendar.view.response.json"));
         assert_eq!(serde_json::to_value(&view).unwrap(), raw);
 
-        let get: EventGetResult =
-            serde_json::from_value(result(include_str!("../fixtures/event.get.response.json")))
-                .expect("event.get");
-        assert!(matches!(get.event.time, CalendarEventTime::AllDay { .. }));
+        assert!(list.calendars.iter().all(|c| c.features.is_empty()));
+        let teams = &view.events[0];
+        assert!(teams.is_online_meeting);
+        assert_eq!(
+            teams.online_meeting_provider.as_deref(),
+            Some("teams-for-business")
+        );
+        assert_eq!(teams.kind, "exception");
+        let proposal = teams.attendees[1]
+            .proposed_time
+            .as_ref()
+            .expect("a proposal");
+        assert_eq!(proposal.start, "2026-11-04T09:00:00Z");
+
+        let raw = result(include_str!("../fixtures/event.get.response.json"));
+        let get: EventGetResult = serde_json::from_value(raw.clone()).expect("event.get");
+        assert!(matches!(get.event.time, CalendarEventTime::Timed { .. }));
+        let series = get.series.as_ref().expect("an occurrence's series");
+        let rule = series.recurrence.as_ref().expect("its rule");
+        assert_eq!(rule.frequency, "weekly");
+        assert_eq!(rule.weekdays, ["tuesday"]);
+        assert_eq!(serde_json::to_value(&get).unwrap(), raw);
         let _: serde_json::Value = params(include_str!("../fixtures/event.get.request.json"));
 
         let respond: EventRespondParams = serde_json::from_value(params(include_str!(

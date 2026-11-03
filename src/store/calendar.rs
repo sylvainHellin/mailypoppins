@@ -22,8 +22,10 @@
 //!   and the path the backend synced through.
 //! - [`SERIES_TABLE`]: what a backend resolved about a recurring series
 //!   ([`SeriesInfo`]), so Graph asks for a series master once rather than at
-//!   every poll: its `UID`, rule and zone, and the master itself as an event
-//!   in `master_json`, whose details a trimmed occurrence shows.
+//!   every poll: its `UID`, its rule (structured in `recurrence_json`, and as
+//!   `RRULE` text in `recurrence` for a reader of the database) and zone, and
+//!   the master itself as an event in `master_json`, whose details a trimmed
+//!   occurrence shows.
 //! - [`INVITES_TABLE`]: the server event an invitation mail stands for, by
 //!   its `messages.id` and the server id it was looked up under, so
 //!   `message.invite` asks the server once per invitation mail (a mail that
@@ -134,6 +136,7 @@ pub fn create_sql() -> [(&'static str, String); 6] {
                     master_id   TEXT NOT NULL,
                     uid         TEXT NOT NULL,
                     recurrence  TEXT,
+                    recurrence_json TEXT,
                     master_json TEXT,
                     zone        TEXT,
                     PRIMARY KEY (account, master_id)
@@ -157,12 +160,14 @@ pub fn create_sql() -> [(&'static str, String); 6] {
 
 /// The columns added to a calendar table after a build created it, as
 /// `(table, column, type)`: the series master's details and the mark of an
-/// occurrence that inherits them (PERSO-200). A table an older build created
-/// gains them here; its rows fill at the next baseline.
-const ADDED_COLUMNS: [(&str, &str, &str); 3] = [
+/// occurrence that inherits them (PERSO-200), and the structured series rule
+/// (PERSO-255). A table an older build created gains them here; its rows
+/// fill at the next baseline.
+const ADDED_COLUMNS: [(&str, &str, &str); 4] = [
     (EVENTS_TABLE, "inherits", "INTEGER NOT NULL DEFAULT 0"),
     (SERIES_TABLE, "master_json", "TEXT"),
     (SERIES_TABLE, "zone", "TEXT"),
+    (SERIES_TABLE, "recurrence_json", "TEXT"),
 ];
 
 /// Add [`ADDED_COLUMNS`] to the calendar tables that lack them, after
@@ -750,29 +755,54 @@ fn save_sync_state_in(
     Ok(())
 }
 
+/// The columns [`series_row`] reads, in its order.
+const SERIES_COLUMNS: &str = "master_id, uid, recurrence_json, master_json, zone";
+
+/// A [`SERIES_TABLE`] row selected as [`SERIES_COLUMNS`]. A rule or a master
+/// this build cannot read is none, which the next baseline writes afresh.
+fn series_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeriesInfo> {
+    Ok(SeriesInfo {
+        master_id: row.get(0)?,
+        uid: row.get(1)?,
+        recurrence: row
+            .get::<_, Option<String>>(2)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
+        master: row
+            .get::<_, Option<String>>(3)?
+            .as_deref()
+            .and_then(parse_event)
+            .map(Box::new),
+        zone: row.get(4)?,
+    })
+}
+
 /// The series of `account` the store has resolved.
 pub fn load_series(store: &Store, account: &str) -> Result<Vec<SeriesInfo>> {
     let mut stmt = store.conn().prepare(&format!(
-        "SELECT master_id, uid, recurrence, master_json, zone FROM {SERIES_TABLE}
-         WHERE account = ?1 ORDER BY master_id"
+        "SELECT {SERIES_COLUMNS} FROM {SERIES_TABLE} WHERE account = ?1 ORDER BY master_id"
     ))?;
     let series = stmt
-        .query_map([account], |row| {
-            Ok(SeriesInfo {
-                master_id: row.get(0)?,
-                uid: row.get(1)?,
-                recurrence: row.get(2)?,
-                master: row
-                    .get::<_, Option<String>>(3)?
-                    .as_deref()
-                    .and_then(parse_event)
-                    .map(Box::new),
-                zone: row.get(4)?,
-            })
-        })?
+        .query_map([account], series_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("reading the calendar series")?;
     Ok(series)
+}
+
+/// The series of `account` whose master is `master_id`, when the store has
+/// resolved it.
+pub fn get_series(store: &Store, account: &str, master_id: &str) -> Result<Option<SeriesInfo>> {
+    store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT {SERIES_COLUMNS} FROM {SERIES_TABLE}
+                 WHERE account = ?1 AND master_id = ?2"
+            ),
+            params![account, master_id],
+            series_row,
+        )
+        .optional()
+        .context("reading a calendar series")
 }
 
 fn write_series(conn: &rusqlite::Connection, account: &str, series: &SeriesInfo) -> Result<()> {
@@ -782,19 +812,28 @@ fn write_series(conn: &rusqlite::Connection, account: &str, series: &SeriesInfo)
         .map(serde_json::to_string)
         .transpose()
         .context("serialising a series master")?;
+    let rule = series
+        .recurrence
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serialising a series rule")?;
     conn.execute(
         &format!(
-            "INSERT INTO {SERIES_TABLE} (account, master_id, uid, recurrence, master_json, zone)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO {SERIES_TABLE}
+                (account, master_id, uid, recurrence, recurrence_json, master_json, zone)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (account, master_id) DO UPDATE SET
                 uid = excluded.uid, recurrence = excluded.recurrence,
+                recurrence_json = excluded.recurrence_json,
                 master_json = excluded.master_json, zone = excluded.zone"
         ),
         params![
             account,
             series.master_id,
             series.uid,
-            series.recurrence,
+            series.recurrence.as_ref().map(|rule| rule.rrule()),
+            rule,
             master,
             series.zone
         ],
@@ -828,7 +867,9 @@ pub fn drop_calendar_cache(store: &Store, account: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar_model::{OwnResponse, Sensitivity, ShowAs};
+    use crate::calendar_model::{
+        EventKind, Frequency, OwnResponse, Recurrence, Sensitivity, ShowAs, Weekday,
+    };
     use chrono::TimeZone;
 
     fn open() -> (tempfile::TempDir, Store) {
@@ -865,6 +906,7 @@ mod tests {
             uid: format!("{id}@example.com"),
             recurrence_id: None,
             series_master_id: None,
+            kind: EventKind::Single,
             summary: id.into(),
             time,
             location: None,
@@ -875,12 +917,33 @@ mod tests {
             recurrence: None,
             reminder: None,
             online_meeting_url: None,
+            is_online_meeting: false,
+            online_meeting_provider: None,
             sensitivity: Sensitivity::Normal,
             show_as: ShowAs::Busy,
             cancelled: false,
             is_organizer: false,
             last_modified: Some(utc(1, 8)),
             web_link: None,
+            allow_new_time_proposals: true,
+            response_requested: true,
+            transaction_id: None,
+        }
+    }
+
+    /// Weekly on Wednesday from 4 November, ten times.
+    fn weekly() -> Recurrence {
+        Recurrence {
+            frequency: Frequency::Weekly,
+            interval: 1,
+            weekdays: vec![Weekday::Wednesday],
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: Some(Weekday::Monday),
+            start: Some(day(4)),
+            until: None,
+            count: Some(10),
         }
     }
 
@@ -943,7 +1006,8 @@ mod tests {
             .execute_batch(&format!(
                 "ALTER TABLE {EVENTS_TABLE} DROP COLUMN inherits;
                  ALTER TABLE {SERIES_TABLE} DROP COLUMN master_json;
-                 ALTER TABLE {SERIES_TABLE} DROP COLUMN zone;"
+                 ALTER TABLE {SERIES_TABLE} DROP COLUMN zone;
+                 ALTER TABLE {SERIES_TABLE} DROP COLUMN recurrence_json;"
             ))
             .unwrap();
         ensure_columns(store.conn()).unwrap();
@@ -953,7 +1017,7 @@ mod tests {
         result.series = vec![SeriesInfo {
             master_id: "m".into(),
             uid: "series@example.com".into(),
-            recurrence: None,
+            recurrence: Some(weekly()),
             master: Some(Box::new(timed("m", "a", 2, 9))),
             zone: Some("Europe/Berlin".into()),
         }];
@@ -1147,12 +1211,29 @@ mod tests {
         result.series = vec![SeriesInfo {
             master_id: "m".into(),
             uid: "series@example.com".into(),
-            recurrence: Some("FREQ=WEEKLY".into()),
+            recurrence: Some(weekly()),
             master: Some(Box::new(timed("m", "a", 2, 9))),
             zone: Some("Europe/Berlin".into()),
         }];
         apply_sync(&store, "evoqs", "a", &result, november(), utc(1, 0)).unwrap();
         assert_eq!(load_series(&store, "evoqs").unwrap(), result.series);
+        assert_eq!(
+            get_series(&store, "evoqs", "m").unwrap().as_ref(),
+            result.series.first()
+        );
+        assert_eq!(get_series(&store, "evoqs", "other").unwrap(), None);
+        let rrule: Option<String> = store
+            .conn()
+            .query_row(
+                &format!("SELECT recurrence FROM {SERIES_TABLE} WHERE master_id = 'm'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rrule.as_deref(),
+            Some("FREQ=WEEKLY;BYDAY=WE;WKST=MO;COUNT=10")
+        );
 
         drop_calendar_cache(&store, "evoqs").unwrap();
         assert!(list_calendars(&store, "evoqs").unwrap().is_empty());

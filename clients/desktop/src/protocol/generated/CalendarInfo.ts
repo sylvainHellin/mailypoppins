@@ -32,4 +32,11 @@ visible: boolean,
  * The account's calendar backend as the configuration spells it
  * (`graph`, `ews`, `caldav`, `none`); `none` on the invitation calendar.
  */
-backend: string, };
+backend: string,
+/**
+ * What the backend lets a client do beyond reading and answering, each
+ * listed once the daemon serves it there: `write`, `online-meeting`,
+ * `propose-time`, `free-busy`, `server-reminders`. Empty on the
+ * invitation calendar.
+ */
+features: Array<string>, };

@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 
 use crate::calendar_backend::fake::FakeCalendarBackend;
 use crate::calendar_model::{
-    Attendee, AttendeeRole, Calendar, Event, EventTime, OwnResponse, Person, ResponseStatus,
-    Sensitivity, ShowAs,
+    Attendee, AttendeeRole, Calendar, Event, EventKind, EventTime, OwnResponse, Person,
+    ResponseStatus, Sensitivity, ShowAs,
 };
 use crate::calendar_sync::sync_account;
 use crate::config::{AccountConfig, CalendarBackendKind};
@@ -213,6 +213,7 @@ fn server_event(id: &str, calendar: &str, summary: &str, time: EventTime) -> Eve
         uid: format!("{id}@example.com"),
         recurrence_id: None,
         series_master_id: None,
+        kind: EventKind::Single,
         summary: summary.into(),
         time,
         location: None,
@@ -223,12 +224,17 @@ fn server_event(id: &str, calendar: &str, summary: &str, time: EventTime) -> Eve
         recurrence: None,
         reminder: None,
         online_meeting_url: None,
+        is_online_meeting: false,
+        online_meeting_provider: None,
         sensitivity: Sensitivity::Normal,
         show_as: ShowAs::Busy,
         cancelled: false,
         is_organizer: false,
         last_modified: None,
         web_link: None,
+        allow_new_time_proposals: true,
+        response_requested: true,
+        transaction_id: None,
     }
 }
 
@@ -259,6 +265,7 @@ fn server() -> FakeCalendarBackend {
         email: "sylvain@example.com".into(),
         role: AttendeeRole::Required,
         status: ResponseStatus::NeedsAction,
+        proposed_time: None,
     }];
     meeting.own_response = OwnResponse::NeedsAction;
     let holiday = server_event(

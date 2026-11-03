@@ -19,7 +19,7 @@
 //!                             settles {account, selector, response, subject,
 //!                                      organizer, message_id, delivered}
 //! event.get               {account, event}
-//!                             -> {account, event: CalendarEvent}
+//!                             -> {account, event: CalendarEvent, series?}
 //! event.respond           {account, event, response, comment?, send_response?}
 //!                             -> {operation_id}
 //!                             settles EventRespondResult
@@ -241,6 +241,10 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
         let store = open_store(name)?;
         if has_backend(account) {
             let backend = account.calendar_backend().as_str();
+            let features: Vec<String> = crate::calendar_backend::features(account)
+                .into_iter()
+                .map(|feature| feature.as_str().to_string())
+                .collect();
             let listed = cache::list_calendars(&store, name).map_err(|e| server_error(name, &e))?;
             calendars.extend(listed.into_iter().map(|calendar| CalendarInfo {
                 account: calendar.account,
@@ -251,6 +255,7 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
                 can_edit: calendar.can_edit,
                 visible: calendar.visible,
                 backend: backend.to_string(),
+                features: features.clone(),
             }));
         }
         if crate::calendar_view::has_invitations(&store, name) {
@@ -266,6 +271,7 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
                 backend: crate::config::CalendarBackendKind::None
                     .as_str()
                     .to_string(),
+                features: Vec::new(),
             });
         }
     }
@@ -326,7 +332,7 @@ pub fn view(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
 
 /// The `result` of `event.get`: a cached server event, or an invitation
 /// mail's (`imip:<row_id>`), whose floating times are read in the daemon's
-/// zone.
+/// zone, with the series of an occurrence.
 pub fn event_get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     only_params("event.get", params, &["account", "event"])?;
     let name = string_param(params, "account")?;
@@ -335,10 +341,13 @@ pub fn event_get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, Rp
     let found = crate::calendar_view::get(account, &id, local_zone())
         .map_err(|e| server_error(&name, &e))?
         .ok_or_else(|| invalid_params(format!("{name} has no event {id}")))?;
+    let series =
+        crate::calendar_view::series(account, &found.event).map_err(|e| server_error(&name, &e))?;
     let event = found.to_wire().map_err(|e| internal(format!("{e:#}")))?;
     to_value(&EventGetResult {
         account: name,
         event,
+        series,
     })
 }
 

@@ -5,28 +5,46 @@
     "events": [
       {
         "account": "evoqs",
+        "allow_new_time_proposals": true,
         "attendees": [
           {
             "email": "sylvain@example.com",
             "name": "Sylvain",
             "role": "required",
             "status": "needs-action"
+          },
+          {
+            "email": "grace@example.com",
+            "name": "Grace Hopper",
+            "proposed_time": {
+              "end": "2026-11-04T10:00:00Z",
+              "start": "2026-11-04T09:00:00Z"
+            },
+            "role": "optional",
+            "status": "tentative"
           }
         ],
         "calendar": "AAMkADcal1",
         "cancelled": false,
         "id": "AAMkADev1",
+        "is_online_meeting": true,
         "is_organizer": false,
+        "kind": "exception",
         "last_modified": "2026-10-30T08:00:00Z",
         "location": "Room 1",
+        "online_meeting_provider": "teams-for-business",
         "online_meeting_url": "https://teams.microsoft.com/l/meetup-join/abc",
         "organizer": {
           "email": "ada@example.com",
           "name": "Ada Lovelace"
         },
         "own_response": "needs-action",
+        "recurrence": "Weekly on Tuesday",
+        "recurrence_id": "2026-11-03T08:00:00Z",
         "reminder": 15,
+        "response_requested": true,
         "sensitivity": "normal",
+        "series_master_id": "AAMkADmaster1",
         "show_as": "busy",
         "summary": "Project review",
         "time": {
@@ -40,6 +58,7 @@
       },
       {
         "account": "perso",
+        "allow_new_time_proposals": true,
         "attendees": [
           {
             "email": "perso@example.com",
@@ -50,12 +69,15 @@
         "calendar": "imip",
         "cancelled": false,
         "id": "imip:42",
+        "is_online_meeting": false,
         "is_organizer": false,
+        "kind": "single",
         "location": "Room 4.12",
         "organizer": {
           "email": "chair@tum.de"
         },
         "own_response": "needs-action",
+        "response_requested": true,
         "sensitivity": "normal",
         "show_as": "busy",
         "source": {

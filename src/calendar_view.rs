@@ -23,13 +23,14 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use log::warn;
 use mp_protocol::calendar::{
-    AgendaEvent, CalendarEvent, CalendarEventSource, IMIP_CALENDAR_ID, IMIP_EVENT_PREFIX,
+    AgendaEvent, CalendarEvent, CalendarEventSource, CalendarSeries, IMIP_CALENDAR_ID,
+    IMIP_EVENT_PREFIX,
 };
 
 use crate::calendar_backend::has_backend;
 use crate::calendar_model::{
-    Attendee, AttendeeRole, CalendarWindow, Event, EventKey, EventTime, OwnResponse, Person,
-    ResponseStatus, Sensitivity, ShowAs,
+    Attendee, AttendeeRole, CalendarWindow, Event, EventKey, EventKind, EventTime, OwnResponse,
+    Person, ResponseStatus, Sensitivity, ShowAs,
 };
 use crate::config::AccountConfig;
 use crate::store::{calendar as cache, BlobStore, Store};
@@ -187,6 +188,31 @@ pub fn get(account: &AccountConfig, id: &str, viewer: Tz) -> Result<Option<Sourc
     )
 }
 
+/// The series `event` is an occurrence of, as `event.get` answers it: the
+/// master's id, with its summary and rule when the series cache holds them.
+/// `None` for an event in no series.
+pub fn series(account: &AccountConfig, event: &Event) -> Result<Option<CalendarSeries>> {
+    let Some(master_id) = event.series_master_id.as_deref() else {
+        return Ok(None);
+    };
+    let store = open_store(&account.name)?;
+    let cached = cache::get_series(&store, &account.name, master_id)?;
+    let recurrence = cached
+        .as_ref()
+        .and_then(|series| series.recurrence.as_ref())
+        .map(|rule| serde_json::to_value(rule).and_then(serde_json::from_value))
+        .transpose()
+        .context("a series rule in its wire form")?;
+    Ok(Some(CalendarSeries {
+        master_id: master_id.to_string(),
+        summary: cached
+            .and_then(|series| series.master)
+            .map(|master| master.summary)
+            .filter(|summary| !summary.trim().is_empty()),
+        recurrence,
+    }))
+}
+
 /// Whether `account` has any invitation mail, which gives it the virtual
 /// invitation calendar in `calendar.list`.
 pub fn has_invitations(store: &Store, account: &str) -> bool {
@@ -291,6 +317,16 @@ pub fn imip_event(row: &AgendaEvent, account: &str, viewer: Tz) -> Option<Event>
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| row.subject.clone());
+    let recurrence = Some(fm.recurrence.clone()).filter(|r| !r.is_empty());
+    // A mail about one occurrence names its RECURRENCE-ID, and a mail about
+    // the whole series its rule.
+    let kind = if fm.recurrence_id.is_some() {
+        EventKind::Occurrence
+    } else if recurrence.is_some() {
+        EventKind::SeriesMaster
+    } else {
+        EventKind::Single
+    };
     Some(Event {
         account: account.to_string(),
         calendar: IMIP_CALENDAR_ID.to_string(),
@@ -302,6 +338,7 @@ pub fn imip_event(row: &AgendaEvent, account: &str, viewer: Tz) -> Option<Event>
             .unwrap_or_else(|| format!("row:{}", row.row_id)),
         recurrence_id: fm.recurrence_id.clone(),
         series_master_id: None,
+        kind,
         summary,
         time,
         location: fm.location.clone().filter(|l| !l.is_empty()),
@@ -328,18 +365,24 @@ pub fn imip_event(row: &AgendaEvent, account: &str, viewer: Tz) -> Option<Event>
                     "declined" => ResponseStatus::Declined,
                     _ => ResponseStatus::NeedsAction,
                 },
+                proposed_time: None,
             })
             .collect(),
         own_response,
-        recurrence: Some(fm.recurrence.clone()).filter(|r| !r.is_empty()),
+        recurrence,
         reminder: None,
         online_meeting_url: None,
+        is_online_meeting: false,
+        online_meeting_provider: None,
         sensitivity: Sensitivity::Normal,
         show_as,
         cancelled: row.cancelled,
         is_organizer: row.is_organizer,
         last_modified: None,
         web_link: None,
+        allow_new_time_proposals: true,
+        response_requested: true,
+        transaction_id: None,
     })
 }
 

@@ -33,7 +33,12 @@ recurrence_id?: string,
 /**
  * The server id of the series master, on an occurrence.
  */
-series_master_id?: string, summary: string, time: CalendarEventTime, location?: string,
+series_master_id?: string,
+/**
+ * `single`, `series-master`, `occurrence`, or `exception` for an
+ * occurrence changed apart from its series.
+ */
+kind: string, summary: string, time: CalendarEventTime, location?: string,
 /**
  * The description as plain text.
  */
@@ -44,14 +49,24 @@ body?: string, organizer?: CalendarPerson, attendees: Array<CalendarAttendee>,
  */
 own_response: string,
 /**
- * The `RRULE` of a series master; on an invitation mail's event, the
- * human-readable summary the mail's agenda row carried.
+ * The series rule in words (`Weekly on Wednesday`), on an occurrence and
+ * a series master; on an invitation mail's event, the summary the mail's
+ * agenda row carried.
  */
 recurrence?: string,
 /**
  * Minutes before the start a reminder fires.
  */
 reminder?: number, online_meeting_url?: string,
+/**
+ * Whether the event is an online meeting, which a server can say before
+ * its join link exists.
+ */
+is_online_meeting: boolean,
+/**
+ * `teams-for-business`, `skype-for-business` or `skype-for-consumer`.
+ */
+online_meeting_provider?: string,
 /**
  * `normal`, `personal`, `private` or `confidential`.
  */
@@ -68,6 +83,19 @@ last_modified?: string,
  * The event in the server's own web client.
  */
 web_link?: string,
+/**
+ * Whether the organizer lets attendees propose a new time.
+ */
+allow_new_time_proposals: boolean,
+/**
+ * Whether the organizer asks for an answer.
+ */
+response_requested: boolean,
+/**
+ * The id of the create that made the event, when an app created it
+ * with one.
+ */
+transaction_id?: string,
 /**
  * The invitation mail an `imip:` event was derived from.
  */

@@ -59,13 +59,16 @@ describe("the Calendar view", () => {
     expect(c).toHaveTextContent("OrganizerKim Lee <kim@example.com>");
     expect(c).toHaveTextContent("Your responseNo response yet");
     expect(c).toHaveTextContent("Walk through the new reader layout before the release.");
+    expect(c).toHaveTextContent("OnlineTeams meeting");
+    expect(c).not.toHaveTextContent("Repeats");
+    expect(c).not.toHaveTextContent("Proposals");
     expect(within(c).getByRole("button", { name: "Join the meeting" })).toBeInTheDocument();
     expect(within(c).queryByRole("button", { name: "Open mail" })).toBeNull();
     const attendees = within(c).getByRole("list", { name: "Attendees" });
     expect(within(attendees).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
       "Kim Lee <kim@example.com>Accepted",
       "Me <me@example.com>No response yet",
-      "Robin Roe <robin@example.com> (optional)Tentative",
+      "Robin Roe <robin@example.com> (optional)Proposes Wed 14 Oct 2099, 14:00 to 15:30Tentative",
     ]);
   });
 
@@ -77,7 +80,7 @@ describe("the Calendar view", () => {
     expect(card()).toHaveTextContent("Calendarwork/Invitations");
     await user.keyboard("G");
     expect(cursorEvent()).toBe("AAMkAD-weekly-20991020");
-    expect(card()).toHaveTextContent("RepeatsFREQ=WEEKLY;BYDAY=TU");
+    expect(card()).toHaveTextContent("RepeatsWeekly on Tuesday, this occurrence changed");
     await user.keyboard("k");
     expect(cursorEvent()).toBe("AAMkAD-holiday");
     expect(card()).toHaveTextContent("WhenFri 16 Oct 2099, all day");

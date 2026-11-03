@@ -22,7 +22,9 @@ use std::future::Future;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
-use crate::calendar_model::{Calendar, CalendarWindow, Event, EventId};
+use crate::calendar_model::{
+    Calendar, CalendarFeature, CalendarWindow, Event, EventId, Recurrence,
+};
 use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
 
 use fake::FakeCalendarBackend;
@@ -54,9 +56,9 @@ pub struct SeriesInfo {
     pub master_id: EventId,
     /// The iCalendar `UID` of the series.
     pub uid: String,
-    /// The series rule as `RRULE` text, when the backend could express it.
+    /// The series rule, when the backend could express it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recurrence: Option<String>,
+    pub recurrence: Option<Recurrence>,
     /// The series master as an event, when the backend read one: its
     /// summary, all-day flag, people and free/busy are what a trimmed
     /// occurrence shows.
@@ -278,6 +280,18 @@ pub fn has_backend(account: &AccountConfig) -> bool {
         choose_backend(account),
         Ok(BackendChoice::Fake(_) | BackendChoice::Graph)
     )
+}
+
+/// What `account`'s calendar backend lets a client do beyond reading and
+/// answering ([`CalendarFeature`]), decided without a network call: a
+/// feature is listed once this build serves it on that backend, and an
+/// account without a backend, or with one this build refuses, has none.
+pub fn features(account: &AccountConfig) -> Vec<CalendarFeature> {
+    match choose_backend(account) {
+        Ok(BackendChoice::Fake(fake)) => fake.features(),
+        Ok(BackendChoice::Graph) => graph::FEATURES.to_vec(),
+        Ok(BackendChoice::None) | Err(_) => Vec::new(),
+    }
 }
 
 /// The scope check a write runs before an operation starts: the fake's
