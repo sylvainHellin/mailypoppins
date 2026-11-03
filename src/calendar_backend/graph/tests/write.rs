@@ -145,20 +145,27 @@ async fn a_minimal_create_leaves_the_defaults_to_the_server() {
     assert_eq!(sent[1].body, Some(expected));
 }
 
-/// A zone the CLDR table has no Windows name for goes out as UTC with the
+/// A regional zone (Vienna) and the current spelling of one CLDR names the
+/// legacy way (Kolkata) go out as their wall time under their Windows name;
+/// a zone the CLDR table has no Windows name for goes out as UTC with the
 /// instants exact, as does a UTC event; an all-day event goes out as its
 /// midnights, the end exclusive.
 #[tokio::test]
 async fn times_go_out_in_their_windows_zone_or_in_utc() {
-    let fetch = (0..3).fold(ScriptedFetch::default(), |fetch, _| {
+    let fetch = (0..5).fold(ScriptedFetch::default(), |fetch, _| {
         fetch.route(&format!("{BASE}/me/calendars/"), status(201, &created("x")))
     });
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
     let cal = calendar("cal", true);
-    let vienna = EventTime::timed(utc(3, 9, 30), utc(3, 10, 0), "Europe/Vienna").unwrap();
-    let in_utc = EventTime::timed(utc(3, 9, 30), utc(3, 10, 0), "UTC").unwrap();
-    let all_day = EventTime::all_day(day(5), day(7)).unwrap();
-    for (i, time) in [vienna, in_utc, all_day].into_iter().enumerate() {
+    let timed = |zone| EventTime::timed(utc(3, 9, 30), utc(3, 10, 0), zone).unwrap();
+    let times = [
+        timed("Antarctica/Troll"),
+        timed("UTC"),
+        EventTime::all_day(day(5), day(7)).unwrap(),
+        timed("Europe/Vienna"),
+        timed("Asia/Kolkata"),
+    ];
+    for (i, time) in times.into_iter().enumerate() {
         let input = EventInput::new("Slot", time);
         backend
             .create_event(&cal, &input, &format!("tx-{i}"))
@@ -185,6 +192,24 @@ async fn times_go_out_in_their_windows_zone_or_in_utc() {
         json!({"dateTime": "2026-11-07T00:00:00", "timeZone": "UTC"})
     );
     assert_eq!(body["isAllDay"], true);
+    let zoned = |request: &Sent| {
+        let body = request.body.as_ref().unwrap();
+        (body["start"].clone(), body["end"].clone())
+    };
+    assert_eq!(
+        zoned(&sent[3]),
+        (
+            json!({"dateTime": "2026-11-03T10:30:00", "timeZone": "W. Europe Standard Time"}),
+            json!({"dateTime": "2026-11-03T11:00:00", "timeZone": "W. Europe Standard Time"}),
+        )
+    );
+    assert_eq!(
+        zoned(&sent[4]),
+        (
+            json!({"dateTime": "2026-11-03T15:00:00", "timeZone": "India Standard Time"}),
+            json!({"dateTime": "2026-11-03T15:30:00", "timeZone": "India Standard Time"}),
+        )
+    );
 }
 
 /// A patch sends only what it names: an empty one is `{}`, a cleared

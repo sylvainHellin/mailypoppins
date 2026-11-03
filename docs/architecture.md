@@ -517,7 +517,9 @@ A create or an update answers `Written`: the event as the server holds it, an oc
 
 `src/calendar_backend/graph/write.rs` sends `POST /me/calendars/{id}/events` with the `transactionId`, `PATCH /me/events/{id}` with only the fields the patch names, `POST /me/events/{id}/cancel` with the comment, `DELETE /me/events/{id}`, and `dismissReminder` and `snoozeReminder` on the event.
 `GraphFetch` gains `patch` and `delete`, and all four verbs send `Prefer: IdType="ImmutableId"`, which a test pins on the production requests.
-A timed event goes out as its wall time plus the Windows name of its zone, which `windows_zones::iana_to_windows_zone` reads from the CLDR table in reverse; a zone the table lacks goes out as UTC with the instants exact, and an all-day event as its midnights in UTC.
+A timed event goes out as its wall time plus the Windows name of its zone, which `windows_zones::iana_to_windows_zone` reads from a second generated table, `IANA_ZONES`.
+That table maps every IANA zone CLDR lists under a Windows zone for any territory, so `Europe/Vienna` and `America/Toronto` resolve as well as each zone's territory 001 entry, plus every alias CLDR's `bcp47/timezone.xml` gives such a zone, so the current spellings a system names (`Asia/Kolkata`, `Europe/Kyiv`) resolve where CLDR maps the legacy ones (`Asia/Calcutta`, `Europe/Kiev`).
+A zone neither lists (`Antarctica/Troll`) goes out as UTC with the instants exact, and an all-day event as its midnights in UTC.
 A cancel, a delete, a dismiss or a snooze of an event Graph answers 404 for counts as done; an update of one fails.
 The fake applies every write to its events, answers a repeated transaction id with the event the first create made, and records each write, appending it to `write_log` when the spec names one.
 

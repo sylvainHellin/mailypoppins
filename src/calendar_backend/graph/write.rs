@@ -11,8 +11,9 @@
 //!   `snoozeReminder` with the new reminder time.
 //!
 //! Each time goes out as the event's wall time plus the Windows name of its
-//! zone, the form Graph takes, through the CLDR table read in reverse; a zone
-//! the table lacks goes out as UTC, with the instants exact. An all-day event
+//! zone, the form Graph takes, through CLDR's IANA-to-Windows table (every
+//! territory's zones and their aliases); a zone the table lacks goes out as
+//! UTC, with the instants exact. An all-day event
 //! goes out as its midnights in UTC, which Graph keeps as the dates.
 //!
 //! A cancel, a delete, a dismiss or a snooze of an event Graph no longer has
