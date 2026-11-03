@@ -374,6 +374,7 @@ pub fn calendar_event(
         uid: format!("{id}@example.org"),
         recurrence_id: None,
         series_master_id: None,
+        kind: "single".into(),
         summary: summary.into(),
         time,
         location: None,
@@ -384,12 +385,17 @@ pub fn calendar_event(
         recurrence: None,
         reminder: None,
         online_meeting_url: None,
+        is_online_meeting: false,
+        online_meeting_provider: None,
         sensitivity: "normal".into(),
         show_as: "busy".into(),
         cancelled: false,
         is_organizer: false,
         last_modified: None,
         web_link: None,
+        allow_new_time_proposals: true,
+        response_requested: true,
+        transaction_id: None,
         source: None,
     }
 }
@@ -404,14 +410,15 @@ pub fn timed(start: &str, end: &str) -> CalendarEventTime {
 }
 
 /// The frozen calendar: the week of Mon 2026-08-03 with today on the
-/// Tuesday, in Europe/Berlin. A timed meeting with attendees, two occurrences
-/// of a recurring jour fixe, an invitation mail's event overlapping the first
-/// of them, a two-day all-day holiday and a cancelled meeting, over the
-/// calendars of two accounts, one of them hidden. The agenda layout, cursor
-/// on the first row.
+/// Tuesday, in Europe/Berlin. A timed meeting with attendees, one of whom
+/// proposed another time, two occurrences of a recurring Teams jour fixe (the
+/// second moved apart from its series), an invitation mail's event
+/// overlapping the first of them, a two-day all-day holiday and a cancelled
+/// meeting, over the calendars of two accounts, one of them hidden. The
+/// agenda layout, cursor on the first row.
 pub fn calendar_fixture() -> App {
     use mp_protocol::calendar::{
-        CalendarAttendee, CalendarEventSource, CalendarPerson, IMIP_CALENDAR_ID,
+        CalendarAttendee, CalendarEventSource, CalendarPerson, CalendarTimeSlot, IMIP_CALENDAR_ID,
     };
     let mut app = mail_fixture();
     app.view = View::Calendar;
@@ -425,6 +432,7 @@ pub fn calendar_fixture() -> App {
         email: email.into(),
         role: "required".into(),
         status: status.into(),
+        proposed_time: None,
     };
 
     let mut handover = calendar_event(
@@ -436,10 +444,12 @@ pub fn calendar_fixture() -> App {
     );
     handover.location = Some("Raum 2.14".into());
     handover.organizer = Some(person("planung@example.org"));
-    handover.attendees = vec![
-        attendee("Sylvain", "sylvain@example.org", "accepted"),
-        attendee("Ada", "ada@example.org", "tentative"),
-    ];
+    let mut ada = attendee("Ada", "ada@example.org", "tentative");
+    ada.proposed_time = Some(CalendarTimeSlot {
+        start: "2026-08-03T09:00:00Z".into(),
+        end: "2026-08-03T10:00:00Z".into(),
+    });
+    handover.attendees = vec![attendee("Sylvain", "sylvain@example.org", "accepted"), ada];
     handover.own_response = "accepted".into();
     handover.body = Some("Bitte Helm mitbringen.".into());
     handover.web_link = Some("https://outlook.office.com/calendar/item/ev-handover".into());
@@ -449,9 +459,13 @@ pub fn calendar_fixture() -> App {
             calendar_event("evoqs", "cal-main", id, "Jour fixe", timed(start, end));
         occurrence.recurrence_id = Some(recurrence_id.into());
         occurrence.series_master_id = Some("ev-jour".into());
+        occurrence.kind = "occurrence".into();
+        occurrence.recurrence = Some("Weekly on Tuesday, Thursday".into());
         occurrence.organizer = Some(person("chef@example.org"));
         occurrence.own_response = "needs-action".into();
         occurrence.online_meeting_url = Some("https://teams.example.org/l/jour-fixe".into());
+        occurrence.is_online_meeting = true;
+        occurrence.online_meeting_provider = Some("teams-for-business".into());
         occurrence
     };
     let jour_tuesday = jour(
@@ -460,12 +474,13 @@ pub fn calendar_fixture() -> App {
         "2026-08-04T09:00:00Z",
         "2026-08-04T08:00:00Z",
     );
-    let jour_thursday = jour(
+    let mut jour_thursday = jour(
         "ev-jour-2",
         "2026-08-06T08:00:00Z",
         "2026-08-06T09:00:00Z",
         "2026-08-06T08:00:00Z",
     );
+    jour_thursday.kind = "exception".into();
 
     let mut colloquium = calendar_event(
         "perso",
@@ -521,6 +536,7 @@ pub fn calendar_fixture() -> App {
                 "graph"
             }
             .into(),
+            features: Vec::new(),
         };
 
     let cv = &mut app.calendar_view;

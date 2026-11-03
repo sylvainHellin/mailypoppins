@@ -37,8 +37,8 @@ use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::RpcError;
 
 use support::calendar_fixture::{
-    at, day, fake_spec_with, seed, seed_series, series_occurrences, IMIP, LOCAL_UID, MEETING_UID,
-    SERIES_UID, SERVER,
+    at, day, fake_spec_with, seed, seed_series, series_occurrences, FAKE_FEATURES, IMIP, LOCAL_UID,
+    MEETING_UID, SERIES_UID, SERVER,
 };
 use support::parity::{socket_path, DaemonFixture};
 use support::read_fixture;
@@ -265,6 +265,11 @@ async fn calendar_list_shows_the_fake_calendars_and_the_invitation_calendars() {
     assert_eq!(listed["calendars"][0]["name"], "Calendar");
     assert_eq!(listed["calendars"][0]["is_default"], true);
     assert_eq!(listed["calendars"][3]["name"], "Invitations");
+    // The backend's features on its calendars, none on an invitation one.
+    assert_eq!(listed["calendars"][0]["features"], json!(FAKE_FEATURES));
+    assert_eq!(listed["calendars"][1]["features"], json!(FAKE_FEATURES));
+    assert_eq!(listed["calendars"][2]["features"], json!([]));
+    assert_eq!(listed["calendars"][3]["features"], json!([]));
 
     let one = call(&mut conn, "calendar.list", json!({"account": IMIP})).await;
     assert_eq!(one["calendars"].as_array().unwrap().len(), 1);
@@ -381,6 +386,33 @@ async fn a_series_invitation_gives_way_to_the_servers_occurrences() {
     let series: Vec<&Value> = events.iter().filter(|e| e["uid"] == SERIES_UID).collect();
     assert_eq!(series.len(), 2);
     assert!(series.iter().all(|e| e.get("source").is_none()));
+    let first = series[0];
+    assert_eq!(first["kind"], "occurrence");
+    assert_eq!(first["recurrence"], "Weekly (2 times)");
+    assert_eq!(first["is_online_meeting"], true);
+    assert_eq!(first["online_meeting_provider"], "teams-for-business");
+    assert_eq!(first["allow_new_time_proposals"], true);
+    assert_eq!(events[0]["kind"], "single", "{}", events[0]);
+
+    // event.get answers an occurrence with its series from the cache.
+    let got = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-series-1"}),
+    )
+    .await;
+    assert_eq!(got["series"]["master_id"], "ev-series");
+    assert_eq!(got["series"]["summary"], "Weekly sync");
+    let rule = &got["series"]["recurrence"];
+    assert_eq!(rule["frequency"], "weekly");
+    assert_eq!(rule["count"], 2);
+    let single = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-meeting"}),
+    )
+    .await;
+    assert!(single.get("series").is_none(), "{single}");
 }
 
 /// An account without a backend views exactly its agenda: the one invitation

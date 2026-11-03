@@ -212,6 +212,7 @@ pub fn view_params(
 // ---------------------------------------------------------------------------
 
 pub use mp_client::format::{calendar_names, calendar_tag, response_mark, CalendarNames};
+use mp_client::format::{online_meeting_line, series_line, time_span};
 
 fn instant(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
@@ -468,22 +469,30 @@ pub fn render_event(event: &CalendarEvent, zone: Tz, names: &CalendarNames) -> S
             attendee.status
         );
         field(if n == 0 { "attendees" } else { "" }, &line);
+        if let Some(slot) = &attendee.proposed_time {
+            field(
+                "",
+                &format!("  proposes {}", time_span(&slot.start, &slot.end, &zone)),
+            );
+        }
     }
-    field(
-        "response",
-        &format!(
-            "{} {}",
-            response_mark(&event.own_response),
-            event.own_response
-        ),
+    let mut response = format!(
+        "{} {}",
+        response_mark(&event.own_response),
+        event.own_response
     );
-    if let Some(recurrence) = event.recurrence.as_deref() {
-        field("recurrence", recurrence);
-    } else if event.series_master_id.is_some() {
-        field("recurrence", "one occurrence of a series");
+    if !event.response_requested && !event.is_organizer {
+        response.push_str(" (no answer requested)");
     }
-    if let Some(url) = event.online_meeting_url.as_deref() {
-        field("online", url);
+    field("response", &response);
+    if !event.allow_new_time_proposals {
+        field("proposals", "new times not accepted");
+    }
+    if let Some(series) = series_line(event) {
+        field("recurrence", &series);
+    }
+    if let Some(online) = online_meeting_line(event) {
+        field("online", &online);
     }
     if let Some(link) = event.web_link.as_deref() {
         field("link", link);
@@ -530,6 +539,7 @@ mod tests {
             uid: format!("{id}@example.com"),
             recurrence_id: None,
             series_master_id: None,
+            kind: "single".into(),
             summary: summary.into(),
             time,
             location: None,
@@ -540,12 +550,17 @@ mod tests {
             recurrence: None,
             reminder: None,
             online_meeting_url: None,
+            is_online_meeting: false,
+            online_meeting_provider: None,
             sensitivity: "normal".into(),
             show_as: "busy".into(),
             cancelled: false,
             is_organizer: false,
             last_modified: None,
             web_link: None,
+            allow_new_time_proposals: true,
+            response_requested: true,
+            transaction_id: None,
             source: None,
         }
     }
@@ -575,6 +590,7 @@ mod tests {
             can_edit: true,
             visible: true,
             backend: "graph".into(),
+            features: Vec::new(),
         }])
     }
 
@@ -749,6 +765,7 @@ mod tests {
                 can_edit: true,
                 visible: true,
                 backend: "graph".into(),
+                features: Vec::new(),
             },
             CalendarInfo {
                 account: "perso".into(),
@@ -759,6 +776,7 @@ mod tests {
                 can_edit: false,
                 visible: false,
                 backend: "none".into(),
+                features: Vec::new(),
             },
         ];
         assert_eq!(
@@ -788,12 +806,14 @@ mod tests {
                 email: "sylvain@example.com".into(),
                 role: "required".into(),
                 status: "needs-action".into(),
+                proposed_time: None,
             },
             CalendarAttendee {
                 name: Some("Bob".into()),
                 email: "bob@example.com".into(),
                 role: "optional".into(),
                 status: "accepted".into(),
+                proposed_time: None,
             },
         ];
         meeting.own_response = "needs-action".into();
@@ -822,6 +842,49 @@ mod tests {
         let holiday = event("ev-2", "Holiday", all_day("2026-07-10", "2026-07-12"));
         assert!(render_event(&holiday, berlin(), &names())
             .contains("when        Fri 2026-07-10 to Sat 2026-07-11, all day\n"));
+    }
+
+    /// A changed occurrence of a Teams series whose organizer refuses new
+    /// times and asks for no answer, with an attendee's proposal read in the
+    /// viewer's zone.
+    #[test]
+    fn the_event_card_shows_the_series_the_meeting_and_the_proposals() {
+        let mut meeting = event(
+            "ev-1",
+            "Jour fixe",
+            timed("2026-07-08T07:00:00Z", "2026-07-08T08:00:00Z"),
+        );
+        meeting.kind = "exception".into();
+        meeting.series_master_id = Some("ev-series".into());
+        meeting.recurrence = Some("Weekly on Wednesday".into());
+        meeting.is_online_meeting = true;
+        meeting.online_meeting_provider = Some("teams-for-business".into());
+        meeting.online_meeting_url = Some("https://teams.example/l/jf".into());
+        meeting.allow_new_time_proposals = false;
+        meeting.response_requested = false;
+        meeting.own_response = "needs-action".into();
+        meeting.attendees = vec![CalendarAttendee {
+            name: Some("Bob".into()),
+            email: "bob@example.com".into(),
+            role: "required".into(),
+            status: "tentative".into(),
+            proposed_time: Some(mp_protocol::calendar::CalendarTimeSlot {
+                start: "2026-07-09T12:00:00Z".into(),
+                end: "2026-07-09T13:00:00Z".into(),
+            }),
+        }];
+        let card = render_event(&meeting, berlin(), &names());
+        assert!(
+            card.contains(
+                "  attendees   Bob <bob@example.com>  required, tentative\n\
+                 \x20               proposes Thu 2026-07-09 14:00-15:00\n\
+                 \x20 response    ? needs-action (no answer requested)\n\
+                 \x20 proposals   new times not accepted\n\
+                 \x20 recurrence  Weekly on Wednesday, this occurrence changed\n\
+                 \x20 online      Teams meeting  https://teams.example/l/jf\n"
+            ),
+            "{card}"
+        );
     }
 
     #[test]

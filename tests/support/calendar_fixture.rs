@@ -12,9 +12,10 @@ use std::path::Path;
 use chrono::{DateTime, Duration as Days, NaiveTime, Utc};
 use serde_json::json;
 
+use mailypoppins::calendar_backend::SeriesInfo;
 use mailypoppins::calendar_model::{
-    Attendee, AttendeeRole, Calendar, Event, EventTime, OwnResponse, Person, ResponseStatus,
-    Sensitivity, ShowAs,
+    Attendee, AttendeeRole, Calendar, Event, EventKind, EventTime, Frequency,
+    OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus, Sensitivity, ShowAs,
 };
 
 use super::read_fixture;
@@ -98,6 +99,7 @@ pub fn event(id: &str, calendar: &str, uid: &str, summary: &str, time: EventTime
         uid: uid.into(),
         recurrence_id: None,
         series_master_id: None,
+        kind: EventKind::Single,
         summary: summary.into(),
         time,
         location: None,
@@ -108,12 +110,17 @@ pub fn event(id: &str, calendar: &str, uid: &str, summary: &str, time: EventTime
         recurrence: None,
         reminder: None,
         online_meeting_url: None,
+        is_online_meeting: false,
+        online_meeting_provider: None,
         sensitivity: Sensitivity::Normal,
         show_as: ShowAs::Busy,
         cancelled: false,
         is_organizer: false,
         last_modified: None,
         web_link: None,
+        allow_new_time_proposals: true,
+        response_requested: true,
+        transaction_id: None,
     }
 }
 
@@ -142,6 +149,7 @@ pub fn fake_spec_with(log: &Path, missing_scope: bool, extra: Vec<Event>) -> Str
         email: "sylvain@example.com".into(),
         role: AttendeeRole::Required,
         status: ResponseStatus::NeedsAction,
+        proposed_time: None,
     }];
     meeting.own_response = OwnResponse::NeedsAction;
     let holiday = event(
@@ -158,6 +166,8 @@ pub fn fake_spec_with(log: &Path, missing_scope: bool, extra: Vec<Event>) -> Str
         "log": log.to_string_lossy(),
         "missing_scope": missing_scope,
         "message_events": {INVITE_GRAPH_ID: "ev-meeting"},
+        "features": FAKE_FEATURES,
+        "series": [series_info()],
     })
     .to_string()
 }
@@ -188,9 +198,48 @@ fn request_ics_with(
     .into_bytes()
 }
 
+/// What the fake claims to serve, which `calendar.list` reports on its
+/// calendars.
+pub const FAKE_FEATURES: [&str; 2] = ["write", "online-meeting"];
+
+/// The weekly series of [`series_occurrences`] as the fake's baseline
+/// resolves it: its master, a Teams meeting, and its rule of two weeks.
+pub fn series_info() -> SeriesInfo {
+    let start = at(10, 8);
+    let mut master = event(
+        "ev-series",
+        "cal-main",
+        SERIES_UID,
+        "Weekly sync",
+        EventTime::timed(start, start + Days::hours(1), "Europe/Berlin").unwrap(),
+    );
+    master.kind = EventKind::SeriesMaster;
+    master.is_online_meeting = true;
+    master.online_meeting_provider = Some(OnlineMeetingProvider::TeamsForBusiness);
+    SeriesInfo {
+        master_id: "ev-series".into(),
+        uid: SERIES_UID.into(),
+        recurrence: Some(Recurrence {
+            frequency: Frequency::Weekly,
+            interval: 1,
+            weekdays: Vec::new(),
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: None,
+            start: Some(start.date_naive()),
+            until: None,
+            count: Some(2),
+        }),
+        master: Some(Box::new(master)),
+        zone: Some("Europe/Berlin".into()),
+    }
+}
+
 /// The two server occurrences of the weekly series, ten and seventeen days
 /// out, each named by its original start the way Graph names one; the server
-/// never lists the series master.
+/// never lists the series master. They carry what a backend gives an
+/// occurrence: the series' rule in words and its Teams meeting.
 pub fn series_occurrences() -> Vec<Event> {
     [("ev-series-1", 10), ("ev-series-2", 17)]
         .into_iter()
@@ -205,6 +254,10 @@ pub fn series_occurrences() -> Vec<Event> {
             );
             occurrence.recurrence_id = Some(start.to_rfc3339());
             occurrence.series_master_id = Some("ev-series".into());
+            occurrence.kind = EventKind::Occurrence;
+            occurrence.recurrence = Some("Weekly (2 times)".into());
+            occurrence.is_online_meeting = true;
+            occurrence.online_meeting_provider = Some(OnlineMeetingProvider::TeamsForBusiness);
             occurrence
         })
         .collect()

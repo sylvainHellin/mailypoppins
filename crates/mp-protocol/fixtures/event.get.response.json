@@ -5,21 +5,43 @@
     "account": "evoqs",
     "event": {
       "account": "evoqs",
+      "allow_new_time_proposals": true,
       "attendees": [],
-      "calendar": "AAMkADcal2",
+      "calendar": "AAMkADcal1",
       "cancelled": false,
-      "id": "AAMkADev2",
-      "is_organizer": false,
-      "own_response": "none",
+      "id": "AAMkADocc2",
+      "is_online_meeting": false,
+      "is_organizer": true,
+      "kind": "occurrence",
+      "own_response": "organizer",
+      "recurrence": "Weekly on Tuesday until 2027-06-29",
+      "recurrence_id": "2026-11-10T13:00:00Z",
+      "response_requested": true,
       "sensitivity": "normal",
-      "show_as": "oof",
-      "summary": "Holiday",
+      "series_master_id": "AAMkADmaster1",
+      "show_as": "busy",
+      "summary": "Weekly sync",
       "time": {
-        "end": "2026-11-07",
-        "kind": "all-day",
-        "start": "2026-11-05"
+        "end": "2026-11-10T14:00:00Z",
+        "kind": "timed",
+        "start": "2026-11-10T13:00:00Z",
+        "zone": "Europe/Berlin"
       },
-      "uid": "holiday@example.com"
+      "uid": "040000008200E00074C5B7101A82E008WEEKLY"
+    },
+    "series": {
+      "master_id": "AAMkADmaster1",
+      "recurrence": {
+        "first_day_of_week": "monday",
+        "frequency": "weekly",
+        "interval": 1,
+        "start": "2026-11-03",
+        "until": "2027-06-29",
+        "weekdays": [
+          "tuesday"
+        ]
+      },
+      "summary": "Weekly sync"
     }
   }
 }

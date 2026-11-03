@@ -42,9 +42,25 @@ fn written_event(written: Written) -> Event {
 /// Berlin wall time under its Windows name, and converts the answer.
 #[tokio::test]
 async fn a_create_posts_every_field_with_the_transaction_id() {
+    // Graph answers a Teams create with the meeting, its flags and the
+    // transaction id, which the conversion carries into the event.
+    let mut answer: serde_json::Value = serde_json::from_str(&created("AAMk/new=")).unwrap();
+    for (key, value) in [
+        ("isOnlineMeeting", json!(true)),
+        ("onlineMeetingProvider", json!("teamsForBusiness")),
+        (
+            "onlineMeeting",
+            json!({"joinUrl": "https://teams.microsoft.com/l/meetup-join/new"}),
+        ),
+        ("allowNewTimeProposals", json!(false)),
+        ("responseRequested", json!(true)),
+        ("transactionId", json!("tx-1")),
+    ] {
+        answer[key] = value;
+    }
     let fetch = ScriptedFetch::default().route(
         &format!("{BASE}/me/calendars/"),
-        status(201, &created("AAMk/new=")),
+        status(201, &answer.to_string()),
     );
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
     let mut input = EventInput::new("Project review", berlin(9, 10));
@@ -81,6 +97,18 @@ async fn a_create_posts_every_field_with_the_transaction_id() {
     assert_eq!(event.uid, "UID-NEW");
     assert_eq!(event.time, berlin(9, 10));
     assert_eq!(event.reminder, Some(10));
+    assert_eq!(event.kind, EventKind::Single);
+    assert!(event.is_online_meeting);
+    assert_eq!(
+        event.online_meeting_provider,
+        Some(OnlineMeetingProvider::TeamsForBusiness)
+    );
+    assert_eq!(
+        event.online_meeting_url.as_deref(),
+        Some("https://teams.microsoft.com/l/meetup-join/new")
+    );
+    assert!(!event.allow_new_time_proposals);
+    assert_eq!(event.transaction_id.as_deref(), Some("tx-1"));
 
     let sent = backend.fetch.sent();
     assert_eq!(sent.len(), 1);
@@ -394,7 +422,16 @@ async fn an_updated_series_comes_back_as_its_series() {
     };
     assert_eq!(series.master_id, "AAMkEv-weekly");
     assert_eq!(series.uid, MASTER_UID);
-    assert_eq!(series.recurrence.as_deref(), Some("FREQ=WEEKLY;BYDAY=TU"));
+    assert_eq!(
+        series.recurrence.clone().map(|rule| Recurrence {
+            start: None,
+            ..rule
+        }),
+        Recurrence::from_rrule("FREQ=WEEKLY;BYDAY=TU", chrono_tz::UTC)
+    );
+    let master = series.master.as_deref().unwrap();
+    assert_eq!(master.kind, EventKind::SeriesMaster);
+    assert_eq!(master.recurrence.as_deref(), Some("Weekly on Tuesday"));
     assert_eq!(series.zone.as_deref(), Some("Europe/Berlin"));
     assert_eq!(
         series.master.as_ref().map(|m| m.summary.as_str()),

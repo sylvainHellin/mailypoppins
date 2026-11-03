@@ -1,7 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { ExternalLink, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { CalendarEvent, CalendarInfo, EventFrontmatter } from "@/protocol/types";
+import type { CalendarEvent, CalendarInfo, CalendarTimeSlot, EventFrontmatter } from "@/protocol/types";
 import { addDays, calendarTag, dayLabel, dayOf, eventTitle, isOrganizer, viewerZone } from "@/app/calendar";
 
 /** A status word as a person reads it, the TUI's `humanize_status`. */
@@ -157,6 +157,42 @@ export function neutralWhen(e: CalendarEvent, zone: string | null = viewerZone()
 
 const person = (p: { name?: string; email: string }) => (p.name ? `${p.name} <${p.email}>` : p.email);
 
+/** A span of instants in the viewer's zone, `neutralWhen`'s timed form: an attendee's proposed time. */
+export function slotWhen(slot: CalendarTimeSlot): string {
+  const start = new Date(slot.start);
+  const end = new Date(slot.end);
+  const to = dayOf(end) === dayOf(start) ? hhmm(end) : `${dayLabel(dayOf(end))}, ${hhmm(end)}`;
+  return `${dayLabel(dayOf(start))}, ${hhmm(start)} to ${to}`;
+}
+
+/**
+ * Where the event sits in its series, the TUI's `series_line`: the rule in
+ * words, or that it is one occurrence when the rule is unknown, a changed
+ * occurrence saying so; null for an event in no series.
+ */
+export function seriesLine(e: CalendarEvent): string | null {
+  const changed = e.kind === "exception";
+  const instance = changed || e.kind === "occurrence" || !!e.series_master_id || !!e.recurrence_id;
+  if (e.recurrence) return changed ? `${e.recurrence}, this occurrence changed` : e.recurrence;
+  if (changed) return "An occurrence of a series, changed";
+  return instance ? "An occurrence of a series" : null;
+}
+
+/** The service of an online meeting, the TUI's `online_meeting_line` without the link; null for none. */
+export function onlineMeetingLabel(e: CalendarEvent): string | null {
+  if (!e.is_online_meeting && !e.online_meeting_url) return null;
+  switch (e.online_meeting_provider) {
+    case "teams-for-business":
+      return "Teams meeting";
+    case "skype-for-business":
+      return "Skype for Business meeting";
+    case "skype-for-consumer":
+      return "Skype meeting";
+    default:
+      return "Online meeting";
+  }
+}
+
 export type CalendarEventCardProps = {
   event: CalendarEvent;
   /** The listed calendars, which name the event's. */
@@ -175,14 +211,15 @@ export type CalendarEventCardProps = {
  * One event of the server calendar or of an invitation mail (PERSO-200),
  * the TUI's event card: the summary, a cancellation first, when with its
  * zone, the series, where, the calendar, the organizer, the user's own
- * answer, the join link, the description and every attendee's status; an
+ * answer, whether new times may be proposed, the online meeting and its join
+ * link, the description and every attendee's status and proposed time; an
  * event that came from an invitation mail offers that mail.
  */
 export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, children }: CalendarEventCardProps) {
   const attendeesId = useId();
   const rows: [string, ReactNode][] = [["When", neutralWhen(event)]];
-  if (event.recurrence) rows.push(["Repeats", event.recurrence]);
-  else if (event.recurrence_id) rows.push(["Repeats", "An occurrence of a series"]);
+  const series = seriesLine(event);
+  if (series) rows.push(["Repeats", series]);
   if (event.location) rows.push(["Where", event.location]);
   rows.push(["Calendar", calendarTag(calendars, event)]);
   if (event.organizer) rows.push(["Organizer", person(event.organizer)]);
@@ -191,9 +228,13 @@ export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, ch
       "Your response",
       <span key="response" data-slot="event-rsvp" className={STATUS_TONE[event.own_response] ?? "text-muted-foreground"}>
         {humanStatus(event.own_response)}
+        {event.response_requested ? null : <span className="text-muted-foreground"> (no answer requested)</span>}
       </span>,
     ]);
   }
+  if (!event.allow_new_time_proposals) rows.push(["Proposals", "New times not accepted"]);
+  const online = onlineMeetingLabel(event);
+  if (online) rows.push(["Online", online]);
   const url = event.online_meeting_url;
   return (
     <section id={id} tabIndex={-1} aria-label="Event" data-slot="event-card" className="flex flex-col gap-2 text-sm outline-none">
@@ -240,9 +281,16 @@ export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, ch
           <ul aria-labelledby={attendeesId} className="flex flex-col gap-0.5">
             {event.attendees.map((a) => (
               <li key={a.email} data-slot="event-attendee" className="flex min-w-0 justify-between gap-3">
-                <span className="truncate">
-                  {person(a)}
-                  {a.role === "optional" ? <span className="text-muted-foreground"> (optional)</span> : null}
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate">
+                    {person(a)}
+                    {a.role === "optional" ? <span className="text-muted-foreground"> (optional)</span> : null}
+                  </span>
+                  {a.proposed_time ? (
+                    <span data-slot="event-proposal" className="text-warning">
+                      Proposes {slotWhen(a.proposed_time)}
+                    </span>
+                  ) : null}
                 </span>
                 <span className={`shrink-0 ${STATUS_TONE[a.status] ?? "text-muted-foreground"}`}>{humanStatus(a.status)}</span>
               </li>

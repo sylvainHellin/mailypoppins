@@ -309,13 +309,20 @@ async fn a_baseline_follows_next_link_then_delta_link_and_converts_every_kind() 
         occurrence.series_master_id.as_deref(),
         Some("AAMkEv-weekly")
     );
-    assert_eq!(occurrence.recurrence, None);
+    assert_eq!(occurrence.kind, EventKind::Occurrence);
+    assert_eq!(
+        occurrence.recurrence.as_deref(),
+        Some("Weekly on Tuesday until 2027-06-29"),
+        "an occurrence carries its series' rule in words"
+    );
     assert_eq!(
         occurrence.dedup_key(),
         EventKey::new(MASTER_UID, Some("2026-11-10T14:00:00+01:00"))
     );
     let exception = find(&result, "AAMkEv-weekly-exc3");
     assert_eq!(exception.uid, MASTER_UID);
+    assert_eq!(exception.kind, EventKind::Exception);
+    assert_eq!(exception.recurrence, occurrence.recurrence);
     assert_eq!(
         exception.recurrence_id.as_deref(),
         Some("2026-11-17T13:00:00Z")
@@ -347,7 +354,18 @@ async fn a_baseline_follows_next_link_then_delta_link_and_converts_every_kind() 
         [SeriesInfo {
             master_id: "AAMkEv-weekly".into(),
             uid: MASTER_UID.into(),
-            recurrence: Some("FREQ=WEEKLY;BYDAY=TU;WKST=MO;UNTIL=20270629".into()),
+            recurrence: Some(Recurrence {
+                frequency: Frequency::Weekly,
+                interval: 1,
+                weekdays: vec![Weekday::Tuesday],
+                day_of_month: None,
+                week_index: None,
+                month: None,
+                first_day_of_week: Some(Weekday::Monday),
+                start: Some(day(3)),
+                until: Some(NaiveDate::from_ymd_opt(2027, 6, 29).unwrap()),
+                count: None,
+            }),
             // The fixture's master carries no times, so no details either.
             master: None,
             zone: Some("Europe/Berlin".into()),
@@ -770,34 +788,233 @@ fn an_all_day_occurrence_is_keyed_by_its_original_date() {
 }
 
 #[test]
-fn recurrence_patterns_become_rrules() {
+fn recurrence_patterns_become_rules() {
     let rule = |value: serde_json::Value| {
-        rrule_of(&serde_json::from_value::<wire::Recurrence>(value).unwrap())
+        recurrence_of(&serde_json::from_value::<wire::Recurrence>(value).unwrap())
     };
+    // A pattern reads as the rule its RRULE states, the range start aside.
+    let rrule = |value: serde_json::Value| rule(value).map(|r| Recurrence { start: None, ..r });
+    let from = |text: &str| Recurrence::from_rrule(text, chrono_tz::UTC);
+    let last_thursday = rule(serde_json::json!({
+        "pattern": {"type": "relativeMonthly", "interval": 2, "daysOfWeek": ["thursday"], "index": "last"},
+        "range": {"type": "numbered", "numberOfOccurrences": 6, "startDate": "2026-11-26"}
+    }))
+    .unwrap();
+    assert_eq!(last_thursday.week_index, Some(WeekIndex::Last));
+    assert_eq!(last_thursday.count, Some(6));
+    assert_eq!(last_thursday.start, NaiveDate::from_ymd_opt(2026, 11, 26));
     assert_eq!(
-        rule(serde_json::json!({
-            "pattern": {"type": "relativeMonthly", "interval": 2, "daysOfWeek": ["thursday"], "index": "last"},
-            "range": {"type": "numbered", "numberOfOccurrences": 6}
-        }))
-        .as_deref(),
-        Some("FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6")
+        Some(Recurrence {
+            start: None,
+            ..last_thursday
+        }),
+        from("FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6")
     );
     assert_eq!(
-        rule(serde_json::json!({
+        rrule(serde_json::json!({
             "pattern": {"type": "absoluteYearly", "interval": 1, "month": 3, "dayOfMonth": 14},
             "range": {"type": "noEnd"}
-        }))
-        .as_deref(),
-        Some("FREQ=YEARLY;BYMONTHDAY=14;BYMONTH=3")
+        })),
+        from("FREQ=YEARLY;BYMONTHDAY=14;BYMONTH=3")
     );
     assert_eq!(
-        rule(serde_json::json!({"pattern": {"type": "daily", "interval": 1}})).as_deref(),
-        Some("FREQ=DAILY")
+        rrule(serde_json::json!({"pattern": {"type": "daily", "interval": 1}})),
+        from("FREQ=DAILY")
     );
     assert_eq!(
         rule(serde_json::json!({"pattern": {"type": "hourly"}})),
         None
     );
+    // The relative yearly pattern the event form only shows as text.
+    let thanksgiving = rule(serde_json::json!({
+        "pattern": {"type": "relativeYearly", "interval": 1, "month": 11,
+                    "daysOfWeek": ["thursday"], "index": "fourth", "dayOfMonth": 0},
+        "range": {"type": "endDate", "endDate": "2030-12-31"}
+    }))
+    .unwrap();
+    assert_eq!(
+        thanksgiving.describe(),
+        "Yearly on the fourth Thursday of November until 2030-12-31"
+    );
+}
+
+/// One series reads the same from the `RRULE` of its invitation mail and
+/// from Graph's `patternedRecurrence` of its server copy: the same rule, its
+/// range start aside (an `RRULE` leaves it to `DTSTART`), and the same words
+/// on the card, the invitation's read through the iMIP parser.
+#[test]
+fn a_series_reads_the_same_from_its_invitation_and_from_graph() {
+    let cases = [
+        (
+            "FREQ=WEEKLY;BYDAY=TU;WKST=MO;UNTIL=20270629T070000Z",
+            serde_json::json!({
+                "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["tuesday"],
+                            "firstDayOfWeek": "monday", "dayOfMonth": 0, "month": 0, "index": "first"},
+                "range": {"type": "endDate", "startDate": "2026-11-03", "endDate": "2027-06-29",
+                          "numberOfOccurrences": 0}
+            }),
+        ),
+        (
+            "FREQ=MONTHLY;INTERVAL=2;BYDAY=-1TH;COUNT=6",
+            serde_json::json!({
+                "pattern": {"type": "relativeMonthly", "interval": 2, "daysOfWeek": ["thursday"],
+                            "index": "last", "dayOfMonth": 0, "month": 0},
+                "range": {"type": "numbered", "startDate": "2026-11-26", "numberOfOccurrences": 6,
+                          "endDate": "0001-01-01"}
+            }),
+        ),
+        (
+            "FREQ=YEARLY;BYMONTH=10;BYMONTHDAY=31",
+            serde_json::json!({
+                "pattern": {"type": "absoluteYearly", "interval": 1, "month": 10, "dayOfMonth": 31,
+                            "index": "first", "daysOfWeek": []},
+                "range": {"type": "noEnd", "startDate": "2012-10-31", "endDate": "0001-01-01"}
+            }),
+        ),
+    ];
+    for (rrule, graph) in cases {
+        let from_graph = recurrence_of(&serde_json::from_value(graph).unwrap()).unwrap();
+        let from_mail = Recurrence::from_rrule(rrule, chrono_tz::UTC).unwrap();
+        assert_eq!(
+            Recurrence {
+                start: None,
+                ..from_graph.clone()
+            },
+            from_mail,
+            "{rrule}"
+        );
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n\
+             BEGIN:VEVENT\r\nUID:series@example.com\r\nDTSTAMP:20261001T090000Z\r\n\
+             DTSTART:20261103T080000Z\r\nDTEND:20261103T090000Z\r\nRRULE:{rrule}\r\n\
+             SUMMARY:Series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).unwrap();
+        assert_eq!(parsed.recurrence, Some(from_graph.describe()), "{rrule}");
+    }
+}
+
+/// The weekly master of the evoqs dump fills every pattern field whatever
+/// its type (`dayOfMonth: 0`, `month: 0`, `index: "first"`) and its open
+/// range with a year-one `endDate`: the rule keeps only what a weekly
+/// pattern names.
+#[test]
+fn a_dumped_weekly_rule_drops_the_fields_its_pattern_does_not_name() {
+    let rule = recurrence_of(
+        &serde_json::from_value::<wire::Recurrence>(serde_json::json!({
+            "pattern": {
+                "dayOfMonth": 0, "daysOfWeek": ["wednesday"], "firstDayOfWeek": "sunday",
+                "index": "first", "interval": 1, "month": 0, "type": "weekly"
+            },
+            "range": {
+                "endDate": "0001-01-01", "numberOfOccurrences": 0,
+                "recurrenceTimeZone": "W. Europe Standard Time",
+                "startDate": "2024-10-23", "type": "noEnd"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rule,
+        Recurrence {
+            frequency: Frequency::Weekly,
+            interval: 1,
+            weekdays: vec![Weekday::Wednesday],
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: Some(Weekday::Sunday),
+            start: NaiveDate::from_ymd_opt(2024, 10, 23),
+            until: None,
+            count: None,
+        }
+    );
+    assert_eq!(rule.describe(), "Weekly on Wednesday");
+}
+
+/// The Teams invitation of the evoqs dump, with an attendee's proposal as
+/// Graph shows it the organizer: the online-meeting flag and provider, the
+/// organizer's flags, the occurrence kind and the proposed slot.
+#[test]
+fn a_dumped_teams_meeting_reads_its_meeting_flags_and_a_proposal() {
+    let event: wire::Event = serde_json::from_value(serde_json::json!({
+        "@odata.type": "#microsoft.graph.event",
+        "allowNewTimeProposals": false,
+        "attendees": [
+            {
+                "emailAddress": {"address": "sylvain.hellin@tum.de", "name": "Sylvain Hellin"},
+                "status": {"response": "tentativelyAccepted", "time": "2026-10-29T11:54:33Z"},
+                "type": "required",
+                "proposedNewTime": {
+                    "start": {"dateTime": "2026-10-29T14:00:00.0000000", "timeZone": "UTC"},
+                    "end": {"dateTime": "2026-10-29T14:30:00.0000000", "timeZone": "UTC"}
+                }
+            },
+            {
+                "emailAddress": {"address": "sylvain@hellin.me", "name": "sylvain@hellin.me"},
+                "status": {"response": "none", "time": "0001-01-01T00:00:00Z"},
+                "type": "required"
+            }
+        ],
+        "end": {"dateTime": "2026-10-29T12:30:00.0000000", "timeZone": "UTC"},
+        "iCalUId": "040000008200E00074C5B7101A82E008TEAMS",
+        "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AzoRj33zlHEyVmoF9pf4higAHvnXLAwAA",
+        "isAllDay": false,
+        "isCancelled": false,
+        "isOnlineMeeting": true,
+        "isOrganizer": true,
+        "onlineMeeting": {"joinUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting"},
+        "onlineMeetingProvider": "teamsForBusiness",
+        "onlineMeetingUrl": null,
+        "originalStartTimeZone": "W. Europe Standard Time",
+        "recurrence": null,
+        "responseRequested": false,
+        "responseStatus": {"response": "organizer", "time": "0001-01-01T00:00:00Z"},
+        "start": {"dateTime": "2026-10-29T12:00:00.0000000", "timeZone": "UTC"},
+        "subject": "test-invitation",
+        "transactionId": "mp-7f3c",
+        "type": "singleInstance"
+    }))
+    .unwrap();
+    let converted = from_graph("evoqs", "cal", &event, None).unwrap();
+    assert_eq!(converted.kind, EventKind::Single);
+    assert!(converted.is_online_meeting);
+    assert_eq!(
+        converted.online_meeting_provider,
+        Some(OnlineMeetingProvider::TeamsForBusiness)
+    );
+    assert!(!converted.allow_new_time_proposals);
+    assert!(!converted.response_requested);
+    assert_eq!(converted.transaction_id.as_deref(), Some("mp-7f3c"));
+    assert_eq!(converted.recurrence, None);
+    let october = |h, m| Utc.with_ymd_and_hms(2026, 10, 29, h, m, 0).unwrap();
+    assert_eq!(
+        converted.attendees[0].proposed_time,
+        Some(TimeSlot {
+            start: october(14, 0),
+            end: october(14, 30)
+        })
+    );
+    assert_eq!(converted.attendees[1].proposed_time, None);
+
+    // The dump's plain meeting: `unknown` is no provider, and Graph's
+    // defaults stand for flags it left out.
+    let plain: wire::Event = serde_json::from_value(serde_json::json!({
+        "id": "plain",
+        "type": "singleInstance",
+        "isOnlineMeeting": false,
+        "onlineMeetingProvider": "unknown",
+        "transactionId": null,
+        "start": {"dateTime": "2026-10-29T12:00:00.0000000", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-10-29T12:30:00.0000000", "timeZone": "UTC"}
+    }))
+    .unwrap();
+    let plain = from_graph("evoqs", "cal", &plain, None).unwrap();
+    assert!(!plain.is_online_meeting);
+    assert_eq!(plain.online_meeting_provider, None);
+    assert!(plain.allow_new_time_proposals && plain.response_requested);
+    assert_eq!(plain.transaction_id, None);
 }
 
 #[test]
@@ -870,6 +1087,11 @@ fn delta_master(all_day: bool, subject: &str) -> serde_json::Value {
             "bodyPreview": "Weekly agenda",
             "onlineMeeting": null,
             "onlineMeetingUrl": null,
+            "isOnlineMeeting": false,
+            "onlineMeetingProvider": "unknown",
+            "allowNewTimeProposals": true,
+            "responseRequested": true,
+            "transactionId": null,
             "originalStartTimeZone": "W. Europe Standard Time",
             "start": {"dateTime": "2024-10-23T07:00:00.0000000", "timeZone": "UTC"},
             "end": {"dateTime": "2024-10-23T09:00:00.0000000", "timeZone": "UTC"},
@@ -951,6 +1173,9 @@ fn assert_inherited(result: &SyncResult) {
     assert_eq!(cms.own_response, OwnResponse::Organizer);
     assert!(cms.is_organizer);
     assert_eq!(cms.reminder, Some(15));
+    assert_eq!(cms.kind, EventKind::Occurrence);
+    assert_eq!(cms.recurrence.as_deref(), Some("Weekly on Wednesday"));
+    assert!(!cms.is_online_meeting && cms.online_meeting_provider.is_none());
 
     let holiday = find(result, "occ-ref");
     assert_eq!(holiday.summary, "Reformation Day");
@@ -962,6 +1187,7 @@ fn assert_inherited(result: &SyncResult) {
     );
     assert_eq!(holiday.uid, "REF-UID");
     assert_eq!(holiday.recurrence_id.as_deref(), Some("2026-10-31"));
+    assert_eq!(holiday.recurrence.as_deref(), Some("Yearly on 31 October"));
 
     // The store's re-derivation from the master agrees with the conversion,
     // so a sync that reads the same feed again moves nothing.

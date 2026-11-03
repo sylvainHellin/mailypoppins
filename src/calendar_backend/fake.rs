@@ -16,7 +16,9 @@
 //!   "log": "<path>",
 //!   "write_log": "<path>",
 //!   "missing_scope": false,
-//!   "message_events": {"<server message id>": "<event id>"}
+//!   "message_events": {"<server message id>": "<event id>"},
+//!   "features": ["write", ...],
+//!   "series": [<SeriesInfo>...]
 //! }
 //! ```
 //!
@@ -39,10 +41,12 @@ use anyhow::anyhow;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{BackendResult, CalendarBackend, CalendarBackendError, Response, SyncResult, Written};
+use super::{
+    BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult, Written,
+};
 use crate::calendar_model::{
-    Attendee, AttendeeRole, Calendar, CalendarWindow, Event, EventTime, OwnResponse, Person,
-    ResponseStatus, Sensitivity, ShowAs,
+    Attendee, AttendeeRole, Calendar, CalendarFeature, CalendarWindow, Event, EventKind, EventTime,
+    OnlineMeetingProvider, OwnResponse, Person, ResponseStatus, Sensitivity, ShowAs,
 };
 use crate::calendar_write::{AttendeeInput, EventInput, EventPatch};
 
@@ -142,6 +146,10 @@ struct FakeSpec {
     missing_scope: bool,
     #[serde(default)]
     message_events: HashMap<String, String>,
+    #[serde(default)]
+    features: Vec<CalendarFeature>,
+    #[serde(default)]
+    series: Vec<SeriesInfo>,
 }
 
 /// A calendar server with fixed contents that records every answer.
@@ -161,6 +169,12 @@ pub struct FakeCalendarBackend {
     /// The invitation mails the fake knows the event of, by server message
     /// id ([`CalendarBackend::event_for_message`]).
     message_events: HashMap<String, String>,
+    /// What the fake claims to serve ([`super::features`]): the spec's
+    /// `features`, none unless a test names some.
+    features: Vec<CalendarFeature>,
+    /// The series masters a baseline reports resolved, as Graph's does
+    /// ([`SyncResult::series`]), so the store's series cache fills.
+    series: Vec<SeriesInfo>,
 }
 
 impl FakeCalendarBackend {
@@ -222,6 +236,8 @@ impl FakeCalendarBackend {
         fake.log = spec.log;
         fake.write_log = spec.write_log;
         fake.message_events = spec.message_events;
+        fake.features = spec.features;
+        fake.series = spec.series;
         Some(fake)
     }
 
@@ -250,6 +266,18 @@ impl FakeCalendarBackend {
     /// a Graph token issued before the calendar scope does.
     pub fn missing_scope(mut self) -> Self {
         self.missing_scope = true;
+        self
+    }
+
+    /// What the fake claims to serve ([`super::features`]), as its spec
+    /// names it.
+    pub fn features(&self) -> Vec<CalendarFeature> {
+        self.features.clone()
+    }
+
+    /// Report `series` resolved at every baseline.
+    pub fn with_series(mut self, series: Vec<SeriesInfo>) -> Self {
+        self.series = series;
         self
     }
 
@@ -301,6 +329,7 @@ impl FakeCalendarBackend {
             uid: format!("{id}@example.com"),
             recurrence_id: None,
             series_master_id: None,
+            kind: EventKind::Single,
             summary: summary.into(),
             time,
             location: None,
@@ -311,12 +340,17 @@ impl FakeCalendarBackend {
             recurrence: None,
             reminder: None,
             online_meeting_url: None,
+            is_online_meeting: false,
+            online_meeting_provider: None,
             sensitivity: Sensitivity::Normal,
             show_as: ShowAs::Busy,
             cancelled: false,
             is_organizer: false,
             last_modified: None,
             web_link: None,
+            allow_new_time_proposals: true,
+            response_requested: true,
+            transaction_id: None,
         };
         let at = |d: u32, h: u32| Utc.with_ymd_and_hms(2026, 11, d, h, 0, 0).unwrap();
         let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
@@ -337,6 +371,7 @@ impl FakeCalendarBackend {
             email: "sylvain@example.com".into(),
             role: AttendeeRole::Required,
             status: ResponseStatus::NeedsAction,
+            proposed_time: None,
         }];
         meeting.own_response = OwnResponse::NeedsAction;
         meeting.reminder = Some(15);
@@ -358,6 +393,8 @@ impl FakeCalendarBackend {
         occurrence.uid = "ev-weekly@example.com".into();
         occurrence.recurrence_id = Some("2026-11-10T14:00:00Z".into());
         occurrence.series_master_id = Some("ev-weekly".into());
+        occurrence.kind = EventKind::Occurrence;
+        occurrence.recurrence = Some("Weekly on Tuesday".into());
         occurrence.is_organizer = true;
         occurrence.own_response = OwnResponse::Organizer;
 
@@ -428,6 +465,7 @@ fn written_attendee(input: &AttendeeInput, before: &[Attendee]) -> Attendee {
         email: input.email.clone(),
         role: input.role,
         status,
+        proposed_time: None,
     }
 }
 
@@ -436,16 +474,25 @@ fn join_link(id: &str) -> String {
     format!("https://teams.example.com/join/{id}")
 }
 
+/// Turn `event` into an online meeting with the fake's join link, as Graph
+/// provisions a Teams meeting.
+fn provision_meeting(event: &mut Event) {
+    event.is_online_meeting = true;
+    event.online_meeting_provider = Some(OnlineMeetingProvider::TeamsForBusiness);
+    event.online_meeting_url = Some(join_link(&event.id));
+}
+
 /// The event a create of `input` makes in `calendar` under `id`, the user
-/// its organizer.
-fn created_event(calendar: &Calendar, id: &str, input: &EventInput) -> Event {
-    Event {
+/// its organizer, carrying the create's `transaction_id` as Graph's does.
+fn created_event(calendar: &Calendar, id: &str, input: &EventInput, transaction_id: &str) -> Event {
+    let mut event = Event {
         account: calendar.account.clone(),
         calendar: calendar.id.clone(),
         id: id.to_string(),
         uid: format!("{id}@fake.example.com"),
         recurrence_id: None,
         series_master_id: None,
+        kind: EventKind::Single,
         summary: input.summary.clone(),
         time: input.time.clone(),
         location: input.location.clone(),
@@ -459,14 +506,23 @@ fn created_event(calendar: &Calendar, id: &str, input: &EventInput) -> Event {
         own_response: OwnResponse::Organizer,
         recurrence: None,
         reminder: input.reminder.unwrap_or(Some(FAKE_DEFAULT_REMINDER)),
-        online_meeting_url: input.online_meeting.then(|| join_link(id)),
+        online_meeting_url: None,
+        is_online_meeting: false,
+        online_meeting_provider: None,
         sensitivity: input.sensitivity.unwrap_or(Sensitivity::Normal),
         show_as: input.show_as.unwrap_or(ShowAs::Busy),
         cancelled: false,
         is_organizer: true,
         last_modified: None,
         web_link: None,
+        allow_new_time_proposals: input.allow_new_time_proposals.unwrap_or(true),
+        response_requested: true,
+        transaction_id: Some(transaction_id.to_string()).filter(|t| !t.trim().is_empty()),
+    };
+    if input.online_meeting {
+        provision_meeting(&mut event);
     }
+    event
 }
 
 /// `event` with the fields `patch` names changed.
@@ -491,7 +547,7 @@ fn apply_patch(event: &mut Event, patch: &EventPatch) {
     }
     // Once on, the link stays, as on Graph, which ignores turning it off.
     if patch.online_meeting == Some(true) && event.online_meeting_url.is_none() {
-        event.online_meeting_url = Some(join_link(&event.id));
+        provision_meeting(event);
     }
     if let Some(reminder) = patch.reminder {
         event.reminder = reminder;
@@ -501,6 +557,9 @@ fn apply_patch(event: &mut Event, patch: &EventPatch) {
     }
     if let Some(sensitivity) = patch.sensitivity {
         event.sensitivity = sensitivity;
+    }
+    if let Some(allow) = patch.allow_new_time_proposals {
+        event.allow_new_time_proposals = allow;
     }
 }
 
@@ -550,6 +609,7 @@ impl CalendarBackend for FakeCalendarBackend {
                 token: next_token,
                 full_resync: true,
                 path: Some("fake".into()),
+                series: self.series.clone(),
                 ..Default::default()
             });
         };
@@ -616,7 +676,7 @@ impl CalendarBackend for FakeCalendarBackend {
                 None => {
                     state.created += 1;
                     let id = format!("fake-created-{}", state.created);
-                    let event = created_event(calendar, &id, input);
+                    let event = created_event(calendar, &id, input, transaction_id);
                     state
                         .transactions
                         .insert(transaction_id.to_string(), id.clone());
@@ -749,6 +809,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_baseline_reports_the_series_it_was_given_and_a_delta_none() {
+        let series = SeriesInfo {
+            master_id: "ev-weekly".into(),
+            uid: "ev-weekly@example.com".into(),
+            recurrence: None,
+            master: None,
+            zone: Some("Europe/Berlin".into()),
+        };
+        let fake = FakeCalendarBackend::canned().with_series(vec![series.clone()]);
+        let main = fake.list_calendars().await.unwrap().remove(0);
+        let baseline = fake.sync_window(&main, november(), None).await.unwrap();
+        assert_eq!(baseline.series, [series]);
+        let delta = fake
+            .sync_window(&main, november(), baseline.token)
+            .await
+            .unwrap();
+        assert!(delta.series.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_token_returns_the_changes_since_and_an_expired_one_a_baseline() {
         let fake = FakeCalendarBackend::canned();
         let main = fake.list_calendars().await.unwrap().remove(0);
@@ -868,6 +948,12 @@ mod tests {
         assert_eq!(event.attendees[0].status, ResponseStatus::NeedsAction);
         assert_eq!(event.reminder, Some(FAKE_DEFAULT_REMINDER));
         assert!(event.online_meeting_url.is_some());
+        assert!(event.is_online_meeting);
+        assert_eq!(
+            event.online_meeting_provider,
+            Some(OnlineMeetingProvider::TeamsForBusiness)
+        );
+        assert_eq!(event.transaction_id.as_deref(), Some("tx-1"));
 
         let again = written(fake.create_event(&main, &input(), "tx-1").await.unwrap());
         assert_eq!(again, event);
@@ -910,6 +996,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(off.online_meeting_url, link);
+        assert!(on.is_online_meeting && off.is_online_meeting);
     }
 
     /// An update changes only what the patch names, a re-invited attendee
@@ -1025,10 +1112,15 @@ mod tests {
             "calendars": canned.calendars,
             "events": canned.events(),
             "missing_scope": true,
+            "features": ["write", "online-meeting"],
         });
         let parsed: FakeSpec = serde_json::from_value(spec).unwrap();
         assert_eq!(parsed.calendars, canned.calendars);
         assert_eq!(parsed.events, canned.events());
         assert!(parsed.missing_scope && parsed.log.is_none());
+        assert_eq!(
+            parsed.features,
+            [CalendarFeature::Write, CalendarFeature::OnlineMeeting]
+        );
     }
 }

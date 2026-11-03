@@ -344,6 +344,14 @@ pub enum ResponseStatus {
     Declined,
 }
 
+/// A span of time as UTC instants, half-open: a time an attendee proposed
+/// instead of the event's (Graph `timeSlot`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeSlot {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
 /// One attendee with role and status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attendee {
@@ -352,6 +360,10 @@ pub struct Attendee {
     pub email: String,
     pub role: AttendeeRole,
     pub status: ResponseStatus,
+    /// The time the attendee proposed instead, which the server shows the
+    /// organizer on the event (Graph `proposedNewTime`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_time: Option<TimeSlot>,
 }
 
 /// The user's own standing on an event: an attendee's answer, the organizer,
@@ -391,6 +403,464 @@ pub enum ShowAs {
     Unknown,
 }
 
+/// What an event is to its series (Graph `type`, iCalendar `RRULE` and
+/// `RECURRENCE-ID`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EventKind {
+    /// An event of its own, in no series.
+    #[default]
+    Single,
+    /// The series itself, which carries the rule; the views show its
+    /// occurrences rather than it.
+    SeriesMaster,
+    /// One occurrence of a series, as the rule placed it.
+    Occurrence,
+    /// One occurrence of a series, changed apart from the rule (moved,
+    /// renamed, answered differently).
+    Exception,
+}
+
+impl EventKind {
+    /// Whether the event is one occurrence of a series, changed or not.
+    pub fn is_instance(self) -> bool {
+        matches!(self, EventKind::Occurrence | EventKind::Exception)
+    }
+}
+
+/// The service an online meeting runs on (Graph `onlineMeetingProvider`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnlineMeetingProvider {
+    TeamsForBusiness,
+    SkypeForBusiness,
+    SkypeForConsumer,
+}
+
+/// What a calendar backend lets a client do beyond reading the calendar and
+/// answering an invitation, which `calendar.list` reports per calendar so a
+/// client greys out what an account lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CalendarFeature {
+    /// Create, update, cancel and delete events.
+    Write,
+    /// Give an event an online meeting (a Teams link).
+    OnlineMeeting,
+    /// Propose a new time when answering.
+    ProposeTime,
+    /// The free/busy of other people and rooms.
+    FreeBusy,
+    /// Dismiss and snooze a reminder on the server.
+    ServerReminders,
+}
+
+impl CalendarFeature {
+    /// The feature's word on the wire, as serde spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CalendarFeature::Write => "write",
+            CalendarFeature::OnlineMeeting => "online-meeting",
+            CalendarFeature::ProposeTime => "propose-time",
+            CalendarFeature::FreeBusy => "free-busy",
+            CalendarFeature::ServerReminders => "server-reminders",
+        }
+    }
+}
+
+/// How often a series repeats (iCalendar `FREQ`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Frequency {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+/// A day of the week, in a recurrence rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl Weekday {
+    /// The day by its English name, any case (`wednesday`, Graph's spelling).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "monday" => Weekday::Monday,
+            "tuesday" => Weekday::Tuesday,
+            "wednesday" => Weekday::Wednesday,
+            "thursday" => Weekday::Thursday,
+            "friday" => Weekday::Friday,
+            "saturday" => Weekday::Saturday,
+            "sunday" => Weekday::Sunday,
+            _ => return None,
+        })
+    }
+
+    /// The iCalendar two-letter code (`WE`).
+    pub fn code(self) -> &'static str {
+        match self {
+            Weekday::Monday => "MO",
+            Weekday::Tuesday => "TU",
+            Weekday::Wednesday => "WE",
+            Weekday::Thursday => "TH",
+            Weekday::Friday => "FR",
+            Weekday::Saturday => "SA",
+            Weekday::Sunday => "SU",
+        }
+    }
+
+    /// The English name, capitalised (`Wednesday`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Weekday::Monday => "Monday",
+            Weekday::Tuesday => "Tuesday",
+            Weekday::Wednesday => "Wednesday",
+            Weekday::Thursday => "Thursday",
+            Weekday::Friday => "Friday",
+            Weekday::Saturday => "Saturday",
+            Weekday::Sunday => "Sunday",
+        }
+    }
+}
+
+/// Which week of the month a relative monthly or yearly rule names (Graph
+/// `weekIndex`, iCalendar `BYSETPOS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeekIndex {
+    First,
+    Second,
+    Third,
+    Fourth,
+    Last,
+}
+
+impl WeekIndex {
+    /// The index by Graph's word for it (`first` to `fourth`, `last`).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "first" => WeekIndex::First,
+            "second" => WeekIndex::Second,
+            "third" => WeekIndex::Third,
+            "fourth" => WeekIndex::Fourth,
+            "last" => WeekIndex::Last,
+            _ => return None,
+        })
+    }
+
+    /// The iCalendar `BYSETPOS` value: 1 to 4, or -1 for the last.
+    pub fn position(self) -> i8 {
+        match self {
+            WeekIndex::First => 1,
+            WeekIndex::Second => 2,
+            WeekIndex::Third => 3,
+            WeekIndex::Fourth => 4,
+            WeekIndex::Last => -1,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            WeekIndex::First => "first",
+            WeekIndex::Second => "second",
+            WeekIndex::Third => "third",
+            WeekIndex::Fourth => "fourth",
+            WeekIndex::Last => "last",
+        }
+    }
+}
+
+/// The rule of a recurring series, in the terms Graph's `patternedRecurrence`
+/// and Outlook's repeat menu use: a frequency and an interval, the weekdays,
+/// day of month, week index and month the pattern names, and a range that
+/// ends on a date, after a count, or never.
+///
+/// Which fields a pattern reads:
+///
+/// - daily: `interval`;
+/// - weekly: `weekdays` and `first_day_of_week`;
+/// - monthly on a date: `day_of_month`;
+/// - monthly on a weekday: `week_index` and `weekdays`;
+/// - yearly on a date: `month` and `day_of_month`;
+/// - yearly on a weekday: `month`, `week_index` and `weekdays`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recurrence {
+    pub frequency: Frequency,
+    /// Every how many days, weeks, months or years; at least 1.
+    #[serde(default = "one")]
+    pub interval: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weekdays: Vec<Weekday>,
+    /// 1 to 31.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day_of_month: Option<u32>,
+    /// Set on a relative rule (the last Thursday), unset on one by date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_index: Option<WeekIndex>,
+    /// 1 to 12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub month: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_day_of_week: Option<Weekday>,
+    /// The day the range starts, in the series' zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<NaiveDate>,
+    /// The last day an occurrence may fall on, inclusive; `None` with no
+    /// `count` is a series without end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<NaiveDate>,
+    /// How many occurrences the series has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// The last day an `UNTIL` value allows, in the event's `zone`: a UTC
+/// date-time on its day there, a floating date-time or a date on its own.
+fn until_date(value: &str, zone: Tz) -> Option<NaiveDate> {
+    let value = value.trim().to_ascii_uppercase();
+    if let Some(utc) = value.strip_suffix('Z') {
+        let at = NaiveDateTime::parse_from_str(utc, "%Y%m%dT%H%M%S").ok()?;
+        return Some(at.and_utc().with_timezone(&zone).date_naive());
+    }
+    if value.len() == 8 {
+        return NaiveDate::parse_from_str(&value, "%Y%m%d").ok();
+    }
+    NaiveDateTime::parse_from_str(&value, "%Y%m%dT%H%M%S")
+        .ok()
+        .map(|at| at.date())
+}
+
+/// The weekday an iCalendar two-letter code (`WE`) names.
+fn weekday_of_code(code: &str) -> Option<Weekday> {
+    [
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+        Weekday::Sunday,
+    ]
+    .into_iter()
+    .find(|day| day.code() == code)
+}
+
+fn month_name(month: u32) -> Option<&'static str> {
+    MONTH_NAMES.get(month.checked_sub(1)? as usize).copied()
+}
+
+impl Recurrence {
+    /// The rule an iCalendar `RRULE` value (`FREQ=WEEKLY;BYDAY=WE`) states,
+    /// or `None` for a rule this model cannot hold: another frequency, a
+    /// list of month days or months, an hour or week-number part, weekdays
+    /// with different ordinals, both `UNTIL` and `COUNT`, or a part it does
+    /// not know.
+    ///
+    /// `zone` is the zone of the event's `DTSTART`, UTC when it names none:
+    /// a UTC `UNTIL` (`20270630T035959Z`) is read on its day there, the
+    /// series' last local day, while a floating or date-only `UNTIL` keeps its
+    /// own date. The range start is `DTSTART`'s, which an `RRULE` does not
+    /// carry.
+    pub fn from_rrule(rrule: &str, zone: Tz) -> Option<Self> {
+        let mut rule = Recurrence {
+            frequency: Frequency::Daily,
+            interval: 1,
+            weekdays: Vec::new(),
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: None,
+            start: None,
+            until: None,
+            count: None,
+        };
+        let mut frequency = None;
+        let mut ordinal: Option<i8> = None;
+        let mut set_position: Option<i8> = None;
+        let mut first_day = None;
+        for part in rrule.trim().split(';').filter(|p| !p.trim().is_empty()) {
+            let (key, value) = part.split_once('=')?;
+            let value = value.trim();
+            match key.trim().to_ascii_uppercase().as_str() {
+                "FREQ" => {
+                    frequency = Some(match value.to_ascii_uppercase().as_str() {
+                        "DAILY" => Frequency::Daily,
+                        "WEEKLY" => Frequency::Weekly,
+                        "MONTHLY" => Frequency::Monthly,
+                        "YEARLY" => Frequency::Yearly,
+                        _ => return None,
+                    })
+                }
+                "INTERVAL" => rule.interval = value.parse().ok().filter(|i| *i > 0)?,
+                "COUNT" => rule.count = Some(value.parse().ok().filter(|c| *c > 0)?),
+                "UNTIL" => rule.until = Some(until_date(value, zone)?),
+                "BYDAY" => {
+                    for day in value.split(',') {
+                        let day = day.trim().to_ascii_uppercase();
+                        let split = day.len().checked_sub(2)?;
+                        let (position, code) = day.split_at(split);
+                        rule.weekdays.push(weekday_of_code(code)?);
+                        let position = match position {
+                            "" => None,
+                            raw => Some(raw.trim_start_matches('+').parse::<i8>().ok()?),
+                        };
+                        if rule.weekdays.len() > 1 && position != ordinal {
+                            return None;
+                        }
+                        ordinal = position;
+                    }
+                }
+                "BYSETPOS" => set_position = Some(value.parse().ok()?),
+                "BYMONTHDAY" => {
+                    rule.day_of_month = Some(value.parse().ok().filter(|d| (1..=31).contains(d))?)
+                }
+                "BYMONTH" => {
+                    rule.month = Some(value.parse().ok().filter(|m| (1..=12).contains(m))?)
+                }
+                "WKST" => first_day = Some(weekday_of_code(&value.to_ascii_uppercase())?),
+                _ => return None,
+            }
+        }
+        rule.frequency = frequency?;
+        if rule.until.is_some() && rule.count.is_some() {
+            return None;
+        }
+        let position = match (ordinal, set_position) {
+            (Some(_), Some(_)) => return None,
+            (position, None) | (None, position) => position,
+        };
+        let relative = match position {
+            None => None,
+            Some(position) => Some(
+                [
+                    WeekIndex::First,
+                    WeekIndex::Second,
+                    WeekIndex::Third,
+                    WeekIndex::Fourth,
+                    WeekIndex::Last,
+                ]
+                .into_iter()
+                .find(|index| index.position() == position)?,
+            ),
+        };
+        match rule.frequency {
+            Frequency::Daily => {
+                let plain = rule.weekdays.is_empty()
+                    && relative.is_none()
+                    && rule.day_of_month.is_none()
+                    && rule.month.is_none();
+                plain.then_some(())?;
+            }
+            Frequency::Weekly => {
+                let plain =
+                    relative.is_none() && rule.day_of_month.is_none() && rule.month.is_none();
+                plain.then_some(())?;
+                rule.first_day_of_week = first_day;
+            }
+            Frequency::Monthly | Frequency::Yearly => {
+                if rule.frequency == Frequency::Monthly && rule.month.is_some() {
+                    return None;
+                }
+                match relative {
+                    // The first to fourth or the last of some weekdays.
+                    Some(index) if !rule.weekdays.is_empty() && rule.day_of_month.is_none() => {
+                        rule.week_index = Some(index);
+                    }
+                    Some(_) => return None,
+                    // Every one of some weekdays in the month: no Outlook
+                    // pattern.
+                    None if !rule.weekdays.is_empty() => return None,
+                    None => {}
+                }
+            }
+        }
+        Some(rule)
+    }
+
+    /// The rule in words, as the event cards print it: `Weekly on
+    /// Wednesday`, `Every 2 months on the last Thursday (6 times)`, `Yearly
+    /// on 31 October until 2030-10-31`.
+    pub fn describe(&self) -> String {
+        let (unit, units) = match self.frequency {
+            Frequency::Daily => ("Daily", "days"),
+            Frequency::Weekly => ("Weekly", "weeks"),
+            Frequency::Monthly => ("Monthly", "months"),
+            Frequency::Yearly => ("Yearly", "years"),
+        };
+        let mut text = if self.interval > 1 {
+            format!("Every {} {units}", self.interval)
+        } else {
+            unit.to_string()
+        };
+        let days = self
+            .weekdays
+            .iter()
+            .map(|d| d.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let month = self.month.and_then(month_name);
+        match (self.frequency, self.week_index) {
+            (Frequency::Daily, _) => {}
+            (Frequency::Weekly, _) => {
+                if !days.is_empty() {
+                    text.push_str(&format!(" on {days}"));
+                }
+            }
+            (Frequency::Monthly | Frequency::Yearly, Some(index)) if !days.is_empty() => {
+                text.push_str(&format!(" on the {} {days}", index.word()));
+                if let (Frequency::Yearly, Some(month)) = (self.frequency, month) {
+                    text.push_str(&format!(" of {month}"));
+                }
+            }
+            (Frequency::Monthly, _) => {
+                if let Some(day) = self.day_of_month {
+                    text.push_str(&format!(" on day {day}"));
+                }
+            }
+            (Frequency::Yearly, _) => match (self.day_of_month, month) {
+                (Some(day), Some(month)) => text.push_str(&format!(" on {day} {month}")),
+                (None, Some(month)) => text.push_str(&format!(" in {month}")),
+                _ => {}
+            },
+        }
+        if let Some(until) = self.until {
+            text.push_str(&format!(" until {until}"));
+        } else if let Some(count) = self.count {
+            text.push_str(&format!(" ({count} times)"));
+        }
+        text
+    }
+}
+
 /// One event, or one occurrence of a series, from any backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -412,6 +882,10 @@ pub struct Event {
     /// The server id of the series master, on an occurrence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series_master_id: Option<EventId>,
+    /// What the event is to its series. An event cached by a build that did
+    /// not record it reads as single until the next baseline.
+    #[serde(default)]
+    pub kind: EventKind,
     pub summary: String,
     pub time: EventTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,7 +898,10 @@ pub struct Event {
     #[serde(default)]
     pub attendees: Vec<Attendee>,
     pub own_response: OwnResponse,
-    /// The `RRULE` text of a series master; an occurrence carries `None`.
+    /// The series rule in words ([`Recurrence::describe`]), on a series
+    /// master and on each occurrence of it the backend knows the rule of; on
+    /// an invitation mail's event, the summary of the mail's `RRULE`. The
+    /// rule itself stays in the series cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recurrence: Option<String>,
     /// Minutes before the start a reminder fires; `None` when off.
@@ -433,6 +910,13 @@ pub struct Event {
     /// The join link of a Teams or other online meeting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub online_meeting_url: Option<String>,
+    /// Whether the event is an online meeting (Graph `isOnlineMeeting`),
+    /// which a server can say before its join link exists.
+    #[serde(default)]
+    pub is_online_meeting: bool,
+    /// The service of the online meeting, when the server names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_meeting_provider: Option<OnlineMeetingProvider>,
     pub sensitivity: Sensitivity,
     pub show_as: ShowAs,
     #[serde(default)]
@@ -446,6 +930,18 @@ pub struct Event {
     /// The event in the server's own web client (Outlook on the web).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_link: Option<String>,
+    /// Whether the organizer lets attendees propose a new time; the servers'
+    /// default is yes.
+    #[serde(default = "default_true")]
+    pub allow_new_time_proposals: bool,
+    /// Whether the organizer asks for an answer; the servers' default is yes.
+    #[serde(default = "default_true")]
+    pub response_requested: bool,
+    /// The client's id for the create that made the event (Graph
+    /// `transactionId`), which a server returns only for an event an app
+    /// created with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
 }
 
 impl Event {
@@ -476,8 +972,9 @@ impl Event {
 
     /// Take the details of an occurrence from its series `master`: the
     /// `UID` and everything that describes the meeting rather than this
-    /// occurrence's place in time. The occurrence keeps its own ids, time,
-    /// `RECURRENCE-ID`, change stamp and web link.
+    /// occurrence's place in time, the series rule in words included. The
+    /// occurrence keeps its own ids, kind, time, `RECURRENCE-ID`, change
+    /// stamp and web link.
     ///
     /// What an occurrence Graph's delta trims to its times shows (PERSO-200):
     /// the Graph adapter and the store's re-derivation, whenever its master
@@ -491,11 +988,17 @@ impl Event {
         self.attendees = master.attendees.clone();
         self.own_response = master.own_response;
         self.reminder = master.reminder;
+        self.recurrence = master.recurrence.clone();
         self.online_meeting_url = master.online_meeting_url.clone();
+        self.is_online_meeting = master.is_online_meeting;
+        self.online_meeting_provider = master.online_meeting_provider;
         self.sensitivity = master.sensitivity;
         self.show_as = master.show_as;
         self.cancelled = master.cancelled;
         self.is_organizer = master.is_organizer;
+        self.allow_new_time_proposals = master.allow_new_time_proposals;
+        self.response_requested = master.response_requested;
+        self.transaction_id = master.transaction_id.clone();
     }
 }
 
@@ -596,6 +1099,7 @@ mod tests {
             uid: "uid-1".into(),
             recurrence_id: None,
             series_master_id: None,
+            kind: EventKind::Single,
             summary: "Standup".into(),
             time,
             location: None,
@@ -609,18 +1113,318 @@ mod tests {
                 email: "sylvain@example.com".into(),
                 role: AttendeeRole::Required,
                 status: ResponseStatus::NeedsAction,
+                proposed_time: None,
             }],
             own_response: OwnResponse::NeedsAction,
             recurrence: None,
             reminder: Some(15),
             online_meeting_url: None,
+            is_online_meeting: false,
+            online_meeting_provider: None,
             sensitivity: Sensitivity::Normal,
             show_as: ShowAs::Busy,
             cancelled: false,
             is_organizer: false,
             last_modified: Some(utc(2026, 10, 1, 8, 0)),
             web_link: None,
+            allow_new_time_proposals: true,
+            response_requested: true,
+            transaction_id: None,
         }
+    }
+
+    fn rule(frequency: Frequency) -> Recurrence {
+        Recurrence {
+            frequency,
+            interval: 1,
+            weekdays: Vec::new(),
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: None,
+            start: None,
+            until: None,
+            count: None,
+        }
+    }
+
+    /// Each pattern an `RRULE` can state in the model's terms reads into the
+    /// rule, an ordinal weekday or a `BYSETPOS` alike, and a rule beyond the
+    /// model is none.
+    #[test]
+    fn an_rrule_reads_into_the_rule_of_its_pattern() {
+        let read = |rrule: &str| Recurrence::from_rrule(rrule, Tz::UTC);
+        assert_eq!(
+            read("FREQ=WEEKLY;BYDAY=WE;WKST=SU"),
+            Some(Recurrence {
+                weekdays: vec![Weekday::Wednesday],
+                first_day_of_week: Some(Weekday::Sunday),
+                ..rule(Frequency::Weekly)
+            })
+        );
+        assert_eq!(
+            read("freq=weekly;interval=2;byday=MO,TH;until=20270629T215959Z"),
+            Some(Recurrence {
+                interval: 2,
+                weekdays: vec![Weekday::Monday, Weekday::Thursday],
+                until: Some(date(2027, 6, 29)),
+                ..rule(Frequency::Weekly)
+            })
+        );
+        assert_eq!(
+            read("FREQ=DAILY;INTERVAL=3;COUNT=5"),
+            Some(Recurrence {
+                interval: 3,
+                count: Some(5),
+                ..rule(Frequency::Daily)
+            })
+        );
+        assert_eq!(
+            read("FREQ=MONTHLY;BYMONTHDAY=15"),
+            Some(Recurrence {
+                day_of_month: Some(15),
+                ..rule(Frequency::Monthly)
+            })
+        );
+        let last_thursday = Recurrence {
+            interval: 2,
+            weekdays: vec![Weekday::Thursday],
+            week_index: Some(WeekIndex::Last),
+            count: Some(6),
+            ..rule(Frequency::Monthly)
+        };
+        assert_eq!(
+            read("FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6").as_ref(),
+            Some(&last_thursday)
+        );
+        assert_eq!(
+            read("FREQ=MONTHLY;INTERVAL=2;BYDAY=-1TH;COUNT=6"),
+            Some(last_thursday)
+        );
+        assert_eq!(
+            read("FREQ=YEARLY;BYMONTH=10;BYMONTHDAY=31;UNTIL=20301031"),
+            Some(Recurrence {
+                month: Some(10),
+                day_of_month: Some(31),
+                until: Some(date(2030, 10, 31)),
+                ..rule(Frequency::Yearly)
+            })
+        );
+        assert_eq!(
+            read("FREQ=YEARLY;BYDAY=4TH;BYMONTH=11"),
+            Some(Recurrence {
+                month: Some(11),
+                weekdays: vec![Weekday::Thursday],
+                week_index: Some(WeekIndex::Fourth),
+                ..rule(Frequency::Yearly)
+            })
+        );
+        for beyond in [
+            "FREQ=HOURLY",
+            "BYDAY=MO",
+            "FREQ=MONTHLY;BYDAY=MO",
+            "FREQ=MONTHLY;BYDAY=1MO,-1FR",
+            "FREQ=MONTHLY;BYMONTHDAY=1,15",
+            "FREQ=MONTHLY;BYDAY=5MO",
+            "FREQ=YEARLY;BYMONTH=1,7",
+            "FREQ=WEEKLY;BYDAY=2MO",
+            "FREQ=DAILY;BYDAY=MO",
+            "FREQ=DAILY;BYHOUR=9",
+            "FREQ=DAILY;COUNT=3;UNTIL=20270101",
+            "FREQ=DAILY;INTERVAL=0",
+            "FREQ=DAILY;UNTIL=soon",
+            "garbage",
+        ] {
+            assert_eq!(read(beyond), None, "{beyond}");
+        }
+    }
+
+    /// A New York series ending at 23:59:59 local on 29 June has a UTC
+    /// `UNTIL` on 30 June, read back on its New York day; a floating or
+    /// date-only `UNTIL` keeps its own date wherever the event is.
+    #[test]
+    fn a_utc_until_is_read_on_its_day_in_the_events_zone() {
+        let new_york = chrono_tz::America::New_York;
+        let until = |rrule: &str, zone| Recurrence::from_rrule(rrule, zone).unwrap().until;
+        let utc_until = "FREQ=WEEKLY;BYDAY=MO;UNTIL=20270630T035959Z";
+        assert_eq!(until(utc_until, new_york), Some(date(2027, 6, 29)));
+        assert_eq!(until(utc_until, Tz::UTC), Some(date(2027, 6, 30)));
+        assert_eq!(
+            until("FREQ=DAILY;UNTIL=20270630T235959", new_york),
+            Some(date(2027, 6, 30))
+        );
+        assert_eq!(
+            until("FREQ=DAILY;UNTIL=20270630", new_york),
+            Some(date(2027, 6, 30))
+        );
+    }
+
+    #[test]
+    fn every_pattern_reads_in_words() {
+        let weekly = Recurrence {
+            weekdays: vec![Weekday::Wednesday],
+            first_day_of_week: Some(Weekday::Sunday),
+            start: Some(date(2024, 10, 23)),
+            ..rule(Frequency::Weekly)
+        };
+        assert_eq!(weekly.describe(), "Weekly on Wednesday");
+
+        let fortnightly = Recurrence {
+            interval: 2,
+            weekdays: vec![Weekday::Monday, Weekday::Thursday],
+            until: Some(date(2027, 6, 29)),
+            ..rule(Frequency::Weekly)
+        };
+        assert_eq!(
+            fortnightly.describe(),
+            "Every 2 weeks on Monday, Thursday until 2027-06-29"
+        );
+
+        let daily = Recurrence {
+            interval: 3,
+            count: Some(5),
+            ..rule(Frequency::Daily)
+        };
+        assert_eq!(daily.describe(), "Every 3 days (5 times)");
+
+        let by_date = Recurrence {
+            day_of_month: Some(15),
+            ..rule(Frequency::Monthly)
+        };
+        assert_eq!(by_date.describe(), "Monthly on day 15");
+
+        let last_thursday = Recurrence {
+            interval: 2,
+            weekdays: vec![Weekday::Thursday],
+            week_index: Some(WeekIndex::Last),
+            count: Some(6),
+            ..rule(Frequency::Monthly)
+        };
+        assert_eq!(
+            last_thursday.describe(),
+            "Every 2 months on the last Thursday (6 times)"
+        );
+
+        let birthday = Recurrence {
+            month: Some(10),
+            day_of_month: Some(31),
+            ..rule(Frequency::Yearly)
+        };
+        assert_eq!(birthday.describe(), "Yearly on 31 October");
+
+        let thanksgiving = Recurrence {
+            month: Some(11),
+            weekdays: vec![Weekday::Thursday],
+            week_index: Some(WeekIndex::Fourth),
+            ..rule(Frequency::Yearly)
+        };
+        assert_eq!(
+            thanksgiving.describe(),
+            "Yearly on the fourth Thursday of November"
+        );
+    }
+
+    #[test]
+    fn a_feature_spells_its_wire_word_as_serde_does() {
+        for feature in [
+            CalendarFeature::Write,
+            CalendarFeature::OnlineMeeting,
+            CalendarFeature::ProposeTime,
+            CalendarFeature::FreeBusy,
+            CalendarFeature::ServerReminders,
+        ] {
+            assert_eq!(
+                serde_json::to_value(feature).unwrap(),
+                serde_json::json!(feature.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_round_trips_through_json_in_kebab_case() {
+        let rule = Recurrence {
+            weekdays: vec![Weekday::Thursday],
+            week_index: Some(WeekIndex::Last),
+            start: Some(date(2026, 11, 26)),
+            ..rule(Frequency::Monthly)
+        };
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "frequency": "monthly",
+                "interval": 1,
+                "weekdays": ["thursday"],
+                "week_index": "last",
+                "start": "2026-11-26"
+            })
+        );
+        assert_eq!(serde_json::from_value::<Recurrence>(json).unwrap(), rule);
+    }
+
+    #[test]
+    fn an_event_cached_before_the_phase_2_fields_reads_with_the_servers_defaults() {
+        let ev = event(EventTime::all_day(date(2026, 11, 3), date(2026, 11, 4)).unwrap());
+        let mut json = serde_json::to_value(&ev).unwrap();
+        let object = json.as_object_mut().unwrap();
+        for key in [
+            "kind",
+            "is_online_meeting",
+            "allow_new_time_proposals",
+            "response_requested",
+        ] {
+            assert!(object.remove(key).is_some(), "{key} is always written");
+        }
+        let read: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(read, ev);
+    }
+
+    #[test]
+    fn an_occurrence_inherits_the_meeting_but_keeps_its_own_kind_and_slot() {
+        let mut master = event(
+            EventTime::timed(
+                utc(2026, 10, 7, 8, 0),
+                utc(2026, 10, 7, 9, 0),
+                "Europe/Berlin",
+            )
+            .unwrap(),
+        );
+        master.id = "master".into();
+        master.kind = EventKind::SeriesMaster;
+        master.recurrence = Some("Weekly on Wednesday".into());
+        master.is_online_meeting = true;
+        master.online_meeting_provider = Some(OnlineMeetingProvider::TeamsForBusiness);
+        master.allow_new_time_proposals = false;
+        master.response_requested = false;
+        master.transaction_id = Some("tx-1".into());
+        master.attendees[0].proposed_time = Some(TimeSlot {
+            start: utc(2026, 11, 4, 9, 0),
+            end: utc(2026, 11, 4, 10, 0),
+        });
+
+        let time = EventTime::timed(utc(2026, 11, 4, 8, 0), utc(2026, 11, 4, 9, 0), "UTC").unwrap();
+        let mut occurrence = event(time.clone());
+        occurrence.id = "occ".into();
+        occurrence.kind = EventKind::Occurrence;
+        occurrence.summary = String::new();
+        occurrence.inherit_from(&master);
+
+        assert_eq!(occurrence.id, "occ");
+        assert_eq!(occurrence.kind, EventKind::Occurrence);
+        assert_eq!(occurrence.time, time);
+        assert_eq!(occurrence.summary, "Standup");
+        assert_eq!(
+            occurrence.recurrence.as_deref(),
+            Some("Weekly on Wednesday")
+        );
+        assert!(occurrence.is_online_meeting);
+        assert_eq!(
+            occurrence.online_meeting_provider,
+            Some(OnlineMeetingProvider::TeamsForBusiness)
+        );
+        assert!(!occurrence.allow_new_time_proposals && !occurrence.response_requested);
+        assert_eq!(occurrence.transaction_id.as_deref(), Some("tx-1"));
+        assert_eq!(occurrence.attendees, master.attendees);
     }
 
     #[test]

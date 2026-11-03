@@ -1,5 +1,5 @@
 {
-  "_comment": "The server calendar the fixture serves (PERSO-200): calendar.list, calendar.view, event.get and event.respond. The week of 2099-10-12 holds a timed event, overlapping ones, an all-day one and the first occurrence of a weekly series whose second falls on 2099-10-20; imip:1008 is work's steering committee, the invitation mail of messages.json. invites names the server event message.invite answers as event_id on an account with a backend.",
+  "_comment": "The server calendar the fixture serves (PERSO-200): calendar.list, calendar.view, event.get and event.respond. The week of 2099-10-12 holds a timed event, overlapping ones, an all-day one and the first occurrence of a weekly series whose second, moved apart from the series, falls on 2099-10-20, and a Teams design review Robin proposed another time for; imip:1008 is work's steering committee, the invitation mail of messages.json. invites names the server event message.invite answers as event_id on an account with a backend.",
   "calendars": [
     {
       "account": "home",
@@ -9,7 +9,8 @@
       "is_default": true,
       "can_edit": true,
       "visible": true,
-      "backend": "graph"
+      "backend": "graph",
+      "features": []
     },
     {
       "account": "home",
@@ -19,7 +20,8 @@
       "is_default": false,
       "can_edit": false,
       "visible": true,
-      "backend": "graph"
+      "backend": "graph",
+      "features": []
     },
     {
       "account": "work",
@@ -29,7 +31,8 @@
       "is_default": false,
       "can_edit": false,
       "visible": true,
-      "backend": "none"
+      "backend": "none",
+      "features": []
     }
   ],
   "events": [
@@ -71,7 +74,11 @@
         "email": "kim@example.com"
       },
       "location": "Room 1.02",
-      "recurrence": "FREQ=WEEKLY;BYDAY=TU"
+      "recurrence": "Weekly on Tuesday",
+      "kind": "occurrence",
+      "is_online_meeting": false,
+      "allow_new_time_proposals": true,
+      "response_requested": true
     },
     {
       "account": "home",
@@ -102,7 +109,11 @@
           "name": "Robin Roe",
           "email": "robin@example.com",
           "role": "optional",
-          "status": "tentative"
+          "status": "tentative",
+          "proposed_time": {
+            "start": "2099-10-14T12:00:00Z",
+            "end": "2099-10-14T13:30:00Z"
+          }
         }
       ],
       "own_response": "needs-action",
@@ -117,7 +128,12 @@
         "email": "kim@example.com"
       },
       "online_meeting_url": "https://teams.microsoft.com/l/meetup-join/fixture-design-review",
-      "reminder": 15
+      "reminder": 15,
+      "kind": "single",
+      "is_online_meeting": true,
+      "allow_new_time_proposals": true,
+      "response_requested": true,
+      "online_meeting_provider": "teams-for-business"
     },
     {
       "account": "work",
@@ -162,7 +178,11 @@
         "row_id": 1008,
         "selector": "mp://work/inbox/invitation-steering-comm-1008@fixture.example",
         "subject": "Invitation: Steering committee"
-      }
+      },
+      "kind": "single",
+      "is_online_meeting": false,
+      "allow_new_time_proposals": true,
+      "response_requested": true
     },
     {
       "account": "home",
@@ -192,7 +212,11 @@
       "organizer": {
         "name": "Me",
         "email": "me@example.com"
-      }
+      },
+      "kind": "single",
+      "is_online_meeting": false,
+      "allow_new_time_proposals": true,
+      "response_requested": true
     },
     {
       "account": "home",
@@ -210,7 +234,11 @@
       "sensitivity": "normal",
       "show_as": "oof",
       "cancelled": false,
-      "is_organizer": false
+      "is_organizer": false,
+      "kind": "single",
+      "is_online_meeting": false,
+      "allow_new_time_proposals": true,
+      "response_requested": true
     },
     {
       "account": "home",
@@ -250,7 +278,11 @@
         "email": "kim@example.com"
       },
       "location": "Room 1.02",
-      "recurrence": "FREQ=WEEKLY;BYDAY=TU"
+      "recurrence": "Weekly on Tuesday",
+      "kind": "exception",
+      "is_online_meeting": false,
+      "allow_new_time_proposals": true,
+      "response_requested": true
     },
     {
       "account": "home",
@@ -285,7 +317,11 @@
       "organizer": {
         "email": "praxis@example.com"
       },
-      "location": "Praxis Dr. Weiss"
+      "location": "Praxis Dr. Weiss",
+      "kind": "single",
+      "is_online_meeting": false,
+      "allow_new_time_proposals": true,
+      "response_requested": true
     }
   ],
   "invites": {

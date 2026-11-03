@@ -24,9 +24,10 @@
 //! (`GET /me/calendars/{id}/events/{seriesMasterId}`, which a calendar shared
 //! with the account answers too), once per series: the store caches it
 //! ([`SeriesInfo`], [`CalendarBackend::remember_series`]) and a baseline
-//! reads it again to refresh the rule. An occurrence carries no
-//! [`Event::recurrence`], as the model asks; the series rule stays in the
-//! series cache.
+//! reads it again to refresh the rule. The rule is read into the structured
+//! [`Recurrence`] the series cache keeps ([`SeriesInfo::recurrence`]), and
+//! every occurrence of the series carries it in words
+//! ([`Event::recurrence`]), so a card says how the series repeats.
 //!
 //! Both delta routes trim an `occurrence` to its `id`, `seriesMasterId`,
 //! `type`, `start` and `end`, while the series master in the same feed
@@ -58,7 +59,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context};
-use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use chrono_tz::Tz;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -67,8 +68,9 @@ use super::{
     BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult, Written,
 };
 use crate::calendar_model::{
-    Attendee, AttendeeRole, Calendar, CalendarWindow, Event, EventId, EventTime, OwnResponse,
-    Person, ResponseStatus, Sensitivity, ShowAs,
+    Attendee, AttendeeRole, Calendar, CalendarFeature, CalendarWindow, Event, EventId, EventKind,
+    EventTime, Frequency, OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus,
+    Sensitivity, ShowAs, TimeSlot, WeekIndex, Weekday,
 };
 use crate::calendar_write::{EventInput, EventPatch};
 use crate::config::{AccountConfig, GraphConfig};
@@ -83,6 +85,11 @@ const MAX_PAGES: usize = 500;
 
 /// The scope a 403 on a calendar call is reported missing.
 const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
+
+/// What this build serves on a Graph calendar beyond reading and answering
+/// ([`super::features`]): nothing yet, since every write of phase 2 adds its
+/// feature here as its daemon method ships.
+pub const FEATURES: &[CalendarFeature] = &[];
 
 // ---------------------------------------------------------------------------
 // The HTTP seam
@@ -321,12 +328,19 @@ mod wire {
     }
 
     #[derive(Debug, Clone, Deserialize)]
+    pub struct TimeSlot {
+        pub start: Option<DateTimeZone>,
+        pub end: Option<DateTimeZone>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Attendee {
         #[serde(rename = "type")]
         pub kind: Option<String>,
         pub status: Option<Status>,
         pub email_address: Option<EmailAddress>,
+        pub proposed_new_time: Option<TimeSlot>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -367,6 +381,7 @@ mod wire {
     pub struct RecurrenceRange {
         #[serde(rename = "type")]
         pub kind: Option<String>,
+        pub start_date: Option<String>,
         pub end_date: Option<String>,
         pub number_of_occurrences: Option<u32>,
     }
@@ -407,6 +422,11 @@ mod wire {
         pub is_reminder_on: Option<bool>,
         pub online_meeting: Option<OnlineMeeting>,
         pub online_meeting_url: Option<String>,
+        pub is_online_meeting: Option<bool>,
+        pub online_meeting_provider: Option<String>,
+        pub allow_new_time_proposals: Option<bool>,
+        pub response_requested: Option<bool>,
+        pub transaction_id: Option<String>,
         pub sensitivity: Option<String>,
         pub show_as: Option<String>,
         pub is_cancelled: Option<bool>,
@@ -585,7 +605,37 @@ fn attendee(raw: &wire::Attendee) -> Option<Attendee> {
         email: email.to_string(),
         role,
         status,
+        proposed_time: raw.proposed_new_time.as_ref().and_then(time_slot),
     })
+}
+
+/// A Graph `timeSlot` as instants; `None` when a bound is missing or
+/// unreadable, or the slot ends before it starts.
+fn time_slot(slot: &wire::TimeSlot) -> Option<TimeSlot> {
+    let start = instant_of(slot.start.as_ref()?).ok()?;
+    let end = instant_of(slot.end.as_ref()?).ok()?;
+    (end >= start).then_some(TimeSlot { start, end })
+}
+
+/// A Graph event `type` as the model's kind; an event without one is single.
+fn event_kind(raw: Option<&str>) -> EventKind {
+    match raw {
+        Some("seriesMaster") => EventKind::SeriesMaster,
+        Some("occurrence") => EventKind::Occurrence,
+        Some("exception") => EventKind::Exception,
+        _ => EventKind::Single,
+    }
+}
+
+/// A Graph `onlineMeetingProvider`; `unknown`, which Graph answers for an
+/// event that is no online meeting, is none.
+fn meeting_provider(raw: Option<&str>) -> Option<OnlineMeetingProvider> {
+    match raw {
+        Some("teamsForBusiness") => Some(OnlineMeetingProvider::TeamsForBusiness),
+        Some("skypeForBusiness") => Some(OnlineMeetingProvider::SkypeForBusiness),
+        Some("skypeForConsumer") => Some(OnlineMeetingProvider::SkypeForConsumer),
+        _ => None,
+    }
 }
 
 fn own_response(raw: Option<&str>) -> OwnResponse {
@@ -645,7 +695,7 @@ fn plain_body(event: &wire::Event) -> Option<String> {
 
 /// Whether a Graph event `type` is one occurrence of a series.
 fn is_instance(kind: Option<&str>) -> bool {
-    matches!(kind, Some("occurrence") | Some("exception"))
+    event_kind(kind).is_instance()
 }
 
 /// Whether `event` is an occurrence Graph's delta trimmed to its ids and
@@ -659,14 +709,16 @@ fn is_trimmed(event: &wire::Event) -> bool {
 /// master, for an occurrence: its `UID` is the one the series shares, and an
 /// occurrence a delta trimmed to its times places them with the master's
 /// all-day flag and zone and takes every detail from it
-/// ([`Event::inherit_from`]).
+/// ([`Event::inherit_from`]). An occurrence carries its series' rule in
+/// words, and a series master its own.
 pub(crate) fn from_graph(
     account: &str,
     calendar: &str,
     event: &wire::Event,
     series: Option<&SeriesInfo>,
 ) -> Result<Event, String> {
-    let instance = is_instance(event.kind.as_deref());
+    let kind = event_kind(event.kind.as_deref());
+    let instance = kind.is_instance();
     let series = series.filter(|_| instance);
     let master = series.and_then(|s| s.master.as_deref());
 
@@ -701,6 +753,10 @@ pub(crate) fn from_graph(
     } else {
         None
     };
+    let rule = match kind {
+        EventKind::SeriesMaster => event.recurrence.as_ref().and_then(recurrence_of),
+        _ => series.and_then(|s| s.recurrence.clone()),
+    };
 
     let mut converted = Event {
         account: account.to_string(),
@@ -709,6 +765,7 @@ pub(crate) fn from_graph(
         uid,
         recurrence_id,
         series_master_id: event.series_master_id.clone().filter(|_| instance),
+        kind,
         summary: event.subject.clone().unwrap_or_default(),
         location: event
             .location
@@ -731,7 +788,7 @@ pub(crate) fn from_graph(
                 .as_ref()
                 .and_then(|s| s.response.as_deref()),
         ),
-        recurrence: None,
+        recurrence: rule.as_ref().map(Recurrence::describe),
         reminder: event
             .reminder_minutes_before_start
             .filter(|_| event.is_reminder_on.unwrap_or(false))
@@ -742,6 +799,8 @@ pub(crate) fn from_graph(
             .and_then(|m| m.join_url.clone())
             .or_else(|| event.online_meeting_url.clone())
             .filter(|url| !url.trim().is_empty()),
+        is_online_meeting: event.is_online_meeting.unwrap_or(false),
+        online_meeting_provider: meeting_provider(event.online_meeting_provider.as_deref()),
         sensitivity: sensitivity(event.sensitivity.as_deref()),
         show_as: show_as(event.show_as.as_deref()),
         cancelled: event.is_cancelled.unwrap_or(false),
@@ -752,6 +811,12 @@ pub(crate) fn from_graph(
             .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
             .map(|at| at.with_timezone(&Utc)),
         web_link: event.web_link.clone(),
+        allow_new_time_proposals: event.allow_new_time_proposals.unwrap_or(true),
+        response_requested: event.response_requested.unwrap_or(true),
+        transaction_id: event
+            .transaction_id
+            .clone()
+            .filter(|id| !id.trim().is_empty()),
         time,
     };
     if let Some(master) = master.filter(|_| is_trimmed(event)) {
@@ -787,81 +852,82 @@ fn recurrence_id(
     })
 }
 
-/// A Graph `recurrence` as `RRULE` text, or `None` for a pattern it cannot
-/// express.
-fn rrule_of(recurrence: &wire::Recurrence) -> Option<String> {
+/// A Graph `patternedRecurrence` as the model's rule, or `None` for a
+/// pattern it cannot express.
+///
+/// Graph fills every pattern field whatever the type (a weekly rule comes
+/// with `dayOfMonth: 0`, `month: 0` and `index: "first"`, and a range with
+/// `endDate: "0001-01-01"`), so each type reads only the fields it names
+/// and a zero or year-one value is no value.
+fn recurrence_of(recurrence: &wire::Recurrence) -> Option<Recurrence> {
     let pattern = recurrence.pattern.as_ref()?;
-    let day = |name: &str| -> Option<&'static str> {
-        Some(match name.to_ascii_lowercase().as_str() {
-            "monday" => "MO",
-            "tuesday" => "TU",
-            "wednesday" => "WE",
-            "thursday" => "TH",
-            "friday" => "FR",
-            "saturday" => "SA",
-            "sunday" => "SU",
-            _ => return None,
-        })
-    };
-    let days: Vec<&str> = pattern.days_of_week.iter().filter_map(|d| day(d)).collect();
-    let mut parts: Vec<String> = Vec::new();
-    let (freq, relative) = match pattern.kind.as_deref()? {
-        "daily" => ("DAILY", false),
-        "weekly" => ("WEEKLY", false),
-        "absoluteMonthly" => ("MONTHLY", false),
-        "relativeMonthly" => ("MONTHLY", true),
-        "absoluteYearly" => ("YEARLY", false),
-        "relativeYearly" => ("YEARLY", true),
+    let (frequency, relative) = match pattern.kind.as_deref()? {
+        "daily" => (Frequency::Daily, false),
+        "weekly" => (Frequency::Weekly, false),
+        "absoluteMonthly" => (Frequency::Monthly, false),
+        "relativeMonthly" => (Frequency::Monthly, true),
+        "absoluteYearly" => (Frequency::Yearly, false),
+        "relativeYearly" => (Frequency::Yearly, true),
         _ => return None,
     };
-    parts.push(format!("FREQ={freq}"));
-    if let Some(interval) = pattern.interval.filter(|i| *i > 1) {
-        parts.push(format!("INTERVAL={interval}"));
-    }
-    if !days.is_empty() && freq != "DAILY" {
-        parts.push(format!("BYDAY={}", days.join(",")));
-    }
-    if relative {
-        let position = match pattern.index.as_deref().unwrap_or("first") {
-            "first" => 1,
-            "second" => 2,
-            "third" => 3,
-            "fourth" => 4,
-            "last" => -1,
-            _ => return None,
-        };
-        parts.push(format!("BYSETPOS={position}"));
-    } else if freq == "MONTHLY" || freq == "YEARLY" {
-        if let Some(day) = pattern.day_of_month.filter(|d| *d > 0) {
-            parts.push(format!("BYMONTHDAY={day}"));
+    let positive = |value: Option<u32>| value.filter(|v| *v > 0);
+    let date = |raw: Option<&String>| {
+        raw.and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok())
+            .filter(|date| date.year() > 1)
+    };
+    let weekdays: Vec<Weekday> = pattern
+        .days_of_week
+        .iter()
+        .filter_map(|day| Weekday::from_name(day))
+        .collect();
+    let mut rule = Recurrence {
+        frequency,
+        interval: positive(pattern.interval).unwrap_or(1),
+        weekdays: Vec::new(),
+        day_of_month: None,
+        week_index: None,
+        month: None,
+        first_day_of_week: None,
+        start: date(
+            recurrence
+                .range
+                .as_ref()
+                .and_then(|r| r.start_date.as_ref()),
+        ),
+        until: None,
+        count: None,
+    };
+    match frequency {
+        Frequency::Daily => {}
+        Frequency::Weekly => {
+            rule.weekdays = weekdays;
+            rule.first_day_of_week = pattern
+                .first_day_of_week
+                .as_deref()
+                .and_then(Weekday::from_name);
         }
-    }
-    if freq == "YEARLY" {
-        if let Some(month) = pattern.month.filter(|m| *m > 0) {
-            parts.push(format!("BYMONTH={month}"));
-        }
-    }
-    if freq == "WEEKLY" {
-        if let Some(first) = pattern.first_day_of_week.as_deref().and_then(day) {
-            parts.push(format!("WKST={first}"));
+        Frequency::Monthly | Frequency::Yearly => {
+            if relative {
+                rule.week_index = Some(WeekIndex::from_name(
+                    pattern.index.as_deref().unwrap_or("first"),
+                )?);
+                rule.weekdays = weekdays;
+            } else {
+                rule.day_of_month = positive(pattern.day_of_month);
+            }
+            if frequency == Frequency::Yearly {
+                rule.month = positive(pattern.month).filter(|m| *m <= 12);
+            }
         }
     }
     if let Some(range) = &recurrence.range {
         match range.kind.as_deref() {
-            Some("endDate") => {
-                if let Some(end) = &range.end_date {
-                    parts.push(format!("UNTIL={}", end.replace('-', "")));
-                }
-            }
-            Some("numbered") => {
-                if let Some(count) = range.number_of_occurrences.filter(|c| *c > 0) {
-                    parts.push(format!("COUNT={count}"));
-                }
-            }
+            Some("endDate") => rule.until = date(range.end_date.as_ref()),
+            Some("numbered") => rule.count = positive(range.number_of_occurrences),
             _ => {}
         }
     }
-    Some(parts.join(";"))
+    Some(rule)
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1355,7 @@ enum MasterError {
 const MASTER_SELECT: &str = "iCalUId,recurrence,originalStartTimeZone,type,start,end,isAllDay,\
     subject,body,bodyPreview,location,organizer,attendees,responseStatus,isOrganizer,\
     isCancelled,isReminderOn,reminderMinutesBeforeStart,onlineMeeting,onlineMeetingUrl,\
+    isOnlineMeeting,onlineMeetingProvider,allowNewTimeProposals,responseRequested,transactionId,\
     sensitivity,showAs";
 
 /// What a series master tells about its series: its `UID` (`None` without
@@ -1311,7 +1378,7 @@ fn series_of(account: &str, calendar: &str, master: &wire::Event) -> Option<Seri
     Some(SeriesInfo {
         master_id: master.id.clone(),
         uid: uid.to_string(),
-        recurrence: master.recurrence.as_ref().and_then(rrule_of),
+        recurrence: master.recurrence.as_ref().and_then(recurrence_of),
         master: details,
         zone: zone_of(master.original_start_time_zone.as_deref()).map(|tz| tz.name().to_string()),
     })

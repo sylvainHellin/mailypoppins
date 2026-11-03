@@ -519,6 +519,75 @@ pub fn calendar_tag(event: &CalendarEvent, names: &CalendarNames) -> String {
     format!("{}/{}", event.account, name)
 }
 
+/// A span of RFC 3339 instants read in `zone`: `Tue 2026-07-07 09:00-10:00`,
+/// or its two ends when it spans days; the raw values when one does not
+/// parse. The timed line of an event card, and an attendee's proposal.
+pub fn time_span<Z: chrono::TimeZone>(start: &str, end: &str, zone: &Z) -> String
+where
+    Z::Offset: std::fmt::Display,
+{
+    let instant = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw).ok();
+    let (Some(from), Some(to)) = (instant(start), instant(end)) else {
+        return format!("{start} to {end}");
+    };
+    let (from, to) = (from.with_timezone(zone), to.with_timezone(zone));
+    if from.date_naive() == to.date_naive() {
+        format!(
+            "{}-{}",
+            from.format("%a %Y-%m-%d %H:%M"),
+            to.format("%H:%M")
+        )
+    } else {
+        format!(
+            "{} to {}",
+            from.format("%a %Y-%m-%d %H:%M"),
+            to.format("%a %Y-%m-%d %H:%M")
+        )
+    }
+}
+
+/// How an event card says where an event sits in its series: the rule in
+/// words, or that it is one occurrence when the rule is unknown, with a
+/// changed occurrence (`exception`) saying so; `None` for an event in no
+/// series.
+pub fn series_line(event: &CalendarEvent) -> Option<String> {
+    let changed = event.kind == "exception";
+    let instance = changed
+        || event.kind == "occurrence"
+        || event.series_master_id.is_some()
+        || event.recurrence_id.is_some();
+    match (event.recurrence.as_deref(), changed) {
+        (Some(rule), false) => Some(rule.to_string()),
+        (Some(rule), true) => Some(format!("{rule}, this occurrence changed")),
+        (None, true) => Some("one occurrence of a series, changed".to_string()),
+        (None, false) if instance => Some("one occurrence of a series".to_string()),
+        (None, false) => None,
+    }
+}
+
+/// How an event card names its online meeting: the service (`Teams
+/// meeting`), then the join link when there is one; `None` for an event
+/// that is no online meeting.
+pub fn online_meeting_line(event: &CalendarEvent) -> Option<String> {
+    let url = event
+        .online_meeting_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty());
+    if !event.is_online_meeting && url.is_none() {
+        return None;
+    }
+    let label = match event.online_meeting_provider.as_deref() {
+        Some("teams-for-business") => "Teams meeting",
+        Some("skype-for-business") => "Skype for Business meeting",
+        Some("skype-for-consumer") => "Skype meeting",
+        _ => "Online meeting",
+    };
+    Some(match url {
+        Some(url) => format!("{label}  {url}"),
+        None => format!("{label}, no join link yet"),
+    })
+}
+
 /// The one-character mark of the user's own answer to an event.
 pub fn response_mark(own_response: &str) -> char {
     match own_response {
@@ -534,6 +603,85 @@ pub fn response_mark(own_response: &str) -> char {
 #[cfg(test)]
 mod tests {
     use super::refused_rebuild_line;
+    use super::{online_meeting_line, series_line, time_span};
+    use mp_protocol::calendar::{CalendarEvent, CalendarEventTime};
+
+    fn event() -> CalendarEvent {
+        serde_json::from_value(serde_json::json!({
+            "account": "evoqs",
+            "calendar": "cal",
+            "id": "ev",
+            "uid": "ev@example.com",
+            "summary": "Jour fixe",
+            "time": {"kind": "timed", "start": "2026-11-03T08:00:00Z",
+                     "end": "2026-11-03T09:00:00Z", "zone": "UTC"},
+            "own_response": "none",
+            "sensitivity": "normal",
+            "show_as": "busy"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_span_is_one_day_or_two_ends_in_the_zone_given() {
+        assert_eq!(
+            time_span("2026-11-03T08:00:00Z", "2026-11-03T09:30:00Z", &chrono::Utc),
+            "Tue 2026-11-03 08:00-09:30"
+        );
+        assert_eq!(
+            time_span("2026-11-03T23:00:00Z", "2026-11-04T01:00:00Z", &chrono::Utc),
+            "Tue 2026-11-03 23:00 to Wed 2026-11-04 01:00"
+        );
+        assert_eq!(time_span("soon", "later", &chrono::Utc), "soon to later");
+    }
+
+    #[test]
+    fn the_series_line_names_the_rule_and_a_changed_occurrence() {
+        let mut ev = event();
+        assert!(matches!(ev.time, CalendarEventTime::Timed { .. }));
+        assert_eq!(ev.kind, "single", "an absent kind reads as single");
+        assert_eq!(series_line(&ev), None);
+        ev.kind = "occurrence".into();
+        assert_eq!(
+            series_line(&ev).as_deref(),
+            Some("one occurrence of a series")
+        );
+        ev.recurrence = Some("Weekly on Tuesday".into());
+        assert_eq!(series_line(&ev).as_deref(), Some("Weekly on Tuesday"));
+        ev.kind = "exception".into();
+        assert_eq!(
+            series_line(&ev).as_deref(),
+            Some("Weekly on Tuesday, this occurrence changed")
+        );
+        ev.recurrence = None;
+        assert_eq!(
+            series_line(&ev).as_deref(),
+            Some("one occurrence of a series, changed")
+        );
+    }
+
+    #[test]
+    fn the_online_line_names_the_service_and_the_link() {
+        let mut ev = event();
+        assert_eq!(online_meeting_line(&ev), None);
+        ev.is_online_meeting = true;
+        assert_eq!(
+            online_meeting_line(&ev).as_deref(),
+            Some("Online meeting, no join link yet")
+        );
+        ev.online_meeting_provider = Some("teams-for-business".into());
+        ev.online_meeting_url = Some("https://teams.example.org/l/x".into());
+        assert_eq!(
+            online_meeting_line(&ev).as_deref(),
+            Some("Teams meeting  https://teams.example.org/l/x")
+        );
+        ev.is_online_meeting = false;
+        ev.online_meeting_provider = None;
+        assert_eq!(
+            online_meeting_line(&ev).as_deref(),
+            Some("Online meeting  https://teams.example.org/l/x")
+        );
+    }
 
     /// The two refusals of the cache guard have one wording in every client,
     /// and a written index has none.

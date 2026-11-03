@@ -13,11 +13,11 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 07 |││  10:00-11:00 ? Jour fixe              ││Organizer   planung@example.org                                            ││
 08 |││                [evoqs/Calendar]       ││Attendees   Sylvain <sylvain@example.org>  accepted                        ││
 09 |││  10:30-12:00 ? PhD Kolloquium         ││            Ada <ada@example.org>  tentative                               ││
-10 |││                [perso/Invitations]  @…││Response    ✓ accepted                                                     ││
-11 |││                                       ││Link        https://outlook.office.com/calendar/item/ev-handover           ││
-12 |││Wed 2026-08-05                         ││                                                                           ││
-13 |││  all day       Sommerfest             ││Bitte Helm mitbringen.                                                     ││
-14 |││                [evoqs/Holidays]       ││                                                                           ││
+10 |││                [perso/Invitations]  @…││              proposes Mon 2026-08-03 11:00-12:00                          ││
+11 |││                                       ││Response    ✓ accepted                                                     ││
+12 |││Wed 2026-08-05                         ││Link        https://outlook.office.com/calendar/item/ev-handover           ││
+13 |││  all day       Sommerfest             ││                                                                           ││
+14 |││                [evoqs/Holidays]       ││Bitte Helm mitbringen.                                                     ││
 15 |││                            ╭──────────────────────────────────────────────────────────╮                            ││
 16 |││Thu 2026-08-06              │PhD Kolloquium                                            │                            ││
 17 |││  all day       Sommerfest  │                                                          │                            ││

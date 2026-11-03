@@ -22,7 +22,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use mp_client::format::{calendar_names, calendar_tag, response_mark, CalendarNames};
+use mp_client::format::{
+    calendar_names, calendar_tag, online_meeting_line, response_mark, series_line, time_span,
+    CalendarNames,
+};
 
 use super::super::app::{
     day_part, App, CalendarEvent, CalendarEventTime, CalendarLayout, CalendarsOverlay, DayPart,
@@ -998,7 +1001,6 @@ pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut 
 /// its two ends when it spans days, or its dates when it is all-day.
 fn when(event: &CalendarEvent, zone: Tz) -> String {
     let date = |raw: &str| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
-    let instant = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw).ok();
     match &event.time {
         CalendarEventTime::AllDay { start, end } => {
             let (Some(first), Some(end)) = (date(start), date(end)) else {
@@ -1015,25 +1017,7 @@ fn when(event: &CalendarEvent, zone: Tz) -> String {
                 )
             }
         }
-        CalendarEventTime::Timed { start, end, .. } => {
-            let (Some(start), Some(end)) = (instant(start), instant(end)) else {
-                return format!("{start} to {end}");
-            };
-            let (start, end) = (start.with_timezone(&zone), end.with_timezone(&zone));
-            if start.date_naive() == end.date_naive() {
-                format!(
-                    "{}-{}",
-                    start.format("%a %Y-%m-%d %H:%M"),
-                    end.format("%H:%M")
-                )
-            } else {
-                format!(
-                    "{} to {}",
-                    start.format("%a %Y-%m-%d %H:%M"),
-                    end.format("%a %Y-%m-%d %H:%M")
-                )
-            }
-        }
+        CalendarEventTime::Timed { start, end, .. } => time_span(start, end, &zone),
     }
 }
 
@@ -1055,8 +1039,9 @@ fn status_style(status: &str) -> Style {
 }
 
 /// The card's lines: the title, then when, where, the calendar, the
-/// organizer, the attendees with their answers, the user's own answer, the
-/// recurrence, the links, the invitation mail, and the body.
+/// organizer, the attendees with their answers and proposed times, the
+/// user's own answer, whether new times may be proposed, the series, the
+/// online meeting, the links, the invitation mail, and the body.
 pub(super) fn event_lines(
     event: &CalendarEvent,
     zone: Tz,
@@ -1109,29 +1094,42 @@ pub(super) fn event_lines(
             ),
             Span::styled(attendee.status.clone(), status_style(&attendee.status)),
         ]));
+        if let Some(slot) = &attendee.proposed_time {
+            field(
+                &mut lines,
+                "",
+                format!("  proposes {}", time_span(&slot.start, &slot.end, &zone)),
+                Style::default().fg(theme.warning),
+            );
+        }
+    }
+    let mut response = format!(
+        "{} {}",
+        response_mark(&event.own_response),
+        event.own_response
+    );
+    if !event.response_requested && !event.is_organizer {
+        response.push_str(" (no answer requested)");
     }
     field(
         &mut lines,
         "Response",
-        format!(
-            "{} {}",
-            response_mark(&event.own_response),
-            event.own_response
-        ),
+        response,
         status_style(&event.own_response),
     );
-    if let Some(recurrence) = event.recurrence.as_deref() {
-        field(&mut lines, "Recurrence", recurrence.to_string(), value);
-    } else if event.series_master_id.is_some() || event.recurrence_id.is_some() {
+    if !event.allow_new_time_proposals {
         field(
             &mut lines,
-            "Recurrence",
-            "one occurrence of a series".to_string(),
+            "Proposals",
+            "new times not accepted".to_string(),
             value,
         );
     }
-    if let Some(url) = event.online_meeting_url.as_deref() {
-        field(&mut lines, "Online", url.to_string(), value);
+    if let Some(series) = series_line(event) {
+        field(&mut lines, "Recurrence", series, value);
+    }
+    if let Some(online) = online_meeting_line(event) {
+        field(&mut lines, "Online", online, value);
     }
     if let Some(link) = event.web_link.as_deref() {
         field(&mut lines, "Link", link.to_string(), value);

@@ -11,6 +11,7 @@
 use std::str::FromStr;
 
 use chrono::TimeZone;
+use chrono_tz::Tz;
 use icalendar::{Calendar, CalendarComponent, Component, DatePerhapsTime, EventLike, PartStat};
 
 use crate::types::{EventAttendee, EventFrontmatter};
@@ -116,12 +117,19 @@ pub fn parse_ics(bytes: &[u8]) -> Option<ParsedEvent> {
         .map(strip_mailto)
         .map(|s| s.to_string());
 
-    let start = event.get_start().and_then(format_date_perhaps_time);
+    let dtstart = event.get_start();
+    let start_zone = dtstart.as_ref().and_then(zone_of_start);
+    let start = dtstart.and_then(format_date_perhaps_time);
     let end = event.get_end().and_then(format_date_perhaps_time);
 
+    // The rule in the words a server event's card uses, its UNTIL read in
+    // the zone of DTSTART; a rule the model cannot hold keeps its raw text.
     let recurrence = event
         .property_value("RRULE")
-        .map(humanize_rrule)
+        .map(|rrule| {
+            crate::calendar_model::Recurrence::from_rrule(rrule, start_zone.unwrap_or(Tz::UTC))
+                .map_or_else(|| rrule.trim().to_string(), |rule| rule.describe())
+        })
         .filter(|s| !s.is_empty());
 
     let attendees = event
@@ -236,6 +244,27 @@ pub fn resolve_local(
     Some(tz.from_utc_datetime(&utc))
 }
 
+/// The IANA zone a `TZID` names, read as IANA first and as a Windows name
+/// (`W. Europe Standard Time`) second.
+fn zone_of_tzid(tzid: &str) -> Option<Tz> {
+    tzid.parse::<Tz>().ok().or_else(|| {
+        crate::windows_zones::windows_zone_to_iana(tzid.trim()).and_then(|iana| iana.parse().ok())
+    })
+}
+
+/// The zone a `DTSTART` is written in: its `TZID`'s, UTC for a UTC time, and
+/// none for a floating time or a date.
+fn zone_of_start(start: &DatePerhapsTime) -> Option<Tz> {
+    use icalendar::CalendarDateTime;
+    match start {
+        DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { tzid, .. }) => {
+            zone_of_tzid(tzid)
+        }
+        DatePerhapsTime::DateTime(CalendarDateTime::Utc(_)) => Some(Tz::UTC),
+        _ => None,
+    }
+}
+
 /// Render a `DTSTART`/`DTEND` value as an RFC3339 string.
 ///
 /// - UTC times → `...Z`-equivalent offset (`+00:00`).
@@ -256,11 +285,7 @@ fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
             Some(naive.format("%Y-%m-%dT%H:%M:%S").to_string())
         }
         DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { date_time, tzid }) => {
-            let zone = tzid.parse::<chrono_tz::Tz>().ok().or_else(|| {
-                crate::windows_zones::windows_zone_to_iana(tzid.trim())
-                    .and_then(|iana| iana.parse().ok())
-            });
-            if let Some(tz) = zone {
+            if let Some(tz) = zone_of_tzid(&tzid) {
                 if let Some(zoned) = resolve_local(&tz, &date_time) {
                     return Some(zoned.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
                 }
@@ -270,101 +295,6 @@ fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
         }
         DatePerhapsTime::Date(date) => Some(date.format("%Y-%m-%dT00:00:00").to_string()),
     }
-}
-
-/// Render an `RRULE` value into a short, human-readable summary (display-only,
-/// D6). This is deliberately shallow — it covers the common FREQ/INTERVAL/BYDAY
-/// cases and falls back to the raw rule for anything unrecognised.
-fn humanize_rrule(rrule: &str) -> String {
-    let mut freq = None;
-    let mut interval: u32 = 1;
-    let mut byday: Option<String> = None;
-    let mut count: Option<String> = None;
-    let mut until: Option<String> = None;
-
-    for part in rrule.split(';') {
-        let mut kv = part.splitn(2, '=');
-        let key = kv.next().unwrap_or("").trim().to_uppercase();
-        let val = kv.next().unwrap_or("").trim().to_string();
-        match key.as_str() {
-            "FREQ" => freq = Some(val.to_uppercase()),
-            "INTERVAL" => interval = val.parse().unwrap_or(1),
-            "BYDAY" => byday = Some(val.to_uppercase()),
-            "COUNT" => count = Some(val),
-            "UNTIL" => until = Some(val),
-            _ => {}
-        }
-    }
-
-    let Some(freq) = freq else {
-        return rrule.to_string();
-    };
-
-    let base = match freq.as_str() {
-        "DAILY" => {
-            if interval == 1 {
-                "Daily".to_string()
-            } else {
-                format!("Every {} days", interval)
-            }
-        }
-        "WEEKLY" => {
-            let unit = if interval == 1 {
-                "Weekly".to_string()
-            } else {
-                format!("Every {} weeks", interval)
-            };
-            match byday.as_deref() {
-                Some(days) if !days.is_empty() => format!("{} on {}", unit, humanize_days(days)),
-                _ => unit,
-            }
-        }
-        "MONTHLY" => {
-            if interval == 1 {
-                "Monthly".to_string()
-            } else {
-                format!("Every {} months", interval)
-            }
-        }
-        "YEARLY" => {
-            if interval == 1 {
-                "Yearly".to_string()
-            } else {
-                format!("Every {} years", interval)
-            }
-        }
-        _ => return rrule.to_string(),
-    };
-
-    if let Some(count) = count {
-        format!("{} ({} times)", base, count)
-    } else if let Some(until) = until {
-        format!("{} until {}", base, until)
-    } else {
-        base
-    }
-}
-
-/// Expand a `BYDAY` list (e.g. `MO,WE`) into readable day names.
-fn humanize_days(days: &str) -> String {
-    days.split(',')
-        .map(|d| {
-            // Strip any ordinal prefix (e.g. `2MO` → Monday).
-            let code: String = d.trim().chars().filter(|c| c.is_alphabetic()).collect();
-            match code.as_str() {
-                "MO" => "Monday",
-                "TU" => "Tuesday",
-                "WE" => "Wednesday",
-                "TH" => "Thursday",
-                "FR" => "Friday",
-                "SA" => "Saturday",
-                "SU" => "Sunday",
-                other => other,
-            }
-            .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// The current instant as an agenda `start_sort`-comparable UTC key.
@@ -607,20 +537,47 @@ END:VCALENDAR\r
         assert_eq!(fm.attendees.len(), 1);
     }
 
+    /// An invitation's rule reads in the words of a server event's card,
+    /// and one the model cannot hold keeps its raw text.
     #[test]
-    fn humanize_rrule_variants() {
-        assert_eq!(humanize_rrule("FREQ=WEEKLY;BYDAY=MO"), "Weekly on Monday");
+    fn an_invitations_rule_reads_in_the_cards_words() {
+        let rule = |rrule: &str| {
+            let ics =
+                GOOGLE_REQUEST.replace("RRULE:FREQ=WEEKLY;BYDAY=MO", &format!("RRULE:{rrule}"));
+            parse_ics(ics.as_bytes()).unwrap().recurrence.unwrap()
+        };
+        assert_eq!(rule("FREQ=WEEKLY;BYDAY=MO"), "Weekly on Monday");
         assert_eq!(
-            humanize_rrule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE"),
-            "Every 2 weeks on Monday, Wednesday"
+            rule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;UNTIL=20270629T215959Z"),
+            "Every 2 weeks on Monday, Wednesday until 2027-06-29"
         );
-        assert_eq!(humanize_rrule("FREQ=DAILY"), "Daily");
-        assert_eq!(humanize_rrule("FREQ=DAILY;INTERVAL=3"), "Every 3 days");
-        assert_eq!(humanize_rrule("FREQ=MONTHLY"), "Monthly");
-        assert_eq!(humanize_rrule("FREQ=YEARLY"), "Yearly");
-        assert_eq!(humanize_rrule("FREQ=WEEKLY;COUNT=5"), "Weekly (5 times)");
-        // Unrecognised freq falls back to the raw rule.
-        assert_eq!(humanize_rrule("FREQ=SECONDLY"), "FREQ=SECONDLY");
+        assert_eq!(
+            rule("FREQ=MONTHLY;BYDAY=-1TH;COUNT=6"),
+            "Monthly on the last Thursday (6 times)"
+        );
+        assert_eq!(
+            rule("FREQ=YEARLY;BYMONTH=10;BYMONTHDAY=31"),
+            "Yearly on 31 October"
+        );
+        assert_eq!(rule("FREQ=SECONDLY"), "FREQ=SECONDLY");
+    }
+
+    /// A New York series whose last occurrence is on Tuesday 29 June ends at
+    /// 23:59:59 local, which its UTC `UNTIL` writes on 30 June: the card reads
+    /// it on its New York day.
+    #[test]
+    fn a_utc_until_reads_on_its_day_in_the_zone_of_dtstart() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n\
+                   BEGIN:VEVENT\r\nUID:ny-weekly@example.com\r\nDTSTAMP:20261001T090000Z\r\n\
+                   DTSTART;TZID=America/New_York:20261103T090000\r\n\
+                   DTEND;TZID=America/New_York:20261103T100000\r\n\
+                   RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20270630T035959Z\r\n\
+                   SUMMARY:Standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed = parse_ics(ics.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.recurrence.as_deref(),
+            Some("Weekly on Tuesday until 2027-06-29")
+        );
     }
 
     #[test]
