@@ -3369,4 +3369,5 @@ A trimmed occurrence whose master cannot be read is stored as sent and not marke
 ## Exchange ignores an iMIP REPLY whose TZID has no VTIMEZONE (2026-10-29, PERSO-200)
 
 Exchange ignores an iMIP REPLY whose TZID has no VTIMEZONE; copy the request's VTIMEZONE text verbatim, because icalendar 0.17 adds DTSTAMP and UID to every block it renders and re-sorts its lines.
-Proton rewrites an outgoing multipart/alternative text/calendar part into a multipart/mixed attachment.ics and strips Content-Class.
+Proton's outbound processing (Bridge and Proton SMTP) rewrites an iMIP REPLY from multipart/alternative with an inline text/calendar method=REPLY part into multipart/mixed with the calendar as `attachment.ics`, and drops Content-Class; an Exchange organizer (TUM on-prem) then does not register the answer, while the identical reply sent from a plain IMAP/SMTP account (OVH Zimbra) registers.
+mp cannot fix this from its side: the workaround is to answer from a non-Proton account or in the Proton web client.
