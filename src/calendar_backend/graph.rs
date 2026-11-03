@@ -44,6 +44,11 @@
 //! mapped through [`crate::windows_zones`]; a zone the table does not know
 //! (`tzone://Microsoft/Custom`) is labelled UTC, with the instants exact.
 //!
+//! Writes (`write.rs`, PERSO-255) create, patch, cancel and delete events
+//! and dismiss or snooze their reminders, sending each time as the event's
+//! wall time in its Windows zone ([`crate::windows_zones::iana_to_windows_zone`]),
+//! or in UTC for a zone the table lacks.
+//!
 //! The HTTP layer is the [`GraphFetch`] seam: [`GraphHttp`] over the mail
 //! client's [`GraphClient`] in production, a scripted fake in the tests, so
 //! the paging, the fallbacks and the 410 handling run without a tenant.
@@ -60,13 +65,14 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult,
+    BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult, Written,
 };
 use crate::calendar_model::{
     Attendee, AttendeeRole, Calendar, CalendarFeature, CalendarWindow, Event, EventId, EventKind,
     EventTime, Frequency, OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus,
     Sensitivity, ShowAs, TimeSlot, WeekIndex, Weekday,
 };
+use crate::calendar_write::{EventInput, EventPatch};
 use crate::config::{AccountConfig, GraphConfig};
 use crate::graph::{encode_id, GraphClient, GRAPH_BASE, PREFER_IMMUTABLE_ID};
 
@@ -98,8 +104,9 @@ pub struct HttpAnswer {
     pub location: Option<String>,
 }
 
-/// The two kinds of request the adapter makes. Every one carries
-/// `Prefer: IdType="ImmutableId"`; `prefer` adds to it.
+/// The four kinds of request the adapter makes. Every one carries
+/// `Prefer: IdType="ImmutableId"`, so the ids a write names and the ones it
+/// answers with are the immutable ids the cache holds; `prefer` adds to it.
 pub trait GraphFetch: Send + Sync {
     fn get(
         &self,
@@ -107,11 +114,21 @@ pub trait GraphFetch: Send + Sync {
         prefer: &[String],
     ) -> impl Future<Output = anyhow::Result<HttpAnswer>> + Send;
 
+    /// A JSON `body`; [`serde_json::Value::Null`] posts an empty one, for
+    /// the actions that take no parameters (`dismissReminder`).
     fn post(
         &self,
         url: &str,
         body: serde_json::Value,
     ) -> impl Future<Output = anyhow::Result<HttpAnswer>> + Send;
+
+    fn patch(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+    ) -> impl Future<Output = anyhow::Result<HttpAnswer>> + Send;
+
+    fn delete(&self, url: &str) -> impl Future<Output = anyhow::Result<HttpAnswer>> + Send;
 }
 
 /// [`GraphFetch`] over the mail client: its connection pool, its timeouts
@@ -146,28 +163,60 @@ async fn read_answer(resp: reqwest::Response) -> anyhow::Result<HttpAnswer> {
     })
 }
 
-impl GraphFetch for GraphHttp {
-    async fn get(&self, url: &str, prefer: &[String]) -> anyhow::Result<HttpAnswer> {
-        let resp = self
+impl GraphHttp {
+    /// One request of the seam, with its `Prefer` header and its body: none,
+    /// an empty one for [`serde_json::Value::Null`], else the JSON.
+    fn build(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        prefer: &[String],
+        body: Option<serde_json::Value>,
+    ) -> reqwest::RequestBuilder {
+        let request = self
             .client
-            .request(reqwest::Method::GET, url)
-            .header("Prefer", prefer_header(prefer))
+            .request(method, url)
+            .header("Prefer", prefer_header(prefer));
+        match body {
+            None => request,
+            Some(serde_json::Value::Null) => request.body(Vec::new()),
+            Some(body) => request.json(&body),
+        }
+    }
+
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        prefer: &[String],
+        body: Option<serde_json::Value>,
+    ) -> anyhow::Result<HttpAnswer> {
+        let what = format!("{method} {}", strip_query(url));
+        let resp = self
+            .build(method, url, prefer, body)
             .send()
             .await
-            .with_context(|| format!("GET {}", strip_query(url)))?;
+            .with_context(|| what)?;
         read_answer(resp).await
+    }
+}
+
+impl GraphFetch for GraphHttp {
+    async fn get(&self, url: &str, prefer: &[String]) -> anyhow::Result<HttpAnswer> {
+        self.send(reqwest::Method::GET, url, prefer, None).await
     }
 
     async fn post(&self, url: &str, body: serde_json::Value) -> anyhow::Result<HttpAnswer> {
-        let resp = self
-            .client
-            .request(reqwest::Method::POST, url)
-            .header("Prefer", prefer_header(&[]))
-            .json(&body)
-            .send()
+        self.send(reqwest::Method::POST, url, &[], Some(body)).await
+    }
+
+    async fn patch(&self, url: &str, body: serde_json::Value) -> anyhow::Result<HttpAnswer> {
+        self.send(reqwest::Method::PATCH, url, &[], Some(body))
             .await
-            .with_context(|| format!("POST {}", strip_query(url)))?;
-        read_answer(resp).await
+    }
+
+    async fn delete(&self, url: &str) -> anyhow::Result<HttpAnswer> {
+        self.send(reqwest::Method::DELETE, url, &[], None).await
     }
 }
 
@@ -1443,6 +1492,40 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
         Err(anyhow!("Graph refused the {action}: {}", error_text(&answer)).into())
     }
 
+    async fn create_event(
+        &self,
+        calendar: &Calendar,
+        input: &EventInput,
+        transaction_id: &str,
+    ) -> BackendResult<Written> {
+        self.post_event(calendar, input, transaction_id).await
+    }
+
+    async fn update_event(
+        &self,
+        calendar: &str,
+        event: &str,
+        patch: &EventPatch,
+    ) -> BackendResult<Written> {
+        self.patch_event(calendar, event, patch).await
+    }
+
+    async fn cancel_event(&self, event: &str, comment: Option<String>) -> BackendResult<()> {
+        self.post_cancel(event, comment).await
+    }
+
+    async fn delete_event(&self, event: &str) -> BackendResult<()> {
+        self.send_delete(event).await
+    }
+
+    async fn dismiss_reminder(&self, event: &str) -> BackendResult<()> {
+        self.post_dismiss(event).await
+    }
+
+    async fn snooze_reminder(&self, event: &str, until: DateTime<Utc>) -> BackendResult<()> {
+        self.post_snooze(event, until).await
+    }
+
     /// `GET /me/messages/{id}?$expand=microsoft.graph.eventMessage/event`:
     /// the immutable id of the event an `eventMessage` stands for. A message
     /// that is no `eventMessage` carries no `event`, and one the server no
@@ -1487,6 +1570,8 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
         }
     }
 }
+
+mod write;
 
 #[cfg(test)]
 mod tests;

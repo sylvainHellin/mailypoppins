@@ -13,6 +13,9 @@ const PAGE1: &str = include_str!("../../../tests/fixtures/graph_calendar/delta_p
 const PAGE2: &str = include_str!("../../../tests/fixtures/graph_calendar/delta_page2.json");
 const MASTER: &str = include_str!("../../../tests/fixtures/graph_calendar/series_master.json");
 
+/// The writes (`write.rs`), against the same scripted Graph.
+mod write;
+
 const MASTER_UID: &str = "040000008200E00074C5B7101A82E00800000000WEEKLY";
 const BASE: &str = "https://graph.microsoft.com/v1.0";
 
@@ -82,6 +85,14 @@ impl GraphFetch for ScriptedFetch {
 
     async fn post(&self, url: &str, body: serde_json::Value) -> anyhow::Result<HttpAnswer> {
         Ok(self.answer("POST", url, prefer_header(&[]), Some(body)))
+    }
+
+    async fn patch(&self, url: &str, body: serde_json::Value) -> anyhow::Result<HttpAnswer> {
+        Ok(self.answer("PATCH", url, prefer_header(&[]), Some(body)))
+    }
+
+    async fn delete(&self, url: &str) -> anyhow::Result<HttpAnswer> {
+        Ok(self.answer("DELETE", url, prefer_header(&[]), None))
     }
 }
 
