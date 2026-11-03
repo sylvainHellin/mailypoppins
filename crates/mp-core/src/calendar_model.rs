@@ -643,11 +643,154 @@ const MONTH_NAMES: [&str; 12] = [
     "December",
 ];
 
+/// The weekday an iCalendar two-letter code (`WE`) names.
+fn weekday_of_code(code: &str) -> Option<Weekday> {
+    [
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+        Weekday::Sunday,
+    ]
+    .into_iter()
+    .find(|day| day.code() == code)
+}
+
 fn month_name(month: u32) -> Option<&'static str> {
     MONTH_NAMES.get(month.checked_sub(1)? as usize).copied()
 }
 
 impl Recurrence {
+    /// The rule an iCalendar `RRULE` value (`FREQ=WEEKLY;BYDAY=WE`) states,
+    /// or `None` for a rule this model cannot hold: another frequency, a
+    /// list of month days or months, an hour or week-number part, weekdays
+    /// with different ordinals, both `UNTIL` and `COUNT`, or a part it does
+    /// not know.
+    ///
+    /// `UNTIL` keeps its date: a `UTC` date-time is read on its UTC day,
+    /// which is the series' last local day for the zones of Europe; the range
+    /// start is `DTSTART`'s, which an `RRULE` does not carry.
+    pub fn from_rrule(rrule: &str) -> Option<Self> {
+        let mut rule = Recurrence {
+            frequency: Frequency::Daily,
+            interval: 1,
+            weekdays: Vec::new(),
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: None,
+            start: None,
+            until: None,
+            count: None,
+        };
+        let mut frequency = None;
+        let mut ordinal: Option<i8> = None;
+        let mut set_position: Option<i8> = None;
+        let mut first_day = None;
+        for part in rrule.trim().split(';').filter(|p| !p.trim().is_empty()) {
+            let (key, value) = part.split_once('=')?;
+            let value = value.trim();
+            match key.trim().to_ascii_uppercase().as_str() {
+                "FREQ" => {
+                    frequency = Some(match value.to_ascii_uppercase().as_str() {
+                        "DAILY" => Frequency::Daily,
+                        "WEEKLY" => Frequency::Weekly,
+                        "MONTHLY" => Frequency::Monthly,
+                        "YEARLY" => Frequency::Yearly,
+                        _ => return None,
+                    })
+                }
+                "INTERVAL" => rule.interval = value.parse().ok().filter(|i| *i > 0)?,
+                "COUNT" => rule.count = Some(value.parse().ok().filter(|c| *c > 0)?),
+                "UNTIL" => {
+                    let digits = value.get(..8)?;
+                    rule.until = Some(NaiveDate::parse_from_str(digits, "%Y%m%d").ok()?);
+                }
+                "BYDAY" => {
+                    for day in value.split(',') {
+                        let day = day.trim().to_ascii_uppercase();
+                        let split = day.len().checked_sub(2)?;
+                        let (position, code) = day.split_at(split);
+                        rule.weekdays.push(weekday_of_code(code)?);
+                        let position = match position {
+                            "" => None,
+                            raw => Some(raw.trim_start_matches('+').parse::<i8>().ok()?),
+                        };
+                        if rule.weekdays.len() > 1 && position != ordinal {
+                            return None;
+                        }
+                        ordinal = position;
+                    }
+                }
+                "BYSETPOS" => set_position = Some(value.parse().ok()?),
+                "BYMONTHDAY" => {
+                    rule.day_of_month = Some(value.parse().ok().filter(|d| (1..=31).contains(d))?)
+                }
+                "BYMONTH" => {
+                    rule.month = Some(value.parse().ok().filter(|m| (1..=12).contains(m))?)
+                }
+                "WKST" => first_day = Some(weekday_of_code(&value.to_ascii_uppercase())?),
+                _ => return None,
+            }
+        }
+        rule.frequency = frequency?;
+        if rule.until.is_some() && rule.count.is_some() {
+            return None;
+        }
+        let position = match (ordinal, set_position) {
+            (Some(_), Some(_)) => return None,
+            (position, None) | (None, position) => position,
+        };
+        let relative = match position {
+            None => None,
+            Some(position) => Some(
+                [
+                    WeekIndex::First,
+                    WeekIndex::Second,
+                    WeekIndex::Third,
+                    WeekIndex::Fourth,
+                    WeekIndex::Last,
+                ]
+                .into_iter()
+                .find(|index| index.position() == position)?,
+            ),
+        };
+        match rule.frequency {
+            Frequency::Daily => {
+                let plain = rule.weekdays.is_empty()
+                    && relative.is_none()
+                    && rule.day_of_month.is_none()
+                    && rule.month.is_none();
+                plain.then_some(())?;
+            }
+            Frequency::Weekly => {
+                let plain =
+                    relative.is_none() && rule.day_of_month.is_none() && rule.month.is_none();
+                plain.then_some(())?;
+                rule.first_day_of_week = first_day;
+            }
+            Frequency::Monthly | Frequency::Yearly => {
+                if rule.frequency == Frequency::Monthly && rule.month.is_some() {
+                    return None;
+                }
+                match relative {
+                    // The first to fourth or the last of some weekdays.
+                    Some(index) if !rule.weekdays.is_empty() && rule.day_of_month.is_none() => {
+                        rule.week_index = Some(index);
+                    }
+                    Some(_) => return None,
+                    // Every one of some weekdays in the month: no Outlook
+                    // pattern.
+                    None if !rule.weekdays.is_empty() => return None,
+                    None => {}
+                }
+            }
+        }
+        Some(rule)
+    }
+
     /// The rule as `RRULE` text (`FREQ=WEEKLY;BYDAY=WE;WKST=SU`).
     pub fn rrule(&self) -> String {
         let freq = match self.frequency {
@@ -1033,6 +1176,97 @@ mod tests {
             start: None,
             until: None,
             count: None,
+        }
+    }
+
+    /// Each pattern an `RRULE` can state in the model's terms reads into the
+    /// rule, an ordinal weekday or a `BYSETPOS` alike, and a rule beyond the
+    /// model is none.
+    #[test]
+    fn an_rrule_reads_into_the_rule_of_its_pattern() {
+        let read = Recurrence::from_rrule;
+        assert_eq!(
+            read("FREQ=WEEKLY;BYDAY=WE;WKST=SU"),
+            Some(Recurrence {
+                weekdays: vec![Weekday::Wednesday],
+                first_day_of_week: Some(Weekday::Sunday),
+                ..rule(Frequency::Weekly)
+            })
+        );
+        assert_eq!(
+            read("freq=weekly;interval=2;byday=MO,TH;until=20270629T215959Z"),
+            Some(Recurrence {
+                interval: 2,
+                weekdays: vec![Weekday::Monday, Weekday::Thursday],
+                until: Some(date(2027, 6, 29)),
+                ..rule(Frequency::Weekly)
+            })
+        );
+        assert_eq!(
+            read("FREQ=DAILY;INTERVAL=3;COUNT=5"),
+            Some(Recurrence {
+                interval: 3,
+                count: Some(5),
+                ..rule(Frequency::Daily)
+            })
+        );
+        assert_eq!(
+            read("FREQ=MONTHLY;BYMONTHDAY=15"),
+            Some(Recurrence {
+                day_of_month: Some(15),
+                ..rule(Frequency::Monthly)
+            })
+        );
+        let last_thursday = Recurrence {
+            interval: 2,
+            weekdays: vec![Weekday::Thursday],
+            week_index: Some(WeekIndex::Last),
+            count: Some(6),
+            ..rule(Frequency::Monthly)
+        };
+        assert_eq!(
+            read("FREQ=MONTHLY;INTERVAL=2;BYDAY=TH;BYSETPOS=-1;COUNT=6").as_ref(),
+            Some(&last_thursday)
+        );
+        assert_eq!(
+            read("FREQ=MONTHLY;INTERVAL=2;BYDAY=-1TH;COUNT=6"),
+            Some(last_thursday)
+        );
+        assert_eq!(
+            read("FREQ=YEARLY;BYMONTH=10;BYMONTHDAY=31;UNTIL=20301031"),
+            Some(Recurrence {
+                month: Some(10),
+                day_of_month: Some(31),
+                until: Some(date(2030, 10, 31)),
+                ..rule(Frequency::Yearly)
+            })
+        );
+        assert_eq!(
+            read("FREQ=YEARLY;BYDAY=4TH;BYMONTH=11"),
+            Some(Recurrence {
+                month: Some(11),
+                weekdays: vec![Weekday::Thursday],
+                week_index: Some(WeekIndex::Fourth),
+                ..rule(Frequency::Yearly)
+            })
+        );
+        for beyond in [
+            "FREQ=HOURLY",
+            "BYDAY=MO",
+            "FREQ=MONTHLY;BYDAY=MO",
+            "FREQ=MONTHLY;BYDAY=1MO,-1FR",
+            "FREQ=MONTHLY;BYMONTHDAY=1,15",
+            "FREQ=MONTHLY;BYDAY=5MO",
+            "FREQ=YEARLY;BYMONTH=1,7",
+            "FREQ=WEEKLY;BYDAY=2MO",
+            "FREQ=DAILY;BYDAY=MO",
+            "FREQ=DAILY;BYHOUR=9",
+            "FREQ=DAILY;COUNT=3;UNTIL=20270101",
+            "FREQ=DAILY;INTERVAL=0",
+            "FREQ=DAILY;UNTIL=soon",
+            "garbage",
+        ] {
+            assert_eq!(read(beyond), None, "{beyond}");
         }
     }
 

@@ -834,6 +834,62 @@ fn recurrence_patterns_become_rules() {
     );
 }
 
+/// One series reads the same from the `RRULE` of its invitation mail and
+/// from Graph's `patternedRecurrence` of its server copy: the same rule, its
+/// range start aside (an `RRULE` leaves it to `DTSTART`), and the same words
+/// on the card, the invitation's read through the iMIP parser.
+#[test]
+fn a_series_reads_the_same_from_its_invitation_and_from_graph() {
+    let cases = [
+        (
+            "FREQ=WEEKLY;BYDAY=TU;WKST=MO;UNTIL=20270629T070000Z",
+            serde_json::json!({
+                "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["tuesday"],
+                            "firstDayOfWeek": "monday", "dayOfMonth": 0, "month": 0, "index": "first"},
+                "range": {"type": "endDate", "startDate": "2026-11-03", "endDate": "2027-06-29",
+                          "numberOfOccurrences": 0}
+            }),
+        ),
+        (
+            "FREQ=MONTHLY;INTERVAL=2;BYDAY=-1TH;COUNT=6",
+            serde_json::json!({
+                "pattern": {"type": "relativeMonthly", "interval": 2, "daysOfWeek": ["thursday"],
+                            "index": "last", "dayOfMonth": 0, "month": 0},
+                "range": {"type": "numbered", "startDate": "2026-11-26", "numberOfOccurrences": 6,
+                          "endDate": "0001-01-01"}
+            }),
+        ),
+        (
+            "FREQ=YEARLY;BYMONTH=10;BYMONTHDAY=31",
+            serde_json::json!({
+                "pattern": {"type": "absoluteYearly", "interval": 1, "month": 10, "dayOfMonth": 31,
+                            "index": "first", "daysOfWeek": []},
+                "range": {"type": "noEnd", "startDate": "2012-10-31", "endDate": "0001-01-01"}
+            }),
+        ),
+    ];
+    for (rrule, graph) in cases {
+        let from_graph = recurrence_of(&serde_json::from_value(graph).unwrap()).unwrap();
+        let from_mail = Recurrence::from_rrule(rrule).unwrap();
+        assert_eq!(
+            Recurrence {
+                start: None,
+                ..from_graph.clone()
+            },
+            from_mail,
+            "{rrule}"
+        );
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n\
+             BEGIN:VEVENT\r\nUID:series@example.com\r\nDTSTAMP:20261001T090000Z\r\n\
+             DTSTART:20261103T080000Z\r\nDTEND:20261103T090000Z\r\nRRULE:{rrule}\r\n\
+             SUMMARY:Series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).unwrap();
+        assert_eq!(parsed.recurrence, Some(from_graph.describe()), "{rrule}");
+    }
+}
+
 /// The weekly master of the evoqs dump fills every pattern field whatever
 /// its type (`dayOfMonth: 0`, `month: 0`, `index: "first"`) and its open
 /// range with a year-one `endDate`: the rule keeps only what a weekly
