@@ -108,6 +108,10 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
 /// daemon's refusal) under them, and the keys. The problem line and the
 /// keys keep their own bottom rows, and the availability rows get only the
 /// height the fields leave, so a short terminal hides rows, never them.
+/// A terminal too short for every field (80x24 has room for the title and
+/// fifteen lines) still keeps one line for the availability, its count of
+/// the rows, and shows a window of the fields that holds the cursor row, an
+/// arrow after the title telling which way the hidden ones lie.
 pub(super) fn render_event_form(
     form: &EventForm,
     availability: &crate::app::Availability,
@@ -151,15 +155,8 @@ pub(super) fn render_event_form(
         (None, Some(_)) => "New event (retry)",
         (None, None) => "New event",
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(theme::active().accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
+    let mut fields: Vec<Line> = Vec::with_capacity(rows.len());
+    let cursor = rows.iter().position(|row| *row == form.row).unwrap_or(0);
     let switch = |on: bool| if on { "[x]" } else { "[ ]" };
     for row in rows {
         let on = form.row == row;
@@ -233,18 +230,47 @@ pub(super) fn render_event_form(
         } else {
             normal
         };
-        lines.push(Line::from(vec![
+        fields.push(Line::from(vec![
             Span::styled(prefix, if on { focused } else { muted }),
             Span::styled(shown, value_style),
         ]));
     }
     // The availability takes what the fields leave of the body; the blank
     // lines around it go first when the terminal is short, then the one
-    // under the title, so an 80x24 terminal keeps the count of the rows.
-    if wanted > 0 && lines.len() >= body.height as usize {
-        lines.remove(1);
+    // under the title. Shorter still, the availability keeps one line for
+    // the count of its rows and the fields show the window of them that
+    // holds the cursor.
+    let height = body.height as usize;
+    let reserve = usize::from(wanted > 0);
+    let blank_under_title = 2 + fields.len() + reserve <= height;
+    let room = height.saturating_sub(1 + reserve);
+    let (first, last) = if blank_under_title || fields.len() <= room {
+        (0, fields.len())
+    } else {
+        let first = (cursor + 1).saturating_sub(room);
+        (first, first + room)
+    };
+    let mut heading = vec![Span::styled(
+        title,
+        Style::default()
+            .fg(theme::active().accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let hidden = match (first > 0, last < fields.len()) {
+        (true, true) => Some("\u{2195}"),
+        (true, false) => Some("\u{2191}"),
+        (false, true) => Some("\u{2193}"),
+        (false, false) => None,
+    };
+    if let Some(arrow) = hidden {
+        heading.push(Span::styled(format!("  {arrow} more fields"), muted));
     }
-    let spare = (body.height as usize).saturating_sub(lines.len());
+    let mut lines = vec![Line::from(heading)];
+    if blank_under_title {
+        lines.push(Line::from(""));
+    }
+    lines.extend(fields.drain(first..last));
+    let spare = height.saturating_sub(lines.len());
     let available = super::availability::availability_lines(form, availability, width, spare);
     let blanks = spare - available.len();
     if !available.is_empty() && blanks > 0 {
