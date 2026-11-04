@@ -497,7 +497,7 @@ Dropping the cache is a `DELETE` of every table but `calendar_prefs`, so a hidde
 A token is passed only while it is good for the window, since a Graph delta link is bound to the window its first request named, so a moved window or a baseline older than a day starts a fresh baseline.
 A store stamped with another `MODEL_VERSION` (`src/store/calendar.rs`, in `meta` as `calendar_model_version`) drops every calendar's token on open, so its next sync is a baseline that reads every event and series master again.
 A backend that starts reading a field from the server bumps `MODEL_VERSION`, since a delta sync leaves the rows an older build wrote without it until their event changes.
-The daemon runs `poll_account` after the mail pass of every tick and `sync_account` right after an answer, both under `account_lock`, the per-account lock `calendar.rebuild` takes too, so two syncs never run one account from the same token.
+The daemon runs `poll_account` after the mail pass of every tick and `sync_account` right after an answer or a new event, both under `account_lock`, the per-account lock `calendar.rebuild` takes too, so two syncs never run one account from the same token.
 A sync publishes `calendar.changed` only when it moved the cached rows, so a calendar read in full every tick stays quiet; a sign-in without the calendar scope is skipped quietly there, since the health check already prompts.
 
 ### The merged view
@@ -515,28 +515,38 @@ An invitation mail's event (`imip:<row_id>`) is answered with the iMIP reply `ca
 `message.invite` names an invitation mail's server event (`event_id`) on an account with a backend, so the reader's invitation card answers the server event in its place.
 The CLI's `mp event respond` and `mp invite`, the TUI's respond overlay and the desktop app's event card all answer through `event.respond`; `calendar.rsvp` stays as the iMIP path's own address.
 
+### Creating events
+
+`event.create` (`src/daemon/methods/calendar.rs`) resolves what a client typed into an `EventInput` before an operation exists (`calendar_write::resolve_input`): the times in the forms `send.invite` reads (`invite::resolve_span_in`, a wall-clock time read in the event's zone), the attendees with their roles, and the zone, which places an all-day event's midnights.
+It refuses an account without a backend, a sign-in without the calendar scope, an input typed wrong, and a calendar the cache does not list or may not write to, and picks the account's default calendar when the client names none.
+It answers the operation id with the create's `transaction_id`, the client's or one it mints, so a client whose operation vanished retries with the same id (the 2026-11-03 decision of an in-memory write).
+The operation settles with a cached event carrying that transaction id without calling the server, else posts the event and writes the server's answer into the cache under `account_lock` before the immediate sync and `calendar.changed`.
+The CLI's `mp event create`, the TUI's event form (`n` in the Calendar view) and the desktop app's event form all create through `event.create`.
+
 ### Write seam
 
-`CalendarBackend` has six write methods (PERSO-255): `create_event`, `update_event`, `cancel_event`, `delete_event`, `dismiss_reminder` and `snooze_reminder`; no daemon method calls them yet.
-`mp-core/calendar_write.rs` holds what a write sends, in the model's terms: `EventInput` for a new event (an `EventTime`, attendees with their role, the Teams flag, a reminder that is absent for the mailbox default and `null` for none) and `EventPatch` for a change, where an absent key stays, a present one changes and `null` clears a location, a description or a reminder.
+`CalendarBackend` has six write methods (PERSO-255): `create_event`, `update_event`, `cancel_event`, `delete_event`, `dismiss_reminder` and `snooze_reminder`; `event.create` calls the first, and no daemon method calls the others yet.
+`mp-core/calendar_write.rs` holds what a write sends, in the model's terms: `EventInput` for a new event (an `EventTime`, the IANA zone an all-day time's midnights fall in, attendees with their role, the Teams flag, a reminder that is absent for the mailbox default and `null` for none) and `EventPatch` for a change, where an absent key stays, a present one changes and `null` clears a location, a description or a reminder.
 A create or an update answers `Written`: the event as the server holds it, an occurrence carrying its series' `UID`, or the series for a write to a series master.
 
-`src/calendar_backend/graph/write.rs` sends `POST /me/calendars/{id}/events` with the `transactionId`, `PATCH /me/events/{id}` with only the fields the patch names, `POST /me/events/{id}/cancel` with the comment, `DELETE /me/events/{id}`, and `dismissReminder` and `snoozeReminder` on the event.
+`src/calendar_backend/graph/write.rs` sends `POST /me/calendars/{id}/events` with the `transactionId` (a changed repeat of a create, which Graph answers with 400 `ErrorDuplicateTransactionId` and the first event's id in `@event.existingEventId`, patches that event with the create's fields), `PATCH /me/events/{id}` with only the fields the patch names, `POST /me/events/{id}/cancel` with the comment, `DELETE /me/events/{id}`, and `dismissReminder` and `snoozeReminder` on the event.
 `GraphFetch` has `get`, `post`, `patch` and `delete`, and all four send `Prefer: IdType="ImmutableId"`, which a test pins on the production requests.
 A timed event goes out as its wall time plus the Windows name of its zone, which `windows_zones::iana_to_windows_zone` reads from a second generated table, `IANA_ZONES`.
 That table maps every IANA zone CLDR lists under a Windows zone for any territory, so `Europe/Vienna` and `America/Toronto` resolve beside each zone's territory 001 entry.
 It also maps every alias CLDR's `bcp47/timezone.xml` gives such a zone, so the current spellings (`Asia/Kolkata`, `Europe/Kyiv`) resolve where CLDR lists the legacy ones (`Asia/Calcutta`, `Europe/Kiev`).
-A zone neither lists (`Antarctica/Troll`) goes out as UTC with the instants exact, and an all-day event as its midnights in UTC.
+A zone neither lists (`Antarctica/Troll`) goes out as UTC with the instants exact.
+An all-day event goes out as its midnights under the Windows name of the write's zone, the host's when the write names none: Graph keeps the dates either way, but midnights sent as UTC are the instants 01:00 to 01:00 for a Berlin user, which a range query or free/busy read sees spill into the next day (probe of 2026-11-04).
 A cancel, a delete, a dismiss or a snooze of an event Graph answers 404 for counts as done; an update of one fails.
 Graph keeps an online meeting online and ignores `isOnlineMeeting: false`, so the backend sends only `true` (with `teamsForBusiness`) and drops `online_meeting: false` from a patch; the daemon's `event.update` (slice 4) must refuse `online_meeting: false` on an event that has a Teams link, so the user is told the link stays rather than seeing the change accepted and not applied.
-The fake applies every write to its events, keeps a Teams link once it has provisioned one, answers a repeated transaction id with the event the first create made, and records each write, appending it to `write_log` when the spec names one.
+The fake applies every write to its events, keeps a Teams link once it has provisioned one, answers a repeated transaction id with the event the first create made (patched with the repeat's fields when they changed), and records each write, appending it to `write_log` when the spec names one.
+The daemon keeps one fake per account for the life of its process (`FakeCalendarBackend::armed`), so an event a write made is still there at the next sync.
 
 ### Calendar scope prompt
 
 `Calendars.ReadWrite` is in `GRAPH_SCOPES`, and `oauth2::scopes_for` asks for it only on an account whose calendar is Graph's.
 The token cache records the scopes Entra granted; a cache written before PERSO-200 records none and counts as lacking the scope.
 A refresh whose scopes Entra refuses is retried once without the calendar scope, so mail keeps working on a tenant that has not consented, and only a scope refusal is retried that way.
-A Graph calendar account whose token lacks the scope reports it as `missing_scopes` in the existing `account.credentials` answer and as a `calendar:<name>` health check with the line `calendar needs a re-login (mp config oauth2-login -A <name>)`; `event.respond` refuses with the same prompt as a `-32603` with `{account, missing_scopes}` without reaching the server, and `calendar.rebuild` reports it as its server resync's error.
+A Graph calendar account whose token lacks the scope reports it as `missing_scopes` in the existing `account.credentials` answer and as a `calendar:<name>` health check with the line `calendar needs a re-login (mp config oauth2-login -A <name>)`; `event.respond` and `event.create` refuse with the same prompt as a `-32603` with `{account, missing_scopes}` without reaching the server, and `calendar.rebuild` reports it as its server resync's error.
 No new method carries the prompt: `mp config show` prints the line, the desktop Settings view says the account needs a new sign-in, and the TUI shows a banner over the Calendar view, asking `account.credentials` again on `calendar.changed` and on an account's ready so the banner leaves after a sign-in; `config.oauth2_login` re-evaluates the health check once a sign-in succeeds.
 
 ## Module map

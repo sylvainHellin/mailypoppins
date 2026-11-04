@@ -134,6 +134,7 @@
       { "key": "e", "action": "Open the invitation's .ics in $EDITOR" },
       { "key": "V", "action": "Respond (accept / tentative / decline, comment)" },
       { "key": "c", "action": "Show or hide calendars" },
+      { "key": "n", "action": "New event (the event form, on the cursor's day)" },
       { "key": "r", "action": "Read the events again" }
     ]
   },

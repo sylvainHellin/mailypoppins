@@ -24,6 +24,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/calendar.ts` | The Calendar view's events and calendars, its layouts and days, the part of a day an event covers, the cursor's entries, the grid's columns, the source and mail open |
 | `src/app/rsvp.ts` | The reader's invitation cards, the New invitation form's Graph refusal, the answer refusals in the TUI's words, the respond choice and the answers this window awaits |
 | `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
+| `src/app/eventForm.ts` | The event form's calendars, checks and params, and the creates this window awaits |
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
 | `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
@@ -51,7 +52,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host, and `EmptyView.tsx`, the placeholder no view uses any more |
 | `src/components/contacts` | The Contacts view, its list and rows |
-| `src/components/calendar` | The Calendar view, its agenda list and rows, its day and week grid, the calendars panel, the event cards (the reader's invitation card reuses one), the respond choice and the New invitation form |
+| `src/components/calendar` | The Calendar view, its agenda list and rows, its day and week grid, the calendars panel, the event cards (the reader's invitation card reuses one), the respond choice, the event form and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 | `src/components/signatures` | The Signatures dialog |
 | `src/components/activity` | The activity log dialog |
@@ -716,11 +717,12 @@ The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
 - `e` opens an invitation mail's `invite.ics` in the external editor through `invite_source_open`; a server event says "This event is the server's; no invitation mail stands behind it", and the notice otherwise names the editor, or says "That event has no ics source in the store", or "Open failed: <why>".
 - `m` shows the invitation mail of the cursor event in Mail, as the card's "Open mail" does.
 - `V` opens the respond choice for the cursor event (see Respond).
+- `n` opens the event form on the cursor's day (see New event).
 - `c` shows or hides the calendars panel (see Calendars).
 - `r` reads the events and the calendars again and says "Calendar refreshed (N events)" once they land; a read that fails says "Calendar refresh failed: <why>" and keeps the events it had.
 
-The palette runs the same actions from the CALENDAR rows ("Previous / next day or week (also [ and ])", "Go to today", "Jump to date (e.g. 2026-07-06)", "Agenda / day / week layout", "Open the event card", "Open the invitation's .ics in $EDITOR", "Respond (accept / tentative / decline, comment)", "Show or hide calendars", "Read the events again"), plus its own "Next day or week", "Day layout", "Week layout" and "Open the invitation mail"; outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the calendar".
-The header's buttons run the same: Previous, Today, Next, the "Jump to date" field, the Agenda, Day and Week layout buttons (`aria-pressed`), Calendars, New invitation (see New invitation), Refresh and Mail.
+The palette runs the same actions from the CALENDAR rows ("Previous / next day or week (also [ and ])", "Go to today", "Jump to date (e.g. 2026-07-06)", "Agenda / day / week layout", "Open the event card", "Open the invitation's .ics in $EDITOR", "Respond (accept / tentative / decline, comment)", "New event (the event form, on the cursor's day)", "Show or hide calendars", "Read the events again"), plus its own "Next day or week", "Day layout", "Week layout" and "Open the invitation mail"; outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the calendar".
+The header's buttons run the same: Previous, Today, Next, the "Jump to date" field, the Agenda, Day and Week layout buttons (`aria-pressed`), Calendars, New event (see New event), New invitation (see New invitation), Refresh and Mail.
 When no event is under the cursor the view's body takes the focus, so the keys reach the view and not a header button.
 
 ### Calendars
@@ -749,6 +751,19 @@ An answer that should have reached the organizer and did not (`send_response` an
 A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; an answer dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
 While it runs, the activity area's running card can cancel it, and the end then says that the daemon may still send it.
 Every end makes the Calendar view and the account's invitation cards stale, and the daemon's `calendar.changed` does too, so the card and the event show the new answer.
+
+### New event
+
+`n`, the header's "New event" and the palette's "New event (the event form, on the cursor's day)" open the event form (CAL-11, PERSO-255), the overlay `event` (`NewEventDialog.tsx`, a dialog named "New event"), the TUI's event form; outside the Calendar view the palette's row opens it on today.
+It offers the calendars `calendar_list` names that take a new event (`writableCalendars` in `src/app/eventForm.ts`): those the user may edit on a backend whose `features` hold `write`, each account's default first, the selection's account's default selected; with none it says "No calendar takes new events: no account has a server calendar mp writes to".
+Its fields are Calendar, Title, the "All day" checkbox, Start and End (`datetime-local`, or First day and Last day as dates on an all-day event, the last day optional), Location, Attendees, Optional and Rooms (comma separated), the "Teams meeting" checkbox (disabled with "This calendar has no online meetings" where the backend lacks `online-meeting`), Reminder in minutes with "None", and Description.
+The form starts on 09:00 to 10:00 of the cursor's day with the focus in Title; Enter in a one-line field moves on, Cmd+Enter or Ctrl+Enter creates, Escape cancels and drops what was typed.
+Its alert names the first problem with the fields as typed and Create event stays disabled until there is none; the daemon checks every field again.
+
+A create is `event_create` with the form's fields as `EventCreateParams`, the times read in this window's IANA zone, which the dialog's description names; a refusal (an event typed wrong, a read-only calendar, a sign-in without the calendar scope) shows verbatim in the alert and keeps the form open.
+Once started the form closes, and `state.eventCreates` keeps each create (`{token, account, summary, dialog, operation_id}`) with the transaction id its start answered, `eventCreateEarly` an end that overtook the answer.
+The settle says "Created <summary>", then "; invited <address>" or "; invited N people".
+A failure ("The event was not created: <why>") or a create a daemon restart dropped ("The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once") opens the form again as "New event (retry)", with what was typed and Retry, which sends the same transaction id, so the server makes the event at most once; with another dialog open the form is kept instead, and New event opens it.
 
 ### New invitation
 
@@ -1149,8 +1164,8 @@ Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab
 An account's header in the sidebar is a button with `aria-expanded` and `tabindex="-1"`, reached by pointer, as the outbox line is.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the account picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the account picker on the current account, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the account picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the event form, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the account picker on the current account, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, the event form in Title, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
