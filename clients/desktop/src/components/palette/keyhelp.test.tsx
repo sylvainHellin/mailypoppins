@@ -80,6 +80,13 @@ describe("the key help filter", () => {
     expect(within(again).getAllByTestId("help-item")).toHaveLength(TOTAL);
   });
 
+  it("lists the TUI's R reminders row", async () => {
+    const { user, help } = await openHelp();
+    await user.keyboard("reminders");
+    const row = within(help).getAllByTestId("help-item").find((r) => r.getAttribute("data-label")?.startsWith("Calendar reminders"));
+    expect(row).toHaveTextContent("R");
+  });
+
   it("Enter on a row runs nothing and Escape closes the help", async () => {
     const { user, input } = await openHelp();
     await user.keyboard("archive");

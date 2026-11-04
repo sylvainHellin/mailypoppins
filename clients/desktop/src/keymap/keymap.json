@@ -39,6 +39,10 @@
         "action": "Toggle activity log"
       },
       {
+        "key": "R",
+        "action": "Calendar reminders (snooze, dismiss, open)"
+      },
+      {
         "key": "x",
         "action": "Send current draft (approve + send)"
       },

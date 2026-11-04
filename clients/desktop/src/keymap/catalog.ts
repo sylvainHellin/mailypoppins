@@ -151,7 +151,7 @@ export type Badge = "M3" | "M4" | "soon" | "key" | "menu" | "later";
 type Binding = { id: ActionId; keys?: string[] } | { badge: Badge; keys?: string[] };
 
 /** By the KEYMAP description, whatever the section. */
-const BY_ACTION: Record<string, Binding> = {
+export const BY_ACTION: Record<string, Binding> = {
   Quit: { badge: "menu" },
   "Jump to mailbox": { badge: "key" },
   "Cycle focus forward": { id: "focus_next" },
@@ -233,7 +233,7 @@ const BY_ACTION: Record<string, Binding> = {
 const BY_SECTION: Record<string, Badge> = {};
 
 /** A section's own reading of a shared description. */
-const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
+export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   BODY: { "Half-page down / up": { badge: "key" } },
   // The activity log dialog's own keys (ActivityLogDialog.tsx), which act
   // inside the open dialog only.

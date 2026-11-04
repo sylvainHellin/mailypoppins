@@ -3,7 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
 import { VIEW_KEYS } from "@/keymap/viewKeys";
-import { bindingFor, GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
+import {
+  BY_ACTION,
+  bindingFor,
+  DESKTOP_KEYS,
+  GUI_ENTRIES,
+  paletteEntries,
+  SECTION_OVERRIDES,
+  SECTIONS,
+  type ActionId,
+} from "@/keymap/catalog";
 import { LINE_PX } from "@/keymap/useKeymap";
 import { HALF_PAGE } from "@/app/actions";
 
@@ -16,6 +25,23 @@ function selectedSubject(): string | null {
   const row = document.querySelector('[role="option"][aria-selected="true"]');
   return row?.getAttribute("aria-label") ?? null;
 }
+
+describe("the catalog against the generated KEYMAP", () => {
+  // A label with no row binds nothing, silently: the row a stale keymap.json
+  // lacks, or a TUI description reworded without the catalog.
+  it("names only descriptions that keymap.json has, in the section an override names", () => {
+    const all = new Set(SECTIONS.flatMap((s) => s.bindings.map((b) => b.action)));
+    expect(Object.keys(BY_ACTION).filter((label) => !all.has(label))).toEqual([]);
+    expect(Object.keys(DESKTOP_KEYS).filter((label) => !all.has(label))).toEqual([]);
+    const missing = Object.entries(SECTION_OVERRIDES).flatMap(([title, rows]) => {
+      const section = SECTIONS.find((s) => s.title === title);
+      return Object.keys(rows)
+        .filter((label) => !section?.bindings.some((b) => b.action === label))
+        .map((label) => `${title}: ${label}`);
+    });
+    expect(missing).toEqual([]);
+  });
+});
 
 describe("keyboard routing", () => {
   it("ff opens the Server Search form, the TUI's Search all mail, and the help and palette name it", async () => {

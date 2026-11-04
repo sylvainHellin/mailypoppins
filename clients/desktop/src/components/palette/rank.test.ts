@@ -19,11 +19,12 @@ const entry = (label: string, keys: string[] = [], id: ActionId | null = null, s
 describe("the palette's ranking", () => {
   it("puts a label match above rows that match by their section only", () => {
     const shown = rankPalette(CATALOG, "cal", []);
-    expect(shown.slice(0, 2).map((e) => e.label)).toEqual(["Switch to Calendar view", "Show or hide calendars"]);
+    const top = ["Calendar reminders (snooze, dismiss, open)", "Switch to Calendar view", "Show or hide calendars"];
+    expect(shown.slice(0, 3).map((e) => e.label)).toEqual(top);
     // Every CALENDAR row still matches, by its section, below them.
     const calendar = CATALOG.filter((e) => e.section === "CALENDAR");
     expect(shown.filter((e) => e.section === "CALENDAR")).toHaveLength(calendar.length);
-    expect(shown.slice(2).every((e) => paletteScore(e, "cal") < paletteScore(shown[0], "cal"))).toBe(true);
+    expect(shown.slice(3).every((e) => paletteScore(e, "cal") < paletteScore(shown[0], "cal"))).toBe(true);
   });
 
   it("hides a row whose letters only turn up scattered", () => {
@@ -69,8 +70,12 @@ describe("the palette's ranking", () => {
       "Dismiss all notices",
     ]);
     // Recency never lifts a weaker match.
-    expect(labels("cal", ["calendar_today"]).slice(0, 2)).toEqual(["Switch to Calendar view", "Show or hide calendars"]);
-    expect(labels("cal", ["calendar_today"])[2]).toBe("Go to today");
+    expect(labels("cal", ["calendar_today"]).slice(0, 3)).toEqual([
+      "Calendar reminders (snooze, dismiss, open)",
+      "Switch to Calendar view",
+      "Show or hide calendars",
+    ]);
+    expect(labels("cal", ["calendar_today"])[3]).toBe("Go to today");
   });
 
   it("keeps nothing for an empty query", () => {
