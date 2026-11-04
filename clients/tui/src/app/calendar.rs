@@ -722,6 +722,11 @@ impl App {
             self.set_status(why);
             return;
         }
+        // Someone else's meeting is refused before any scope is asked.
+        if let Err(why) = removal_kind(event) {
+            self.set_status(why);
+            return;
+        }
         if is_occurrence(event) {
             self.overlay = Overlay::EventScope(Box::new(EventScopeChooser {
                 event: event.clone(),
@@ -735,19 +740,9 @@ impl App {
 
     /// The cancel or delete confirmation of `event` in `scope`.
     fn confirm_event_remove(&mut self, event: &CalendarEvent, scope: Option<&str>) {
-        let meeting = !event.attendees.is_empty();
-        let cancel = if event.cancelled {
-            false
-        } else if event.is_organizer {
-            meeting
-        } else if event.organizer.is_none() && !meeting {
-            false
-        } else {
-            self.set_status(format!(
-                "{} is someone else's meeting: decline it with V to tell the organizer",
-                event.summary
-            ));
-            return;
+        let cancel = match removal_kind(event) {
+            Ok(cancel) => cancel,
+            Err(why) => return self.set_status(why),
         };
         self.overlay = Overlay::EventRemove(Box::new(EventRemoveOverlay {
             account: event.account.clone(),
@@ -781,6 +776,26 @@ impl App {
         if let Some(event) = self.selected_event().cloned() {
             self.open_rsvp_overlay_for(&event);
         }
+    }
+}
+
+/// Whether `D` on `event` cancels it (`true`: a meeting the user organizes,
+/// which tells its attendees) or deletes it (`false`: an event that tells
+/// nobody, or the user's copy of a cancelled meeting), or why neither, for
+/// someone else's live meeting, which the answer `V` sends declines instead.
+fn removal_kind(event: &CalendarEvent) -> Result<bool, String> {
+    let meeting = !event.attendees.is_empty();
+    if event.cancelled {
+        Ok(false)
+    } else if event.is_organizer {
+        Ok(meeting)
+    } else if event.organizer.is_none() && !meeting {
+        Ok(false)
+    } else {
+        Err(format!(
+            "{} is someone else's meeting: decline it with V to tell the organizer",
+            event.summary
+        ))
     }
 }
 

@@ -871,8 +871,9 @@ fn an_attendee_edits_the_reminder_through_event_update() {
 }
 
 /// `D` on someone else's meeting points at the answer that tells its
-/// organizer; on an event that tells nobody it asks to delete it, and `y`
-/// is one `event.delete`; `n` keeps the event.
+/// organizer, on an occurrence of it before any scope is asked, as the
+/// desktop does; on an event that tells nobody it asks to delete it, and
+/// `y` is one `event.delete`; `n` keeps the event.
 #[test]
 fn d_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
     let _data = seeded();
@@ -880,10 +881,19 @@ fn d_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
     app.switch_view(View::Calendar);
     app.handle_key(key('D'));
     assert!(matches!(app.overlay, Overlay::None));
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Project review is someone else's meeting: decline it with V to tell the organizer")
+    let refusal =
+        "Project review is someone else's meeting: decline it with V to tell the organizer";
+    assert_eq!(app.status_message.as_deref(), Some(refusal));
+    let mut occurrence = app.selected_event().cloned().expect("the meeting");
+    occurrence.kind = "occurrence".into();
+    occurrence.series_master_id = Some("ev-review-series".into());
+    app.status_message = None;
+    app.open_event_remove_for(&occurrence);
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "no scope is asked of someone else's occurrence"
     );
+    assert_eq!(app.status_message.as_deref(), Some(refusal));
 
     app.handle_key(key('j'));
     app.handle_key(key('D'));
