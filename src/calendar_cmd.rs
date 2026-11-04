@@ -537,31 +537,40 @@ pub fn freebusy_params(
     }
 }
 
-/// The hour ruler over a day's row of `interval`-minute slots: an hour
-/// label every few hours, as wide as the labels need; `None` when the slots
-/// do not divide an hour.
-fn hour_ruler(interval: u32) -> Option<String> {
+/// The hour ruler over a day's row of `slots` slots of `interval` minutes
+/// from `open`: an hour label every few hours, as wide as the labels need,
+/// each over the slot whose wall time in `zone` starts that hour, so a day
+/// the clocks change on (23 or 25 hours) skips or repeats its hour where
+/// the row does; `None` when the slots do not divide an hour.
+fn day_ruler(zone: Tz, open: DateTime<Utc>, slots: usize, interval: u32) -> Option<String> {
+    use chrono::Timelike;
     if interval == 0 || interval > 60 || 60 % interval != 0 {
         return None;
     }
     let per_hour = (60 / interval) as usize;
-    let every = [1usize, 2, 3, 4, 6, 12]
+    let every = [1u32, 2, 3, 4, 6, 12]
         .into_iter()
-        .find(|hours| hours * per_hour >= 4)
+        .find(|hours| *hours as usize * per_hour >= 4)
         .unwrap_or(24);
     let mut ruler = String::new();
-    for hour in (0..24).step_by(every) {
-        ruler.push_str(&format!("{hour:02}"));
-        let width = every * per_hour;
-        ruler.push_str(&" ".repeat(width.saturating_sub(2)));
+    for slot in 0..slots {
+        let at = (open + chrono::Duration::minutes(i64::from(interval) * slot as i64))
+            .with_timezone(&zone);
+        // A label needs its two columns and a space after the one before.
+        let room = ruler.is_empty() || slot > ruler.chars().count();
+        if at.minute() == 0 && at.hour().is_multiple_of(every) && room {
+            ruler.push_str(&" ".repeat(slot - ruler.chars().count()));
+            ruler.push_str(&format!("{:02}", at.hour()));
+        }
     }
-    Some(ruler.trim_end().to_string())
+    Some(ruler)
 }
 
 /// `mp calendar freebusy`: per address a row of glyphs for each day of the
-/// range in `zone`, an hour ruler over the first, and the blocks that are
-/// not free with their times; an address the server has no free/busy for
-/// says so.
+/// range in `zone`, an hour ruler over the first and again over a day whose
+/// hours differ (a day the clocks change on and the day after it), and the
+/// blocks that are not free with their times; an address the server has no
+/// free/busy for says so.
 pub fn render_freebusy(result: &mp_protocol::calendar::CalendarFreeBusyResult, zone: Tz) -> String {
     use mp_client::format::{availability_row, availability_word, slot_of, AVAILABILITY_LEGEND};
     let (Some(start), Some(end)) = (instant(&result.start), instant(&result.end)) else {
@@ -591,7 +600,8 @@ pub fn render_freebusy(result: &mp_protocol::calendar::CalendarFreeBusyResult, z
     ));
     out.push_str(&format!("{}\n", AVAILABILITY_LEGEND.dimmed()));
     let days: Vec<NaiveDate> = first.iter_days().take_while(|day| *day <= last).collect();
-    let row_of = |view: &str, day: NaiveDate| {
+    // Each day's first slot, its slot count and its ruler.
+    let shape = |day: NaiveDate| {
         let open = day_start(zone, day).max(start);
         let close = day_start(zone, day + Days::new(1)).min(end);
         let from = slot_of(&result.start, interval, open).unwrap_or(0);
@@ -601,8 +611,10 @@ pub fn render_freebusy(result: &mp_protocol::calendar::CalendarFreeBusyResult, z
             close - chrono::Duration::seconds(1),
         )
         .unwrap_or(from);
-        availability_row(view, from, (to - from + 1).max(0) as usize)
+        let slots = (to - from + 1).max(0) as usize;
+        (from, slots, day_ruler(zone, open, slots, interval))
     };
+    let shapes: Vec<_> = days.iter().map(|day| shape(*day)).collect();
     for schedule in &result.schedules {
         out.push('\n');
         out.push_str(&format!("{}\n", schedule.address.bold()));
@@ -613,14 +625,16 @@ pub fn render_freebusy(result: &mp_protocol::calendar::CalendarFreeBusyResult, z
             ));
             continue;
         }
-        if let Some(ruler) = hour_ruler(interval) {
-            out.push_str(&format!("  {:<10}  {}\n", "", ruler.dimmed()));
-        }
-        for day in &days {
+        let mut above: Option<&String> = None;
+        for (day, (from, slots, ruler)) in days.iter().zip(&shapes) {
+            if let Some(ruler) = ruler.as_ref().filter(|ruler| above != Some(*ruler)) {
+                out.push_str(&format!("  {:<10}  {}\n", "", ruler.dimmed()));
+                above = Some(ruler);
+            }
             out.push_str(&format!(
                 "  {:<10}  {}\n",
                 day.format("%a %d %b").to_string(),
-                row_of(&schedule.view, *day)
+                availability_row(&schedule.view, *from, *slots)
             ));
         }
         for item in &schedule.items {
@@ -1142,5 +1156,92 @@ mod tests {
             dots(26),
         );
         assert_eq!(text, expected);
+    }
+
+    /// The rulers and rows of `render_freebusy`, without their label
+    /// column, for one address busy over `busy`, from `start` to `end` in
+    /// Berlin at 30-minute slots.
+    fn dst_rows(start: &str, end: &str, busy: (&str, &str)) -> Vec<String> {
+        use mp_protocol::calendar::{CalendarFreeBusyResult, CalendarSchedule};
+        let berlin: Tz = "Europe/Berlin".parse().unwrap();
+        let (from, to) = (instant(start).unwrap(), instant(end).unwrap());
+        let (busy_from, busy_to) = (instant(busy.0).unwrap(), instant(busy.1).unwrap());
+        let slot = |at: DateTime<Utc>| ((at - from).num_minutes() / 30) as usize;
+        let view: String = (0..slot(to))
+            .map(|at| {
+                if (slot(busy_from)..slot(busy_to)).contains(&at) {
+                    '2'
+                } else {
+                    '0'
+                }
+            })
+            .collect();
+        let result = CalendarFreeBusyResult {
+            account: "evoqs".into(),
+            start: start.into(),
+            end: end.into(),
+            interval_minutes: 30,
+            schedules: vec![CalendarSchedule {
+                address: "s.hellin@evoqs.com".into(),
+                view,
+                items: Vec::new(),
+                error: None,
+            }],
+        };
+        uncoloured(&render_freebusy(&result, berlin))
+            .lines()
+            .skip(4)
+            .map(|line| line.get(14..).unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// On the day the clocks go forward the row is 23 hours long and its
+    /// ruler skips 02:00, so a 09:00 block sits two slots after "08"; the
+    /// days around it keep the 24-hour ruler, printed again after it.
+    #[test]
+    fn the_ruler_follows_the_spring_clock_change() {
+        let rows = dst_rows(
+            "2026-03-27T23:00:00Z",
+            "2026-03-30T22:00:00Z",
+            ("2026-03-29T07:00:00Z", "2026-03-29T08:00:00Z"),
+        );
+        let normal = "00  02  04  06  08  10  12  14  16  18  20  22";
+        let spring = "00    04  06  08  10  12  14  16  18  20  22";
+        let dots = |n: usize| "\u{b7}".repeat(n);
+        let busy = "\u{2588}".repeat(2);
+        assert_eq!(
+            rows,
+            [
+                normal.to_string(),
+                dots(48),
+                spring.to_string(),
+                format!("{}{busy}{}", dots(16), dots(28)),
+                normal.to_string(),
+                dots(48),
+            ]
+        );
+        assert_eq!(spring.find("08"), Some(14));
+    }
+
+    /// On the day the clocks go back the row is 25 hours long and its ruler
+    /// shows 02:00 once, so a 09:00 block sits two slots after "08".
+    #[test]
+    fn the_ruler_follows_the_autumn_clock_change() {
+        let rows = dst_rows(
+            "2026-10-24T22:00:00Z",
+            "2026-10-25T23:00:00Z",
+            ("2026-10-25T08:00:00Z", "2026-10-25T09:00:00Z"),
+        );
+        let autumn = "00  02    04  06  08  10  12  14  16  18  20  22";
+        let dots = |n: usize| "\u{b7}".repeat(n);
+        let busy = "\u{2588}".repeat(2);
+        assert_eq!(
+            rows,
+            [
+                autumn.to_string(),
+                format!("{}{busy}{}", dots(20), dots(28)),
+            ]
+        );
+        assert_eq!(autumn.find("08"), Some(18));
     }
 }
