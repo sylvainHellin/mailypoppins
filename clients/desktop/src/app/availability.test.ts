@@ -76,5 +76,8 @@ describe("the availability grid's model", () => {
     expect(currentSlots(fields({ start: "2099-10-15T10:00", end: "2099-10-15T11:00" }), r, "2099-10-14")).toBeNull();
     expect(currentSlots(fields({ allDay: true, start: "2099-10-14", end: "" }), r, "2099-10-14")).toBeNull();
     expect(currentSlots(null, r, "2099-10-14")).toBeNull();
+    expect(currentSlots(fields({ start: "2099-10-14T21:00", end: "2099-10-14T22:00" }), r, "2099-10-14")).toBeNull();
+    expect(currentSlots(fields({ start: "2099-10-14T05:00", end: "2099-10-14T06:00" }), r, "2099-10-14")).toBeNull();
+    expect(currentSlots(fields({ start: "2099-10-14T19:30", end: "2099-10-14T21:00" }), r, "2099-10-14")).toEqual([25, 27]);
   });
 });

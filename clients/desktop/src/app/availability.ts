@@ -98,9 +98,14 @@ export function chosenSlots(fields: EventFields, result: CalendarFreeBusyResult,
 /**
  * The slots an edited event holds now (its fields as the form opened), so
  * the organizer's busy block there reads as the event itself; null for an
- * all-day event or one that starts on another day.
+ * all-day event, one that starts on another day or one wholly outside the
+ * FIRST_HOUR to LAST_HOUR grid, as the TUI filters it.
  */
 export function currentSlots(original: EventFields | null | undefined, result: CalendarFreeBusyResult, day: string): [number, number] | null {
   if (!original || !original.start.startsWith(day)) return null;
-  return chosenSlots(original, result, day);
+  const slots = chosenSlots(original, result, day);
+  if (!slots) return null;
+  const count = ((LAST_HOUR - FIRST_HOUR) * 60) / Math.max(result.interval_minutes, 1);
+  const [from, to] = slots;
+  return to < 0 || from >= count ? null : slots;
 }

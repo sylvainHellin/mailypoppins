@@ -179,12 +179,11 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 
 Phase 1's methods are final and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", holds their shapes: `calendar.list {account?}`, `calendar.set_visibility {account, calendar, visible}`, `calendar.view {start, end, accounts?, calendars?, include_hidden?, zone?}`, `event.get {account, event}`, `event.respond {account, event, response, comment?, send_response?}` and the `calendar.changed {account}` event; `calendar.rebuild {account}` also drops and resyncs an account's server cache.
 An invitation mail's event has the id `imip:<row_id>`, and `event.respond` answers it with the iMIP reply `calendar.rsvp` sends; `calendar.rsvp` and `send.invite` stay until the later phases fold them in.
-Phase 2's `event.create` and `calendar.freebusy {account, addresses, start, end, zone?, interval_minutes?}` are final there too.
-The later phases' methods are provisional:
+Phase 2's `event.create`, `event.update {account, event, fields}`, `event.cancel {account, event, comment?}`, `event.delete {account, event}`, `calendar.freebusy {account, addresses, start, end, zone?, interval_minutes?}` and the reminders (`calendar.reminders`, `calendar.dismiss_reminder`, `calendar.snooze_reminder` and the `calendar.reminder` event) are final there too.
+The later phases' changes are provisional:
 
 - `event.respond` gains `proposed_time` for proposing a new time (phase 2).
-- `event.update {event, scope, fields}` and `event.cancel {event, scope, comment?}`: the organizer's operations, with `scope` naming the occurrence or the series.
-- Reminders reach the clients as daemon events, and the desktop notification follows the existing notification path.
+- `event.update` and `event.cancel` gain `scope`, naming the occurrence or the series, for recurring events (phase 2, slice 5).
 
 Every write is an `operation.*` in the daemon's in-memory operation registry, and `event.create` carries a Graph `transactionId`, so a retry after an interruption cannot create the event twice.
 
