@@ -1793,6 +1793,21 @@ async fn a_recurring_create_makes_a_series_the_sync_fills() {
     .await;
     assert_eq!(succeeded(&retry)["event"]["id"], id.as_str());
     assert_eq!(writes(&slice).len(), 1);
+
+    // A retry with a shorter rule patches the series, and the occurrence it
+    // no longer places leaves the view.
+    let mut shorter = meeting_input_with_rule();
+    shorter["recurrence"]["count"] = 2.into();
+    let patched = run_operation(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": shorter, "transaction_id": "tx-series"}),
+    )
+    .await;
+    assert_eq!(succeeded(&patched)["event"]["id"], id.as_str());
+    assert_eq!(writes(&slice).len(), 2);
+    let listed = occurrences_of(&mut conn, &id).await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
 }
 
 fn meeting_input_with_rule() -> Value {

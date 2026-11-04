@@ -1348,6 +1348,46 @@ async fn a_master_change_reaches_the_cached_occurrences_it_trimmed() {
     .await
     .unwrap();
     assert!(!quiet.changed(), "{quiet:?}");
+
+    // An occurrence deleted in Outlook: the delta re-sends the master and
+    // the occurrences left, and never names the deleted one, which goes.
+    let next = trimmed(
+        "occ-cms-2",
+        "master-cms",
+        "2026-11-04T08:00:00.0000000",
+        "2026-11-04T10:00:00.0000000",
+    );
+    let page = delta_page(
+        &format!("{DELTA}round5"),
+        vec![delta_master(false, "CMS Weekly"), next],
+    );
+    let fifth = sync_account(&store, &backend(page), "evoqs", hour(4))
+        .await
+        .unwrap();
+    assert!(fifth.changed());
+    assert_eq!(cache::get_event(&store, "evoqs", "occ-cms").unwrap(), None);
+    assert_eq!(summary("occ-cms-2"), "CMS Weekly");
+    assert_eq!(summary("occ-ref"), "Reformation Day");
+
+    // The series deleted in Outlook: the delta names its master alone, which
+    // takes the occurrences and the series row along.
+    let page = delta_page(
+        &format!("{DELTA}round6"),
+        vec![serde_json::json!({"id": "master-cms", "@removed": {"reason": "deleted"}})],
+    );
+    let sixth = sync_account(&store, &backend(page), "evoqs", hour(5))
+        .await
+        .unwrap();
+    assert!(sixth.changed());
+    assert_eq!(
+        cache::get_event(&store, "evoqs", "occ-cms-2").unwrap(),
+        None
+    );
+    assert_eq!(
+        cache::get_series(&store, "evoqs", "master-cms").unwrap(),
+        None
+    );
+    assert_eq!(summary("occ-ref"), "Reformation Day");
 }
 
 /// A backend that knows `master-cms` by its `UID` alone, as an older build

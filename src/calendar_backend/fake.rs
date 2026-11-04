@@ -251,6 +251,14 @@ impl FakeCalendarBackend {
         state.changes.push(id.to_string());
     }
 
+    /// Delete the event with `id` as Outlook does, as a server-side change:
+    /// a series master with all its occurrences, the next sync naming the
+    /// master alone; one occurrence silently, the next sync re-sending its
+    /// series without it.
+    pub fn delete_in_outlook(&self, id: &str) {
+        self.state().take_off(id);
+    }
+
     /// Refuse every token handed out so far, as a server whose sync state
     /// expired (Graph's 410): the next sync is a fresh baseline.
     pub fn expire_tokens(&self) {
@@ -856,7 +864,8 @@ impl CalendarBackend for FakeCalendarBackend {
     /// A baseline (no token) returns the calendar's events in the window, all
     /// day ones seen from UTC; one of the fake's own tokens returns what
     /// changed since it was handed out, an event changed out of the calendar
-    /// or the window as removed; any other token, or one from before
+    /// or the window as removed and a changed series whole, as re-sent
+    /// ([`SyncResult::resent_series`]); any other token, or one from before
     /// [`FakeCalendarBackend::expire_tokens`], is refused the way Graph
     /// answers 410, with a baseline.
     async fn sync_window(
@@ -911,6 +920,7 @@ impl CalendarBackend for FakeCalendarBackend {
         for id in changed {
             if let Some(at) = state.series_of(id) {
                 result.series.push(state.series[at].clone());
+                result.resent_series.push(id.to_string());
                 for event in &state.events {
                     if event.series_master_id.as_deref() == Some(id)
                         && belongs(event)

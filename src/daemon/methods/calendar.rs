@@ -1473,8 +1473,10 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
         match &changed {
             Changed::Updated(event) => cache::upsert_event(&store, &account.name, event)?,
             Changed::SeriesUpdated(series) => {
-                cache::upsert_series(&store, &account.name, series)?;
+                // The token goes first: a failure after it leaves a baseline
+                // to come rather than a delta that cannot clean the series.
                 cache::forget_sync_state(&store, &account.name, &calendar)?;
+                cache::upsert_series(&store, &account.name, series)?;
             }
             Changed::Removed(removal) if series_scope => {
                 cache::remove_series(&store, &account.name, &id, &removed_id, removal, now)?;
@@ -1747,6 +1749,13 @@ async fn create(work: CreateWork, handle: OperationHandle) {
                 *event
             }
             Written::Series(series) => {
+                // A retry that patched the series may have dropped some of
+                // its occurrences, which the delta never names: the sync
+                // after it is a baseline of the calendar, as after a series
+                // update.
+                if let Some((master, _)) = &made {
+                    cache::forget_sync_state(&store, &account.name, &master.calendar)?;
+                }
                 cache::upsert_series(&store, &account.name, &series)?;
                 written_master(&series)?
             }

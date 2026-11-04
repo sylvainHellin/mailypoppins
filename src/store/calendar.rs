@@ -463,7 +463,10 @@ fn meeting_providers(raw: Option<String>) -> Vec<OnlineMeetingProvider> {
 
 /// Fold one sync of `calendar_id` into the cache, with its token, in one
 /// transaction: a `full_resync` replaces every cached event of the calendar,
-/// anything else merges its upserts and removals. A baseline stamps
+/// anything else merges its upserts and removals, a removed series master
+/// taking its occurrences and its series row along and a series re-sent
+/// whole ([`SyncResult::resent_series`]) keeping only the occurrences that
+/// came. A baseline stamps
 /// `baselined_at` with `now`; an incremental sync keeps the stamp it had.
 ///
 /// Each series master the sync brings is handed on to the cached occurrences
@@ -508,11 +511,35 @@ pub fn apply_sync(
             changed = true;
         }
     }
+    // The cached occurrences of the series `master` in this calendar.
+    let occurrences_of = |master: &str| -> rusqlite::Result<Vec<String>> {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT event_id FROM {EVENTS_TABLE}
+             WHERE account = ?1 AND calendar_id = ?2
+               AND json_extract(event_json, '$.series_master_id') = ?3"
+        ))?;
+        let ids = stmt
+            .query_map([account, calendar_id, master], |row| row.get(0))?
+            .collect();
+        ids
+    };
     for id in &result.removed {
         if delete(id)? > 0 {
             changed = true;
         }
         cached.remove(id);
+        // A removed series master takes its occurrences along, which the
+        // delta never names, and its series row.
+        for occurrence in occurrences_of(id)? {
+            delete(&occurrence)?;
+            cached.remove(&occurrence);
+            changed = true;
+        }
+        tx.execute(
+            &format!("DELETE FROM {SERIES_TABLE} WHERE account = ?1 AND master_id = ?2"),
+            [account, id.as_str()],
+        )
+        .with_context(|| format!("removing series {id}"))?;
     }
     let inheriting: HashSet<&str> = result.inheriting.iter().map(String::as_str).collect();
     for event in &result.upserts {
@@ -524,6 +551,20 @@ pub fn apply_sync(
         write_event(&tx, account, calendar_id, event, &row.0, row.1)?;
         cached.insert(event.id.clone(), row);
         changed = true;
+    }
+    // A series re-sent whole keeps the occurrences that came and loses the
+    // ones that did not, deleted or ended by a new rule on the server.
+    if !result.full_resync {
+        let brought: HashSet<&str> = result.upserts.iter().map(|e| e.id.as_str()).collect();
+        for master in &result.resent_series {
+            for occurrence in occurrences_of(master)? {
+                if !brought.contains(occurrence.as_str()) {
+                    delete(&occurrence)?;
+                    cached.remove(&occurrence);
+                    changed = true;
+                }
+            }
+        }
     }
     for series in &result.series {
         write_series(&tx, account, series)?;
@@ -1704,6 +1745,71 @@ mod tests {
         assert_eq!(ids(&events), ["e4"]);
         let state = load_sync_state(&store, "evoqs", "a").unwrap().unwrap();
         assert_eq!(state.baselined_at, utc(2, 0));
+    }
+
+    /// A series the delta re-sends whole keeps only the occurrences that
+    /// came (one deleted in Outlook goes), a master re-sent alone prunes
+    /// nothing, and a removed master takes every occurrence and its series
+    /// row along, the other events staying.
+    #[test]
+    fn a_delta_prunes_what_left_a_series_and_a_removed_master_takes_its_occurrences() {
+        let (_dir, store) = open();
+        let occurrence = |id: &str, d: u32| {
+            let mut event = timed(id, "a", d, 9);
+            event.kind = crate::calendar_model::EventKind::Occurrence;
+            event.series_master_id = Some("ev-series".into());
+            event
+        };
+        let series = SeriesInfo {
+            master_id: "ev-series".into(),
+            uid: "UID-SERIES".into(),
+            recurrence: None,
+            master: None,
+            zone: None,
+        };
+        let [first, second, third] =
+            [("occ-1", 2), ("occ-2", 9), ("occ-3", 16)].map(|(id, d)| occurrence(id, d));
+        let mut first_sync = baseline(vec![
+            first.clone(),
+            second,
+            third.clone(),
+            timed("e-other", "a", 3, 9),
+        ]);
+        first_sync.series = vec![series.clone()];
+        apply_sync(&store, "evoqs", "a", &first_sync, november(), utc(1, 0)).unwrap();
+
+        let delta = |upserts: Vec<Event>, resent: bool, removed: Vec<String>| SyncResult {
+            upserts,
+            removed,
+            token: Some("t2".into()),
+            series: if resent {
+                vec![series.clone()]
+            } else {
+                Vec::new()
+            },
+            resent_series: if resent {
+                vec!["ev-series".into()]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        };
+        let alone = delta(Vec::new(), false, Vec::new());
+        assert!(!apply_sync(&store, "evoqs", "a", &alone, november(), utc(1, 1)).unwrap());
+        let events = events_in_range(&store, &[], november(), chrono_tz::UTC, false).unwrap();
+        assert_eq!(ids(&events), ["occ-1", "e-other", "occ-2", "occ-3"]);
+
+        let resent = delta(vec![first, third], true, Vec::new());
+        assert!(apply_sync(&store, "evoqs", "a", &resent, november(), utc(1, 2)).unwrap());
+        let events = events_in_range(&store, &[], november(), chrono_tz::UTC, false).unwrap();
+        assert_eq!(ids(&events), ["occ-1", "e-other", "occ-3"]);
+        assert!(get_series(&store, "evoqs", "ev-series").unwrap().is_some());
+
+        let removed = delta(Vec::new(), false, vec!["ev-series".into()]);
+        assert!(apply_sync(&store, "evoqs", "a", &removed, november(), utc(1, 3)).unwrap());
+        let events = events_in_range(&store, &[], november(), chrono_tz::UTC, false).unwrap();
+        assert_eq!(ids(&events), ["e-other"]);
+        assert_eq!(get_series(&store, "evoqs", "ev-series").unwrap(), None);
     }
 
     #[test]
