@@ -1113,7 +1113,8 @@ The wire types are `mp_protocol::calendar`; an event is `CalendarEvent`, the neu
 
 `calendar.list` `{account?}` -> `{calendars: [CalendarInfo]}` is a query.
 A row is `{account, id, name, color, is_default, can_edit, visible, backend, features}`, `color` `null` when the server names none and `backend` the account's `calendar_backend` as the configuration spells it.
-`features` lists what the backend lets a client do beyond reading and answering, each word listed once the daemon serves it there: `write`, `online-meeting`, `propose-time`, `free-busy` and `server-reminders` (PERSO-255), so a client greys out what an account lacks; this build serves none of them yet, so a Graph calendar and the invitation calendar answer `[]`.
+`features` lists what the backend lets a client do beyond reading and answering, so a client greys out what an account lacks: `write`, `online-meeting`, `propose-time`, `free-busy` and `server-reminders` (PERSO-255), each listed once the daemon serves it there.
+This build serves none of them, so a Graph calendar and the invitation calendar answer `[]`.
 An account with a backend lists its server calendars in the server's order, as the last sync stored them, so an account that never synced lists none.
 Every account holding an invitation mail lists one more, the virtual invitation calendar `{id: "imip", name: "Invitations", backend: "none"}`, so its events can be hidden like a server calendar's.
 Without `account` it answers every account with a store, in configuration order; a named account is refused as `message.list` refuses one.
