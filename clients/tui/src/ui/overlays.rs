@@ -230,8 +230,22 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
 
 /// Render the `D` confirmation (PERSO-255): a cancel names how many people
 /// it tells and takes a comment for them; a delete says it tells nobody.
+/// One opened again after a failure says why under it, wrapped.
 pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Frame, area: Rect) {
-    let height = if overlay.cancel { 9 } else { 8 };
+    // The modal's inner width, as `render_modal_shell` will size it: 60 or
+    // the area less its margin, less the border.
+    let inner_width = 60.min(area.width.saturating_sub(4)).saturating_sub(2) as usize;
+    let error = overlay
+        .error
+        .as_deref()
+        .map(|why| wrap_words(why, inner_width, 3))
+        .unwrap_or_default();
+    let extra = if error.is_empty() {
+        0
+    } else {
+        error.len() as u16 + 1
+    };
+    let height = if overlay.cancel { 9 } else { 8 } + extra;
     let Some((_, inner)) = render_modal_shell(
         frame,
         area,
@@ -285,6 +299,15 @@ pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Fram
     } else {
         lines.push(Line::from(Span::styled("The server tells nobody.", muted)));
     }
+    if !error.is_empty() {
+        lines.push(Line::from(""));
+        let style = Style::default().fg(theme::active().error);
+        lines.extend(
+            error
+                .into_iter()
+                .map(|row| Line::from(Span::styled(row, style))),
+        );
+    }
     frame.render_widget(Paragraph::new(lines), stack.content);
     if let Some(footer) = stack.footer {
         let keys = if overlay.cancel {
@@ -294,6 +317,32 @@ pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Fram
         };
         frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
     }
+}
+
+/// `text` wrapped at word boundaries to `width` columns, at most `rows` of
+/// them, the last one truncated when the text runs on.
+fn wrap_words(text: &str, width: usize, rows: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let fits = row.is_empty()
+            || super::util::display_width(&row) + 1 + super::util::display_width(word) <= width;
+        if !fits {
+            out.push(std::mem::take(&mut row));
+        }
+        if !row.is_empty() {
+            row.push(' ');
+        }
+        row.push_str(word);
+    }
+    if !row.is_empty() {
+        out.push(row);
+    }
+    if out.len() > rows {
+        let rest = out.split_off(rows - 1).join(" ");
+        out.push(truncate(&rest, width));
+    }
+    out.into_iter().map(|row| truncate(&row, width)).collect()
 }
 
 pub(super) fn render_confirm_dialog(dialog: &ConfirmDialog, frame: &mut Frame, area: Rect) {

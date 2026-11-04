@@ -709,8 +709,9 @@ fn the_event_form_creates_through_event_create_and_retries_with_its_transaction_
 // ---------------------------------------------------------------------------
 
 /// The edit form on a meeting the user organizes, its start moved; and the
-/// `D` confirmations, a cancel with its comment being typed and a delete of
-/// an event that tells nobody.
+/// `D` confirmations, a cancel with its comment being typed, the same cancel
+/// asking again after its daemon restarted, and a delete of an event that
+/// tells nobody.
 #[test]
 fn golden_calendar_event_edit_and_remove() {
     let mut app = calendar_fixture();
@@ -737,8 +738,21 @@ fn golden_calendar_event_edit_and_remove() {
         cancel: true,
         attendees: 2,
         comment: "Verschoben".into(),
+        error: None,
     }));
     assert_snapshot!("event_cancel", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    if let Overlay::EventRemove(removal) = &mut app.overlay {
+        removal.error = Some(
+            "The daemon restarted before it was confirmed; confirming again is safe, and \
+             counts as done if it went through"
+                .into(),
+        );
+    }
+    assert_snapshot!(
+        "event_cancel_failed",
+        frame_snapshot(&mut app, WIDTH, HEIGHT)
+    );
 
     app.overlay = Overlay::EventRemove(Box::new(EventRemoveOverlay {
         account: "evoqs".into(),
@@ -747,6 +761,7 @@ fn golden_calendar_event_edit_and_remove() {
         cancel: false,
         attendees: 0,
         comment: String::new(),
+        error: None,
     }));
     assert_snapshot!("event_delete", frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
@@ -917,6 +932,7 @@ fn a_cancel_sends_its_comment_through_event_cancel() {
         cancel: true,
         attendees: 1,
         comment: String::new(),
+        error: None,
     }));
     for c in "Postponed".chars() {
         app.handle_key(key(c));
@@ -950,4 +966,103 @@ fn a_cancel_sends_its_comment_through_event_cancel() {
         app.status_message.as_deref(),
         Some("Cancelled Budget; told ada@example.com")
     );
+}
+
+/// A cancel the server failed asks again, as the desktop's does: the
+/// confirmation comes back with the comment as typed and the reason under
+/// it, and `Enter` sends the same cancel. One that fails while another
+/// overlay is open is kept for `D` on the event, which the status line
+/// says, and a refusal at the call asks again at once.
+#[test]
+fn a_failed_cancel_asks_again_with_its_comment() {
+    let mut app = App::default_for_tests();
+    let removal = EventRemoveOverlay {
+        account: ACCOUNT.into(),
+        event: "ev-own".into(),
+        summary: "Budget".into(),
+        cancel: true,
+        attendees: 2,
+        comment: "Postponed".into(),
+        error: None,
+    };
+    let door = Writes::default();
+    assert!(dispatch(
+        &mut app,
+        &door,
+        &Action::RemoveEvent(Box::new(removal.clone()))
+    ));
+    assert_eq!(app.calendar_view.pending_removals.len(), 1);
+    let failed = settled(
+        &Awaited::EventChange {
+            operation_id: "op-1".into(),
+            done: "Cancelled Budget".into(),
+        },
+        &json!({"operation_id": "op-1", "state": "failed",
+                "error": {"code": -32603, "message": "Graph refused the cancel: HTTP 503"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, failed);
+    assert!(app.calendar_view.pending_removals.is_empty());
+    let Overlay::EventRemove(again) = &app.overlay else {
+        panic!("a failed cancel asks again: {:?}", app.status_message);
+    };
+    assert_eq!(again.comment, "Postponed");
+    let why = again.error.clone().unwrap();
+    assert!(why.starts_with("Cancelling Budget failed"), "{why}");
+    assert!(why.contains("HTTP 503"), "{why}");
+
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Some(Action::RemoveEvent(retry)) = app.pending_actions.pop_front() else {
+        panic!("Enter sends the cancel again");
+    };
+    assert_eq!(retry.comment, "Postponed");
+    assert!(dispatch(&mut app, &door, &Action::RemoveEvent(retry)));
+    assert_eq!(
+        door.0.lock().unwrap()[1],
+        (
+            "event.cancel".to_string(),
+            json!({"account": ACCOUNT, "event": "ev-own", "comment": "Postponed"})
+        )
+    );
+
+    app.overlay = Overlay::Help;
+    let failed = settled(
+        &Awaited::EventChange {
+            operation_id: "op-2".into(),
+            done: "Cancelled Budget".into(),
+        },
+        &json!({"operation_id": "op-2", "state": "failed",
+                "error": {"code": -32603, "message": "HTTP 503"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, failed);
+    assert!(matches!(app.overlay, Overlay::Help));
+    assert!(app
+        .status_message
+        .as_deref()
+        .unwrap()
+        .ends_with("; D on Budget asks again"));
+    assert_eq!(
+        app.calendar_view
+            .kept_removal
+            .as_ref()
+            .map(|kept| kept.comment.as_str()),
+        Some("Postponed")
+    );
+
+    struct Refuses;
+    impl Queries for Refuses {
+        fn call(&self, _method: &str, _params: Value) -> anyhow::Result<Value> {
+            anyhow::bail!("The calendar Calendar of evoqs is read-only")
+        }
+    }
+    app.overlay = Overlay::None;
+    assert!(dispatch(
+        &mut app,
+        &Refuses,
+        &Action::RemoveEvent(Box::new(removal))
+    ));
+    let Overlay::EventRemove(again) = &app.overlay else {
+        panic!("a refusal asks again");
+    };
+    assert!(again.error.as_deref().unwrap().contains("read-only"));
+    assert!(app.calendar_view.pending_removals.is_empty());
 }

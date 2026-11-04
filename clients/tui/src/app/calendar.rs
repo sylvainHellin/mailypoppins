@@ -655,6 +655,17 @@ impl App {
     /// cancelled meeting); and for someone else's live meeting, the answer
     /// that tells its organizer instead.
     pub fn open_event_remove_for(&mut self, event: &CalendarEvent) {
+        let kept = self
+            .calendar_view
+            .kept_removal
+            .as_ref()
+            .is_some_and(|kept| kept.account == event.account && kept.event == event.id);
+        if kept {
+            if let Some(removal) = self.calendar_view.kept_removal.take() {
+                self.overlay = Overlay::EventRemove(Box::new(removal));
+                return;
+            }
+        }
         if let Some(why) = self.unchangeable(event) {
             self.set_status(why);
             return;
@@ -680,7 +691,23 @@ impl App {
             cancel,
             attendees: event.attendees.len(),
             comment: String::new(),
+            error: None,
         }));
+    }
+
+    /// A cancel or delete that did not go through: its confirmation comes
+    /// back with `why` under it and the comment as typed, over the view when
+    /// nothing else is open, else kept for `D` on the event.
+    pub fn reopen_event_remove(&mut self, mut removal: EventRemoveOverlay, why: String) {
+        removal.error = Some(why.clone());
+        if self.overlay.is_active() {
+            let line = format!("{why}; D on {} asks again", removal.summary);
+            self.calendar_view.kept_removal = Some(removal);
+            self.set_status_level(line, StatusLevel::Error);
+        } else {
+            self.overlay = Overlay::EventRemove(Box::new(removal));
+            self.set_status_level(why, StatusLevel::Error);
+        }
     }
 
     /// `V` in the Calendar view: answer the event under the cursor.

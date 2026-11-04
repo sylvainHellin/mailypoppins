@@ -560,6 +560,7 @@ fn one_of_each_action() -> Vec<Action> {
             cancel: true,
             attendees: 1,
             comment: String::new(),
+            error: None,
         })),
         Action::EditEventDescription,
         Action::ComposeToContact {

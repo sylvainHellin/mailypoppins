@@ -1902,6 +1902,14 @@ pub struct CalendarView {
     /// A form whose create failed while another overlay was up, or whose
     /// daemon restarted under it: `n` reopens it.
     pub kept_form: Option<super::EventForm>,
+    /// The `D` confirmations whose `event.cancel` or `event.delete` is
+    /// running, by operation id, kept so a failure asks again with the
+    /// comment as typed.
+    pub pending_removals: std::collections::HashMap<String, EventRemoveOverlay>,
+    /// A confirmation whose cancel or delete failed while another overlay
+    /// was up, or whose daemon restarted under it: `D` on its event opens
+    /// it again.
+    pub kept_removal: Option<EventRemoveOverlay>,
 }
 
 impl Default for CalendarView {
@@ -1921,6 +1929,8 @@ impl Default for CalendarView {
             error: None,
             pending_forms: std::collections::HashMap::new(),
             kept_form: None,
+            pending_removals: std::collections::HashMap::new(),
+            kept_removal: None,
         }
     }
 }
@@ -1965,6 +1975,9 @@ pub struct EventRemoveOverlay {
     pub attendees: usize,
     /// The comment a cancel sends, empty for none.
     pub comment: String,
+    /// Why the last cancel or delete of this confirmation did not go
+    /// through, shown under it when it opens again.
+    pub error: Option<String>,
 }
 
 /// Messages that drive state transitions (TEA pattern).

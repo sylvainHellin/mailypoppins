@@ -898,7 +898,9 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
 /// knows whether the event exists. The form keeps its transaction id, so
 /// `Enter` retries it and the server makes the event at most once. An edit
 /// form comes back the same way; its change sets fields to values, so
-/// sending it again is safe.
+/// sending it again is safe. A cancel's or a delete's confirmation asks
+/// again with its comment: the daemon counts a repeat of one that went
+/// through as done.
 fn orphan_event_forms(app: &mut App) {
     let mut gone: Vec<String> = app
         .calendar_view
@@ -917,6 +919,24 @@ fn orphan_event_forms(app: &mut App) {
                  same transaction id, which creates it at most once"
             };
             app.reopen_event_form(form, why.to_string());
+        }
+    }
+    let mut gone: Vec<String> = app
+        .calendar_view
+        .pending_removals
+        .keys()
+        .filter(|id| !app.events.awaits(id))
+        .cloned()
+        .collect();
+    gone.sort();
+    for id in gone {
+        if let Some(removal) = app.calendar_view.pending_removals.remove(&id) {
+            app.reopen_event_remove(
+                removal,
+                "The daemon restarted before it was confirmed; confirming again is safe, and \
+                 counts as done if it went through"
+                    .to_string(),
+            );
         }
     }
 }

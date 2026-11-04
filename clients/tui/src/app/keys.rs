@@ -2042,10 +2042,12 @@ impl App {
             }
             KeyCode::Char(c) if cancel => {
                 overlay.comment.push(c);
+                overlay.error = None;
                 false
             }
             KeyCode::Backspace if cancel => {
                 overlay.comment.pop();
+                overlay.error = None;
                 false
             }
             KeyCode::Char('y') => true,

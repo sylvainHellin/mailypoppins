@@ -860,9 +860,15 @@ fn update_event(app: &mut App, commands: &dyn Queries, form: &super::app::EventF
     );
 }
 
-/// `event.cancel` or `event.delete`, as the `X` confirmation decided
-/// (PERSO-255). A refusal is the daemon's sentence on the status line.
+/// `event.cancel` or `event.delete`, as the `D` confirmation decided
+/// (PERSO-255).
+///
+/// The confirmation is kept under the operation's id while it runs, so a
+/// failure asks again with the comment as typed. A refusal comes back at
+/// once and asks again with the daemon's sentence.
 fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::EventRemoveOverlay) {
+    let mut removal = removal.clone();
+    removal.error = None;
     let (method, params, verb) = if removal.cancel {
         let comment = Some(removal.comment.trim().to_string()).filter(|c| !c.is_empty());
         (
@@ -879,24 +885,25 @@ fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::Eve
     };
     let started = match commands.call(method, params) {
         Ok(started) => started,
-        Err(e) => return app.set_status_level(format!("{e:#}"), StatusLevel::Error),
+        Err(e) => return app.reopen_event_remove(removal, format!("{e:#}")),
     };
     let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
-        return app.set_status_level(
-            format!("{method} answered no operation id"),
-            StatusLevel::Error,
-        );
+        return app.reopen_event_remove(removal, format!("{method} answered no operation id"));
     };
     app.set_status_level(
         format!("{} {}...", verb.0, removal.summary),
         StatusLevel::Progress,
     );
+    let done = format!("{} {}", verb.1, removal.summary);
+    app.calendar_view
+        .pending_removals
+        .insert(id.clone(), removal);
     app.bg_count += 1;
     app.events.started(
         id.clone(),
         Awaited::EventChange {
             operation_id: id,
-            done: format!("{} {}", verb.1, removal.summary),
+            done,
         },
     );
 }
