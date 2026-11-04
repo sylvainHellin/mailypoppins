@@ -339,6 +339,54 @@ async fn the_presenter_follows_the_clients_connected() {
     presenter_becomes(&mut conn, Value::Null).await;
 }
 
+/// Hiding the calendar of a fired reminder takes it off the list and showing
+/// the calendar again brings it back without a second firing; the clients are
+/// told both times.
+#[tokio::test]
+async fn hiding_and_showing_a_calendar_moves_the_list() {
+    let slice = Slice::start();
+    let mut gui = slice.attach(ClientKind::Gui).await;
+    let mut conn = slice.connect(ClientKind::Cli).await;
+    run_operation(&mut conn, "calendar.rebuild", json!({"account": SERVER})).await;
+    next_event(&mut gui, "calendar.reminder").await;
+    assert_eq!(pending(&mut conn).await.len(), 1);
+
+    let visibility =
+        |visible: bool| json!({"account": SERVER, "calendar": "cal-main", "visible": visible});
+    call(&mut conn, "calendar.set_visibility", visibility(false)).await;
+    assert_eq!(
+        next_event(&mut gui, "calendar.reminders_changed").await["account"],
+        SERVER
+    );
+    assert!(
+        pending(&mut conn).await.is_empty(),
+        "a hidden calendar's reminder waits"
+    );
+
+    call(&mut conn, "calendar.set_visibility", visibility(true)).await;
+    let shown = next_event_or_reminder(&mut gui).await;
+    assert_eq!(shown["kind"], "calendar.reminders_changed", "{shown}");
+    assert_eq!(shown["payload"]["account"], SERVER);
+    assert_eq!(pending(&mut conn).await.len(), 1);
+}
+
+/// The next `calendar.reminder` or `calendar.reminders_changed` `watcher`
+/// receives, as `{kind, payload}`.
+async fn next_event_or_reminder(watcher: &mut Connection) -> Value {
+    let start = Instant::now();
+    while start.elapsed() < SETTLE_DEADLINE {
+        let Some(notification) = within("a reminder event", watcher.next_notification()).await
+        else {
+            break;
+        };
+        let kind = &notification.params["kind"];
+        if kind == "calendar.reminder" || kind == "calendar.reminders_changed" {
+            return json!({"kind": kind, "payload": notification.params["payload"]});
+        }
+    }
+    panic!("no reminder event reached the client");
+}
+
 /// What cannot be dismissed or snoozed is refused before anything is
 /// recorded.
 #[tokio::test]

@@ -20,7 +20,9 @@
 //! connected, else `tui` when a TUI is ([`CanonicalState::presenter`]).
 //! A fired reminder that stops qualifying (its event cancelled, declined,
 //! hidden or its reminder turned off, which is what a dismissal in Outlook
-//! does) leaves the pending list, and `calendar.reminders_changed` says so.
+//! does) leaves the pending list, one that qualifies again (its calendar
+//! shown again) comes back to it, and `calendar.reminders_changed` says so
+//! either way ([`list_changed`]).
 //!
 //! The clock is the system's, except under [`FAKE_CLOCK_SPEED_ENV`], which a
 //! daemon slice test sets to run the reminder clock faster than real time
@@ -401,6 +403,25 @@ fn reminder_event(reminder: &CalendarReminder) -> Option<DaemonEvent> {
     }
 }
 
+/// Whether the pending list of an account moved other than by the reminders
+/// that just `fired`, each of which its own `calendar.reminder` announces:
+/// one left it (dismissed in Outlook, cancelled, declined, hidden) or one
+/// came back without firing (its calendar shown again). The first pass after
+/// the start has nothing to compare with and says nothing, since a client
+/// reads the list at its bootstrap.
+fn list_changed(
+    before: Option<&BTreeSet<String>>,
+    fired: &[String],
+    pending: &BTreeSet<String>,
+) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    let mut expected = before.clone();
+    expected.extend(fired.iter().cloned());
+    expected != *pending
+}
+
 /// The accounts the task computes for: a calendar backend and a store.
 pub fn reminding_accounts(accounts: &[AccountConfig]) -> Vec<AccountConfig> {
     accounts
@@ -470,6 +491,7 @@ async fn run_once(
     let mut next: Option<DateTime<Utc>> = None;
     for (account, outcome) in outcomes {
         let presenter = canonical.presenter();
+        let fired: Vec<String> = outcome.fired.iter().map(|r| r.event.clone()).collect();
         for mut reminder in outcome.fired {
             info!(
                 "[reminders] {account}: {} is due (presenter {})",
@@ -481,12 +503,12 @@ async fn run_once(
                 canonical.publish(event);
             }
         }
-        let cleared = {
+        let changed = {
             let mut seen = lock(&reminders.pending);
             let before = seen.insert(account.clone(), outcome.pending.clone());
-            before.is_some_and(|before| before.difference(&outcome.pending).next().is_some())
+            list_changed(before.as_ref(), &fired, &outcome.pending)
         };
-        if cleared {
+        if changed {
             canonical.publish(reminders_changed(&account));
         }
         if let Some(at) = outcome.next {
@@ -726,6 +748,24 @@ mod tests {
             decide(&store, "work", "nope", Decision::Dismiss, berlin()).unwrap(),
             Err(Refusal::NoEvent)
         );
+    }
+
+    /// The pending list moving either way is a change, a firing alone is not
+    /// (its `calendar.reminder` says it), and the first pass says nothing.
+    #[test]
+    fn the_pending_list_changes_both_ways() {
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<BTreeSet<_>>();
+        let fired = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        assert!(!list_changed(None, &[], &set(&["a"])));
+        assert!(!list_changed(Some(&set(&["a"])), &[], &set(&["a"])));
+        assert!(list_changed(Some(&set(&["a"])), &[], &set(&[])), "hidden");
+        assert!(list_changed(Some(&set(&[])), &[], &set(&["a"])), "shown");
+        assert!(!list_changed(Some(&set(&[])), &fired(&["a"]), &set(&["a"])));
+        assert!(list_changed(
+            Some(&set(&["b"])),
+            &fired(&["a"]),
+            &set(&["a"])
+        ));
     }
 
     /// The fake clock runs from its origin at its speed, and the task never
