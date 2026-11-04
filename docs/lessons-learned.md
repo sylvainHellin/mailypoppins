@@ -3418,3 +3418,9 @@ ts-rs also warns "failed to parse serde attribute" on `#[serde(deserialize_with 
 Graph silently ignores `isOnlineMeeting: true` on a calendar whose `allowedOnlineMeetingProviders` is empty (a mailbox with no Teams licence, as EVOQS): the create succeeds with `isOnlineMeeting: false` and `onlineMeetingProvider: "unknown"`.
 The online-meeting capability is therefore read per calendar from that list, and `calendar.list` reports `online-meeting` only on a calendar that names `teamsForBusiness`.
 The calendar list is read in full at every sync, so a new `Calendar` field needs a store column but no `MODEL_VERSION` bump.
+
+## A required field added on one branch breaks the other branch's test initialisers only after the merge (2026-11-04, PERSO-255)
+
+Git merges a new struct field on main and a new struct literal on a branch without a conflict, because the two edits touch different lines.
+The merged tree then fails to compile in a test that builds the struct by hand (main's `Calendar::online_meeting_providers` against a reminders test on the slice 8 branch).
+After merging a long-lived branch, run `cargo test --workspace` before calling the merge clean: the compiler, not git, is the conflict check for new required fields.
