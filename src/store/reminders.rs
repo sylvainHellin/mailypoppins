@@ -7,8 +7,9 @@
 //!
 //! Like `calendar_prefs` the table sits beside the calendar cache rather than
 //! in it: `calendar.rebuild` drops the cache and leaves this table alone, so a
-//! rebuild does not fire every reminder again. A row lives until its event
-//! has ended (`end_at`), and [`prune`] removes it then.
+//! rebuild does not fire every reminder again; a schema-version store rebuild
+//! carries it over ([`super::rebuild`]) for the same reason. A row lives
+//! until its event has ended (`end_at`), and [`prune`] removes it then.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

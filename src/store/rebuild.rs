@@ -29,6 +29,11 @@
 //! from the server, but a calendar the user hid is a local choice no sync can
 //! restate, and losing it shows every hidden calendar again.
 //!
+//! What became of each calendar reminder (`calendar_reminders`, PERSO-255)
+//! is carried for the same reason ([`salvage_calendar_reminders`]): the
+//! record of what fired, was dismissed or is snoozed is local, and losing it
+//! fires every overdue reminder of an event not yet ended once more.
+//!
 //! `pending_ops` (#0039) is deliberately **not** carried, unlike the outbox it
 //! otherwise mirrors. A pending mutation is a flag, move or delete of a message
 //! the server still holds, so a queued-but-undrained row that a rebuild drops
@@ -152,6 +157,18 @@ pub(super) struct SalvagedCalendarPref {
     visible: bool,
 }
 
+/// One calendar reminder record read out of the old file
+/// ([`crate::store::reminders::TABLE`]), its columns as stored.
+#[derive(Debug, Clone)]
+pub(super) struct SalvagedReminder {
+    account: String,
+    event_id: String,
+    fire_at: i64,
+    end_at: i64,
+    state: String,
+    snoozed_until: Option<i64>,
+}
+
 /// What the pre-drop read got out of the old file.
 #[derive(Debug, Default)]
 pub(super) struct Salvage {
@@ -161,6 +178,8 @@ pub(super) struct Salvage {
     pub cleanups: Vec<SalvagedCleanup>,
     /// The calendar visibility choices ([`salvage_calendar_prefs`]).
     pub calendar_prefs: Vec<SalvagedCalendarPref>,
+    /// The calendar reminder records ([`salvage_calendar_reminders`]).
+    pub calendar_reminders: Vec<SalvagedReminder>,
     /// What the read itself could not get, in the shape
     /// [`RebuildReport::lost`] carries: a damaged page that ended the scan, a
     /// row that would not come back, a table too big to read in full. These
@@ -177,6 +196,8 @@ pub(super) struct RebuildReport {
     pub carried_cleanups: usize,
     /// Calendar visibility choices carried into the fresh store.
     pub carried_calendar_prefs: usize,
+    /// Calendar reminder records carried into the fresh store.
+    pub carried_calendar_reminders: usize,
     /// Outbox rows that could not be carried, each with its reason.
     pub lost: Vec<(String, String)>,
     pub swept_files: u64,
@@ -392,6 +413,60 @@ pub(super) fn salvage_calendar_prefs(path: &Path) -> Vec<SalvagedCalendarPref> {
             Err(e) => {
                 warn!(
                     "[store] a calendar visibility in {} could not be read: {e}",
+                    path.display()
+                );
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Read the calendar reminder records out of a store that failed validation
+/// (PERSO-255).
+///
+/// Best effort and small, like [`salvage_calendar_prefs`]: one row per
+/// reminding event not yet ended, and a row that cannot be read ends the read
+/// with a warning, since the cost of losing one is a reminder shown again.
+pub(super) fn salvage_calendar_reminders(path: &Path) -> Vec<SalvagedReminder> {
+    let Ok(conn) = Connection::open(path) else {
+        return Vec::new();
+    };
+    let table = crate::store::reminders::TABLE;
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT account, event_id, fire_at, end_at, state, snoozed_until FROM {table} \
+         LIMIT {SALVAGE_LIMIT}"
+    )) {
+        Ok(stmt) => stmt,
+        // A file from before the reminders, or not one of ours.
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map([], |r| {
+        Ok(SalvagedReminder {
+            account: r.get(0)?,
+            event_id: r.get(1)?,
+            fire_at: r.get(2)?,
+            end_at: r.get(3)?,
+            state: r.get(4)?,
+            snoozed_until: r.get(5)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                "[store] no calendar reminders salvaged from {}: {e}",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok(reminder) => out.push(reminder),
+            Err(e) => {
+                warn!(
+                    "[store] a calendar reminder in {} could not be read: {e}",
                     path.display()
                 );
                 break;
@@ -819,6 +894,33 @@ pub(super) fn finish(conn: &Connection, path: &Path, salvaged: Salvage) -> Rebui
                 "[store] the visibility of calendar {} of {} did not survive the rebuild: {e}",
                 clip(&pref.calendar_id),
                 clip(&pref.account)
+            ),
+        }
+    }
+    // A reminder record holds no bytes either, and one the fresh store
+    // refuses costs a reminder shown again, so it is logged too.
+    for reminder in &salvaged.calendar_reminders {
+        match conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO {} \
+                 (account, event_id, fire_at, end_at, state, snoozed_until) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                crate::store::reminders::TABLE
+            ),
+            rusqlite::params![
+                reminder.account,
+                reminder.event_id,
+                reminder.fire_at,
+                reminder.end_at,
+                reminder.state,
+                reminder.snoozed_until
+            ],
+        ) {
+            Ok(_) => report.carried_calendar_reminders += 1,
+            Err(e) => warn!(
+                "[store] the reminder of event {} of {} did not survive the rebuild: {e}",
+                clip(&reminder.event_id),
+                clip(&reminder.account)
             ),
         }
     }
@@ -1378,6 +1480,44 @@ mod tests {
             visible,
             vec![("work".into(), true), ("birthdays".into(), false)]
         );
+    }
+
+    /// What became of each calendar reminder survives a schema-version
+    /// rebuild, so an overdue reminder already fired, dismissed or snoozed
+    /// does not fire again once the cache refills (PERSO-255).
+    #[test]
+    fn a_rebuild_carries_the_calendar_reminders() {
+        use crate::store::reminders::{self, ReminderRow, ReminderState};
+        use chrono::{TimeZone, Utc};
+
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 11, 4, h, 0, 0).unwrap();
+        let row = |event: &str, state: ReminderState| ReminderRow {
+            account: "alice".into(),
+            event: event.into(),
+            fire_at: at(8),
+            end_at: at(10),
+            state,
+        };
+        let written = vec![
+            row("ev-dismissed", ReminderState::Dismissed),
+            row("ev-fired", ReminderState::Fired),
+            row("ev-snoozed", ReminderState::Snoozed(at(9))),
+        ];
+        let (_dir, path, _blobs) = account_dir();
+        {
+            let store = Store::open(&path).unwrap();
+            for reminder in &written {
+                reminders::put(&store, reminder).unwrap();
+            }
+        }
+        stamp_a_wrong_version(&path);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
+        assert_eq!(reminders::load(&store, "alice").unwrap(), written);
     }
 
     #[test]
