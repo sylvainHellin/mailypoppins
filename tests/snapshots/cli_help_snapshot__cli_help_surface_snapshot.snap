@@ -875,7 +875,7 @@ Options:
 
 Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
 today; --on (default today) is one day, --from through --to a range of up to
-62 days. Each row is one slot of --interval minutes: · free, ▒ tentative,
+61 days. Each glyph is one slot of --interval minutes: · free, ▒ tentative,
 █ busy, ▓ away, ░ working elsewhere, ? unknown. An address outside your
 organisation reads "no free/busy". Needs a Microsoft 365 account.
 

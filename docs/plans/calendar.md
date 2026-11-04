@@ -190,7 +190,7 @@ Every write is an `operation.*` in the daemon's in-memory operation registry, an
 
 ## Client surfaces
 
-- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; phase 2 adds `mp event create` and `mp calendar freebusy`, `mp event update|cancel|delete` are the names its later slices take, and `mp send --invite` keeps working on iMIP accounts.
+- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; phase 2 adds `mp event create` and `mp calendar freebusy`, and `mp event update|cancel|delete` are the names its later slices take, and `mp send --invite` keeps working on iMIP accounts.
 - TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; phase 2 adds the event form on `n` for a new event, which update, the repeat settings and the proposed time extend.
 - Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; phase 2 adds the New event form beside "New invitation", which stays for an account without a calendar backend until the event form sends its invitation by mail too.
 - Every new capability gets its row in [parity-matrix.md](../parity-matrix.md) with its CLI, TUI and desktop location, and the website pages follow the CLI.

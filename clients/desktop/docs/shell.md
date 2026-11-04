@@ -769,6 +769,7 @@ With another dialog open the form is kept, and New event opens it.
 The Availability grid (CAL-14, `AvailabilityGrid.tsx`, the model in `src/app/availability.ts`) shows the free/busy of the user, the attendees, the optional attendees and the rooms over the day of Start, on a calendar whose `features` hold `free-busy`, and nothing elsewhere.
 It asks `calendar_freebusy` for that day in this window's zone at 30-minute slots, with every whole address of the three lists once, once the day and the addresses have stood still for 500 ms, so typing an address asks once; an answer for a query the form no longer names is dropped.
 Each person or room is a row from 07:00 to 20:00 under the hour labels, the user's own first, each slot coloured by its status (free, tentative, busy, away, working elsewhere, unknown) with the status in its title, the chosen time outlined, and "no free/busy" for an address the server cannot read; until the first answer the label says "(checking…)", and a refusal is "No availability: <why>".
+While a changed day or address is asked again, the last answer's rows stay, dimmed under "(checking…)", so the grid keeps its height under the field being typed in.
 
 ### New invitation
 

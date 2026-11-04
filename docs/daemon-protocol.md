@@ -1168,7 +1168,12 @@ The daemon asks about the account's own address first, then each address of `add
 It settles `CalendarFreeBusyResult` `{account, start, end, interval_minutes, schedules}`, `start` and `end` the range as UTC instants and one `CalendarSchedule` `{address, view, items, error?}` per address in that order.
 `view` is one digit per slot from `start` (`0` free, `1` tentative, `2` busy, `3` away, `4` working elsewhere, `?` unknown), and `items` (`CalendarScheduleItem` `{start, end, status, subject?, location?}`) the blocks that are not free in start order, `status` one of `free`, `tentative`, `busy`, `oof`, `working-elsewhere` and `unknown`, `subject` and `location` only where the person shares them.
 An address the server has no free/busy for (outside the organisation, or a mailbox it does not know) carries `error`, Graph's message and code (`Proxy web request failed (5016)`), with an empty `view` and no items, and the other schedules stand.
-The refusals come before the operation starts, all `-32602` but one: an account without a calendar backend, a backend whose `features` lack `free-busy`, an address that is none, more than 20 addresses with the account's own, a range of more than 62 days or one whose end does not come after its start, and a slot outside 5 to 1440 minutes or longer than the range, Graph's own limits; a sign-in without the calendar scope is `-32603` with the re-login prompt.
+The refusals come before the operation starts.
+An unknown account is `-32005` and one without a store `-32006`, as every read makes them.
+These are `-32602`: an account without a calendar backend, a backend whose `features` lack `free-busy`, an unknown zone, a `start` or `end` that does not read, an address without an `@` or with whitespace, a query left with no address, and more than 20 addresses, the account's own included.
+A range whose end does not come after its start or that runs past 61 calendar days of the query's zone, and a slot outside 5 to 1440 minutes or longer than the range, are `-32602` as well.
+The slot lengths are Graph's own limit; the 61 days stay a day under Graph's 62 days of elapsed time, which 62 calendar days across the autumn clock change exceed by an hour.
+A sign-in without the calendar scope is `-32603` with the re-login prompt.
 A cancel, or the close of the connection that asked, drops the query, even while the server call runs.
 
 `calendar.rebuild` `{account}` keeps its iMIP meaning, the fold of the stored replies, on every account, since every account's invitation mails feed its view.

@@ -804,7 +804,7 @@ Examples:
     #[command(after_help = "\
 Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
 today; --on (default today) is one day, --from through --to a range of up to
-62 days. Each row is one slot of --interval minutes: \u{b7} free, \u{2592} tentative,
+61 days. Each glyph is one slot of --interval minutes: \u{b7} free, \u{2592} tentative,
 \u{2588} busy, \u{2593} away, \u{2591} working elsewhere, ? unknown. An address outside your
 organisation reads \"no free/busy\". Needs a Microsoft 365 account.
 
