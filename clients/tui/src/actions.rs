@@ -1230,6 +1230,7 @@ pub(super) fn handle_action(
         | Action::CancelHeldSend
         | Action::Rsvp { .. }
         | Action::CreateEvent(_)
+        | Action::QueryFreeBusy(_)
         | Action::Approve
         | Action::BatchApprove(_)
         | Action::MarkDraft

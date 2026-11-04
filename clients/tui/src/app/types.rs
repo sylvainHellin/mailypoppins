@@ -1173,6 +1173,12 @@ pub enum BgResult {
         operation_id: String,
         result: Result<String, String>,
     },
+    /// `calendar.freebusy` settled (PERSO-255): the event form's
+    /// availability rows, or why there are none.
+    FreeBusy {
+        operation_id: String,
+        result: Result<mp_protocol::calendar::CalendarFreeBusyResult, String>,
+    },
     SendApproved {
         account_index: usize,
         result: Result<String, String>,
@@ -1896,6 +1902,8 @@ pub struct CalendarView {
     /// A form whose create failed while another overlay was up, or whose
     /// daemon restarted under it: `n` reopens it.
     pub kept_form: Option<super::EventForm>,
+    /// The open event form's availability rows (PERSO-255).
+    pub availability: super::Availability,
 }
 
 impl Default for CalendarView {
@@ -1915,6 +1923,7 @@ impl Default for CalendarView {
             error: None,
             pending_forms: std::collections::HashMap::new(),
             kept_form: None,
+            availability: super::Availability::default(),
         }
     }
 }
@@ -2117,6 +2126,9 @@ pub enum Action {
     CreateEvent(Box<super::EventForm>),
     /// Edit the open event form's description in `$EDITOR` (PERSO-255).
     EditEventDescription,
+    /// Ask `calendar.freebusy` for the open event form's availability rows
+    /// (PERSO-255).
+    QueryFreeBusy(Box<mp_protocol::calendar::CalendarFreeBusyParams>),
     /// Answer an invitation (#0029, PERSO-200) through `event.respond`: the
     /// server event on an account with a calendar backend, else the
     /// invitation mail's iMIP reply.
@@ -2274,6 +2286,7 @@ impl Action {
             | Action::ComposeWizardCancel
             | Action::Rsvp { .. }
             | Action::CreateEvent(_)
+            | Action::QueryFreeBusy(_)
             | Action::ComposeToContact { .. }
             | Action::CopyContactEmail { .. }
             | Action::LoadContacts { .. }

@@ -189,6 +189,11 @@ pub enum Awaited {
         /// Its own id, which keys the form kept while it runs.
         operation_id: String,
     },
+    /// `calendar.freebusy`, the event form's availability rows (PERSO-255).
+    FreeBusy {
+        /// Its own id, which the form's availability waits for.
+        operation_id: String,
+    },
     /// `message.search_server`, the overlay's server leg (`LST-08`, #0126).
     ///
     /// Its hits do not arrive here: they stream as `message.server_hit`

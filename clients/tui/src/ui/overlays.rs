@@ -103,11 +103,18 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
 }
 
 /// Render the event form (PERSO-255, `n` in the Calendar view): one row
-/// per field, the cursor row highlighted, the first problem with the fields
-/// as typed (or the daemon's refusal) under them, and the keys.
-pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect) {
+/// per field, the cursor row highlighted, the availability rows of its
+/// people on its day, the first problem with the fields as typed (or the
+/// daemon's refusal) under them, and the keys.
+pub(super) fn render_event_form(
+    form: &EventForm,
+    availability: &crate::app::Availability,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let rows = form.rows();
-    let height = rows.len() as u16 + 7;
+    let available = super::availability::availability_lines(form, availability);
+    let height = rows.len() as u16 + 7 + available.len() as u16;
     let Some((_, inner)) = render_modal_shell(
         frame,
         area,
@@ -195,6 +202,7 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
             Span::styled(shown, value_style),
         ]));
     }
+    lines.extend(available);
     lines.push(Line::from(""));
     let (problem, style) = match (&form.error, form.problem()) {
         (Some(error), _) => (error.clone(), Style::default().fg(theme::active().error)),

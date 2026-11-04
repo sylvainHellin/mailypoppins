@@ -176,6 +176,7 @@ pub fn route(action: &Action) -> ActionRoute {
         }
         Action::Rsvp { .. } => ActionRoute::Daemon(&["event.respond"]),
         Action::CreateEvent(_) => ActionRoute::Daemon(&["event.create"]),
+        Action::QueryFreeBusy(_) => ActionRoute::Daemon(&["calendar.freebusy"]),
         Action::EditEventDescription => {
             ActionRoute::ClientOnly("$EDITOR, over the event form's description")
         }
@@ -370,6 +371,10 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             create_event(app, commands, form);
             true
         }
+        Action::QueryFreeBusy(params) => {
+            query_free_busy(app, commands, params);
+            true
+        }
         Action::BatchToggleFlag(msgs) => {
             let any_unflagged = msgs
                 .iter()
@@ -497,6 +502,13 @@ pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
         Awaited::EventCreate { operation_id } => BgResult::EventCreated {
             operation_id: operation_id.clone(),
             result: result.and_then(|settled| created_line(&settled)),
+        },
+        Awaited::FreeBusy { operation_id } => BgResult::FreeBusy {
+            operation_id: operation_id.clone(),
+            result: result.and_then(|settled| {
+                serde_json::from_value(settled)
+                    .map_err(|e| format!("the free/busy answer did not decode: {e}"))
+            }),
         },
         Awaited::ServerSearch { generation } => BgResult::ServerSearch {
             generation: *generation,
@@ -807,6 +819,42 @@ fn create_event(app: &mut App, commands: &dyn Queries, form: &super::app::EventF
             operation_id: id.to_string(),
         },
     );
+}
+
+/// `calendar.freebusy` for the event form's availability rows (PERSO-255):
+/// the operation is awaited quietly, and a refusal is the rows' sentence
+/// rather than the status line's.
+fn query_free_busy(
+    app: &mut App,
+    commands: &dyn Queries,
+    params: &mp_protocol::calendar::CalendarFreeBusyParams,
+) {
+    let started = serde_json::to_value(params)
+        .map_err(|e| format!("{e}"))
+        .and_then(|params| {
+            commands
+                .call("calendar.freebusy", params)
+                .map_err(|e| format!("{e:#}"))
+        });
+    let state = &mut app.calendar_view.availability;
+    let id = match started {
+        Ok(started) => match started["operation_id"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                state.answer = Some(Err("calendar.freebusy answered no operation id".into()));
+                return;
+            }
+        },
+        Err(why) => {
+            state.operation = None;
+            state.answer = Some(Err(why));
+            return;
+        }
+    };
+    state.operation = Some(id.clone());
+    app.bg_count += 1;
+    app.events
+        .started(id.clone(), Awaited::FreeBusy { operation_id: id });
 }
 
 /// `event.create`'s settled event as the status line: what was created, and
