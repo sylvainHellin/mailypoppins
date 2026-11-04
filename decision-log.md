@@ -443,3 +443,14 @@ The bundle is signed ad hoc (`bundle.macOS.signingIdentity = "-"`, in `tauri.bun
 Rejected: real Snooze and Dismiss buttons through `UNUserNotificationCenter` (`objc2-user-notifications`), which needs a properly signed bundle and a permission prompt; revisit once the app has Developer ID signing.
 Source: Sylvain in chat, 2026-11-04
 Status: accepted
+
+## 2026-11-04 - One client per reminder raises the system notification: the daemon elects the most recently bootstrapped desktop app, else the most recently bootstrapped TUI
+
+Why: every client connected to the daemon receives `calendar.reminder`, so a reminder would raise one notification per open client, a desktop app and two TUIs notifying three times.
+The daemon elects one presenter among the bootstrapped connections at each firing (`CanonicalState::presenter`): the desktop app's connection that bootstrapped last, else the TUI's that bootstrapped last, else none.
+The reminder names that connection (`presenter_connection`, the `connection` its `state.bootstrap` answered) and its kind, and only the client on that connection raises a system notification, so one reminder gives exactly one notification; every client still shows the reminder in its own window.
+The desktop app comes first because its notification opens the event on a click; the last bootstrapped is the client the user opened most recently.
+With only the CLI connected nobody notifies, and the reminder waits in `mp calendar reminders`.
+Rejected: each client notifying on its own (one notification per open client) and the clients agreeing among themselves (a second channel between clients the daemon already is).
+Source: implementation of PERSO-255 on branch `calendar-p2-p2s8`, 2026-11-04.
+Status: accepted
