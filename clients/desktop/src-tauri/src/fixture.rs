@@ -50,7 +50,10 @@
 //! an attendee or of an event without attendees, a delete of a live
 //! meeting), read an update with the daemon's own `resolve_patch`, change
 //! or remove the event at once with `calendar.changed`, and settle the
-//! daemon's result after [`RSVP_DELAY`].
+//! daemon's result after [`RSVP_DELAY`]. A cancel or delete that removed an
+//! event is remembered, as the daemon's `calendar_removed_events`: a repeat
+//! of the same method on that event settles with the first call's result,
+//! while another method or an id never held is refused.
 //!
 //! `contact.search` answers each account's ranked contacts from
 //! `fixtures/contacts.json`: a case-insensitive substring match over the
@@ -677,6 +680,10 @@ struct State {
     server_calendars: Vec<CalendarInfo>,
     /// The events `calendar.view` answers, in start order.
     server_events: Vec<CalendarEvent>,
+    /// (account, event id) -> the method and the result of the cancel or
+    /// delete that took the event off the server, as the daemon's
+    /// `calendar_removed_events`: a repeat of that call settles with it.
+    removed_events: BTreeMap<(String, String), (String, Value)>,
     /// The reminders `calendar.reminders` answers (`reminder` fires one).
     reminders: Vec<CalendarReminder>,
     /// (account, row id) -> the server event `message.invite` names.
@@ -903,6 +910,131 @@ impl State {
             -32006,
             &format!("{account} has no local store to read yet; run `mp sync -A {account}`"),
         ))
+    }
+
+    /// `event.update`, `event.cancel` or `event.delete` of `account`'s server
+    /// event `id`, refused in the daemon's words, else made on the server
+    /// calendar at once; the result the operation settles with.
+    fn change_server_event(
+        &mut self,
+        method: &str,
+        account: &str,
+        id: &str,
+        params: &Value,
+    ) -> Result<Value> {
+        let refusal = |message: String| refused(method, -32602, &message);
+        let event = self.server_event(method, account, id)?;
+        if event.kind != "single" || event.series_master_id.is_some() {
+            return Err(refusal(format!(
+                "{} is part of a recurring series, which mp cannot change yet; change it \
+                 in Outlook",
+                event.summary
+            )));
+        }
+        let calendar = self
+            .server_calendars
+            .iter()
+            .find(|c| c.account == account && c.id == event.calendar)
+            .cloned()
+            .ok_or_else(|| refusal(format!("{account} has no calendar for {id}")))?;
+        if !calendar.can_edit {
+            return Err(refusal(format!(
+                "The calendar {} of {account} is read-only",
+                calendar.name
+            )));
+        }
+        let result = match method {
+            "event.update" => {
+                let fields: mp_protocol::calendar::EventPatchParams =
+                    serde_json::from_value(params["fields"].clone())
+                        .map_err(|e| refusal(format!("event.update: {e}")))?;
+                let berlin = mp_core::calendar_model::parse_zone("Europe/Berlin")
+                    .ok_or_else(|| refused(method, -32603, "no Europe/Berlin zone"))?;
+                let model =
+                    model_event(&event).map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
+                let patch = mp_core::calendar_write::resolve_patch(&fields, &model, berlin)
+                    .map_err(refusal)?;
+                if patch.is_empty() {
+                    return Err(refusal(
+                        "Nothing to change: name at least one field of the event".into(),
+                    ));
+                }
+                let own = mp_core::calendar_write::EventPatch {
+                    reminder: patch.reminder,
+                    show_as: patch.show_as,
+                    ..Default::default()
+                };
+                if !event.is_organizer && own != patch {
+                    return Err(refusal(ORGANIZER_ONLY_REFUSAL.into()));
+                }
+                if patch.online_meeting == Some(false) && event.is_online_meeting {
+                    return Err(refusal(format!(
+                        "{} stays a Teams meeting: the server keeps its link once it \
+                         exists",
+                        event.summary
+                    )));
+                }
+                if patch.body.is_some() && event.is_online_meeting {
+                    return Err(refusal(format!(
+                        "The description of {} cannot be changed from mp yet: the \
+                         server would drop its Teams join details; change it in Outlook",
+                        event.summary
+                    )));
+                }
+                let changed = patched_event(&event, &patch)
+                    .map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
+                if let Some(slot) = self
+                    .server_events
+                    .iter_mut()
+                    .find(|e| e.account == account && e.id == id)
+                {
+                    *slot = changed.clone();
+                }
+                json!({"account": account, "event": changed})
+            }
+            "event.cancel" => {
+                if !event.is_organizer {
+                    return Err(refusal(format!(
+                        "Only the organizer can cancel {}; decline it instead",
+                        event.summary
+                    )));
+                }
+                if event.attendees.is_empty() {
+                    return Err(refusal(format!(
+                        "{} invites nobody, so there is nobody to tell; delete it \
+                         instead",
+                        event.summary
+                    )));
+                }
+                self.server_events
+                    .retain(|e| !(e.account == account && e.id == id));
+                let notified: Vec<String> =
+                    event.attendees.iter().map(|a| a.email.clone()).collect();
+                json!({"account": account, "event": id, "notified": notified})
+            }
+            _ => {
+                let meeting = !event.attendees.is_empty();
+                if !event.cancelled && event.is_organizer && meeting {
+                    return Err(refusal(format!(
+                        "{} is a meeting with attendees; cancel it to tell them",
+                        event.summary
+                    )));
+                }
+                if !event.cancelled && !event.is_organizer && (event.organizer.is_some() || meeting)
+                {
+                    return Err(refusal(format!(
+                        "{} is a meeting you were invited to; decline it to tell the \
+                         organizer",
+                        event.summary
+                    )));
+                }
+                self.server_events
+                    .retain(|e| !(e.account == account && e.id == id));
+                json!({"account": account, "event": id})
+            }
+        };
+
+        Ok(result)
     }
 
     /// The server event `id` of `account`, what `event.respond` answers; an
@@ -3105,6 +3237,7 @@ impl Fixture {
             invites: BTreeMap::new(),
             server_calendars: server.calendars,
             server_events: server.events,
+            removed_events: BTreeMap::new(),
             reminders: Vec::new(),
             invite_events,
             rsvp_fail: false,
@@ -4544,116 +4677,30 @@ impl Fixture {
                          (event.respond); {method} changes a server event"
                     )));
                 }
-                let event = s.server_event(method, &account, &id)?;
-                if event.kind != "single" || event.series_master_id.is_some() {
-                    return Err(refusal(format!(
-                        "{} is part of a recurring series, which mp cannot change yet; change \
-                         it in Outlook",
-                        event.summary
-                    )));
-                }
-                let calendar = s
-                    .server_calendars
+                // The daemon's counted-as-done retry: a repeat of the cancel or
+                // delete that already took the event off the server settles
+                // with that call's result and reaches the server no more; a
+                // different method or an id never removed is still refused.
+                let held = s
+                    .server_events
                     .iter()
-                    .find(|c| c.account == account && c.id == event.calendar)
-                    .cloned()
-                    .ok_or_else(|| refusal(format!("{account} has no calendar for {id}")))?;
-                if !calendar.can_edit {
-                    return Err(refusal(format!(
-                        "The calendar {} of {account} is read-only",
-                        calendar.name
-                    )));
-                }
-                let result = match method {
-                    "event.update" => {
-                        let fields: mp_protocol::calendar::EventPatchParams =
-                            serde_json::from_value(params["fields"].clone())
-                                .map_err(|e| refusal(format!("event.update: {e}")))?;
-                        let berlin = mp_core::calendar_model::parse_zone("Europe/Berlin")
-                            .ok_or_else(|| refused(method, -32603, "no Europe/Berlin zone"))?;
-                        let model = model_event(&event)
-                            .map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
-                        let patch = mp_core::calendar_write::resolve_patch(&fields, &model, berlin)
-                            .map_err(refusal)?;
-                        if patch.is_empty() {
-                            return Err(refusal(
-                                "Nothing to change: name at least one field of the event".into(),
-                            ));
+                    .any(|e| e.account == account && e.id == id);
+                let retried = s
+                    .removed_events
+                    .get(&(account.clone(), id.clone()))
+                    .filter(|(removed_by, _)| !held && removed_by == method)
+                    .map(|(_, result)| result.clone());
+                let result = match retried {
+                    Some(result) => result,
+                    None => {
+                        let result = s.change_server_event(method, &account, &id, &params)?;
+                        if method != "event.update" {
+                            s.removed_events.insert(
+                                (account.clone(), id.clone()),
+                                (method.to_string(), result.clone()),
+                            );
                         }
-                        let own = mp_core::calendar_write::EventPatch {
-                            reminder: patch.reminder,
-                            show_as: patch.show_as,
-                            ..Default::default()
-                        };
-                        if !event.is_organizer && own != patch {
-                            return Err(refusal(ORGANIZER_ONLY_REFUSAL.into()));
-                        }
-                        if patch.online_meeting == Some(false) && event.is_online_meeting {
-                            return Err(refusal(format!(
-                                "{} stays a Teams meeting: the server keeps its link once it \
-                                 exists",
-                                event.summary
-                            )));
-                        }
-                        if patch.body.is_some() && event.is_online_meeting {
-                            return Err(refusal(format!(
-                                "The description of {} cannot be changed from mp yet: the \
-                                 server would drop its Teams join details; change it in Outlook",
-                                event.summary
-                            )));
-                        }
-                        let changed = patched_event(&event, &patch)
-                            .map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
-                        if let Some(slot) = s
-                            .server_events
-                            .iter_mut()
-                            .find(|e| e.account == account && e.id == id)
-                        {
-                            *slot = changed.clone();
-                        }
-                        json!({"account": account, "event": changed})
-                    }
-                    "event.cancel" => {
-                        if !event.is_organizer {
-                            return Err(refusal(format!(
-                                "Only the organizer can cancel {}; decline it instead",
-                                event.summary
-                            )));
-                        }
-                        if event.attendees.is_empty() {
-                            return Err(refusal(format!(
-                                "{} invites nobody, so there is nobody to tell; delete it \
-                                 instead",
-                                event.summary
-                            )));
-                        }
-                        s.server_events
-                            .retain(|e| !(e.account == account && e.id == id));
-                        let notified: Vec<String> =
-                            event.attendees.iter().map(|a| a.email.clone()).collect();
-                        json!({"account": account, "event": id, "notified": notified})
-                    }
-                    _ => {
-                        let meeting = !event.attendees.is_empty();
-                        if !event.cancelled && event.is_organizer && meeting {
-                            return Err(refusal(format!(
-                                "{} is a meeting with attendees; cancel it to tell them",
-                                event.summary
-                            )));
-                        }
-                        if !event.cancelled
-                            && !event.is_organizer
-                            && (event.organizer.is_some() || meeting)
-                        {
-                            return Err(refusal(format!(
-                                "{} is a meeting you were invited to; decline it to tell the \
-                                 organizer",
-                                event.summary
-                            )));
-                        }
-                        s.server_events
-                            .retain(|e| !(e.account == account && e.id == id));
-                        json!({"account": account, "event": id})
+                        result
                     }
                 };
                 self.emit_locked(&mut s, "calendar.changed", json!({"account": account}));
@@ -6966,6 +7013,55 @@ mod tests {
             .server_event("event.respond", "home", "AAMkAD-design")
             .expect("the event");
         assert_eq!(design.own_response, "declined");
+    }
+
+    #[test]
+    fn a_repeated_cancel_or_delete_settles_with_the_first_result_and_another_is_refused() {
+        let (f, rx) = fixture();
+        f.set_rsvp_delay(Duration::ZERO);
+        let sentence = |method: &str, params: Value| {
+            let e = f.call(method, params).expect_err("refused");
+            crate::error::refusal_sentence(&format!("{e:#}"))
+                .unwrap_or_default()
+                .to_string()
+        };
+        // The result an operation settles with, after its `calendar.changed`.
+        let settled = |method: &str, params: Value| {
+            let started = f.call(method, params).expect("started");
+            assert_eq!(next_event(&rx).kind, "calendar.changed");
+            let finished = next_event(&rx);
+            assert_eq!(finished.kind, KIND_OPERATION_FINISHED);
+            assert_eq!(finished.payload["operation_id"], started["operation_id"]);
+            finished.payload["result"].clone()
+        };
+        let robin = json!({"account": "home", "event": "AAMkAD-robin"});
+        let first = settled("event.cancel", robin.clone());
+        assert_eq!(first["event"], "AAMkAD-robin");
+        assert!(!first["notified"].as_array().expect("notified").is_empty());
+        assert_eq!(settled("event.cancel", robin.clone()), first);
+        assert_eq!(
+            sentence("event.delete", robin),
+            "home has no event AAMkAD-robin"
+        );
+        assert_eq!(
+            sentence("event.cancel", json!({"account": "home", "event": "nope"})),
+            "home has no event nope"
+        );
+        // The user's copy of a meeting its organizer cancelled is deleted.
+        f.state()
+            .server_events
+            .iter_mut()
+            .find(|e| e.id == "AAMkAD-dentist")
+            .expect("the dentist")
+            .cancelled = true;
+        let dentist = json!({"account": "home", "event": "AAMkAD-dentist"});
+        let first = settled("event.delete", dentist.clone());
+        assert_eq!(first, json!({"account": "home", "event": "AAMkAD-dentist"}));
+        assert_eq!(settled("event.delete", dentist.clone()), first);
+        assert_eq!(
+            sentence("event.cancel", dentist),
+            "home has no event AAMkAD-dentist"
+        );
     }
 
     #[test]
