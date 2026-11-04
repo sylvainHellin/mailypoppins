@@ -1,8 +1,9 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { emitEnvelope, IMIP_SILENT_REFUSAL, INVITE_ROW, mock, settleRsvp, simulateInvite } from "@/test/tauri-mock";
-import { ORGANIZER } from "@/app/rsvp";
+import { emitEnvelope, IMIP_PROPOSAL_REFUSAL, IMIP_SILENT_REFUSAL, INVITE_ROW, mock, settleRsvp, simulateInvite } from "@/test/tauri-mock";
+import { ORGANIZER, PROPOSAL_NEEDS_RESPONSE } from "@/app/rsvp";
+import * as cmd from "@/lib/commands";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const lastView = () => callsOf("calendar_view").slice(-1)[0];
@@ -279,7 +280,7 @@ describe("V and the respond choice in the Calendar view", () => {
     await user.click(within(dialog).getByRole("textbox", { name: "Comment" }));
     await user.keyboard("On leave that week{Enter}");
     expect(callsOf("event_respond")).toEqual([
-      { account: "home", event: "AAMkAD-design", response: "decline", comment: "On leave that week", send_response: false },
+      { account: "home", event: "AAMkAD-design", response: "decline", comment: "On leave that week", send_response: false, proposed_time: null },
     ]);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
     act(() => void settleRsvp());
@@ -297,11 +298,53 @@ describe("V and the respond choice in the Calendar view", () => {
     expect(within(dialog).queryByRole("checkbox")).toBeNull();
     expect(dialog).toHaveTextContent("The answer goes to the organizer as a reply mail.");
     await user.keyboard("{Enter}");
-    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null, proposed_time: null }]);
     act(() => void settleRsvp({ delivered: false }));
     expect(
       await screen.findByText("RSVP failed: Replied accept to Steering committee, but the organizer could not be told; the outbox says why"),
     ).toBeInTheDocument();
+  });
+
+  it("a tentative or a decline proposes a new time with the window's zone; Accept and a silent answer send none", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("V");
+    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
+    expect(within(dialog).queryByLabelText("Proposed start")).toBeNull();
+    await user.keyboard("t");
+    const start = await within(dialog).findByLabelText("Proposed start");
+    fireEvent.change(start, { target: { value: "2099-10-14T15:00" } });
+    const toggle = within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" });
+    await user.click(toggle);
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(PROPOSAL_NEEDS_RESPONSE);
+    expect(within(dialog).getByRole("button", { name: /^Send Tentative/ })).toBeDisabled();
+    await user.click(toggle);
+    fireEvent.change(within(dialog).getByLabelText("Proposed end"), { target: { value: "2099-10-14T16:00" } });
+    await user.click(within(dialog).getByRole("button", { name: /^Send Tentative/ }));
+    expect(callsOf("event_respond")).toEqual([
+      {
+        account: "home",
+        event: "AAMkAD-design",
+        response: "tentative",
+        comment: null,
+        send_response: true,
+        proposed_time: { start: "2099-10-14T15:00", end: "2099-10-14T16:00", zone: "Europe/Berlin" },
+      },
+    ]);
+    act(() => void settleRsvp());
+    expect(await screen.findByText("Replied tentative to Design review, proposing a new time")).toBeInTheDocument();
+  });
+
+  it("an invitation mail's event offers no proposed time, and the daemon refuses one by mail", async () => {
+    const { user } = await openCalendar();
+    await user.keyboard("j");
+    await user.keyboard("V");
+    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
+    await user.keyboard("d");
+    expect(dialog).toHaveTextContent("Steering committee");
+    expect(within(dialog).queryByLabelText("Proposed start")).toBeNull();
+    await expect(cmd.eventRespond("work", `imip:${INVITE_ROW}`, "tentative", null, null, { start: "2099-10-14T15:00" })).rejects.toMatchObject({
+      message: IMIP_PROPOSAL_REFUSAL,
+    });
   });
 
   it("refuses the organizer's event with the TUI's sentence, and the daemon's refusal reaches the notice line", async () => {

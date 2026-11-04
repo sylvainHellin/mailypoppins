@@ -8,7 +8,7 @@
 // lives here too, as the cards' did before the daemon answered them.
 
 import type { Dispatch } from "react";
-import type { CalendarEvent, EventFrontmatter, EventRespondResult } from "@/protocol/types";
+import type { CalendarEvent, EventFrontmatter, EventProposedTime, EventRespondResult } from "@/protocol/types";
 import type { GuiError, InviteCard } from "@/lib/gui-types";
 import { asGuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
@@ -42,6 +42,8 @@ export const NOT_INVITE = "Not a calendar invite";
 export const NOT_INVITATION = "This event is not an invitation; there is nothing to answer";
 export const SERVER_ONLY = "This search hit has no local copy to RSVP from";
 export const BUSY = "A reply to this invitation is being sent";
+/** The TUI's refusal of a proposed time the organizer would not be told of (PERSO-255). */
+export const PROPOSAL_NEEDS_RESPONSE = "A proposed time needs Send response on";
 
 function isRequest(event: EventFrontmatter | null): boolean {
   return event?.method?.toUpperCase() === "REQUEST";
@@ -197,7 +199,7 @@ export function rsvpUntold(settled: EventRespondResult | null): boolean {
  */
 export function rsvpText(run: RsvpRun, settled: EventRespondResult | null): string {
   const response = settled?.response || run.response;
-  const text = `Replied ${response} to ${run.summary}`;
+  const text = `Replied ${response} to ${run.summary}${settled?.proposed_time ? ", proposing a new time" : ""}`;
   if (!settled || settled.delivered) return text;
   if (!settled.send_response) return `${text}; no response sent to the organizer`;
   const outbox = settled.via === "imip" ? "; the outbox says why" : "";
@@ -266,22 +268,26 @@ export type RsvpTarget = { account: string; event: string; summary: string };
 
 /**
  * Send `response` to an event, awaited as `rsvp`: one `event.respond`, with
- * the comment (a blank one is none) and, on a server event, whether the
- * organizer is told; an invitation mail's answer is its reply mail, so it
- * names no choice.
+ * the comment (a blank one is none), on a server event whether the
+ * organizer is told, and the new time a tentative or a decline proposes (a
+ * blank start is none); an invitation mail's answer is its reply mail, so it
+ * names no choice and proposes nothing.
  */
 export async function sendRsvp(
   dispatch: Dispatch<Action>,
   target: RsvpTarget,
   response: RsvpResponse,
-  options: { comment?: string; sendResponse?: boolean | null } = {},
+  options: { comment?: string; sendResponse?: boolean | null; proposedTime?: EventProposedTime | null } = {},
 ): Promise<void> {
   const token = nextRsvp++;
   dispatch({ type: "rsvp_requested", token, account: target.account, event: target.event, response, summary: target.summary });
   const comment = options.comment?.trim() || null;
-  const sendResponse = target.event.startsWith(IMIP_PREFIX) ? null : (options.sendResponse ?? null);
+  const imip = target.event.startsWith(IMIP_PREFIX);
+  const sendResponse = imip ? null : (options.sendResponse ?? null);
+  const proposed = options.proposedTime;
+  const proposedTime = !imip && response !== "accept" && proposed?.start.trim() ? proposed : null;
   try {
-    const { operation_id } = await cmd.eventRespond(target.account, target.event, response, comment, sendResponse);
+    const { operation_id } = await cmd.eventRespond(target.account, target.event, response, comment, sendResponse, proposedTime);
     dispatch({ type: "rsvp_started", token, operation_id });
   } catch (e: unknown) {
     dispatch({ type: "rsvp_failed", token, error: asGuiError(e) });
@@ -331,14 +337,24 @@ export async function openRsvp(s: AppState, dispatch: Dispatch<Action>): Promise
   const refusal = rsvpRefusal(card?.event ?? null, false) ?? busy(s, account, event);
   if (refusal) return say(refusal);
   const summary = card?.event.summary?.trim() || subject || "(no subject)";
-  dispatch({ type: "open_rsvp", dialog: { account, event, summary, server: card?.event_id != null } });
+  // The card does not say whether the organizer takes proposals; the daemon refuses one it does not.
+  const server = card?.event_id != null;
+  dispatch({ type: "open_rsvp", dialog: { account, event, summary, server, propose: server } });
 }
 
-/** The respond choice for a calendar event, after the TUI's guards; null when it opened, else why not. */
+/**
+ * The respond choice for a calendar event, after the TUI's guards; null when
+ * it opened, else why not. It may propose a new time on a server event whose
+ * organizer accepts proposals, on a calendar whose backend offers
+ * `propose-time` (a calendar list not read yet lets the daemon decide).
+ */
 export function rsvpDialogFor(s: AppState, e: CalendarEvent): RsvpDialog | string {
   const refusal = eventRsvpRefusal(e) ?? busy(s, e.account, e.id);
   if (refusal) return refusal;
-  return { account: e.account, event: e.id, summary: eventTitle(e), server: !isImip(e) };
+  const server = !isImip(e);
+  const calendar = s.calendars.data?.find((c) => c.account === e.account && c.id === e.calendar);
+  const offered = calendar ? calendar.features.includes("propose-time") : true;
+  return { account: e.account, event: e.id, summary: eventTitle(e), server, propose: server && e.allow_new_time_proposals && offered };
 }
 
 /** The Calendar view's `V`: the respond choice for the cursor event. */

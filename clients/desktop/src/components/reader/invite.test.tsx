@@ -33,7 +33,7 @@ describe("the reader's invitation card", () => {
     const group = await replies();
     for (const name of ["Accept", "Tentative", "Decline"]) expect(button(group, name)).toBeEnabled();
     await user.click(button(group, "Accept"));
-    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "accept", comment: null, send_response: null, proposed_time: null }]);
     await waitFor(() => expect(button(group, "Accept")).toBeDisabled());
     expect(await within(c).findByText("Sending Accept…")).toBeInTheDocument();
     act(() => void settleRsvp());
@@ -153,7 +153,7 @@ describe("tv and the RSVP choice", () => {
     await user.keyboard("{Shift>}{Tab}{/Shift}");
     expect(selected()).toBe("tentative");
     await user.keyboard("{Enter}");
-    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "tentative", comment: null, send_response: null }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "work", event: `imip:${INVITE_ROW}`, response: "tentative", comment: null, send_response: null, proposed_time: null }]);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
   });
 
@@ -215,7 +215,7 @@ describe("an invitation on an account with a calendar backend", () => {
     expect(within(c).queryByText(/RSVP is not supported/)).toBeNull();
     expect(callsOf("invite_refusal")).toEqual([]);
     await user.click(button(await replies(), "Tentative"));
-    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "tentative", comment: null, send_response: null }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "tentative", comment: null, send_response: null, proposed_time: null }]);
     act(() => void settleRsvp());
     expect(await screen.findByText("Replied tentative to Dentist")).toBeInTheDocument();
   });
@@ -231,6 +231,6 @@ describe("an invitation on an account with a calendar backend", () => {
     await user.keyboard("Running late");
     await user.click(within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" }));
     await user.click(within(dialog).getByRole("button", { name: /^Send Decline/ }));
-    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "decline", comment: "Running late", send_response: false }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "decline", comment: "Running late", send_response: false, proposed_time: null }]);
   });
 });

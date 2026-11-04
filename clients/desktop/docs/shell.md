@@ -706,6 +706,7 @@ The event card (`CalendarEventCard` in `EventCard.tsx`, a region named "Event") 
 "Join the meeting" opens the online meeting link through `open_external`, and an event that came from an invitation mail has "Open mail", which shows that mail in Mail, its mailbox opened and the mail selected (the TUI card's `m`).
 The card's "Respond" button runs `V`, disabled with the refusal under it.
 On a server event the card also has "Edit" (`E`) and "Cancel meeting" or "Delete" (`D`), each disabled with the reason as its title where mp cannot make the change (see Edit, cancel and delete).
+An attendee's proposed time shows under them ("Proposes Wed 14 Oct 2099, 14:00 to 14:30"), and on a meeting the user organizes a "Use this time" button beside it (named "Use this time, proposed by <attendee>", the TUI card's `p`) opens the edit form at that time, in this window's zone, so "Save changes" sends the new start and end through `event_update` and the server tells every attendee (PERSO-255, `proposalDialogFor` in `src/app/eventChange.ts`); the button is disabled with the edit form's reason as its title on an occurrence, which waits for the scopes of slice 5, and on a calendar that takes no changes.
 
 ### Keys and actions
 
@@ -743,6 +744,8 @@ Every one is `event_respond`, the daemon's `event.respond`: a server event is an
 Which answers an account takes is the daemon's call: no probe runs ahead of it, and a refusal comes back as "RSVP failed: <the daemon's sentence>".
 
 `tv` and `V` open the respond choice, the overlay `rsvp` (`RsvpDialog.tsx`, a dialog named "RSVP" with the event's summary): a listbox named "Response" with Accept, Tentative and Decline, Accept selected, a Comment field, and on a server event the checkbox "Send a response to the organizer", checked; on an invitation mail's event a line says the answer goes to the organizer as a reply mail, which always goes out.
+On a tentative or a decline of a server event that may take one, "Propose a new time (optional)" offers a "Proposed start" and a "Proposed end" (`datetime-local`, the end empty for the event's length), sent as `proposed_time` in this window's zone (PERSO-255); `V` offers it where the organizer accepts proposals and the calendar's `features` carry `propose-time`, and `tv` on any server event, since the mail's card does not carry the organizer's flag and the daemon refuses a proposal the organizer does not take.
+A proposal with "Send a response to the organizer" unticked is refused in the dialog, "A proposed time needs Send response on", and Send is disabled until one of them changes; the settle of an answer that proposed a time says "Replied <response> to <summary>, proposing a new time".
 Its keys are the TUI's respond overlay: `a`, `t` and `d` pick an answer, `j`, Down and Tab move down, `k`, Up and Shift+Tab move up, Tab from Decline goes on to the comment, Enter sends the selected answer from anywhere in the dialog, Escape and `q` close without sending.
 The dialog owns every key while it is open, the comment's typing and the checkbox's Space aside.
 It reads them in the capture phase, as the Signatures dialog does, since the popup stops the arrow keys on their way up.

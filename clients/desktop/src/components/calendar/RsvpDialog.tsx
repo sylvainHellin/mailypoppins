@@ -11,7 +11,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { RESPONSE_LABEL, sendRsvp } from "@/app/rsvp";
+import { PROPOSAL_NEEDS_RESPONSE, RESPONSE_LABEL, sendRsvp } from "@/app/rsvp";
+import { localZone } from "@/app/eventForm";
 import { useDispatch } from "@/app/store";
 import { RSVP_RESPONSES, type RsvpDialog as RsvpDialogState, type RsvpResponse } from "@/app/state";
 
@@ -24,10 +25,13 @@ export type RsvpDialogProps = { dialog: RsvpDialogState | null; onOpenChange: (o
  * respond overlay (PERSO-200): `a`, `t` and `d` pick Accept, Tentative and
  * Decline, `j`, Down or Tab move down, `k`, Up or Shift+Tab move up, Enter
  * sends the choice, Escape or `q` closes. Tab from Decline goes on to the
- * comment, sent with the answer, and on a server event to "Send a response
- * to the organizer", which an invitation mail's answer, a reply mail, does
- * not offer. The dialog owns every key while it is open, the comment's own
- * typing aside.
+ * comment, sent with the answer, on a tentative or a decline of a server
+ * event whose organizer accepts proposals to "Propose a new time" (a start,
+ * and an end that defaults to the event's length; PERSO-255), and on a
+ * server event to "Send a response to the organizer", which an invitation
+ * mail's answer, a reply mail, does not offer. A proposal with the response
+ * off is refused in the dialog, the TUI's sentence. The dialog owns every
+ * key while it is open, the fields' own typing aside.
  */
 export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const dispatch = useDispatch();
@@ -36,30 +40,41 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const [selected, setSelected] = useState(0);
   const [comment, setComment] = useState("");
   const [sendResponse, setSendResponse] = useState(true);
+  const [proposedStart, setProposedStart] = useState("");
+  const [proposedEnd, setProposedEnd] = useState("");
   const open = dialog !== null;
 
   useEffect(() => {
     setSelected(0);
     setComment("");
     setSendResponse(true);
+    setProposedStart("");
+    setProposedEnd("");
   }, [dialog]);
 
-  const latest = useRef({ dialog, selected, comment, sendResponse });
-  latest.current = { dialog, selected, comment, sendResponse };
+  const latest = useRef({ dialog, selected, comment, sendResponse, proposedStart, proposedEnd });
+  latest.current = { dialog, selected, comment, sendResponse, proposedStart, proposedEnd };
 
+  const proposing = !!dialog?.propose && RSVP_RESPONSES[selected] !== "accept";
+  const problem = proposing && proposedStart.trim() && !sendResponse ? PROPOSAL_NEEDS_RESPONSE : null;
+
+  /** The answer `response` with what the fields hold, unless the proposal would tell nobody. */
   const sendNow = (response: RsvpResponse) => {
-    const { dialog: d, comment: c, sendResponse: tell } = latest.current;
-    if (d) void sendRsvp(dispatch, d, response, { comment: c, sendResponse: d.server ? tell : null });
+    const { dialog: d, comment: c, sendResponse: tell, proposedStart: from, proposedEnd: to } = latest.current;
+    if (!d) return;
+    const start = d.propose && response !== "accept" ? from.trim() : "";
+    if (start && !tell) return;
+    const proposedTime = start ? { start, end: to.trim() || undefined, zone: localZone() } : null;
+    void sendRsvp(dispatch, d, response, { comment: c, sendResponse: d.server ? tell : null, proposedTime });
   };
+  const sendRef = useRef(sendNow);
+  sendRef.current = sendNow;
 
   // On the window, so the keys work before the popup has taken focus, and in
   // the capture phase, since the popup stops the arrow keys on their way up.
   useEffect(() => {
     if (!open) return;
-    const send = () => {
-      const { dialog: d, selected: i, comment: c, sendResponse: tell } = latest.current;
-      if (d) void sendRsvp(dispatch, d, RSVP_RESPONSES[i], { comment: c, sendResponse: d.server ? tell : null });
-    };
+    const send = () => sendRef.current(RSVP_RESPONSES[latest.current.selected]);
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
       // The comment and the toggle take their own keys; Enter still sends,
@@ -158,11 +173,43 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
         ) : (
           <p className="text-xs text-muted-foreground">The answer goes to the organizer as a reply mail.</p>
         )}
+        {proposing ? (
+          <fieldset data-slot="rsvp-propose" className="flex flex-col gap-1 text-sm">
+            <legend className="text-muted-foreground">Propose a new time (optional)</legend>
+            <div className="flex gap-2">
+              <label className="flex flex-1 flex-col gap-1">
+                <span className="text-xs text-muted-foreground">Start</span>
+                <Input
+                  data-rsvp-field
+                  type="datetime-local"
+                  aria-label="Proposed start"
+                  value={proposedStart}
+                  onChange={(e) => setProposedStart(e.currentTarget.value)}
+                />
+              </label>
+              <label className="flex flex-1 flex-col gap-1">
+                <span className="text-xs text-muted-foreground">End (default: the event's length)</span>
+                <Input
+                  data-rsvp-field
+                  type="datetime-local"
+                  aria-label="Proposed end"
+                  value={proposedEnd}
+                  onChange={(e) => setProposedEnd(e.currentTarget.value)}
+                />
+              </label>
+            </div>
+          </fieldset>
+        ) : null}
+        {problem ? (
+          <p role="alert" data-slot="rsvp-problem" className="text-xs text-destructive">
+            {problem}
+          </p>
+        ) : null}
         <DialogFooter>
           <DialogClose render={<Button variant="outline" />}>
             Cancel <Kbd aria-hidden="true">q</Kbd>
           </DialogClose>
-          <Button onClick={() => sendNow(RSVP_RESPONSES[selected])}>
+          <Button disabled={problem !== null} onClick={() => sendNow(RSVP_RESPONSES[selected])}>
             Send {RESPONSE_LABEL[RSVP_RESPONSES[selected]]} <Kbd aria-hidden="true">↵</Kbd>
           </Button>
         </DialogFooter>
