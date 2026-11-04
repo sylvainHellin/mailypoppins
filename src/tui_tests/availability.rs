@@ -368,8 +368,8 @@ fn text_rows(frame: &str) -> Vec<&str> {
 
 /// On a short terminal the form keeps its fields, its problem line and its
 /// keys, and shows as many availability rows as the height leaves, the rest
-/// counted: at 80x26 the header and one row, at 80x24 the count alone, at
-/// 80x23 no availability at all.
+/// counted: at 80x27 the header and one row, at 80x24 the count alone in
+/// the blank under the title, at 80x23 no availability at all.
 #[test]
 fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
     let mut app = calendar_fixture();
@@ -385,7 +385,7 @@ fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
     };
     let frame = frame_snapshot(&mut app, 80, 24);
     assert_snapshot!("event_form_availability_80x24", frame);
-    for (height, rows, more) in [(26, 1, "+3 more"), (24, 0, "+4 more"), (23, 0, "")] {
+    for (height, rows, more) in [(27, 1, "+3 more"), (24, 0, "+4 more"), (23, 0, "")] {
         let frame = frame_snapshot(&mut app, 80, height);
         let text = text_rows(&frame);
         let at = |needle: &str| text.iter().position(|line| line.contains(needle));

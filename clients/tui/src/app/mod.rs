@@ -10,7 +10,7 @@ mod types;
 
 pub use availability::{Availability, FreeBusyKey, AVAILABILITY_DEBOUNCE};
 pub use calendar::{day_part, DayPart};
-pub use event_form::{EventCalendarChoice, EventForm, EventFormRow};
+pub use event_form::{EventCalendarChoice, EventEdit, EventForm, EventFormRow};
 pub use keymap::{
     dump_json, dump_markdown, help_sections, hint_bindings, leader_is_view_agnostic,
     palette_actions, palette_match_text, prefix_continuations, resolve, Guard, KeyAction,
@@ -780,6 +780,7 @@ impl App {
             | Overlay::Signatures(_)
             | Overlay::Rsvp(_)
             | Overlay::EventForm(_)
+            | Overlay::EventRemove(_)
             | Overlay::Calendars(_)
             | Overlay::EventCard(_)
             | Overlay::Reminders(_)

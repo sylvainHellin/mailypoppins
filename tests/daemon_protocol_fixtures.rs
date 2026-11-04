@@ -129,12 +129,21 @@ const CALENDAR_FIXTURES: &[&str] = &[
 ];
 
 /// The fixtures PERSO-255 adds for the calendar writes: `event.create` and
-/// the operation id and transaction id it answers with at once.
+/// the operation id and transaction id it answers with at once, and a pair
+/// each for `event.update`, `event.cancel` and `event.delete`.
 ///
 /// Separate from the lists above for the reason they are separate from each
 /// other: each list is the record of what one change required.
-const CALENDAR_WRITE_FIXTURES: &[&str] =
-    &["event.create.request.json", "event.create.response.json"];
+const CALENDAR_WRITE_FIXTURES: &[&str] = &[
+    "event.cancel.request.json",
+    "event.cancel.response.json",
+    "event.create.request.json",
+    "event.create.response.json",
+    "event.delete.request.json",
+    "event.delete.response.json",
+    "event.update.request.json",
+    "event.update.response.json",
+];
 
 /// The fixtures PERSO-255 adds for the calendar reminders: a pair per
 /// method, one `calendar.reminder` and one `calendar.reminders_changed`.

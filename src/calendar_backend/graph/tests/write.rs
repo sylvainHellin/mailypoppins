@@ -349,6 +349,59 @@ async fn an_update_patches_only_the_fields_it_names() {
     );
 }
 
+/// What a client's `event.update` typed reaches Graph as: the meeting moved
+/// to 15:00 Berlin wall time keeping its hour, under the zone's Windows name,
+/// the location cleared and the new attendee list whole, and nothing else.
+#[tokio::test]
+async fn a_typed_update_patches_graph_with_the_fields_it_names() {
+    let fetch =
+        ScriptedFetch::default().route(&format!("{BASE}/me/events/"), ok(&created("AAMk-ev")));
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let mut current = written_event(
+        backend
+            .update_event("cal", "AAMk-ev", &EventPatch::default())
+            .await
+            .unwrap(),
+    );
+    current.time = berlin(9, 10);
+    current.location = Some("Room 1".into());
+    let typed: mp_protocol::calendar::EventPatchParams = serde_json::from_value(json!({
+        "start": "2026-11-03T15:00",
+        "location": null,
+        "attendees": [
+            {"email": "ada@example.com", "name": "Ada Lovelace"},
+            {"email": "room-2@example.com", "role": "resource"},
+        ],
+    }))
+    .unwrap();
+    let patch = crate::calendar_write::resolve_patch(&typed, &current, chrono_tz::UTC).unwrap();
+    let fetch =
+        ScriptedFetch::default().route(&format!("{BASE}/me/events/"), ok(&created("AAMk-ev")));
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    backend
+        .update_event("cal", "AAMk-ev", &patch)
+        .await
+        .unwrap();
+    let sent = backend.fetch.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method, "PATCH");
+    assert_eq!(sent[0].url, format!("{BASE}/me/events/AAMk-ev"));
+    assert_eq!(
+        sent[0].body,
+        Some(json!({
+            "start": {"dateTime": "2026-11-03T15:00:00", "timeZone": "W. Europe Standard Time"},
+            "end": {"dateTime": "2026-11-03T16:00:00", "timeZone": "W. Europe Standard Time"},
+            "isAllDay": false,
+            "location": {"displayName": ""},
+            "attendees": [
+                {"emailAddress": {"address": "ada@example.com", "name": "Ada Lovelace"},
+                 "type": "required"},
+                {"emailAddress": {"address": "room-2@example.com"}, "type": "resource"},
+            ],
+        }))
+    );
+}
+
 /// A create replayed with its transaction id after its body changed meets
 /// Graph's `ErrorDuplicateTransactionId`: the create adopts the event the
 /// first one made, patches it with every field it sets and the server's

@@ -1179,6 +1179,12 @@ pub enum BgResult {
         operation_id: String,
         result: Result<mp_protocol::calendar::CalendarFreeBusyResult, String>,
     },
+    /// `event.update`, `event.cancel` or `event.delete` settled (PERSO-255):
+    /// the status line, or why it failed.
+    EventChanged {
+        operation_id: String,
+        result: Result<String, String>,
+    },
     SendApproved {
         account_index: usize,
         result: Result<String, String>,
@@ -1904,6 +1910,14 @@ pub struct CalendarView {
     pub kept_form: Option<super::EventForm>,
     /// The open event form's availability rows (PERSO-255).
     pub availability: super::Availability,
+    /// The `D` confirmations whose `event.cancel` or `event.delete` is
+    /// running, by operation id, kept so a failure asks again with the
+    /// comment as typed.
+    pub pending_removals: std::collections::HashMap<String, EventRemoveOverlay>,
+    /// A confirmation whose cancel or delete failed while another overlay
+    /// was up, or whose daemon restarted under it: `D` on its event opens
+    /// it again.
+    pub kept_removal: Option<EventRemoveOverlay>,
 }
 
 impl Default for CalendarView {
@@ -1924,6 +1938,8 @@ impl Default for CalendarView {
             pending_forms: std::collections::HashMap::new(),
             kept_form: None,
             availability: super::Availability::default(),
+            pending_removals: std::collections::HashMap::new(),
+            kept_removal: None,
         }
     }
 }
@@ -1951,6 +1967,26 @@ pub struct RemindersOverlay {
 pub struct EventCardOverlay {
     pub event: CalendarEvent,
     pub scroll: u16,
+}
+
+/// The `D` confirmation of the Calendar view (PERSO-255): cancel a meeting
+/// the user organizes, with a comment for its attendees, or delete an event
+/// that tells nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventRemoveOverlay {
+    pub account: String,
+    pub event: String,
+    pub summary: String,
+    /// Cancel the meeting, which tells its attendees, rather than delete an
+    /// event that tells nobody.
+    pub cancel: bool,
+    /// How many people and rooms a cancel tells.
+    pub attendees: usize,
+    /// The comment a cancel sends, empty for none.
+    pub comment: String,
+    /// Why the last cancel or delete of this confirmation did not go
+    /// through, shown under it when it opens again.
+    pub error: Option<String>,
 }
 
 /// Messages that drive state transitions (TEA pattern).
@@ -2124,6 +2160,12 @@ pub enum Action {
     /// Create the event the event form holds (PERSO-255) through
     /// `event.create`.
     CreateEvent(Box<super::EventForm>),
+    /// Change the event an edit form holds (PERSO-255) through
+    /// `event.update`, with the fields that changed.
+    UpdateEvent(Box<super::EventForm>),
+    /// Cancel a meeting through `event.cancel`, or delete an event through
+    /// `event.delete` (PERSO-255), as the `D` confirmation decided.
+    RemoveEvent(Box<EventRemoveOverlay>),
     /// Edit the open event form's description in `$EDITOR` (PERSO-255).
     EditEventDescription,
     /// Ask `calendar.freebusy` for the open event form's availability rows
@@ -2287,6 +2329,8 @@ impl Action {
             | Action::Rsvp { .. }
             | Action::CreateEvent(_)
             | Action::QueryFreeBusy(_)
+            | Action::UpdateEvent(_)
+            | Action::RemoveEvent(_)
             | Action::ComposeToContact { .. }
             | Action::CopyContactEmail { .. }
             | Action::LoadContacts { .. }
@@ -2580,8 +2624,10 @@ pub enum Overlay {
     Signatures(SignaturesOverlay),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
-    /// The event form (`n` in the Calendar view, PERSO-255).
+    /// The event form (`n` in the Calendar view, `E` on an event, PERSO-255).
     EventForm(Box<super::EventForm>),
+    /// The cancel or delete confirmation (`D` on an event, PERSO-255).
+    EventRemove(Box<EventRemoveOverlay>),
     /// The calendars shown or hidden in the Calendar view (`c`, PERSO-200).
     Calendars(CalendarsOverlay),
     /// One event of the Calendar view in full (`Enter`, PERSO-200).

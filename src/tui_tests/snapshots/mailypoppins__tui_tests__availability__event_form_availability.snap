@@ -25,18 +25,18 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 19 |││  10:00-11:00 ? Jour f│  Rooms        room-1@example.org                                     │                      ││
 20 |││                [evoqs│  Teams        [ ]                                                    │                      ││
 21 |││                      │  Reminder     (the mailbox default; minutes or none)                 │                      ││
-22 |││Fri 2026-08-07        │  Description  (none; Enter edits in $EDITOR)                         │                      ││
-23 |││  14:00-15:00 ✓ Abgesa│                                                                      │                      ││
-24 |││                [evoqs│  Availability           07  09  11  13  15  17  19                   │                      ││
-25 |││                      │  sylvain@example.org    ····██····················                   │                      ││
-26 |││                      │  ada@example.org        ············▓▓··▒·········                   │                      ││
-27 |││                      │  someone@gmail.com      no free/busy                                 │                      ││
-28 |││                      │  room-1@example.org     ··························                   │                      ││
-29 |││                      │                                                                      │                      ││
-30 |││                      │  Times in Europe/Berlin                                              │                      ││
-31 |││                      │  Enter create · Tab next · Space toggle · ←/→ calendar · Esc cancel  │                      ││
-32 |│╰──────────────────────╰──────────────────────────────────────────────────────────────────────╯                      ││
-33 |│╭ View ─────────────────────────────────╮│                                                                           ││
+22 |││Fri 2026-08-07        │  Show as      ‹ Busy ›                                               │                      ││
+23 |││  14:00-15:00 ✓ Abgesa│  Description  (none; Enter edits in $EDITOR)                         │                      ││
+24 |││                [evoqs│                                                                      │                      ││
+25 |││                      │  Availability           07  09  11  13  15  17  19                   │                      ││
+26 |││                      │  sylvain@example.org    ····██····················                   │                      ││
+27 |││                      │  ada@example.org        ············▓▓··▒·········                   │                      ││
+28 |││                      │  someone@gmail.com      no free/busy                                 │                      ││
+29 |││                      │  room-1@example.org     ··························                   │                      ││
+30 |││                      │                                                                      │                      ││
+31 |││                      │  Times in Europe/Berlin                                              │                      ││
+32 |│╰──────────────────────│  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │                      ││
+33 |│╭ View ────────────────╰──────────────────────────────────────────────────────────────────────╯                      ││
 34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
 35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
 36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
@@ -55,7 +55,7 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 22 |bold@2..16
 23 |strike@2..24
 24 |strike@2..18
-25 |bold@64..67
 26 |bold@64..67
-28 |bold@64..67
+27 |bold@64..67
+29 |bold@64..67
 34 |bold@27..37

@@ -1,0 +1,22 @@
+{
+  "id": 84,
+  "jsonrpc": "2.0",
+  "method": "event.update",
+  "params": {
+    "account": "evoqs",
+    "event": "AAMkADev1",
+    "fields": {
+      "attendees": [
+        {
+          "email": "ada@example.com",
+          "name": "Ada Lovelace",
+          "role": "required"
+        }
+      ],
+      "location": null,
+      "reminder": 5,
+      "start": "2026-11-18T15:00",
+      "summary": "Project review, moved"
+    }
+  }
+}

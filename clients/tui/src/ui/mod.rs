@@ -321,6 +321,7 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::EventForm(form) => {
             overlays::render_event_form(form, &app.calendar_view.availability, frame, area)
         }
+        Overlay::EventRemove(overlay) => overlays::render_event_remove(overlay, frame, area),
         Overlay::Calendars(overlay) => calendar::render_calendars_overlay(overlay, frame, area),
         Overlay::EventCard(card) => calendar::render_event_card(app, card, frame, area),
         Overlay::Reminders(overlay) => {

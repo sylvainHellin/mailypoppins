@@ -23,12 +23,13 @@
 //! the replay's fields, and [`EventInput::as_patch`] is the change that makes
 //! it carry them when it does not.
 
+use chrono::NaiveDate;
 use chrono_tz::Tz;
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
 use crate::calendar_model::{parse_zone, AttendeeRole, Event, EventTime, Sensitivity, ShowAs};
 use crate::invite::{resolve_span_in, EventSpan};
-use mp_protocol::calendar::EventInputParams;
+use mp_protocol::calendar::{EventAttendeeInput, EventInputParams, EventPatchParams};
 
 /// One person or room invited to an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,32 +257,200 @@ impl EventPatch {
 /// all-day event whose `end` is its last day, included. The input carries
 /// the zone, which places an all-day event's midnights.
 pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, String> {
-    let summary = params.summary.trim();
+    let summary = resolve_summary(&params.summary)?;
+    let zone = resolve_zone(params.zone.as_deref(), host)?;
+    let time = resolve_time(
+        &params.start,
+        params.end.as_deref(),
+        params.duration.as_deref(),
+        params.all_day,
+        zone,
+    )?;
+    let show_as = resolve_show_as(params.show_as.as_deref())?;
+    let sensitivity = resolve_sensitivity(params.sensitivity.as_deref())?;
+    Ok(EventInput {
+        summary,
+        time,
+        zone: Some(zone.name().to_string()),
+        location: text(params.location.as_deref()),
+        body: description(params.body.as_deref()),
+        attendees: resolve_attendees(&params.attendees)?,
+        online_meeting: params.online_meeting.unwrap_or(false),
+        reminder: params.reminder,
+        show_as,
+        sensitivity,
+        allow_new_time_proposals: params.allow_new_time_proposals,
+    })
+}
+
+/// The [`EventPatch`] a client's `event.update` names for `current`, or the
+/// sentence that says what is wrong with it.
+///
+/// A key the client left out stays out of the patch. A new time is read
+/// against the event's current one: in the event's own zone unless
+/// `params.zone` names another (`host` for an all-day event), a new start
+/// with no end or duration keeping the event's length, and an end or a
+/// duration with no start keeping its start. `null` or an empty text clears
+/// the location and the description.
+pub fn resolve_patch(
+    params: &EventPatchParams,
+    current: &Event,
+    host: Tz,
+) -> Result<EventPatch, String> {
+    let mut patch = EventPatch::default();
+    if let Some(summary) = &params.summary {
+        patch.summary = Some(resolve_summary(summary)?);
+    }
+    let named = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let (start, end, duration) = (
+        named(&params.start),
+        named(&params.end),
+        named(&params.duration),
+    );
+    let zone_named = named(&params.zone);
+    if start.is_some()
+        || end.is_some()
+        || duration.is_some()
+        || zone_named.is_some()
+        || params
+            .all_day
+            .is_some_and(|all_day| all_day != current.is_all_day())
+    {
+        let own = current.time.zone().unwrap_or(host);
+        let zone = resolve_zone(zone_named.as_deref(), own)?;
+        let wants_all_day = match (&start, params.all_day) {
+            (_, Some(all_day)) => all_day,
+            (Some(start), None) => is_date(start),
+            (None, None) => current.is_all_day(),
+        };
+        let start = match start {
+            Some(start) => start,
+            None => current_start(&current.time, own, wants_all_day),
+        };
+        let keeps_length = end.is_none() && duration.is_none();
+        let duration = match duration {
+            Some(duration) => Some(duration),
+            None if keeps_length && wants_all_day == current.is_all_day() => {
+                Some(current_length(&current.time))
+            }
+            None => None,
+        };
+        patch.time = Some(resolve_time(
+            &start,
+            end.as_deref(),
+            duration.as_deref(),
+            Some(wants_all_day),
+            zone,
+        )?);
+        patch.zone = Some(zone.name().to_string());
+    }
+    if let Some(location) = &params.location {
+        patch.location = Some(text(location.as_deref()));
+    }
+    if let Some(body) = &params.body {
+        patch.body = Some(description(body.as_deref()));
+    }
+    if let Some(attendees) = &params.attendees {
+        patch.attendees = Some(resolve_attendees(attendees)?);
+    }
+    patch.online_meeting = params.online_meeting;
+    patch.reminder = params.reminder;
+    if params.show_as.is_some() {
+        patch.show_as = Some(
+            resolve_show_as(params.show_as.as_deref())?
+                .ok_or_else(|| "show-as \"unknown\" cannot be set".to_string())?,
+        );
+    }
+    patch.sensitivity = resolve_sensitivity(params.sensitivity.as_deref())?;
+    patch.allow_new_time_proposals = params.allow_new_time_proposals;
+    Ok(patch)
+}
+
+/// Whether `value` is a bare date (`2026-11-18`), the form of an all-day
+/// time.
+fn is_date(value: &str) -> bool {
+    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").is_ok()
+}
+
+/// The current start of `time` in the form a new time is read in: its wall
+/// time in `zone` (or its date, for an all-day time asked for), else its
+/// first day.
+fn current_start(time: &EventTime, zone: Tz, all_day: bool) -> String {
+    match time {
+        EventTime::Timed { start, .. } => {
+            let local = start.with_timezone(&zone).naive_local();
+            if all_day {
+                local.date().to_string()
+            } else {
+                local.format("%Y-%m-%dT%H:%M:%S").to_string()
+            }
+        }
+        EventTime::AllDay { start, .. } => start.to_string(),
+    }
+}
+
+/// The length of `time` as a duration a new time takes: seconds for a
+/// timed time, whole days for an all-day one.
+fn current_length(time: &EventTime) -> String {
+    match time {
+        EventTime::Timed { start, end, .. } => {
+            format!("PT{}S", (*end - *start).num_seconds().max(60))
+        }
+        EventTime::AllDay { start, end } => {
+            format!("P{}D", (*end - *start).num_days().max(1))
+        }
+    }
+}
+
+fn resolve_summary(summary: &str) -> Result<String, String> {
+    let summary = summary.trim();
     if summary.is_empty() {
         return Err("An event needs a summary".into());
     }
-    let zone = match params.zone.as_deref().map(str::trim) {
+    Ok(summary.to_string())
+}
+
+/// The zone `name` names, else `fallback`.
+fn resolve_zone(name: Option<&str>, fallback: Tz) -> Result<Tz, String> {
+    match name.map(str::trim) {
         Some(name) if !name.is_empty() => parse_zone(name).ok_or_else(|| {
             format!("unknown time zone {name:?}; use an IANA name like Europe/Berlin")
-        })?,
-        _ => host,
-    };
+        }),
+        _ => Ok(fallback),
+    }
+}
+
+/// The time a start, an end or a duration name in `zone`; `all_day`
+/// insists on the form.
+fn resolve_time(
+    start: &str,
+    end: Option<&str>,
+    duration: Option<&str>,
+    all_day: Option<bool>,
+    zone: Tz,
+) -> Result<EventTime, String> {
     let span = resolve_span_in(
-        &params.start,
-        params.end.as_deref().filter(|e| !e.trim().is_empty()),
-        params.duration.as_deref().filter(|d| !d.trim().is_empty()),
+        start,
+        end.filter(|e| !e.trim().is_empty()),
+        duration.filter(|d| !d.trim().is_empty()),
         zone,
     )
     .map_err(|e| format!("{e:#}"))?;
-    let time = match span {
+    match span {
         EventSpan::Timed { start, end } => {
-            if params.all_day == Some(true) {
+            if all_day == Some(true) {
                 return Err("An all-day event takes bare dates (2026-11-18), not times".to_string());
             }
             EventTime::timed(start, end, zone.name())
         }
         EventSpan::AllDay { first, last } => {
-            if params.all_day == Some(false) {
+            if all_day == Some(false) {
                 return Err(
                     "A bare date makes an all-day event; give a time (2026-11-18T14:00) for a \
                      timed one"
@@ -294,10 +463,14 @@ pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, 
             EventTime::all_day(first, end)
         }
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
 
+/// The attendees, each address once, with their role word, required by
+/// default.
+fn resolve_attendees(listed: &[EventAttendeeInput]) -> Result<Vec<AttendeeInput>, String> {
     let mut attendees: Vec<AttendeeInput> = Vec::new();
-    for attendee in &params.attendees {
+    for attendee in listed {
         let email = attendee.email.trim();
         if !email.contains('@') || email.contains(char::is_whitespace) {
             return Err(format!("{email:?} is not an email address"));
@@ -323,7 +496,11 @@ pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, 
             role,
         });
     }
-    let show_as = match params.show_as.as_deref() {
+    Ok(attendees)
+}
+
+fn resolve_show_as(word: Option<&str>) -> Result<Option<ShowAs>, String> {
+    Ok(match word {
         Some(word) => Some(word_as::<ShowAs>(
             word,
             "show-as",
@@ -331,39 +508,32 @@ pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, 
         )?)
         .filter(|show_as| *show_as != ShowAs::Unknown),
         None => None,
-    };
-    let sensitivity = match params.sensitivity.as_deref() {
+    })
+}
+
+fn resolve_sensitivity(word: Option<&str>) -> Result<Option<Sensitivity>, String> {
+    match word {
         Some(word) => Some(word_as(
             word,
             "the sensitivity",
             "normal, personal, private, confidential",
-        )?),
-        None => None,
-    };
-    let text = |value: &Option<String>| {
-        value
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-    };
-    Ok(EventInput {
-        summary: summary.to_string(),
-        time,
-        zone: Some(zone.name().to_string()),
-        location: text(&params.location),
-        body: params
-            .body
-            .as_deref()
-            .filter(|b| !b.trim().is_empty())
-            .map(str::to_string),
-        attendees,
-        online_meeting: params.online_meeting.unwrap_or(false),
-        reminder: params.reminder,
-        show_as,
-        sensitivity,
-        allow_new_time_proposals: params.allow_new_time_proposals,
-    })
+        ))
+        .transpose(),
+        None => Ok(None),
+    }
+}
+
+/// A text trimmed, an empty one as none.
+fn text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// A description as typed, a blank one as none.
+fn description(value: Option<&str>) -> Option<String> {
+    value.filter(|b| !b.trim().is_empty()).map(str::to_string)
 }
 
 /// One of a model enum's words, or a sentence naming the ones it takes.
@@ -682,6 +852,80 @@ mod tests {
         )
         .unwrap();
         assert!(!other_zone.matches(&event));
+    }
+
+    /// A patch names only what the client sent: a new start keeps the
+    /// event's length and is read in the event's own zone, an end alone
+    /// keeps the start, a zone alone keeps the wall time, and `null` or an
+    /// empty text clears; nothing sent is an empty patch.
+    #[test]
+    fn a_patch_reads_a_new_time_against_the_current_one() {
+        let mut current = made(&EventInput::new("Review", time()));
+        current.location = Some("Room 1".into());
+        let patch = |value: serde_json::Value| {
+            let params: EventPatchParams = serde_json::from_value(value).unwrap();
+            resolve_patch(&params, &current, chrono_tz::UTC)
+        };
+        assert!(patch(json!({})).unwrap().is_empty());
+
+        let at = |h, m| Utc.with_ymd_and_hms(2026, 11, 3, h, m, 0).unwrap();
+        let moved = patch(json!({"start": "2026-11-03T15:30"})).unwrap();
+        assert_eq!(
+            moved.time,
+            Some(EventTime::timed(at(14, 30), at(15, 30), "Europe/Berlin").unwrap())
+        );
+        assert_eq!(moved.zone.as_deref(), Some("Europe/Berlin"));
+        assert_eq!(moved.summary, None);
+        assert_eq!(moved.location, None);
+
+        let longer = patch(json!({"end": "2026-11-03T12:00"})).unwrap();
+        assert_eq!(
+            longer.time,
+            Some(EventTime::timed(at(9, 0), at(11, 0), "Europe/Berlin").unwrap())
+        );
+        let shorter = patch(json!({"duration": "30m"})).unwrap();
+        assert_eq!(
+            shorter.time,
+            Some(EventTime::timed(at(9, 0), at(9, 30), "Europe/Berlin").unwrap())
+        );
+        let elsewhere = patch(json!({"zone": "Europe/London"})).unwrap();
+        assert_eq!(
+            elsewhere.time,
+            Some(EventTime::timed(at(10, 0), at(11, 0), "Europe/London").unwrap())
+        );
+
+        let day = |d| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let all_day = patch(json!({"all_day": true})).unwrap();
+        assert_eq!(
+            all_day.time,
+            Some(EventTime::all_day(day(3), day(4)).unwrap())
+        );
+        assert!(patch(json!({"start": "2026-11-05", "all_day": false})).is_err());
+
+        let cleared = patch(json!({"location": null, "body": " ", "reminder": null})).unwrap();
+        assert_eq!(cleared.location, Some(None));
+        assert_eq!(cleared.body, Some(None));
+        assert_eq!(cleared.reminder, Some(None));
+        assert_eq!(cleared.time, None);
+
+        assert_eq!(
+            patch(json!({"summary": "  "})).unwrap_err(),
+            "An event needs a summary"
+        );
+        assert!(patch(json!({"attendees": [{"email": "ada"}]}))
+            .unwrap_err()
+            .contains("not an email"));
+        assert!(patch(json!({"show_as": "unknown"})).is_err());
+
+        let mut holiday = current.clone();
+        holiday.time = EventTime::all_day(day(5), day(7)).unwrap();
+        let params: EventPatchParams =
+            serde_json::from_value(json!({"start": "2026-11-10"})).unwrap();
+        let shifted = resolve_patch(&params, &holiday, chrono_tz::UTC).unwrap();
+        assert_eq!(
+            shifted.time,
+            Some(EventTime::all_day(day(10), day(12)).unwrap())
+        );
     }
 
     fn value_with(input: &EventInput, key: &str, value: serde_json::Value) -> EventInput {

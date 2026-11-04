@@ -566,3 +566,45 @@ fn a_reconnect_to_a_new_instance_drops_the_await_without_asking() {
         crate::events::Applied::Ignored
     );
 }
+
+/// A cancel whose daemon restarted before it settled asks again: the
+/// confirmation comes back with its comment as typed and says that
+/// confirming again is safe, since the daemon counts a repeat of a cancel
+/// that went through as done (PERSO-255).
+#[test]
+fn a_restart_asks_again_for_a_dropped_cancel_with_its_comment() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = App::from_bootstrap(config(), &snapshot(1, 5));
+    app.events.started(
+        AWAITED.to_string(),
+        crate::events::Awaited::EventChange {
+            operation_id: AWAITED.to_string(),
+            done: "Cancelled Budget".to_string(),
+        },
+    );
+    app.bg_count += 1;
+    app.calendar_view.pending_removals.insert(
+        AWAITED.to_string(),
+        crate::app::EventRemoveOverlay {
+            account: ACCOUNT.to_string(),
+            event: "ev-own".to_string(),
+            summary: "Budget".to_string(),
+            cancel: true,
+            attendees: 2,
+            comment: "Postponed".to_string(),
+            error: None,
+        },
+    );
+    let door = OpsDoor::new(restarted_snapshot(3), Err("never asked".to_string()));
+
+    reconnect(&mut app, &door, "restarted");
+
+    assert!(app.calendar_view.pending_removals.is_empty());
+    let crate::app::Overlay::EventRemove(removal) = &app.overlay else {
+        panic!("the cancel asks again, got {:?}", app.status_message);
+    };
+    assert_eq!(removal.comment, "Postponed");
+    assert!(removal.cancel);
+    let why = removal.error.as_deref().expect("it says why it asks again");
+    assert!(why.contains("confirming again is safe"), "{why}");
+}

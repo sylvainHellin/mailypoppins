@@ -26,9 +26,18 @@
 //! event.respond           {account, event, response, comment?, send_response?}
 //!                             -> {operation_id}
 //!                             settles EventRespondResult
+//! event.update            {account, event, fields: EventPatchParams}
+//!                             -> {operation_id}
+//!                             settles EventUpdateResult {account, event}
+//! event.cancel            {account, event, comment?}
+//!                             -> {operation_id}
+//!                             settles EventCancelResult {account, event, notified}
+//! event.delete            {account, event}
+//!                             -> {operation_id}
+//!                             settles EventDeleteResult {account, event}
 //! ```
 //!
-//! `calendar.rebuild`, `calendar.rsvp`, `event.create` and `event.respond`
+//! `calendar.rebuild`, `calendar.rsvp` and every `event.*` but `event.get`
 //! are operations. A
 //! rebuild folds every stored `METHOD:REPLY` onto every stored invitation, and
 //! drops and resyncs the server cache of an account with a backend; an answer
@@ -69,6 +78,31 @@
 //! (the sentence names the field), a calendar the account does not list, or
 //! one the user may not write to.
 //!
+//! `event.update`, `event.cancel` and `event.delete` (PERSO-255) address a
+//! server event the cache holds, read before an operation exists. An update
+//! is a patch of the fields the client names, read against the cached event
+//! ([`crate::calendar_write::resolve_patch`]); a cancel tells every attendee,
+//! with an optional comment; a delete tells nobody. The server's answer goes
+//! into the cache under the account's calendar lock, the updated event
+//! upserted and the cancelled or deleted one removed, before the account
+//! syncs and `calendar.changed` is announced. A cancel or a delete of an
+//! event the server no longer holds counts as done, and so does a retry of
+//! the same cancel or delete once the cache dropped the event: the removal
+//! is remembered with it ([`cache::remove_event`]), so the retry settles as
+//! the first call did without reaching the server.
+//!
+//! Their refusals, all `-32602` before an operation starts but the re-login
+//! prompt: an invitation mail's event (`imip:`), an account without a
+//! backend, an event the cache does not hold (and mp did not just cancel or
+//! delete through the same call), an occurrence or a series (the
+//! scopes are a later slice), a read-only calendar; for an update, an empty
+//! change, a change by an attendee to anything but the reminder and the
+//! show-as ([`ORGANIZER_ONLY_REFUSAL`]), turning a Teams meeting's link off,
+//! a Teams meeting on a calendar that offers none, and a new description on a
+//! Teams meeting, whose join details the server would drop; for a cancel, an
+//! event the user does not organize or one without attendees; for a delete,
+//! a live meeting, which the organizer cancels and an attendee declines.
+//!
 //! `calendar.set_visibility` is a command: a local preference, but one
 //! `calendar.list` and `calendar.view` observe, so it answers with the
 //! revision its `calendar.changed` moved the daemon to, as `signature.set_default`
@@ -94,8 +128,9 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{
     CalendarChanged, CalendarEvent, CalendarInfo, CalendarListResult, CalendarRange,
-    CalendarViewParams, CalendarViewResult, EventCreateParams, EventGetResult, EventRespondParams,
-    EventRespondResult, EventWriteResult, IMIP_CALENDAR_ID,
+    CalendarViewParams, CalendarViewResult, EventCancelParams, EventCancelResult,
+    EventCreateParams, EventDeleteParams, EventDeleteResult, EventGetResult, EventRespondParams,
+    EventRespondResult, EventUpdateParams, EventUpdateResult, EventWriteResult, IMIP_CALENDAR_ID,
 };
 use mp_protocol::events::KIND_CALENDAR_CHANGED;
 use mp_protocol::RpcError;
@@ -104,14 +139,17 @@ use crate::calendar_backend::{
     backend_for, calendar_features, choose_backend, has_backend, preflight_scope, BackendChoice,
     CalendarBackend, CalendarBackendError, Response, Written,
 };
-use crate::calendar_model::{window_for, Calendar, CalendarFeature};
+use crate::calendar_model::{
+    window_for, Calendar, CalendarFeature, Event as CachedEvent, EventKind,
+};
 use crate::calendar_view::{
     imip_row_id, local_zone, parse_zone, Sourced, ViewFilter, IMIP_CALENDAR_NAME,
 };
-use crate::calendar_write::{resolve_input, EventInput};
+use crate::calendar_write::{resolve_input, resolve_patch, EventInput, EventPatch};
 use crate::config::{AccountConfig, AuthMethod};
 use crate::invite::Rsvp;
 use crate::reconcile::reconcile_account;
+use crate::store::calendar::Removal;
 use crate::store::{calendar as cache, BlobStore, Store};
 
 use super::super::config::ConfigStore;
@@ -158,10 +196,13 @@ pub const CALENDAR_VIEW_METHOD_SPECS: [MethodSpec; 3] = [
 ];
 
 /// The `event.*` family (PERSO-200, PERSO-255), in method-name order.
-pub const EVENT_METHOD_SPECS: [MethodSpec; 3] = [
+pub const EVENT_METHOD_SPECS: [MethodSpec; 6] = [
+    MethodSpec::new("event.cancel", MethodKind::Operation, 1),
     MethodSpec::new("event.create", MethodKind::Operation, 1),
+    MethodSpec::new("event.delete", MethodKind::Operation, 1),
     MethodSpec::new("event.get", MethodKind::Query, 1),
     MethodSpec::new("event.respond", MethodKind::Operation, 1),
+    MethodSpec::new("event.update", MethodKind::Operation, 1),
 ];
 
 /// Register both families on `dispatcher`.
@@ -440,6 +481,30 @@ enum Work {
     Respond(Box<RespondWork>),
     /// A new event through the calendar backend.
     Create(Box<CreateWork>),
+    /// A change to, a cancellation or a deletion of a cached server event.
+    Change(Box<ChangeWork>),
+    /// A retried cancel or delete of an event the same call already took
+    /// off the server and out of the cache, which settles as that call did.
+    Removed {
+        account: String,
+        event: String,
+        removal: Removal,
+    },
+}
+
+/// What one change does to its event.
+enum Change {
+    Update(EventPatch),
+    Cancel { comment: Option<String> },
+    Delete,
+}
+
+/// Everything one update, cancel or delete needs, resolved before the
+/// operation id exists: the event as the cache holds it.
+struct ChangeWork {
+    account: AccountConfig,
+    event: CachedEvent,
+    change: Change,
 }
 
 /// Everything one create needs, resolved before the operation id exists.
@@ -537,8 +602,261 @@ fn plan(
         }
         "event.respond" => plan_respond(params, snapshot),
         "event.create" => plan_create(params, snapshot),
+        "event.update" => plan_update(params, snapshot),
+        "event.cancel" => plan_cancel(params, snapshot),
+        "event.delete" => plan_delete(params, snapshot),
         _ => plan_rsvp(method, params, snapshot),
     }
+}
+
+/// The account and store of the server event an update, a cancel or a
+/// delete addresses, each refused before an operation starts: an invitation
+/// mail's event, an account without a backend, and a sign-in without the
+/// calendar scope.
+fn change_store(
+    method: &str,
+    name: &str,
+    id: &str,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<(AccountConfig, Store), RpcError> {
+    let account = super::account::configured_account(&snapshot.accounts, name)?.clone();
+    if imip_row_id(id).is_some() {
+        return Err(invalid_params(format!(
+            "{id} is an invitation mail's event, which can only be answered (event.respond); \
+             {method} changes a server event"
+        )));
+    }
+    match choose_backend(&account) {
+        Ok(BackendChoice::None) => {
+            return Err(invalid_params(format!(
+                "{name} has no calendar backend, so {id} names no server event to change"
+            )))
+        }
+        Ok(_) => {}
+        Err(CalendarBackendError::Other(e)) => return Err(invalid_params(format!("{e:#}"))),
+        Err(e) => return Err(backend_error(name, e)),
+    }
+    super::account::ready_account(&snapshot.accounts, name)?;
+    preflight_scope(&account).map_err(|e| backend_error(name, e))?;
+    let store = open_store(name)?;
+    Ok((account, store))
+}
+
+/// The cached server event `id` of `name` a change addresses, with its
+/// calendar, each refused before an operation starts: an event the cache
+/// does not hold, one of a recurring series, and one on a read-only
+/// calendar.
+fn changed_event(store: &Store, name: &str, id: &str) -> Result<(CachedEvent, Calendar), RpcError> {
+    let event = cache::get_event(store, name, id)
+        .map_err(|e| server_error(name, &e))?
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "{name} has no event {id} (cancelled or deleted already, or not synced yet)"
+            ))
+        })?;
+    if event.kind != EventKind::Single || event.series_master_id.is_some() {
+        return Err(invalid_params(format!(
+            "{} is part of a recurring series, which mp cannot change yet; change it in Outlook",
+            event.summary
+        )));
+    }
+    let calendar = cache::list_calendars(store, name)
+        .map_err(|e| server_error(name, &e))?
+        .into_iter()
+        .find(|calendar| calendar.id == event.calendar)
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "{name} has no calendar {} for {id}; calendar.list names them",
+                event.calendar
+            ))
+        })?;
+    if !calendar.can_edit {
+        return Err(invalid_params(format!(
+            "The calendar {} of {name} is read-only",
+            calendar.name
+        )));
+    }
+    Ok((event, calendar))
+}
+
+/// A cancel or a delete of an event the cache no longer holds because the
+/// same call of mp already took it off the server: a retry of an operation
+/// that vanished, which counts as done ([`Work::Removed`]). `None` when the
+/// cache holds the event or mp never made that call, which
+/// [`changed_event`] then reads or refuses, so an id the cache never held is
+/// still refused rather than reported done.
+fn retried_removal(
+    method: &str,
+    store: &Store,
+    name: &str,
+    id: &str,
+) -> Result<Option<Work>, RpcError> {
+    if cache::get_event(store, name, id)
+        .map_err(|e| server_error(name, &e))?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let removal =
+        cache::removal(store, name, id, Utc::now()).map_err(|e| server_error(name, &e))?;
+    Ok(removal
+        .filter(|removal| removal.method == method)
+        .map(|removal| Work::Removed {
+            account: name.to_string(),
+            event: id.to_string(),
+            removal,
+        }))
+}
+
+/// `event.update`: the change the client typed, read against the cached
+/// event, and refused when the user may not make it.
+fn plan_update(
+    params: &Value,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<Work, RpcError> {
+    only_params("event.update", params, &["account", "event", "fields"])?;
+    let request: EventUpdateParams = serde_json::from_value(params.clone())
+        .map_err(|e| invalid_params(format!("event.update: {e}")))?;
+    let name = request.account.as_str();
+    let (account, store) = change_store("event.update", name, &request.event, snapshot)?;
+    let (event, calendar) = changed_event(&store, name, &request.event)?;
+    let mut patch = resolve_patch(&request.fields, &event, local_zone()).map_err(invalid_params)?;
+    // Turning off a meeting that is not online changes nothing.
+    if patch.online_meeting == Some(false) && !event.is_online_meeting {
+        patch.online_meeting = None;
+    }
+    if patch.is_empty() {
+        return Err(invalid_params(
+            "Nothing to change: name at least one field of the event",
+        ));
+    }
+    if !event.is_organizer && !attendee_may_change(&patch) {
+        return Err(invalid_params(ORGANIZER_ONLY_REFUSAL));
+    }
+    if patch.online_meeting == Some(false) {
+        return Err(invalid_params(format!(
+            "{} stays a Teams meeting: the server keeps its link once it exists",
+            event.summary
+        )));
+    }
+    if patch.online_meeting == Some(true)
+        && !event.is_online_meeting
+        && !calendar_features(&account, &calendar).contains(&CalendarFeature::OnlineMeeting)
+    {
+        return Err(no_teams_refusal(&account, &calendar));
+    }
+    if patch.body.is_some() && event.is_online_meeting {
+        return Err(invalid_params(format!(
+            "The description of {} cannot be changed from mp yet: the server would drop its \
+             Teams join details; change it in Outlook",
+            event.summary
+        )));
+    }
+    Ok(Work::Change(Box::new(ChangeWork {
+        account,
+        event,
+        change: Change::Update(patch),
+    })))
+}
+
+/// The refusal of an attendee's change to anything but their own copy's
+/// reminder and show-as.
+pub const ORGANIZER_ONLY_REFUSAL: &str = "Only the organizer can change this event";
+
+/// Whether an attendee may make `patch` on their copy of a meeting: the
+/// reminder and the show-as are the attendee's own, the rest the
+/// organizer's.
+fn attendee_may_change(patch: &EventPatch) -> bool {
+    let own = EventPatch {
+        reminder: patch.reminder,
+        show_as: patch.show_as,
+        ..Default::default()
+    };
+    &own == patch
+}
+
+/// The refusal of a Teams meeting on `calendar`, which offers none.
+fn no_teams_refusal(account: &AccountConfig, calendar: &Calendar) -> RpcError {
+    let name = &account.name;
+    invalid_params(if calendar.offers_teams() {
+        format!("The calendar backend of {name} offers no Teams meetings")
+    } else {
+        format!(
+            "The calendar {} of {name} offers no Teams meetings (the mailbox has no Teams \
+             licence)",
+            calendar.name
+        )
+    })
+}
+
+/// `event.cancel`: a meeting the user organizes, which tells its attendees.
+fn plan_cancel(
+    params: &Value,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<Work, RpcError> {
+    only_params("event.cancel", params, &["account", "comment", "event"])?;
+    let request: EventCancelParams = serde_json::from_value(params.clone())
+        .map_err(|e| invalid_params(format!("event.cancel: {e}")))?;
+    let (account, store) =
+        change_store("event.cancel", &request.account, &request.event, snapshot)?;
+    if let Some(retry) = retried_removal("event.cancel", &store, &account.name, &request.event)? {
+        return Ok(retry);
+    }
+    let (event, _) = changed_event(&store, &account.name, &request.event)?;
+    if !event.is_organizer {
+        return Err(invalid_params(format!(
+            "Only the organizer can cancel {}; decline it instead",
+            event.summary
+        )));
+    }
+    if event.attendees.is_empty() {
+        return Err(invalid_params(format!(
+            "{} invites nobody, so there is nobody to tell; delete it instead",
+            event.summary
+        )));
+    }
+    let comment = request.comment.filter(|comment| !comment.trim().is_empty());
+    Ok(Work::Change(Box::new(ChangeWork {
+        account,
+        event,
+        change: Change::Cancel { comment },
+    })))
+}
+
+/// `event.delete`: an event that tells nobody, one without attendees or
+/// the user's copy of a meeting its organizer cancelled.
+fn plan_delete(
+    params: &Value,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<Work, RpcError> {
+    only_params("event.delete", params, &["account", "event"])?;
+    let request: EventDeleteParams = serde_json::from_value(params.clone())
+        .map_err(|e| invalid_params(format!("event.delete: {e}")))?;
+    let (account, store) =
+        change_store("event.delete", &request.account, &request.event, snapshot)?;
+    if let Some(retry) = retried_removal("event.delete", &store, &account.name, &request.event)? {
+        return Ok(retry);
+    }
+    let (event, _) = changed_event(&store, &account.name, &request.event)?;
+    if !event.cancelled {
+        if event.is_organizer && !event.attendees.is_empty() {
+            return Err(invalid_params(format!(
+                "{} is a meeting with attendees; cancel it to tell them",
+                event.summary
+            )));
+        }
+        if !event.is_organizer && (event.organizer.is_some() || !event.attendees.is_empty()) {
+            return Err(invalid_params(format!(
+                "{} is a meeting you were invited to; decline it to tell the organizer",
+                event.summary
+            )));
+        }
+    }
+    Ok(Work::Change(Box::new(ChangeWork {
+        account,
+        event,
+        change: Change::Delete,
+    })))
 }
 
 /// `event.create`: the account's backend and scope, the event the client
@@ -606,15 +924,7 @@ fn plan_create(
     if input.online_meeting
         && !calendar_features(&account, &calendar).contains(&CalendarFeature::OnlineMeeting)
     {
-        return Err(invalid_params(if calendar.offers_teams() {
-            format!("The calendar backend of {name} offers no Teams meetings")
-        } else {
-            format!(
-                "The calendar {} of {name} offers no Teams meetings (the mailbox has no Teams \
-                 licence)",
-                calendar.name
-            )
-        }));
+        return Err(no_teams_refusal(&account, &calendar));
     }
     let transaction_id = match request.transaction_id.as_deref().map(str::trim) {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -889,6 +1199,140 @@ async fn run(work: Work, handle: OperationHandle) {
         Work::Rsvp(work) => reply(*work, handle).await,
         Work::Respond(work) => respond(*work, handle).await,
         Work::Create(work) => create(*work, handle).await,
+        Work::Change(work) => change(*work, handle).await,
+        Work::Removed {
+            account,
+            event,
+            removal,
+        } => {
+            handle.announce(calendar_changed(&account));
+            settle_removal(&handle, account, event, removal);
+        }
+    }
+}
+
+/// What a change left on the server, for the cache and the settle.
+enum Changed {
+    /// The event as the server holds it after an update.
+    Updated(Box<CachedEvent>),
+    /// The event is gone: cancelled or deleted.
+    Removed(Removal),
+}
+
+/// Settle a cancel or a delete with its own result shape.
+fn settle_removal(handle: &OperationHandle, account: String, event: String, removal: Removal) {
+    if removal.method == "event.cancel" {
+        settle(
+            handle,
+            EventCancelResult {
+                account,
+                event,
+                notified: removal.notified,
+            },
+        );
+    } else {
+        settle(handle, EventDeleteResult { account, event });
+    }
+}
+
+/// An update, a cancel or a delete: the server's answer, written into the
+/// cache under the account's calendar lock (the updated event upserted, the
+/// cancelled or deleted one removed), then the sync that confirms it.
+async fn change(work: ChangeWork, handle: OperationHandle) {
+    let ChangeWork {
+        account,
+        event,
+        change,
+    } = work;
+    let name = account.name.clone();
+    let token = handle.token.clone();
+    let method = match &change {
+        Change::Update(_) => "event.update",
+        Change::Cancel { .. } => "event.cancel",
+        Change::Delete => "event.delete",
+    };
+    let (id, calendar) = (event.id.clone(), event.calendar.clone());
+    let notified: Vec<String> = event.attendees.into_iter().map(|a| a.email).collect();
+    let changed = off_thread("the event change", move || async move {
+        let backend = backend_for(&account)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{} has no calendar backend", account.name))?;
+        if !commit_point(method, &token).await {
+            return Ok(None);
+        }
+        let changed = match change {
+            Change::Update(patch) => match backend.update_event(&calendar, &id, &patch).await? {
+                Written::Event(event) => Changed::Updated(event),
+                Written::Series(series) => {
+                    return Err(anyhow::anyhow!(
+                        "the server answered the change with the series {}",
+                        series.master_id
+                    )
+                    .into())
+                }
+            },
+            Change::Cancel { comment } => {
+                backend.cancel_event(&id, comment).await?;
+                Changed::Removed(Removal {
+                    method: method.to_string(),
+                    notified,
+                })
+            }
+            Change::Delete => {
+                backend.delete_event(&id).await?;
+                Changed::Removed(Removal {
+                    method: method.to_string(),
+                    notified: Vec::new(),
+                })
+            }
+        };
+        let store = Store::open(crate::config::store_path(&account.name))?;
+        let lock = crate::calendar_sync::account_lock(&account.name);
+        let _held = lock.lock().await;
+        match &changed {
+            Changed::Updated(event) => cache::upsert_event(&store, &account.name, event)?,
+            Changed::Removed(removal) => {
+                cache::remove_event(&store, &account.name, &id, removal, Utc::now())?;
+            }
+        }
+        if let Err(e) =
+            crate::calendar_sync::sync_account(&store, &backend, &account.name, Utc::now()).await
+        {
+            warn!(
+                "[calendar] {}: the sync after {method} failed: {e}",
+                account.name
+            );
+        }
+        Ok::<_, CalendarBackendError>(Some(changed))
+    })
+    .await;
+    match changed {
+        // Cancelled at the commit point: nothing was sent, and the registry
+        // has already settled the operation.
+        Ok(Ok(None)) => {}
+        Ok(Ok(Some(changed))) => {
+            handle.announce(calendar_changed(&name));
+            match changed {
+                Changed::Updated(updated) => match (Sourced {
+                    event: *updated,
+                    source: None,
+                })
+                .to_wire()
+                {
+                    Ok(event) => settle(
+                        &handle,
+                        EventUpdateResult {
+                            account: name,
+                            event,
+                        },
+                    ),
+                    Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+                },
+                Changed::Removed(removal) => settle_removal(&handle, name, event.id, removal),
+            }
+        }
+        Ok(Err(e)) => handle.fail(DomainError::from(backend_error(&name, e))),
+        Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
     }
 }
 
@@ -1302,8 +1746,25 @@ mod tests {
         }
     }
 
-    /// The server calendar's arrays are in method-name order, and its two
-    /// operations are durable: an answer or an event the server took cannot
+    /// An attendee may change their own copy's reminder and show-as, and
+    /// nothing else.
+    #[test]
+    fn an_attendee_changes_only_the_reminder_and_show_as() {
+        let own = EventPatch {
+            reminder: Some(None),
+            show_as: Some(crate::calendar_model::ShowAs::Free),
+            ..Default::default()
+        };
+        assert!(attendee_may_change(&own));
+        let renamed = EventPatch {
+            summary: Some("Mine now".into()),
+            ..own
+        };
+        assert!(!attendee_may_change(&renamed));
+    }
+
+    /// The server calendar's arrays are in method-name order, and its
+    /// operations are durable: an answer or a write the server took cannot
     /// be recalled.
     #[test]
     fn the_server_calendar_arrays_are_in_name_order() {
@@ -1318,11 +1779,13 @@ mod tests {
             sorted.sort_unstable();
             assert_eq!(names, sorted);
         }
-        for (index, name) in [(0, "event.create"), (2, "event.respond")] {
-            let spec = EVENT_METHOD_SPECS[index];
-            assert_eq!(spec.name, name);
-            assert_eq!(spec.kind, MethodKind::Operation);
-            assert_eq!(spec.cancel_scope, CancelScope::Durable);
+        for spec in EVENT_METHOD_SPECS {
+            if spec.name == "event.get" {
+                assert_eq!(spec.kind, MethodKind::Query);
+                continue;
+            }
+            assert_eq!(spec.kind, MethodKind::Operation, "{}", spec.name);
+            assert_eq!(spec.cancel_scope, CancelScope::Durable, "{}", spec.name);
         }
     }
 

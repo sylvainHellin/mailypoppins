@@ -454,3 +454,11 @@ With only the CLI connected nobody notifies, and the reminder waits in `mp calen
 Rejected: each client notifying on its own (one notification per open client) and the clients agreeing among themselves (a second channel between clients the daemon already is).
 Source: implementation of PERSO-255 on branch `calendar-p2-p2s8`, 2026-11-04.
 Status: accepted
+
+## 2026-11-04 - Cmd+P opens the desktop palette, and a palette search ranks label matches first, hides scattered-letter matches and breaks ties by recent use
+
+Why: Cmd+P is the macOS habit for a command palette, beside the TUI's `:` and Ctrl+P, and like Ctrl+P it stays a text field's; cmdk's default scoring tied every CALENDAR row for `cal`, listed rows whose letters only turned up scattered (`test` found "Toggle flag/star"), and ranked the section and keys as high as the label.
+Each query word must match the start of a word of the label or section, or, at three letters or more, a run inside a word of the label; the whole query equal to a key matches that row; a label match counts twice the same match in the section or keys; equal scores list the action last run from the palette first (the last 30, kept in the desktop's localStorage prefs), then catalog order.
+Rejected: a threshold on cmdk's command-score (a magic number over a score that still mixes label, section and keys); a menu accelerator for Cmd+P (it would take the key from text fields and the embedded editor).
+Source: Sylvain in chat, 2026-11-04
+Status: accepted

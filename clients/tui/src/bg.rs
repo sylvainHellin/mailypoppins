@@ -271,6 +271,37 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             result,
         } => app.land_free_busy(&operation_id, result),
 
+        BgResult::EventChanged {
+            operation_id,
+            result,
+        } => {
+            let form = app.calendar_view.pending_forms.remove(&operation_id);
+            let removal = app.calendar_view.pending_removals.remove(&operation_id);
+            match (result, form, removal) {
+                (Ok(line), _, _) => {
+                    app.set_status_level(line, StatusLevel::Success);
+                    app.rebuild_calendar_if_loaded();
+                }
+                (Err(e), Some(form), _) => app.reopen_event_form(
+                    form,
+                    format!("The change did not go through: {e}; Enter sends it again"),
+                ),
+                (Err(e), None, Some(removal)) => {
+                    let verb = if removal.cancel {
+                        "Cancelling"
+                    } else {
+                        "Deleting"
+                    };
+                    let why = format!("{verb} {} failed: {e}", removal.summary);
+                    app.reopen_event_remove(removal, why);
+                }
+                (Err(e), None, None) => app.set_status_level(
+                    format!("The event was not changed: {e}"),
+                    StatusLevel::Error,
+                ),
+            }
+        }
+
         BgResult::SendApproved {
             account_index,
             result,

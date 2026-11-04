@@ -724,6 +724,129 @@ pub struct CalendarFreeBusyResult {
     pub schedules: Vec<CalendarSchedule>,
 }
 
+/// A change to an event as a client types it: the keys of
+/// [`EventInputParams`] with patch semantics, an absent key left alone, a
+/// present one changed, and `null` clearing `location`, `body` or
+/// `reminder`. The daemon reads a new time against the event's current one
+/// and checks every field before an operation starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventPatchParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub summary: Option<String>,
+    /// The new start, in the forms of [`EventInputParams::start`]; absent,
+    /// the event's own start when `end` or `duration` moves its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub start: Option<String>,
+    /// The new end; absent with no `duration`, a new start keeps the
+    /// event's length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub duration: Option<String>,
+    /// The IANA zone the new times are read in; the event's own zone when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub zone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub all_day: Option<bool>,
+    /// `null` or an empty text clears it.
+    #[serde(default, with = "present", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<Option<String>>"))]
+    pub location: Option<Option<String>>,
+    /// The description as plain text; `null` or an empty text clears it.
+    #[serde(default, with = "present", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<Option<String>>"))]
+    pub body: Option<Option<String>>,
+    /// The whole new list, which the server turns into updates for the
+    /// attendees that changed only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub attendees: Option<Vec<EventAttendeeInput>>,
+    /// `true` adds an online meeting; a meeting once online stays online.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub online_meeting: Option<bool>,
+    /// Minutes before the start, `null` for none.
+    #[serde(default, with = "present", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<Option<u32>>"))]
+    pub reminder: Option<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub show_as: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub sensitivity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub allow_new_time_proposals: Option<bool>,
+}
+
+/// The `params` of `event.update`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventUpdateParams {
+    pub account: String,
+    /// A [`CalendarEvent::id`] of a server event.
+    pub event: String,
+    pub fields: EventPatchParams,
+}
+
+/// What a settled `event.update` reports.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventUpdateResult {
+    pub account: String,
+    /// The event as the server holds it after the change, now in the cache.
+    pub event: CalendarEvent,
+}
+
+/// The `params` of `event.cancel`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventCancelParams {
+    pub account: String,
+    /// A [`CalendarEvent::id`] of a meeting the user organizes.
+    pub event: String,
+    /// A message for the attendees, sent with the cancellation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub comment: Option<String>,
+}
+
+/// What a settled `event.cancel` reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventCancelResult {
+    pub account: String,
+    pub event: String,
+    /// The addresses the server sent the cancellation to, rooms included.
+    pub notified: Vec<String>,
+}
+
+/// The `params` of `event.delete`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventDeleteParams {
+    pub account: String,
+    /// A [`CalendarEvent::id`] of an event that tells nobody.
+    pub event: String,
+}
+
+/// What a settled `event.delete` reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventDeleteResult {
+    pub account: String,
+    pub event: String,
+}
+
 /// The payload of a `calendar.changed` event: an account's calendars or
 /// events moved (a sync, a respond, a visibility change), and a client that
 /// shows them reads `calendar.list` or `calendar.view` again.
@@ -822,6 +945,29 @@ mod tests {
         )))
         .expect("event.create's answer");
         assert_eq!(started.transaction_id, create.transaction_id.unwrap());
+
+        let raw = params(include_str!("../fixtures/event.update.request.json"));
+        let update: EventUpdateParams =
+            serde_json::from_value(raw.clone()).expect("event.update params");
+        assert_eq!(update.fields.location, Some(None));
+        assert_eq!(update.fields.reminder, Some(Some(5)));
+        assert_eq!(update.fields.body, None);
+        assert_eq!(serde_json::to_value(&update).unwrap(), raw);
+        let raw = params(include_str!("../fixtures/event.cancel.request.json"));
+        let cancel: EventCancelParams =
+            serde_json::from_value(raw.clone()).expect("event.cancel params");
+        assert_eq!(serde_json::to_value(&cancel).unwrap(), raw);
+        let raw = params(include_str!("../fixtures/event.delete.request.json"));
+        let delete: EventDeleteParams =
+            serde_json::from_value(raw.clone()).expect("event.delete params");
+        assert_eq!(serde_json::to_value(&delete).unwrap(), raw);
+        for answer in [
+            include_str!("../fixtures/event.update.response.json"),
+            include_str!("../fixtures/event.cancel.response.json"),
+            include_str!("../fixtures/event.delete.response.json"),
+        ] {
+            assert!(result(answer)["operation_id"].is_string());
+        }
 
         let visibility = params(include_str!(
             "../fixtures/calendar.set_visibility.request.json"

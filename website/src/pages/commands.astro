@@ -130,6 +130,9 @@ const calendarCommands = [
   { command: 'mp calendar show|hide <calendar-id> [-A NAME]', description: 'Show a hidden calendar in the views again, or hide one; a local preference that survives mp calendar rebuild' },
   { command: 'mp calendar freebusy [-A NAME] [--on DATE | --from DATE --to DATE] [ADDRESS]...', description: 'Show when people and rooms are busy, your own row first: per address a row of 30-minute slots per day (· free, ▒ tentative, █ busy, ▓ away, ░ working elsewhere, ? unknown) and the busy blocks with their times; an address outside your organisation reads "no free/busy". --on is one day (default today), --from through --to up to 61 days, --interval MIN sets the slot length (5 to 1440), --zone ZONE the days\' zone, --json prints the result. Needs a Microsoft 365 account' },
   { command: 'mp event create [-A NAME] --summary TEXT --start WHEN [--end WHEN | --duration D]', description: 'Create an event in the account\'s server calendar, whose server sends the invitations: --to, --optional and --room invite people and rooms, --teams adds a Teams link on a calendar that offers Teams (one whose mailbox has no Teams licence refuses it), --reminder MIN or --no-reminder sets the reminder (the mailbox default otherwise), --location, --body or --body-file, --calendar ID (default the account\'s default calendar), --zone ZONE for the times (default the local zone); a bare date makes an all-day event whose --end is its last day; --transaction-id reruns a create with the id it printed when it could not confirm the event, so the server makes the event once; --json prints the result' },
+  { command: 'mp event update <event-id> [-A NAME]', description: 'Change an event: only the fields you name change, and the server sends the attendees an update. --summary, --start, --end or --duration, --all-day, --zone (default the event\'s own), --location or --clear-location, --body, --body-file or --clear-body, --to, --optional and --room (the whole new attendee list), --teams, --reminder MIN or --no-reminder and --show-as; a new --start keeps the event\'s length. An attendee may change only --reminder, --no-reminder and --show-as on their own copy; an event of a recurring series is not changed yet; --json prints the result' },
+  { command: 'mp event cancel <event-id> [-A NAME] [--comment TEXT]', description: 'Cancel a meeting you organize: the server sends every attendee the cancellation, with the comment; a meeting someone else organizes is declined with mp event respond instead, and one that invites nobody is deleted; --json prints the result' },
+  { command: 'mp event delete <event-id> [-A NAME]', description: 'Delete an event that tells nobody: one without attendees, or your copy of a meeting its organizer cancelled; a live meeting is cancelled (organizer) or declined (attendee) instead; --json prints the result' },
   { command: 'mp event show <event-id> [-A NAME] [--json]', description: 'Print one event: when, where, organizer, attendees with their answers and proposed times, your own answer, whether new times are accepted, the series rule (and whether this occurrence was changed), the online meeting and its service, link and description; --json adds the series of an occurrence' },
   { command: 'mp event respond <event-id> accept|tentative|decline [-A NAME]', description: 'Answer an invitation through the server for a server event, or by iMIP reply for an invitation mail (imip:<row_id>); --comment TEXT adds a note, --no-send-response records the answer without telling the organizer (server events only), --json prints the result' },
   { command: 'mp invite accept|tentative|decline <selector> [--comment TEXT] [--no-send-response]', description: 'Answer a received invitation mail: through the server when the account has a server calendar holding its event, else by iMIP REPLY' },
@@ -462,6 +465,8 @@ mp calendar view week --on +7 -A evoqs
 mp calendar hide AAMkADcal2 -A evoqs
 mp calendar freebusy -A evoqs --on tomorrow ada@example.com room-1@example.com
 mp event create -A evoqs --summary "Project review" --start 2026-11-18T14:00 --duration 1h --to ada@example.com --teams
+mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
+mp event cancel AAMkADev1 --comment "Postponed to next month" -A evoqs
 mp event respond AAMkADev2 accept --comment "See you there" -A evoqs`}
       />
       <p>
@@ -475,7 +480,13 @@ mp event respond AAMkADev2 accept --comment "See you there" -A evoqs`}
         event card, <code>V</code> answers an invitation, <code>n</code> opens
         the event form on the cursor's day (Tab moves between its fields,
         <code>Enter</code> on the description opens <code>$EDITOR</code>, and
-        <code>Enter</code> anywhere else creates the event), and <code>c</code>
+        <code>Enter</code> anywhere else creates the event), <code>E</code>
+        opens the same form on the event under the cursor and sends only what
+        you change (on someone else's meeting only the reminder and the show
+        as, which <code>Left</code> and <code>Right</code> pick, as they pick
+        the calendar),
+        <code>D</code> cancels a meeting you organize, with a comment for its
+        attendees, or deletes an event that tells nobody, and <code>c</code>
         lists the calendars, where <code>Space</code> shows or hides one. A
         create that fails brings the form back as it was, and <code>Enter</code>
         retries it without making a second event. On a Microsoft 365 account

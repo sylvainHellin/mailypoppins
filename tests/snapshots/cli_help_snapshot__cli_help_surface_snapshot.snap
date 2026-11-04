@@ -988,6 +988,9 @@ Usage: mp event [OPTIONS] <COMMAND>
 
 Commands:
   create   Create an event in the account's server calendar; the server sends the invitations
+  update   Change an event: only the fields you name change, and the server sends the attendees an update
+  cancel   Cancel a meeting you organize: every attendee gets the cancellation
+  delete   Delete an event that tells nobody: one without attendees, or your copy of a meeting its organizer cancelled
   show     Show one event: when, where, organizer, attendees, your answer
   respond  Answer an invitation: through the server for a server event, by iMIP reply for an invitation mail's event
   help     Print this message or the help of the given subcommand(s)
@@ -1037,6 +1040,82 @@ whose --end is its last day, included. --duration takes 1h30m or PT1H30M.
 The command prints the create's transaction id when it cannot confirm the
 event; rerun it with --transaction-id and the server creates the event at
 most once.
+
+$ mp event update --help
+Change an event: only the fields you name change, and the server sends the attendees an update
+
+Usage: mp event update [OPTIONS] <EVENT>
+
+Arguments:
+  <EVENT>  The event id, as `mp calendar view --json` prints it
+
+Options:
+      --summary <TEXT>     The new title
+      --start <WHEN>       The new start
+      --end <WHEN>         The new end; on an all-day event the last day, included
+      --duration <D>       The new length (1h30m, PT1H30M; whole days on an all-day event)
+      --all-day            Make it an all-day event: --start and --end are bare dates
+      --zone <ZONE>        The IANA zone the new times are read in (default the event's own)
+      --location <TEXT>    Where it takes place
+      --clear-location     Remove the location
+      --body <TEXT>        The new description
+      --body-file <PATH>   The new description, read from a file (- for stdin)
+      --clear-body         Remove the description
+      --to <ADDR>          A required attendee of the new list (repeatable)
+      --optional <ADDR>    An optional attendee of the new list (repeatable)
+      --room <ADDR>        A room mailbox of the new list (repeatable)
+      --teams              Add a Teams meeting link (when the calendar offers Teams); a link once added stays
+      --reminder <MIN>     Minutes before the start the reminder fires
+      --no-reminder        No reminder
+      --show-as <WORD>     How the time shows to others: free, tentative, busy, oof, working-elsewhere
+      --json               Print the settled `event.update` result as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+WHEN takes the forms of mp event create. A new --start keeps the event's
+length unless --end or --duration names a new one, and an --end or a
+--duration alone keeps its start; the times are read in the event's own zone
+unless --zone names another. --to, --optional and --room name the whole new
+attendee list. An attendee may change only --reminder, --no-reminder and
+--show-as on their own copy of a meeting; the rest is the organizer's.
+
+Examples:
+  mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
+  mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs
+
+$ mp event cancel --help
+Cancel a meeting you organize: every attendee gets the cancellation
+
+Usage: mp event cancel [OPTIONS] <EVENT>
+
+Arguments:
+  <EVENT>  The event id, as `mp calendar view --json` prints it
+
+Options:
+      --comment <TEXT>     A message for the attendees, sent with the cancellation
+      --json               Print the settled `event.cancel` result as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+A meeting that invites nobody is deleted with mp event delete, and a meeting
+someone else organizes is declined with mp event respond EVENT decline.
+
+$ mp event delete --help
+Delete an event that tells nobody: one without attendees, or your copy of a meeting its organizer cancelled
+
+Usage: mp event delete [OPTIONS] <EVENT>
+
+Arguments:
+  <EVENT>  The event id, as `mp calendar view --json` prints it
+
+Options:
+      --json               Print the settled `event.delete` result as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+A live meeting is not deleted: its organizer cancels it (mp event cancel), so
+the attendees are told, and an attendee declines it (mp event respond EVENT
+decline), so the organizer is.
 
 $ mp event show --help
 Show one event: when, where, organizer, attendees, your answer

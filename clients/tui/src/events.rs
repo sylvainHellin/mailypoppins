@@ -194,6 +194,14 @@ pub enum Awaited {
         /// Its own id, which the form's availability waits for.
         operation_id: String,
     },
+    /// `event.update`, `event.cancel` or `event.delete` (PERSO-255).
+    EventChange {
+        /// Its own id, which keys an edit form kept while it runs.
+        operation_id: String,
+        /// What the status line says once it went through: `Updated
+        /// Budget`.
+        done: String,
+    },
     /// `message.search_server`, the overlay's server leg (`LST-08`, #0126).
     ///
     /// Its hits do not arrive here: they stream as `message.server_hit`
@@ -893,7 +901,11 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
 /// Reopen every event form whose create this client no longer awaits: its
 /// daemon restarted, or forgot the operation, before it settled, so nobody
 /// knows whether the event exists. The form keeps its transaction id, so
-/// `Enter` retries it and the server makes the event at most once.
+/// `Enter` retries it and the server makes the event at most once. An edit
+/// form comes back the same way; its change sets fields to values, so
+/// sending it again is safe. A cancel's or a delete's confirmation asks
+/// again with its comment: the daemon counts a repeat of one that went
+/// through as done.
 fn orphan_event_forms(app: &mut App) {
     let mut gone: Vec<String> = app
         .calendar_view
@@ -905,10 +917,29 @@ fn orphan_event_forms(app: &mut App) {
     gone.sort();
     for id in gone {
         if let Some(form) = app.calendar_view.pending_forms.remove(&id) {
-            app.reopen_event_form(
-                form,
+            let why = if form.editing.is_some() {
+                "The daemon restarted before the change was confirmed; Enter sends it again"
+            } else {
                 "The daemon restarted before the event was confirmed; Enter retries with the \
                  same transaction id, which creates it at most once"
+            };
+            app.reopen_event_form(form, why.to_string());
+        }
+    }
+    let mut gone: Vec<String> = app
+        .calendar_view
+        .pending_removals
+        .keys()
+        .filter(|id| !app.events.awaits(id))
+        .cloned()
+        .collect();
+    gone.sort();
+    for id in gone {
+        if let Some(removal) = app.calendar_view.pending_removals.remove(&id) {
+            app.reopen_event_remove(
+                removal,
+                "The daemon restarted before it was confirmed; confirming again is safe, and \
+                 counts as done if it went through"
                     .to_string(),
             );
         }

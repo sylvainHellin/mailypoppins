@@ -1000,3 +1000,609 @@ async fn event_create_without_the_scope_is_the_relogin_prompt() {
     );
     assert!(writes(&slice).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// event.update, event.cancel and event.delete (PERSO-255)
+// ---------------------------------------------------------------------------
+
+/// The events the change rows work on, beside the fixture's meeting (where
+/// the user is an attendee) and holiday: a Teams meeting the user organizes
+/// with one attendee, an event of the user's own with nobody invited, the
+/// user's copy of a meeting its organizer cancelled, and the two occurrences
+/// of the weekly series.
+fn change_events() -> Vec<mailypoppins::calendar_model::Event> {
+    use mailypoppins::calendar_model::{
+        Attendee, AttendeeRole, EventTime, OnlineMeetingProvider, OwnResponse, Person,
+        ResponseStatus,
+    };
+    use support::calendar_fixture::event;
+    let berlin = |days, hour| EventTime::timed(at(days, hour), at(days, hour + 1), "Europe/Berlin");
+    let mut own = event(
+        "ev-own",
+        "cal-main",
+        "own@example.com",
+        "Budget",
+        berlin(8, 9).unwrap(),
+    );
+    own.is_organizer = true;
+    own.own_response = OwnResponse::Organizer;
+    own.location = Some("Room 1".into());
+    own.reminder = Some(15);
+    own.is_online_meeting = true;
+    own.online_meeting_provider = Some(OnlineMeetingProvider::TeamsForBusiness);
+    own.attendees = vec![Attendee {
+        name: Some("Ada Lovelace".into()),
+        email: "ada@example.com".into(),
+        role: AttendeeRole::Required,
+        status: ResponseStatus::Accepted,
+        proposed_time: None,
+    }];
+    let mut solo = event(
+        "ev-solo",
+        "cal-second",
+        "solo@example.com",
+        "Dentist",
+        berlin(9, 7).unwrap(),
+    );
+    solo.is_organizer = true;
+    solo.own_response = OwnResponse::Organizer;
+    let mut called_off = event(
+        "ev-called-off",
+        "cal-main",
+        "called-off@example.com",
+        "Canceled: Offsite",
+        berlin(11, 9).unwrap(),
+    );
+    called_off.cancelled = true;
+    called_off.organizer = Some(Person {
+        name: None,
+        email: "chair@tum.de".into(),
+    });
+    called_off.own_response = OwnResponse::Accepted;
+    [vec![own, solo, called_off], series_occurrences()].concat()
+}
+
+fn change_slice() -> Slice {
+    Slice::start_seeded(false, &[], |_| (), change_events())
+}
+
+/// An update by the organizer answers an operation id, reaches the fake with
+/// the fields it names only (the new start keeping the meeting's hour, the
+/// location cleared), settles with the server's event, which the cache holds
+/// before the operation settles, and is announced.
+#[tokio::test]
+async fn event_update_patches_the_fields_it_names_and_writes_through() {
+    let slice = change_slice();
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({})).await;
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+
+    let start = format!("{}T15:00", day(8).date_naive());
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": SERVER, "event": "ev-own",
+               "fields": {"start": start, "location": null, "reminder": 5}}),
+    )
+    .await;
+    let result = succeeded(&status);
+    assert_eq!(result["account"], SERVER);
+    let event = &result["event"];
+    assert_eq!(event["id"], "ev-own");
+    assert_eq!(event["summary"], "Budget");
+    assert!(event.get("location").is_none(), "{event}");
+    assert_eq!(event["reminder"], 5);
+    let wall = day(8).date_naive().and_hms_opt(15, 0, 0).unwrap();
+    let expected = chrono::TimeZone::from_local_datetime(&chrono_tz::Europe::Berlin, &wall)
+        .unwrap()
+        .to_utc();
+    let instant = |key: &str| {
+        chrono::DateTime::parse_from_rfc3339(event["time"][key].as_str().unwrap())
+            .unwrap()
+            .to_utc()
+    };
+    assert_eq!(event["time"]["zone"], "Europe/Berlin");
+    assert_eq!(instant("start"), expected);
+    assert_eq!(instant("end"), expected + Days::hours(1));
+
+    let recorded = writes(&slice);
+    let [RecordedWrite::Update {
+        calendar,
+        event: id,
+        patch,
+    }] = recorded.as_slice()
+    else {
+        panic!("one update: {recorded:?}");
+    };
+    assert_eq!((calendar.as_str(), id.as_str()), ("cal-main", "ev-own"));
+    assert!(patch.time.is_some());
+    assert_eq!(patch.zone.as_deref(), Some("Europe/Berlin"));
+    assert_eq!(patch.location, Some(None));
+    assert_eq!(patch.reminder, Some(Some(5)));
+    assert_eq!(patch.summary, None);
+    assert_eq!(patch.body, None);
+    assert_eq!(patch.attendees, None);
+
+    let got = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-own"}),
+    )
+    .await;
+    assert_eq!(got["event"]["reminder"], 5);
+    assert_eq!(got["event"]["time"], event["time"]);
+
+    let start = Instant::now();
+    let mut announced = false;
+    while start.elapsed() < SETTLE_DEADLINE {
+        let Some(notification) = within("state.event", watcher.next_notification()).await else {
+            break;
+        };
+        if notification.params["kind"] == "calendar.changed" {
+            announced = true;
+            break;
+        }
+    }
+    assert!(announced, "a client was told the calendar changed");
+}
+
+/// An attendee changes their own copy's reminder and show-as and nothing
+/// else; every other refusal of an update comes before an operation, and
+/// nothing refused reaches the server.
+#[tokio::test]
+async fn event_update_refuses_before_an_operation_starts() {
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let update = |account: &str, event: &str, fields: Value| json!({"account": account, "event": event, "fields": fields});
+    let refused = |error: RpcError| {
+        assert_eq!(error.code, -32602, "{}", error.message);
+        error.message
+    };
+
+    let attendee = call_err(
+        &mut conn,
+        "event.update",
+        update(SERVER, "ev-meeting", json!({"summary": "Mine now"})),
+    )
+    .await;
+    assert_eq!(
+        refused(attendee),
+        "Only the organizer can change this event"
+    );
+    let own_copy = run_operation(
+        &mut conn,
+        "event.update",
+        update(
+            SERVER,
+            "ev-meeting",
+            json!({"reminder": null, "show_as": "free"}),
+        ),
+    )
+    .await;
+    assert_eq!(succeeded(&own_copy)["event"]["show_as"], "free");
+    let before = writes(&slice).len();
+    assert_eq!(before, 1);
+
+    let cases = [
+        (update(SERVER, "ev-own", json!({})), "Nothing to change"),
+        (
+            update(SERVER, "ev-own", json!({"online_meeting": false})),
+            "stays a Teams meeting",
+        ),
+        (
+            update(SERVER, "ev-own", json!({"body": "New agenda"})),
+            "cannot be changed from mp yet",
+        ),
+        (
+            update(SERVER, "ev-solo", json!({"online_meeting": true})),
+            "offers no Teams meetings",
+        ),
+        (
+            update(SERVER, "ev-series-1", json!({"summary": "Renamed"})),
+            "part of a recurring series",
+        ),
+        (
+            update(SERVER, "ev-nope", json!({"summary": "Renamed"})),
+            "has no event ev-nope",
+        ),
+        (
+            update(SERVER, "imip:1", json!({"summary": "Renamed"})),
+            "can only be answered",
+        ),
+        (
+            update(IMIP, "ev-own", json!({"summary": "Renamed"})),
+            "has no calendar backend",
+        ),
+        (
+            update(SERVER, "ev-own", json!({"summary": " "})),
+            "An event needs a summary",
+        ),
+    ];
+    for (params, words) in cases {
+        let message = refused(call_err(&mut conn, "event.update", params.clone()).await);
+        assert!(message.contains(words), "{params}: {message}");
+    }
+    assert_eq!(writes(&slice).len(), before);
+}
+
+/// A cancel by the organizer tells the attendees with the comment, takes
+/// the meeting out of the cache before it settles and names who was told;
+/// an attendee's cancel and a cancel of an event that invites nobody are
+/// refused before an operation starts.
+#[tokio::test]
+async fn event_cancel_tells_the_attendees_and_removes_the_meeting() {
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+
+    for (event, words) in [
+        ("ev-meeting", "Only the organizer can cancel Project review"),
+        ("ev-solo", "Dentist invites nobody"),
+        ("ev-series-2", "part of a recurring series"),
+    ] {
+        let error = call_err(
+            &mut conn,
+            "event.cancel",
+            json!({"account": SERVER, "event": event}),
+        )
+        .await;
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains(words), "{}", error.message);
+    }
+    assert!(writes(&slice).is_empty());
+
+    let status = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": "ev-own", "comment": "Postponed"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&status),
+        &json!({"account": SERVER, "event": "ev-own", "notified": ["ada@example.com"]})
+    );
+    assert_eq!(
+        writes(&slice),
+        [RecordedWrite::Cancel {
+            event: "ev-own".into(),
+            comment: Some("Postponed".into()),
+        }]
+    );
+    let events = view(&mut conn, json!({"accounts": [SERVER]})).await;
+    assert!(
+        !ids(&events).contains(&format!("{SERVER}/ev-own")),
+        "{events:?}"
+    );
+
+    // A retry, as a client whose operation vanished sends it, counts as done
+    // with the first call's answer and reaches the server no more; a delete
+    // of the cancelled meeting and a cancel of an id the cache never held
+    // are still refused.
+    let retry = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": "ev-own", "comment": "Postponed"}),
+    )
+    .await;
+    assert_eq!(succeeded(&retry), succeeded(&status));
+    assert_eq!(writes(&slice).len(), 1);
+    for (method, event) in [("event.delete", "ev-own"), ("event.cancel", "ev-nope")] {
+        let unknown = call_err(
+            &mut conn,
+            method,
+            json!({"account": SERVER, "event": event}),
+        )
+        .await;
+        assert_eq!(unknown.code, -32602);
+        assert!(
+            unknown.message.contains(&format!(
+                "has no event {event} (cancelled or deleted already"
+            )),
+            "{method}: {}",
+            unknown.message
+        );
+    }
+    assert_eq!(writes(&slice).len(), 1);
+}
+
+/// A cancel or a delete of an event the cache still holds but the server
+/// lost already (the daemon died after the server answered and before the
+/// cache heard of it) reaches the server, whose "gone" counts as done, and
+/// leaves the cache.
+#[tokio::test]
+async fn a_cancel_or_delete_the_server_lost_already_counts_as_done() {
+    use mailypoppins::calendar_model::{
+        Attendee, AttendeeRole, EventTime, OwnResponse, ResponseStatus,
+    };
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let time = || EventTime::timed(at(12, 9), at(12, 10), "Europe/Berlin").unwrap();
+    let mut meeting = support::calendar_fixture::event(
+        "ev-lost-meeting",
+        "cal-main",
+        "lost-meeting@example.com",
+        "Lost meeting",
+        time(),
+    );
+    meeting.is_organizer = true;
+    meeting.own_response = OwnResponse::Organizer;
+    meeting.attendees = vec![Attendee {
+        name: None,
+        email: "ada@example.com".into(),
+        role: AttendeeRole::Required,
+        status: ResponseStatus::Accepted,
+        proposed_time: None,
+    }];
+    let mut solo = support::calendar_fixture::event(
+        "ev-lost-solo",
+        "cal-main",
+        "lost-solo@example.com",
+        "Lost dentist",
+        time(),
+    );
+    solo.is_organizer = true;
+    solo.own_response = OwnResponse::Organizer;
+    let store = read_fixture::store(slice.root(), SERVER);
+    for event in [&meeting, &solo] {
+        mailypoppins::store::calendar::upsert_event(&store, SERVER, event).unwrap();
+    }
+
+    let cancelled = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": "ev-lost-meeting"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&cancelled),
+        &json!({"account": SERVER, "event": "ev-lost-meeting", "notified": ["ada@example.com"]})
+    );
+    let deleted = run_operation(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": "ev-lost-solo"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&deleted),
+        &json!({"account": SERVER, "event": "ev-lost-solo"})
+    );
+    for id in ["ev-lost-meeting", "ev-lost-solo"] {
+        assert_eq!(
+            mailypoppins::store::calendar::get_event(&store, SERVER, id).unwrap(),
+            None,
+            "{id}"
+        );
+    }
+}
+
+/// A delete tells nobody: an event without attendees and the user's copy of
+/// a cancelled meeting go, from the server and the cache; a live meeting is
+/// refused, the organizer's with "cancel it" and an attendee's with
+/// "decline it".
+#[tokio::test]
+async fn event_delete_removes_an_event_that_tells_nobody() {
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+
+    for (event, words) in [
+        ("ev-own", "Budget is a meeting with attendees; cancel it"),
+        (
+            "ev-meeting",
+            "Project review is a meeting you were invited to; decline it",
+        ),
+    ] {
+        let error = call_err(
+            &mut conn,
+            "event.delete",
+            json!({"account": SERVER, "event": event}),
+        )
+        .await;
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains(words), "{}", error.message);
+    }
+    assert!(writes(&slice).is_empty());
+
+    for event in ["ev-solo", "ev-called-off"] {
+        let status = run_operation(
+            &mut conn,
+            "event.delete",
+            json!({"account": SERVER, "event": event}),
+        )
+        .await;
+        assert_eq!(
+            succeeded(&status),
+            &json!({"account": SERVER, "event": event})
+        );
+    }
+    assert_eq!(
+        writes(&slice),
+        [
+            RecordedWrite::Delete {
+                event: "ev-solo".into()
+            },
+            RecordedWrite::Delete {
+                event: "ev-called-off".into()
+            },
+        ]
+    );
+    let events = view(
+        &mut conn,
+        json!({"accounts": [SERVER], "include_hidden": true}),
+    )
+    .await;
+    let listed = ids(&events);
+    assert!(!listed.contains(&format!("{SERVER}/ev-solo")), "{listed:?}");
+    assert!(
+        !listed.contains(&format!("{SERVER}/ev-called-off")),
+        "{listed:?}"
+    );
+
+    // A retry counts as done and reaches the server no more; a cancel of the
+    // deleted event is still refused.
+    let retry = run_operation(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": "ev-solo"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&retry),
+        &json!({"account": SERVER, "event": "ev-solo"})
+    );
+    assert_eq!(writes(&slice).len(), 2);
+    let unknown = call_err(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": "ev-solo"}),
+    )
+    .await;
+    assert!(
+        unknown.message.contains("has no event ev-solo"),
+        "{}",
+        unknown.message
+    );
+}
+
+/// An update, a cancel or a delete of an event on a calendar that takes no
+/// writes is refused before an operation starts, and nothing reaches the
+/// server.
+#[tokio::test]
+async fn event_changes_on_a_read_only_calendar_are_refused() {
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let store = read_fixture::store(slice.root(), SERVER);
+    let calendars: Vec<_> = mailypoppins::store::calendar::list_calendars(&store, SERVER)
+        .unwrap()
+        .into_iter()
+        .map(|mut calendar| {
+            calendar.can_edit = false;
+            calendar
+        })
+        .collect();
+    mailypoppins::store::calendar::upsert_calendars(&store, SERVER, &calendars).unwrap();
+
+    for (method, params, name) in [
+        (
+            "event.update",
+            json!({"account": SERVER, "event": "ev-own", "fields": {"reminder": 5}}),
+            "Calendar",
+        ),
+        (
+            "event.cancel",
+            json!({"account": SERVER, "event": "ev-own", "comment": "Postponed"}),
+            "Calendar",
+        ),
+        (
+            "event.delete",
+            json!({"account": SERVER, "event": "ev-solo"}),
+            "Holidays",
+        ),
+    ] {
+        let refused = call_err(&mut conn, method, params).await;
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (
+                -32602,
+                format!("The calendar {name} of {SERVER} is read-only").as_str()
+            ),
+            "{method}"
+        );
+    }
+    assert!(writes(&slice).is_empty());
+    for id in ["ev-own", "ev-solo"] {
+        assert!(
+            mailypoppins::store::calendar::get_event(&store, SERVER, id)
+                .unwrap()
+                .is_some(),
+            "{id} stays in the cache"
+        );
+    }
+}
+
+/// An update the server refuses fails the operation with the server's
+/// error, and the cache keeps the event as it was.
+#[tokio::test]
+async fn an_update_the_server_refuses_leaves_the_cache_as_it_was() {
+    use mailypoppins::calendar_model::{EventTime, OwnResponse};
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    // An event the cache holds and the server does not, which the fake
+    // refuses to update as Graph answers 404.
+    let mut lost = support::calendar_fixture::event(
+        "ev-lost",
+        "cal-main",
+        "lost@example.com",
+        "Lost review",
+        EventTime::timed(at(12, 9), at(12, 10), "Europe/Berlin").unwrap(),
+    );
+    lost.is_organizer = true;
+    lost.own_response = OwnResponse::Organizer;
+    lost.reminder = Some(15);
+    let store = read_fixture::store(slice.root(), SERVER);
+    mailypoppins::store::calendar::upsert_event(&store, SERVER, &lost).unwrap();
+    let before = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-lost"}),
+    )
+    .await;
+
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": SERVER, "event": "ev-lost",
+               "fields": {"summary": "Found review", "reminder": 5}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(error.contains("no event with id ev-lost"), "{status}");
+    assert!(writes(&slice).is_empty());
+
+    let after = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-lost"}),
+    )
+    .await;
+    assert_eq!(after, before);
+    assert_eq!(after["event"]["summary"], "Lost review");
+    assert_eq!(after["event"]["reminder"], 15);
+}
+
+/// A sign-in without the calendar scope is the re-login prompt for every
+/// change, before an operation starts.
+#[tokio::test]
+async fn event_changes_without_the_scope_are_the_relogin_prompt() {
+    let slice = Slice::start_seeded(true, &[], |_| (), change_events());
+    let mut conn = slice.connect().await;
+    for (method, params) in [
+        (
+            "event.update",
+            json!({"account": SERVER, "event": "ev-own", "fields": {"reminder": 5}}),
+        ),
+        (
+            "event.cancel",
+            json!({"account": SERVER, "event": "ev-own"}),
+        ),
+        (
+            "event.delete",
+            json!({"account": SERVER, "event": "ev-solo"}),
+        ),
+    ] {
+        let refused = call_err(&mut conn, method, params).await;
+        assert_eq!(refused.code, -32603, "{method}");
+        assert_eq!(
+            refused.message,
+            format!("calendar needs a re-login (mp config oauth2-login -A {SERVER})")
+        );
+    }
+    assert!(writes(&slice).is_empty());
+}

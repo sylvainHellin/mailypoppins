@@ -1,9 +1,13 @@
-// The event form (CAL-11, PERSO-255; the TUI's `n` overlay, the CLI's
-// `mp event create`): Calendar, Title, All day, Start, End, the attendees'
-// availability (CAL-14), Location, Attendees, Optional, Rooms, Teams,
-// Reminder, Description. It creates
-// through `event.create`, and a failed or vanished create opens it again
-// with what was typed and a Retry that sends the same transaction id.
+// The event form (CAL-11, CAL-12, PERSO-255; the TUI's `n` and `E` overlay,
+// the CLI's `mp event create` and `mp event update`): Calendar, Title, All
+// day, Start, End, the attendees' availability (CAL-14), Location,
+// Attendees, Optional, Rooms, Teams, Reminder, Show as, Description. It
+// creates through `event.create`, and a failed or vanished create opens it
+// again with what was typed and a Retry that sends the same transaction id.
+// Opened on an event (`dialog.edit`), it holds the event's values and Save
+// sends `event.update` with what changed; the calendar stays the event's, a
+// Teams meeting stays one, and an attendee changes the reminder and the
+// show-as only.
 
 import { useEffect, useId, useRef, useState, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -11,7 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { eventProblem, localZone, submitEvent } from "@/app/eventForm";
+import { eventProblem, localZone, SHOW_AS, submitEvent } from "@/app/eventForm";
+import { editProblem, submitEdit } from "@/app/eventChange";
 import { AvailabilityGrid } from "@/components/calendar/AvailabilityGrid";
 import { useDispatch } from "@/app/store";
 import type { EventDialog, EventFields } from "@/app/state";
@@ -44,13 +49,20 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
   }, [dialog]);
 
   const chosen = calendars.find((c) => c.key === fields?.calendar) ?? null;
-  const problem = fields ? eventProblem(fields, calendars) : null;
+  const edit = dialog?.edit ?? null;
+  const problem = fields && dialog ? (edit ? editProblem({ ...dialog, fields }) : eventProblem(fields, calendars)) : null;
   const retry = dialog?.transactionId != null;
+  // An attendee changes their copy's reminder and show-as and nothing else.
+  const locked = edit !== null && !edit.organizer;
+  const title = edit ? (locked ? "Edit event (your reminder and show-as)" : "Edit event") : retry ? "New event (retry)" : "New event";
+  // A word the server gave that the list does not name (`unknown`) shows until another is picked.
+  const showAs = fields?.showAs ?? "busy";
+  const showAsOptions = SHOW_AS.some((o) => o.word === showAs) ? SHOW_AS : [...SHOW_AS, { word: showAs, label: showAs }];
 
   const submit = async () => {
     if (!dialog || !fields || busy) return;
     setBusy(true);
-    const refused = await submitEvent(dispatch, { ...dialog, fields });
+    const refused = edit ? await submitEdit(dispatch, { ...dialog, fields }) : await submitEvent(dispatch, { ...dialog, fields });
     setBusy(false);
     setError(refused);
   };
@@ -98,6 +110,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
         value={fields?.[name] ?? ""}
         autoComplete="off"
         spellCheck={name === "title" || name === "location"}
+        disabled={locked && name !== "reminder"}
         onChange={(e) => change({ [name]: e.currentTarget.value })}
         {...extra}
       />,
@@ -120,14 +133,16 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent initialFocus={titleRef} data-slot="new-event" className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{retry ? "New event (retry)" : "New event"}</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            {`Times in ${localZone()}; the server sends each attendee and room an invitation.`}
+            {edit
+              ? `Times in ${localZone()}; only what you change is sent, and the server tells the attendees.`
+              : `Times in ${localZone()}; the server sends each attendee and room an invitation.`}
           </DialogDescription>
         </DialogHeader>
         <form
           ref={formRef}
-          aria-label="New event"
+          aria-label={edit ? "Edit event" : "New event"}
           className="flex flex-col gap-2"
           onKeyDown={onKeyDown}
           onSubmit={(e) => {
@@ -141,6 +156,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
             <select
               id={`${id}-calendar`}
               data-field="calendar"
+              disabled={edit !== null}
               value={fields?.calendar ?? ""}
               onChange={(e) => {
                 const next = calendars.find((c) => c.key === e.currentTarget.value);
@@ -158,7 +174,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
           {field("title", "Title")}
           <div className="grid grid-cols-[6rem_1fr] items-center gap-2">
             <span />
-            {check("allDay", "All day", toggleAllDay)}
+            {check("allDay", "All day", toggleAllDay, locked)}
           </div>
           {field("start", allDay ? "First day" : "Start", { type: allDay ? "date" : "datetime-local" })}
           {field("end", allDay ? "Last day" : "End", { type: allDay ? "date" : "datetime-local" })}
@@ -170,8 +186,12 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
           <div className="grid grid-cols-[6rem_1fr] items-center gap-2">
             <span />
             <span className="flex flex-col gap-0.5">
-              {check("teams", "Teams meeting", (on) => change({ teams: on }), !chosen?.teams)}
-              {chosen && !chosen.teams ? (
+              {check("teams", "Teams meeting", (on) => change({ teams: on }), !chosen?.teams || locked || edit?.online === true)}
+              {edit?.online ? (
+                <span data-slot="teams-stays" className="text-xs text-muted-foreground">
+                  A Teams meeting stays one
+                </span>
+              ) : chosen && !chosen.teams ? (
                 <span data-slot="teams-unavailable" className="text-xs text-muted-foreground">
                   This calendar has no online meetings
                 </span>
@@ -188,7 +208,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
                 data-field="reminder"
                 className="w-40"
                 inputMode="numeric"
-                placeholder="mailbox default"
+                placeholder={edit ? "none" : "mailbox default"}
                 value={fields?.reminder ?? ""}
                 disabled={fields?.noReminder ?? false}
                 onChange={(e) => change({ reminder: e.currentTarget.value })}
@@ -198,9 +218,34 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
             </span>
           </div>
           {row(
+            "show-as",
+            "Show as",
+            <select
+              id={`${id}-show-as`}
+              data-field="showAs"
+              value={showAs}
+              onChange={(e) => change({ showAs: e.currentTarget.value })}
+              className="h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {showAsOptions.map((o) => (
+                <option key={o.word} value={o.word}>
+                  {o.label}
+                </option>
+              ))}
+            </select>,
+          )}
+          {row(
             "body",
             "Description",
-            <Textarea id={`${id}-body`} data-field="body" rows={3} value={fields?.body ?? ""} onChange={(e) => change({ body: e.currentTarget.value })} />,
+            <Textarea
+              id={`${id}-body`}
+              data-field="body"
+              rows={3}
+              disabled={locked || edit?.online === true}
+              title={edit?.online ? "A Teams meeting's description cannot be changed from mp yet: the server would drop its join details" : undefined}
+              value={fields?.body ?? ""}
+              onChange={(e) => change({ body: e.currentTarget.value })}
+            />,
           )}
           <p role="alert" data-slot="event-error" className={`min-h-5 text-sm ${error ? "text-destructive" : "text-warning"}`}>
             {error ?? problem}
@@ -208,7 +253,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
           <DialogFooter>
             <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
             <Button type="submit" data-submit="" disabled={busy || problem !== null}>
-              {retry ? "Retry" : "Create event"} <Kbd aria-hidden="true">⌘↵</Kbd>
+              {edit ? "Save changes" : retry ? "Retry" : "Create event"} <Kbd aria-hidden="true">⌘↵</Kbd>
             </Button>
           </DialogFooter>
         </form>

@@ -18,6 +18,7 @@ import { AccountPicker } from "@/components/sidebar/AccountPicker";
 import { FolderPicker } from "@/components/sidebar/FolderPicker";
 import { RsvpDialog } from "@/components/calendar/RsvpDialog";
 import { NewEventDialog } from "@/components/calendar/NewEventDialog";
+import { EventRemoveDialog } from "@/components/calendar/EventRemoveDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
 import { ServerSearchDialog } from "@/components/search/ServerSearchDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
@@ -35,6 +36,7 @@ import { hiddenPaletteRows, useStoredReaderMode } from "@/app/readerMode";
 import { updatePaletteEntries, useUpdateEvents } from "@/app/updates";
 import { screenFor } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
+import type { ActionId } from "@/keymap/catalog";
 import { useKeymap } from "@/keymap/useKeymap";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
@@ -65,6 +67,11 @@ export function AppShell() {
   useUpdateEvents(dispatch, checkUpdates);
   const updateRows = useMemo(() => updatePaletteEntries(s.update), [s.update]);
   const hiddenRows = hiddenPaletteRows(s);
+  // A palette run leads its search's equal matches from then on.
+  const runFromPalette = (id: ActionId) => {
+    dispatch({ type: "palette_ran", id });
+    run(id);
+  };
 
   const layout = useLayout();
   useEffect(() => dispatch({ type: "set_layout", layout }), [layout, dispatch]);
@@ -105,7 +112,14 @@ export function AppShell() {
       {body}
       <TerminalHost />
       <PrefixPopup state={s} />
-      <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} extra={updateRows} hidden={hiddenRows} />
+      <CommandPalette
+        open={s.overlay === "palette"}
+        onOpenChange={close}
+        onRun={runFromPalette}
+        extra={updateRows}
+        hidden={hiddenRows}
+        recent={s.prefs.paletteRecent}
+      />
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
       <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />
@@ -127,6 +141,7 @@ export function AppShell() {
       <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
       <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
       <NewEventDialog dialog={s.overlay === "event" ? s.eventDialog : null} onOpenChange={close} />
+      <EventRemoveDialog dialog={s.overlay === "event_remove" ? s.eventRemoveDialog : null} onOpenChange={close} />
       <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />
       <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
       <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />

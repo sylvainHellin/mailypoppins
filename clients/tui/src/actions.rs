@@ -1218,8 +1218,9 @@ pub(super) fn handle_action(
             edit_event_description(app, terminal)?;
         }
 
-        // The twenty-one the command layer owns (P5-U6's fifteen, P5-U8's five
-        // operations and P6-U2's cancel). Listed rather than wildcarded so a
+        // The twenty-five the command layer owns (P5-U6's fifteen, P5-U8's
+        // operations, P6-U2's cancel, the contacts' refresh and the calendar
+        // writes of PERSO-255). Listed rather than wildcarded so a
         // new action still has to be classified here, and unreachable because
         // `dispatch` answered `true` for every one of them before this match
         // was entered.
@@ -1231,6 +1232,8 @@ pub(super) fn handle_action(
         | Action::Rsvp { .. }
         | Action::CreateEvent(_)
         | Action::QueryFreeBusy(_)
+        | Action::UpdateEvent(_)
+        | Action::RemoveEvent(_)
         | Action::Approve
         | Action::BatchApprove(_)
         | Action::MarkDraft

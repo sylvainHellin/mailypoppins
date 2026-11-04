@@ -148,6 +148,9 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "calendar.set_visibility",
     "calendar.freebusy",
     "event.create",
+    "event.update",
+    "event.cancel",
+    "event.delete",
     "event.respond",
     "send.invite",
     "contact.search",
@@ -1304,6 +1307,9 @@ mod tests {
             "calendar.set_visibility",
             "calendar.freebusy",
             "event.create",
+            "event.update",
+            "event.cancel",
+            "event.delete",
             "event.respond",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");

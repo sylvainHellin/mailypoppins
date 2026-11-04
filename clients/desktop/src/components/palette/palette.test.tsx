@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { GUI_ENTRIES, paletteEntries, SECTIONS } from "@/keymap/catalog";
 import { emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
+import { PREFS_KEY } from "@/app/prefs";
 
 describe("the command palette", () => {
   it("lists every action of the generated keymap", async () => {
@@ -191,6 +192,7 @@ describe("the command palette", () => {
     expect(desktop).toHaveTextContent("Cancel the held send");
     expect(desktop).toHaveTextContent("Mark range");
     expect(desktop).toHaveTextContent("Dismiss the newest notice");
+    expect(desktop).toHaveTextContent("Cmd+pCommand palette");
     // The M2 rows lost their badge.
     const archive = within(help).getAllByText("Archive")[0].closest("[cmdk-item]");
     expect(archive).not.toHaveTextContent("M2");
@@ -262,8 +264,39 @@ describe("the command palette", () => {
     );
   });
 
-  it("merges keys that share an action within a section", () => {
+  it("merges keys that share an action within a section, the desktop's own last", () => {
     const palette = paletteEntries().find((e) => e.label.startsWith("Command palette"));
-    expect(palette?.keys).toEqual([":", "Ctrl+p"]);
+    expect(palette?.keys).toEqual([":", "Ctrl+p", "Cmd+p"]);
+  });
+
+  it("hides scattered matches, and lists an action run from it first among equal matches, after a restart too", async () => {
+    const { user, unmount } = renderApp();
+    await shellReady();
+    await user.keyboard(":");
+    let dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.keyboard("test");
+    await waitFor(() =>
+      expect([...dialog.querySelectorAll("[data-testid='palette-item']")].map((r) => r.getAttribute("data-label"))).toEqual([
+        "Show a test reminder notification",
+      ]),
+    );
+    await user.keyboard("{Escape}");
+    await user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("Dismiss all notices"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull());
+    await waitFor(() => expect(localStorage.getItem(PREFS_KEY)).toContain("dismiss_all_notices"));
+    unmount();
+
+    const again = renderApp();
+    await shellReady();
+    await again.user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await again.user.keyboard("not");
+    await waitFor(() => {
+      const first = dialog.querySelector("[data-testid='palette-item']");
+      expect(first).toHaveAttribute("data-label", "Dismiss all notices");
+      expect(first).toHaveAttribute("data-selected", "true");
+    });
   });
 });

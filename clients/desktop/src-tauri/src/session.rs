@@ -170,6 +170,9 @@ pub enum PendingKind {
     SendInvite,
     /// `event.create`: its `result` is an `EventWriteResult`.
     EventCreate,
+    /// `event.update`, `event.cancel` or `event.delete`: its `result` is an
+    /// `EventUpdateResult`, an `EventCancelResult` or an `EventDeleteResult`.
+    EventChange,
     /// `contact.rebuild`: its `result` is a `ContactRebuilt`.
     ContactRebuild,
     /// `config.oauth2_login`: its one progress carries the device code, and

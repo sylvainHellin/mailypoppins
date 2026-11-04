@@ -32,7 +32,7 @@ use crate::calendar_sync::sync_account;
 use crate::config::{AccountConfig, CalendarBackendKind};
 use crate::tui::app::{
     AccountState, Action, App, BgResult, CalendarLayout, Credentials, EventCalendarChoice,
-    EventForm, EventFormRow, Overlay, RsvpChoice, RsvpOverlay, RsvpRow, View,
+    EventForm, EventFormRow, EventRemoveOverlay, Overlay, RsvpChoice, RsvpOverlay, RsvpRow, View,
 };
 use crate::tui::commands::{dispatch, settled};
 use crate::tui::events::{Applied, Awaited};
@@ -702,4 +702,367 @@ fn the_event_form_creates_through_event_create_and_retries_with_its_transaction_
         app.status_message.as_deref(),
         Some("Created Planning; invited ada@example.com")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Changing, cancelling and deleting an event (PERSO-255)
+// ---------------------------------------------------------------------------
+
+/// The edit form on a meeting the user organizes, its start moved; and the
+/// `D` confirmations, a cancel with its comment being typed, the same cancel
+/// asking again after its daemon restarted, and a delete of an event that
+/// tells nobody.
+#[test]
+fn golden_calendar_event_edit_and_remove() {
+    let mut app = calendar_fixture();
+    let mut handover = app.calendar_view.events[0].clone();
+    handover.is_organizer = true;
+    handover.own_response = "organizer".into();
+    let choice = EventCalendarChoice {
+        account: "evoqs".into(),
+        id: "cal-main".into(),
+        name: "Calendar".into(),
+        teams: true,
+    };
+    let mut form = EventForm::edit(&handover, choice, app.calendar_view.zone);
+    form.start = "10:00".into();
+    form.end = "11:00".into();
+    form.row = EventFormRow::End;
+    app.overlay = Overlay::EventForm(Box::new(form));
+    assert_snapshot!("event_form_edit", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    app.overlay = Overlay::EventRemove(Box::new(EventRemoveOverlay {
+        account: "evoqs".into(),
+        event: "ev-handover".into(),
+        summary: "Baustellen\u{fc}bergabe".into(),
+        cancel: true,
+        attendees: 2,
+        comment: "Verschoben".into(),
+        error: None,
+    }));
+    assert_snapshot!("event_cancel", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    if let Overlay::EventRemove(removal) = &mut app.overlay {
+        removal.error = Some(
+            "The daemon restarted before it was confirmed; confirming again is safe, and \
+             counts as done if it went through"
+                .into(),
+        );
+    }
+    assert_snapshot!(
+        "event_cancel_failed",
+        frame_snapshot(&mut app, WIDTH, HEIGHT)
+    );
+
+    app.overlay = Overlay::EventRemove(Box::new(EventRemoveOverlay {
+        account: "evoqs".into(),
+        event: "ev-holiday".into(),
+        summary: "Sommerfest".into(),
+        cancel: false,
+        attendees: 0,
+        comment: String::new(),
+        error: None,
+    }));
+    assert_snapshot!("event_delete", frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// Records every call and starts an operation for each.
+#[derive(Default)]
+struct Writes(Mutex<Vec<(String, Value)>>);
+
+impl Queries for Writes {
+    fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let mut calls = self.0.lock().unwrap();
+        calls.push((method.to_string(), params));
+        Ok(json!({"operation_id": format!("op-{}", calls.len())}))
+    }
+}
+
+/// `E` on a meeting the user was invited to opens the form on the
+/// reminder, which with the show-as below it is all an attendee changes; a
+/// changed title is named as the organizer's, and the reminder and the
+/// show-as `Right` moved to are one `event.update` with those fields. A failed change reopens the form, and a settled one says so.
+#[test]
+fn an_attendee_edits_the_reminder_through_event_update() {
+    let _data = seeded();
+    let mut app = app_over(CallLog::default());
+    app.switch_view(View::Calendar);
+    assert_eq!(summaries(&app)[0], "Project review");
+    app.handle_key(key('E'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("E opens the event form: {:?}", app.status_message);
+    };
+    assert!(form.editing.is_some());
+    assert_eq!(form.row, EventFormRow::Reminder);
+    assert_eq!(form.title, "Project review");
+
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("an unchanged form stays open");
+    };
+    assert_eq!(form.error.as_deref(), Some("Nothing changed yet"));
+    for c in "none".chars() {
+        app.handle_key(key(c));
+    }
+    let Overlay::EventForm(form) = &mut app.overlay else {
+        panic!("the form is open");
+    };
+    form.reminder = "10".into();
+    form.title = "Mine now".into();
+    assert!(form.problem().unwrap().starts_with("Only the organizer"));
+    form.title = "Project review".into();
+    app.handle_key(KeyEvent::from(KeyCode::Down));
+    app.handle_key(KeyEvent::from(KeyCode::Right));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("the form is open");
+    };
+    assert_eq!(form.row, EventFormRow::ShowAs);
+    assert_eq!(form.show_as_label(), "Out of office");
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Some(Action::UpdateEvent(form)) = app.pending_actions.pop_front() else {
+        panic!("Enter queues the change");
+    };
+
+    let door = Writes::default();
+    assert!(dispatch(&mut app, &door, &Action::UpdateEvent(form)));
+    assert_eq!(
+        door.0.lock().unwrap().clone(),
+        [(
+            "event.update".to_string(),
+            json!({"account": ACCOUNT, "event": "ev-meeting",
+                   "fields": {"reminder": 10, "show_as": "oof"}})
+        )]
+    );
+    assert_eq!(app.bg_count, 1);
+
+    let failed = settled(
+        &Awaited::EventChange {
+            operation_id: "op-1".into(),
+            done: "Updated Project review".into(),
+        },
+        &json!({"operation_id": "op-1", "state": "failed",
+                "error": {"code": -32603, "message": "Graph refused the update: HTTP 503"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, failed);
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("a failed change reopens the form");
+    };
+    assert!(form.error.as_deref().unwrap().contains("HTTP 503"));
+    assert_eq!(form.reminder, "10");
+    let form = form.clone();
+    app.overlay = Overlay::None;
+    assert!(dispatch(&mut app, &door, &Action::UpdateEvent(form)));
+    let done = settled(
+        &Awaited::EventChange {
+            operation_id: "op-2".into(),
+            done: "Updated Project review".into(),
+        },
+        &json!({"operation_id": "op-2", "state": "succeeded", "result": {"account": ACCOUNT}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, done);
+    assert!(app.calendar_view.pending_forms.is_empty());
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Updated Project review")
+    );
+}
+
+/// `D` on someone else's meeting points at the answer that tells its
+/// organizer; on an event that tells nobody it asks to delete it, and `y`
+/// is one `event.delete`; `n` keeps the event.
+#[test]
+fn d_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
+    let _data = seeded();
+    let mut app = app_over(CallLog::default());
+    app.switch_view(View::Calendar);
+    app.handle_key(key('D'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Project review is someone else's meeting: decline it with V to tell the organizer")
+    );
+
+    app.handle_key(key('j'));
+    app.handle_key(key('D'));
+    let Overlay::EventRemove(overlay) = &app.overlay else {
+        panic!("D on the holiday asks to delete it");
+    };
+    assert!(!overlay.cancel);
+    assert_eq!(overlay.event, "ev-holiday");
+    app.handle_key(key('n'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert!(app.pending_actions.is_empty());
+
+    app.handle_key(key('D'));
+    app.handle_key(key('y'));
+    let Some(Action::RemoveEvent(removal)) = app.pending_actions.pop_front() else {
+        panic!("y queues the delete");
+    };
+    let door = Writes::default();
+    assert!(dispatch(&mut app, &door, &Action::RemoveEvent(removal)));
+    assert_eq!(
+        door.0.lock().unwrap().clone(),
+        [(
+            "event.delete".to_string(),
+            json!({"account": ACCOUNT, "event": "ev-holiday"})
+        )]
+    );
+    let done = settled(
+        &Awaited::EventChange {
+            operation_id: "op-1".into(),
+            done: "Deleted Holiday".into(),
+        },
+        &json!({"operation_id": "op-1", "state": "succeeded",
+                "result": {"account": ACCOUNT, "event": "ev-holiday"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, done);
+    assert_eq!(app.status_message.as_deref(), Some("Deleted Holiday"));
+}
+
+/// The cancel confirmation of a meeting the user organizes takes a comment
+/// as typed, and `Enter` is one `event.cancel` with it; the settled cancel
+/// names who was told.
+#[test]
+fn a_cancel_sends_its_comment_through_event_cancel() {
+    let mut app = App::default_for_tests();
+    app.overlay = Overlay::EventRemove(Box::new(EventRemoveOverlay {
+        account: ACCOUNT.into(),
+        event: "ev-own".into(),
+        summary: "Budget".into(),
+        cancel: true,
+        attendees: 1,
+        comment: String::new(),
+        error: None,
+    }));
+    for c in "Postponed".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(KeyEvent::from(KeyCode::Backspace));
+    app.handle_key(key('d'));
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Some(Action::RemoveEvent(removal)) = app.pending_actions.pop_front() else {
+        panic!("Enter queues the cancel");
+    };
+    let door = Writes::default();
+    assert!(dispatch(&mut app, &door, &Action::RemoveEvent(removal)));
+    assert_eq!(
+        door.0.lock().unwrap().clone(),
+        [(
+            "event.cancel".to_string(),
+            json!({"account": ACCOUNT, "event": "ev-own", "comment": "Postponed"})
+        )]
+    );
+    let done = settled(
+        &Awaited::EventChange {
+            operation_id: "op-1".into(),
+            done: "Cancelled Budget".into(),
+        },
+        &json!({"operation_id": "op-1", "state": "succeeded",
+                "result": {"account": ACCOUNT, "event": "ev-own",
+                           "notified": ["ada@example.com"]}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, done);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Cancelled Budget; told ada@example.com")
+    );
+}
+
+/// A cancel the server failed asks again, as the desktop's does: the
+/// confirmation comes back with the comment as typed and the reason under
+/// it, and `Enter` sends the same cancel. One that fails while another
+/// overlay is open is kept for `D` on the event, which the status line
+/// says, and a refusal at the call asks again at once.
+#[test]
+fn a_failed_cancel_asks_again_with_its_comment() {
+    let mut app = App::default_for_tests();
+    let removal = EventRemoveOverlay {
+        account: ACCOUNT.into(),
+        event: "ev-own".into(),
+        summary: "Budget".into(),
+        cancel: true,
+        attendees: 2,
+        comment: "Postponed".into(),
+        error: None,
+    };
+    let door = Writes::default();
+    assert!(dispatch(
+        &mut app,
+        &door,
+        &Action::RemoveEvent(Box::new(removal.clone()))
+    ));
+    assert_eq!(app.calendar_view.pending_removals.len(), 1);
+    let failed = settled(
+        &Awaited::EventChange {
+            operation_id: "op-1".into(),
+            done: "Cancelled Budget".into(),
+        },
+        &json!({"operation_id": "op-1", "state": "failed",
+                "error": {"code": -32603, "message": "Graph refused the cancel: HTTP 503"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, failed);
+    assert!(app.calendar_view.pending_removals.is_empty());
+    let Overlay::EventRemove(again) = &app.overlay else {
+        panic!("a failed cancel asks again: {:?}", app.status_message);
+    };
+    assert_eq!(again.comment, "Postponed");
+    let why = again.error.clone().unwrap();
+    assert!(why.starts_with("Cancelling Budget failed"), "{why}");
+    assert!(why.contains("HTTP 503"), "{why}");
+
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Some(Action::RemoveEvent(retry)) = app.pending_actions.pop_front() else {
+        panic!("Enter sends the cancel again");
+    };
+    assert_eq!(retry.comment, "Postponed");
+    assert!(dispatch(&mut app, &door, &Action::RemoveEvent(retry)));
+    assert_eq!(
+        door.0.lock().unwrap()[1],
+        (
+            "event.cancel".to_string(),
+            json!({"account": ACCOUNT, "event": "ev-own", "comment": "Postponed"})
+        )
+    );
+
+    app.overlay = Overlay::Help;
+    let failed = settled(
+        &Awaited::EventChange {
+            operation_id: "op-2".into(),
+            done: "Cancelled Budget".into(),
+        },
+        &json!({"operation_id": "op-2", "state": "failed",
+                "error": {"code": -32603, "message": "HTTP 503"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, failed);
+    assert!(matches!(app.overlay, Overlay::Help));
+    assert!(app
+        .status_message
+        .as_deref()
+        .unwrap()
+        .ends_with("; D on Budget asks again"));
+    assert_eq!(
+        app.calendar_view
+            .kept_removal
+            .as_ref()
+            .map(|kept| kept.comment.as_str()),
+        Some("Postponed")
+    );
+
+    struct Refuses;
+    impl Queries for Refuses {
+        fn call(&self, _method: &str, _params: Value) -> anyhow::Result<Value> {
+            anyhow::bail!("The calendar Calendar of evoqs is read-only")
+        }
+    }
+    app.overlay = Overlay::None;
+    assert!(dispatch(
+        &mut app,
+        &Refuses,
+        &Action::RemoveEvent(Box::new(removal))
+    ));
+    let Overlay::EventRemove(again) = &app.overlay else {
+        panic!("a refusal asks again");
+    };
+    assert!(again.error.as_deref().unwrap().contains("read-only"));
+    assert!(app.calendar_view.pending_removals.is_empty());
 }

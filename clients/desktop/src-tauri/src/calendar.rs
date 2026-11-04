@@ -31,6 +31,13 @@
 //! gets the schedules back, the account's own first, an address the server
 //! cannot read carrying its error. Every refusal is the daemon's sentence.
 //!
+//! A change (CAL-12, CAL-13, PERSO-255) is `event.update` with the fields
+//! the form changed, `event.cancel` with a comment for the attendees, or
+//! `event.delete`, each awaited as `event_change`; what the user may not do
+//! (an attendee's change beyond reminder and show-as, a cancel of someone
+//! else's meeting, a delete of a live meeting, a recurring event) is the
+//! daemon's refusal, passed on as its sentence.
+//!
 //! A new invitation (SND-05) is `send.invite`, awaited as `send_invite`: the
 //! daemon builds the `VEVENT` and the iMIP message and submits it through
 //! its outbox. Its refusals are the CLI's (`--invite requires --subject`),
@@ -52,7 +59,8 @@ use tauri::{AppHandle, State};
 use mp_client::queries;
 use mp_protocol::calendar::{
     CalendarFreeBusyParams, CalendarFreeBusyResult, CalendarInfo, CalendarViewParams,
-    CalendarViewResult, EventCreateParams, EventCreateStarted, EventFrontmatter,
+    CalendarViewResult, EventCancelParams, EventCreateParams, EventCreateStarted,
+    EventDeleteParams, EventFrontmatter, EventUpdateParams,
 };
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
@@ -84,6 +92,10 @@ const RESPOND_START_BUDGET: Duration = Duration::from_secs(10);
 /// Starting `event.create`: the daemon resolves the event and reads the
 /// account's calendars first.
 const CREATE_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// Starting `event.update`, `event.cancel` or `event.delete`: the daemon
+/// reads the cached event and checks the change first.
+const CHANGE_START_BUDGET: Duration = Duration::from_secs(10);
 
 /// The Graph probe: a refusal before any read.
 const PROBE_BUDGET: Duration = Duration::from_secs(5);
@@ -280,6 +292,76 @@ pub fn calendar_freebusy_on(
             )))
         }
     }
+}
+
+/// Start `method` with `params` awaited as `event_change`.
+fn start_change(
+    session: &SessionHandle,
+    door: &Door,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<OperationStarted, GuiError> {
+    let operation_id = session
+        .start_operation(
+            door,
+            method,
+            params,
+            PendingKind::EventChange,
+            CHANGE_START_BUDGET,
+        )
+        .map_err(daemon_sentence)?;
+    Ok(OperationStarted { operation_id })
+}
+
+/// Change the fields `params` names on an event, an operation awaited as
+/// `event_change`, whose `result` is an `EventUpdateResult`. Every refusal
+/// is the daemon's sentence.
+pub fn event_update_on(
+    session: &SessionHandle,
+    door: &Door,
+    params: &EventUpdateParams,
+) -> Result<OperationStarted, GuiError> {
+    let params = serde_json::to_value(params)
+        .map_err(|e| GuiError::protocol(format!("event.update params: {e}")))?;
+    start_change(session, door, "event.update", params)
+}
+
+/// Cancel a meeting the user organizes, telling its attendees with an
+/// optional comment (a blank one is none), awaited as `event_change`.
+pub fn event_cancel_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    event: &str,
+    comment: Option<&str>,
+) -> Result<OperationStarted, GuiError> {
+    let params = EventCancelParams {
+        account: account.to_string(),
+        event: event.to_string(),
+        comment: comment
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
+    };
+    let params = serde_json::to_value(params)
+        .map_err(|e| GuiError::protocol(format!("event.cancel params: {e}")))?;
+    start_change(session, door, "event.cancel", params)
+}
+
+/// Delete an event that tells nobody, awaited as `event_change`.
+pub fn event_delete_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    event: &str,
+) -> Result<OperationStarted, GuiError> {
+    let params = EventDeleteParams {
+        account: account.to_string(),
+        event: event.to_string(),
+    };
+    let params = serde_json::to_value(params)
+        .map_err(|e| GuiError::protocol(format!("event.delete params: {e}")))?;
+    start_change(session, door, "event.delete", params)
 }
 
 /// Where row `row_id`'s `invite.ics` is written: one file per row, so the
@@ -550,6 +632,45 @@ pub async fn calendar_freebusy(
 ) -> Result<CalendarFreeBusyResult, GuiError> {
     with_door(&session, move |session, door| {
         calendar_freebusy_on(session, door, &params)
+    })
+    .await
+}
+
+/// Change an event, awaited as `event_change`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn event_update(
+    session: State<'_, SessionHandle>,
+    params: EventUpdateParams,
+) -> Result<OperationStarted, GuiError> {
+    with_door(&session, move |session, door| {
+        event_update_on(session, door, &params)
+    })
+    .await
+}
+
+/// Cancel a meeting, awaited as `event_change`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn event_cancel(
+    session: State<'_, SessionHandle>,
+    account: String,
+    event: String,
+    comment: Option<String>,
+) -> Result<OperationStarted, GuiError> {
+    with_door(&session, move |session, door| {
+        event_cancel_on(session, door, &account, &event, comment.as_deref())
+    })
+    .await
+}
+
+/// Delete an event, awaited as `event_change`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn event_delete(
+    session: State<'_, SessionHandle>,
+    account: String,
+    event: String,
+) -> Result<OperationStarted, GuiError> {
+    with_door(&session, move |session, door| {
+        event_delete_on(session, door, &account, &event)
     })
     .await
 }
@@ -1001,6 +1122,98 @@ mod tests {
         let err = calendar_freebusy_on(&session, &door, &params("home", "2100-01-01"))
             .expect_err("too long");
         assert!(err.message().contains("61 days"), "{err:?}");
+    }
+
+    /// An update starts `event.update` awaited as `event_change` with the
+    /// fields it names, and the fixture's week shows the change; an
+    /// attendee's change beyond the reminder, a cancel of someone else's
+    /// meeting and a delete of a live meeting are the daemon's sentences; the
+    /// organizer's cancel tells the attendees and a delete of an event that
+    /// tells nobody removes it.
+    #[test]
+    fn changes_start_event_change_operations_and_refusals_are_the_daemons_sentences() {
+        let (door, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let fields = |value: serde_json::Value| EventUpdateParams {
+            account: "home".into(),
+            event: "AAMkAD-robin".into(),
+            fields: serde_json::from_value(value).expect("fields"),
+        };
+        let started = event_update_on(
+            &session,
+            &door,
+            &fields(json!({"summary": "1:1, moved", "start": "2099-10-14T11:00"})),
+        )
+        .expect("started");
+        assert_eq!(
+            session.pending_kind(&started.operation_id),
+            Some(PendingKind::EventChange)
+        );
+        let (method, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(method, "event.update");
+        assert_eq!(params["fields"]["summary"], "1:1, moved");
+        let (start, end) = ("2099-10-12T00:00:00+02:00", "2099-10-19T00:00:00+02:00");
+        let week = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("week");
+        let moved = week
+            .events
+            .iter()
+            .find(|e| e.id == "AAMkAD-robin")
+            .expect("the meeting");
+        assert_eq!(moved.summary, "1:1, moved");
+
+        let attendee = event_update_on(
+            &session,
+            &door,
+            &EventUpdateParams {
+                event: "AAMkAD-design".into(),
+                ..fields(json!({"summary": "Mine now"}))
+            },
+        )
+        .expect_err("refused");
+        assert_eq!(
+            attendee,
+            GuiError::Protocol {
+                message: crate::fixture::ORGANIZER_ONLY_REFUSAL.to_string(),
+                code: Some(-32602)
+            }
+        );
+        let foreign =
+            event_cancel_on(&session, &door, "home", "AAMkAD-design", None).expect_err("refused");
+        assert!(foreign.message().contains("Only the organizer can cancel"));
+        let live = event_delete_on(&session, &door, "home", "AAMkAD-robin").expect_err("refused");
+        assert!(live.message().contains("cancel it to tell them"));
+
+        event_cancel_on(
+            &session,
+            &door,
+            "home",
+            "AAMkAD-robin",
+            Some("  Postponed "),
+        )
+        .expect("started");
+        let (method, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(method, "event.cancel");
+        assert_eq!(params["comment"], "Postponed");
+        let week = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("week");
+        assert!(week.events.iter().all(|e| e.id != "AAMkAD-robin"));
+
+        let created = event_create_on(&session, &door, &{
+            let mut solo = new_event("Focus");
+            solo.event.attendees.clear();
+            solo
+        })
+        .expect("created");
+        let week = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("week");
+        let solo = week
+            .events
+            .iter()
+            .find(|e| e.transaction_id.as_deref() == Some(created.transaction_id.as_str()))
+            .expect("the new event")
+            .id
+            .clone();
+        event_delete_on(&session, &door, "home", &solo).expect("started");
+        let week = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("week");
+        assert!(week.events.iter().all(|e| e.id != solo));
     }
 
     fn fields() -> InviteFields {

@@ -39,6 +39,10 @@
         "action": "Toggle activity log"
       },
       {
+        "key": "R",
+        "action": "Calendar reminders (snooze, dismiss, open)"
+      },
+      {
         "key": "x",
         "action": "Send current draft (approve + send)"
       },
@@ -443,6 +447,14 @@
       {
         "key": "n",
         "action": "New event (the event form, on the cursor's day)"
+      },
+      {
+        "key": "E",
+        "action": "Edit the event (the event form with its values)"
+      },
+      {
+        "key": "D",
+        "action": "Cancel the meeting (tells the attendees) or delete the event"
       },
       {
         "key": "r",

@@ -27,14 +27,14 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 21 |││                      │  Rooms        room-1@example.org                                     │                      ││
 22 |││Fri 2026-08-07        │  Teams        [ ]                                                    │                      ││
 23 |││  14:00-15:00 ✓ Abgesa│  Reminder     (the mailbox default; minutes or none)                 │                      ││
-24 |││                [evoqs│  Description  (none; Enter edits in $EDITOR)                         │                      ││
-25 |││                      │                                                                      │                      ││
-26 |││                      │  Availability           checking…                                    │                      ││
-27 |││                      │                                                                      │                      ││
-28 |││                      │  Times in Europe/Berlin                                              │                      ││
-29 |││                      │  Enter create · Tab next · Space toggle · ←/→ calendar · Esc cancel  │                      ││
-30 |││                      ╰──────────────────────────────────────────────────────────────────────╯                      ││
-31 |││                                       ││                                                                           ││
+24 |││                [evoqs│  Show as      ‹ Busy ›                                               │                      ││
+25 |││                      │  Description  (none; Enter edits in $EDITOR)                         │                      ││
+26 |││                      │                                                                      │                      ││
+27 |││                      │  Availability           checking…                                    │                      ││
+28 |││                      │                                                                      │                      ││
+29 |││                      │  Times in Europe/Berlin                                              │                      ││
+30 |││                      │  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │                      ││
+31 |││                      ╰──────────────────────────────────────────────────────────────────────╯                      ││
 32 |│╰───────────────────────────────────────╯│                                                                           ││
 33 |│╭ View ─────────────────────────────────╮│                                                                           ││
 34 |││    mail  |  contacts  |  calendar     ││                                                                           ││

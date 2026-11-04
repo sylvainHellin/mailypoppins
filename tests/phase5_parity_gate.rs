@@ -77,7 +77,9 @@
 //! Once the cutover shipped the key surface was allowed to grow as well, so the
 //! dump now has to keep every Phase 0 binding in its section rather than
 //! reproduce the capture byte for byte, and the byte-identical pin moved to the
-//! living copy, `website/src/data/tui-keys.json`.
+//! living copy, `website/src/data/tui-keys.json`. The desktop's copy,
+//! `clients/desktop/src/keymap/keymap.json`, is pinned to the same dump as
+//! JSON, since its generator pretty-prints it.
 //!
 //! The recursive `mp --help` half of this oracle was retired once the cutover
 //! shipped and the CLI surface was allowed to evolve (the post-cutover
@@ -699,6 +701,21 @@ fn dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture() {
     let website = repo().join("website/src/data/tui-keys.json");
     let expected = fs::read(&website).unwrap_or_else(|e| panic!("read {}: {e}", website.display()));
     assert_bytes_equal(&out.stdout, &expected, &website);
+
+    // The desktop's copy (`pnpm gen:keymap`, pretty-printed by the generator)
+    // holds the same sections and bindings, or its key help and palette lack
+    // a TUI row and the catalog's binding for it runs nothing.
+    let desktop = repo().join("clients/desktop/src/keymap/keymap.json");
+    let committed = parse(
+        &fs::read(&desktop).unwrap_or_else(|e| panic!("read {}: {e}", desktop.display())),
+        &desktop,
+    );
+    assert!(
+        committed == live,
+        "{} is not this run's `mp dump-keys --json`; regenerate it with \
+         `MP_BIN=<this build's mp> pnpm gen:keymap` in clients/desktop",
+        desktop.display()
+    );
 }
 
 /// Byte comparison with a failure a reader can act on: the first differing

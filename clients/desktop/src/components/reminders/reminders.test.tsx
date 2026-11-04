@@ -89,6 +89,22 @@ describe("the reminder banner", () => {
     expect(screen.getByRole("region", { name: "Calendar" })).toBeInTheDocument();
   });
 
+  it("the palette's Calendar reminders row focuses the first Snooze, as R does, and says so when none waits", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(":");
+    await user.keyboard("calendar reminders");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("No reminders waiting")).toBeInTheDocument();
+
+    const fired = fire();
+    await screen.findByRole("region", { name: "Reminders" });
+    await user.keyboard(":");
+    await user.keyboard("calendar reminders");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(document.activeElement).toHaveAccessibleName(`Snooze ${fired.summary} for 5 minutes`));
+  });
+
   it("raises a test notification from the palette's action", async () => {
     const { user } = renderApp();
     await shellReady();

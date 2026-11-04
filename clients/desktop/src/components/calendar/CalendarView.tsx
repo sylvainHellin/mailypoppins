@@ -1,5 +1,5 @@
 import { useCallback, useState, type FormEvent } from "react";
-import { ArrowLeft, CalendarCheck, CalendarPlus, ChevronLeft, ChevronRight, Layers, RotateCw } from "lucide-react";
+import { ArrowLeft, CalendarCheck, CalendarPlus, CalendarX, ChevronLeft, ChevronRight, Layers, Pencil, RotateCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -23,6 +23,7 @@ import {
   wantedDays,
 } from "@/app/calendar";
 import { rsvpDialogFor } from "@/app/rsvp";
+import { editDialogFor, removeDialogFor } from "@/app/eventChange";
 import { useAppState, useDispatch } from "@/app/store";
 import type { CalendarLayout } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
@@ -43,7 +44,8 @@ const LAYOUTS: { layout: CalendarLayout; label: string; key: string; action: Act
  * move by a day or a week, `t` comes back to today, `gt` jumps to a date,
  * `a`/`d`/`w` switch the layout, `c` shows the calendars to show or hide,
  * `V` answers the cursor event, `n` opens the event form on the cursor's
- * day, `e` opens an invitation's invite.ics, `m`
+ * day, `E` opens it on the cursor event, `D` cancels or deletes that event,
+ * `e` opens an invitation's invite.ics, `m`
  * its mail, `r` reads the events again, Escape brings Mail back.
  */
 export function CalendarView() {
@@ -73,6 +75,10 @@ export function CalendarView() {
   const narrow = s.layout === "narrow";
   const answer = current ? rsvpDialogFor(s, current.event) : null;
   const refusal = typeof answer === "string" ? answer : null;
+  // An invitation mail's event is only answered, so it shows neither.
+  const server = current !== null && !current.event.id.startsWith("imip:");
+  const editing = current ? editDialogFor(current.event, calendars) : null;
+  const removal = current ? removeDialogFor(current.event, calendars) : null;
 
   const submitJump = (e: FormEvent) => {
     e.preventDefault();
@@ -232,6 +238,30 @@ export function CalendarView() {
                   <p data-slot="rsvp-refusal" className="text-xs text-muted-foreground">
                     {refusal}
                   </p>
+                ) : null}
+                {server ? (
+                  <span className="flex flex-wrap gap-1.5">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={typeof editing === "string"}
+                      onClick={() => run("edit_event")}
+                      title={typeof editing === "string" ? editing : "Edit the event (E)"}
+                    >
+                      <Pencil aria-hidden="true" />
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={typeof removal === "string"}
+                      onClick={() => run("remove_event")}
+                      title={typeof removal === "string" ? removal : removal?.cancel ? "Cancel the meeting, telling its attendees (D)" : "Delete the event, telling nobody (D)"}
+                    >
+                      {typeof removal === "object" && removal?.cancel ? <CalendarX aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
+                      {typeof removal === "object" && removal?.cancel ? "Cancel meeting" : "Delete"}
+                    </Button>
+                  </span>
                 ) : null}
               </div>
             </CalendarEventCard>
