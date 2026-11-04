@@ -3384,3 +3384,9 @@ Such a zone falls back to UTC, which keeps a single event's instants exact but m
 
 A weekly rule arrives with `dayOfMonth` 0, `month` 0 and `index` "first", and an open range with `endDate` 0001-01-01.
 Each pattern type reads only the fields it names, and a zero or year one reads as no value.
+
+## A delta-synced calendar cache keeps old defaults for every newly read field (2026-11-04, PERSO-255)
+
+A delta sync revisits only the events that changed on the server, so after a build starts reading a new field the rows an older build wrote keep that field's default until their event changes.
+Live, a series occurrence read as a single event and a Teams meeting had no Teams flag until `mp calendar rebuild`.
+Bump `store::calendar::MODEL_VERSION` in the same change as the read: a store stamped with another version drops its sync tokens on open, and the next sync of each calendar is a baseline.
