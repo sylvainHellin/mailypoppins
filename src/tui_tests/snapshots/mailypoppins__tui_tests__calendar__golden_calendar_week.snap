@@ -40,7 +40,7 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 34 |││    mail  |  contacts  |  calendar     ││Tue 04 10:30-12:00 ? PhD Kolloquium  Enter for the card                    ││
 35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
 36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
-37 |││ CALENDAR   j/k Events  h/l Day/week  t Today  a/d/w Layout  Enter Card  V Respond  c Calendars  n New              ││
+37 |││ CALENDAR   j/k Events  h/l Day/week  a/d/w Layout  Enter Card  V Respond  c Calendars  n New                       ││
 38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
@@ -48,4 +48,4 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 06 |strike@71..86
 07 |bg:surface+fg:selection+bold@19..35
 34 |bold@27..37
-37 |bold@2..12 bold@14..17 bold@26..29 bold@40..41 bold@49..54 bold@63..68 bold@75..76 bold@86..87 bold@99..100
+37 |bold@2..12 bold@14..17 bold@26..29 bold@40..45 bold@54..59 bold@66..67 bold@77..78 bold@90..91

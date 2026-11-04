@@ -1654,16 +1654,13 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Jump to top / bottom",
         false,
     ),
-    short(
-        b(
-            "t",
-            Chord::Char('t'),
-            KeyCtx::Calendar,
-            KeyAction::CalendarToday,
-            "Go to today",
-            true,
-        ),
-        "Today",
+    b(
+        "t",
+        Chord::Char('t'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarToday,
+        "Go to today",
+        false,
     ),
     row(
         "gt",
