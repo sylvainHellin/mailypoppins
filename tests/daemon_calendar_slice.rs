@@ -270,9 +270,10 @@ async fn calendar_list_shows_the_fake_calendars_and_the_invitation_calendars() {
     assert_eq!(listed["calendars"][0]["name"], "Calendar");
     assert_eq!(listed["calendars"][0]["is_default"], true);
     assert_eq!(listed["calendars"][3]["name"], "Invitations");
-    // The backend's features on its calendars, none on an invitation one.
+    // The backend's features on its calendars, less the online meeting on
+    // one that offers no Teams, and none on an invitation one.
     assert_eq!(listed["calendars"][0]["features"], json!(FAKE_FEATURES));
-    assert_eq!(listed["calendars"][1]["features"], json!(FAKE_FEATURES));
+    assert_eq!(listed["calendars"][1]["features"], json!(["write"]));
     assert_eq!(listed["calendars"][2]["features"], json!([]));
     assert_eq!(listed["calendars"][3]["features"], json!([]));
 
@@ -911,8 +912,8 @@ async fn event_create_takes_an_all_day_range_and_a_calendar() {
 }
 
 /// Every refusal comes before an operation: an account without a backend,
-/// an event typed wrong, and a calendar the account does not list; nothing
-/// reaches the server.
+/// an event typed wrong, a calendar the account does not list, and a Teams
+/// meeting on a calendar that offers none; nothing reaches the server.
 #[tokio::test]
 async fn event_create_refuses_before_an_operation_starts() {
     let slice = Slice::start();
@@ -961,6 +962,21 @@ async fn event_create_refuses_before_an_operation_starts() {
         unknown.message.contains("has no calendar cal-nope"),
         "{}",
         unknown.message
+    );
+
+    let no_teams = call_err(
+        &mut conn,
+        "event.create",
+        refusal(SERVER, meeting_input(), Some("cal-second")),
+    )
+    .await;
+    assert_eq!(
+        (no_teams.code, no_teams.message.as_str()),
+        (
+            -32602,
+            "The calendar Holidays of evoqs offers no Teams meetings (the mailbox has no Teams \
+             licence)"
+        )
     );
     assert!(writes(&slice).is_empty());
 }

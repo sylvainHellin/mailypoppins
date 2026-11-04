@@ -22,6 +22,11 @@
 //! }
 //! ```
 //!
+//! A spec calendar offers Teams when its `online_meeting_providers` names
+//! `teams-for-business`, as the test fixtures' calendars do unless a test
+//! clears it; `calendar.list` then reports the spec's `online-meeting`
+//! feature on it ([`super::calendar_features`]).
+//!
 //! The writes change the fake's events the way a server does: a create adds
 //! one (or answers the one an earlier create with the same transaction id
 //! made, patched with the create's fields when they changed, as the Graph
@@ -349,6 +354,7 @@ impl FakeCalendarBackend {
             is_default,
             can_edit: true,
             visible: true,
+            online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
         };
         let base = |id: &str, calendar: &str, summary: &str, time: EventTime| Event {
             account: "evoqs".into(),

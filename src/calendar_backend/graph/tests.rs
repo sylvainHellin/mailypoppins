@@ -127,6 +127,7 @@ fn calendar(id: &str, is_default: bool) -> Calendar {
         is_default,
         can_edit: true,
         visible: true,
+        online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
     }
 }
 
@@ -190,6 +191,22 @@ async fn the_calendar_list_maps_colours_flags_and_permissions() {
         ]
     );
     assert!(calendars.iter().all(|c| c.account == "evoqs"));
+    // allowedOnlineMeetingProviders: Teams on the default calendar, none on
+    // the holidays (a mailbox without a Teams licence answers an empty
+    // list), and `unknown` dropped beside Skype on the team calendar.
+    let providers: Vec<_> = calendars
+        .iter()
+        .map(|c| c.online_meeting_providers.as_slice())
+        .collect();
+    assert_eq!(
+        providers,
+        [
+            &[OnlineMeetingProvider::TeamsForBusiness][..],
+            &[][..],
+            &[OnlineMeetingProvider::SkypeForConsumer][..],
+        ]
+    );
+    assert!(calendars[0].offers_teams() && !calendars[2].offers_teams());
     let sent = backend.fetch.sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].prefer, r#"IdType="ImmutableId""#);

@@ -101,10 +101,10 @@ use mp_protocol::events::KIND_CALENDAR_CHANGED;
 use mp_protocol::RpcError;
 
 use crate::calendar_backend::{
-    backend_for, choose_backend, has_backend, preflight_scope, BackendChoice, CalendarBackend,
-    CalendarBackendError, Response, Written,
+    backend_for, calendar_features, choose_backend, has_backend, preflight_scope, BackendChoice,
+    CalendarBackend, CalendarBackendError, Response, Written,
 };
-use crate::calendar_model::{window_for, Calendar};
+use crate::calendar_model::{window_for, Calendar, CalendarFeature};
 use crate::calendar_view::{
     imip_row_id, local_zone, parse_zone, Sourced, ViewFilter, IMIP_CALENDAR_NAME,
 };
@@ -265,21 +265,23 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
         let store = open_store(name)?;
         if has_backend(account) {
             let backend = account.calendar_backend().as_str();
-            let features: Vec<String> = crate::calendar_backend::features(account)
-                .into_iter()
-                .map(|feature| feature.as_str().to_string())
-                .collect();
             let listed = cache::list_calendars(&store, name).map_err(|e| server_error(name, &e))?;
-            calendars.extend(listed.into_iter().map(|calendar| CalendarInfo {
-                account: calendar.account,
-                id: calendar.id,
-                name: calendar.name,
-                color: calendar.color,
-                is_default: calendar.is_default,
-                can_edit: calendar.can_edit,
-                visible: calendar.visible,
-                backend: backend.to_string(),
-                features: features.clone(),
+            calendars.extend(listed.into_iter().map(|calendar| {
+                let features = calendar_features(account, &calendar)
+                    .into_iter()
+                    .map(|feature| feature.as_str().to_string())
+                    .collect();
+                CalendarInfo {
+                    account: calendar.account,
+                    id: calendar.id,
+                    name: calendar.name,
+                    color: calendar.color,
+                    is_default: calendar.is_default,
+                    can_edit: calendar.can_edit,
+                    visible: calendar.visible,
+                    backend: backend.to_string(),
+                    features,
+                }
             }));
         }
         if crate::calendar_view::has_invitations(&store, name) {
@@ -600,6 +602,19 @@ fn plan_create(
             "The calendar {} of {name} is read-only",
             calendar.name
         )));
+    }
+    if input.online_meeting
+        && !calendar_features(&account, &calendar).contains(&CalendarFeature::OnlineMeeting)
+    {
+        return Err(invalid_params(if calendar.offers_teams() {
+            format!("The calendar backend of {name} offers no Teams meetings")
+        } else {
+            format!(
+                "The calendar {} of {name} offers no Teams meetings (the mailbox has no Teams \
+                 licence)",
+                calendar.name
+            )
+        }));
     }
     let transaction_id = match request.transaction_id.as_deref().map(str::trim) {
         Some(id) if !id.is_empty() => id.to_string(),

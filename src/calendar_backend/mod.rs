@@ -354,6 +354,18 @@ pub fn features(account: &AccountConfig) -> Vec<CalendarFeature> {
     }
 }
 
+/// What `calendar` of `account` lets a client do: the backend's
+/// [`features`], less [`CalendarFeature::OnlineMeeting`] on a calendar that
+/// offers no Teams meeting ([`Calendar::offers_teams`]), since Graph drops a
+/// meeting request there without a word.
+pub fn calendar_features(account: &AccountConfig, calendar: &Calendar) -> Vec<CalendarFeature> {
+    let mut features = features(account);
+    if !calendar.offers_teams() {
+        features.retain(|feature| *feature != CalendarFeature::OnlineMeeting);
+    }
+    features
+}
+
 /// The scope check a write runs before an operation starts: the fake's
 /// `missing_scope`, or the Graph token's scopes ([`calendar_scope_check`]).
 /// No network call either way.

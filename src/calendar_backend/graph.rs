@@ -89,7 +89,9 @@ const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
 
 /// What this build serves on a Graph calendar beyond reading and answering
 /// ([`super::features`]), each feature listed once its daemon method ships:
-/// `event.create` writes events, with a Teams link on request.
+/// `event.create` writes events, with a Teams link on request on a calendar
+/// whose `allowedOnlineMeetingProviders` names Teams
+/// ([`super::calendar_features`]).
 pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::Write, CalendarFeature::OnlineMeeting];
 
 // ---------------------------------------------------------------------------
@@ -302,6 +304,10 @@ mod wire {
         pub is_default_calendar: bool,
         #[serde(default)]
         pub can_edit: bool,
+        /// `teamsForBusiness`, `skypeForBusiness`, `skypeForConsumer` or
+        /// `unknown`; empty for a mailbox without a Teams licence.
+        #[serde(default)]
+        pub allowed_online_meeting_providers: Vec<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -505,6 +511,11 @@ fn calendar_from_graph(account: &str, cal: wire::Calendar) -> Calendar {
         is_default: cal.is_default_calendar,
         can_edit: cal.can_edit,
         visible: true,
+        online_meeting_providers: cal
+            .allowed_online_meeting_providers
+            .iter()
+            .filter_map(|raw| meeting_provider(Some(raw)))
+            .collect(),
     }
 }
 

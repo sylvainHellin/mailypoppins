@@ -700,4 +700,24 @@ fn event_create_through_the_cli() {
         &start,
     ]);
     assert!(refused.contains("needs --end or --duration"), "{refused}");
+
+    let no_teams = slice.err(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--calendar",
+        "cal-second",
+        "--summary",
+        "Call",
+        "--start",
+        &start,
+        "--duration",
+        "30m",
+        "--teams",
+    ]);
+    assert!(
+        no_teams.contains("The calendar Holidays of evoqs offers no Teams meetings"),
+        "{no_teams}"
+    );
 }

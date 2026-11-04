@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 
 use crate::calendar_backend::fake::FakeCalendarBackend;
 use crate::calendar_model::{
-    Attendee, AttendeeRole, Calendar, Event, EventKind, EventTime, OwnResponse, Person,
-    ResponseStatus, Sensitivity, ShowAs,
+    Attendee, AttendeeRole, Calendar, Event, EventKind, EventTime, OnlineMeetingProvider,
+    OwnResponse, Person, ResponseStatus, Sensitivity, ShowAs,
 };
 use crate::calendar_sync::sync_account;
 use crate::config::{AccountConfig, CalendarBackendKind};
@@ -292,6 +292,7 @@ fn server() -> FakeCalendarBackend {
         is_default,
         can_edit: true,
         visible: true,
+        online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
     };
     let mut meeting = server_event(
         "ev-meeting",

@@ -926,7 +926,7 @@ Options:
       --to <ADDR>            A required attendee (repeatable)
       --optional <ADDR>      An optional attendee (repeatable)
       --room <ADDR>          A room mailbox (repeatable)
-      --teams                Add a Teams meeting link
+      --teams                Add a Teams meeting link (when the calendar offers Teams)
       --reminder <MIN>       Minutes before the start the reminder fires (default the mailbox's)
       --no-reminder          No reminder
       --transaction-id <ID>  The id of an earlier run of this create, which the server makes once

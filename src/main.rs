@@ -972,7 +972,7 @@ struct CreateFlags {
     /// A room mailbox (repeatable)
     #[arg(long = "room", value_name = "ADDR")]
     room: Vec<String>,
-    /// Add a Teams meeting link
+    /// Add a Teams meeting link (when the calendar offers Teams)
     #[arg(long)]
     teams: bool,
     /// Minutes before the start the reminder fires (default the mailbox's)

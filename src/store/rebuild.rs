@@ -1337,7 +1337,7 @@ mod tests {
     /// (PERSO-200).
     #[test]
     fn a_rebuild_carries_the_calendar_visibility() {
-        use crate::calendar_model::Calendar;
+        use crate::calendar_model::{Calendar, OnlineMeetingProvider};
         use crate::store::calendar::{list_calendars, set_calendar_visible, upsert_calendars};
 
         let calendar = |id: &str| Calendar {
@@ -1348,6 +1348,7 @@ mod tests {
             is_default: false,
             can_edit: true,
             visible: true,
+            online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
         };
         let (_dir, path, _blobs) = account_dir();
         {

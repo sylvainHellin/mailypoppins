@@ -62,6 +62,20 @@ pub struct Calendar {
     /// survives a cache rebuild, and a backend always reports `true`.
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// The online-meeting services an event of this calendar may carry
+    /// (Graph `allowedOnlineMeetingProviders`): empty when the mailbox has
+    /// none, as one without a Teams licence, whose server drops a request
+    /// for a meeting link without a word.
+    #[serde(default)]
+    pub online_meeting_providers: Vec<OnlineMeetingProvider>,
+}
+
+impl Calendar {
+    /// Whether an event of this calendar can carry a Teams meeting.
+    pub fn offers_teams(&self) -> bool {
+        self.online_meeting_providers
+            .contains(&OnlineMeetingProvider::TeamsForBusiness)
+    }
 }
 
 fn default_true() -> bool {
