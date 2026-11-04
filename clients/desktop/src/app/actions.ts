@@ -99,8 +99,9 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "toggle_help":
       return dispatch({ type: "overlay", overlay: s.overlay === "help" ? null : "help" });
     case "focus_reminders": {
-      // The banner's first Snooze button; Tab walks on to Dismiss and the next reminder.
-      const first = document.querySelector<HTMLElement>(`[data-slot="reminders"] button`);
+      // The first reminder's Snooze button, as the TUI's `R` opens on the first
+      // reminder with `s` to hand; Tab walks on to Dismiss and the next reminder.
+      const first = document.querySelector<HTMLElement>(`[data-slot="reminders"] [data-reminder="snooze"]`);
       if (!first || (s.reminders.data ?? []).length === 0) return dispatch({ type: "notice", text: "No reminders waiting" });
       first.focus();
       return;

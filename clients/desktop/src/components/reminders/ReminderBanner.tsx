@@ -5,6 +5,9 @@
 // is frontmost, so the banner is what says a reminder fired whatever the
 // notification did. A decision goes to the daemon, whose
 // `calendar.reminders_changed` clears or moves the reminder in every client.
+// `R` focuses the first reminder's Snooze button (the TUI's `R` overlay, whose
+// `s` and `d` act), and the section's `data-own-keys` keeps the panes' Enter
+// and Space off its buttons, so the keyboard presses them.
 
 import { useEffect, useState } from "react";
 import { AlarmClock, BellOff, Clock } from "lucide-react";
@@ -50,7 +53,7 @@ export function ReminderBanner() {
   };
 
   return (
-    <section aria-label="Reminders" data-slot="reminders" className="border-b border-border bg-card">
+    <section aria-label="Reminders" data-slot="reminders" data-own-keys className="border-b border-border bg-card">
       <ul className="flex flex-col">
         {reminders.map((r) => (
           <li key={`${r.account}\u0000${r.event}`} className="flex items-center gap-2 px-4 py-1.5 text-sm">
@@ -65,7 +68,7 @@ export function ReminderBanner() {
               <span className="font-medium">{title(r)}</span>
               <span className="text-muted-foreground">, {reminderDetail(r, now)}</span>
             </button>
-            <Button size="xs" variant="outline" onClick={() => decide(r, true)} aria-label={`Snooze ${title(r)} for ${SNOOZE_MINUTES} minutes`}>
+            <Button size="xs" variant="outline" data-reminder="snooze" onClick={() => decide(r, true)} aria-label={`Snooze ${title(r)} for ${SNOOZE_MINUTES} minutes`}>
               <Clock aria-hidden="true" />
               Snooze {SNOOZE_MINUTES} min
             </Button>

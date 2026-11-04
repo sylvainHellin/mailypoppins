@@ -52,6 +52,43 @@ describe("the reminder banner", () => {
     await waitFor(() => expect(document.querySelector('[data-view="calendar"]')).not.toBeNull());
   });
 
+  it("R focuses the first Snooze, and Enter and Space press the banner's buttons in the Mail view", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const fired = fire();
+    await screen.findByRole("region", { name: "Reminders" });
+    await user.keyboard("R");
+    expect(document.activeElement).toHaveAccessibleName(`Snooze ${fired.summary} for 5 minutes`);
+    await user.keyboard("{Tab}");
+    expect(document.activeElement).toHaveAccessibleName(`Dismiss ${fired.summary}`);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(banner()).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("reminder_dismiss", { account: fired.account, event: fired.event });
+    expect(document.querySelector('[data-view="calendar"]')).toBeNull();
+
+    const again = fire();
+    await screen.findByRole("region", { name: "Reminders" });
+    await user.keyboard("R");
+    await user.keyboard(" ");
+    await waitFor(() => expect(banner()).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("reminder_snooze", { account: again.account, event: again.event, minutes: 5 });
+  });
+
+  it("R focuses the first Snooze, and Enter presses it over a full-pane view", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(" a");
+    await screen.findByRole("region", { name: "Calendar" });
+    const fired = fire();
+    await screen.findByRole("region", { name: "Reminders" });
+    await user.keyboard("R");
+    expect(document.activeElement).toHaveAccessibleName(`Snooze ${fired.summary} for 5 minutes`);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(banner()).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("reminder_snooze", { account: fired.account, event: fired.event, minutes: 5 });
+    expect(screen.getByRole("region", { name: "Calendar" })).toBeInTheDocument();
+  });
+
   it("raises a test notification from the palette's action", async () => {
     const { user } = renderApp();
     await shellReady();
