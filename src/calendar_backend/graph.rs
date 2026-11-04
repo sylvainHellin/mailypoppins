@@ -114,8 +114,9 @@ pub trait GraphFetch: Send + Sync {
         prefer: &[String],
     ) -> impl Future<Output = anyhow::Result<HttpAnswer>> + Send;
 
-    /// A JSON `body`; [`serde_json::Value::Null`] posts an empty one, for
-    /// the actions that take no parameters (`dismissReminder`).
+    /// A JSON `body`; an action that takes no parameters (`dismissReminder`)
+    /// posts `{}`, since Exchange answers an empty POST, which reqwest sends
+    /// without a `Content-Length`, with HTTP 411.
     fn post(
         &self,
         url: &str,
@@ -164,8 +165,8 @@ async fn read_answer(resp: reqwest::Response) -> anyhow::Result<HttpAnswer> {
 }
 
 impl GraphHttp {
-    /// One request of the seam, with its `Prefer` header and its body: none,
-    /// an empty one for [`serde_json::Value::Null`], else the JSON.
+    /// One request of the seam, with its `Prefer` header and its JSON body,
+    /// when it has one.
     fn build(
         &self,
         method: reqwest::Method,
@@ -179,7 +180,6 @@ impl GraphHttp {
             .header("Prefer", prefer_header(prefer));
         match body {
             None => request,
-            Some(serde_json::Value::Null) => request.body(Vec::new()),
             Some(body) => request.json(&body),
         }
     }

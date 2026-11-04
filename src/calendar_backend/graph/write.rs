@@ -364,7 +364,7 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
     pub(super) async fn post_dismiss(&self, event: &str) -> BackendResult<()> {
         let answer = self
             .fetch
-            .post(&event_url(event, Some("dismissReminder")), Value::Null)
+            .post(&event_url(event, Some("dismissReminder")), json!({}))
             .await?;
         self.done_or_gone("reminder dismissal", event, &answer)
     }
