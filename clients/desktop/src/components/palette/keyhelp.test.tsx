@@ -80,6 +80,13 @@ describe("the key help filter", () => {
     expect(within(again).getAllByTestId("help-item")).toHaveLength(TOTAL);
   });
 
+  it("lists both of Back's keys in the DESKTOP section", async () => {
+    const { help } = await openHelp();
+    const desktop = within(help).getByRole("group", { name: "DESKTOP" });
+    const back = within(desktop).getAllByTestId("help-item").find((r) => r.getAttribute("data-label") === "Back");
+    expect(back).toHaveTextContent("Cmd+[ / Alt+Left");
+  });
+
   it("lists the TUI's R reminders row", async () => {
     const { user, help } = await openHelp();
     await user.keyboard("reminders");

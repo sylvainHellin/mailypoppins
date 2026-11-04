@@ -373,7 +373,7 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Widen list", keys: [], id: "widen_list", badge: null },
   { section: "APP", label: "Narrow list", keys: [], id: "narrow_list", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
-  { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
+  { section: "APP", label: "Back", keys: ["Cmd+[", "Alt+Left"], id: "back", badge: null },
   // The TUI has no settings view, and no key for one (D11): the palette, the
   // sidebar and the app menu's "Settings…", whose Cmd+, is the macOS convention.
   { section: "APP", label: "Open settings", keys: ["Cmd+,"], id: "open_settings", badge: null },
