@@ -2142,7 +2142,7 @@ impl App {
                 self.close_overlay();
                 self.open_event_edit_for(&event);
             }
-            KeyCode::Char('X') => {
+            KeyCode::Char('D') => {
                 let event = card.event.clone();
                 self.close_overlay();
                 self.open_event_remove_for(&event);

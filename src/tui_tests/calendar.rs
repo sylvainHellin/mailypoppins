@@ -709,7 +709,7 @@ fn the_event_form_creates_through_event_create_and_retries_with_its_transaction_
 // ---------------------------------------------------------------------------
 
 /// The edit form on a meeting the user organizes, its start moved; and the
-/// `X` confirmations, a cancel with its comment being typed and a delete of
+/// `D` confirmations, a cancel with its comment being typed and a delete of
 /// an event that tells nobody.
 #[test]
 fn golden_calendar_event_edit_and_remove() {
@@ -844,15 +844,15 @@ fn an_attendee_edits_the_reminder_through_event_update() {
     );
 }
 
-/// `X` on someone else's meeting points at the answer that tells its
+/// `D` on someone else's meeting points at the answer that tells its
 /// organizer; on an event that tells nobody it asks to delete it, and `y`
 /// is one `event.delete`; `n` keeps the event.
 #[test]
-fn x_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
+fn d_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
     let _data = seeded();
     let mut app = app_over(CallLog::default());
     app.switch_view(View::Calendar);
-    app.handle_key(key('X'));
+    app.handle_key(key('D'));
     assert!(matches!(app.overlay, Overlay::None));
     assert_eq!(
         app.status_message.as_deref(),
@@ -860,9 +860,9 @@ fn x_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
     );
 
     app.handle_key(key('j'));
-    app.handle_key(key('X'));
+    app.handle_key(key('D'));
     let Overlay::EventRemove(overlay) = &app.overlay else {
-        panic!("X on the holiday asks to delete it");
+        panic!("D on the holiday asks to delete it");
     };
     assert!(!overlay.cancel);
     assert_eq!(overlay.event, "ev-holiday");
@@ -870,7 +870,7 @@ fn x_deletes_an_event_that_tells_nobody_and_refuses_a_live_meeting() {
     assert!(matches!(app.overlay, Overlay::None));
     assert!(app.pending_actions.is_empty());
 
-    app.handle_key(key('X'));
+    app.handle_key(key('D'));
     app.handle_key(key('y'));
     let Some(Action::RemoveEvent(removal)) = app.pending_actions.pop_front() else {
         panic!("y queues the delete");

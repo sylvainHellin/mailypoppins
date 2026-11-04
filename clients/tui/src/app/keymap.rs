@@ -371,7 +371,7 @@ pub enum KeyAction {
     CalendarNewEvent,
     /// `E`: the event form on the event under the cursor (PERSO-255).
     CalendarEditEvent,
-    /// `X`: cancel the meeting or delete the event under the cursor.
+    /// `D`: cancel the meeting or delete the event under the cursor.
     CalendarRemoveEvent,
     /// `h` / `[` and `l` / `]`: the previous or next day or week.
     CalendarPrev,
@@ -1778,8 +1778,8 @@ pub static KEYMAP: &[KeyBinding] = &[
         false,
     ),
     b(
-        "X",
-        Chord::Char('X'),
+        "D",
+        Chord::Char('D'),
         KeyCtx::Calendar,
         KeyAction::CalendarRemoveEvent,
         "Cancel the meeting (tells the attendees) or delete the event",

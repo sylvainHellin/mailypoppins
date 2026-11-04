@@ -1950,7 +1950,7 @@ pub struct EventCardOverlay {
     pub scroll: u16,
 }
 
-/// The `X` confirmation of the Calendar view (PERSO-255): cancel a meeting
+/// The `D` confirmation of the Calendar view (PERSO-255): cancel a meeting
 /// the user organizes, with a comment for its attendees, or delete an event
 /// that tells nobody.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2142,7 +2142,7 @@ pub enum Action {
     /// `event.update`, with the fields that changed.
     UpdateEvent(Box<super::EventForm>),
     /// Cancel a meeting through `event.cancel`, or delete an event through
-    /// `event.delete` (PERSO-255), as the `X` confirmation decided.
+    /// `event.delete` (PERSO-255), as the `D` confirmation decided.
     RemoveEvent(Box<EventRemoveOverlay>),
     /// Edit the open event form's description in `$EDITOR` (PERSO-255).
     EditEventDescription,
@@ -2600,7 +2600,7 @@ pub enum Overlay {
     Rsvp(RsvpOverlay),
     /// The event form (`n` in the Calendar view, `E` on an event, PERSO-255).
     EventForm(Box<super::EventForm>),
-    /// The cancel or delete confirmation (`X` on an event, PERSO-255).
+    /// The cancel or delete confirmation (`D` on an event, PERSO-255).
     EventRemove(Box<EventRemoveOverlay>),
     /// The calendars shown or hidden in the Calendar view (`c`, PERSO-200).
     Calendars(CalendarsOverlay),

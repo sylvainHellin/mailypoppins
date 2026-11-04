@@ -2,7 +2,7 @@
 //! what part of a day an event covers, the cursor's rows, and the reads and
 //! writes the view makes through the daemon (`calendar.view`, `calendar.list`,
 //! `calendar.set_visibility`), the event form `n` opens (`event.create`) and
-//! `E` opens on an event (`event.update`), and the cancel or delete `X`
+//! `E` opens on an event (`event.update`), and the cancel or delete `D`
 //! confirms (`event.cancel`, `event.delete`).
 //!
 //! The pure half ([`day_part`], [`calendar_entries`]) takes the events, the
@@ -615,7 +615,7 @@ impl App {
         }
         if event.cancelled {
             self.set_status(format!(
-                "{} was cancelled by its organizer; X deletes your copy",
+                "{} was cancelled by its organizer; D deletes your copy",
                 event.summary
             ));
             return;
@@ -642,14 +642,14 @@ impl App {
         self.overlay = Overlay::EventForm(Box::new(form));
     }
 
-    /// `X`: cancel or delete the event under the cursor.
+    /// `D`: cancel or delete the event under the cursor.
     pub fn open_event_remove(&mut self) {
         if let Some(event) = self.selected_event().cloned() {
             self.open_event_remove_for(&event);
         }
     }
 
-    /// The confirmation `X` asks on `event`: cancel a meeting the user
+    /// The confirmation `D` asks on `event`: cancel a meeting the user
     /// organizes, which tells its attendees, with a comment; delete an event
     /// that tells nobody (one without attendees, or the user's copy of a
     /// cancelled meeting); and for someone else's live meeting, the answer

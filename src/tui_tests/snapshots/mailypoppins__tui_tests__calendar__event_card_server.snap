@@ -30,7 +30,7 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 24 |││          │                                                                                              │          ││
 25 |││          │Bitte Helm mitbringen.                                                                        │          ││
 26 |││          │                                                                                              │          ││
-27 |││          │  V respond · E edit · X cancel or delete · j/k scroll · Esc close                            │          ││
+27 |││          │  V respond · E edit · D cancel or delete · j/k scroll · Esc close                            │          ││
 28 |││          ╰──────────────────────────────────────────────────────────────────────────────────────────────╯          ││
 29 |││                                       ││                                                                           ││
 30 |││                                       ││                                                                           ││

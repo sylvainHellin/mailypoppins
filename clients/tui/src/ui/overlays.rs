@@ -224,7 +224,7 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
     }
 }
 
-/// Render the `X` confirmation (PERSO-255): a cancel names how many people
+/// Render the `D` confirmation (PERSO-255): a cancel names how many people
 /// it tells and takes a comment for them; a delete says it tells nobody.
 pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Frame, area: Rect) {
     let height = if overlay.cancel { 9 } else { 8 };
