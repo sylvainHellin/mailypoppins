@@ -462,3 +462,13 @@ Each query word must match the start of a word of the label or section, or, at t
 Rejected: a threshold on cmdk's command-score (a magic number over a score that still mixes label, section and keys); a menu accelerator for Cmd+P (it would take the key from text fields and the embedded editor).
 Source: Sylvain in chat, 2026-11-04
 Status: accepted
+
+## 2026-11-04 - An occurrence's change names its scope, and a change to a whole series re-baselines the calendar that holds it
+
+Why: the live probes of slice 5 (`.agents/research/2026-11-04-graph-recurrence-probes.md`) show Graph's delta re-sending a series' occurrences after a change to its master but never naming an occurrence that left it (one cancelled or deleted, or one a shorter rule dropped), and only the master's removal when the series goes.
+So mp's write-through removes the occurrence it cancels or deletes, removes every occurrence with the series it cancels or deletes, and after an update of a whole series drops the sync token of the series' calendar, so the sync right after is a baseline of that calendar's window.
+An occurrence's id needs `scope` (`occurrence` or `series`) in every client, a series master's id is the series and a single event takes none, since a default would make a choice the user did not; a new rule is only accepted in the series scope, and a single event does not become a series through `event.update` in phase 2.
+What a rule's pattern leaves out is filled from the event's first day (the weekday, the day of the month, the month), a weekly week starts on Monday, and a recurrence patch names its `recurrenceTimeZone`, without which Graph resets it to UTC.
+Rejected: trusting the delta to drop the occurrences (ghost occurrences until the daily baseline); reading `GET /instances` after every series write (a second read path, and the design keeps phase 2 off it); defaulting an occurrence's scope to the occurrence.
+Source: implementation of PERSO-255 on branch `calendar-p2-p2s5`, 2026-11-04.
+Status: accepted
