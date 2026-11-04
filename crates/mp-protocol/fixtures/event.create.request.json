@@ -1,0 +1,31 @@
+{
+  "id": 76,
+  "jsonrpc": "2.0",
+  "method": "event.create",
+  "params": {
+    "account": "evoqs",
+    "calendar": "AAMkADcal1",
+    "event": {
+      "attendees": [
+        {
+          "email": "ada@example.com",
+          "name": "Ada Lovelace",
+          "role": "required"
+        },
+        {
+          "email": "room-1@example.com",
+          "role": "resource"
+        }
+      ],
+      "body": "Agenda: the budget",
+      "duration": "1h",
+      "location": "Room 1",
+      "online_meeting": true,
+      "reminder": 10,
+      "start": "2026-11-18T14:00",
+      "summary": "Project review",
+      "zone": "Europe/Berlin"
+    },
+    "transaction_id": "mp-3f9c2a7e1b5d4c60"
+  }
+}

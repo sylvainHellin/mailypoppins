@@ -31,14 +31,14 @@ use chrono::Duration as Days;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use mailypoppins::calendar_backend::fake::{RecordedResponse, FAKE_CALENDAR_ENV};
+use mailypoppins::calendar_backend::fake::{RecordedResponse, RecordedWrite, FAKE_CALENDAR_ENV};
 use mailypoppins::calendar_backend::Response;
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::RpcError;
 
 use support::calendar_fixture::{
-    at, day, fake_spec_with, seed, seed_series, series_occurrences, FAKE_FEATURES, IMIP, LOCAL_UID,
-    MEETING_UID, SERIES_UID, SERVER,
+    at, day, fake_spec_with, seed, seed_series, series_occurrences, write_log, FAKE_FEATURES, IMIP,
+    LOCAL_UID, MEETING_UID, SERIES_UID, SERVER,
 };
 use support::parity::{socket_path, DaemonFixture};
 use support::read_fixture;
@@ -156,6 +156,11 @@ async fn call_err(conn: &mut Connection, method: &str, params: Value) -> RpcErro
 /// Start an operation and wait for its terminal status.
 async fn run_operation(conn: &mut Connection, method: &str, params: Value) -> Value {
     let started = call(conn, method, params).await;
+    wait_for(conn, method, &started).await
+}
+
+/// The terminal status of the operation `started` names.
+async fn wait_for(conn: &mut Connection, method: &str, started: &Value) -> Value {
     let id = started["operation_id"].as_str().unwrap().to_string();
     let start = Instant::now();
     loop {
@@ -694,4 +699,233 @@ async fn an_all_day_event_is_placed_in_the_viewers_zone() {
         seen.push(ids(answer["events"].as_array().unwrap()));
     }
     assert_eq!(seen, [Vec::new(), vec![format!("{SERVER}/ev-holiday")]]);
+}
+
+// ---------------------------------------------------------------------------
+// event.create (PERSO-255)
+// ---------------------------------------------------------------------------
+
+/// The writes the fake recorded, in order.
+fn writes(slice: &Slice) -> Vec<RecordedWrite> {
+    match std::fs::read_to_string(write_log(&slice.root().join("calendar.jsonl"))) {
+        Ok(text) => text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// A Teams meeting with one attendee and a room, ten days out at 14:00 in
+/// Berlin.
+fn meeting_input() -> Value {
+    json!({
+        "summary": "Planning",
+        "start": format!("{}T14:00", day(10).date_naive()),
+        "duration": "1h",
+        "zone": "Europe/Berlin",
+        "location": "Room 1",
+        "attendees": [
+            {"email": "ada@example.com", "name": "Ada Lovelace"},
+            {"email": "room-1@example.com", "role": "resource"},
+        ],
+        "online_meeting": true,
+        "reminder": 10,
+    })
+}
+
+/// A create answers its transaction id at once, reaches the fake with the
+/// event resolved, settles with the server's event, which is in the cache
+/// before the operation settles and stays there across a resync; a retry
+/// with the same transaction id settles with the same event and calls the
+/// server no more.
+#[tokio::test]
+async fn event_create_writes_through_and_a_retry_creates_nothing() {
+    let slice = Slice::start();
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({})).await;
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+
+    let started = call(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": meeting_input()}),
+    )
+    .await;
+    let transaction_id = started["transaction_id"].as_str().unwrap().to_string();
+    assert!(transaction_id.starts_with("mp-"), "{started}");
+    let status = wait_for(&mut conn, "event.create", &started).await;
+    let result = succeeded(&status).clone();
+    assert_eq!(result["account"], SERVER);
+    assert_eq!(result["transaction_id"], transaction_id.as_str());
+    assert_eq!(
+        result["invited"],
+        json!(["ada@example.com", "room-1@example.com"])
+    );
+    let event = &result["event"];
+    let id = event["id"].as_str().unwrap().to_string();
+    assert_eq!(event["calendar"], "cal-main");
+    assert_eq!(event["summary"], "Planning");
+    assert_eq!(event["is_organizer"], true);
+    assert_eq!(event["is_online_meeting"], true);
+    assert_eq!(event["reminder"], 10);
+    assert_eq!(event["time"]["zone"], "Europe/Berlin");
+    assert_eq!(event["attendees"][1]["role"], "resource");
+
+    let created = writes(&slice);
+    assert!(
+        matches!(created.as_slice(), [RecordedWrite::Create { transaction_id: t, .. }] if *t == transaction_id),
+        "{created:?}"
+    );
+    let got = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": id}),
+    )
+    .await;
+    assert_eq!(got["event"]["summary"], "Planning");
+
+    // A resync reads the server again, which still holds the event.
+    rebuild(&mut conn, SERVER).await;
+    let events = view(&mut conn, json!({"accounts": [SERVER]})).await;
+    assert!(
+        ids(&events).contains(&format!("{SERVER}/{id}")),
+        "{events:?}"
+    );
+
+    // A retry settles with the cached event and calls the server no more.
+    let before = writes(&slice).len();
+    let retry = run_operation(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": meeting_input(), "transaction_id": transaction_id}),
+    )
+    .await;
+    assert_eq!(succeeded(&retry)["event"]["id"], id.as_str());
+    assert_eq!(writes(&slice).len(), before);
+
+    let start = Instant::now();
+    let mut announced = false;
+    while start.elapsed() < SETTLE_DEADLINE {
+        let Some(notification) = within("state.event", watcher.next_notification()).await else {
+            break;
+        };
+        if notification.params["kind"] == "calendar.changed" {
+            announced = true;
+            break;
+        }
+    }
+    assert!(announced, "a client was told the calendar changed");
+}
+
+/// An all-day create of two days is the model's all-day range, the end the
+/// day after the last, and lands in the calendar it names.
+#[tokio::test]
+async fn event_create_takes_an_all_day_range_and_a_calendar() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let first = day(12).date_naive();
+    let last = day(13).date_naive();
+    let status = run_operation(
+        &mut conn,
+        "event.create",
+        json!({
+            "account": SERVER,
+            "calendar": "cal-second",
+            "event": {"summary": "Away", "start": first.to_string(), "end": last.to_string(),
+                      "zone": "Europe/Berlin", "show_as": "oof", "reminder": null},
+        }),
+    )
+    .await;
+    let event = &succeeded(&status)["event"];
+    assert_eq!(event["calendar"], "cal-second");
+    assert_eq!(
+        event["time"],
+        json!({"kind": "all-day", "start": first.to_string(), "end": day(14).date_naive().to_string()})
+    );
+    assert_eq!(event["show_as"], "oof");
+    assert!(event.get("reminder").is_none(), "{event}");
+    let recorded = writes(&slice);
+    let RecordedWrite::Create { input, .. } = &recorded[0] else {
+        panic!("{recorded:?}");
+    };
+    assert_eq!(input.zone.as_deref(), Some("Europe/Berlin"));
+    assert_eq!(input.reminder, Some(None));
+}
+
+/// Every refusal comes before an operation: an account without a backend,
+/// an event typed wrong, and a calendar the account does not list; nothing
+/// reaches the server.
+#[tokio::test]
+async fn event_create_refuses_before_an_operation_starts() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let refusal = |account: &str, event: Value, calendar: Option<&str>| {
+        let mut params = json!({"account": account, "event": event});
+        if let Some(calendar) = calendar {
+            params["calendar"] = calendar.into();
+        }
+        params
+    };
+    let no_backend = call_err(
+        &mut conn,
+        "event.create",
+        refusal(IMIP, meeting_input(), None),
+    )
+    .await;
+    assert_eq!(no_backend.code, -32602);
+    assert!(
+        no_backend.message.contains("no calendar backend"),
+        "{}",
+        no_backend.message
+    );
+
+    let mut no_summary = meeting_input();
+    no_summary["summary"] = " ".into();
+    let bad = call_err(&mut conn, "event.create", refusal(SERVER, no_summary, None)).await;
+    assert_eq!(
+        (bad.code, bad.message.as_str()),
+        (-32602, "An event needs a summary")
+    );
+
+    let mut no_end = meeting_input();
+    no_end.as_object_mut().unwrap().remove("duration");
+    let bad = call_err(&mut conn, "event.create", refusal(SERVER, no_end, None)).await;
+    assert_eq!(bad.code, -32602, "{}", bad.message);
+
+    let unknown = call_err(
+        &mut conn,
+        "event.create",
+        refusal(SERVER, meeting_input(), Some("cal-nope")),
+    )
+    .await;
+    assert!(
+        unknown.message.contains("has no calendar cal-nope"),
+        "{}",
+        unknown.message
+    );
+    assert!(writes(&slice).is_empty());
+}
+
+/// A sign-in without the calendar scope is the re-login prompt, before an
+/// operation starts.
+#[tokio::test]
+async fn event_create_without_the_scope_is_the_relogin_prompt() {
+    let slice = Slice::start_with(true, &[]);
+    let mut conn = slice.connect().await;
+    let refused = call_err(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": meeting_input()}),
+    )
+    .await;
+    assert_eq!(refused.code, -32603);
+    assert_eq!(
+        refused.message,
+        format!("calendar needs a re-login (mp config oauth2-login -A {SERVER})")
+    );
+    assert!(writes(&slice).is_empty());
 }

@@ -684,6 +684,37 @@ pub fn event_keys(store: &Store, account: &str) -> Result<HashSet<EventKey>> {
     Ok(keys)
 }
 
+/// Write one event the server answered a write with into the cache (the
+/// write-through of `event.create`), before the delta sync brings the same
+/// row, which the upsert by id then leaves alone.
+pub fn upsert_event(store: &Store, account: &str, event: &Event) -> Result<()> {
+    let json = serde_json::to_string(event).context("serialising a calendar event")?;
+    write_event(store.conn(), account, &event.calendar, event, &json, false)
+}
+
+/// The cached event of `account` a create with `transaction_id` made, if the
+/// cache holds it: what a retried create settles with instead of posting.
+pub fn event_by_transaction(
+    store: &Store,
+    account: &str,
+    transaction_id: &str,
+) -> Result<Option<Event>> {
+    let json: Option<String> = store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT event_json FROM {EVENTS_TABLE}
+                 WHERE account = ?1 AND json_extract(event_json, '$.transaction_id') = ?2
+                 LIMIT 1"
+            ),
+            [account, transaction_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("looking up a calendar event by transaction id")?;
+    Ok(json.as_deref().and_then(parse_event))
+}
+
 /// One cached event of `account` by its server id.
 pub fn get_event(store: &Store, account: &str, id: &str) -> Result<Option<Event>> {
     let json: Option<String> = store
@@ -1012,6 +1043,27 @@ mod tests {
             utc(1, 0),
             Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap(),
         )
+    }
+
+    /// A written event enters the cache before any sync, and a retried
+    /// create finds it by its transaction id, on its own account only.
+    #[test]
+    fn a_written_event_is_found_by_its_transaction_id() {
+        let (_dir, store) = open();
+        upsert_calendars(&store, "evoqs", &[calendar("cal-main", true)]).unwrap();
+        let mut created = timed("ev-new", "cal-main", 4, 9);
+        created.transaction_id = Some("tx-1".into());
+        upsert_event(&store, "evoqs", &created).unwrap();
+        assert_eq!(
+            get_event(&store, "evoqs", "ev-new").unwrap(),
+            Some(created.clone())
+        );
+        assert_eq!(
+            event_by_transaction(&store, "evoqs", "tx-1").unwrap(),
+            Some(created)
+        );
+        assert_eq!(event_by_transaction(&store, "evoqs", "tx-2").unwrap(), None);
+        assert_eq!(event_by_transaction(&store, "perso", "tx-1").unwrap(), None);
     }
 
     fn baseline(upserts: Vec<Event>) -> SyncResult {

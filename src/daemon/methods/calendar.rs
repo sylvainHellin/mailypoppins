@@ -18,6 +18,9 @@
 //!                             -> {operation_id}
 //!                             settles {account, selector, response, subject,
 //!                                      organizer, message_id, delivered}
+//! event.create            {account, calendar?, transaction_id?, event: EventInputParams}
+//!                             -> {operation_id, transaction_id}
+//!                             settles EventWriteResult
 //! event.get               {account, event}
 //!                             -> {account, event: CalendarEvent, series?}
 //! event.respond           {account, event, response, comment?, send_response?}
@@ -25,7 +28,8 @@
 //!                             settles EventRespondResult
 //! ```
 //!
-//! `calendar.rebuild`, `calendar.rsvp` and `event.respond` are operations. A
+//! `calendar.rebuild`, `calendar.rsvp`, `event.create` and `event.respond`
+//! are operations. A
 //! rebuild folds every stored `METHOD:REPLY` onto every stored invitation, and
 //! drops and resyncs the server cache of an account with a backend; an answer
 //! *sends*, over SMTP through the durable outbox or to the server's calendar
@@ -46,6 +50,22 @@
 //! iMIP path's own address, though every client answers through `event.respond`.
 //! An answer through the backend is followed by an immediate calendar sync,
 //! and every answer that went through announces `calendar.changed`.
+//!
+//! `event.create` (PERSO-255) resolves the event a client typed and its
+//! calendar before an operation exists, and answers the operation id with
+//! the transaction id the create carries (the client's, or one it mints),
+//! so a client whose operation vanished retries with the same id and the
+//! server makes one event. The operation settles at once with an event the
+//! cache already holds under that transaction id; otherwise it creates the
+//! event, writes the server's answer into the cache under the account's
+//! calendar lock, syncs the account and announces `calendar.changed`. The
+//! cache is written only once the server answered.
+//!
+//! Its refusals, all before an operation starts and `-32602` unless named:
+//! an account without a calendar backend, the sign-in without the calendar
+//! scope (the re-login prompt, `-32603`), an event the client typed wrong
+//! (the sentence names the field), a calendar the account does not list, or
+//! one the user may not write to.
 //!
 //! `calendar.set_visibility` is a command: a local preference, but one
 //! `calendar.list` and `calendar.view` observe, so it answers with the
@@ -72,20 +92,21 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{
     CalendarChanged, CalendarEvent, CalendarInfo, CalendarListResult, CalendarRange,
-    CalendarViewParams, CalendarViewResult, EventGetResult, EventRespondParams, EventRespondResult,
-    IMIP_CALENDAR_ID,
+    CalendarViewParams, CalendarViewResult, EventCreateParams, EventGetResult, EventRespondParams,
+    EventRespondResult, EventWriteResult, IMIP_CALENDAR_ID,
 };
 use mp_protocol::events::KIND_CALENDAR_CHANGED;
 use mp_protocol::RpcError;
 
 use crate::calendar_backend::{
     backend_for, choose_backend, has_backend, preflight_scope, BackendChoice, CalendarBackend,
-    CalendarBackendError, Response,
+    CalendarBackendError, Response, Written,
 };
-use crate::calendar_model::window_for;
+use crate::calendar_model::{window_for, Calendar};
 use crate::calendar_view::{
     imip_row_id, local_zone, parse_zone, Sourced, ViewFilter, IMIP_CALENDAR_NAME,
 };
+use crate::calendar_write::{resolve_input, EventInput};
 use crate::config::{AccountConfig, AuthMethod};
 use crate::invite::Rsvp;
 use crate::reconcile::reconcile_account;
@@ -134,8 +155,9 @@ pub const CALENDAR_VIEW_METHOD_SPECS: [MethodSpec; 3] = [
     MethodSpec::new("calendar.view", MethodKind::Query, 1),
 ];
 
-/// The `event.*` family (PERSO-200), in method-name order.
-pub const EVENT_METHOD_SPECS: [MethodSpec; 2] = [
+/// The `event.*` family (PERSO-200, PERSO-255), in method-name order.
+pub const EVENT_METHOD_SPECS: [MethodSpec; 3] = [
+    MethodSpec::new("event.create", MethodKind::Operation, 1),
     MethodSpec::new("event.get", MethodKind::Query, 1),
     MethodSpec::new("event.respond", MethodKind::Operation, 1),
 ];
@@ -412,6 +434,16 @@ enum Work {
     Rsvp(Box<RsvpWork>),
     /// An answer through the calendar backend.
     Respond(Box<RespondWork>),
+    /// A new event through the calendar backend.
+    Create(Box<CreateWork>),
+}
+
+/// Everything one create needs, resolved before the operation id exists.
+struct CreateWork {
+    account: AccountConfig,
+    calendar: Calendar,
+    input: EventInput,
+    transaction_id: String,
 }
 
 /// What a settled iMIP reply reports: `calendar.rsvp`'s own shape, or
@@ -459,13 +491,21 @@ impl Method for CalendarMethod {
         Box::pin(async move {
             let snapshot = self.config.snapshot();
             let work = plan(self.spec.name, &params, &snapshot)?;
+            let transaction_id = match &work {
+                Work::Create(create) => Some(create.transaction_id.clone()),
+                _ => None,
+            };
             let (id, handle) = self.operations.start(
                 ConnectionId(ctx.connection_id),
                 self.spec.cancel_scope,
                 self.spec.name,
             );
             tokio::spawn(run(work, handle));
-            Ok(Outcome::query(json!({"operation_id": id.as_str()})))
+            let mut started = json!({"operation_id": id.as_str()});
+            if let Some(transaction_id) = transaction_id {
+                started["transaction_id"] = transaction_id.into();
+            }
+            Ok(Outcome::query(started))
         })
     }
 }
@@ -492,8 +532,92 @@ fn plan(
             })
         }
         "event.respond" => plan_respond(params, snapshot),
+        "event.create" => plan_create(params, snapshot),
         _ => plan_rsvp(method, params, snapshot),
     }
+}
+
+/// `event.create`: the account's backend and scope, the event the client
+/// typed, and the calendar it goes to, each refused before an operation
+/// starts.
+fn plan_create(
+    params: &Value,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<Work, RpcError> {
+    only_params(
+        "event.create",
+        params,
+        &["account", "calendar", "event", "transaction_id"],
+    )?;
+    let request: EventCreateParams = serde_json::from_value(params.clone())
+        .map_err(|e| invalid_params(format!("event.create: {e}")))?;
+    let name = request.account.clone();
+    let account = super::account::configured_account(&snapshot.accounts, &name)?.clone();
+    match choose_backend(&account) {
+        Ok(BackendChoice::None) => {
+            return Err(invalid_params(format!(
+                "{name} has no calendar backend, so it has no server calendar to create the \
+                 event in; an invitation from it goes out by mail (mp send --invite)"
+            )))
+        }
+        Ok(_) => {}
+        Err(CalendarBackendError::Other(e)) => return Err(invalid_params(format!("{e:#}"))),
+        Err(e) => return Err(backend_error(&name, e)),
+    }
+    super::account::ready_account(&snapshot.accounts, &name)?;
+    preflight_scope(&account).map_err(|e| backend_error(&name, e))?;
+    let input = resolve_input(&request.event, local_zone()).map_err(invalid_params)?;
+
+    let store = open_store(&name)?;
+    let calendars = cache::list_calendars(&store, &name).map_err(|e| server_error(&name, &e))?;
+    let calendar = match request
+        .calendar
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    {
+        Some(id) => calendars
+            .into_iter()
+            .find(|calendar| calendar.id == id)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "{name} has no calendar {id}; calendar.list names them"
+                ))
+            })?,
+        None => calendars
+            .into_iter()
+            .find(|calendar| calendar.is_default)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "{name} has no default calendar yet: its calendars have not synced \
+                     (mp calendar rebuild -A {name})"
+                ))
+            })?,
+    };
+    if !calendar.can_edit {
+        return Err(invalid_params(format!(
+            "The calendar {} of {name} is read-only",
+            calendar.name
+        )));
+    }
+    let transaction_id = match request.transaction_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => mint_transaction_id(),
+    };
+    Ok(Work::Create(Box::new(CreateWork {
+        account,
+        calendar,
+        input,
+        transaction_id,
+    })))
+}
+
+/// A fresh transaction id, `mp-` and 32 hex digits of randomness.
+fn mint_transaction_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("mp-{hex}")
 }
 
 /// `calendar.rsvp`: the iMIP reply to a message addressed by selector or row.
@@ -747,6 +871,7 @@ async fn run(work: Work, handle: OperationHandle) {
         Work::Rebuild { account, server } => rebuild(account, server, handle).await,
         Work::Rsvp(work) => reply(*work, handle).await,
         Work::Respond(work) => respond(*work, handle).await,
+        Work::Create(work) => create(*work, handle).await,
     }
 }
 
@@ -888,7 +1013,7 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
         Ok(Ok(false)) => {}
         Ok(Ok(true)) => {
             handle.announce(calendar_changed(&name));
-            succeed(
+            settle(
                 &handle,
                 EventRespondResult {
                     account: name,
@@ -900,6 +1025,84 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
                     delivered: send_response,
                 },
             );
+        }
+        Ok(Err(e)) => handle.fail(DomainError::from(backend_error(&name, e))),
+        Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+    }
+}
+
+/// A new event: the one the cache already holds under the transaction id,
+/// else the server's answer to the create, written into the cache before the
+/// sync that confirms it.
+async fn create(work: CreateWork, handle: OperationHandle) {
+    let CreateWork {
+        account,
+        calendar,
+        input,
+        transaction_id,
+    } = work;
+    let name = account.name.clone();
+    let token = handle.token.clone();
+    let tx = transaction_id.clone();
+    let created = off_thread("the new event", move || async move {
+        let store = Store::open(crate::config::store_path(&account.name))?;
+        if let Some(event) = cache::event_by_transaction(&store, &account.name, &tx)? {
+            return Ok::<_, CalendarBackendError>(Some(event));
+        }
+        let backend = backend_for(&account)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{} has no calendar backend", account.name))?;
+        if !commit_point("event.create", &token).await {
+            return Ok(None);
+        }
+        let event = match backend.create_event(&calendar, &input, &tx).await? {
+            Written::Event(event) => *event,
+            Written::Series(series) => {
+                return Err(anyhow::anyhow!(
+                    "the server answered the new event with the series {}",
+                    series.master_id
+                )
+                .into())
+            }
+        };
+        let lock = crate::calendar_sync::account_lock(&account.name);
+        let _held = lock.lock().await;
+        cache::upsert_event(&store, &account.name, &event)?;
+        if let Err(e) =
+            crate::calendar_sync::sync_account(&store, &backend, &account.name, Utc::now()).await
+        {
+            warn!(
+                "[calendar] {}: the sync after a new event failed: {e}",
+                account.name
+            );
+        }
+        Ok(Some(event))
+    })
+    .await;
+    match created {
+        // Cancelled at the commit point: nothing was sent, and the registry
+        // has already settled the operation.
+        Ok(Ok(None)) => {}
+        Ok(Ok(Some(event))) => {
+            handle.announce(calendar_changed(&name));
+            let invited = event.attendees.iter().map(|a| a.email.clone()).collect();
+            let wired = Sourced {
+                event,
+                source: None,
+            }
+            .to_wire();
+            match wired {
+                Ok(event) => settle(
+                    &handle,
+                    EventWriteResult {
+                        account: name,
+                        event,
+                        transaction_id,
+                        invited,
+                    },
+                ),
+                Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+            }
         }
         Ok(Err(e)) => handle.fail(DomainError::from(backend_error(&name, e))),
         Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
@@ -960,7 +1163,7 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
             })),
             ReplyShape::Event { event } => {
                 handle.announce(calendar_changed(&name));
-                succeed(
+                settle(
                     &handle,
                     EventRespondResult {
                         account: name,
@@ -978,11 +1181,12 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
     }
 }
 
-fn succeed(handle: &OperationHandle, result: EventRespondResult) {
+/// Settle `handle` with `result`, serialised.
+fn settle<T: serde::Serialize>(handle: &OperationHandle, result: T) {
     match serde_json::to_value(result) {
         Ok(value) => handle.succeed(value),
         Err(e) => handle.fail(DomainError::internal(format!(
-            "serialising an answer's result: {e}"
+            "serialising an operation's result: {e}"
         ))),
     }
 }
@@ -1069,8 +1273,9 @@ mod tests {
         }
     }
 
-    /// The server calendar's arrays are in method-name order, and its one
-    /// operation is durable: an answer the server took cannot be recalled.
+    /// The server calendar's arrays are in method-name order, and its two
+    /// operations are durable: an answer or an event the server took cannot
+    /// be recalled.
     #[test]
     fn the_server_calendar_arrays_are_in_name_order() {
         for names in [
@@ -1084,10 +1289,12 @@ mod tests {
             sorted.sort_unstable();
             assert_eq!(names, sorted);
         }
-        let respond = EVENT_METHOD_SPECS[1];
-        assert_eq!(respond.name, "event.respond");
-        assert_eq!(respond.kind, MethodKind::Operation);
-        assert_eq!(respond.cancel_scope, CancelScope::Durable);
+        for (index, name) in [(0, "event.create"), (2, "event.respond")] {
+            let spec = EVENT_METHOD_SPECS[index];
+            assert_eq!(spec.name, name);
+            assert_eq!(spec.kind, MethodKind::Operation);
+            assert_eq!(spec.cancel_scope, CancelScope::Durable);
+        }
     }
 
     #[test]

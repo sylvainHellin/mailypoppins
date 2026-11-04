@@ -124,6 +124,11 @@ pub fn event(id: &str, calendar: &str, uid: &str, summary: &str, time: EventTime
     }
 }
 
+/// Where the fake whose answer log is `log` records its writes.
+pub fn write_log(log: &Path) -> std::path::PathBuf {
+    log.with_extension("writes.jsonl")
+}
+
 /// The fake's server: a default and a second calendar, a meeting the server
 /// account was also invited to by mail, and an all-day holiday.
 pub fn fake_spec(log: &Path, missing_scope: bool) -> String {
@@ -164,6 +169,7 @@ pub fn fake_spec_with(log: &Path, missing_scope: bool, extra: Vec<Event>) -> Str
         "calendars": [calendar("cal-main", "Calendar", true), calendar("cal-second", "Holidays", false)],
         "events": events,
         "log": log.to_string_lossy(),
+        "write_log": write_log(log).to_string_lossy(),
         "missing_scope": missing_scope,
         "message_events": {INVITE_GRAPH_ID: "ev-meeting"},
         "features": FAKE_FEATURES,

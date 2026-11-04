@@ -8,14 +8,22 @@
 //! (`resolve_span`'s `WHEN`, a duration) into these before it calls the
 //! backend, and each backend turns them into its own request.
 //!
+//! An all-day time names dates and no zone, but a server stores its midnights
+//! as instants, so a write carries the IANA zone those midnights fall in
+//! (`zone`): the user's own, which makes the event cover the user's day
+//! exactly. A timed time carries its zone in itself, and `zone` is unread.
+//!
 //! A patch changes only what it names, so a concurrent change to another
 //! field in Outlook survives: an absent key stays, a present one changes, and
 //! for the fields that can be emptied (location, description, reminder) a
 //! JSON `null` clears.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use chrono_tz::Tz;
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
-use crate::calendar_model::{AttendeeRole, EventTime, Sensitivity, ShowAs};
+use crate::calendar_model::{parse_zone, AttendeeRole, EventTime, Sensitivity, ShowAs};
+use crate::invite::{resolve_span_in, EventSpan};
+use mp_protocol::calendar::EventInputParams;
 
 /// One person or room invited to an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +40,10 @@ pub struct AttendeeInput {
 pub struct EventInput {
     pub summary: String,
     pub time: EventTime,
+    /// The IANA zone an all-day `time`'s midnights fall in; absent, the
+    /// backend's host zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
     /// The description as plain text.
@@ -71,6 +83,7 @@ impl EventInput {
         EventInput {
             summary: summary.into(),
             time,
+            zone: None,
             location: None,
             body: None,
             attendees: Vec::new(),
@@ -79,6 +92,25 @@ impl EventInput {
             show_as: None,
             sensitivity: None,
             allow_new_time_proposals: None,
+        }
+    }
+
+    /// The patch that sets every field this input sets and leaves the rest:
+    /// what lands a create's fields on an event that already exists (a
+    /// create replayed with its transaction id after its body changed).
+    pub fn as_patch(&self) -> EventPatch {
+        EventPatch {
+            summary: Some(self.summary.clone()),
+            time: Some(self.time.clone()),
+            zone: self.zone.clone(),
+            location: self.location.clone().map(Some),
+            body: self.body.clone().map(Some),
+            attendees: (!self.attendees.is_empty()).then(|| self.attendees.clone()),
+            online_meeting: self.online_meeting.then_some(true),
+            reminder: self.reminder,
+            show_as: self.show_as,
+            sensitivity: self.sensitivity,
+            allow_new_time_proposals: self.allow_new_time_proposals,
         }
     }
 }
@@ -93,6 +125,10 @@ pub struct EventPatch {
     /// The new time; switching between timed and all-day is a time too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<EventTime>,
+    /// The IANA zone an all-day `time`'s midnights fall in; absent, the
+    /// backend's host zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     #[serde(
         default,
         deserialize_with = "present",
@@ -130,6 +166,131 @@ impl EventPatch {
     pub fn is_empty(&self) -> bool {
         self == &EventPatch::default()
     }
+}
+
+/// The [`EventInput`] a client's `event.create` names, or the sentence that
+/// says what is wrong with it.
+///
+/// The times take the forms `mp send --invite` reads
+/// ([`crate::invite::resolve_span`]): a time with or without an offset, read
+/// in the event's zone (`params.zone`, else `host`), or a bare date for an
+/// all-day event whose `end` is its last day, included. The input carries
+/// the zone, which places an all-day event's midnights.
+pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, String> {
+    let summary = params.summary.trim();
+    if summary.is_empty() {
+        return Err("An event needs a summary".into());
+    }
+    let zone = match params.zone.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => parse_zone(name).ok_or_else(|| {
+            format!("unknown time zone {name:?}; use an IANA name like Europe/Berlin")
+        })?,
+        _ => host,
+    };
+    let span = resolve_span_in(
+        &params.start,
+        params.end.as_deref().filter(|e| !e.trim().is_empty()),
+        params.duration.as_deref().filter(|d| !d.trim().is_empty()),
+        zone,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    let time = match span {
+        EventSpan::Timed { start, end } => {
+            if params.all_day == Some(true) {
+                return Err("An all-day event takes bare dates (2026-11-18), not times".to_string());
+            }
+            EventTime::timed(start, end, zone.name())
+        }
+        EventSpan::AllDay { first, last } => {
+            if params.all_day == Some(false) {
+                return Err(
+                    "A bare date makes an all-day event; give a time (2026-11-18T14:00) for a \
+                     timed one"
+                        .to_string(),
+                );
+            }
+            let end = last
+                .succ_opt()
+                .ok_or_else(|| "the last day runs past the calendar".to_string())?;
+            EventTime::all_day(first, end)
+        }
+    }
+    .map_err(|e| e.to_string())?;
+
+    let mut attendees: Vec<AttendeeInput> = Vec::new();
+    for attendee in &params.attendees {
+        let email = attendee.email.trim();
+        if !email.contains('@') || email.contains(char::is_whitespace) {
+            return Err(format!("{email:?} is not an email address"));
+        }
+        let role = match attendee.role.as_deref().map(str::trim) {
+            None | Some("") => AttendeeRole::Required,
+            Some(word) => word_as(word, "an attendee's role", "required, optional, resource")?,
+        };
+        if attendees
+            .iter()
+            .any(|known| known.email.eq_ignore_ascii_case(email))
+        {
+            continue;
+        }
+        attendees.push(AttendeeInput {
+            email: email.to_string(),
+            name: attendee
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string),
+            role,
+        });
+    }
+    let show_as = match params.show_as.as_deref() {
+        Some(word) => Some(word_as::<ShowAs>(
+            word,
+            "show-as",
+            "free, tentative, busy, oof, working-elsewhere",
+        )?)
+        .filter(|show_as| *show_as != ShowAs::Unknown),
+        None => None,
+    };
+    let sensitivity = match params.sensitivity.as_deref() {
+        Some(word) => Some(word_as(
+            word,
+            "the sensitivity",
+            "normal, personal, private, confidential",
+        )?),
+        None => None,
+    };
+    let text = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    Ok(EventInput {
+        summary: summary.to_string(),
+        time,
+        zone: Some(zone.name().to_string()),
+        location: text(&params.location),
+        body: params
+            .body
+            .as_deref()
+            .filter(|b| !b.trim().is_empty())
+            .map(str::to_string),
+        attendees,
+        online_meeting: params.online_meeting.unwrap_or(false),
+        reminder: params.reminder,
+        show_as,
+        sensitivity,
+        allow_new_time_proposals: params.allow_new_time_proposals,
+    })
+}
+
+/// One of a model enum's words, or a sentence naming the ones it takes.
+fn word_as<T: DeserializeOwned>(word: &str, what: &str, words: &str) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(word.trim().to_string()))
+        .map_err(|_| format!("{word:?} is not {what}; use one of {words}"))
 }
 
 /// A key that is present, `null` included, as `Some`: with `default`, an
@@ -215,6 +376,125 @@ mod tests {
             back["attendees"],
             json!([{"email": "room@example.com", "role": "resource"}])
         );
+    }
+
+    fn params(start: &str) -> EventInputParams {
+        EventInputParams {
+            summary: " Review ".into(),
+            start: start.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A wall-clock time is read in the event's zone, else in the host's,
+    /// and the input carries that zone; an offset wins over both.
+    #[test]
+    fn a_timed_input_is_read_in_its_zone() {
+        let mut berlin = params("2026-11-03T10:00");
+        berlin.duration = Some("1h".into());
+        berlin.zone = Some("Europe/Berlin".into());
+        let input = resolve_input(&berlin, chrono_tz::UTC).unwrap();
+        assert_eq!(input.summary, "Review");
+        assert_eq!(input.time, time());
+        assert_eq!(input.zone.as_deref(), Some("Europe/Berlin"));
+
+        let mut host = params("2026-11-03T10:00");
+        host.end = Some("2026-11-03T11:00".into());
+        let input = resolve_input(&host, chrono_tz::Europe::Berlin).unwrap();
+        assert_eq!(input.time, time());
+
+        let mut offset = params("2026-11-03T09:00:00Z");
+        offset.duration = Some("PT1H".into());
+        offset.zone = Some("Europe/Berlin".into());
+        assert_eq!(resolve_input(&offset, chrono_tz::UTC).unwrap().time, time());
+    }
+
+    /// A bare date is an all-day event whose `end` is its last day, the
+    /// model's end the day after; `all_day` insists on the form.
+    #[test]
+    fn a_bare_date_is_an_all_day_input() {
+        let mut holiday = params("2026-11-18");
+        holiday.end = Some("2026-11-19".into());
+        holiday.zone = Some("America/New_York".into());
+        let input = resolve_input(&holiday, chrono_tz::UTC).unwrap();
+        let day = |d| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        assert_eq!(input.time, EventTime::all_day(day(18), day(20)).unwrap());
+        assert_eq!(input.zone.as_deref(), Some("America/New_York"));
+        let mut one = params("2026-11-18");
+        one.all_day = Some(true);
+        assert_eq!(
+            resolve_input(&one, chrono_tz::UTC).unwrap().time,
+            EventTime::all_day(day(18), day(19)).unwrap()
+        );
+
+        let mut timed = params("2026-11-18T09:00");
+        timed.duration = Some("1h".into());
+        timed.all_day = Some(true);
+        assert!(resolve_input(&timed, chrono_tz::UTC).is_err());
+        one.all_day = Some(false);
+        assert!(resolve_input(&one, chrono_tz::UTC).is_err());
+    }
+
+    /// Attendees take their role word, required by default, once per
+    /// address; a field the input names in a word outside its set is
+    /// refused with the words it takes, as is an empty summary or an
+    /// unknown zone.
+    #[test]
+    fn an_input_checks_its_words_and_addresses() {
+        let attendee =
+            |email: &str, role: Option<&str>| mp_protocol::calendar::EventAttendeeInput {
+                email: email.into(),
+                name: None,
+                role: role.map(str::to_string),
+            };
+        let mut meeting = params("2026-11-18");
+        meeting.attendees = vec![
+            attendee("ada@example.com", None),
+            attendee("ADA@example.com", Some("optional")),
+            attendee("room-1@example.com", Some("resource")),
+        ];
+        meeting.show_as = Some("working-elsewhere".into());
+        meeting.reminder = Some(None);
+        meeting.location = Some("  ".into());
+        let input = resolve_input(&meeting, chrono_tz::UTC).unwrap();
+        let roles: Vec<AttendeeRole> = input.attendees.iter().map(|a| a.role).collect();
+        assert_eq!(roles, [AttendeeRole::Required, AttendeeRole::Resource]);
+        assert_eq!(input.show_as, Some(ShowAs::WorkingElsewhere));
+        assert_eq!(input.reminder, Some(None));
+        assert_eq!(input.location, None);
+
+        let refused = |change: &dyn Fn(&mut EventInputParams)| {
+            let mut bad = params("2026-11-18");
+            change(&mut bad);
+            resolve_input(&bad, chrono_tz::UTC).unwrap_err()
+        };
+        assert_eq!(
+            refused(&|p| p.summary = " ".into()),
+            "An event needs a summary"
+        );
+        assert!(refused(&|p| p.zone = Some("Mars/Base".into())).contains("unknown time zone"));
+        assert!(refused(&|p| p.show_as = Some("away".into())).contains("free, tentative"));
+        assert!(refused(&|p| p.attendees = vec![attendee("ada", None)]).contains("not an email"));
+        assert!(
+            refused(&|p| p.attendees = vec![attendee("a@b.c", Some("chair"))])
+                .contains("required, optional, resource")
+        );
+    }
+
+    /// The patch an input stands for sets what the input sets and leaves
+    /// the rest, the defaults included.
+    #[test]
+    fn an_input_as_a_patch_sets_only_its_fields() {
+        let mut input = EventInput::new("Review", time());
+        input.location = Some("Room 1".into());
+        let patch = input.as_patch();
+        assert_eq!(patch.summary.as_deref(), Some("Review"));
+        assert_eq!(patch.time, Some(time()));
+        assert_eq!(patch.location, Some(Some("Room 1".into())));
+        assert_eq!(patch.body, None);
+        assert_eq!(patch.reminder, None);
+        assert_eq!(patch.attendees, None);
+        assert_eq!(patch.online_meeting, None);
     }
 
     fn value_with(input: &EventInput, key: &str, value: serde_json::Value) -> EventInput {

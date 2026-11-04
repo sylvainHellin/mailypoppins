@@ -184,6 +184,25 @@ pub fn parse_datetime(input: &str) -> Result<DateTime<Utc>> {
     }
 }
 
+/// [`parse_datetime`] with a wall-clock time read in `zone` rather than in
+/// the process's local zone; an RFC 3339 time keeps its own offset.
+pub fn parse_datetime_in(input: &str, zone: chrono_tz::Tz) -> Result<DateTime<Utc>> {
+    let s = input.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    let naive = parse_naive_local(s)
+        .ok_or_else(|| anyhow!("Unrecognized datetime '{}'. Use RFC3339 (2026-07-20T14:00:00+02:00), local time (2026-07-20T14:00), or a bare date (2026-12-24) for an all-day event.", input))?;
+    match zone.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
+        chrono::LocalResult::Ambiguous(earliest, _) => Ok(earliest.with_timezone(&Utc)),
+        chrono::LocalResult::None => Err(anyhow!(
+            "Local time '{input}' does not exist in {} (DST gap)",
+            zone.name()
+        )),
+    }
+}
+
 fn parse_naive_local(s: &str) -> Option<NaiveDateTime> {
     const FORMATS: &[&str] = &[
         "%Y-%m-%dT%H:%M:%S",
@@ -795,10 +814,13 @@ enum When {
     Instant(DateTime<Utc>),
 }
 
-fn parse_when(input: &str) -> Result<When> {
+/// How a `--start` or `--end` that is a time becomes an instant.
+type InstantReader<'a> = &'a dyn Fn(&str) -> Result<DateTime<Utc>>;
+
+fn parse_when(input: &str, instant: InstantReader<'_>) -> Result<When> {
     match parse_date(input) {
         Some(date) => Ok(When::Date(date)),
-        None => parse_datetime(input).map(When::Instant),
+        None => instant(input).map(When::Instant),
     }
 }
 
@@ -812,7 +834,29 @@ const MIXED_FORMS: &str = "--start and --end must be the same kind: two bare dat
 /// of days (`P3D`, `3d`), and neither means the one day. Any other `--start`
 /// is a time and needs `--end` (a time) or `--duration`, as it always has.
 pub fn resolve_span(start: &str, end: Option<&str>, duration: Option<&str>) -> Result<EventSpan> {
-    let start_when = parse_when(start).context("Invalid --start")?;
+    span_with(start, end, duration, &parse_datetime)
+}
+
+/// [`resolve_span`] with a wall-clock time read in `zone` rather than in the
+/// process's local zone ([`parse_datetime_in`]).
+pub fn resolve_span_in(
+    start: &str,
+    end: Option<&str>,
+    duration: Option<&str>,
+    zone: chrono_tz::Tz,
+) -> Result<EventSpan> {
+    span_with(start, end, duration, &|input| {
+        parse_datetime_in(input, zone)
+    })
+}
+
+fn span_with(
+    start: &str,
+    end: Option<&str>,
+    duration: Option<&str>,
+    instant: InstantReader<'_>,
+) -> Result<EventSpan> {
+    let start_when = parse_when(start, instant).context("Invalid --start")?;
     if end.is_some() && duration.is_some() {
         return Err(anyhow!(
             "Provide exactly one of --end or --duration, not both"
@@ -821,7 +865,7 @@ pub fn resolve_span(start: &str, end: Option<&str>, duration: Option<&str>) -> R
     match start_when {
         When::Instant(start_dt) => {
             let end_dt = match (end, duration) {
-                (Some(e), _) => match parse_when(e).context("Invalid --end")? {
+                (Some(e), _) => match parse_when(e, instant).context("Invalid --end")? {
                     When::Instant(dt) => dt,
                     When::Date(_) => return Err(anyhow!("{MIXED_FORMS}")),
                 },
@@ -838,7 +882,7 @@ pub fn resolve_span(start: &str, end: Option<&str>, duration: Option<&str>) -> R
         }
         When::Date(first) => {
             let last = match (end, duration) {
-                (Some(e), _) => match parse_when(e).context("Invalid --end")? {
+                (Some(e), _) => match parse_when(e, instant).context("Invalid --end")? {
                     When::Date(date) => date,
                     When::Instant(_) => return Err(anyhow!("{MIXED_FORMS}")),
                 },

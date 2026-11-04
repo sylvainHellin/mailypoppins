@@ -314,8 +314,8 @@ pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
     if kind == CalendarBackendKind::None {
         return Ok(BackendChoice::None);
     }
-    if let Some(fake) = FakeCalendarBackend::from_env() {
-        return Ok(BackendChoice::Fake(fake.serving(&account.name)));
+    if let Some(fake) = FakeCalendarBackend::armed(&account.name) {
+        return Ok(BackendChoice::Fake(fake));
     }
     match kind {
         CalendarBackendKind::Graph => Ok(BackendChoice::Graph),

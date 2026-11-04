@@ -128,6 +128,14 @@ const CALENDAR_FIXTURES: &[&str] = &[
     "notification.calendar_changed.json",
 ];
 
+/// The fixtures PERSO-255 adds for the calendar writes: `event.create` and
+/// the operation id and transaction id it answers with at once.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const CALENDAR_WRITE_FIXTURES: &[&str] =
+    &["event.create.request.json", "event.create.response.json"];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -196,6 +204,7 @@ fn every_required_fixture_is_committed() {
         .chain(LIST_STREAM_FIXTURES)
         .chain(CONVERSATION_FIXTURES)
         .chain(CALENDAR_FIXTURES)
+        .chain(CALENDAR_WRITE_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
