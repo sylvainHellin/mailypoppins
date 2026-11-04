@@ -96,7 +96,7 @@ All-day events keep a date range with an exclusive end, as in iCalendar; the Gra
 
 ### Event store
 
-Each account has six tables in its sqlite store (`src/store/calendar.rs`): the calendars (name, colour, permissions), the visibility preferences, the expanded occurrences of the rolling window, each calendar's sync token with the window it was minted for, what a backend resolved about a series, and the server event each invitation mail stands for.
+Each account has seven tables in its sqlite store (`src/store/calendar.rs`): the calendars (name, colour, permissions), the visibility preferences, the expanded occurrences of the rolling window, each calendar's sync token with the window it was minted for, what a backend resolved about a series, the server event each invitation mail stands for, and the events mp's own cancels and deletes removed, which a retry of the same call settles from.
 Visibility per calendar is a local preference in a table of its own, which a cache drop leaves alone and a store rebuild carries over.
 `calendar.rebuild` drops the cache of an account and resyncs it from the server; on every account it keeps its iMIP meaning, refolding the invitation mails.
 
@@ -192,8 +192,8 @@ Every write is an `operation.*` in the daemon's in-memory operation registry, an
 ## Client surfaces
 
 - CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; phase 2 adds `mp event create|update|cancel|delete`, and `mp calendar freebusy` is the name a later slice takes, and `mp send --invite` keeps working on iMIP accounts.
-- TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; phase 2 adds the event form on `n` for a new event and on `E` for a change, and `D` to cancel or delete, which the repeat settings and the proposed time extend.
-- Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; phase 2 adds the event form (New event, and Edit on an event) and Cancel meeting or Delete beside "New invitation", which stays for an account without a calendar backend until the event form sends its invitation by mail too.
+- TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; phase 2 adds `D` to cancel or delete, and the event form on `n` for a new event and on `E` for a change, which the repeat settings and the proposed time extend.
+- Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; phase 2 adds the New event form beside "New invitation", which stays for an account without a calendar backend until the event form sends its invitation by mail too, and the event card's Edit and Cancel meeting or Delete.
 - Every new capability gets its row in [parity-matrix.md](../parity-matrix.md) with its CLI, TUI and desktop location, and the website pages follow the CLI.
 
 ## Phases

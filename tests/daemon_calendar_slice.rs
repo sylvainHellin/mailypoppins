@@ -1275,17 +1275,108 @@ async fn event_cancel_tells_the_attendees_and_removes_the_meeting() {
         !ids(&events).contains(&format!("{SERVER}/ev-own")),
         "{events:?}"
     );
-    let gone = call_err(
+
+    // A retry, as a client whose operation vanished sends it, counts as done
+    // with the first call's answer and reaches the server no more; a delete
+    // of the cancelled meeting and a cancel of an id the cache never held
+    // are still refused.
+    let retry = run_operation(
         &mut conn,
         "event.cancel",
-        json!({"account": SERVER, "event": "ev-own"}),
+        json!({"account": SERVER, "event": "ev-own", "comment": "Postponed"}),
     )
     .await;
-    assert!(
-        gone.message.contains("has no event ev-own"),
-        "{}",
-        gone.message
+    assert_eq!(succeeded(&retry), succeeded(&status));
+    assert_eq!(writes(&slice).len(), 1);
+    for (method, event) in [("event.delete", "ev-own"), ("event.cancel", "ev-nope")] {
+        let unknown = call_err(
+            &mut conn,
+            method,
+            json!({"account": SERVER, "event": event}),
+        )
+        .await;
+        assert_eq!(unknown.code, -32602);
+        assert!(
+            unknown.message.contains(&format!(
+                "has no event {event} (cancelled or deleted already"
+            )),
+            "{method}: {}",
+            unknown.message
+        );
+    }
+    assert_eq!(writes(&slice).len(), 1);
+}
+
+/// A cancel or a delete of an event the cache still holds but the server
+/// lost already (the daemon died after the server answered and before the
+/// cache heard of it) reaches the server, whose "gone" counts as done, and
+/// leaves the cache.
+#[tokio::test]
+async fn a_cancel_or_delete_the_server_lost_already_counts_as_done() {
+    use mailypoppins::calendar_model::{
+        Attendee, AttendeeRole, EventTime, OwnResponse, ResponseStatus,
+    };
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let time = || EventTime::timed(at(12, 9), at(12, 10), "Europe/Berlin").unwrap();
+    let mut meeting = support::calendar_fixture::event(
+        "ev-lost-meeting",
+        "cal-main",
+        "lost-meeting@example.com",
+        "Lost meeting",
+        time(),
     );
+    meeting.is_organizer = true;
+    meeting.own_response = OwnResponse::Organizer;
+    meeting.attendees = vec![Attendee {
+        name: None,
+        email: "ada@example.com".into(),
+        role: AttendeeRole::Required,
+        status: ResponseStatus::Accepted,
+        proposed_time: None,
+    }];
+    let mut solo = support::calendar_fixture::event(
+        "ev-lost-solo",
+        "cal-main",
+        "lost-solo@example.com",
+        "Lost dentist",
+        time(),
+    );
+    solo.is_organizer = true;
+    solo.own_response = OwnResponse::Organizer;
+    let store = read_fixture::store(slice.root(), SERVER);
+    for event in [&meeting, &solo] {
+        mailypoppins::store::calendar::upsert_event(&store, SERVER, event).unwrap();
+    }
+
+    let cancelled = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": "ev-lost-meeting"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&cancelled),
+        &json!({"account": SERVER, "event": "ev-lost-meeting", "notified": ["ada@example.com"]})
+    );
+    let deleted = run_operation(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": "ev-lost-solo"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&deleted),
+        &json!({"account": SERVER, "event": "ev-lost-solo"})
+    );
+    for id in ["ev-lost-meeting", "ev-lost-solo"] {
+        assert_eq!(
+            mailypoppins::store::calendar::get_event(&store, SERVER, id).unwrap(),
+            None,
+            "{id}"
+        );
+    }
 }
 
 /// A delete tells nobody: an event without attendees and the user's copy of
@@ -1349,6 +1440,31 @@ async fn event_delete_removes_an_event_that_tells_nobody() {
     assert!(
         !listed.contains(&format!("{SERVER}/ev-called-off")),
         "{listed:?}"
+    );
+
+    // A retry counts as done and reaches the server no more; a cancel of the
+    // deleted event is still refused.
+    let retry = run_operation(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": "ev-solo"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&retry),
+        &json!({"account": SERVER, "event": "ev-solo"})
+    );
+    assert_eq!(writes(&slice).len(), 2);
+    let unknown = call_err(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": "ev-solo"}),
+    )
+    .await;
+    assert!(
+        unknown.message.contains("has no event ev-solo"),
+        "{}",
+        unknown.message
     );
 }
 

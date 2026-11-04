@@ -483,6 +483,7 @@ Nothing is written to the cache before the server answers, so a refusal the daem
 
 `event.update`, `event.cancel` and `event.delete` (PERSO-255) are operations in the same journal, and nothing replays them after a restart either.
 An update sets fields to values, so a client whose operation vanished sends it again safely; a cancel or a delete of an event the server no longer holds (404) counts as done, the rule a delete of a mail already gone from its folder follows.
+A retry of a cancel or a delete that already took the event out of the cache counts as done too: the removal writes a row into `calendar_removed_events` in the same transaction, kept seven days, and the retry settles with that row's result before any server call, while an id the cache never held is still refused.
 Each reads the cached event before the operation starts, refuses there what the user may not do, then connects the backend, looks at its cancel token and sends the change.
 The server's answer goes into the cache under the account's calendar lock, the updated event upserted and a cancelled or deleted one removed, then the account syncs at once; a failure of that sync is logged and leaves the change standing, and `calendar.changed` follows, which also moves the reminders.
 

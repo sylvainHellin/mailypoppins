@@ -86,11 +86,15 @@
 //! into the cache under the account's calendar lock, the updated event
 //! upserted and the cancelled or deleted one removed, before the account
 //! syncs and `calendar.changed` is announced. A cancel or a delete of an
-//! event the server no longer holds counts as done.
+//! event the server no longer holds counts as done, and so does a retry of
+//! the same cancel or delete once the cache dropped the event: the removal
+//! is remembered with it ([`cache::remove_event`]), so the retry settles as
+//! the first call did without reaching the server.
 //!
 //! Their refusals, all `-32602` before an operation starts but the re-login
 //! prompt: an invitation mail's event (`imip:`), an account without a
-//! backend, an event the cache does not hold, an occurrence or a series (the
+//! backend, an event the cache does not hold (and mp did not just cancel or
+//! delete through the same call), an occurrence or a series (the
 //! scopes are a later slice), a read-only calendar; for an update, an empty
 //! change, a change by an attendee to anything but the reminder and the
 //! show-as ([`ORGANIZER_ONLY_REFUSAL`]), turning a Teams meeting's link off,
@@ -145,6 +149,7 @@ use crate::calendar_write::{resolve_input, resolve_patch, EventInput, EventPatch
 use crate::config::{AccountConfig, AuthMethod};
 use crate::invite::Rsvp;
 use crate::reconcile::reconcile_account;
+use crate::store::calendar::Removal;
 use crate::store::{calendar as cache, BlobStore, Store};
 
 use super::super::config::ConfigStore;
@@ -478,6 +483,13 @@ enum Work {
     Create(Box<CreateWork>),
     /// A change to, a cancellation or a deletion of a cached server event.
     Change(Box<ChangeWork>),
+    /// A retried cancel or delete of an event the same call already took
+    /// off the server and out of the cache, which settles as that call did.
+    Removed {
+        account: String,
+        event: String,
+        removal: Removal,
+    },
 }
 
 /// What one change does to its event.
@@ -597,17 +609,16 @@ fn plan(
     }
 }
 
-/// The cached server event an update, a cancel or a delete addresses, with
-/// its account and calendar, each refused before an operation starts: an
-/// invitation mail's event, an account without a backend, a sign-in without
-/// the calendar scope, an event the cache does not hold, one of a recurring
-/// series, and one on a read-only calendar.
-fn changed_event(
+/// The account and store of the server event an update, a cancel or a
+/// delete addresses, each refused before an operation starts: an invitation
+/// mail's event, an account without a backend, and a sign-in without the
+/// calendar scope.
+fn change_store(
     method: &str,
     name: &str,
     id: &str,
     snapshot: &super::super::config::Snapshot,
-) -> Result<(AccountConfig, CachedEvent, Calendar), RpcError> {
+) -> Result<(AccountConfig, Store), RpcError> {
     let account = super::account::configured_account(&snapshot.accounts, name)?.clone();
     if imip_row_id(id).is_some() {
         return Err(invalid_params(format!(
@@ -628,7 +639,15 @@ fn changed_event(
     super::account::ready_account(&snapshot.accounts, name)?;
     preflight_scope(&account).map_err(|e| backend_error(name, e))?;
     let store = open_store(name)?;
-    let event = cache::get_event(&store, name, id)
+    Ok((account, store))
+}
+
+/// The cached server event `id` of `name` a change addresses, with its
+/// calendar, each refused before an operation starts: an event the cache
+/// does not hold, one of a recurring series, and one on a read-only
+/// calendar.
+fn changed_event(store: &Store, name: &str, id: &str) -> Result<(CachedEvent, Calendar), RpcError> {
+    let event = cache::get_event(store, name, id)
         .map_err(|e| server_error(name, &e))?
         .ok_or_else(|| {
             invalid_params(format!(
@@ -641,7 +660,7 @@ fn changed_event(
             event.summary
         )));
     }
-    let calendar = cache::list_calendars(&store, name)
+    let calendar = cache::list_calendars(store, name)
         .map_err(|e| server_error(name, &e))?
         .into_iter()
         .find(|calendar| calendar.id == event.calendar)
@@ -657,7 +676,36 @@ fn changed_event(
             calendar.name
         )));
     }
-    Ok((account, event, calendar))
+    Ok((event, calendar))
+}
+
+/// A cancel or a delete of an event the cache no longer holds because the
+/// same call of mp already took it off the server: a retry of an operation
+/// that vanished, which counts as done ([`Work::Removed`]). `None` when the
+/// cache holds the event or mp never made that call, which
+/// [`changed_event`] then reads or refuses, so an id the cache never held is
+/// still refused rather than reported done.
+fn retried_removal(
+    method: &str,
+    store: &Store,
+    name: &str,
+    id: &str,
+) -> Result<Option<Work>, RpcError> {
+    if cache::get_event(store, name, id)
+        .map_err(|e| server_error(name, &e))?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let removal =
+        cache::removal(store, name, id, Utc::now()).map_err(|e| server_error(name, &e))?;
+    Ok(removal
+        .filter(|removal| removal.method == method)
+        .map(|removal| Work::Removed {
+            account: name.to_string(),
+            event: id.to_string(),
+            removal,
+        }))
 }
 
 /// `event.update`: the change the client typed, read against the cached
@@ -670,7 +718,8 @@ fn plan_update(
     let request: EventUpdateParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.update: {e}")))?;
     let name = request.account.as_str();
-    let (account, event, calendar) = changed_event("event.update", name, &request.event, snapshot)?;
+    let (account, store) = change_store("event.update", name, &request.event, snapshot)?;
+    let (event, calendar) = changed_event(&store, name, &request.event)?;
     let mut patch = resolve_patch(&request.fields, &event, local_zone()).map_err(invalid_params)?;
     // Turning off a meeting that is not online changes nothing.
     if patch.online_meeting == Some(false) && !event.is_online_meeting {
@@ -748,8 +797,12 @@ fn plan_cancel(
     only_params("event.cancel", params, &["account", "comment", "event"])?;
     let request: EventCancelParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.cancel: {e}")))?;
-    let (account, event, _) =
-        changed_event("event.cancel", &request.account, &request.event, snapshot)?;
+    let (account, store) =
+        change_store("event.cancel", &request.account, &request.event, snapshot)?;
+    if let Some(retry) = retried_removal("event.cancel", &store, &account.name, &request.event)? {
+        return Ok(retry);
+    }
+    let (event, _) = changed_event(&store, &account.name, &request.event)?;
     if !event.is_organizer {
         return Err(invalid_params(format!(
             "Only the organizer can cancel {}; decline it instead",
@@ -779,8 +832,12 @@ fn plan_delete(
     only_params("event.delete", params, &["account", "event"])?;
     let request: EventDeleteParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.delete: {e}")))?;
-    let (account, event, _) =
-        changed_event("event.delete", &request.account, &request.event, snapshot)?;
+    let (account, store) =
+        change_store("event.delete", &request.account, &request.event, snapshot)?;
+    if let Some(retry) = retried_removal("event.delete", &store, &account.name, &request.event)? {
+        return Ok(retry);
+    }
+    let (event, _) = changed_event(&store, &account.name, &request.event)?;
     if !event.cancelled {
         if event.is_organizer && !event.attendees.is_empty() {
             return Err(invalid_params(format!(
@@ -1143,6 +1200,14 @@ async fn run(work: Work, handle: OperationHandle) {
         Work::Respond(work) => respond(*work, handle).await,
         Work::Create(work) => create(*work, handle).await,
         Work::Change(work) => change(*work, handle).await,
+        Work::Removed {
+            account,
+            event,
+            removal,
+        } => {
+            handle.announce(calendar_changed(&account));
+            settle_removal(&handle, account, event, removal);
+        }
     }
 }
 
@@ -1151,7 +1216,23 @@ enum Changed {
     /// The event as the server holds it after an update.
     Updated(Box<CachedEvent>),
     /// The event is gone: cancelled or deleted.
-    Removed,
+    Removed(Removal),
+}
+
+/// Settle a cancel or a delete with its own result shape.
+fn settle_removal(handle: &OperationHandle, account: String, event: String, removal: Removal) {
+    if removal.method == "event.cancel" {
+        settle(
+            handle,
+            EventCancelResult {
+                account,
+                event,
+                notified: removal.notified,
+            },
+        );
+    } else {
+        settle(handle, EventDeleteResult { account, event });
+    }
 }
 
 /// An update, a cancel or a delete: the server's answer, written into the
@@ -1171,6 +1252,7 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
         Change::Delete => "event.delete",
     };
     let (id, calendar) = (event.id.clone(), event.calendar.clone());
+    let notified: Vec<String> = event.attendees.into_iter().map(|a| a.email).collect();
     let changed = off_thread("the event change", move || async move {
         let backend = backend_for(&account)
             .await?
@@ -1191,11 +1273,17 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
             },
             Change::Cancel { comment } => {
                 backend.cancel_event(&id, comment).await?;
-                Changed::Removed
+                Changed::Removed(Removal {
+                    method: method.to_string(),
+                    notified,
+                })
             }
             Change::Delete => {
                 backend.delete_event(&id).await?;
-                Changed::Removed
+                Changed::Removed(Removal {
+                    method: method.to_string(),
+                    notified: Vec::new(),
+                })
             }
         };
         let store = Store::open(crate::config::store_path(&account.name))?;
@@ -1203,8 +1291,8 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
         let _held = lock.lock().await;
         match &changed {
             Changed::Updated(event) => cache::upsert_event(&store, &account.name, event)?,
-            Changed::Removed => {
-                cache::remove_event(&store, &account.name, &id)?;
+            Changed::Removed(removal) => {
+                cache::remove_event(&store, &account.name, &id, removal, Utc::now())?;
             }
         }
         if let Err(e) =
@@ -1240,21 +1328,7 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
                     ),
                     Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
                 },
-                Changed::Removed if method == "event.cancel" => settle(
-                    &handle,
-                    EventCancelResult {
-                        account: name,
-                        event: event.id,
-                        notified: event.attendees.into_iter().map(|a| a.email).collect(),
-                    },
-                ),
-                Changed::Removed => settle(
-                    &handle,
-                    EventDeleteResult {
-                        account: name,
-                        event: event.id,
-                    },
-                ),
+                Changed::Removed(removal) => settle_removal(&handle, name, event.id, removal),
             }
         }
         Ok(Err(e)) => handle.fail(DomainError::from(backend_error(&name, e))),
