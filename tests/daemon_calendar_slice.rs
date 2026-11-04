@@ -66,6 +66,19 @@ impl Slice {
         Slice::start_seeded(missing_scope, extra, |_| (), Vec::new())
     }
 
+    /// The fixture with the fake armed from `spec`, built over the answer
+    /// log at `log` in the root.
+    fn start_spec(spec: impl FnOnce(&Path) -> String) -> Slice {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path());
+        let spec = spec(&tmp.path().join("calendar.jsonl"));
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_CALENDAR_ENV, &spec)]);
+        Slice {
+            tmp,
+            daemon: Some(daemon),
+        }
+    }
+
     /// The fixture plus what `seed_more` writes, and `events` on the fake
     /// beside its own.
     fn start_seeded(
@@ -1201,7 +1214,7 @@ async fn event_update_refuses_before_an_operation_starts() {
         ),
         (
             update(SERVER, "ev-series-1", json!({"summary": "Renamed"})),
-            "part of a recurring series",
+            "is one occurrence of a series: name the scope",
         ),
         (
             update(SERVER, "ev-nope", json!({"summary": "Renamed"})),
@@ -1240,7 +1253,10 @@ async fn event_cancel_tells_the_attendees_and_removes_the_meeting() {
     for (event, words) in [
         ("ev-meeting", "Only the organizer can cancel Project review"),
         ("ev-solo", "Dentist invites nobody"),
-        ("ev-series-2", "part of a recurring series"),
+        (
+            "ev-series-2",
+            "is one occurrence of a series: name the scope",
+        ),
     ] {
         let error = call_err(
             &mut conn,
@@ -1605,4 +1621,465 @@ async fn event_changes_without_the_scope_are_the_relogin_prompt() {
         );
     }
     assert!(writes(&slice).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Recurrence and scopes (PERSO-255, slice 5)
+// ---------------------------------------------------------------------------
+
+/// An organizer's series of `count` weekly occurrences from `first` days
+/// out at 08:00 UTC, inviting `attendees`, with its occurrences named as the
+/// fake names the ones it expands: the master's id and their date.
+fn own_series(
+    id: &str,
+    first: i64,
+    count: u32,
+    attendees: &[&str],
+) -> (
+    mailypoppins::calendar_backend::SeriesInfo,
+    Vec<mailypoppins::calendar_model::Event>,
+) {
+    use mailypoppins::calendar_model::{
+        Attendee, AttendeeRole, EventKind, EventTime, Frequency, OwnResponse, Recurrence,
+        ResponseStatus,
+    };
+    let time = |days: i64| EventTime::timed(at(days, 8), at(days, 9), "Europe/Berlin").unwrap();
+    let mut master = support::calendar_fixture::event(
+        id,
+        "cal-main",
+        &format!("{id}@example.com"),
+        "Standup",
+        time(first),
+    );
+    master.kind = EventKind::SeriesMaster;
+    master.is_organizer = true;
+    master.own_response = OwnResponse::Organizer;
+    master.attendees = attendees
+        .iter()
+        .map(|email| Attendee {
+            name: None,
+            email: email.to_string(),
+            role: AttendeeRole::Required,
+            status: ResponseStatus::Accepted,
+            proposed_time: None,
+        })
+        .collect();
+    let rule = Recurrence {
+        frequency: Frequency::Weekly,
+        interval: 1,
+        weekdays: vec![mailypoppins::calendar_model::Weekday::of_date(
+            day(first).date_naive(),
+        )],
+        day_of_month: None,
+        week_index: None,
+        month: None,
+        first_day_of_week: None,
+        start: Some(day(first).date_naive()),
+        until: None,
+        count: Some(count),
+    };
+    master.recurrence = Some(rule.describe());
+    let occurrences = (0..i64::from(count))
+        .map(|n| {
+            let days = first + 7 * n;
+            let mut occurrence = master.clone();
+            occurrence.id = occurrence_id(id, days);
+            occurrence.kind = EventKind::Occurrence;
+            occurrence.series_master_id = Some(id.to_string());
+            occurrence.time = time(days);
+            occurrence.recurrence_id = Some(at(days, 8).to_rfc3339());
+            occurrence
+        })
+        .collect();
+    let series = mailypoppins::calendar_backend::SeriesInfo {
+        master_id: id.into(),
+        uid: format!("{id}@example.com"),
+        recurrence: Some(rule),
+        master: Some(Box::new(master)),
+        zone: Some("Europe/Berlin".into()),
+    };
+    (series, occurrences)
+}
+
+/// The id of the occurrence of series `master` `days` out.
+fn occurrence_id(master: &str, days: i64) -> String {
+    format!("{master}-{}", day(days).date_naive().format("%Y%m%d"))
+}
+
+/// The change rows' fake plus two series the user organizes: a standup of
+/// three weekly occurrences from ten days out inviting Ada, and a focus
+/// block of two from twelve days out inviting nobody.
+fn series_slice() -> Slice {
+    let (standup, standups) = own_series("ev-standup", 10, 3, &["ada@example.com"]);
+    let (focus, focuses) = own_series("ev-focus", 12, 2, &[]);
+    Slice::start_spec(|log| {
+        let events = [change_events(), standups, focuses].concat();
+        let mut spec: Value = serde_json::from_str(&fake_spec_with(log, false, events)).unwrap();
+        spec["series"].as_array_mut().unwrap().extend([
+            serde_json::to_value(standup).unwrap(),
+            serde_json::to_value(focus).unwrap(),
+        ]);
+        spec.to_string()
+    })
+}
+
+/// The summary of each cached occurrence of `master`, by id.
+async fn occurrences_of(conn: &mut Connection, master: &str) -> Vec<(String, String)> {
+    let events = view(conn, json!({"accounts": [SERVER]})).await;
+    let mut listed: Vec<(String, String)> = events
+        .iter()
+        .filter(|e| e["series_master_id"] == master)
+        .map(|e| {
+            (
+                e["id"].as_str().unwrap().to_string(),
+                e["summary"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    listed.sort();
+    listed
+}
+
+/// A create with a rule reaches the fake with the rule read against the
+/// start's day, settles with the series master, whose occurrences the sync
+/// after it brings into the view; `event.get` answers the master with its
+/// rule, and a retry of the transaction settles with the same series.
+#[tokio::test]
+async fn a_recurring_create_makes_a_series_the_sync_fills() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let mut input = meeting_input();
+    input["recurrence"] = json!({"frequency": "weekly", "interval": 1, "count": 3});
+    let status = run_operation(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": input, "transaction_id": "tx-series"}),
+    )
+    .await;
+    let event = succeeded(&status)["event"].clone();
+    let weekday = mailypoppins::calendar_model::Weekday::of_date(day(10).date_naive());
+    assert_eq!(event["kind"], "series-master", "{event}");
+    assert_eq!(
+        event["recurrence"],
+        format!("Weekly on {} (3 times)", weekday.name())
+    );
+    let id = event["id"].as_str().unwrap().to_string();
+    let recorded = writes(&slice);
+    let [RecordedWrite::Create { input, .. }] = recorded.as_slice() else {
+        panic!("one create: {recorded:?}");
+    };
+    let rule = input.recurrence.as_ref().unwrap();
+    assert_eq!(rule.weekdays, [weekday]);
+    assert_eq!(rule.start, Some(day(10).date_naive()));
+
+    let listed = occurrences_of(&mut conn, &id).await;
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    let got = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": id}),
+    )
+    .await;
+    assert_eq!(got["event"]["kind"], "series-master");
+    assert_eq!(got["series"]["master_id"], id.as_str());
+    assert_eq!(got["series"]["recurrence"]["count"], 3);
+
+    let retry = run_operation(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": meeting_input_with_rule(), "transaction_id": "tx-series"}),
+    )
+    .await;
+    assert_eq!(succeeded(&retry)["event"]["id"], id.as_str());
+    assert_eq!(writes(&slice).len(), 1);
+}
+
+fn meeting_input_with_rule() -> Value {
+    let mut input = meeting_input();
+    input["recurrence"] = json!({"frequency": "weekly", "interval": 1, "count": 3});
+    input
+}
+
+/// An occurrence's id needs its scope, and a scope that does not fit the
+/// event is refused before an operation starts, as a rule outside the
+/// series scope is; nothing refused reaches the server.
+#[tokio::test]
+async fn a_scope_that_does_not_fit_is_refused() {
+    let slice = series_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let first = occurrence_id("ev-standup", 10);
+    let rule = json!({"frequency": "daily", "interval": 1});
+    let cases = [
+        (
+            "event.update",
+            json!({"event": first, "fields": {"summary": "Renamed"}}),
+            "Standup is one occurrence of a series: name the scope, occurrence or series",
+        ),
+        ("event.cancel", json!({"event": first}), "name the scope"),
+        (
+            "event.delete",
+            json!({"event": occurrence_id("ev-focus", 12)}),
+            "name the scope",
+        ),
+        (
+            "event.update",
+            json!({"event": "ev-solo", "scope": "occurrence", "fields": {"summary": "x"}}),
+            "Dentist is not an occurrence of a series",
+        ),
+        (
+            "event.delete",
+            json!({"event": "ev-solo", "scope": "series"}),
+            "Dentist is not part of a series",
+        ),
+        (
+            "event.update",
+            json!({"event": "ev-standup", "scope": "occurrence", "fields": {"summary": "x"}}),
+            "is a whole series",
+        ),
+        (
+            "event.update",
+            json!({"event": first, "scope": "occurrence", "fields": {"recurrence": rule}}),
+            "An occurrence repeats by its series' rule",
+        ),
+        (
+            "event.update",
+            json!({"event": "ev-solo", "fields": {"recurrence": rule}}),
+            "Dentist does not repeat",
+        ),
+        (
+            "event.update",
+            json!({"event": first, "scope": "following", "fields": {"summary": "x"}}),
+            "use one of occurrence, series",
+        ),
+        (
+            "event.update",
+            json!({"event": first, "scope": "series",
+                   "fields": {"recurrence": {"frequency": "weekly", "interval": 1, "count": 0}}}),
+            "A series has 1 to 999 occurrences",
+        ),
+    ];
+    for (method, mut params, words) in cases {
+        params["account"] = SERVER.into();
+        let error = call_err(&mut conn, method, params.clone()).await;
+        assert_eq!(error.code, -32602, "{params}");
+        assert!(error.message.contains(words), "{params}: {}", error.message);
+    }
+    assert!(writes(&slice).is_empty());
+}
+
+/// A change to one occurrence patches that occurrence, which becomes an
+/// exception; a change to the series patches its master, reaches every
+/// occurrence not changed apart and settles with the master; a new rule
+/// resets the exception and ends the occurrences it no longer places, which
+/// the server's delta never names and the baseline after the change drops.
+#[tokio::test]
+async fn an_occurrence_and_the_series_change_in_their_scope() {
+    let slice = series_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let [first, second, third] = [10, 17, 24].map(|days| occurrence_id("ev-standup", days));
+
+    let moved = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": SERVER, "event": second, "scope": "occurrence",
+               "fields": {"summary": "Standup, moved"}}),
+    )
+    .await;
+    let result = succeeded(&moved);
+    assert_eq!(result["scope"], "occurrence");
+    assert_eq!(result["event"]["id"], second.as_str());
+    assert_eq!(result["event"]["kind"], "exception");
+
+    let renamed = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": SERVER, "event": first, "scope": "series",
+               "fields": {"summary": "Daily standup"}}),
+    )
+    .await;
+    let result = succeeded(&renamed);
+    assert_eq!(result["scope"], "series");
+    assert_eq!(result["event"]["id"], "ev-standup");
+    assert_eq!(result["event"]["kind"], "series-master");
+    assert_eq!(result["event"]["summary"], "Daily standup");
+    assert_eq!(
+        occurrences_of(&mut conn, "ev-standup").await,
+        [
+            (first.clone(), "Daily standup".to_string()),
+            (second.clone(), "Standup, moved".to_string()),
+            (third.clone(), "Daily standup".to_string()),
+        ]
+    );
+
+    let reruled = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": SERVER, "event": "ev-standup", "scope": "series",
+               "fields": {"recurrence": {"frequency": "weekly", "interval": 1, "count": 2}}}),
+    )
+    .await;
+    assert_eq!(succeeded(&reruled)["event"]["recurrence"], {
+        let weekday = mailypoppins::calendar_model::Weekday::of_date(day(10).date_naive());
+        format!("Weekly on {} (2 times)", weekday.name())
+    });
+    assert_eq!(
+        occurrences_of(&mut conn, "ev-standup").await,
+        [
+            (first.clone(), "Daily standup".to_string()),
+            (second.clone(), "Daily standup".to_string()),
+        ]
+    );
+    let got = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": first}),
+    )
+    .await;
+    assert_eq!(got["series"]["recurrence"]["count"], 2);
+
+    let recorded = writes(&slice);
+    let updated: Vec<&str> = recorded
+        .iter()
+        .map(|write| match write {
+            RecordedWrite::Update { event, .. } => event.as_str(),
+            other => panic!("only updates: {other:?}"),
+        })
+        .collect();
+    assert_eq!(updated, [second.as_str(), "ev-standup", "ev-standup"]);
+}
+
+/// A cancel of one occurrence tells the attendees of it and takes it out of
+/// the cache, the others staying; a cancel of the series cancels its master
+/// and takes every occurrence and the series out; a retry in the same scope
+/// counts as done, and one in another scope is refused.
+#[tokio::test]
+async fn an_occurrence_or_the_series_is_cancelled_in_its_scope() {
+    let slice = series_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let [first, second, third] = [10, 17, 24].map(|days| occurrence_id("ev-standup", days));
+
+    let one = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": first, "scope": "occurrence", "comment": "Off"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&one),
+        &json!({"account": SERVER, "event": first, "notified": ["ada@example.com"],
+                "scope": "occurrence"})
+    );
+    let listed: Vec<String> = occurrences_of(&mut conn, "ev-standup")
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(listed, [second.clone(), third.clone()]);
+
+    let all = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": second, "scope": "series"}),
+    )
+    .await;
+    let settled = json!({"account": SERVER, "event": second, "notified": ["ada@example.com"],
+                         "scope": "series"});
+    assert_eq!(succeeded(&all), &settled);
+    assert!(occurrences_of(&mut conn, "ev-standup").await.is_empty());
+    let gone = call_err(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-standup"}),
+    )
+    .await;
+    assert_eq!(gone.code, -32602);
+    assert_eq!(
+        writes(&slice),
+        [
+            RecordedWrite::Cancel {
+                event: first.clone(),
+                comment: Some("Off".into()),
+            },
+            RecordedWrite::Cancel {
+                event: "ev-standup".into(),
+                comment: None,
+            },
+        ]
+    );
+
+    let retry = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": second, "scope": "series"}),
+    )
+    .await;
+    assert_eq!(succeeded(&retry), &settled);
+    let other = call_err(
+        &mut conn,
+        "event.cancel",
+        json!({"account": SERVER, "event": second, "scope": "occurrence"}),
+    )
+    .await;
+    assert!(other.message.contains("has no event"), "{}", other.message);
+    assert_eq!(writes(&slice).len(), 2);
+}
+
+/// A delete of one occurrence of a series that tells nobody takes it alone,
+/// a delete of the series takes them all, and a series with attendees is
+/// cancelled rather than deleted.
+#[tokio::test]
+async fn an_occurrence_or_the_series_is_deleted_in_its_scope() {
+    let slice = series_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let [first, second] = [12, 19].map(|days| occurrence_id("ev-focus", days));
+
+    let refused = call_err(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": occurrence_id("ev-standup", 10), "scope": "series"}),
+    )
+    .await;
+    assert!(refused.message.contains("cancel it"), "{}", refused.message);
+
+    let one = run_operation(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": first, "scope": "occurrence"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&one),
+        &json!({"account": SERVER, "event": first, "scope": "occurrence"})
+    );
+    let listed: Vec<String> = occurrences_of(&mut conn, "ev-focus")
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(listed, std::slice::from_ref(&second));
+    let all = run_operation(
+        &mut conn,
+        "event.delete",
+        json!({"account": SERVER, "event": "ev-focus", "scope": "series"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&all),
+        &json!({"account": SERVER, "event": "ev-focus", "scope": "series"})
+    );
+    assert!(occurrences_of(&mut conn, "ev-focus").await.is_empty());
+    assert_eq!(
+        writes(&slice),
+        [
+            RecordedWrite::Delete { event: first },
+            RecordedWrite::Delete {
+                event: "ev-focus".into()
+            },
+        ]
+    );
 }

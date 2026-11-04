@@ -6,6 +6,13 @@ import type { EventPatchParams } from "./EventPatchParams";
  */
 export type EventUpdateParams = { account: string,
 /**
- * A [`CalendarEvent::id`] of a server event.
+ * A [`CalendarEvent::id`] of a server event, or a series master's id.
  */
-event: string, fields: EventPatchParams, };
+event: string,
+/**
+ * `occurrence` or `series`, which an occurrence's id needs: the change
+ * reaches that occurrence alone, or the whole series through its
+ * master. Absent on a single event; a series master's id is the
+ * series.
+ */
+scope?: string, fields: EventPatchParams, };

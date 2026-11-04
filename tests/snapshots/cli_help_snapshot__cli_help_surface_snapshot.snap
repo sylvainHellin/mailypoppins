@@ -1029,6 +1029,12 @@ Options:
       --reminder <MIN>       Minutes before the start the reminder fires (default the mailbox's)
       --no-reminder          No reminder
       --transaction-id <ID>  The id of an earlier run of this create, which the server makes once
+      --repeat <FREQ>        Repeat the event as a series [possible values: daily, weekly, monthly, yearly]
+      --every <N>            Every N days, weeks, months or years (default 1)
+      --on <DAYS>            The days of a weekly series, or the weekday of a monthly one by weekday (MO,WE; default the start's)
+      --monthly-by <BY>      What a monthly series falls on: the start's day of the month (date, the default) or its weekday in the same week of the month [possible values: date, weekday]
+      --until <DATE>         The series' last day (YYYY-MM-DD)
+      --count <N>            How many occurrences the series has
       --json                 Print the settled `event.create` result as JSON on stdout
   -A, --account <ACCOUNT>    Account to use
   -h, --help                 Print help
@@ -1037,9 +1043,19 @@ WHEN is a time read in --zone (2026-11-18T14:00), a time with an offset
 (2026-11-18T14:00:00+01:00), or a bare date (2026-11-18) for an all-day event,
 whose --end is its last day, included. --duration takes 1h30m or PT1H30M.
 
+--repeat makes a series: --every N for every N days, weeks, months or years,
+--on MO,WE for the days of a weekly series (default the start's), --monthly-by
+weekday for a monthly series on the start's weekday in the same week of the
+month (default its day of the month), and --until DATE or --count N for its
+end (default none). A yearly series falls on the start's day and month.
+
 The command prints the create's transaction id when it cannot confirm the
 event; rerun it with --transaction-id and the server creates the event at
 most once.
+
+Examples:
+  mp event create -A evoqs --summary Standup --start 2026-11-23T09:00 --duration 15m --repeat weekly --on MO,WE,FR --until 2026-12-18
+  mp event create -A evoqs --summary Review --start 2026-11-26T14:00 --duration 1h --repeat monthly --monthly-by weekday --count 6
 
 $ mp event update --help
 Change an event: only the fields you name change, and the server sends the attendees an update
@@ -1050,6 +1066,7 @@ Arguments:
   <EVENT>  The event id, as `mp calendar view --json` prints it
 
 Options:
+      --scope <SCOPE>      What a change to an occurrence of a series reaches: it alone, or the whole series [possible values: occurrence, series]
       --summary <TEXT>     The new title
       --start <WHEN>       The new start
       --end <WHEN>         The new end; on an all-day event the last day, included
@@ -1068,6 +1085,12 @@ Options:
       --reminder <MIN>     Minutes before the start the reminder fires
       --no-reminder        No reminder
       --show-as <WORD>     How the time shows to others: free, tentative, busy, oof, working-elsewhere
+      --repeat <FREQ>      Repeat the event as a series [possible values: daily, weekly, monthly, yearly]
+      --every <N>          Every N days, weeks, months or years (default 1)
+      --on <DAYS>          The days of a weekly series, or the weekday of a monthly one by weekday (MO,WE; default the start's)
+      --monthly-by <BY>    What a monthly series falls on: the start's day of the month (date, the default) or its weekday in the same week of the month [possible values: date, weekday]
+      --until <DATE>       The series' last day (YYYY-MM-DD)
+      --count <N>          How many occurrences the series has
       --json               Print the settled `event.update` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
@@ -1079,9 +1102,15 @@ unless --zone names another. --to, --optional and --room name the whole new
 attendee list. An attendee may change only --reminder, --no-reminder and
 --show-as on their own copy of a meeting; the rest is the organizer's.
 
+An occurrence of a series needs --scope: occurrence changes it alone, series
+changes the whole series, its times read against the series' first
+occurrence; a series' new time or --repeat resets the occurrences changed on
+their own. --repeat takes the flags of mp event create, with --scope series.
+
 Examples:
   mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
   mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs
+  mp event update AAMkADocc --scope series --summary 'Standup, new room' -A evoqs
 
 $ mp event cancel --help
 Cancel a meeting you organize: every attendee gets the cancellation
@@ -1092,13 +1121,16 @@ Arguments:
   <EVENT>  The event id, as `mp calendar view --json` prints it
 
 Options:
+      --scope <SCOPE>      What a cancel of an occurrence of a series reaches [possible values: occurrence, series]
       --comment <TEXT>     A message for the attendees, sent with the cancellation
       --json               Print the settled `event.cancel` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
 A meeting that invites nobody is deleted with mp event delete, and a meeting
-someone else organizes is declined with mp event respond EVENT decline.
+someone else organizes is declined with mp event respond EVENT decline. An
+occurrence of a series needs --scope: occurrence cancels it alone, series
+cancels the whole series.
 
 $ mp event delete --help
 Delete an event that tells nobody: one without attendees, or your copy of a meeting its organizer cancelled
@@ -1109,13 +1141,15 @@ Arguments:
   <EVENT>  The event id, as `mp calendar view --json` prints it
 
 Options:
+      --scope <SCOPE>      What a delete of an occurrence of a series reaches [possible values: occurrence, series]
       --json               Print the settled `event.delete` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
 A live meeting is not deleted: its organizer cancels it (mp event cancel), so
 the attendees are told, and an attendee declines it (mp event respond EVENT
-decline), so the organizer is.
+decline), so the organizer is. An occurrence of a series needs --scope:
+occurrence deletes it alone, series deletes the whole series.
 
 $ mp event show --help
 Show one event: when, where, organizer, attendees, your answer

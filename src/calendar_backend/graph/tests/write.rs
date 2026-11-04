@@ -505,6 +505,217 @@ fn a_replay_patch_clears_what_the_replay_left_out() {
     assert!(sent.get("reminderMinutesBeforeStart").is_none());
 }
 
+/// What Graph answers a create or an update of a series with: its master.
+fn series_answer(id: &str) -> String {
+    json!({
+        "id": id,
+        "iCalUId": "UID-SERIES",
+        "type": "seriesMaster",
+        "subject": "Standup",
+        "start": {"dateTime": "2026-11-23T09:00:00.0000000", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-11-23T09:15:00.0000000", "timeZone": "UTC"},
+        "isAllDay": false,
+        "originalStartTimeZone": "W. Europe Standard Time",
+        "isOrganizer": true,
+        "recurrence": {
+            "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["monday", "wednesday"],
+                        "firstDayOfWeek": "monday", "dayOfMonth": 0, "month": 0, "index": "first"},
+            "range": {"type": "endDate", "startDate": "2026-11-23", "endDate": "2026-12-18",
+                      "numberOfOccurrences": 0, "recurrenceTimeZone": "W. Europe Standard Time"},
+        },
+    })
+    .to_string()
+}
+
+/// Each pattern the form writes goes out as Graph's `patternedRecurrence`
+/// of its type, naming only the fields that type reads, its range ending on
+/// a date, after a count or never, held in the event's Windows zone; the
+/// answer, a series master, comes back as the series.
+#[tokio::test]
+async fn a_recurring_create_posts_each_pattern() {
+    use crate::calendar_model::{Frequency, WeekIndex, Weekday};
+    let rule = |frequency| Recurrence {
+        frequency,
+        interval: 1,
+        weekdays: Vec::new(),
+        day_of_month: None,
+        week_index: None,
+        month: None,
+        first_day_of_week: None,
+        start: Some(day(23)),
+        until: None,
+        count: None,
+    };
+    let rules = [
+        Recurrence {
+            interval: 2,
+            count: Some(5),
+            ..rule(Frequency::Daily)
+        },
+        Recurrence {
+            weekdays: vec![Weekday::Monday, Weekday::Wednesday],
+            first_day_of_week: Some(Weekday::Monday),
+            until: Some(day(30)),
+            ..rule(Frequency::Weekly)
+        },
+        Recurrence {
+            day_of_month: Some(23),
+            ..rule(Frequency::Monthly)
+        },
+        Recurrence {
+            week_index: Some(WeekIndex::Last),
+            weekdays: vec![Weekday::Monday],
+            count: Some(3),
+            ..rule(Frequency::Monthly)
+        },
+        Recurrence {
+            day_of_month: Some(23),
+            month: Some(11),
+            ..rule(Frequency::Yearly)
+        },
+        Recurrence {
+            week_index: Some(WeekIndex::Fourth),
+            weekdays: vec![Weekday::Monday],
+            month: Some(11),
+            ..rule(Frequency::Yearly)
+        },
+    ];
+    let fetch = (0..rules.len()).fold(ScriptedFetch::default(), |fetch, _| {
+        fetch.route(
+            &format!("{BASE}/me/calendars/"),
+            status(201, &series_answer("AAMk-series")),
+        )
+    });
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let cal = calendar("cal", true);
+    let time = EventTime::timed(utc(23, 9, 0), utc(23, 9, 15), "Europe/Berlin").unwrap();
+    for (i, rule) in rules.iter().enumerate() {
+        let mut input = EventInput::new("Standup", time.clone());
+        input.recurrence = Some(rule.clone());
+        let written = backend
+            .create_event(&cal, &input, &format!("tx-{i}"))
+            .await
+            .unwrap();
+        let Written::Series(series) = written else {
+            panic!("expected the series, got {written:?}");
+        };
+        assert_eq!(series.master_id, "AAMk-series");
+        assert_eq!(series.uid, "UID-SERIES");
+    }
+    let zone = "W. Europe Standard Time";
+    let range = |extra: serde_json::Value| {
+        let mut range = json!({"startDate": "2026-11-23", "recurrenceTimeZone": zone});
+        for (key, value) in extra.as_object().unwrap() {
+            range[key] = value.clone();
+        }
+        range
+    };
+    let expected = [
+        json!({"pattern": {"type": "daily", "interval": 2},
+               "range": range(json!({"type": "numbered", "numberOfOccurrences": 5}))}),
+        json!({"pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["monday", "wednesday"],
+                           "firstDayOfWeek": "monday"},
+               "range": range(json!({"type": "endDate", "endDate": "2026-11-30"}))}),
+        json!({"pattern": {"type": "absoluteMonthly", "interval": 1, "dayOfMonth": 23},
+               "range": range(json!({"type": "noEnd"}))}),
+        json!({"pattern": {"type": "relativeMonthly", "interval": 1, "daysOfWeek": ["monday"],
+                           "index": "last"},
+               "range": range(json!({"type": "numbered", "numberOfOccurrences": 3}))}),
+        json!({"pattern": {"type": "absoluteYearly", "interval": 1, "dayOfMonth": 23, "month": 11},
+               "range": range(json!({"type": "noEnd"}))}),
+        json!({"pattern": {"type": "relativeYearly", "interval": 1, "daysOfWeek": ["monday"],
+                           "index": "fourth", "month": 11},
+               "range": range(json!({"type": "noEnd"}))}),
+    ];
+    let sent = backend.fetch.sent();
+    assert_eq!(sent.len(), expected.len());
+    for (sent, expected) in sent.iter().zip(expected) {
+        let body = sent.body.as_ref().unwrap();
+        assert_eq!(body["recurrence"], expected);
+        assert_eq!(body["start"]["dateTime"], "2026-11-23T10:00:00");
+    }
+}
+
+/// A write to one occurrence patches the occurrence's own id and a write to
+/// the whole series its master's; a series' new rule names the zone it is
+/// held in, the series' own when the patch moves no time, or Graph resets it
+/// to UTC.
+#[tokio::test]
+async fn occurrence_and_series_patches_reach_their_own_ids() {
+    let fetch = ScriptedFetch::default()
+        .route(&format!("{BASE}/me/events/"), ok(&exception_answer()))
+        .route(
+            &format!("{BASE}/me/calendars/AAMkCal-default/events/AAMkEv-weekly?"),
+            ok(MASTER),
+        )
+        .route(
+            &format!("{BASE}/me/events/"),
+            ok(&series_answer("AAMkEv-weekly")),
+        );
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let moved = EventPatch {
+        time: Some(EventTime::timed(utc(10, 14, 0), utc(10, 15, 0), "Europe/Berlin").unwrap()),
+        ..Default::default()
+    };
+    let occurrence = written_event(
+        backend
+            .update_event("AAMkCal-default", "AAMkEv-weekly-occ", &moved)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(occurrence.kind, EventKind::Exception);
+    assert_eq!(occurrence.id, "AAMkEv-weekly-occ");
+    let rule = Recurrence::from_rrule("FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20261218", chrono_tz::UTC)
+        .map(|rule| Recurrence {
+            start: Some(day(23)),
+            first_day_of_week: Some(crate::calendar_model::Weekday::Monday),
+            ..rule
+        });
+    let renamed = EventPatch {
+        summary: Some("Standup".into()),
+        recurrence: rule,
+        zone: Some("Europe/Berlin".into()),
+        ..Default::default()
+    };
+    let written = backend
+        .update_event("AAMkCal-default", "AAMkEv-weekly", &renamed)
+        .await
+        .unwrap();
+    assert!(matches!(written, Written::Series(_)), "{written:?}");
+
+    let patches: Vec<_> = backend
+        .fetch
+        .sent()
+        .into_iter()
+        .filter(|s| s.method == "PATCH")
+        .collect();
+    assert_eq!(
+        patches[0].url,
+        format!("{BASE}/me/events/AAMkEv-weekly-occ")
+    );
+    assert_eq!(
+        patches[0].body,
+        Some(json!({
+            "start": {"dateTime": "2026-11-10T15:00:00", "timeZone": "W. Europe Standard Time"},
+            "end": {"dateTime": "2026-11-10T16:00:00", "timeZone": "W. Europe Standard Time"},
+            "isAllDay": false,
+        }))
+    );
+    assert_eq!(patches[1].url, format!("{BASE}/me/events/AAMkEv-weekly"));
+    assert_eq!(
+        patches[1].body,
+        Some(json!({
+            "subject": "Standup",
+            "recurrence": {
+                "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["monday", "wednesday"],
+                            "firstDayOfWeek": "monday"},
+                "range": {"type": "endDate", "startDate": "2026-11-23", "endDate": "2026-12-18",
+                          "recurrenceTimeZone": "W. Europe Standard Time"},
+            },
+        }))
+    );
+}
+
 fn exception_answer() -> String {
     json!({
         "id": "AAMkEv-weekly-occ",
@@ -632,10 +843,7 @@ async fn a_refused_write_reports_the_graph_code() {
         .update_event("cal", "occ", &patch)
         .await
         .unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "Graph refused the update: HTTP 400: ErrorOccurrenceCrossingBoundary: nope"
-    );
+    assert_eq!(err.to_string(), super::super::write::CROSSING_REFUSAL);
     let err = backend
         .update_event("cal", "gone", &patch)
         .await

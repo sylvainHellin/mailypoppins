@@ -26,15 +26,15 @@
 //! event.respond           {account, event, response, comment?, send_response?}
 //!                             -> {operation_id}
 //!                             settles EventRespondResult
-//! event.update            {account, event, fields: EventPatchParams}
+//! event.update            {account, event, scope?, fields: EventPatchParams}
 //!                             -> {operation_id}
-//!                             settles EventUpdateResult {account, event}
-//! event.cancel            {account, event, comment?}
+//!                             settles EventUpdateResult {account, event, scope?}
+//! event.cancel            {account, event, scope?, comment?}
 //!                             -> {operation_id}
-//!                             settles EventCancelResult {account, event, notified}
-//! event.delete            {account, event}
+//!                             settles EventCancelResult {account, event, notified, scope?}
+//! event.delete            {account, event, scope?}
 //!                             -> {operation_id}
-//!                             settles EventDeleteResult {account, event}
+//!                             settles EventDeleteResult {account, event, scope?}
 //! ```
 //!
 //! `calendar.rebuild`, `calendar.rsvp` and every `event.*` but `event.get`
@@ -72,6 +72,11 @@
 //! `calendar.changed` is announced. The cache is written only once the server
 //! answered.
 //!
+//! A create with a `recurrence` makes a series: the server answers with its
+//! master, which goes into the series cache and settles the operation, and
+//! the sync right after brings its occurrences. Its retry looks for the
+//! series by the master's transaction id, its rule compared too.
+//!
 //! Its refusals, all before an operation starts and `-32602` unless named:
 //! an account without a calendar backend, the sign-in without the calendar
 //! scope (the re-login prompt, `-32603`), an event the client typed wrong
@@ -91,11 +96,25 @@
 //! is remembered with it ([`cache::remove_event`]), so the retry settles as
 //! the first call did without reaching the server.
 //!
+//! An occurrence's id needs a `scope`: `occurrence` writes to that
+//! occurrence's own id, `series` to its master's, read from the series
+//! cache, the change read against the master. A series master's id is the
+//! series. The write-through follows what the server's delta does not say
+//! (`.agents/research/2026-11-04-graph-recurrence-probes.md`): an
+//! occurrence cancelled or deleted leaves the cache, a series cancelled or
+//! deleted leaves it with every occurrence and its series row, and a series
+//! updated goes into the series cache with its calendar's sync token
+//! dropped, so the sync right after is a baseline of the calendar's window,
+//! which brings the occurrences the change moved, renamed, reset or ended.
+//!
 //! Their refusals, all `-32602` before an operation starts but the re-login
 //! prompt: an invitation mail's event (`imip:`), an account without a
 //! backend, an event the cache does not hold (and mp did not just cancel or
-//! delete through the same call), an occurrence or a series (the
-//! scopes are a later slice), a read-only calendar; for an update, an empty
+//! delete through the same call in the same scope), an occurrence without a
+//! scope, the `occurrence` scope on an event that is no occurrence or on a
+//! whole series, the `series` scope on a single event, the `series` scope of
+//! an occurrence whose master the series cache does not hold, a read-only
+//! calendar; for an update, a `recurrence` outside the `series` scope, an empty
 //! change, a change by an attendee to anything but the reminder and the
 //! show-as ([`ORGANIZER_ONLY_REFUSAL`]), turning a Teams meeting's link off,
 //! a Teams meeting on a calendar that offers none, and a new description on a
@@ -145,7 +164,7 @@ use crate::calendar_model::{
 use crate::calendar_view::{
     imip_row_id, local_zone, parse_zone, Sourced, ViewFilter, IMIP_CALENDAR_NAME,
 };
-use crate::calendar_write::{resolve_input, resolve_patch, EventInput, EventPatch};
+use crate::calendar_write::{resolve_input, resolve_patch, EventInput, EventPatch, EventScope};
 use crate::config::{AccountConfig, AuthMethod};
 use crate::invite::Rsvp;
 use crate::reconcile::reconcile_account;
@@ -494,17 +513,24 @@ enum Work {
 
 /// What one change does to its event.
 enum Change {
-    Update(EventPatch),
-    Cancel { comment: Option<String> },
+    /// Boxed: a patch is ten times the size of the other changes.
+    Update(Box<EventPatch>),
+    Cancel {
+        comment: Option<String>,
+    },
     Delete,
 }
 
 /// Everything one update, cancel or delete needs, resolved before the
-/// operation id exists: the event as the cache holds it.
+/// operation id exists: the event the change writes to as the cache holds
+/// it (the series master in the `series` scope), the scope, and the id the
+/// client named, which the result names back.
 struct ChangeWork {
     account: AccountConfig,
     event: CachedEvent,
     change: Change,
+    scope: Option<EventScope>,
+    named: String,
 }
 
 /// Everything one create needs, resolved before the operation id exists.
@@ -642,24 +668,96 @@ fn change_store(
     Ok((account, store))
 }
 
-/// The cached server event `id` of `name` a change addresses, with its
-/// calendar, each refused before an operation starts: an event the cache
-/// does not hold, one of a recurring series, and one on a read-only
-/// calendar.
-fn changed_event(store: &Store, name: &str, id: &str) -> Result<(CachedEvent, Calendar), RpcError> {
-    let event = cache::get_event(store, name, id)
+/// The scope a change names, or the sentence naming the two.
+fn scope_param(scope: Option<&str>) -> Result<Option<EventScope>, RpcError> {
+    scope
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .map(EventScope::from_word)
+        .transpose()
+        .map_err(invalid_params)
+}
+
+/// The master of the series `master_id`, as the series cache holds it.
+fn cached_master(
+    store: &Store,
+    name: &str,
+    master_id: &str,
+) -> Result<Option<CachedEvent>, RpcError> {
+    Ok(cache::get_series(store, name, master_id)
         .map_err(|e| server_error(name, &e))?
-        .ok_or_else(|| {
-            invalid_params(format!(
-                "{name} has no event {id} (cancelled or deleted already, or not synced yet)"
-            ))
-        })?;
-    if event.kind != EventKind::Single || event.series_master_id.is_some() {
-        return Err(invalid_params(format!(
-            "{} is part of a recurring series, which mp cannot change yet; change it in Outlook",
-            event.summary
-        )));
-    }
+        .and_then(|series| series.master)
+        .map(|master| *master))
+}
+
+/// The cached server event `id` of `name` a change addresses in `scope`:
+/// the event the change writes to (the single event, the occurrence, or
+/// the series master in the `series` scope), its calendar, and the scope the
+/// change is made in, a series master's id being the series. Each refused
+/// before an operation starts: an event the cache does not hold, an
+/// occurrence without a scope, a scope that does not fit the event, a series
+/// whose master the series cache lacks, and a read-only calendar.
+fn addressed_event(
+    store: &Store,
+    name: &str,
+    id: &str,
+    scope: Option<EventScope>,
+) -> Result<(CachedEvent, Calendar, Option<EventScope>), RpcError> {
+    let cached = match cache::get_event(store, name, id).map_err(|e| server_error(name, &e))? {
+        Some(event) => Some(event),
+        None => cached_master(store, name, id)?,
+    };
+    let event = cached.ok_or_else(|| {
+        invalid_params(format!(
+            "{name} has no event {id} (cancelled or deleted already, or not synced yet)"
+        ))
+    })?;
+    let summary = event.summary.clone();
+    let (event, scope) = if event.kind == EventKind::SeriesMaster {
+        if scope == Some(EventScope::Occurrence) {
+            return Err(invalid_params(format!(
+                "{summary} is a whole series; the occurrence scope names one of its occurrences"
+            )));
+        }
+        (event, Some(EventScope::Series))
+    } else if event.kind.is_instance() || event.series_master_id.is_some() {
+        match scope {
+            None => {
+                return Err(invalid_params(format!(
+                    "{summary} is one occurrence of a series: name the scope, occurrence or \
+                     series"
+                )))
+            }
+            Some(EventScope::Occurrence) => (event, scope),
+            Some(EventScope::Series) => {
+                let master = event
+                    .series_master_id
+                    .as_deref()
+                    .map(|master_id| cached_master(store, name, master_id))
+                    .transpose()?
+                    .flatten()
+                    .ok_or_else(|| {
+                        invalid_params(format!(
+                            "mp has not read the series of {summary} yet; try again after the \
+                             next sync"
+                        ))
+                    })?;
+                (master, scope)
+            }
+        }
+    } else {
+        match scope {
+            None => (event, None),
+            Some(EventScope::Occurrence) => {
+                return Err(invalid_params(format!(
+                    "{summary} is not an occurrence of a series"
+                )))
+            }
+            Some(EventScope::Series) => {
+                return Err(invalid_params(format!("{summary} is not part of a series")))
+            }
+        }
+    };
     let calendar = cache::list_calendars(store, name)
         .map_err(|e| server_error(name, &e))?
         .into_iter()
@@ -676,24 +774,27 @@ fn changed_event(store: &Store, name: &str, id: &str) -> Result<(CachedEvent, Ca
             calendar.name
         )));
     }
-    Ok((event, calendar))
+    Ok((event, calendar, scope))
 }
 
 /// A cancel or a delete of an event the cache no longer holds because the
 /// same call of mp already took it off the server: a retry of an operation
-/// that vanished, which counts as done ([`Work::Removed`]). `None` when the
-/// cache holds the event or mp never made that call, which
-/// [`changed_event`] then reads or refuses, so an id the cache never held is
-/// still refused rather than reported done.
+/// that vanished, which counts as done ([`Work::Removed`]): the same method
+/// in the same scope, or with none named. `None` when the cache holds the
+/// event or mp never made that call, which [`addressed_event`] then reads
+/// or refuses, so an id the cache never held is still refused rather than
+/// reported done.
 fn retried_removal(
     method: &str,
     store: &Store,
     name: &str,
     id: &str,
+    scope: Option<EventScope>,
 ) -> Result<Option<Work>, RpcError> {
     if cache::get_event(store, name, id)
         .map_err(|e| server_error(name, &e))?
         .is_some()
+        || cached_master(store, name, id)?.is_some()
     {
         return Ok(None);
     }
@@ -701,6 +802,9 @@ fn retried_removal(
         cache::removal(store, name, id, Utc::now()).map_err(|e| server_error(name, &e))?;
     Ok(removal
         .filter(|removal| removal.method == method)
+        .filter(|removal| {
+            scope.is_none_or(|scope| removal.scope.as_deref() == Some(scope.as_str()))
+        })
         .map(|removal| Work::Removed {
             account: name.to_string(),
             event: id.to_string(),
@@ -714,12 +818,29 @@ fn plan_update(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<Work, RpcError> {
-    only_params("event.update", params, &["account", "event", "fields"])?;
+    only_params(
+        "event.update",
+        params,
+        &["account", "event", "fields", "scope"],
+    )?;
     let request: EventUpdateParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.update: {e}")))?;
     let name = request.account.as_str();
+    let scope = scope_param(request.scope.as_deref())?;
     let (account, store) = change_store("event.update", name, &request.event, snapshot)?;
-    let (event, calendar) = changed_event(&store, name, &request.event)?;
+    let (event, calendar, scope) = addressed_event(&store, name, &request.event, scope)?;
+    if request.fields.recurrence.is_some() && scope != Some(EventScope::Series) {
+        return Err(invalid_params(match scope {
+            Some(_) => "An occurrence repeats by its series' rule; change the rule in the series \
+                        scope"
+                .to_string(),
+            None => format!(
+                "{} does not repeat, and mp cannot turn it into a series; create a recurring \
+                 event instead",
+                event.summary
+            ),
+        }));
+    }
     let mut patch = resolve_patch(&request.fields, &event, local_zone()).map_err(invalid_params)?;
     // Turning off a meeting that is not online changes nothing.
     if patch.online_meeting == Some(false) && !event.is_online_meeting {
@@ -755,7 +876,9 @@ fn plan_update(
     Ok(Work::Change(Box::new(ChangeWork {
         account,
         event,
-        change: Change::Update(patch),
+        change: Change::Update(Box::new(patch)),
+        scope,
+        named: request.event,
     })))
 }
 
@@ -794,15 +917,22 @@ fn plan_cancel(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<Work, RpcError> {
-    only_params("event.cancel", params, &["account", "comment", "event"])?;
+    only_params(
+        "event.cancel",
+        params,
+        &["account", "comment", "event", "scope"],
+    )?;
     let request: EventCancelParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.cancel: {e}")))?;
+    let scope = scope_param(request.scope.as_deref())?;
     let (account, store) =
         change_store("event.cancel", &request.account, &request.event, snapshot)?;
-    if let Some(retry) = retried_removal("event.cancel", &store, &account.name, &request.event)? {
+    if let Some(retry) =
+        retried_removal("event.cancel", &store, &account.name, &request.event, scope)?
+    {
         return Ok(retry);
     }
-    let (event, _) = changed_event(&store, &account.name, &request.event)?;
+    let (event, _, scope) = addressed_event(&store, &account.name, &request.event, scope)?;
     if !event.is_organizer {
         return Err(invalid_params(format!(
             "Only the organizer can cancel {}; decline it instead",
@@ -820,6 +950,8 @@ fn plan_cancel(
         account,
         event,
         change: Change::Cancel { comment },
+        scope,
+        named: request.event,
     })))
 }
 
@@ -829,15 +961,18 @@ fn plan_delete(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<Work, RpcError> {
-    only_params("event.delete", params, &["account", "event"])?;
+    only_params("event.delete", params, &["account", "event", "scope"])?;
     let request: EventDeleteParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.delete: {e}")))?;
+    let scope = scope_param(request.scope.as_deref())?;
     let (account, store) =
         change_store("event.delete", &request.account, &request.event, snapshot)?;
-    if let Some(retry) = retried_removal("event.delete", &store, &account.name, &request.event)? {
+    if let Some(retry) =
+        retried_removal("event.delete", &store, &account.name, &request.event, scope)?
+    {
         return Ok(retry);
     }
-    let (event, _) = changed_event(&store, &account.name, &request.event)?;
+    let (event, _, scope) = addressed_event(&store, &account.name, &request.event, scope)?;
     if !event.cancelled {
         if event.is_organizer && !event.attendees.is_empty() {
             return Err(invalid_params(format!(
@@ -856,6 +991,8 @@ fn plan_delete(
         account,
         event,
         change: Change::Delete,
+        scope,
+        named: request.event,
     })))
 }
 
@@ -1215,6 +1352,9 @@ async fn run(work: Work, handle: OperationHandle) {
 enum Changed {
     /// The event as the server holds it after an update.
     Updated(Box<CachedEvent>),
+    /// The series as the server holds it after an update of the whole
+    /// series.
+    SeriesUpdated(Box<crate::calendar_backend::SeriesInfo>),
     /// The event is gone: cancelled or deleted.
     Removed(Removal),
 }
@@ -1228,22 +1368,51 @@ fn settle_removal(handle: &OperationHandle, account: String, event: String, remo
                 account,
                 event,
                 notified: removal.notified,
+                scope: removal.scope,
             },
         );
     } else {
-        settle(handle, EventDeleteResult { account, event });
+        settle(
+            handle,
+            EventDeleteResult {
+                account,
+                event,
+                scope: removal.scope,
+            },
+        );
     }
+}
+
+/// The series master a series write answered with, or the failure of an
+/// answer that carried none readable.
+fn written_master(
+    series: &crate::calendar_backend::SeriesInfo,
+) -> Result<CachedEvent, CalendarBackendError> {
+    series.master.as_deref().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "the server wrote the series {} but answered with no readable master",
+            series.master_id
+        )
+        .into()
+    })
 }
 
 /// An update, a cancel or a delete: the server's answer, written into the
 /// cache under the account's calendar lock (the updated event upserted, the
-/// cancelled or deleted one removed), then the sync that confirms it.
+/// cancelled or deleted one removed, a series with every occurrence, an
+/// updated series into the series cache with its calendar's token dropped),
+/// then the sync that confirms it.
 async fn change(work: ChangeWork, handle: OperationHandle) {
     let ChangeWork {
         account,
         event,
         change,
+        scope,
+        named,
     } = work;
+    let series_scope = scope == Some(EventScope::Series);
+    let scope_word = scope.map(|scope| scope.as_str().to_string());
+    let removed_id = named.clone();
     let name = account.name.clone();
     let token = handle.token.clone();
     let method = match &change {
@@ -1253,6 +1422,7 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
     };
     let (id, calendar) = (event.id.clone(), event.calendar.clone());
     let notified: Vec<String> = event.attendees.into_iter().map(|a| a.email).collect();
+    let removal_scope = scope_word.clone();
     let changed = off_thread("the event change", move || async move {
         let backend = backend_for(&account)
             .await?
@@ -1262,7 +1432,15 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
         }
         let changed = match change {
             Change::Update(patch) => match backend.update_event(&calendar, &id, &patch).await? {
-                Written::Event(event) => Changed::Updated(event),
+                Written::Event(event) if !series_scope => Changed::Updated(event),
+                Written::Series(series) if series_scope => Changed::SeriesUpdated(series),
+                Written::Event(event) => {
+                    return Err(anyhow::anyhow!(
+                        "the server answered the change to the series with the event {}",
+                        event.id
+                    )
+                    .into())
+                }
                 Written::Series(series) => {
                     return Err(anyhow::anyhow!(
                         "the server answered the change with the series {}",
@@ -1276,6 +1454,7 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
                 Changed::Removed(Removal {
                     method: method.to_string(),
                     notified,
+                    scope: removal_scope,
                 })
             }
             Change::Delete => {
@@ -1283,16 +1462,25 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
                 Changed::Removed(Removal {
                     method: method.to_string(),
                     notified: Vec::new(),
+                    scope: removal_scope,
                 })
             }
         };
         let store = Store::open(crate::config::store_path(&account.name))?;
         let lock = crate::calendar_sync::account_lock(&account.name);
         let _held = lock.lock().await;
+        let now = Utc::now();
         match &changed {
             Changed::Updated(event) => cache::upsert_event(&store, &account.name, event)?,
+            Changed::SeriesUpdated(series) => {
+                cache::upsert_series(&store, &account.name, series)?;
+                cache::forget_sync_state(&store, &account.name, &calendar)?;
+            }
+            Changed::Removed(removal) if series_scope => {
+                cache::remove_series(&store, &account.name, &id, &removed_id, removal, now)?;
+            }
             Changed::Removed(removal) => {
-                cache::remove_event(&store, &account.name, &id, removal, Utc::now())?;
+                cache::remove_event(&store, &account.name, &id, removal, now)?;
             }
         }
         if let Err(e) =
@@ -1312,23 +1500,31 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
         Ok(Ok(None)) => {}
         Ok(Ok(Some(changed))) => {
             handle.announce(calendar_changed(&name));
-            match changed {
-                Changed::Updated(updated) => match (Sourced {
-                    event: *updated,
-                    source: None,
-                })
-                .to_wire()
-                {
-                    Ok(event) => settle(
-                        &handle,
-                        EventUpdateResult {
-                            account: name,
-                            event,
-                        },
-                    ),
-                    Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+            let updated = match changed {
+                Changed::Updated(updated) => *updated,
+                Changed::SeriesUpdated(series) => match written_master(&series) {
+                    Ok(master) => master,
+                    Err(e) => return handle.fail(DomainError::from(backend_error(&name, e))),
                 },
-                Changed::Removed(removal) => settle_removal(&handle, name, event.id, removal),
+                Changed::Removed(removal) => {
+                    return settle_removal(&handle, name, named, removal);
+                }
+            };
+            match (Sourced {
+                event: updated,
+                source: None,
+            })
+            .to_wire()
+            {
+                Ok(event) => settle(
+                    &handle,
+                    EventUpdateResult {
+                        account: name,
+                        event,
+                        scope: scope_word,
+                    },
+                ),
+                Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
             }
         }
         Ok(Err(e)) => handle.fail(DomainError::from(backend_error(&name, e))),
@@ -1495,7 +1691,9 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
 /// A new event: the one the cache already holds under the transaction id
 /// when it matches the input, that one patched with the input's fields when
 /// the retry changed them, else the server's answer to the create; a written
-/// event goes into the cache before the sync that confirms it.
+/// event goes into the cache before the sync that confirms it. A recurring
+/// input is a series, found by its master and written into the series cache,
+/// whose occurrences the sync brings.
 async fn create(work: CreateWork, handle: OperationHandle) {
     let CreateWork {
         account,
@@ -1508,8 +1706,21 @@ async fn create(work: CreateWork, handle: OperationHandle) {
     let tx = transaction_id.clone();
     let created = off_thread("the new event", move || async move {
         let store = Store::open(crate::config::store_path(&account.name))?;
-        let made = cache::event_by_transaction(&store, &account.name, &tx)?;
-        if let Some(event) = made.as_ref().filter(|event| input.matches(event)) {
+        // What a first try with this transaction id made, and whether it
+        // already carries the input.
+        let made: Option<(CachedEvent, bool)> = if input.recurrence.is_some() {
+            cache::series_by_transaction(&store, &account.name, &tx)?.and_then(|series| {
+                let master = *series.master?;
+                let same = input.matches(&master) && input.matches_rule(series.recurrence.as_ref());
+                Some((master, same))
+            })
+        } else {
+            cache::event_by_transaction(&store, &account.name, &tx)?.map(|event| {
+                let same = input.matches(&event);
+                (event, same)
+            })
+        };
+        if let Some((event, true)) = &made {
             return Ok::<_, CalendarBackendError>(Some(event.clone()));
         }
         let backend = backend_for(&account)
@@ -1521,26 +1732,25 @@ async fn create(work: CreateWork, handle: OperationHandle) {
         // A retry that changed the event a first try made patches it, as the
         // backend adopts it on Graph's ErrorDuplicateTransactionId.
         let written = match &made {
-            Some(event) => {
+            Some((event, _)) => {
                 backend
                     .update_event(&event.calendar, &event.id, &input.as_patch())
                     .await?
             }
             None => backend.create_event(&calendar, &input, &tx).await?,
         };
-        let event = match written {
-            Written::Event(event) => *event,
-            Written::Series(series) => {
-                return Err(anyhow::anyhow!(
-                    "the server answered the new event with the series {}",
-                    series.master_id
-                )
-                .into())
-            }
-        };
         let lock = crate::calendar_sync::account_lock(&account.name);
         let _held = lock.lock().await;
-        cache::upsert_event(&store, &account.name, &event)?;
+        let event = match written {
+            Written::Event(event) => {
+                cache::upsert_event(&store, &account.name, &event)?;
+                *event
+            }
+            Written::Series(series) => {
+                cache::upsert_series(&store, &account.name, &series)?;
+                written_master(&series)?
+            }
+        };
         if let Err(e) =
             crate::calendar_sync::sync_account(&store, &backend, &account.name, Utc::now()).await
         {

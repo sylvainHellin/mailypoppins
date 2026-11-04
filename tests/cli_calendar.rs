@@ -849,3 +849,162 @@ fn event_update_cancel_and_delete_through_the_cli() {
     let gone = slice.err(&["event", "show", &solo, "-A", SERVER]);
     assert!(gone.contains(&format!("has no event {solo}")), "{gone}");
 }
+
+/// `mp event create --repeat` makes a series whose occurrences the views
+/// show, `--monthly-by weekday` names the start's week of the month;
+/// `mp event update`, `cancel` and `delete` refuse an occurrence without
+/// `--scope`, change or remove one occurrence with `--scope occurrence` and
+/// the whole series with `--scope series`, and a flag outside its rule is
+/// refused before the daemon is asked.
+#[test]
+fn a_series_through_the_cli() {
+    let slice = Slice::start();
+    slice.ok(&["calendar", "rebuild", "-A", SERVER]);
+    let first = day(10).date_naive();
+    let start = format!("{first}T09:00");
+    let until = (first + Days::new(14)).to_string();
+    let created = slice.json(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Standup",
+        "--start",
+        &start,
+        "--duration",
+        "15m",
+        "--zone",
+        "UTC",
+        "--to",
+        "ada@example.com",
+        "--repeat",
+        "weekly",
+        "--until",
+        &until,
+        "--json",
+    ]);
+    let master = created["event"]["id"].as_str().unwrap().to_string();
+    let weekday = mailypoppins::calendar_model::Weekday::of_date(first).name();
+    assert_eq!(created["event"]["kind"], "series-master");
+    assert_eq!(
+        created["event"]["recurrence"],
+        format!("Weekly on {weekday} until {until}")
+    );
+    let view = slice.json(&[
+        "calendar", "view", "-A", SERVER, "--from", "+0", "--to", "+30", "--zone", "UTC", "--json",
+    ]);
+    let occurrences: Vec<String> = view["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["series_master_id"] == master.as_str())
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(occurrences.len(), 3, "{view}");
+
+    let monthly = slice.json(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Review",
+        "--start",
+        &start,
+        "--duration",
+        "1h",
+        "--zone",
+        "UTC",
+        "--repeat",
+        "monthly",
+        "--monthly-by",
+        "weekday",
+        "--count",
+        "2",
+        "--json",
+    ]);
+    let index = mailypoppins::calendar_model::WeekIndex::of_date(first).word();
+    assert_eq!(
+        monthly["event"]["recurrence"],
+        format!("Monthly on the {index} {weekday} (2 times)")
+    );
+    let refused = slice.err(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Bad",
+        "--start",
+        &start,
+        "--duration",
+        "1h",
+        "--repeat",
+        "daily",
+        "--on",
+        "MO",
+    ]);
+    assert!(refused.contains("--on names the days"), "{refused}");
+
+    let (one, two, three) = (&occurrences[0], &occurrences[1], &occurrences[2]);
+    let unscoped = slice.err(&["event", "update", one, "-A", SERVER, "--summary", "x"]);
+    assert!(unscoped.contains("name the scope"), "{unscoped}");
+    let moved = slice.json(&[
+        "event",
+        "update",
+        two,
+        "-A",
+        SERVER,
+        "--scope",
+        "occurrence",
+        "--summary",
+        "Standup, moved",
+        "--json",
+    ]);
+    assert_eq!(moved["scope"], "occurrence");
+    assert_eq!(moved["event"]["kind"], "exception");
+    let renamed = slice.ok(&[
+        "event",
+        "update",
+        one,
+        "-A",
+        SERVER,
+        "--scope",
+        "series",
+        "--summary",
+        "Daily standup",
+    ]);
+    assert!(
+        renamed.contains(&format!("Updated Daily standup ({master})")),
+        "{renamed}"
+    );
+    let shown = slice.json(&["event", "show", three, "-A", SERVER, "--json"]);
+    assert_eq!(shown["event"]["summary"], "Daily standup");
+
+    let cancelled = slice.ok(&[
+        "event",
+        "cancel",
+        one,
+        "-A",
+        SERVER,
+        "--scope",
+        "occurrence",
+    ]);
+    assert!(
+        cancelled.contains(&format!("Cancelled the occurrence {one}")),
+        "{cancelled}"
+    );
+    let all = slice.ok(&["event", "cancel", two, "-A", SERVER, "--scope", "series"]);
+    assert!(
+        all.contains(&format!("Cancelled the series of {two}")),
+        "{all}"
+    );
+    let gone = slice.err(&["event", "show", three, "-A", SERVER]);
+    assert!(gone.contains("has no event"), "{gone}");
+    let solo = monthly["event"]["id"].as_str().unwrap().to_string();
+    let deleted = slice.json(&[
+        "event", "delete", &solo, "-A", SERVER, "--scope", "series", "--json",
+    ]);
+    assert_eq!(deleted["scope"], "series");
+}

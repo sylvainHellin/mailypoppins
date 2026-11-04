@@ -3,4 +3,8 @@
 /**
  * What a settled `event.delete` reports.
  */
-export type EventDeleteResult = { account: string, event: string, };
+export type EventDeleteResult = { account: string, event: string,
+/**
+ * The scope the delete was made in; absent on a single event.
+ */
+scope?: string, };

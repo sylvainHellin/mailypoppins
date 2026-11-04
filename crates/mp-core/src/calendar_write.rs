@@ -22,14 +22,50 @@
 //! try made: [`EventInput::matches`] tells whether that event already carries
 //! the replay's fields, and [`EventInput::as_patch`] is the change that makes
 //! it carry them when it does not.
+//!
+//! A recurring event carries its rule as a [`Recurrence`]: the client names
+//! the pattern in the wire's [`CalendarRecurrence`] and leaves out what the
+//! event's first day says ([`resolve_recurrence`]), the weekday of a weekly
+//! rule, the day or the weekday of a monthly or yearly one, and its month.
+//! A change to an occurrence or to the whole series names its
+//! [`EventScope`].
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use chrono_tz::Tz;
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
-use crate::calendar_model::{parse_zone, AttendeeRole, Event, EventTime, Sensitivity, ShowAs};
+use crate::calendar_model::{
+    parse_zone, AttendeeRole, Event, EventTime, Frequency, Recurrence, Sensitivity, ShowAs,
+    WeekIndex, Weekday,
+};
 use crate::invite::{resolve_span_in, EventSpan};
-use mp_protocol::calendar::{EventAttendeeInput, EventInputParams, EventPatchParams};
+use mp_protocol::calendar::{
+    CalendarRecurrence, EventAttendeeInput, EventInputParams, EventPatchParams,
+};
+
+/// What a change to one occurrence of a series reaches: that occurrence, or
+/// the whole series through its master.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EventScope {
+    Occurrence,
+    Series,
+}
+
+impl EventScope {
+    /// The scope a client's word names, or the sentence naming the two.
+    pub fn from_word(word: &str) -> Result<Self, String> {
+        word_as(word, "a scope", "occurrence, series")
+    }
+
+    /// The word on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventScope::Occurrence => "occurrence",
+            EventScope::Series => "series",
+        }
+    }
+}
 
 /// One person or room invited to an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +116,9 @@ pub struct EventInput {
     /// default, which allows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_new_time_proposals: Option<bool>,
+    /// The rule of a recurring event; `None` for a single one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence: Option<Recurrence>,
 }
 
 impl EventInput {
@@ -98,6 +137,7 @@ impl EventInput {
             show_as: None,
             sensitivity: None,
             allow_new_time_proposals: None,
+            recurrence: None,
         }
     }
 
@@ -124,6 +164,7 @@ impl EventInput {
             show_as: Some(self.show_as.unwrap_or(ShowAs::Busy)),
             sensitivity: Some(self.sensitivity.unwrap_or(Sensitivity::Normal)),
             allow_new_time_proposals: Some(self.allow_new_time_proposals.unwrap_or(true)),
+            recurrence: self.recurrence.clone(),
         }
     }
 
@@ -170,6 +211,16 @@ impl EventInput {
             && self.sensitivity.unwrap_or(Sensitivity::Normal) == event.sensitivity
             && self.allow_new_time_proposals.unwrap_or(true) == event.allow_new_time_proposals
     }
+
+    /// Whether a series' `rule` is the one this input repeats by
+    /// ([`Recurrence::same_rule`]); a single input matches no rule only.
+    pub fn matches_rule(&self, rule: Option<&Recurrence>) -> bool {
+        match (&self.recurrence, rule) {
+            (None, None) => true,
+            (Some(wanted), Some(held)) => wanted.same_rule(held),
+            _ => false,
+        }
+    }
 }
 
 /// Whether two times are the same span: the same instants in zones of one
@@ -205,8 +256,9 @@ pub struct EventPatch {
     /// The new time; switching between timed and all-day is a time too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<EventTime>,
-    /// The IANA zone an all-day `time`'s midnights fall in; absent, the
-    /// backend's host zone.
+    /// The IANA zone an all-day `time`'s midnights fall in, and the one a
+    /// new `recurrence` is held in when no timed `time` names one; absent,
+    /// the backend's host zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
     #[serde(
@@ -239,6 +291,9 @@ pub struct EventPatch {
     pub sensitivity: Option<Sensitivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_new_time_proposals: Option<bool>,
+    /// The new rule of a series; a series stays one, so nothing clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence: Option<Recurrence>,
 }
 
 impl EventPatch {
@@ -268,6 +323,11 @@ pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, 
     )?;
     let show_as = resolve_show_as(params.show_as.as_deref())?;
     let sensitivity = resolve_sensitivity(params.sensitivity.as_deref())?;
+    let recurrence = params
+        .recurrence
+        .as_ref()
+        .map(|rule| resolve_recurrence(rule, first_day(&time, zone)))
+        .transpose()?;
     Ok(EventInput {
         summary,
         time,
@@ -280,6 +340,7 @@ pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, 
         show_as,
         sensitivity,
         allow_new_time_proposals: params.allow_new_time_proposals,
+        recurrence,
     })
 }
 
@@ -291,7 +352,9 @@ pub fn resolve_input(params: &EventInputParams, host: Tz) -> Result<EventInput, 
 /// `params.zone` names another (`host` for an all-day event), a new start
 /// with no end or duration keeping the event's length, and an end or a
 /// duration with no start keeping its start. `null` or an empty text clears
-/// the location and the description.
+/// the location and the description. A new rule is read against the new
+/// start's first day, else the event's own; on a series, `current` is its
+/// master, whose start is the series'.
 pub fn resolve_patch(
     params: &EventPatchParams,
     current: &Event,
@@ -369,7 +432,208 @@ pub fn resolve_patch(
     }
     patch.sensitivity = resolve_sensitivity(params.sensitivity.as_deref())?;
     patch.allow_new_time_proposals = params.allow_new_time_proposals;
+    if let Some(rule) = &params.recurrence {
+        let time = patch.time.as_ref().unwrap_or(&current.time);
+        let zone = time.zone().unwrap_or(host);
+        patch.recurrence = Some(resolve_recurrence(rule, first_day(time, zone))?);
+        patch.zone.get_or_insert_with(|| zone.name().to_string());
+    }
     Ok(patch)
+}
+
+/// The first day of `time` in `zone`: a timed start's local date, an
+/// all-day event's first date.
+pub fn first_day(time: &EventTime, zone: Tz) -> NaiveDate {
+    match time {
+        EventTime::Timed { start, .. } => start.with_timezone(&zone).date_naive(),
+        EventTime::AllDay { start, .. } => *start,
+    }
+}
+
+/// The most occurrences a rule may count, Outlook's own bound.
+pub const MAX_OCCURRENCES: u32 = 999;
+
+/// The largest interval a rule may name.
+pub const MAX_INTERVAL: u32 = 99;
+
+/// The [`Recurrence`] a client's rule names for an event whose first day is
+/// `first`, or the sentence that says what is wrong with it.
+///
+/// What the pattern leaves out comes from `first`: the weekday of a weekly
+/// rule, the day of a monthly rule by date, the weekday of a rule on the
+/// first to fourth or last weekday (`week_index`), and the month and day of
+/// a yearly one. A weekly rule's week starts on Monday unless it names
+/// another day. The range starts on `first` whatever the client sent, and
+/// ends on `until`, after `count` occurrences, or never.
+pub fn resolve_recurrence(
+    rule: &CalendarRecurrence,
+    first: NaiveDate,
+) -> Result<Recurrence, String> {
+    let frequency: Frequency = word_as(
+        &rule.frequency,
+        "a repeat frequency",
+        "daily, weekly, monthly, yearly",
+    )?;
+    if !(1..=MAX_INTERVAL).contains(&rule.interval) {
+        return Err(format!(
+            "A series repeats every 1 to {MAX_INTERVAL} days, weeks, months or years"
+        ));
+    }
+    let mut weekdays: Vec<Weekday> = Vec::new();
+    for word in &rule.weekdays {
+        let day: Weekday = word_as(word, "a weekday", "monday to sunday")?;
+        if !weekdays.contains(&day) {
+            weekdays.push(day);
+        }
+    }
+    weekdays.sort_by_key(|day| Weekday::ALL.iter().position(|d| d == day));
+    let week_index = rule
+        .week_index
+        .as_deref()
+        .map(|word| {
+            word_as::<WeekIndex>(
+                word,
+                "a week of the month",
+                "first, second, third, fourth, last",
+            )
+        })
+        .transpose()?;
+    if rule
+        .day_of_month
+        .is_some_and(|day| !(1..=31).contains(&day))
+    {
+        return Err("The day of the month is 1 to 31".into());
+    }
+    if rule.month.is_some_and(|month| !(1..=12).contains(&month)) {
+        return Err("The month is 1 to 12".into());
+    }
+    let until = rule
+        .until
+        .as_deref()
+        .map(|raw| {
+            NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+                .map_err(|_| format!("The series' last day {raw:?} is not YYYY-MM-DD"))
+        })
+        .transpose()?;
+    if until.is_some() && rule.count.is_some() {
+        return Err("A series ends on a date or after a number of times, not both".into());
+    }
+    if until.is_some_and(|until| until < first) {
+        return Err(format!("The series ends before its first day, {first}"));
+    }
+    if rule
+        .count
+        .is_some_and(|count| !(1..=MAX_OCCURRENCES).contains(&count))
+    {
+        return Err(format!("A series has 1 to {MAX_OCCURRENCES} occurrences"));
+    }
+    let mut resolved = Recurrence {
+        frequency,
+        interval: rule.interval,
+        weekdays: Vec::new(),
+        day_of_month: None,
+        week_index: None,
+        month: None,
+        first_day_of_week: None,
+        start: Some(first),
+        until,
+        count: rule.count,
+    };
+    let own_day = || vec![Weekday::of_date(first)];
+    match frequency {
+        Frequency::Daily => {
+            if !weekdays.is_empty()
+                || week_index.is_some()
+                || rule.day_of_month.is_some()
+                || rule.month.is_some()
+            {
+                return Err(
+                    "A daily series names no weekday, day or month; repeat it weekly on the days \
+                     instead"
+                        .into(),
+                );
+            }
+        }
+        Frequency::Weekly => {
+            if week_index.is_some() || rule.day_of_month.is_some() || rule.month.is_some() {
+                return Err("A weekly series names its weekdays only".into());
+            }
+            resolved.weekdays = if weekdays.is_empty() {
+                own_day()
+            } else {
+                weekdays
+            };
+            resolved.first_day_of_week = Some(match rule.first_day_of_week.as_deref() {
+                Some(word) => word_as(word, "the first day of the week", "monday to sunday")?,
+                None => Weekday::Monday,
+            });
+        }
+        Frequency::Monthly | Frequency::Yearly => {
+            if frequency == Frequency::Monthly && rule.month.is_some() {
+                return Err("A monthly series names no month; repeat it yearly instead".into());
+            }
+            match week_index {
+                Some(index) => {
+                    if rule.day_of_month.is_some() {
+                        return Err(
+                            "A series falls on a day of the month or on a weekday of it, not \
+                             both"
+                                .into(),
+                        );
+                    }
+                    resolved.week_index = Some(index);
+                    resolved.weekdays = if weekdays.is_empty() {
+                        own_day()
+                    } else {
+                        weekdays
+                    };
+                }
+                None => {
+                    if !weekdays.is_empty() {
+                        return Err(
+                            "A series on a weekday of the month names which one (week_index)"
+                                .into(),
+                        );
+                    }
+                    resolved.day_of_month = Some(rule.day_of_month.unwrap_or(first.day()));
+                }
+            }
+            if frequency == Frequency::Yearly {
+                let month = rule.month.unwrap_or(first.month());
+                if let Some(day) = resolved.day_of_month {
+                    let longest = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+                    if day > longest[month as usize - 1] {
+                        return Err(format!("Month {month} has no day {day}"));
+                    }
+                }
+                resolved.month = Some(month);
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// A rule in the wire's terms, which [`resolve_recurrence`] reads back as
+/// itself.
+pub fn recurrence_to_wire(rule: &Recurrence) -> CalendarRecurrence {
+    let frequency = match rule.frequency {
+        Frequency::Daily => "daily",
+        Frequency::Weekly => "weekly",
+        Frequency::Monthly => "monthly",
+        Frequency::Yearly => "yearly",
+    };
+    CalendarRecurrence {
+        frequency: frequency.to_string(),
+        interval: rule.interval,
+        weekdays: rule.weekdays.iter().map(|d| d.word().to_string()).collect(),
+        day_of_month: rule.day_of_month,
+        week_index: rule.week_index.map(|index| index.word().to_string()),
+        month: rule.month,
+        first_day_of_week: rule.first_day_of_week.map(|d| d.word().to_string()),
+        start: rule.start.map(|d| d.to_string()),
+        until: rule.until.map(|d| d.to_string()),
+        count: rule.count,
+    }
 }
 
 /// Whether `value` is a bare date (`2026-11-18`), the form of an all-day
@@ -926,6 +1190,135 @@ mod tests {
             shifted.time,
             Some(EventTime::all_day(day(10), day(12)).unwrap())
         );
+    }
+
+    fn wire_rule(value: serde_json::Value) -> CalendarRecurrence {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// A rule takes what its pattern leaves out from the event's first day,
+    /// Thursday 26 November 2026: the weekday of a weekly rule (its week from
+    /// Monday), the day of a monthly rule by date, the weekday of one by
+    /// weekday, the month and day of a yearly one; the range starts on that
+    /// day whatever the client sent.
+    #[test]
+    fn a_rule_fills_its_pattern_from_the_first_day() {
+        let first = NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let read = |value| resolve_recurrence(&wire_rule(value), first).unwrap();
+        let weekly = read(json!({"frequency": "weekly", "interval": 1, "start": "2020-01-01"}));
+        assert_eq!(weekly.weekdays, [Weekday::Thursday]);
+        assert_eq!(weekly.first_day_of_week, Some(Weekday::Monday));
+        assert_eq!(weekly.start, Some(first));
+        assert_eq!(weekly.describe(), "Weekly on Thursday");
+        let days = read(json!({"frequency": "weekly", "interval": 2,
+                               "weekdays": ["friday", "monday", "friday"], "until": "2026-12-31"}));
+        assert_eq!(days.weekdays, [Weekday::Monday, Weekday::Friday]);
+        assert_eq!(
+            days.describe(),
+            "Every 2 weeks on Monday, Friday until 2026-12-31"
+        );
+        let by_date = read(json!({"frequency": "monthly", "interval": 1, "count": 6}));
+        assert_eq!(by_date.day_of_month, Some(26));
+        assert_eq!(by_date.describe(), "Monthly on day 26 (6 times)");
+        let by_weekday =
+            read(json!({"frequency": "monthly", "interval": 1, "week_index": "fourth"}));
+        assert_eq!(by_weekday.weekdays, [Weekday::Thursday]);
+        assert_eq!(by_weekday.week_index, Some(WeekIndex::Fourth));
+        assert_eq!(by_weekday.day_of_month, None);
+        assert_eq!(by_weekday.describe(), "Monthly on the fourth Thursday");
+        let yearly = read(json!({"frequency": "yearly", "interval": 1}));
+        assert_eq!((yearly.month, yearly.day_of_month), (Some(11), Some(26)));
+        assert_eq!(yearly.describe(), "Yearly on 26 November");
+        let daily = read(json!({"frequency": "daily", "interval": 3}));
+        assert_eq!(daily.describe(), "Every 3 days");
+        assert_eq!(
+            WeekIndex::of_date(NaiveDate::from_ymd_opt(2026, 11, 30).unwrap()),
+            WeekIndex::Last
+        );
+
+        let back = resolve_recurrence(&recurrence_to_wire(&by_weekday), first).unwrap();
+        assert_eq!(back, by_weekday);
+    }
+
+    /// A rule outside what the form and Graph write is refused with the
+    /// sentence that says why.
+    #[test]
+    fn a_rule_refuses_what_it_cannot_hold() {
+        let first = NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let refused = |value| resolve_recurrence(&wire_rule(value), first).unwrap_err();
+        assert!(refused(json!({"frequency": "hourly", "interval": 1})).contains("daily, weekly"));
+        assert!(refused(json!({"frequency": "daily", "interval": 0})).contains("every 1 to 99"));
+        assert!(
+            refused(json!({"frequency": "daily", "interval": 1, "weekdays": ["monday"]}))
+                .contains("weekly on the days")
+        );
+        assert!(
+            refused(json!({"frequency": "weekly", "interval": 1, "weekdays": ["funday"]}))
+                .contains("monday to sunday")
+        );
+        assert!(
+            refused(json!({"frequency": "monthly", "interval": 1, "weekdays": ["monday"]}))
+                .contains("week_index")
+        );
+        assert!(
+            refused(json!({"frequency": "monthly", "interval": 1, "month": 3})).contains("yearly")
+        );
+        assert!(refused(
+            json!({"frequency": "yearly", "interval": 1, "month": 2, "day_of_month": 30})
+        )
+        .contains("no day 30"));
+        assert!(refused(
+            json!({"frequency": "daily", "interval": 1, "until": "2026-12-01", "count": 3})
+        )
+        .contains("not both"));
+        assert!(
+            refused(json!({"frequency": "daily", "interval": 1, "until": "2026-11-01"}))
+                .contains("before its first day")
+        );
+        assert!(
+            refused(json!({"frequency": "daily", "interval": 1, "count": 1000}))
+                .contains("1 to 999")
+        );
+    }
+
+    /// A create carries its rule read against its start's day in its zone,
+    /// and a patch's new rule is read against the new start, else the
+    /// event's own, and names the zone the rule is held in.
+    #[test]
+    fn inputs_and_patches_read_their_rule_against_their_first_day() {
+        let mut late = params("2026-11-26T23:30");
+        late.duration = Some("30m".into());
+        late.zone = Some("Europe/Berlin".into());
+        late.recurrence = Some(wire_rule(json!({"frequency": "weekly", "interval": 1})));
+        let input = resolve_input(&late, chrono_tz::UTC).unwrap();
+        let rule = input.recurrence.clone().unwrap();
+        assert_eq!(rule.weekdays, [Weekday::Thursday]);
+        assert!(input.matches_rule(Some(&rule)));
+        assert!(!input.matches_rule(None));
+        assert!(EventInput::new("Single", time()).matches_rule(None));
+        assert_eq!(input.as_patch().recurrence, Some(rule));
+
+        let current = made(&EventInput::new("Review", time()));
+        let patch = |value: serde_json::Value| {
+            let params: EventPatchParams = serde_json::from_value(value).unwrap();
+            resolve_patch(&params, &current, chrono_tz::UTC).unwrap()
+        };
+        let own = patch(json!({"recurrence": {"frequency": "weekly", "interval": 1}}));
+        assert_eq!(own.recurrence.unwrap().weekdays, [Weekday::Tuesday]);
+        assert_eq!(own.zone.as_deref(), Some("Europe/Berlin"));
+        let moved = patch(json!({"start": "2026-11-05T10:00",
+                                 "recurrence": {"frequency": "weekly", "interval": 1}}));
+        assert_eq!(moved.recurrence.unwrap().weekdays, [Weekday::Thursday]);
+    }
+
+    /// A scope is one of two words.
+    #[test]
+    fn a_scope_is_an_occurrence_or_the_series() {
+        assert_eq!(EventScope::from_word("series"), Ok(EventScope::Series));
+        assert_eq!(EventScope::Occurrence.as_str(), "occurrence");
+        assert!(EventScope::from_word("following")
+            .unwrap_err()
+            .contains("occurrence, series"));
     }
 
     fn value_with(input: &EventInput, key: &str, value: serde_json::Value) -> EventInput {

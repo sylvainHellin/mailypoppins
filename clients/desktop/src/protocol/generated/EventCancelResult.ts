@@ -7,4 +7,8 @@ export type EventCancelResult = { account: string, event: string,
 /**
  * The addresses the server sent the cancellation to, rooms included.
  */
-notified: Array<string>, };
+notified: Array<string>,
+/**
+ * The scope the cancel was made in; absent on a single event.
+ */
+scope?: string, };

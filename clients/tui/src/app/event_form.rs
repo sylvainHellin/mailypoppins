@@ -603,6 +603,7 @@ impl EventForm {
         Ok(EventUpdateParams {
             account: edit.account.clone(),
             event: edit.event.clone(),
+            scope: None,
             fields: self.changed_fields(),
         })
     }

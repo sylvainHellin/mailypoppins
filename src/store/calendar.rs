@@ -32,8 +32,9 @@
 //!   stands for no event is remembered too, with a `NULL` event).
 //! - [`REMOVED_TABLE`]: each event an `event.cancel` or `event.delete` of mp
 //!   took off the server and out of the cache in the last
-//!   [`REMOVAL_KEPT_DAYS`] days, with who the cancel told, so a retry of the
-//!   same call counts as done rather than as an event the cache never held
+//!   [`REMOVAL_KEPT_DAYS`] days, with who the cancel told and the scope it
+//!   was made in (`occurrence`, `series`, or none for a single event), so a
+//!   retry of the same call counts as done rather than as an event the cache never held
 //!   ([`removal`]). A record of mp's own writes rather than of the server, so
 //!   [`drop_calendar_cache`] keeps it; a schema-version rebuild of the store
 //!   does not carry it, and a retry after one is refused as an unknown event.
@@ -173,7 +174,8 @@ pub fn create_sql() -> [(&'static str, String); 7] {
             REMOVED_TABLE,
             // `method` is `event.cancel` or `event.delete`, `notified` the
             // JSON list of the addresses a cancel told, `removed_at` unix
-            // seconds.
+            // seconds, `scope` `occurrence` or `series` (none on a single
+            // event).
             format!(
                 "CREATE TABLE IF NOT EXISTS {REMOVED_TABLE} (
                     account    TEXT NOT NULL,
@@ -181,6 +183,7 @@ pub fn create_sql() -> [(&'static str, String); 7] {
                     method     TEXT NOT NULL,
                     notified   TEXT NOT NULL,
                     removed_at INTEGER NOT NULL,
+                    scope      TEXT,
                     PRIMARY KEY (account, event_id)
                 )"
             ),
@@ -191,15 +194,17 @@ pub fn create_sql() -> [(&'static str, String); 7] {
 /// The columns added to a calendar table after a build created it, as
 /// `(table, column, type)`: the series master's details and the mark of an
 /// occurrence that inherits them (PERSO-200), the structured series rule and
-/// a calendar's online-meeting services (PERSO-255). A table an older build
-/// created gains them here; its event rows fill at the next baseline, its
-/// calendar rows at the next sync, which lists the calendars in full.
-const ADDED_COLUMNS: [(&str, &str, &str); 5] = [
+/// a calendar's online-meeting services, and the scope of a removal mp made
+/// (PERSO-255). A table an older build created gains them here; its event
+/// rows fill at the next baseline, its calendar rows at the next sync, which
+/// lists the calendars in full, and its removals read as single events'.
+const ADDED_COLUMNS: [(&str, &str, &str); 6] = [
     (EVENTS_TABLE, "inherits", "INTEGER NOT NULL DEFAULT 0"),
     (SERIES_TABLE, "master_json", "TEXT"),
     (SERIES_TABLE, "zone", "TEXT"),
     (SERIES_TABLE, "recurrence_json", "TEXT"),
     (CALENDARS_TABLE, "online_meeting_providers", "TEXT"),
+    (REMOVED_TABLE, "scope", "TEXT"),
 ];
 
 /// Add [`ADDED_COLUMNS`] to the calendar tables that lack them, after
@@ -746,6 +751,9 @@ pub struct Removal {
     pub method: String,
     /// The addresses a cancel told; empty for a delete.
     pub notified: Vec<String>,
+    /// `occurrence` or `series` for a removal made in a scope, `None` for a
+    /// single event's.
+    pub scope: Option<String>,
 }
 
 /// Drop one event of `account` from the cache (the write-through of
@@ -760,8 +768,6 @@ pub fn remove_event(
     removal: &Removal,
     now: DateTime<Utc>,
 ) -> Result<bool> {
-    let notified =
-        serde_json::to_string(&removal.notified).context("serialising who a cancel told")?;
     let tx = store.immediate_transaction()?;
     let removed = tx
         .execute(
@@ -769,23 +775,106 @@ pub fn remove_event(
             [account, id],
         )
         .with_context(|| format!("removing calendar event {id}"))?;
+    remember_removal(&tx, account, id, removal, now)?;
+    tx.commit()
+        .with_context(|| format!("committing the removal of calendar event {id}"))?;
+    Ok(removed > 0)
+}
+
+/// Drop the series `master_id` of `account` from the cache, every
+/// occurrence of it and its series row (the write-through of a cancel or a
+/// delete of a whole series, whose occurrences the server's delta never
+/// names), and remember `removal` under `id`, the event the call named, and
+/// under the master's id, in the same transaction. `true` when the cache
+/// held an occurrence of it.
+pub fn remove_series(
+    store: &Store,
+    account: &str,
+    master_id: &str,
+    id: &str,
+    removal: &Removal,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let tx = store.immediate_transaction()?;
+    let removed = tx
+        .execute(
+            &format!(
+                "DELETE FROM {EVENTS_TABLE}
+                 WHERE account = ?1 AND (event_id = ?2
+                       OR json_extract(event_json, '$.series_master_id') = ?2)"
+            ),
+            [account, master_id],
+        )
+        .with_context(|| format!("removing the occurrences of series {master_id}"))?;
     tx.execute(
+        &format!("DELETE FROM {SERIES_TABLE} WHERE account = ?1 AND master_id = ?2"),
+        [account, master_id],
+    )
+    .with_context(|| format!("removing series {master_id}"))?;
+    remember_removal(&tx, account, id, removal, now)?;
+    if id != master_id {
+        remember_removal(&tx, account, master_id, removal, now)?;
+    }
+    tx.commit()
+        .with_context(|| format!("committing the removal of series {master_id}"))?;
+    Ok(removed > 0)
+}
+
+/// Remember `removal` of `id`, forgetting the removals older than
+/// [`REMOVAL_KEPT_DAYS`].
+fn remember_removal(
+    conn: &rusqlite::Connection,
+    account: &str,
+    id: &str,
+    removal: &Removal,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let notified =
+        serde_json::to_string(&removal.notified).context("serialising who a cancel told")?;
+    conn.execute(
         &format!("DELETE FROM {REMOVED_TABLE} WHERE removed_at < ?1"),
         [(now - Duration::days(REMOVAL_KEPT_DAYS)).timestamp()],
     )
     .context("forgetting old calendar removals")?;
-    tx.execute(
+    conn.execute(
         &format!(
             "INSERT OR REPLACE INTO {REMOVED_TABLE}
-                 (account, event_id, method, notified, removed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)"
+                 (account, event_id, method, notified, removed_at, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
         ),
-        params![account, id, removal.method, notified, now.timestamp()],
+        params![
+            account,
+            id,
+            removal.method,
+            notified,
+            now.timestamp(),
+            removal.scope
+        ],
     )
     .with_context(|| format!("remembering the removal of calendar event {id}"))?;
-    tx.commit()
-        .with_context(|| format!("committing the removal of calendar event {id}"))?;
-    Ok(removed > 0)
+    Ok(())
+}
+
+/// Write one series the server answered a write with into the series cache
+/// (the write-through of a create or an update of a whole series), before
+/// the sync brings it again.
+pub fn upsert_series(store: &Store, account: &str, series: &SeriesInfo) -> Result<()> {
+    write_series(store.conn(), account, series)
+}
+
+/// Drop the sync state of `account`'s calendar `calendar_id`, so its next
+/// sync is a baseline of the window: after a change to a series, whose
+/// occurrences the server's delta re-sends without naming the ones that
+/// left it.
+pub fn forget_sync_state(store: &Store, account: &str, calendar_id: &str) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            &format!("DELETE FROM {SYNC_TABLE} WHERE account = ?1 AND calendar_id = ?2"),
+            [account, calendar_id],
+        )
+        .context("dropping a calendar's sync state")?;
+    Ok(())
 }
 
 /// The cancel or delete of `account`'s event `id` mp made in the last
@@ -797,11 +886,11 @@ pub fn removal(
     id: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<Removal>> {
-    let row: Option<(String, String)> = store
+    let row: Option<(String, String, Option<String>)> = store
         .conn()
         .query_row(
             &format!(
-                "SELECT method, notified FROM {REMOVED_TABLE}
+                "SELECT method, notified, scope FROM {REMOVED_TABLE}
                  WHERE account = ?1 AND event_id = ?2 AND removed_at >= ?3"
             ),
             params![
@@ -809,21 +898,24 @@ pub fn removal(
                 id,
                 (now - Duration::days(REMOVAL_KEPT_DAYS)).timestamp()
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .with_context(|| format!("looking up the removal of calendar event {id}"))?;
-    row.map(|(method, notified)| {
+    row.map(|(method, notified, scope)| {
         Ok(Removal {
             method,
             notified: serde_json::from_str(&notified).context("reading who a cancel told")?,
+            scope,
         })
     })
     .transpose()
 }
 
-/// The cached event of `account` a create with `transaction_id` made, if the
-/// cache holds it: what a retried create settles with instead of posting.
+/// The cached single event of `account` a create with `transaction_id`
+/// made, if the cache holds it: what a retried create settles with instead
+/// of posting. An occurrence, which carries its master's transaction id,
+/// is not one: a series is found by [`series_by_transaction`].
 pub fn event_by_transaction(
     store: &Store,
     account: &str,
@@ -835,6 +927,7 @@ pub fn event_by_transaction(
             &format!(
                 "SELECT event_json FROM {EVENTS_TABLE}
                  WHERE account = ?1 AND json_extract(event_json, '$.transaction_id') = ?2
+                   AND json_extract(event_json, '$.series_master_id') IS NULL
                  LIMIT 1"
             ),
             [account, transaction_id],
@@ -843,6 +936,29 @@ pub fn event_by_transaction(
         .optional()
         .context("looking up a calendar event by transaction id")?;
     Ok(json.as_deref().and_then(parse_event))
+}
+
+/// The cached series of `account` a create with `transaction_id` made, by
+/// its master: what a retried create of a recurring event settles with.
+pub fn series_by_transaction(
+    store: &Store,
+    account: &str,
+    transaction_id: &str,
+) -> Result<Option<SeriesInfo>> {
+    store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT {SERIES_COLUMNS} FROM {SERIES_TABLE}
+                 WHERE account = ?1
+                   AND json_extract(master_json, '$.transaction_id') = ?2
+                 LIMIT 1"
+            ),
+            [account, transaction_id],
+            series_row,
+        )
+        .optional()
+        .context("looking up a calendar series by transaction id")
 }
 
 /// One cached event of `account` by its server id.
@@ -1211,6 +1327,7 @@ mod tests {
         let cancel = Removal {
             method: "event.cancel".into(),
             notified: vec!["ada@example.com".into()],
+            scope: None,
         };
         let now = Utc::now();
         assert!(!remove_event(&store, "perso", "ev-gone", &cancel, now).unwrap());
@@ -1232,6 +1349,7 @@ mod tests {
         let delete = Removal {
             method: "event.delete".into(),
             notified: Vec::new(),
+            scope: Some("occurrence".into()),
         };
         remove_event(&store, "evoqs", "ev-next", &delete, later).unwrap();
         assert_eq!(removal(&store, "evoqs", "ev-gone", now).unwrap(), None);
@@ -1239,6 +1357,76 @@ mod tests {
             removal(&store, "evoqs", "ev-next", later).unwrap(),
             Some(delete)
         );
+    }
+
+    /// A removed series leaves the cache with every occurrence and its
+    /// series row, the other series and events staying, and is remembered
+    /// under the id the call named and under its master's; a series is
+    /// found by its master's transaction id, an occurrence carrying it is
+    /// not a single event made by it, and a dropped sync state makes the
+    /// next sync a baseline.
+    #[test]
+    fn a_removed_series_takes_its_occurrences_and_a_series_is_found_by_transaction() {
+        let (_dir, store) = open();
+        upsert_calendars(&store, "evoqs", &[calendar("cal-main", true)]).unwrap();
+        let mut master = timed("ev-series", "cal-main", 2, 9);
+        master.kind = crate::calendar_model::EventKind::SeriesMaster;
+        master.transaction_id = Some("tx-series".into());
+        let series = SeriesInfo {
+            master_id: "ev-series".into(),
+            uid: "UID-SERIES".into(),
+            recurrence: None,
+            master: Some(Box::new(master.clone())),
+            zone: None,
+        };
+        upsert_series(&store, "evoqs", &series).unwrap();
+        for (id, day) in [("ev-series-1", 2), ("ev-series-2", 9)] {
+            let mut occurrence = timed(id, "cal-main", day, 9);
+            occurrence.kind = crate::calendar_model::EventKind::Occurrence;
+            occurrence.series_master_id = Some("ev-series".into());
+            occurrence.transaction_id = Some("tx-series".into());
+            upsert_event(&store, "evoqs", &occurrence).unwrap();
+        }
+        upsert_event(&store, "evoqs", &timed("ev-other", "cal-main", 3, 9)).unwrap();
+        assert_eq!(
+            event_by_transaction(&store, "evoqs", "tx-series").unwrap(),
+            None
+        );
+        assert_eq!(
+            series_by_transaction(&store, "evoqs", "tx-series").unwrap(),
+            Some(series)
+        );
+
+        let cancel = Removal {
+            method: "event.cancel".into(),
+            notified: vec!["ada@example.com".into()],
+            scope: Some("series".into()),
+        };
+        let now = Utc::now();
+        assert!(remove_series(&store, "evoqs", "ev-series", "ev-series-2", &cancel, now).unwrap());
+        assert_eq!(get_event(&store, "evoqs", "ev-series-1").unwrap(), None);
+        assert_eq!(get_event(&store, "evoqs", "ev-series-2").unwrap(), None);
+        assert!(get_event(&store, "evoqs", "ev-other").unwrap().is_some());
+        assert_eq!(get_series(&store, "evoqs", "ev-series").unwrap(), None);
+        for id in ["ev-series-2", "ev-series"] {
+            assert_eq!(
+                removal(&store, "evoqs", id, now).unwrap(),
+                Some(cancel.clone())
+            );
+        }
+        assert_eq!(removal(&store, "evoqs", "ev-series-1", now).unwrap(), None);
+
+        let window = crate::calendar_model::window_for(now);
+        let state = SyncState {
+            token: Some("t1".into()),
+            window,
+            baselined_at: now,
+            synced_at: now,
+            path: None,
+        };
+        save_sync_state(&store, "evoqs", "cal-main", &state).unwrap();
+        forget_sync_state(&store, "evoqs", "cal-main").unwrap();
+        assert_eq!(load_sync_state(&store, "evoqs", "cal-main").unwrap(), None);
     }
 
     fn baseline(upserts: Vec<Event>) -> SyncResult {
