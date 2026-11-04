@@ -141,8 +141,10 @@ const CARGO_TIMEOUT_SECS: &str = "1800";
 /// Seconds a test waits for another process to finish building the oracle.
 const LOCK_TIMEOUT_SECS: u64 = 2100;
 
-/// Every daemon environment hook `docs/daemon-operations.md` documents, removed
-/// from any child this module spawns.
+/// Fifteen of the nineteen daemon environment hooks `docs/daemon-operations.md`
+/// documents, removed from any child this module spawns; the two service
+/// hooks, the fake transport and the fake calendar are left to the suites that
+/// set them on every child they run.
 pub const DAEMON_ENV_HOOKS: [&str; 15] = [
     "MAILYPOPPINS_DAEMON_AUTOSTART",
     "MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS",

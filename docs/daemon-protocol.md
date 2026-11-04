@@ -1160,7 +1160,7 @@ The daemon syncs an account's calendar after the mail pass of each of its ticks,
 PERSO-255 has the daemon remind of the server events of every account with a calendar backend; the wire types are `mp_protocol::reminder`.
 A reminder falls due at its event's start minus the event's `reminder` minutes, and the daemon fires it at that minute as `calendar.reminder`, once, whichever clients are connected.
 A cancelled event, a declined one, one without a reminder and one in a hidden calendar never remind, nor does an invitation mail's event; a reminder that fell due while the daemon was stopped fires once at its start if its event has not ended.
-The daemon records what fired, was dismissed or is snoozed per account and event, for the due minute it fired at, so a moved event or a changed setting reminds again at its new minute; the record survives `calendar.rebuild`, and an entry goes once its event has ended.
+The daemon records what fired, was dismissed or is snoozed per account and event, for the due minute it fired at, so a moved event or a changed setting reminds again at its new minute; the record survives `calendar.rebuild` and a store rebuilt for a new schema version, and an entry goes once its event has ended.
 
 A reminder is `CalendarReminder` `{account, event, summary, start, all_day, location?, online_meeting_url?, minutes_before, presenter, presenter_connection}`: `event` the id `event.get` takes, `start` an RFC 3339 instant in UTC (an all-day event's first midnight in the daemon's zone), and `minutes_before` the event's setting.
 The presenter is the one connection that raises the system notification: the most recently bootstrapped desktop app, else the most recently bootstrapped TUI, else none.
@@ -1168,7 +1168,8 @@ The presenter is the one connection that raises the system notification: the mos
 Every client shows the reminder in its own window, and only the client whose connection `presenter_connection` names notifies, so a reminder raises one notification however many clients are open.
 
 `calendar.reminders` `{accounts?}` -> `{reminders: [CalendarReminder]}` (`CalendarRemindersParams`, `CalendarRemindersResult`) is a query: the reminders that fired and wait, neither dismissed nor snoozed, of every reminding account or of those named, the earliest start first, each with the presenter as it stands at the call.
-A reminder whose event no longer reminds (cancelled, declined, hidden, its reminder turned off, which is what a dismissal in Outlook reads as at the next sync) leaves the list, and the daemon publishes `calendar.reminders_changed` when one does.
+A reminder whose event stops reminding (cancelled, declined, hidden, its reminder turned off, which is what a dismissal in Outlook reads as at the next sync) leaves the list, and one whose event reminds again without a new firing (its calendar shown again) comes back to it.
+The daemon publishes `calendar.reminders_changed` whenever the list changes other than by a firing, which `calendar.reminder` announces itself.
 
 `calendar.dismiss_reminder` `{account, event}` -> `{account, event}` (`ReminderDismissed`) and `calendar.snooze_reminder` `{account, event, minutes}` -> `{account, event, until}` (`ReminderSnoozed`) are commands that affect `reminder:<account>/<event>` and publish `calendar.reminders_changed`, so every client clears or moves the reminder together.
 Either may come before the reminder fired: a dismissal ahead of time keeps it from firing, and a snooze makes it fire at `until`, `minutes` (1 to 20160) after the call.

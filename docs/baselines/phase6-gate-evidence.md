@@ -281,7 +281,7 @@ Nothing on this list blocks the exit; the first three are the ones a Phase 7 uni
 | `Snapshot::holds` and `operations` stay `Vec<Value>` while the event and `send.hold_status` are typed | **closed** after the gate (git history) |
 | `AccountView.health` is only ever `SyncHealth::default()`, so every snapshot reports `sync_health.state: "unknown"` | **closed** after the gate (git history) |
 | The log reader stamps every line with `Local::now()`'s offset, so a line written across a DST change is an hour out | **closed** after the gate (git history) |
-| `DAEMON_ENV_HOOKS` in `tests/support/parity.rs` clears twelve of the fifteen hooks | PERSO-225 |
+| `DAEMON_ENV_HOOKS` in `tests/support/parity.rs` clears fifteen of the nineteen hooks `docs/daemon-operations.md` documents, leaving the two service hooks, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR` to the suites that set them | PERSO-225 |
 | The activity overlay's `/filter` matches the level's `Debug` spelling as a substring of the same query that matches the message | PERSO-218 |
 | No protocol fixture pins a `state.bootstrap` whose `snapshot.diagnostics` is non-empty | **closed** after the gate (git history) |
 | Every `mp daemon` subcommand inherits the global `-s/--signature`, `--no-signature` and `-A/--account` flags, which mean nothing to a lifecycle command | **closed** after the gate (git history) (2026-10-22) |

@@ -441,5 +441,5 @@ Snooze and Dismiss live in the app's reminder banner and call the daemon, which 
 At launch the app asks the daemon for the reminders already waiting and notifies them once, and the banner lists every waiting reminder, since macOS shows no banner for the frontmost app.
 The bundle is signed ad hoc (`bundle.macOS.signingIdentity = "-"`, in `tauri.bundle.conf.json`, which `scripts/install-local.sh` builds with), so the signature's identifier is the bundle id `dev.mailypoppins.desktop` the notification centre files the app under.
 Rejected: real Snooze and Dismiss buttons through `UNUserNotificationCenter` (`objc2-user-notifications`), which needs a properly signed bundle and a permission prompt; revisit once the app has Developer ID signing.
-Source: chat, 2026-11-04
+Source: Sylvain in chat, 2026-11-04
 Status: accepted
