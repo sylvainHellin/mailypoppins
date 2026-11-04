@@ -3462,3 +3462,25 @@ Graph refuses `accept`, `tentativelyAccept` and `decline` with HTTP 400 when `se
 
 Exchange mails an attendee's proposal to the organizer as `METHOD:COUNTER`, written in the attendee mailbox's own zone with the instants exact and the original slot in `X-MS-OLK-ORIGINALSTART` and `X-MS-OLK-ORIGINALEND`.
 A decline that carries a proposal still removes the meeting from the attendee's calendar, as any decline does.
+
+## Graph's delta never names an occurrence that left its series (2026-11-04, PERSO-255)
+
+Graph's calendarView delta re-sends a series whole (the master and every occurrence in the window) when anything in it changes, and never names an occurrence that left it, whether deleted, cancelled or dropped by a shorter rule; only a removed master is reported.
+A master's `cancelledOccurrences` appears only on an explicit `$select`, not in the delta, so mp prunes a re-sent series to the occurrences that came (`SyncResult::resent_series`) and re-baselines the calendar after its own series writes.
+
+## A recurrence patch must name its zone, and a master's time change drops the exceptions (2026-11-04, PERSO-255)
+
+A recurrence PATCH without `range.recurrenceTimeZone` resets the series' zone to UTC, so every rule mp writes sends the Windows zone.
+A master's time change drops every exception of the series, as Outlook does, while a subject or location change keeps them.
+
+## Typing into a dialog right after it appears races its initial focus (2026-11-04, PERSO-255)
+
+A vitest test that types into a base-ui dialog right after `findByRole("dialog")` races the dialog's initial focus, and passes in the full suite only by timing; wait for `dialog.contains(document.activeElement)` first.
+
+## A help row's words join the palette's search text (2026-11-04, PERSO-255)
+
+A new KEYMAP row's description joins the desktop palette's search text with its section title, so a word in either can pull the row into another row's ranking test: "edit form" in the event card's `p` row made "edit event" match two rows in `rank.test.ts`.
+
+## insta stops at a test's first failing snapshot (2026-11-04, PERSO-255)
+
+insta stops at a test's first failing snapshot, so a change that moves many snapshots takes one run per snapshot; `INSTA_FORCE_PASS=1` writes every `.snap.new` in one run for review.
