@@ -236,7 +236,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -251,7 +251,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -266,7 +266,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -1145,23 +1145,25 @@ Arguments:
 
 Options:
       --comment <TEXT>        A comment for the organizer
-      --no-send-response      Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response      Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
       --propose <WHEN>        Propose a new start to the organizer (tentative or decline)
       --propose-end <WHEN>    The proposed end (default: the event's length)
       --propose-duration <D>  The proposed length (1h30m, PT1H30M)
-      --zone <ZONE>           The IANA zone the proposed times are read in (default the event's own)
+      --zone <ZONE>           The IANA zone the proposed times are read in (default the event's own, the local zone for an all-day event)
       --json                  Print the settled `event.respond` result as JSON on stdout
   -A, --account <ACCOUNT>     Account to use
   -h, --help                  Print help
 
 A tentative or a decline of a server event may propose a new time to the
 organizer: --propose takes the forms of mp event create's WHEN, read in the
-event's own zone unless --zone names another, and the proposal keeps the
-event's length unless --propose-end or --propose-duration names another. The
-organizer sees it on the event and takes it with mp event update EVENT
---use-proposal ADDR. A proposal needs the organizer told, so it does not go
-with --no-send-response, and an invitation mail's event (imip:<row_id>)
-takes none: mp builds no iCalendar COUNTER.
+event's own zone (the local zone for an all-day event) unless --zone names
+another, and the proposal keeps the event's length unless --propose-end or
+--propose-duration names another; a bare date alone on a timed meeting
+proposes that whole day. The organizer sees it on the event and takes it
+with mp event update EVENT --use-proposal ADDR. A proposal must reach the
+organizer, so it is refused with --no-send-response, as a --comment is, and
+an invitation mail's event (imip:<row_id>) takes none: mp builds no
+iCalendar COUNTER.
 
 Example:
   mp event respond AAMkADev1 tentative --propose 2026-11-18T15:00 -A evoqs

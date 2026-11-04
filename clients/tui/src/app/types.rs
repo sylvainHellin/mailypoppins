@@ -2569,6 +2569,20 @@ impl RsvpOverlay {
             zone: (!self.zone.is_empty()).then(|| self.zone.clone()),
         }))
     }
+
+    /// The comment the answer carries, `None` when blank; refused when the
+    /// organizer would not be told, as the daemon refuses it (Graph takes
+    /// no comment on an answer it does not send).
+    pub fn answer_comment(&self) -> Result<Option<String>, String> {
+        let comment = self.comment.trim();
+        if comment.is_empty() {
+            return Ok(None);
+        }
+        if self.server && !self.send_response {
+            return Err("A comment needs Send response on".to_string());
+        }
+        Ok(Some(comment.to_string()))
+    }
 }
 
 /// One message of the conversation shown in the thread overlay (#0008).

@@ -67,7 +67,9 @@
 //! with an accept, with `send_response: false`, on an invitation mail's event
 //! (mp builds no iCalendar `COUNTER`), on an event the cache does not hold,
 //! one that was cancelled, one the user organizes, one whose organizer
-//! accepts no proposals, and on a backend that cannot propose.
+//! accepts no proposals, and on a backend that cannot propose. A comment
+//! with `send_response: false` is refused the same way on every backend,
+//! since Graph takes no comment on an answer it does not send.
 //!
 //! `event.create` (PERSO-255) resolves the event a client typed and its
 //! calendar before an operation exists, and answers the operation id with
@@ -1110,8 +1112,15 @@ fn plan_respond(
     // A sign-in without the calendar scope is refused here, before an
     // operation exists, and without a call to the server.
     preflight_scope(&account).map_err(|e| backend_error(&name, e))?;
+    if !send_response && request.proposed_time.is_some() {
+        return Err(invalid_params(SILENT_PROPOSAL_REFUSAL));
+    }
+    // Graph refuses a comment on an answer it does not send (HTTP 400), and
+    // an answer nobody is told of has no one to read one.
+    if !send_response && comment.is_some() {
+        return Err(invalid_params(SILENT_COMMENT_REFUSAL));
+    }
     let proposed = match &request.proposed_time {
-        Some(_) if !send_response => return Err(invalid_params(SILENT_PROPOSAL_REFUSAL)),
         Some(proposal) => Some(planned_proposal(&account, &request.event, proposal)?),
         None => None,
     };
@@ -1135,6 +1144,12 @@ pub const PROPOSAL_WITH_ACCEPT_REFUSAL: &str =
 pub const SILENT_PROPOSAL_REFUSAL: &str =
     "A proposed time goes to the organizer, so it needs send_response; drop the proposal to \
      answer without telling them";
+
+/// The refusal of a comment on an answer that would not reach the
+/// organizer.
+pub const SILENT_COMMENT_REFUSAL: &str =
+    "A comment goes to the organizer, so it needs send_response; drop the comment to answer \
+     without telling them";
 
 /// The refusal of a proposed time on an invitation mail's event: the iMIP
 /// path builds no iCalendar `COUNTER`.

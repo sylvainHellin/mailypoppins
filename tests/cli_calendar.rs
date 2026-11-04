@@ -532,6 +532,22 @@ fn event_show_and_respond_through_the_cli() {
     assert_eq!(tentative["send_response"], false);
     assert_eq!(tentative["delivered"], false);
     assert_eq!(tentative["comment"], Value::Null);
+    // A comment nobody is told of is the daemon's refusal, not a Graph 400.
+    let unsent = slice.err(&[
+        "event",
+        "respond",
+        "ev-meeting",
+        "decline",
+        "--comment",
+        "away",
+        "--no-send-response",
+        "-A",
+        SERVER,
+    ]);
+    assert!(
+        unsent.contains("A comment goes to the organizer, so it needs send_response"),
+        "{unsent}"
+    );
     slice.ok(&["event", "respond", "ev-meeting", "decline", "-A", SERVER]);
 
     // `mp invite` on the meeting's invitation mail answers the server event.

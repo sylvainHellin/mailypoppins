@@ -737,7 +737,7 @@ fn an_answer_is_one_event_respond_with_its_comment_and_choice() {
             event: "ev-meeting".to_string(),
             choice: RsvpChoice::Tentative,
             comment: Some("running late".to_string()),
-            send_response: false,
+            send_response: true,
             proposed: None,
         },
     ));
@@ -748,7 +748,7 @@ fn an_answer_is_one_event_respond_with_its_comment_and_choice() {
             "event.respond".to_string(),
             json!({
                 "account": ACCOUNT, "event": "ev-meeting", "response": "tentative",
-                "comment": "running late", "send_response": false,
+                "comment": "running late", "send_response": true,
             })
         )]
     );

@@ -44,6 +44,21 @@ export const SERVER_ONLY = "This search hit has no local copy to RSVP from";
 export const BUSY = "A reply to this invitation is being sent";
 /** The TUI's refusal of a proposed time the organizer would not be told of (PERSO-255). */
 export const PROPOSAL_NEEDS_RESPONSE = "A proposed time needs Send response on";
+/** The TUI's refusal of a comment the organizer would not be told of: Graph takes none on an unsent answer. */
+export const COMMENT_NEEDS_RESPONSE = "A comment needs Send response on";
+
+/**
+ * Why the respond choice can not send what its fields hold, the TUI's
+ * sentences, or null: a proposed time, then a comment, on a server event
+ * whose response is off. An invitation mail's answer is the reply mail,
+ * always sent.
+ */
+export function rsvpProblem(fields: { server: boolean; sendResponse: boolean; proposing: boolean; proposedStart: string; comment: string }): string | null {
+  if (!fields.server || fields.sendResponse) return null;
+  if (fields.proposing && fields.proposedStart.trim()) return PROPOSAL_NEEDS_RESPONSE;
+  if (fields.comment.trim()) return COMMENT_NEEDS_RESPONSE;
+  return null;
+}
 
 function isRequest(event: EventFrontmatter | null): boolean {
   return event?.method?.toUpperCase() === "REQUEST";

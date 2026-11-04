@@ -33,8 +33,8 @@
 //! and publishes `calendar.changed`, and `calendar.view` answers the events of
 //! the visible calendars that overlap the range, in start order;
 //! `event.respond` refuses a word it does not take, an
-//! unknown event and `send_response: false` on an `imip:` event with the
-//! daemon's sentence, then settles after [`RSVP_DELAY`] with the event's own
+//! unknown event, `send_response: false` on an `imip:` event and with a
+//! comment with the daemon's sentence, then settles after [`RSVP_DELAY`] with the event's own
 //! response changed and `calendar.changed`, or after `rsvp_fail` fails with
 //! the SMTP error. `message.invite` names the server event of a `home`
 //! invitation as `event_id`, as the daemon does on an account with a backend.
@@ -272,6 +272,11 @@ pub const PROPOSAL_WITH_ACCEPT_REFUSAL: &str =
 pub const SILENT_PROPOSAL_REFUSAL: &str =
     "A proposed time goes to the organizer, so it needs send_response; drop the proposal to \
      answer without telling them";
+
+/// The daemon's `SILENT_COMMENT_REFUSAL`, word for word.
+pub const SILENT_COMMENT_REFUSAL: &str =
+    "A comment goes to the organizer, so it needs send_response; drop the comment to answer \
+     without telling them";
 
 /// The daemon's `IMIP_PROPOSAL_REFUSAL`, word for word.
 pub const IMIP_PROPOSAL_REFUSAL: &str =
@@ -537,22 +542,16 @@ fn created_event(
 /// the show-as.
 pub const ORGANIZER_ONLY_REFUSAL: &str = "Only the organizer can change this event";
 
-/// `event` in the neutral model's terms, as much of it as
-/// `resolve_patch` reads: its time and its kind.
 /// The slot a proposal on `event` names, after the daemon's refusals: the
-/// organizer not told, the user's own meeting, a cancelled one, one whose
-/// organizer accepts no proposals, and a time that does not read, all
-/// `-32602`, the times read in the event's zone or Europe/Berlin.
+/// user's own meeting, a cancelled one, one whose organizer accepts no
+/// proposals, and a time that does not read, all `-32602`, the times read
+/// in the event's zone or Europe/Berlin.
 fn proposed_slot(
     method: &str,
     event: &CalendarEvent,
     proposal: &mp_protocol::calendar::EventProposedTime,
-    send_response: bool,
 ) -> Result<mp_protocol::calendar::CalendarTimeSlot> {
     let refusal = |message: &str| refused(method, -32602, message);
-    if !send_response {
-        return Err(refusal(SILENT_PROPOSAL_REFUSAL));
-    }
     let title = &event.summary;
     if event.cancelled {
         return Err(refusal(&format!(
@@ -580,6 +579,8 @@ fn proposed_slot(
         .map_err(|e| refused(method, -32603, &format!("{e:#}")))
 }
 
+/// `event` in the neutral model's terms, as much of it as
+/// `resolve_patch` reads: its time and its kind.
 fn model_event(event: &CalendarEvent) -> Result<mp_core::calendar_model::Event> {
     Ok(serde_json::from_value(json!({
         "account": event.account,
@@ -4741,15 +4742,21 @@ impl Fixture {
                 if !send_response && imip {
                     return Err(refused(method, -32602, IMIP_SILENT_REFUSAL));
                 }
-                let proposed_time = match &proposal {
-                    Some(proposal) => Some(proposed_slot(method, &held, proposal, send_response)?),
-                    None => None,
-                };
                 let comment = params["comment"]
                     .as_str()
                     .map(str::trim)
                     .filter(|c| !c.is_empty())
                     .map(str::to_string);
+                if !send_response && proposal.is_some() {
+                    return Err(refused(method, -32602, SILENT_PROPOSAL_REFUSAL));
+                }
+                if !send_response && comment.is_some() {
+                    return Err(refused(method, -32602, SILENT_COMMENT_REFUSAL));
+                }
+                let proposed_time = match &proposal {
+                    Some(proposal) => Some(proposed_slot(method, &held, proposal)?),
+                    None => None,
+                };
                 let id = s.next_operation_id("fixture-respond");
                 s.operations.insert(
                     id.clone(),
@@ -7174,6 +7181,9 @@ mod tests {
         assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
     }
 
+    /// `event.respond` refuses a word it does not take, an unknown event, a
+    /// silent answer on an `imip:` event and a comment on an answer not
+    /// sent, then settles with the answer.
     #[test]
     fn event_respond_refuses_a_silent_imip_answer_then_settles_with_the_answer() {
         let (f, rx) = fixture();
@@ -7199,13 +7209,20 @@ mod tests {
             })),
             IMIP_SILENT_REFUSAL
         );
+        assert_eq!(
+            sentence(json!({
+                "account": "home", "event": "AAMkAD-design", "response": "decline",
+                "comment": "On leave", "send_response": false
+            })),
+            SILENT_COMMENT_REFUSAL
+        );
         assert_eq!(f.operation_count(), 0);
         let started = f
             .call(
                 "event.respond",
                 json!({
                     "account": "home", "event": "AAMkAD-design", "response": "decline",
-                    "comment": "On leave", "send_response": false
+                    "comment": " ", "send_response": false
                 }),
             )
             .expect("started");
@@ -7218,7 +7235,7 @@ mod tests {
         let result: mp_protocol::calendar::EventRespondResult =
             serde_json::from_value(finished.payload["result"].clone()).expect("a result");
         assert_eq!(result.response, "decline");
-        assert_eq!(result.comment.as_deref(), Some("On leave"));
+        assert_eq!(result.comment, None);
         assert!(!result.send_response && !result.delivered);
         assert_eq!(result.via, "server");
         let design = f

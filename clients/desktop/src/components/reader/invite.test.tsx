@@ -1,5 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { COMMENT_NEEDS_RESPONSE } from "@/app/rsvp";
 import { renderApp, shellReady } from "@/test/render";
 import { INVITE_ROW, mock, SEND_FAIL_REASON, settleRsvp, simulateInvite } from "@/test/tauri-mock";
 
@@ -220,7 +221,7 @@ describe("an invitation on an account with a calendar backend", () => {
     expect(await screen.findByText("Replied tentative to Dentist")).toBeInTheDocument();
   });
 
-  it("tv offers the comment and the send-response choice, and sends them", async () => {
+  it("tv offers the comment and the send-response choice, sends them, and refuses a comment nobody is told of", async () => {
     const { user } = await openHomeInvitation();
     await card();
     await user.keyboard("tv");
@@ -229,8 +230,12 @@ describe("an invitation on an account with a calendar backend", () => {
     await user.keyboard("jj{Tab}");
     await waitFor(() => expect(document.activeElement).toHaveAttribute("aria-label", "Comment"));
     await user.keyboard("Running late");
-    await user.click(within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" }));
+    const toggle = within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" });
+    await user.click(toggle);
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(COMMENT_NEEDS_RESPONSE);
+    expect(within(dialog).getByRole("button", { name: /^Send Decline/ })).toBeDisabled();
+    await user.click(toggle);
     await user.click(within(dialog).getByRole("button", { name: /^Send Decline/ }));
-    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "decline", comment: "Running late", send_response: false, proposed_time: null }]);
+    expect(callsOf("event_respond")).toEqual([{ account: "home", event: "AAMkAD-dentist", response: "decline", comment: "Running late", send_response: true, proposed_time: null }]);
   });
 });

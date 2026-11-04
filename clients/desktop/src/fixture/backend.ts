@@ -790,6 +790,10 @@ export const PROPOSAL_WITH_ACCEPT_REFUSAL = "A new time is proposed with tentati
 export const SILENT_PROPOSAL_REFUSAL =
   "A proposed time goes to the organizer, so it needs send_response; drop the proposal to answer without telling them";
 
+/** fixture.rs's `SILENT_COMMENT_REFUSAL`: a comment on an answer the organizer would not be told of. */
+export const SILENT_COMMENT_REFUSAL =
+  "A comment goes to the organizer, so it needs send_response; drop the comment to answer without telling them";
+
 /** fixture.rs's `IMIP_PROPOSAL_REFUSAL`: a proposed time on an invitation mail's event. */
 export const IMIP_PROPOSAL_REFUSAL =
   "mp cannot propose a new time by mail yet (no iCalendar COUNTER); answer tentative or decline with a comment naming the time you suggest";
@@ -2294,15 +2298,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (proposed && event.startsWith("imip:")) throw refuse(IMIP_PROPOSAL_REFUSAL);
       const sendResponse = args.send_response == null ? true : Boolean(args.send_response);
       if (!sendResponse && event.startsWith("imip:")) throw refuse(IMIP_SILENT_REFUSAL);
+      const comment = typeof args.comment === "string" && args.comment.trim() ? args.comment.trim() : null;
+      if (!sendResponse && proposed) throw refuse(SILENT_PROPOSAL_REFUSAL);
+      if (!sendResponse && comment) throw refuse(SILENT_COMMENT_REFUSAL);
       if (proposed) {
         // The daemon's refusals of a proposal, word for word.
-        if (!sendResponse) throw refuse(SILENT_PROPOSAL_REFUSAL);
         const title = held.summary;
         if (held.cancelled) throw refuse(`${title} was cancelled by its organizer; there is no time to move`);
         if (held.is_organizer) throw refuse(`You organize ${title}; change its time with event.update instead of proposing one`);
         if (!held.allow_new_time_proposals) throw refuse(`The organizer of ${title} does not accept new time proposals`);
       }
-      const comment = typeof args.comment === "string" && args.comment.trim() ? args.comment.trim() : null;
       const operation_id = `fixture-respond-${mock.nextRsvp++}`;
       let proposedSlot: { start: string; end: string } | null = null;
       if (proposed) {

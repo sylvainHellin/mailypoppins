@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { PROPOSAL_NEEDS_RESPONSE, RESPONSE_LABEL, sendRsvp } from "@/app/rsvp";
+import { RESPONSE_LABEL, rsvpProblem, sendRsvp } from "@/app/rsvp";
 import { localZone } from "@/app/eventForm";
 import { useDispatch } from "@/app/store";
 import { RSVP_RESPONSES, type RsvpDialog as RsvpDialogState, type RsvpResponse } from "@/app/state";
@@ -29,9 +29,10 @@ export type RsvpDialogProps = { dialog: RsvpDialogState | null; onOpenChange: (o
  * event whose organizer accepts proposals to "Propose a new time" (a start,
  * and an end that defaults to the event's length; PERSO-255), and on a
  * server event to "Send a response to the organizer", which an invitation
- * mail's answer, a reply mail, does not offer. A proposal with the response
- * off is refused in the dialog, the TUI's sentence. The dialog owns every
- * key while it is open, the fields' own typing aside.
+ * mail's answer, a reply mail, does not offer. A proposal or a comment with
+ * the response off is refused in the dialog, the TUI's sentence, and Send
+ * waits until one of them changes. The dialog owns every key while it is
+ * open, the fields' own typing aside.
  */
 export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const dispatch = useDispatch();
@@ -56,14 +57,15 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   latest.current = { dialog, selected, comment, sendResponse, proposedStart, proposedEnd };
 
   const proposing = !!dialog?.propose && RSVP_RESPONSES[selected] !== "accept";
-  const problem = proposing && proposedStart.trim() && !sendResponse ? PROPOSAL_NEEDS_RESPONSE : null;
+  const problem = rsvpProblem({ server: !!dialog?.server, sendResponse, proposing, proposedStart, comment });
 
-  /** The answer `response` with what the fields hold, unless the proposal would tell nobody. */
+  /** The answer `response` with what the fields hold, unless the proposal or the comment would tell nobody. */
   const sendNow = (response: RsvpResponse) => {
     const { dialog: d, comment: c, sendResponse: tell, proposedStart: from, proposedEnd: to } = latest.current;
     if (!d) return;
-    const start = d.propose && response !== "accept" ? from.trim() : "";
-    if (start && !tell) return;
+    const offering = d.propose && response !== "accept";
+    if (rsvpProblem({ server: d.server, sendResponse: tell, proposing: offering, proposedStart: from, comment: c })) return;
+    const start = offering ? from.trim() : "";
     const proposedTime = start ? { start, end: to.trim() || undefined, zone: localZone() } : null;
     void sendRsvp(dispatch, d, response, { comment: c, sendResponse: d.server ? tell : null, proposedTime });
   };
@@ -159,20 +161,6 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
             placeholder="Sent with the answer"
           />
         </label>
-        {dialog?.server ? (
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              data-rsvp-field
-              data-slot="rsvp-send-response"
-              checked={sendResponse}
-              onChange={(e) => setSendResponse(e.currentTarget.checked)}
-            />
-            Send a response to the organizer
-          </label>
-        ) : (
-          <p className="text-xs text-muted-foreground">The answer goes to the organizer as a reply mail.</p>
-        )}
         {proposing ? (
           <fieldset data-slot="rsvp-propose" className="flex flex-col gap-1 text-sm">
             <legend className="text-muted-foreground">Propose a new time (optional)</legend>
@@ -200,6 +188,20 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
             </div>
           </fieldset>
         ) : null}
+        {dialog?.server ? (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              data-rsvp-field
+              data-slot="rsvp-send-response"
+              checked={sendResponse}
+              onChange={(e) => setSendResponse(e.currentTarget.checked)}
+            />
+            Send a response to the organizer
+          </label>
+        ) : (
+          <p className="text-xs text-muted-foreground">The answer goes to the organizer as a reply mail.</p>
+        )}
         {problem ? (
           <p role="alert" data-slot="rsvp-problem" className="text-xs text-destructive">
             {problem}

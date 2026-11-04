@@ -1018,12 +1018,14 @@ decline), so the organizer is.")]
     #[command(after_help = "\
 A tentative or a decline of a server event may propose a new time to the
 organizer: --propose takes the forms of mp event create's WHEN, read in the
-event's own zone unless --zone names another, and the proposal keeps the
-event's length unless --propose-end or --propose-duration names another. The
-organizer sees it on the event and takes it with mp event update EVENT
---use-proposal ADDR. A proposal needs the organizer told, so it does not go
-with --no-send-response, and an invitation mail's event (imip:<row_id>)
-takes none: mp builds no iCalendar COUNTER.
+event's own zone (the local zone for an all-day event) unless --zone names
+another, and the proposal keeps the event's length unless --propose-end or
+--propose-duration names another; a bare date alone on a timed meeting
+proposes that whole day. The organizer sees it on the event and takes it
+with mp event update EVENT --use-proposal ADDR. A proposal must reach the
+organizer, so it is refused with --no-send-response, as a --comment is, and
+an invitation mail's event (imip:<row_id>) takes none: mp builds no
+iCalendar COUNTER.
 
 Example:
   mp event respond AAMkADev1 tentative --propose 2026-11-18T15:00 -A evoqs")]
@@ -1079,8 +1081,8 @@ struct AnswerFlags {
     /// A comment for the organizer
     #[arg(long, value_name = "TEXT")]
     comment: Option<String>,
-    /// Record the answer without telling the organizer (server events only:
-    /// an iMIP reply is the answer itself)
+    /// Record the answer without telling the organizer, and so without a
+    /// comment (server events only: an iMIP reply is the answer itself)
     #[arg(long)]
     no_send_response: bool,
 }
@@ -1102,7 +1104,8 @@ struct ProposeFlags {
     /// The proposed length (1h30m, PT1H30M)
     #[arg(long, value_name = "D", requires = "propose")]
     propose_duration: Option<String>,
-    /// The IANA zone the proposed times are read in (default the event's own)
+    /// The IANA zone the proposed times are read in (default the event's
+    /// own, the local zone for an all-day event)
     #[arg(long, value_name = "ZONE", requires = "propose")]
     zone: Option<String>,
 }

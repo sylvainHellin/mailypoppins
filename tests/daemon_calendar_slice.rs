@@ -463,7 +463,8 @@ async fn a_none_accounts_view_is_its_imip_agenda() {
 
 /// Every answer reaches the fake with its comment and its send choice, the
 /// operation settles with what it did, and the immediate sync leaves the
-/// event readable.
+/// event readable; a comment on an answer not sent is refused before the
+/// server is called, since Graph refuses it, and a blank one is none.
 #[tokio::test]
 async fn event_respond_records_every_answer_on_the_fake() {
     let slice = Slice::start();
@@ -484,6 +485,16 @@ async fn event_respond_records_every_answer_on_the_fake() {
                 });
                 if let Some(comment) = comment {
                     params["comment"] = json!(comment);
+                }
+                if comment.is_some() && !send_response {
+                    let refused = call_err(&mut conn, "event.respond", params.clone()).await;
+                    assert_eq!(refused.code, -32602, "{params}");
+                    assert_eq!(
+                        refused.message,
+                        "A comment goes to the organizer, so it needs send_response; drop the \
+                         comment to answer without telling them"
+                    );
+                    continue;
                 }
                 let status = run_operation(&mut conn, "event.respond", params).await;
                 let result = succeeded(&status);
@@ -514,6 +525,23 @@ async fn event_respond_records_every_answer_on_the_fake() {
         response: Response::Accept,
         comment: None,
         send_response: true,
+        proposed_time: None,
+    });
+    let status = run_operation(
+        &mut conn,
+        "event.respond",
+        json!({
+            "account": SERVER, "event": "ev-meeting", "response": "decline",
+            "comment": " ", "send_response": false,
+        }),
+    )
+    .await;
+    succeeded(&status);
+    expected.push(RecordedResponse {
+        event: "ev-meeting".into(),
+        response: Response::Decline,
+        comment: None,
+        send_response: false,
         proposed_time: None,
     });
     assert_eq!(slice.answers(), expected);

@@ -1,8 +1,17 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { emitEnvelope, IMIP_PROPOSAL_REFUSAL, IMIP_SILENT_REFUSAL, INVITE_ROW, mock, settleRsvp, simulateInvite } from "@/test/tauri-mock";
-import { ORGANIZER, PROPOSAL_NEEDS_RESPONSE } from "@/app/rsvp";
+import {
+  emitEnvelope,
+  IMIP_PROPOSAL_REFUSAL,
+  IMIP_SILENT_REFUSAL,
+  INVITE_ROW,
+  mock,
+  settleRsvp,
+  SILENT_COMMENT_REFUSAL,
+  simulateInvite,
+} from "@/test/tauri-mock";
+import { COMMENT_NEEDS_RESPONSE, ORGANIZER, PROPOSAL_NEEDS_RESPONSE } from "@/app/rsvp";
 import * as cmd from "@/lib/commands";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
@@ -268,7 +277,7 @@ describe("the Calendar view", () => {
 });
 
 describe("V and the respond choice in the Calendar view", () => {
-  it("sends one event.respond with the comment and send_response on a server event", async () => {
+  it("sends one event.respond with the comment and send_response on a server event, and no comment untold", async () => {
     const { user } = await openCalendar();
     await user.keyboard("V");
     const dialog = await screen.findByRole("dialog", { name: "RSVP" });
@@ -277,16 +286,26 @@ describe("V and the respond choice in the Calendar view", () => {
     const toggle = within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" });
     expect(toggle).toBeChecked();
     await user.click(toggle);
-    await user.click(within(dialog).getByRole("textbox", { name: "Comment" }));
+    const comment = within(dialog).getByRole("textbox", { name: "Comment" });
+    await user.click(comment);
     await user.keyboard("On leave that week{Enter}");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(COMMENT_NEEDS_RESPONSE);
+    expect(within(dialog).getByRole("button", { name: /^Send Decline/ })).toBeDisabled();
+    expect(callsOf("event_respond")).toEqual([]);
+    await user.clear(comment);
+    await user.keyboard("{Enter}");
     expect(callsOf("event_respond")).toEqual([
-      { account: "home", event: "AAMkAD-design", response: "decline", comment: "On leave that week", send_response: false, proposed_time: null },
+      { account: "home", event: "AAMkAD-design", response: "decline", comment: null, send_response: false, proposed_time: null },
     ]);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
     act(() => void settleRsvp());
     expect(await screen.findByText("Replied decline to Design review; no response sent to the organizer")).toBeInTheDocument();
     await waitFor(() => expect(card()).toHaveTextContent("Your responseDeclined"));
     expect(callsOf("event_respond")).toHaveLength(1);
+    // The daemon refuses the pair the dialog holds back, Graph's HTTP 400.
+    await expect(cmd.eventRespond("home", "AAMkAD-design", "decline", "On leave that week", false, null)).rejects.toMatchObject({
+      message: SILENT_COMMENT_REFUSAL,
+    });
   });
 
   it("an invitation mail's event offers no send-response choice and sends the daemon's default", async () => {
@@ -314,6 +333,8 @@ describe("V and the respond choice in the Calendar view", () => {
     const start = await within(dialog).findByLabelText("Proposed start");
     fireEvent.change(start, { target: { value: "2099-10-14T15:00" } });
     const toggle = within(dialog).getByRole("checkbox", { name: "Send a response to the organizer" });
+    // Tab runs as the TUI's rows do: the comment, the proposed time, the toggle.
+    expect(start.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.click(toggle);
     expect(within(dialog).getByRole("alert")).toHaveTextContent(PROPOSAL_NEEDS_RESPONSE);
     expect(within(dialog).getByRole("button", { name: /^Send Tentative/ })).toBeDisabled();

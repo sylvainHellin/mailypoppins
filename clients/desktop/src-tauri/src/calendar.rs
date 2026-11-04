@@ -987,7 +987,7 @@ mod tests {
             "AAMkAD-design",
             "decline",
             Some("  On leave "),
-            Some(false),
+            Some(true),
             None,
         )
         .expect("started");
@@ -998,7 +998,7 @@ mod tests {
         let (method, params) = f.calls().last().cloned().expect("a call");
         assert_eq!(method, "event.respond");
         assert_eq!(params["comment"], "On leave");
-        assert_eq!(params["send_response"], false);
+        assert_eq!(params["send_response"], true);
         assert_eq!(
             event_respond_on(
                 &session,
@@ -1012,6 +1012,23 @@ mod tests {
             ),
             Err(GuiError::Protocol {
                 message: crate::fixture::IMIP_SILENT_REFUSAL.to_string(),
+                code: Some(-32602)
+            })
+        );
+        // A comment on an answer not sent is the daemon's refusal.
+        assert_eq!(
+            event_respond_on(
+                &session,
+                &door,
+                "home",
+                "AAMkAD-design",
+                "decline",
+                Some("On leave"),
+                Some(false),
+                None,
+            ),
+            Err(GuiError::Protocol {
+                message: crate::fixture::SILENT_COMMENT_REFUSAL.to_string(),
                 code: Some(-32602)
             })
         );

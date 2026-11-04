@@ -980,7 +980,7 @@ mod tests {
             "ev-meeting",
             Response::Tentative,
             Some("late".into()),
-            false,
+            true,
             Some(proposed.clone()),
         )
         .await
@@ -989,7 +989,7 @@ mod tests {
             event: "ev-meeting".into(),
             response: Response::Tentative,
             comment: Some("late".into()),
-            send_response: false,
+            send_response: true,
             proposed_time: Some(proposed),
         };
         assert_eq!(fake.responses(), std::slice::from_ref(&expected));
