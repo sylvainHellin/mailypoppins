@@ -414,6 +414,27 @@ pub fn calendar_set_visibility(
     wire::calendar_set_visibility(q, account, calendar, visible)
 }
 
+/// The fired reminders waiting for the user, of every account, through
+/// `calendar.reminders` (PERSO-255).
+pub fn calendar_reminders(q: &dyn Queries) -> Result<Vec<mp_protocol::reminder::CalendarReminder>> {
+    wire::calendar_reminders(q, None)
+}
+
+/// Dismiss one reminder, through `calendar.dismiss_reminder`.
+pub fn calendar_dismiss_reminder(q: &dyn Queries, account: &str, event: &str) -> Result<()> {
+    wire::calendar_dismiss_reminder(q, account, event)
+}
+
+/// Snooze one reminder for `minutes`, through `calendar.snooze_reminder`.
+pub fn calendar_snooze_reminder(
+    q: &dyn Queries,
+    account: &str,
+    event: &str,
+    minutes: u32,
+) -> Result<()> {
+    wire::calendar_snooze_reminder(q, account, event, minutes).map(|_| ())
+}
+
 /// One message's invitation card, through `message.invite`; `None` on a
 /// refusal, which renders as no card.
 pub fn message_invite(

@@ -185,6 +185,10 @@ impl App {
             .filter(|check| check.status != mp_protocol::diagnostic::CheckStatus::Ok)
             .map(|check| (check.name.clone(), (check.status, check.detail.clone())))
             .collect();
+        // The reminders that fired before this client started or while it
+        // was away (PERSO-255) are the daemon's to list, as no event brings
+        // them back.
+        self.reload_reminders();
         for account in &bootstrap.snapshot.accounts {
             let Some(index) = self
                 .accounts

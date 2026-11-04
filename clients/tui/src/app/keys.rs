@@ -29,6 +29,7 @@ impl App {
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
             Overlay::Calendars(_) => return self.handle_calendars_overlay_key(key),
             Overlay::EventCard(_) => return self.handle_event_card_key(key),
+            Overlay::Reminders(_) => return self.handle_reminders_overlay_key(key),
             Overlay::Thread(_) => return self.handle_thread_overlay_key(key),
             Overlay::Palette(_) => return self.handle_command_palette_key(key),
             Overlay::Attachment(_) => return self.handle_attachment_picker_key(key),
@@ -532,6 +533,10 @@ impl App {
             A::CalendarCalendars => {
                 self.pending_prefix = None;
                 self.open_calendars_overlay();
+            }
+            A::OpenReminders => {
+                self.pending_prefix = None;
+                self.open_reminders_overlay();
             }
             A::CalendarRefresh => {
                 self.pending_prefix = None;
@@ -1967,6 +1972,31 @@ impl App {
             }
             KeyCode::Char(' ') | KeyCode::Enter => self.toggle_calendar_visibility(),
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// The reminders overlay's keys (PERSO-255): `j`/`k` move, `s` snoozes,
+    /// `d` dismisses, `Enter` opens the event, `Esc`, `q` and `R` close.
+    fn handle_reminders_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let len = self.reminders.len();
+        let Overlay::Reminders(overlay) = &mut self.overlay else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if overlay.selected + 1 < len {
+                    overlay.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Char('s') => self.snooze_selected_reminder(),
+            KeyCode::Char('d') => self.dismiss_selected_reminder(),
+            KeyCode::Enter => self.open_selected_reminder_event(),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('R') => self.close_overlay(),
             _ => {}
         }
         None

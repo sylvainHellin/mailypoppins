@@ -108,6 +108,24 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled("  ", Style::default().bg(bg)));
+    // The waiting calendar reminders (PERSO-255), from every view: the count
+    // and the key that opens them, ahead of the hints it may crowd out.
+    if !app.reminders.is_empty() {
+        let count = app.reminders.len();
+        let badge = format!(
+            "\u{25f7} {count} reminder{} (R) ",
+            if count == 1 { "" } else { "s" }
+        );
+        used += display_width(&badge) + 1;
+        spans.push(Span::styled(
+            badge,
+            Style::default()
+                .fg(theme::active().warning)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+    }
 
     // Drop whole `keys` + label pairs that do not fit and mark the cut with an
     // ellipsis, rather than letting ratatui clip the last one mid-word

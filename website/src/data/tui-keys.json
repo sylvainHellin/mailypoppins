@@ -11,6 +11,7 @@
       { "key": "Ctrl+p", "action": "Command palette (run an action by name)" },
       { "key": "z", "action": "Zoom / unzoom the focused pane" },
       { "key": "!", "action": "Toggle activity log" },
+      { "key": "R", "action": "Calendar reminders (snooze, dismiss, open)" },
       { "key": "x", "action": "Send current draft (approve + send)" },
       { "key": "ff", "action": "Search all mail (sender, subject, body)" },
       { "key": "cn", "action": "New draft" },

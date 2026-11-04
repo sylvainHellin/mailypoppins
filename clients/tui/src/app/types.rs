@@ -1915,6 +1915,14 @@ pub struct CalendarsOverlay {
     pub selected: usize,
 }
 
+/// The reminders overlay (`R` from any view, PERSO-255): the reminders that
+/// fired and wait, from [`App::reminders`](super::App::reminders), with the
+/// cursor on one to snooze, dismiss or open.
+#[derive(Debug, Clone, Default)]
+pub struct RemindersOverlay {
+    pub selected: usize,
+}
+
 /// The event card (`Enter` in the Calendar view, PERSO-200): the whole event,
 /// scrollable, with the answer and the mail it came from one key away.
 #[derive(Debug, Clone)]
@@ -2542,6 +2550,8 @@ pub enum Overlay {
     Calendars(CalendarsOverlay),
     /// One event of the Calendar view in full (`Enter`, PERSO-200).
     EventCard(Box<EventCardOverlay>),
+    /// The reminders that fired and wait (`R` from any view, PERSO-255).
+    Reminders(RemindersOverlay),
     /// Conversation / threading overlay (`T`, #0008).
     Thread(ThreadOverlay),
     /// Command palette (`:` / `Ctrl+p`, #0100): a fuzzy finder over the

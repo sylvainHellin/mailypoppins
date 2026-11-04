@@ -771,6 +771,14 @@ fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
     let log = super::daemon::CallLog::default();
     app.session = Some(TestDaemon::new(&[ACCOUNT]).recording_session(log.clone()));
     watermarked(&mut app);
+    // The bootstrap's own read of the waiting reminders.
+    assert_eq!(
+        std::mem::take(&mut *log.lock().expect("the call log"))
+            .into_iter()
+            .map(|(method, _)| method)
+            .collect::<Vec<_>>(),
+        ["calendar.reminders"]
+    );
 
     let applied = app.apply_event(&envelope(
         INSTANCE,

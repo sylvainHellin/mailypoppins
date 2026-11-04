@@ -237,6 +237,9 @@ pub enum KeyAction {
     OpenPalette,
     ToggleActivityLog,
     OpenActivityOverlay,
+    /// `R` from any view: the calendar reminders that fired, to snooze,
+    /// dismiss or open one (PERSO-255).
+    OpenReminders,
     /// Open the signature management overlay (`cs`, #0107): the account's
     /// signature files, with create / rename / edit / delete and the default
     /// selection.
@@ -408,6 +411,7 @@ impl KeyAction {
                 | KeyAction::ToggleHelp
                 | KeyAction::ToggleActivityLog
                 | KeyAction::OpenActivityOverlay
+                | KeyAction::OpenReminders
                 | KeyAction::OpenLogFile
                 | KeyAction::OpenConfigFile
                 | KeyAction::SwitchView
@@ -714,6 +718,16 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::Global,
         KeyAction::ToggleActivityLog,
         "Toggle activity log",
+        false,
+    ),
+    // The calendar reminders from every view (PERSO-255); the overlay takes
+    // `s` snooze, `d` dismiss and `Enter` open, shown in its own footer.
+    b(
+        "R",
+        Chord::Char('R'),
+        KeyCtx::Global,
+        KeyAction::OpenReminders,
+        "Calendar reminders (snooze, dismiss, open)",
         false,
     ),
     // Send the current draft from any focus: one confirm, and an unapproved

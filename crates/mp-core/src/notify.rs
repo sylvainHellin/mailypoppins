@@ -1,7 +1,9 @@
-//! Desktop notifications for new mail (#0009).
+//! Desktop notifications for new mail (#0009) and calendar reminders
+//! (PERSO-255).
 //!
 //! Fired from the TUI when a background quick-sync saves genuinely new
-//! inbox emails (opt-in via the top-level `notifications = true` key in
+//! inbox emails, and when a calendar reminder falls due while no desktop app
+//! is connected (opt-in via the top-level `notifications = true` key in
 //! config.toml). Shells out to platform tools instead of pulling in a
 //! notification crate: `osascript` on macOS, `notify-send` on Linux.
 //! Both degrade silently when the tool is missing or fails -- a lost
@@ -105,6 +107,32 @@ pub fn notify_new_mail(account: &str, new: &[NewMailMeta]) {
     let Some((title, body)) = format_new_mail_notification(account, new) else {
         return;
     };
+    post(title, body);
+}
+
+/// Build the `(title, body)` pair for a calendar reminder: the event's
+/// summary as the title, and `when` (when it starts, and where) as the body.
+pub fn format_reminder_notification(summary: &str, when: &str) -> (String, String) {
+    let summary = sanitize_notification_text(summary, MAX_FIELD_CHARS);
+    let title = if summary.is_empty() {
+        "(no title)".to_string()
+    } else {
+        summary
+    };
+    (title, sanitize_notification_text(when, MAX_FIELD_CHARS * 2))
+}
+
+/// Fire a desktop notification for a calendar reminder (PERSO-255), on the
+/// terms of [`notify_new_mail`]: non-blocking, failures logged at debug
+/// level, and recorded by [`test_sink`] in a test build.
+pub fn notify_reminder(summary: &str, when: &str) {
+    let (title, body) = format_reminder_notification(summary, when);
+    post(title, body);
+}
+
+/// Post one notification off the calling thread, or record it in a test
+/// build.
+fn post(title: String, body: String) {
     #[cfg(any(test, feature = "test-support"))]
     {
         test_sink::record(title, body);
@@ -353,6 +381,25 @@ mod tests {
     #[should_panic(expected = "a test reached the host's notification centre")]
     fn a_notification_with_no_capture_open_panics() {
         notify_new_mail("work", &[meta("a", "s")]);
+    }
+
+    // -- reminders ------------------------------------------------------
+
+    #[test]
+    fn a_reminder_shows_its_summary_and_when() {
+        let capture = test_sink::capture();
+        notify_reminder("Standup\n", "in 15 min (10:00), Room 2.14");
+        notify_reminder("", "now (10:00)");
+        assert_eq!(
+            capture.shown(),
+            vec![
+                (
+                    "Standup".to_string(),
+                    "in 15 min (10:00), Room 2.14".to_string()
+                ),
+                ("(no title)".to_string(), "now (10:00)".to_string()),
+            ]
+        );
     }
 
     // -- NewMailMeta::new ----------------------------------------------
