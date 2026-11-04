@@ -189,6 +189,11 @@ pub enum Awaited {
         /// Its own id, which keys the form kept while it runs.
         operation_id: String,
     },
+    /// `calendar.freebusy`, the event form's availability rows (PERSO-255).
+    FreeBusy {
+        /// Its own id, which the form's availability waits for.
+        operation_id: String,
+    },
     /// `event.update`, `event.cancel` or `event.delete` (PERSO-255).
     EventChange {
         /// Its own id, which keys an edit form kept while it runs.

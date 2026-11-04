@@ -643,6 +643,87 @@ pub struct EventWriteResult {
     pub invited: Vec<String>,
 }
 
+/// The `params` of `calendar.freebusy` (PERSO-255): when the people and the
+/// rooms of `addresses` are busy, as the server's scheduling assistant
+/// shows it. The account's own address is always asked too, first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarFreeBusyParams {
+    pub account: String,
+    /// The people and room mailboxes to ask about; may be empty, which asks
+    /// about the account alone.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// A bare date (`2026-11-18`), its midnight in `zone`; a time read in
+    /// `zone` (`2026-11-18T07:00`); or RFC 3339 with an offset.
+    pub start: String,
+    /// The same forms as `start`; a bare date is the last day, included.
+    pub end: String,
+    /// The IANA zone a date or a time without an offset is read in; the
+    /// daemon's own zone when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub zone: Option<String>,
+    /// The length of one slot of a schedule's `view`, 5 to 1440 minutes;
+    /// 30 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub interval_minutes: Option<u32>,
+}
+
+/// One busy block of a [`CalendarSchedule`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarScheduleItem {
+    /// RFC 3339, UTC.
+    pub start: String,
+    /// RFC 3339, UTC, exclusive.
+    pub end: String,
+    /// `free`, `tentative`, `busy`, `oof`, `working-elsewhere` or `unknown`.
+    pub status: String,
+    /// What the block is, when the person shares their details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub location: Option<String>,
+}
+
+/// One person's or room's free/busy over the asked range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarSchedule {
+    pub address: String,
+    /// One digit per slot of `interval_minutes` from the range's start: `0`
+    /// free, `1` tentative, `2` busy, `3` away (out of office), `4` working
+    /// elsewhere, `?` unknown; empty when `error` is set.
+    pub view: String,
+    /// The blocks that are not free, in start order.
+    pub items: Vec<CalendarScheduleItem>,
+    /// Why the server has no free/busy for the address (one outside the
+    /// organisation, a mailbox it does not know); the other schedules of the
+    /// answer stand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub error: Option<String>,
+}
+
+/// What a settled `calendar.freebusy` reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarFreeBusyResult {
+    pub account: String,
+    /// The range asked for, as RFC 3339 UTC instants, the end exclusive; slot
+    /// `i` of a view starts `i * interval_minutes` after `start`.
+    pub start: String,
+    pub end: String,
+    pub interval_minutes: u32,
+    /// The account's own schedule first, then one per address asked, in
+    /// order, each address once.
+    pub schedules: Vec<CalendarSchedule>,
+}
+
 /// A change to an event as a client types it: the keys of
 /// [`EventInputParams`] with patch semantics, an absent key left alone, a
 /// present one changed, and `null` clearing `location`, `body` or
@@ -905,6 +986,39 @@ mod tests {
         let changed: CalendarChanged =
             serde_json::from_value(note["params"]["payload"].clone()).expect("the payload");
         assert_eq!(changed.account, "evoqs");
+    }
+
+    /// The free/busy fixtures decode whole and re-encode to the same
+    /// objects: the params, and the settled schedules, an outside address
+    /// with its error and no view.
+    #[test]
+    fn the_free_busy_fixtures_round_trip() {
+        let frame =
+            |raw: &str| -> serde_json::Value { serde_json::from_str(raw).expect("a JSON frame") };
+        let raw =
+            frame(include_str!("../fixtures/calendar.freebusy.request.json"))["params"].clone();
+        let params: CalendarFreeBusyParams =
+            serde_json::from_value(raw.clone()).expect("calendar.freebusy params");
+        assert_eq!(params.addresses.len(), 3);
+        assert_eq!(params.interval_minutes, Some(30));
+        assert_eq!(serde_json::to_value(&params).unwrap(), raw);
+        let started = frame(include_str!("../fixtures/calendar.freebusy.response.json"));
+        assert!(started["result"]["operation_id"].is_string());
+
+        let note = frame(include_str!(
+            "../fixtures/notification.calendar_freebusy_finished.json"
+        ));
+        let raw = note["params"]["payload"]["result"].clone();
+        let settled: CalendarFreeBusyResult =
+            serde_json::from_value(raw.clone()).expect("the settled free/busy");
+        assert_eq!(settled.interval_minutes, 30);
+        assert_eq!(settled.schedules[0].address, "s.hellin@evoqs.com");
+        assert_eq!(settled.schedules[0].view.len(), 48);
+        assert_eq!(settled.schedules[1].items[1].status, "oof");
+        assert_eq!(settled.schedules[1].items[1].subject, None);
+        let outside = &settled.schedules[3];
+        assert!(outside.view.is_empty() && outside.error.is_some());
+        assert_eq!(serde_json::to_value(&settled).unwrap(), raw);
     }
 
     /// A new event's reminder is the mailbox default when absent, none when

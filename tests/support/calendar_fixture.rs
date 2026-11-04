@@ -340,3 +340,44 @@ pub fn seed(root: &Path) {
     ));
     read_fixture::ingest(root, IMIP, "inbox", 1, &local);
 }
+
+/// The account's own address, its `default_from`, which free/busy asks
+/// about first.
+pub const OWN_ADDRESS: &str = "sylvain@example.com";
+/// A colleague [`fake_spec_free_busy`] has free/busy for.
+pub const COLLEAGUE: &str = "ada@example.com";
+
+/// [`fake_spec`] with `free-busy` among the fake's features when
+/// `free_busy` is set (PERSO-255), and the busy blocks three days out of
+/// the account (09:00 to 10:00 UTC, busy) and of [`COLLEAGUE`] (09:00 to
+/// 11:00 away, 13:00 to 14:00 tentative), the colleague's address in
+/// another case than a client types it.
+pub fn fake_spec_free_busy(log: &Path, missing_scope: bool, free_busy: bool) -> String {
+    let mut spec: serde_json::Value =
+        serde_json::from_str(&fake_spec(log, missing_scope)).expect("the fake spec");
+    if free_busy {
+        spec["features"]
+            .as_array_mut()
+            .expect("the features")
+            .push("free-busy".into());
+    }
+    let block = |from: i64, to: i64, status: &str, subject: Option<&str>| {
+        let mut item = json!({
+            "start": at(3, from).to_rfc3339(),
+            "end": at(3, to).to_rfc3339(),
+            "status": status,
+        });
+        if let Some(subject) = subject {
+            item["subject"] = subject.into();
+        }
+        item
+    };
+    spec["free_busy"] = json!({
+        OWN_ADDRESS: [block(9, 10, "busy", Some("Project review"))],
+        "Ada@Example.com": [
+            block(13, 14, "tentative", None),
+            block(9, 11, "oof", Some("Away")),
+        ],
+    });
+    spec.to_string()
+}

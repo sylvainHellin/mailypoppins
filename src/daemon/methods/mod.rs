@@ -27,6 +27,7 @@ pub mod config_probe;
 pub mod contact;
 pub mod diagnostic;
 pub mod draft;
+pub mod freebusy;
 pub mod hook;
 pub mod mailbox;
 pub mod message;
@@ -182,6 +183,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&operations),
         Arc::clone(&canonical),
     );
+    self::freebusy::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::reminder::register(
         dispatcher,
         Arc::clone(&config),

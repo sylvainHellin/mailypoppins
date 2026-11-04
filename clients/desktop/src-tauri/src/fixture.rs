@@ -406,6 +406,74 @@ struct ServerCalendarSeed {
     invites: BTreeMap<String, BTreeMap<String, String>>,
 }
 
+/// The fixture accounts' own address, their `default_from`, which a
+/// `calendar.freebusy` asks about first.
+pub const FIXTURE_OWN_ADDRESS: &str = "me@example.com";
+
+/// A colleague the fixture's `calendar.freebusy` knows: busy 10:00 to 11:00
+/// and tentative 15:00 to 16:00 after the range's start, which is 10:00 and
+/// 15:00 on a day asked as a date.
+pub const FIXTURE_COLLEAGUE: &str = "robin@example.com";
+
+/// What the fixture's `calendar.freebusy` says of an address it does not
+/// know, Graph's words for one outside the tenant.
+pub const FIXTURE_NO_FREE_BUSY: &str = "Proxy web request failed (5016)";
+
+/// The settled `calendar.freebusy` of `query`: the account's own timed
+/// events as its blocks, [`FIXTURE_COLLEAGUE`]'s two blocks, a room (an
+/// address starting `room`) free, any other address without free/busy.
+fn fixture_free_busy(
+    account: &str,
+    query: &mp_core::calendar_freebusy::FreeBusyQuery,
+    own: &[CalendarEvent],
+) -> Value {
+    use mp_core::calendar_freebusy::{to_result, Schedule, ScheduleItem};
+    use mp_core::calendar_model::ShowAs;
+    let mine: Vec<ScheduleItem> = own
+        .iter()
+        .filter(|e| !e.cancelled && e.show_as != "free")
+        .filter_map(|e| match &e.time {
+            CalendarEventTime::Timed { start, end, .. } => serde_json::from_value(json!({
+                "start": start,
+                "end": end,
+                "status": e.show_as,
+                "subject": e.summary,
+                "location": e.location,
+            }))
+            .ok(),
+            CalendarEventTime::AllDay { .. } => None,
+        })
+        .collect();
+    let hours = |n: u64| query.window.start + Duration::from_secs(n * 3600);
+    let colleague: Vec<ScheduleItem> = [(10, 11, ShowAs::Busy), (15, 16, ShowAs::Tentative)]
+        .into_iter()
+        .map(|(from, to, status)| ScheduleItem {
+            start: hours(from),
+            end: hours(to),
+            status,
+            subject: None,
+            location: None,
+        })
+        .collect();
+    let schedules: Vec<Schedule> = query
+        .addresses
+        .iter()
+        .map(|address| {
+            let lower = address.to_ascii_lowercase();
+            if lower == FIXTURE_OWN_ADDRESS {
+                Schedule::from_items(address, mine.clone(), query)
+            } else if lower == FIXTURE_COLLEAGUE {
+                Schedule::from_items(address, colleague.clone(), query)
+            } else if lower.starts_with("room") {
+                Schedule::from_items(address, Vec::new(), query)
+            } else {
+                Schedule::unavailable(address, FIXTURE_NO_FREE_BUSY)
+            }
+        })
+        .collect();
+    serde_json::to_value(to_result(account, query, &schedules)).unwrap_or(Value::Null)
+}
+
 /// The server event a fixture `event.create` of `input` makes as `id` in
 /// `calendar`, the user its organizer, as the daemon's cache answers it.
 fn created_event(
@@ -4395,6 +4463,66 @@ impl Fixture {
                     .filter(|c| account.is_none_or(|a| c.account == a))
                     .collect();
                 Ok(json!({"calendars": calendars}))
+            }
+            "calendar.freebusy" => {
+                only(
+                    method,
+                    &params,
+                    &[
+                        "account",
+                        "addresses",
+                        "end",
+                        "interval_minutes",
+                        "start",
+                        "zone",
+                    ],
+                )?;
+                let request: mp_protocol::calendar::CalendarFreeBusyParams =
+                    serde_json::from_value(params.clone())
+                        .map_err(|e| refused(method, -32602, &format!("calendar.freebusy: {e}")))?;
+                let account = request.account.clone();
+                s.account_ready(method, &account)?;
+                let serves = s
+                    .server_calendars
+                    .iter()
+                    .any(|c| c.account == account && c.features.iter().any(|f| f == "free-busy"));
+                if !serves {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "{account} has no calendar backend, so there is no server to ask \
+                             for free/busy; free/busy needs an account whose calendar mp reads \
+                             from the server"
+                        ),
+                    ));
+                }
+                let berlin = mp_core::calendar_model::parse_zone("Europe/Berlin")
+                    .ok_or_else(|| refused(method, -32603, "no Europe/Berlin zone"))?;
+                let query = mp_core::calendar_freebusy::resolve_query(
+                    &request,
+                    FIXTURE_OWN_ADDRESS,
+                    berlin,
+                )
+                .map_err(|why| refused(method, -32602, &why))?;
+                let own: Vec<CalendarEvent> = s
+                    .server_events
+                    .iter()
+                    .filter(|e| e.account == account)
+                    .cloned()
+                    .collect();
+                let result = fixture_free_busy(&account, &query, &own);
+                let id = s.next_operation_id("fixture-freebusy");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "client_scoped", "progress": null, "result": null, "error": null
+                    }),
+                );
+                drop(s);
+                self.settle(&id, "succeeded", Some(result));
+                Ok(json!({"operation_id": id}))
             }
             "calendar.reminders" => {
                 only(method, &params, &["accounts"])?;

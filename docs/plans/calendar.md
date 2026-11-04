@@ -61,9 +61,9 @@ After phase 1 and the first slices of phase 2:
 
 - A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
 - Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
-- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get`, `event.respond`, and `event.create`, `event.update`, `event.cancel` and `event.delete` for single events, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
-- The CLI has `mp calendar list|view|show|hide|reminders|rebuild`, `mp calendar reminder dismiss|snooze` and `mp event create|update|cancel|delete|show|respond`, and `mp invite` answers through `event.respond`.
-- The TUI's `n` and the desktop app's New event open an event form that creates a single event on a Graph account through `event.create`; `E` (and the desktop card's Edit) opens it on an event to change it through `event.update`, and `D` (the desktop card's Cancel meeting or Delete) cancels a meeting the user organizes or deletes an event that tells nobody; an occurrence or a series is refused until slice 5 adds the scopes.
+- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `calendar.freebusy` (Graph's `getSchedule`, the account's own address first), `event.get`, `event.respond`, and `event.create`, `event.update`, `event.cancel` and `event.delete` for single events, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
+- The CLI has `mp calendar list|view|show|hide|freebusy|reminders|rebuild`, `mp calendar reminder dismiss|snooze` and `mp event create|update|cancel|delete|show|respond`, and `mp invite` answers through `event.respond`.
+- The TUI's `n` and the desktop app's New event open an event form that creates a single event on a Graph account through `event.create`; `E` (and the desktop card's Edit) opens it on an event to change it through `event.update`, both showing the availability of the user, the attendees and the rooms on the event's day, and `D` (the desktop card's Cancel meeting or Delete) cancels a meeting the user organizes or deletes an event that tells nobody; an occurrence or a series is refused until slice 5 adds the scopes.
 - The daemon fires each server event's reminder as `calendar.reminder`, records it in `calendar_reminders`, serves `calendar.reminders`, `calendar.dismiss_reminder` and `calendar.snooze_reminder` with the decision written through to Graph, and names one presenter connection that raises the system notification; the TUI shows the count and its `R` overlay, the desktop app a banner and a macOS notification.
 - The TUI and the desktop app show agenda, day and week layouts with an event card, a calendars panel and a respond dialog with a comment and the send-response choice.
 - `GRAPH_SCOPES` holds `Calendars.ReadWrite`; a token without it gets a re-login prompt in every client, and mail keeps working.
@@ -179,19 +179,18 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 
 Phase 1's methods are final and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", holds their shapes: `calendar.list {account?}`, `calendar.set_visibility {account, calendar, visible}`, `calendar.view {start, end, accounts?, calendars?, include_hidden?, zone?}`, `event.get {account, event}`, `event.respond {account, event, response, comment?, send_response?}` and the `calendar.changed {account}` event; `calendar.rebuild {account}` also drops and resyncs an account's server cache.
 An invitation mail's event has the id `imip:<row_id>`, and `event.respond` answers it with the iMIP reply `calendar.rsvp` sends; `calendar.rsvp` and `send.invite` stay until the later phases fold them in.
+Phase 2's `event.create` and `calendar.freebusy {account, addresses, start, end, zone?, interval_minutes?}` are final there too.
 The later phases' methods are provisional:
 
 - `event.respond` gains `proposed_time` for proposing a new time (phase 2).
-- `event.create {calendar, fields, attendees, recurrence?, online_meeting?, reminder?}`: a new event; with attendees the server sends the invitations.
 - `event.update {event, scope, fields}` and `event.cancel {event, scope, comment?}`: the organizer's operations, with `scope` naming the occurrence or the series.
-- `calendar.freebusy {addresses, range}`: availability of attendees and rooms when picking a time.
 - Reminders reach the clients as daemon events, and the desktop notification follows the existing notification path.
 
 Every write is an `operation.*` in the daemon's in-memory operation registry, and `event.create` carries a Graph `transactionId`, so a retry after an interruption cannot create the event twice.
 
 ## Client surfaces
 
-- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; phase 2 adds `mp event create|update|cancel|delete`, and `mp calendar freebusy` is the name a later slice takes, and `mp send --invite` keeps working on iMIP accounts.
+- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; phase 2 adds `mp event create|update|cancel|delete` and `mp calendar freebusy`, and `mp send --invite` keeps working on iMIP accounts.
 - TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; phase 2 adds `D` to cancel or delete, and the event form on `n` for a new event and on `E` for a change, which the repeat settings and the proposed time extend.
 - Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; phase 2 adds the New event form beside "New invitation", which stays for an account without a calendar backend until the event form sends its invitation by mail too, and the event card's Edit and Cancel meeting or Delete.
 - Every new capability gets its row in [parity-matrix.md](../parity-matrix.md) with its CLI, TUI and desktop location, and the website pages follow the CLI.

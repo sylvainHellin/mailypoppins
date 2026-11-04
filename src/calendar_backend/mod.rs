@@ -23,6 +23,7 @@ use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::calendar_freebusy::{FreeBusyQuery, Schedule};
 use crate::calendar_model::{
     Calendar, CalendarFeature, CalendarWindow, Event, EventId, Recurrence,
 };
@@ -274,6 +275,14 @@ pub trait CalendarBackend {
         until: DateTime<Utc>,
     ) -> impl Future<Output = BackendResult<()>> + Send;
 
+    /// The free/busy of every address of `query`, one schedule each in its
+    /// order; an address the server has none for is a schedule with its
+    /// `error` rather than a failed call.
+    fn free_busy(
+        &self,
+        query: &FreeBusyQuery,
+    ) -> impl Future<Output = BackendResult<Vec<Schedule>>> + Send;
+
     /// The series the store already knows, handed over before a sync so a
     /// backend that resolves series (Graph) does not ask for them again. A
     /// backend whose occurrences carry the series `UID` ignores it.
@@ -479,6 +488,13 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.snooze_reminder(event, until).await,
             AccountBackend::Graph(b) => b.snooze_reminder(event, until).await,
+        }
+    }
+
+    async fn free_busy(&self, query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {
+        match self {
+            AccountBackend::Fake(b) => b.free_busy(query).await,
+            AccountBackend::Graph(b) => b.free_busy(query).await,
         }
     }
 

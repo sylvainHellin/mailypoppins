@@ -692,6 +692,98 @@ pub fn response_mark(own_response: &str) -> char {
     }
 }
 
+/// What each free/busy glyph means, the legend printed beside a row.
+pub const AVAILABILITY_LEGEND: &str =
+    "\u{b7} free  \u{2592} tentative  \u{2588} busy  \u{2593} away  \u{2591} elsewhere  ? unknown";
+
+/// The glyph a slot of a `calendar.freebusy` view shows, by its digit: `·`
+/// free, `▒` tentative, `█` busy, `▓` away, `░` working elsewhere, `?` for
+/// anything else, a slot past the view's end included.
+pub fn availability_glyph(digit: char) -> char {
+    match digit {
+        '0' => '\u{b7}',
+        '1' => '\u{2592}',
+        '2' => '\u{2588}',
+        '3' => '\u{2593}',
+        '4' => '\u{2591}',
+        _ => '?',
+    }
+}
+
+/// The glyphs of `count` slots of `view` from slot `first`; a slot before
+/// the view's start or past its end is unknown.
+pub fn availability_row(view: &str, first: i64, count: usize) -> String {
+    let digits: Vec<char> = view.chars().collect();
+    (0..count as i64)
+        .map(|offset| {
+            let at = first + offset;
+            let digit = usize::try_from(at)
+                .ok()
+                .and_then(|at| digits.get(at).copied())
+                .unwrap_or('?');
+            availability_glyph(digit)
+        })
+        .collect()
+}
+
+/// The slot of a view starting at `start` (RFC 3339) with slots of
+/// `interval` minutes that `at` falls in; `None` for an unreadable start.
+pub fn slot_of(start: &str, interval: u32, at: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    let start = chrono::DateTime::parse_from_rfc3339(start).ok()?;
+    let minutes = (at - start.with_timezone(&chrono::Utc)).num_minutes();
+    Some(minutes.div_euclid(i64::from(interval.max(1))))
+}
+
+/// The word a schedule block's status reads as.
+pub fn availability_word(status: &str) -> &'static str {
+    match status {
+        "free" => "free",
+        "tentative" => "tentative",
+        "busy" => "busy",
+        "oof" => "away",
+        "working-elsewhere" => "elsewhere",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::{availability_row, availability_word, slot_of};
+    use chrono::{TimeZone, Utc};
+
+    /// Each digit has its glyph, and a slot outside the view is unknown.
+    #[test]
+    fn a_view_reads_as_one_glyph_per_slot() {
+        assert_eq!(
+            availability_row("012345", 0, 6),
+            "\u{b7}\u{2592}\u{2588}\u{2593}\u{2591}?"
+        );
+        assert_eq!(availability_row("02", -1, 4), "?\u{b7}\u{2588}?");
+        assert_eq!(availability_row("", 0, 2), "??");
+        assert_eq!(availability_word("oof"), "away");
+        assert_eq!(availability_word("working-elsewhere"), "elsewhere");
+    }
+
+    /// An instant falls in the slot its minutes from the start count to,
+    /// one before the start in a negative slot.
+    #[test]
+    fn an_instant_falls_in_its_slot() {
+        let start = "2026-11-03T23:00:00Z";
+        let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 11, 4, h, m, 0).unwrap();
+        assert_eq!(slot_of(start, 30, at(6, 0)), Some(14));
+        assert_eq!(slot_of(start, 30, at(6, 29)), Some(14));
+        assert_eq!(
+            slot_of(
+                start,
+                30,
+                Utc.with_ymd_and_hms(2026, 11, 3, 22, 59, 0).unwrap()
+            ),
+            Some(-1)
+        );
+        assert_eq!(slot_of("soon", 30, at(6, 0)), None);
+    }
+}
+
 #[cfg(test)]
 mod reminder_tests {
     use super::{reminder_body, reminder_line, reminder_notification, reminder_when};

@@ -289,6 +289,7 @@ pub fn run() {
             calendar::calendar_set_visibility,
             calendar::calendar_view,
             calendar::event_create,
+            calendar::calendar_freebusy,
             calendar::event_update,
             calendar::event_cancel,
             calendar::event_delete,

@@ -1,0 +1,58 @@
+---
+source: src/tui_tests/availability.rs
+expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
+---
+== text 120x40 (trailing spaces trimmed) ==
+00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Agenda: Mon 03 Aug to Mon 17 Aug ─────╮╭ Event ────────────────────────────────────────────────────────────────────╮│
+02 |││Mon 2026-08-03                         ││Baustellenübergabe                                                         ││
+03 |││  09:00-10:00 ✓ Baustellenübergabe     ││                                                                           ││
+04 |││                [evoqs/Calendar]  @ Ra…││When        Mon 2026-08-03 09:00-10:00                                     ││
+05 |││                                       ││Where       Raum 2.14                                                      ││
+06 |││Tue 2026-08-04  (today)                ││Calendar    evoqs/Calendar                                                 ││
+07 |││  10:00-11:00 ? Jour fixe              ││Organizer   planung@example.org                                            ││
+08 |││                [evoqs/Calendar]       ││Attendees   Sylvain <sylvain@example.org>  accepted                        ││
+09 |││  10:30-12:00 ? PhD Ko╭──────────────────────────────────────────────────────────────────────╮                      ││
+10 |││                [perso│New event                                                             │                      ││
+11 |││                      │                                                                      │                      ││
+12 |││Wed 2026-08-05        │  Calendar     ‹ evoqs/Kalender ›                                     │ev-handover           ││
+13 |││  all day       Sommer│  Title        Budget review▏                                         │                      ││
+14 |││                [evoqs│  All day      [ ]                                                    │                      ││
+15 |││                      │  Date         2026-08-04                                             │                      ││
+16 |││Thu 2026-08-06        │  Start        14:00                                                  │                      ││
+17 |││  all day       Sommer│  End          15:30                                                  │                      ││
+18 |││                [evoqs│  Location                                                            │                      ││
+19 |││  10:00-11:00 ? Jour f│  Attendees    ada@example.org, someone@gmail.com                     │                      ││
+20 |││                [evoqs│  Optional                                                            │                      ││
+21 |││                      │  Rooms        room-1@example.org                                     │                      ││
+22 |││Fri 2026-08-07        │  Teams        [ ]                                                    │                      ││
+23 |││  14:00-15:00 ✓ Abgesa│  Reminder     (the mailbox default; minutes or none)                 │                      ││
+24 |││                [evoqs│  Show as      ‹ Busy ›                                               │                      ││
+25 |││                      │  Description  (none; Enter edits in $EDITOR)                         │                      ││
+26 |││                      │                                                                      │                      ││
+27 |││                      │  Availability           checking…                                    │                      ││
+28 |││                      │                                                                      │                      ││
+29 |││                      │  Times in Europe/Berlin                                              │                      ││
+30 |││                      │  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │                      ││
+31 |││                      ╰──────────────────────────────────────────────────────────────────────╯                      ││
+32 |│╰───────────────────────────────────────╯│                                                                           ││
+33 |│╭ View ─────────────────────────────────╮│                                                                           ││
+34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
+35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
+37 |││                                                                                                                    ││
+38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
+39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+== style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
+02 |bold@2..16 bold@43..61
+03 |bg:surface+fg:selection+bold@2..41
+04 |bg:surface+fg:selection+bold@2..41
+06 |bold@2..25
+10 |bold@25..34
+12 |bold@2..16
+13 |fg:selection+bold@25..54
+16 |bold@2..16
+22 |bold@2..16
+23 |strike@2..24
+24 |strike@2..18
+34 |bold@27..37

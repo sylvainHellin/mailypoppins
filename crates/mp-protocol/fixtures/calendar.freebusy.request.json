@@ -1,0 +1,17 @@
+{
+  "id": 81,
+  "jsonrpc": "2.0",
+  "method": "calendar.freebusy",
+  "params": {
+    "account": "evoqs",
+    "addresses": [
+      "ada@evoqs.com",
+      "room-1@evoqs.com",
+      "someone@gmail.com"
+    ],
+    "end": "2026-11-04",
+    "interval_minutes": 30,
+    "start": "2026-11-04",
+    "zone": "Europe/Berlin"
+  }
+}

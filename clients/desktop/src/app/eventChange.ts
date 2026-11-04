@@ -95,6 +95,7 @@ export function editDialogFor(event: CalendarEvent, calendars: readonly Calendar
     id: info.id,
     label: `${info.account}/${info.name}`,
     teams: info.features.includes("online-meeting"),
+    freeBusy: info.features.includes("free-busy"),
   };
   const fields = editFields(event, calendar);
   return {

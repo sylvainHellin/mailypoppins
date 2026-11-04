@@ -128,6 +128,7 @@ const calendarCommands = [
   { command: 'mp calendar list [-A NAME] [--json]', description: 'List the calendars with their account, name, id, backend, visibility and colour, the default one marked (every account unless -A names one)' },
   { command: 'mp calendar view [agenda|day|week] [--on DATE | --from DATE --to DATE]', description: 'Show the events: the agenda from --on (default today) through 14 days later or from --from through --to, one day, or the ISO week holding --on. DATE is YYYY-MM-DD, today, tomorrow, yesterday or +N / -N days. -A NAME and --calendar ID (both repeatable) narrow the view, --hidden adds the hidden calendars, --zone reads the times in another IANA zone than the local one, and --json prints the calendar.view answer' },
   { command: 'mp calendar show|hide <calendar-id> [-A NAME]', description: 'Show a hidden calendar in the views again, or hide one; a local preference that survives mp calendar rebuild' },
+  { command: 'mp calendar freebusy [-A NAME] [--on DATE | --from DATE --to DATE] [ADDRESS]...', description: 'Show when people and rooms are busy, your own row first: per address a row of 30-minute slots per day (· free, ▒ tentative, █ busy, ▓ away, ░ working elsewhere, ? unknown) and the busy blocks with their times; an address outside your organisation reads "no free/busy". --on is one day (default today), --from through --to up to 61 days, --interval MIN sets the slot length (5 to 1440), --zone ZONE the days\' zone, --json prints the result. Needs a Microsoft 365 account' },
   { command: 'mp event create [-A NAME] --summary TEXT --start WHEN [--end WHEN | --duration D]', description: 'Create an event in the account\'s server calendar, whose server sends the invitations: --to, --optional and --room invite people and rooms, --teams adds a Teams link on a calendar that offers Teams (one whose mailbox has no Teams licence refuses it), --reminder MIN or --no-reminder sets the reminder (the mailbox default otherwise), --location, --body or --body-file, --calendar ID (default the account\'s default calendar), --zone ZONE for the times (default the local zone); a bare date makes an all-day event whose --end is its last day; --transaction-id reruns a create with the id it printed when it could not confirm the event, so the server makes the event once; --json prints the result' },
   { command: 'mp event update <event-id> [-A NAME]', description: 'Change an event: only the fields you name change, and the server sends the attendees an update. --summary, --start, --end or --duration, --all-day, --zone (default the event\'s own), --location or --clear-location, --body, --body-file or --clear-body, --to, --optional and --room (the whole new attendee list), --teams, --reminder MIN or --no-reminder and --show-as; a new --start keeps the event\'s length. An attendee may change only --reminder, --no-reminder and --show-as on their own copy; an event of a recurring series is not changed yet; --json prints the result' },
   { command: 'mp event cancel <event-id> [-A NAME] [--comment TEXT]', description: 'Cancel a meeting you organize: the server sends every attendee the cancellation, with the comment; a meeting someone else organizes is declined with mp event respond instead, and one that invites nobody is deleted; --json prints the result' },
@@ -462,6 +463,7 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         code={`mp calendar view
 mp calendar view week --on +7 -A evoqs
 mp calendar hide AAMkADcal2 -A evoqs
+mp calendar freebusy -A evoqs --on tomorrow ada@example.com room-1@example.com
 mp event create -A evoqs --summary "Project review" --start 2026-11-18T14:00 --duration 1h --to ada@example.com --teams
 mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
 mp event cancel AAMkADev1 --comment "Postponed to next month" -A evoqs
@@ -487,7 +489,13 @@ mp event respond AAMkADev2 accept --comment "See you there" -A evoqs`}
         attendees, or deletes an event that tells nobody, and <code>c</code>
         lists the calendars, where <code>Space</code> shows or hides one. A
         create that fails brings the form back as it was, and <code>Enter</code>
-        retries it without making a second event. A
+        retries it without making a second event. On a Microsoft 365 account
+        the form shows your availability and the attendees' and rooms' on the
+        event's day: one row each of 30-minute slots from 07:00 to 20:00, the
+        chosen time marked, and on <code>E</code> the time the event holds now
+        in its own colour, so your busy block there reads as the event. It asks again half a second after you stop typing
+        an address or the date; the desktop app's event form shows the
+        same as a coloured grid. A
         Graph account whose sign-in predates the calendar shows a banner over the
         view asking for <code>mp config oauth2-login -A &lt;name&gt;</code>,
         which leaves once the new sign-in lands.

@@ -18,9 +18,15 @@
 //!   "missing_scope": false,
 //!   "message_events": {"<server message id>": "<event id>"},
 //!   "features": ["write", ...],
-//!   "series": [<SeriesInfo>...]
+//!   "series": [<SeriesInfo>...],
+//!   "free_busy": {"<address>": [<ScheduleItem>...]}
 //! }
 //! ```
+//!
+//! `free_busy` is what [`CalendarBackend::free_busy`] answers: each address
+//! it names has those busy blocks, its view computed from them, and any other
+//! address has no free/busy ([`FAKE_NO_FREE_BUSY`]), as Graph answers for an
+//! address outside the tenant. Addresses match whatever their case.
 //!
 //! A spec calendar offers Teams when its `online_meeting_providers` names
 //! `teams-for-business`, as the test fixtures' calendars do unless a test
@@ -52,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult, Written,
 };
+use crate::calendar_freebusy::{FreeBusyQuery, Schedule, ScheduleItem};
 use crate::calendar_model::{
     Attendee, AttendeeRole, Calendar, CalendarFeature, CalendarWindow, Event, EventKind, EventTime,
     OnlineMeetingProvider, OwnResponse, Person, ResponseStatus, Sensitivity, ShowAs,
@@ -67,6 +74,10 @@ pub const FAKE_CALENDAR_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_CALENDAR";
 
 /// The scope a [`FakeCalendarBackend::missing_scope`] fake reports missing.
 pub const FAKE_MISSING_SCOPE: &str = "Calendars.ReadWrite";
+
+/// Why the fake has no free/busy for an address its spec does not name, in
+/// the words Graph's own error for an address outside the tenant reads as.
+pub const FAKE_NO_FREE_BUSY: &str = "Proxy web request failed (5016)";
 
 /// The prefix of the tokens a fake hands out: `fake-calendar-token:<e>:<n>`,
 /// where `e` counts the [`FakeCalendarBackend::expire_tokens`] calls and `n`
@@ -91,6 +102,9 @@ struct FakeState {
     transactions: HashMap<String, (String, EventInput)>,
     /// How many events the creates made, for their ids.
     created: u64,
+    /// The busy blocks [`CalendarBackend::free_busy`] answers, by address
+    /// lowercased.
+    free_busy: HashMap<String, Vec<ScheduleItem>>,
 }
 
 impl FakeState {
@@ -159,6 +173,8 @@ struct FakeSpec {
     features: Vec<CalendarFeature>,
     #[serde(default)]
     series: Vec<SeriesInfo>,
+    #[serde(default)]
+    free_busy: HashMap<String, Vec<ScheduleItem>>,
 }
 
 /// A calendar server with fixed contents that records every answer.
@@ -271,6 +287,11 @@ impl FakeCalendarBackend {
         fake.message_events = spec.message_events;
         fake.features = spec.features;
         fake.series = spec.series;
+        fake.state().free_busy = spec
+            .free_busy
+            .into_iter()
+            .map(|(address, items)| (address.to_ascii_lowercase(), items))
+            .collect();
         Some(fake)
     }
 
@@ -306,6 +327,14 @@ impl FakeCalendarBackend {
     /// names it.
     pub fn features(&self) -> Vec<CalendarFeature> {
         self.features.clone()
+    }
+
+    /// Answer `items` as `address`'s busy blocks in a free/busy query.
+    pub fn with_free_busy(self, address: &str, items: Vec<ScheduleItem>) -> Self {
+        self.state()
+            .free_busy
+            .insert(address.to_ascii_lowercase(), items);
+        self
     }
 
     /// Report `series` resolved at every baseline.
@@ -818,6 +847,23 @@ impl CalendarBackend for FakeCalendarBackend {
         self.check_scope()?;
         Ok(self.message_events.get(message_id).cloned())
     }
+
+    /// The spec's blocks of each address it names, the others without
+    /// free/busy.
+    async fn free_busy(&self, query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {
+        self.check_scope()?;
+        let state = self.state();
+        Ok(query
+            .addresses
+            .iter()
+            .map(
+                |address| match state.free_busy.get(&address.to_ascii_lowercase()) {
+                    Some(items) => Schedule::from_items(address, items.clone(), query),
+                    None => Schedule::unavailable(address, FAKE_NO_FREE_BUSY),
+                },
+            )
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -1200,5 +1246,33 @@ mod tests {
             parsed.features,
             [CalendarFeature::Write, CalendarFeature::OnlineMeeting]
         );
+    }
+
+    /// An address the fake knows answers its blocks with their view, any
+    /// other has no free/busy, and a fake without the scope refuses.
+    #[tokio::test]
+    async fn free_busy_answers_the_known_addresses_and_none_for_the_others() {
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 11, 3, h, 0, 0).unwrap();
+        let busy = ScheduleItem {
+            start: at(9),
+            end: at(10),
+            status: ShowAs::Busy,
+            subject: Some("Project review".into()),
+            location: None,
+        };
+        let fake = FakeCalendarBackend::canned().with_free_busy("Ada@example.com", vec![busy]);
+        let query = FreeBusyQuery {
+            addresses: vec!["ada@example.com".into(), "bob@gmail.com".into()],
+            window: CalendarWindow {
+                start: at(8),
+                end: at(11),
+            },
+            interval: 60,
+        };
+        let schedules = fake.free_busy(&query).await.unwrap();
+        assert_eq!(schedules[0].view, "020");
+        assert_eq!(schedules[0].items.len(), 1);
+        assert_eq!(schedules[1].error.as_deref(), Some(FAKE_NO_FREE_BUSY));
+        assert!(fake.missing_scope().free_busy(&query).await.is_err());
     }
 }

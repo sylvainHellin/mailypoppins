@@ -770,6 +770,7 @@ Usage: mp calendar [OPTIONS] <COMMAND>
 Commands:
   list       List the calendars: account, name, id, backend, visibility, colour
   view       Show the events of an agenda, a day or a week
+  freebusy   Show when people and rooms are busy: the server's free/busy, your own first
   show       Make a calendar's events visible in the views again
   hide       Hide a calendar's events from the views (a local preference)
   reminders  List the reminders that fired and wait for you: summary, when, where, account and event id
@@ -853,6 +854,35 @@ Examples:
   mp calendar view week --on +7
   mp calendar view day --on tomorrow -A evoqs
   mp calendar view --from 2026-08-01 --to 2026-08-31 --json
+
+$ mp calendar freebusy --help
+Show when people and rooms are busy: the server's free/busy, your own first
+
+Usage: mp calendar freebusy [OPTIONS] [ADDRESS]...
+
+Arguments:
+  [ADDRESS]...  The people and room mailboxes to ask about (your own is always asked)
+
+Options:
+      --on <DATE>          The day (default today)
+      --from <DATE>        The range's first day
+      --to <DATE>          The range's last day, included
+      --interval <MIN>     Minutes per slot, 5 to 1440 [default: 30]
+      --zone <ZONE>        The IANA zone the days run in (default the local zone)
+      --json               Print the settled `calendar.freebusy` result as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
+today; --on (default today) is one day, --from through --to a range of up to
+61 days. Each glyph is one slot of --interval minutes: · free, ▒ tentative,
+█ busy, ▓ away, ░ working elsewhere, ? unknown. An address outside your
+organisation reads "no free/busy". Needs a Microsoft 365 account.
+
+Examples:
+  mp calendar freebusy -A evoqs ada@example.com room-1@example.com
+  mp calendar freebusy -A evoqs --on tomorrow --interval 15 ada@example.com
+  mp calendar freebusy -A evoqs --from +1 --to +5 ada@example.com --json
 
 $ mp calendar show --help
 Make a calendar's events visible in the views again

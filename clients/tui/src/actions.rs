@@ -1231,6 +1231,7 @@ pub(super) fn handle_action(
         | Action::CancelHeldSend
         | Action::Rsvp { .. }
         | Action::CreateEvent(_)
+        | Action::QueryFreeBusy(_)
         | Action::UpdateEvent(_)
         | Action::RemoveEvent(_)
         | Action::Approve

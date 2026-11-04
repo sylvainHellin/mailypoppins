@@ -266,6 +266,11 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
+        BgResult::FreeBusy {
+            operation_id,
+            result,
+        } => app.land_free_busy(&operation_id, result),
+
         BgResult::EventChanged {
             operation_id,
             result,

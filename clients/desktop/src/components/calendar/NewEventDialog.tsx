@@ -1,12 +1,13 @@
 // The event form (CAL-11, CAL-12, PERSO-255; the TUI's `n` and `E` overlay,
 // the CLI's `mp event create` and `mp event update`): Calendar, Title, All
-// day, Start, End, Location, Attendees, Optional, Rooms, Teams, Reminder,
-// Show as, Description. It creates through `event.create`, and a failed or vanished
-// create opens it again with what was typed and a Retry that sends the same
-// transaction id. Opened on an event (`dialog.edit`), it holds the event's
-// values and Save sends `event.update` with what changed; the calendar
-// stays the event's, a Teams meeting stays one, and an attendee changes the
-// reminder and the show-as only.
+// day, Start, End, the attendees' availability (CAL-14), Location,
+// Attendees, Optional, Rooms, Teams, Reminder, Show as, Description. It
+// creates through `event.create`, and a failed or vanished create opens it
+// again with what was typed and a Retry that sends the same transaction id.
+// Opened on an event (`dialog.edit`), it holds the event's values and Save
+// sends `event.update` with what changed; the calendar stays the event's, a
+// Teams meeting stays one, and an attendee changes the reminder and the
+// show-as only.
 
 import { useEffect, useId, useRef, useState, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { eventProblem, localZone, SHOW_AS, submitEvent } from "@/app/eventForm";
 import { editProblem, submitEdit } from "@/app/eventChange";
+import { AvailabilityGrid } from "@/components/calendar/AvailabilityGrid";
 import { useDispatch } from "@/app/store";
 import type { EventDialog, EventFields } from "@/app/state";
 
@@ -176,6 +178,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
           </div>
           {field("start", allDay ? "First day" : "Start", { type: allDay ? "date" : "datetime-local" })}
           {field("end", allDay ? "Last day" : "End", { type: allDay ? "date" : "datetime-local" })}
+          <AvailabilityGrid fields={fields} calendar={chosen} current={edit?.original ?? null} />
           {field("location", "Location")}
           {field("to", "Attendees", { placeholder: "ada@example.com, bob@example.com" })}
           {field("optional", "Optional")}

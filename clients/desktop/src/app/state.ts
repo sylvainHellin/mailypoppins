@@ -754,8 +754,12 @@ export type EventChangeRun = {
   operation_id: string | null;
 };
 
-/** A calendar a new event can go to (`account/id` as its key), and whether it can have a Teams link. */
-export type EventCalendar = { key: string; account: string; id: string; label: string; teams: boolean };
+/**
+ * A calendar a new event can go to (`account/id` as its key), whether it can
+ * have a Teams link, and whether its backend serves the attendees'
+ * free/busy (CAL-14), absent for no.
+ */
+export type EventCalendar = { key: string; account: string; id: string; label: string; teams: boolean; freeBusy?: boolean };
 
 /**
  * A new event this window started, until it settles or is dropped;

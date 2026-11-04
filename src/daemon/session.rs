@@ -493,6 +493,7 @@ mod tests {
                 "account.credentials".to_string(),
                 "account.list".to_string(),
                 "calendar.dismiss_reminder".to_string(),
+                "calendar.freebusy".to_string(),
                 "calendar.list".to_string(),
                 "calendar.rebuild".to_string(),
                 "calendar.reminders".to_string(),

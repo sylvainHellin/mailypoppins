@@ -103,11 +103,24 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
 }
 
 /// Render the event form (PERSO-255, `n` in the Calendar view): one row
-/// per field, the cursor row highlighted, the first problem with the fields
-/// as typed (or the daemon's refusal) under them, and the keys.
-pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect) {
+/// per field, the cursor row highlighted, the availability rows of its
+/// people on its day, the first problem with the fields as typed (or the
+/// daemon's refusal) under them, and the keys. The problem line and the
+/// keys keep their own bottom rows, and the availability rows get only the
+/// height the fields leave, so a short terminal hides rows, never them.
+pub(super) fn render_event_form(
+    form: &EventForm,
+    availability: &crate::app::Availability,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let rows = form.rows();
-    let height = rows.len() as u16 + 7;
+    let wanted =
+        super::availability::availability_lines(form, availability, usize::MAX, usize::MAX).len();
+    // Title and blank, the fields, a blank and the availability, a blank,
+    // the problem line, the keys and the two borders.
+    let gap = usize::from(wanted > 0);
+    let height = (rows.len() + 7 + gap + wanted) as u16;
     let Some((_, inner)) = render_modal_shell(
         frame,
         area,
@@ -119,6 +132,10 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
         return;
     };
     let stack = modal_stack_areas(inner, 0, 1);
+    let [body, problem_row] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .areas(stack.content);
     let width = inner.width as usize;
     let normal = Style::default().fg(theme::active().text);
     let focused = Style::default()
@@ -207,17 +224,32 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
             Span::styled(shown, value_style),
         ]));
     }
-    lines.push(Line::from(""));
+    // The availability takes what the fields leave of the body; the blank
+    // lines around it go first when the terminal is short, then the one
+    // under the title, so an 80x24 terminal keeps the count of the rows.
+    if wanted > 0 && lines.len() >= body.height as usize {
+        lines.remove(1);
+    }
+    let spare = (body.height as usize).saturating_sub(lines.len());
+    let available = super::availability::availability_lines(form, availability, width, spare);
+    let blanks = spare - available.len();
+    if !available.is_empty() && blanks > 0 {
+        lines.push(Line::from(""));
+    }
+    lines.extend(available);
+    frame.render_widget(Paragraph::new(lines), body);
     let (problem, style) = match (&form.error, form.problem()) {
         (Some(error), _) => (error.clone(), Style::default().fg(theme::active().error)),
         (None, Some(problem)) => (problem, Style::default().fg(theme::active().warning)),
         (None, None) => (format!("Times in {}", form.zone), muted),
     };
-    lines.push(Line::from(Span::styled(
-        format!("  {}", truncate(&problem, width.saturating_sub(2))),
-        style,
-    )));
-    frame.render_widget(Paragraph::new(lines), stack.content);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {}", truncate(&problem, width.saturating_sub(2))),
+            style,
+        )),
+        problem_row,
+    );
     if let Some(footer) = stack.footer {
         let keys = if form.editing.is_some() {
             "  Enter save \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} choose \u{b7} Esc cancel"

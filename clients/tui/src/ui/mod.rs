@@ -1,4 +1,5 @@
 mod activity;
+mod availability;
 mod calendar;
 mod compose;
 mod contacts;
@@ -317,7 +318,9 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::Mailbox(picker) => overlays::render_mailbox_picker(picker, frame, area),
         Overlay::Signatures(overlay) => overlays::render_signatures_overlay(overlay, frame, area),
         Overlay::Rsvp(overlay) => overlays::render_rsvp_overlay(overlay, frame, area),
-        Overlay::EventForm(form) => overlays::render_event_form(form, frame, area),
+        Overlay::EventForm(form) => {
+            overlays::render_event_form(form, &app.calendar_view.availability, frame, area)
+        }
         Overlay::EventRemove(overlay) => overlays::render_event_remove(overlay, frame, area),
         Overlay::Calendars(overlay) => calendar::render_calendars_overlay(overlay, frame, area),
         Overlay::EventCard(card) => calendar::render_event_card(app, card, frame, area),

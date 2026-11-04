@@ -1,3 +1,4 @@
+mod availability;
 mod bootstrap;
 mod calendar;
 mod event_form;
@@ -7,6 +8,7 @@ mod keys;
 mod reminders;
 mod types;
 
+pub use availability::{Availability, FreeBusyKey, AVAILABILITY_DEBOUNCE};
 pub use calendar::{day_part, DayPart};
 pub use event_form::{EventCalendarChoice, EventEdit, EventForm, EventFormRow};
 pub use keymap::{

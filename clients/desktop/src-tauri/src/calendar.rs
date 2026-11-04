@@ -25,6 +25,12 @@
 //! a refusal comes back as its sentence. Its start answers the transaction id
 //! beside the operation id, which a retry of the same form sends again.
 //!
+//! Free/busy (CAL-14, PERSO-255) is `calendar.freebusy`, a client-scoped
+//! operation this layer blocks on ([`SessionHandle::await_operation`]), as
+//! `message.fetch` is: the event form asks for its availability grid and
+//! gets the schedules back, the account's own first, an address the server
+//! cannot read carrying its error. Every refusal is the daemon's sentence.
+//!
 //! A change (CAL-12, CAL-13, PERSO-255) is `event.update` with the fields
 //! the form changed, `event.cancel` with a comment for the attendees, or
 //! `event.delete`, each awaited as `event_change`; what the user may not do
@@ -52,8 +58,9 @@ use tauri::{AppHandle, State};
 
 use mp_client::queries;
 use mp_protocol::calendar::{
-    CalendarInfo, CalendarViewParams, CalendarViewResult, EventCancelParams, EventCreateParams,
-    EventCreateStarted, EventDeleteParams, EventFrontmatter, EventUpdateParams,
+    CalendarFreeBusyParams, CalendarFreeBusyResult, CalendarInfo, CalendarViewParams,
+    CalendarViewResult, EventCancelParams, EventCreateParams, EventCreateStarted,
+    EventDeleteParams, EventFrontmatter, EventUpdateParams,
 };
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
@@ -92,6 +99,12 @@ const CHANGE_START_BUDGET: Duration = Duration::from_secs(10);
 
 /// The Graph probe: a refusal before any read.
 const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Starting `calendar.freebusy`: the daemon checks the query first.
+const FREEBUSY_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// Waiting for `calendar.freebusy` to settle: one `getSchedule` round trip.
+const FREEBUSY_BUDGET: Duration = Duration::from_secs(30);
 
 /// Starting `send.invite`: the daemon plans the invitation first.
 const INVITE_START_BUDGET: Duration = Duration::from_secs(10);
@@ -244,6 +257,41 @@ pub fn event_create_on(
         operation_id,
         transaction_id,
     })
+}
+
+/// The free/busy of the addresses `params` names and of the account,
+/// blocking on `calendar.freebusy`'s settle. A refusal (an account without a
+/// backend, a range the server would refuse) is the daemon's sentence; a
+/// failed or cancelled query says so.
+pub fn calendar_freebusy_on(
+    session: &SessionHandle,
+    door: &Door,
+    params: &CalendarFreeBusyParams,
+) -> Result<CalendarFreeBusyResult, GuiError> {
+    let params = serde_json::to_value(params)
+        .map_err(|e| GuiError::protocol(format!("calendar.freebusy params: {e}")))?;
+    let end = session
+        .await_operation(
+            door,
+            "calendar.freebusy",
+            params,
+            FREEBUSY_START_BUDGET,
+            FREEBUSY_BUDGET,
+        )
+        .map_err(daemon_sentence)?;
+    match end["state"].as_str() {
+        Some("succeeded") => serde_json::from_value(end["result"].clone())
+            .map_err(|e| GuiError::protocol(format!("calendar.freebusy settled with {e}"))),
+        Some("cancelled") => Err(GuiError::protocol("The free/busy query was cancelled")),
+        _ => {
+            let why = end["error"]["message"]
+                .as_str()
+                .unwrap_or("no reason given");
+            Err(GuiError::protocol(format!(
+                "The free/busy query failed: {why}"
+            )))
+        }
+    }
 }
 
 /// Start `method` with `params` awaited as `event_change`.
@@ -572,6 +620,18 @@ pub async fn event_create(
 ) -> Result<EventCreateStarted, GuiError> {
     with_door(&session, move |session, door| {
         event_create_on(session, door, &params)
+    })
+    .await
+}
+
+/// The free/busy of an event form's people, blocking on its settle.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn calendar_freebusy(
+    session: State<'_, SessionHandle>,
+    params: CalendarFreeBusyParams,
+) -> Result<CalendarFreeBusyResult, GuiError> {
+    with_door(&session, move |session, door| {
+        calendar_freebusy_on(session, door, &params)
     })
     .await
 }
@@ -1009,6 +1069,59 @@ mod tests {
                 code: Some(-32602)
             }
         );
+    }
+
+    /// The fixture's free/busy of a day: the account first, the colleague
+    /// busy at 10:00 and tentative at 15:00, an outside address without
+    /// free/busy; an account without a backend and a range the server would
+    /// refuse are the daemon's sentences.
+    #[test]
+    fn calendar_freebusy_blocks_on_the_settle_and_answers_the_schedules() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        let (session, door) = SessionHandle::pumping(Arc::clone(&fixture), rx);
+        let params = |account: &str, end: &str| CalendarFreeBusyParams {
+            account: account.into(),
+            addresses: vec![
+                crate::fixture::FIXTURE_COLLEAGUE.into(),
+                "someone@gmail.com".into(),
+            ],
+            start: "2099-10-14".into(),
+            end: end.into(),
+            zone: Some("Europe/Berlin".into()),
+            interval_minutes: Some(30),
+        };
+        let result =
+            calendar_freebusy_on(&session, &door, &params("home", "2099-10-14")).expect("answered");
+        assert_eq!(result.start, "2099-10-13T22:00:00Z");
+        assert_eq!(result.interval_minutes, 30);
+        let addresses: Vec<&str> = result
+            .schedules
+            .iter()
+            .map(|s| s.address.as_str())
+            .collect();
+        assert_eq!(
+            addresses,
+            [
+                crate::fixture::FIXTURE_OWN_ADDRESS,
+                crate::fixture::FIXTURE_COLLEAGUE,
+                "someone@gmail.com"
+            ]
+        );
+        let robin = &result.schedules[1].view;
+        assert_eq!(&robin[20..22], "22");
+        assert_eq!(&robin[30..32], "11");
+        assert_eq!(
+            result.schedules[2].error.as_deref(),
+            Some(crate::fixture::FIXTURE_NO_FREE_BUSY)
+        );
+
+        let err = calendar_freebusy_on(&session, &door, &params("work", "2099-10-14"))
+            .expect_err("no backend");
+        assert!(err.message().contains("no calendar backend"), "{err:?}");
+        let err = calendar_freebusy_on(&session, &door, &params("home", "2100-01-01"))
+            .expect_err("too long");
+        assert!(err.message().contains("61 days"), "{err:?}");
     }
 
     /// An update starts `event.update` awaited as `event_change` with the

@@ -418,6 +418,11 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         ActionRoute::ClientOnly("$EDITOR, over the event form's description"),
         true,
     ),
+    (
+        "QueryFreeBusy",
+        ActionRoute::Daemon(&["calendar.freebusy"]),
+        false,
+    ),
     ("ComposeToContact", ActionRoute::Local, false),
     (
         "SendContactVcard",
@@ -563,6 +568,7 @@ fn one_of_each_action() -> Vec<Action> {
             error: None,
         })),
         Action::EditEventDescription,
+        Action::QueryFreeBusy(Box::default()),
         Action::ComposeToContact {
             to: "a@example.com".to_string(),
         },
@@ -649,6 +655,7 @@ fn variant_name(action: &Action) -> &'static str {
         Action::UpdateEvent(_) => "UpdateEvent",
         Action::RemoveEvent(_) => "RemoveEvent",
         Action::EditEventDescription => "EditEventDescription",
+        Action::QueryFreeBusy(_) => "QueryFreeBusy",
         Action::ComposeToContact { .. } => "ComposeToContact",
         Action::SendContactVcard { .. } => "SendContactVcard",
         Action::CopyContactEmail { .. } => "CopyContactEmail",

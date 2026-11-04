@@ -156,6 +156,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `calendar_list` | `account?` | `CalendarInfo[]`, every account's when absent |
 | `calendar_set_visibility` | `account`, `calendar`, `visible` | nothing; the daemon publishes `calendar.changed` |
 | `calendar_view` | `start`, `end` (RFC 3339 with an offset, `end` exclusive), `zone?` | `CalendarViewResult`, every account's visible calendars |
+| `calendar_freebusy` | `params` (`CalendarFreeBusyParams`) | `CalendarFreeBusyResult`, once the query has settled |
 | `event_respond` | `account`, `event`, `response: "accept" \| "tentative" \| "decline"`, `comment?`, `send_response?` | `{ operation_id }` |
 | `event_create` | `params: EventCreateParams` | `EventCreateStarted` (`{ operation_id, transaction_id }`) |
 | `event_update` | `params: EventUpdateParams` (`{account, event, fields}`, the fields that changed) | `{ operation_id }` |
@@ -378,7 +379,8 @@ A range the daemon cannot read is a `protocol` error with its code.
 
 `calendar_list` is `calendar.list {account?}`: every account's calendars (`CalendarInfo`: `account`, `id`, `name`, `color`, `is_default`, `can_edit`, `visible`, `backend`), the invitation mails of an account as its `imip` calendar.
 `calendar_set_visibility` is `calendar.set_visibility {account, calendar, visible}`, a command that answers at once: the daemon keeps the preference across a cache rebuild and publishes `calendar.changed {account}`, which is what reads the view again; an unknown calendar is the daemon's `-32602` sentence.
-`calendar.list`, `calendar.view`, `calendar.set_visibility` and `event.respond` are in `REQUIRED_CAPABILITIES`, so a daemon from before the calendar is a `capability_missing` at the handshake.
+`calendar_freebusy` is `calendar.freebusy` (CAL-14, PERSO-255), a client-scoped operation it blocks on through `SessionHandle::await_operation`, as `message_fetch` does, for at most 10 s to start and 30 s to settle: the event form's Availability grid gets the schedules back, the account's own first, an address the server cannot read carrying its `error`; a refusal (an account without a backend, a range the server would refuse) is the daemon's sentence, and a failed or cancelled query says so.
+`calendar.list`, `calendar.view`, `calendar.set_visibility`, `calendar.freebusy` and `event.respond` are in `REQUIRED_CAPABILITIES`, so a daemon from before the calendar, or from before free/busy, is a `capability_missing` at the handshake.
 
 `invite_source_open` is the TUI's `e` on an invitation mail's event (`Action::OpenEventSource`), with the event's `source.row_id`.
 It reads the row's `invite.ics` with `message.ics {account, row_id}` (`mp_client::queries::message_ics`, which decodes the base64 the wire carries), writes it to `renditions/invite-<account>-<row_id>.ics` under the app's cache directory, the directory 0700 and the file 0600, and opens that file with the external editor as `editor_open` does.

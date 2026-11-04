@@ -3449,3 +3449,7 @@ A client that switches a timed event to all-day without a last day must therefor
 
 A cancel or delete takes the event out of the cache once the server answers, so a client whose operation vanished and retries finds nothing to recognise, and the retry was refused as an unknown event.
 The removal is recorded in `calendar_removed_events` in the same transaction as the cache delete, and a retry of the same method settles from that record with the first call's result without reaching the server; an id the cache never held is still refused.
+
+## A limit counted on UTC instants shifts by an hour across a DST change (2026-11-04, PERSO-255)
+
+A limit counted on UTC instants shifts by an hour across a DST change: count a user-facing range in the zone's calendar days, and keep a day of margin under a server limit that can only measure elapsed time.

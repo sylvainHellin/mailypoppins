@@ -281,6 +281,12 @@ fn run_loop(
             }
         }
 
+        // The event form's availability rows (PERSO-255) follow its query,
+        // asked once it has stood still, so typing an address asks once.
+        if app.tick_availability(Instant::now()) {
+            dirty = true;
+        }
+
         // The daemon's events, drained in the same pre-draw pass and under the
         // same two bounds as the terminal batch above (P5-U8): a first sync of
         // a large mailbox publishing a row per message may not starve the

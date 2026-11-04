@@ -50,6 +50,10 @@
 //! or in UTC for a zone the table lacks; an all-day event's midnights go out
 //! in the Windows zone of the write's `zone`, the host's when absent.
 //!
+//! Free/busy (`freebusy.rs`, PERSO-255) is `POST /me/calendar/getSchedule`,
+//! one schedule per address, an address Graph cannot read answering an
+//! error of its own rather than failing the query.
+//!
 //! The HTTP layer is the [`GraphFetch`] seam: [`GraphHttp`] over the mail
 //! client's [`GraphClient`] in production, a scripted fake in the tests, so
 //! the paging, the fallbacks and the 410 handling run without a tenant.
@@ -91,11 +95,13 @@ const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
 /// ([`super::features`]), each feature listed once its daemon method ships:
 /// `event.create` writes events, with a Teams link on request on a calendar
 /// whose `allowedOnlineMeetingProviders` names Teams
-/// ([`super::calendar_features`]), and `calendar.dismiss_reminder` and
-/// `calendar.snooze_reminder` write a reminder's dismissal and snooze through.
+/// ([`super::calendar_features`]), `calendar.dismiss_reminder` and
+/// `calendar.snooze_reminder` write a reminder's dismissal and snooze through,
+/// and `calendar.freebusy` reads `getSchedule` (`freebusy.rs`).
 pub const FEATURES: &[CalendarFeature] = &[
     CalendarFeature::Write,
     CalendarFeature::OnlineMeeting,
+    CalendarFeature::FreeBusy,
     CalendarFeature::ServerReminders,
 ];
 
@@ -1577,6 +1583,13 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
             .map(str::to_string))
     }
 
+    async fn free_busy(
+        &self,
+        query: &crate::calendar_freebusy::FreeBusyQuery,
+    ) -> BackendResult<Vec<crate::calendar_freebusy::Schedule>> {
+        self.post_schedule(query).await
+    }
+
     fn remember_series(&self, known: Vec<SeriesInfo>) {
         let mut cache = self
             .series
@@ -1588,6 +1601,7 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
     }
 }
 
+mod freebusy;
 mod write;
 
 #[cfg(test)]
