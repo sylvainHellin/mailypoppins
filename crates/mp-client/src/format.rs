@@ -639,7 +639,11 @@ where
     Z::Offset: std::fmt::Display,
 {
     let mut body = reminder_when(reminder, now, zone);
-    if let Some(location) = reminder.location.as_deref().filter(|l| !l.trim().is_empty()) {
+    if let Some(location) = reminder
+        .location
+        .as_deref()
+        .filter(|l| !l.trim().is_empty())
+    {
         body.push_str(&format!(", {location}"));
     }
     body
