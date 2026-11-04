@@ -15,9 +15,10 @@
 //!
 //! What fired, was dismissed or is snoozed is recorded in
 //! [`crate::store::reminders`], which survives a `calendar.rebuild`. A firing
-//! is published as `calendar.reminder` to every client, with the `presenter`
-//! that raises the system notification: `gui` when a desktop app is
-//! connected, else `tui` when a TUI is ([`CanonicalState::presenter`]).
+//! is published as `calendar.reminder` to every client, naming the one
+//! connection that raises the system notification (`presenter_connection`)
+//! and its kind (`presenter`): the most recently bootstrapped desktop app,
+//! else the most recently bootstrapped TUI ([`CanonicalState::presenter`]).
 //! A fired reminder that stops qualifying (its event cancelled, declined,
 //! hidden or its reminder turned off, which is what a dismissal in Outlook
 //! does) leaves the pending list, one that qualifies again (its calendar
@@ -47,7 +48,7 @@ use crate::store::Store;
 
 use super::config::ConfigStore;
 use super::state::events::Event as DaemonEvent;
-use super::state::CanonicalState;
+use super::state::{CanonicalState, ConnectionId};
 
 /// `MAILYPOPPINS_DAEMON_FAKE_CLOCK_SPEED=<n>`: the reminder clock starts at
 /// the daemon's start and runs `n` times faster than real time, so a test
@@ -164,7 +165,15 @@ pub fn to_wire(event: &Event, due: &Due) -> CalendarReminder {
         online_meeting_url: event.online_meeting_url.clone(),
         minutes_before: due.minutes,
         presenter: None,
+        presenter_connection: None,
     }
+}
+
+/// Name `presenter`, the connection elected by [`CanonicalState::presenter`],
+/// on `reminder`: its kind and its connection id, or neither.
+pub fn present(reminder: &mut CalendarReminder, presenter: Option<(ConnectionId, &str)>) {
+    reminder.presenter = presenter.map(|(_, kind)| kind.to_string());
+    reminder.presenter_connection = presenter.map(|(conn, _)| conn.0);
 }
 
 /// The reminding events of `account` that have not ended by `now`, with the
@@ -496,9 +505,12 @@ async fn run_once(
             info!(
                 "[reminders] {account}: {} is due (presenter {})",
                 reminder.event,
-                presenter.unwrap_or("none")
+                presenter.map_or("none".to_string(), |(conn, kind)| format!(
+                    "{kind} connection {}",
+                    conn.0
+                ))
             );
-            reminder.presenter = presenter.map(str::to_string);
+            present(&mut reminder, presenter);
             if let Some(event) = reminder_event(&reminder) {
                 canonical.publish(event);
             }

@@ -22,7 +22,15 @@ use crate::tui::ui::golden_frames::{calendar_fixture, frame_snapshot, HEIGHT, WI
 
 use super::daemon::CallLog;
 
-fn reminder(event: &str, summary: &str, start: &str, all_day: bool, presenter: Value) -> Value {
+/// A reminder as the daemon sends it, `presenter` its presenter's kind and
+/// connection, if any.
+fn reminder(
+    event: &str,
+    summary: &str,
+    start: &str,
+    all_day: bool,
+    presenter: Option<(&str, u64)>,
+) -> Value {
     json!({
         "account": "evoqs",
         "event": event,
@@ -31,7 +39,8 @@ fn reminder(event: &str, summary: &str, start: &str, all_day: bool, presenter: V
         "all_day": all_day,
         "location": "Room 2.14",
         "minutes_before": 15,
-        "presenter": presenter,
+        "presenter": presenter.map(|(kind, _)| kind),
+        "presenter_connection": presenter.map(|(_, conn)| conn),
     })
 }
 
@@ -74,10 +83,14 @@ fn app_with(waiting: Vec<Value>) -> (App, CallLog) {
     app.apply_bootstrap(&mp_protocol::state::Bootstrap {
         instance_id: "tui-test".to_string(),
         revision: 1,
+        connection: TUI_CONNECTION,
         ..Default::default()
     });
     (app, log)
 }
+
+/// The daemon's id of the TUI's connection in [`app_with`].
+const TUI_CONNECTION: u64 = 3;
 
 fn methods(log: &CallLog) -> Vec<(String, Value)> {
     log.lock().unwrap().clone()
@@ -102,20 +115,8 @@ fn fired(app: &mut App, revision: u64, payload: Value) -> Applied {
 #[test]
 fn golden_reminders_overlay() {
     let (mut app, log) = app_with(vec![
-        reminder(
-            "ev-loc",
-            "LOC Day",
-            "2026-08-05T22:00:00Z",
-            true,
-            json!(null),
-        ),
-        reminder(
-            "ev-hol",
-            "Holiday",
-            "2026-08-06T22:00:00Z",
-            true,
-            json!(null),
-        ),
+        reminder("ev-loc", "LOC Day", "2026-08-05T22:00:00Z", true, None),
+        reminder("ev-hol", "Holiday", "2026-08-06T22:00:00Z", true, None),
     ]);
     assert_eq!(methods(&log)[0], ("calendar.reminders".into(), json!({})));
     assert_eq!(app.reminders.len(), 2);
@@ -132,14 +133,8 @@ fn golden_reminders_overlay() {
 #[test]
 fn the_overlay_snoozes_dismisses_and_opens() {
     let (mut app, log) = app_with(vec![
-        reminder(
-            "ev-a",
-            "Standup",
-            "2026-08-04T07:00:00Z",
-            false,
-            json!(null),
-        ),
-        reminder("ev-b", "Review", "2026-08-04T08:00:00Z", false, json!(null)),
+        reminder("ev-a", "Standup", "2026-08-04T07:00:00Z", false, None),
+        reminder("ev-b", "Review", "2026-08-04T08:00:00Z", false, None),
     ]);
     app.handle_key(key('R'));
     app.handle_key(key('s'));
@@ -168,7 +163,7 @@ fn the_overlay_snoozes_dismisses_and_opens() {
         "Jour fixe",
         "2026-08-04T08:00:00Z",
         false,
-        json!(null),
+        None,
     )]);
     app.view = View::Mail;
     app.handle_key(key('R'));
@@ -184,7 +179,8 @@ fn the_overlay_snoozes_dismisses_and_opens() {
 }
 
 /// A fired reminder joins the list and the status line; it raises a
-/// notification only when notifications are on and this TUI presents.
+/// notification only when notifications are on and the daemon names this
+/// TUI's connection as the presenter, not another TUI's nor the desktop app's.
 #[test]
 fn a_fired_reminder_notifies_only_as_the_presenter() {
     let (mut app, _) = app_with(Vec::new());
@@ -198,7 +194,7 @@ fn a_fired_reminder_notifies_only_as_the_presenter() {
             "Standup",
             "2026-08-04T07:00:00Z",
             false,
-            json!("gui"),
+            Some(("gui", 2)),
         ),
     );
     assert_eq!(applied, Applied::Ignored);
@@ -212,6 +208,8 @@ fn a_fired_reminder_notifies_only_as_the_presenter() {
     );
     assert!(capture.shown().is_empty(), "the desktop app presents");
 
+    // Another TUI is the presenter: this one shows the reminder and stays
+    // quiet, so two TUIs raise one notification.
     fired(
         &mut app,
         3,
@@ -220,7 +218,20 @@ fn a_fired_reminder_notifies_only_as_the_presenter() {
             "Standup",
             "2026-08-04T07:00:00Z",
             false,
-            json!("tui"),
+            Some(("tui", TUI_CONNECTION + 1)),
+        ),
+    );
+    assert!(capture.shown().is_empty(), "another TUI presents");
+
+    fired(
+        &mut app,
+        4,
+        reminder(
+            "ev-a",
+            "Standup",
+            "2026-08-04T07:00:00Z",
+            false,
+            Some(("tui", TUI_CONNECTION)),
         ),
     );
     assert_eq!(app.reminders.len(), 1, "a snooze that ended replaces it");
@@ -232,13 +243,13 @@ fn a_fired_reminder_notifies_only_as_the_presenter() {
     app.global_config.notifications = false;
     fired(
         &mut app,
-        4,
+        5,
         reminder(
             "ev-b",
             "Review",
             "2026-08-04T08:00:00Z",
             false,
-            json!("tui"),
+            Some(("tui", TUI_CONNECTION)),
         ),
     );
     assert_eq!(capture.shown().len(), 1, "notifications are off");

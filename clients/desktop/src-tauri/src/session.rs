@@ -322,6 +322,11 @@ struct Shared {
     observer: Mutex<Option<Observer>>,
     /// The latest subscription claimed by `subscribe_events`, in call order.
     subscription: AtomicU64,
+    /// The daemon's id of this app's connection, from the latest bootstrap,
+    /// `0` before one: what a reminder's `presenter_connection` is compared
+    /// with. An atomic rather than a read of `last_bootstrap`, because the
+    /// observer that compares runs under the pump lock.
+    connection: AtomicU64,
     fixture_door: Mutex<Option<Arc<Fixture>>>,
 }
 
@@ -349,6 +354,7 @@ impl SessionHandle {
                 sink: Mutex::new(None),
                 observer: Mutex::new(None),
                 subscription: AtomicU64::new(0),
+                connection: AtomicU64::new(0),
                 fixture_door: Mutex::new(None),
             }),
         }
@@ -642,6 +648,15 @@ impl SessionHandle {
         lock(&self.shared.pump).last_bootstrap.clone()
     }
 
+    /// The daemon's id of this app's connection, as the latest bootstrap
+    /// named it; `None` before one, or from a daemon that does not say.
+    pub fn connection(&self) -> Option<u64> {
+        match self.shared.connection.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
     /// Bootstrap, reset the watermark, send the snapshot and re-query what
     /// is awaited. `None` when the bootstrap failed, which leaves the stream
     /// poisoned so the next event tries again.
@@ -679,6 +694,9 @@ impl SessionHandle {
                 ))
             }
         }
+        self.shared
+            .connection
+            .store(bootstrap.connection, Ordering::SeqCst);
         pump.last_bootstrap = Some(bootstrap.clone());
         self.emit(GuiEvent::Rebootstrapped { cause, bootstrap });
         self.requery_locked(pump, door);

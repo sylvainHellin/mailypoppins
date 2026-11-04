@@ -13,6 +13,7 @@ const reminder = (event: string, start: string, all_day = false): CalendarRemind
   location: "Room 2.14",
   minutes_before: 15,
   presenter: "gui",
+  presenter_connection: 1,
 });
 
 const envelope = (kind: string, payload: unknown) => ({

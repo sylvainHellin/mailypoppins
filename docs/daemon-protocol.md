@@ -188,6 +188,7 @@ SIGTERM and SIGINT run the same eight steps with the default grace, so a unit st
   "instance_id": "1f0c…",
   "revision": 4217,
   "capabilities": ["state.bootstrap", "account.list"],
+  "connection": 7,
   "snapshot": {
     "accounts": [{"name": "work", "state": "opening", "sync_health": {"state": "unknown", "reason": null, "at": null}}],
     "mailboxes": {"work": [{"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0}]},
@@ -202,6 +203,7 @@ SIGTERM and SIGINT run the same eight steps with the default grace, so a unit st
 
 `capabilities` is what **this connection** agreed on at its handshake, not the daemon's whole list: a client acts on what it may use, and the offer is already in the `initialize` result.
 `revision` is never `0`, which the client keeps as its own pre-bootstrap sentinel.
+`connection` is the daemon's id of this connection, never `0` and unique for the life of the daemon process; a client keeps it to recognise a `calendar.reminder` that names this connection as its presenter (`presenter_connection`, "The calendar reminders").
 
 `mailboxes`, `drafts` and `outbox` carry one key per listed account, always, so a client indexes them by account name without a null check.
 A daemon with no configured account answers an empty `accounts` array and three empty objects.
@@ -1160,8 +1162,10 @@ A reminder falls due at its event's start minus the event's `reminder` minutes, 
 A cancelled event, a declined one, one without a reminder and one in a hidden calendar never remind, nor does an invitation mail's event; a reminder that fell due while the daemon was stopped fires once at its start if its event has not ended.
 The daemon records what fired, was dismissed or is snoozed per account and event, for the due minute it fired at, so a moved event or a changed setting reminds again at its new minute; the record survives `calendar.rebuild`, and an entry goes once its event has ended.
 
-A reminder is `CalendarReminder` `{account, event, summary, start, all_day, location?, online_meeting_url?, minutes_before, presenter}`: `event` the id `event.get` takes, `start` an RFC 3339 instant in UTC (an all-day event's first midnight in the daemon's zone), and `minutes_before` the event's setting.
-`presenter` names the kind of client that raises the system notification: `gui` when a bootstrapped desktop app is connected, else `tui` when a bootstrapped TUI is, else `null`; every client shows the reminder in its own window, and only one of the presenter's kind notifies.
+A reminder is `CalendarReminder` `{account, event, summary, start, all_day, location?, online_meeting_url?, minutes_before, presenter, presenter_connection}`: `event` the id `event.get` takes, `start` an RFC 3339 instant in UTC (an all-day event's first midnight in the daemon's zone), and `minutes_before` the event's setting.
+The presenter is the one connection that raises the system notification: the most recently bootstrapped desktop app, else the most recently bootstrapped TUI, else none.
+`presenter_connection` is that connection's id, the `connection` its `state.bootstrap` answered, and `presenter` its kind, `gui` or `tui`; both are `null` when no desktop app or TUI is bootstrapped.
+Every client shows the reminder in its own window, and only the client whose connection `presenter_connection` names notifies, so a reminder raises one notification however many clients are open.
 
 `calendar.reminders` `{accounts?}` -> `{reminders: [CalendarReminder]}` (`CalendarRemindersParams`, `CalendarRemindersResult`) is a query: the reminders that fired and wait, neither dismissed nor snoozed, of every reminding account or of those named, the earliest start first, each with the presenter as it stands at the call.
 A reminder whose event no longer reminds (cancelled, declined, hidden, its reminder turned off, which is what a dismissal in Outlook reads as at the next sync) leaves the list, and the daemon publishes `calendar.reminders_changed` when one does.
@@ -1734,6 +1738,7 @@ It also removed `calendar.events`, the one-account iMIP agenda, once neither the
 The capability list lost the name and the desktop no longer requires it, so a client that still calls it is answered `-32601`.
 The fixtures of the `event.*` family are named `event.<method>.request.json` and `.response.json`, which the fixture suite reads as a call and its answer before it reads the `event.` prefix as a bare envelope.
 
-PERSO-255 (the calendar reminders, phase 2) added three methods, two lifecycle kinds and one feature, all additively; no field was renamed, none was dropped, and no command's output moved.
+PERSO-255 (the calendar reminders, phase 2) added three methods, two lifecycle kinds, one feature and one member of the `state.bootstrap` result, all additively; no field was renamed, none was dropped, and no command's output moved.
 `calendar.reminders` is a query and `calendar.dismiss_reminder` and `calendar.snooze_reminder` are commands, with the shapes of [The calendar reminders](#the-calendar-reminders) and the types of `mp_protocol::reminder`; `calendar.reminder` and `calendar.reminders_changed` are the lifecycle kinds.
 A Graph calendar's `features` list `server-reminders`, and the desktop app requires the three methods at the handshake.
+`state.bootstrap` answers `connection`, the id of the calling connection, which a reminder's `presenter_connection` names so that one client notifies; a client of an older daemon reads it as `0`, no connection, and notifies nothing.

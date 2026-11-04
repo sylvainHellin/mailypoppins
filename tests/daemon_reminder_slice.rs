@@ -7,14 +7,15 @@
 //! so a snooze of a minute ends within a second:
 //!
 //! - an overdue reminder whose event has not ended fires once the calendar
-//!   synced, as `calendar.reminder` to every client, with the desktop app as
-//!   its presenter, and `calendar.reminders` lists it;
+//!   synced, as `calendar.reminder` to every client, with the desktop app's
+//!   connection as its presenter over a TUI's, and `calendar.reminders` lists
+//!   it;
 //! - a snooze takes it off the list, says so with `calendar.reminders_changed`,
 //!   and fires it again when it ends; a dismissal takes it off for good, and a
 //!   `calendar.rebuild` does not bring it back;
 //! - both decisions reach the server through the fake;
-//! - the presenter follows the clients connected: the desktop app first, else
-//!   a TUI, else none;
+//! - the presenter is one connection: the desktop app first, else the most
+//!   recently bootstrapped TUI, else none;
 //! - an event without a reminder, a snooze out of range and a snooze of a
 //!   dismissed reminder are refused.
 
@@ -129,11 +130,12 @@ impl Slice {
     }
 
     /// A connection of `kind` that bootstrapped, which is what a TUI or a
-    /// desktop app is to the presenter rule.
-    async fn attach(&self, kind: ClientKind) -> Connection {
+    /// desktop app is to the presenter rule, and the id its bootstrap named.
+    async fn attach(&self, kind: ClientKind) -> (Connection, u64) {
         let mut conn = self.connect(kind).await;
-        call(&mut conn, "state.bootstrap", json!({})).await;
-        conn
+        let bootstrap = call(&mut conn, "state.bootstrap", json!({})).await;
+        let id = bootstrap["connection"].as_u64().expect("a connection id");
+        (conn, id)
     }
 }
 
@@ -200,19 +202,21 @@ async fn pending(conn: &mut Connection) -> Vec<Value> {
     answer["reminders"].as_array().unwrap().clone()
 }
 
-/// Ask `calendar.reminders` until its presenter reads `expected`: a
-/// disconnect reaches the daemon a moment after the socket closes.
-async fn presenter_becomes(conn: &mut Connection, expected: Value) {
+/// Ask `calendar.reminders` until its presenter reads `expected`, a kind and
+/// a connection id or nothing: a disconnect reaches the daemon a moment after
+/// the socket closes.
+async fn presenter_becomes(conn: &mut Connection, expected: Option<(&str, u64)>) {
+    let expected = json!([expected.map(|(kind, _)| kind), expected.map(|(_, id)| id)]);
     let start = Instant::now();
     loop {
         let listed = pending(conn).await;
-        if listed[0]["presenter"] == expected {
+        let presenter = json!([listed[0]["presenter"], listed[0]["presenter_connection"]]);
+        if presenter == expected {
             return;
         }
         assert!(
             start.elapsed() < SETTLE_DEADLINE,
-            "the presenter stayed {} instead of {expected}",
-            listed[0]["presenter"]
+            "the presenter stayed {presenter} instead of {expected}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -222,7 +226,8 @@ async fn presenter_becomes(conn: &mut Connection, expected: Value) {
 #[tokio::test]
 async fn a_reminder_fires_snoozes_and_dismisses() {
     let slice = Slice::start();
-    let mut gui = slice.attach(ClientKind::Gui).await;
+    let (mut gui, gui_id) = slice.attach(ClientKind::Gui).await;
+    let (_tui, _) = slice.attach(ClientKind::Tui).await;
     let mut conn = slice.connect(ClientKind::Cli).await;
     assert!(pending(&mut conn).await.is_empty(), "nothing synced yet");
 
@@ -235,10 +240,15 @@ async fn a_reminder_fires_snoozes_and_dismisses() {
     assert_eq!(fired["minutes_before"], 10);
     assert_eq!(fired["all_day"], false);
     assert_eq!(fired["presenter"], "gui");
+    assert_eq!(
+        fired["presenter_connection"], gui_id,
+        "the desktop app, not the TUI"
+    );
     let listed = pending(&mut conn).await;
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0]["event"], "ev-standup");
     assert_eq!(listed[0]["presenter"], "gui");
+    assert_eq!(listed[0]["presenter_connection"], gui_id);
 
     let snoozed = call(
         &mut conn,
@@ -315,13 +325,15 @@ async fn a_reminder_fires_snoozes_and_dismisses() {
     );
 }
 
-/// The presenter is the desktop app while one is connected, else a TUI,
-/// else none.
+/// The presenter is one connection: the desktop app while one is connected,
+/// else the most recently bootstrapped TUI, else none.
 #[tokio::test]
 async fn the_presenter_follows_the_clients_connected() {
     let slice = Slice::start();
-    let gui = slice.attach(ClientKind::Gui).await;
-    let tui = slice.attach(ClientKind::Tui).await;
+    let (gui, gui_id) = slice.attach(ClientKind::Gui).await;
+    let (first, first_id) = slice.attach(ClientKind::Tui).await;
+    let (second, second_id) = slice.attach(ClientKind::Tui).await;
+    assert_ne!(first_id, second_id);
     let mut conn = slice.connect(ClientKind::Cli).await;
     run_operation(&mut conn, "calendar.rebuild", json!({"account": SERVER})).await;
     let start = Instant::now();
@@ -332,11 +344,13 @@ async fn the_presenter_follows_the_clients_connected() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    presenter_becomes(&mut conn, json!("gui")).await;
+    presenter_becomes(&mut conn, Some(("gui", gui_id))).await;
     drop(gui);
-    presenter_becomes(&mut conn, json!("tui")).await;
-    drop(tui);
-    presenter_becomes(&mut conn, Value::Null).await;
+    presenter_becomes(&mut conn, Some(("tui", second_id))).await;
+    drop(second);
+    presenter_becomes(&mut conn, Some(("tui", first_id))).await;
+    drop(first);
+    presenter_becomes(&mut conn, None).await;
 }
 
 /// Hiding the calendar of a fired reminder takes it off the list and showing
@@ -345,7 +359,7 @@ async fn the_presenter_follows_the_clients_connected() {
 #[tokio::test]
 async fn hiding_and_showing_a_calendar_moves_the_list() {
     let slice = Slice::start();
-    let mut gui = slice.attach(ClientKind::Gui).await;
+    let (mut gui, _) = slice.attach(ClientKind::Gui).await;
     let mut conn = slice.connect(ClientKind::Cli).await;
     run_operation(&mut conn, "calendar.rebuild", json!({"account": SERVER})).await;
     next_event(&mut gui, "calendar.reminder").await;

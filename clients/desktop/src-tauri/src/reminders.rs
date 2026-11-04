@@ -2,8 +2,9 @@
 //!
 //! The daemon owns the reminders: it fires each at its due minute as
 //! `calendar.reminder`, keeps what was dismissed or snoozed, and names the
-//! presenter, the client kind that raises the system notification (`gui`
-//! whenever this app is connected). This layer raises that notification from
+//! presenter, the one connection that raises the system notification (this
+//! app's whenever it is connected, as its bootstrap named it). This layer
+//! raises that notification from
 //! Rust through `tauri-plugin-notification`, so the webview holds no
 //! notification permission; delivery is a best-effort view of the daemon's
 //! state.
@@ -13,7 +14,8 @@
 //! "Options" menu and a click is lost once the app restarts. A click on its
 //! body arrives as the action `tap` ([`install`]), which shows, unminimizes
 //! and focuses the main window and asks the frontend to open the event
-//! ([`OPEN_EVENT`]). Snooze and Dismiss live in the app's reminder banner,
+//! ([`OPEN_EVENT`]), except for the palette's test notification, which names
+//! no account and only brings the window forward. Snooze and Dismiss live in the app's reminder banner,
 //! which calls `calendar.snooze_reminder` and `calendar.dismiss_reminder`
 //! through [`reminder_snooze`] and [`reminder_dismiss`]. macOS shows no
 //! banner for the frontmost app, which is why the in-app banner lists every
@@ -96,16 +98,20 @@ pub fn notify<R: Runtime>(app: &AppHandle<R>, reminder: &CalendarReminder) {
     }
 }
 
-/// A `calendar.reminder` this app presents is notified; every other event,
-/// and a reminder another client kind presents, is not.
-pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: &EventEnvelope) {
+/// Whether `reminder` is this app's to notify: the daemon names
+/// `connection`, this app's, as its presenter.
+fn presents(reminder: &CalendarReminder, connection: Option<u64>) -> bool {
+    connection.is_some() && reminder.presenter_connection == connection
+}
+
+/// A `calendar.reminder` this app's `connection` presents is notified; every
+/// other event, and a reminder another connection presents, is not.
+pub fn on_event<R: Runtime>(app: &AppHandle<R>, connection: Option<u64>, event: &EventEnvelope) {
     if event.kind != KIND_CALENDAR_REMINDER {
         return;
     }
     match serde_json::from_value::<CalendarReminder>(event.payload.clone()) {
-        Ok(reminder) if reminder.presenter.as_deref() == Some(PRESENTER_GUI) => {
-            notify(app, &reminder)
-        }
+        Ok(reminder) if presents(&reminder, connection) => notify(app, &reminder),
         Ok(_) => {}
         Err(e) => tracing::warn!("[reminders] a calendar.reminder did not decode: {e}"),
     }
@@ -129,6 +135,12 @@ fn bring_forward<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// The event a click on `target`'s notification opens: none for the
+/// palette's test notification, whose made-up event names no account.
+fn to_open(target: ReminderTarget) -> Option<ReminderTarget> {
+    (!target.account.is_empty()).then_some(target)
+}
+
 /// Handle the clicks on this app's notifications: the window comes forward
 /// on the reminder's event. Registered once, before the first notification,
 /// since the plugin reports nothing about one shown before a handler existed.
@@ -138,12 +150,16 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
         let Some(target) = clicked(performed) else {
             return;
         };
+        bring_forward(&handle);
+        let Some(target) = to_open(target) else {
+            tracing::info!("[reminders] the test notification brought the window forward");
+            return;
+        };
         tracing::info!(
             "[reminders] opened {}/{} from its notification",
             target.account,
             target.event
         );
-        bring_forward(&handle);
         if let Err(e) = handle.emit(OPEN_EVENT, target) {
             tracing::warn!("[reminders] could not ask the window to open the event: {e}");
         }
@@ -234,6 +250,7 @@ fn test_reminder() -> CalendarReminder {
         online_meeting_url: None,
         minutes_before: 5,
         presenter: Some(PRESENTER_GUI.into()),
+        presenter_connection: None,
     }
 }
 
@@ -298,7 +315,32 @@ mod tests {
             online_meeting_url: None,
             minutes_before: 15,
             presenter: Some("gui".into()),
+            presenter_connection: Some(4),
         }
+    }
+
+    /// Only the reminder naming this app's connection is notified: one a TUI
+    /// or another connection presents is not, nor any before a bootstrap.
+    #[test]
+    fn only_this_apps_connection_presents() {
+        assert!(presents(&reminder(), Some(4)));
+        assert!(!presents(&reminder(), Some(5)));
+        assert!(!presents(&reminder(), None));
+        let unpresented = CalendarReminder {
+            presenter: None,
+            presenter_connection: None,
+            ..reminder()
+        };
+        assert!(!presents(&unpresented, None));
+    }
+
+    /// A click on a reminder's notification opens its event; one on the
+    /// palette's test notification, which names no account, opens nothing.
+    #[test]
+    fn the_test_notification_opens_no_event() {
+        let target = ReminderTarget::of(&reminder());
+        assert_eq!(to_open(target.clone()), Some(target));
+        assert_eq!(to_open(ReminderTarget::of(&test_reminder())), None);
     }
 
     /// The extra payload a click hands back names the event to open.

@@ -3,15 +3,16 @@
 //! The daemon fires a reminder at its due minute as `calendar.reminder`; the
 //! TUI puts it on the status line, keeps it in [`App::reminders`] (which the
 //! hint bar counts), and raises a system notification through
-//! [`mp_core::notify`] when `notifications = true` and the daemon names the
-//! TUI as the presenter, that is when no desktop app is connected. `R` from
+//! [`mp_core::notify`] when `notifications = true` and the daemon names this
+//! TUI's connection as the presenter, that is when no desktop app is
+//! connected and this is the most recently bootstrapped TUI. `R` from
 //! any view opens the reminders overlay: `s` snoozes the one under the cursor
 //! for [`SNOOZE_MINUTES`], `d` dismisses it, `Enter` opens its event in the
 //! Calendar view. A dismissal or a snooze in any client publishes
 //! `calendar.reminders_changed`, which reads the list again here.
 
 use chrono::{DateTime, Utc};
-use mp_protocol::reminder::{CalendarReminder, PRESENTER_TUI};
+use mp_protocol::reminder::CalendarReminder;
 
 use super::{App, Overlay, RemindersOverlay, StatusLevel, View};
 
@@ -47,7 +48,7 @@ impl App {
 
     /// `calendar.reminder`: a reminder fell due. It joins the list (a snooze
     /// that ended replaces its earlier entry), goes on the status line, and
-    /// raises a notification when this TUI is the presenter.
+    /// raises a notification when this TUI's connection is the presenter.
     pub fn on_reminder_fired(&mut self, payload: &serde_json::Value) {
         let reminder: CalendarReminder = match serde_json::from_value(payload.clone()) {
             Ok(reminder) => reminder,
@@ -59,8 +60,9 @@ impl App {
         let now = Utc::now();
         let zone = self.calendar_view.zone;
         let line = mp_client::format::reminder_line(&reminder, now, &zone);
-        if self.global_config.notifications && reminder.presenter.as_deref() == Some(PRESENTER_TUI)
-        {
+        let presenting =
+            self.connection.is_some() && reminder.presenter_connection == self.connection;
+        if self.global_config.notifications && presenting {
             let body = mp_client::format::reminder_body(&reminder, now, &zone);
             mp_core::notify::notify_reminder(&reminder.summary, &body);
         }

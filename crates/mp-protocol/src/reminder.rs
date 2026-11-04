@@ -10,11 +10,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `presenter` when a desktop app is connected: it raises the system
-/// notification.
+/// `presenter` when a desktop app is connected: the most recently
+/// bootstrapped one raises the system notification.
 pub const PRESENTER_GUI: &str = "gui";
 
-/// `presenter` when a TUI is connected and no desktop app is.
+/// `presenter` when a TUI is connected and no desktop app is: the most
+/// recently bootstrapped TUI raises the system notification.
 pub const PRESENTER_TUI: &str = "tui";
 
 /// One reminder that fell due, as `calendar.reminder` carries it and
@@ -42,10 +43,16 @@ pub struct CalendarReminder {
     pub online_meeting_url: Option<String>,
     /// The event's reminder setting, in minutes before the start.
     pub minutes_before: u32,
-    /// Which kind of client raises the system notification: [`PRESENTER_GUI`]
-    /// when a desktop app is connected, else [`PRESENTER_TUI`] when a TUI is,
-    /// else none; every client shows the reminder in its own window.
+    /// The kind of the connection that raises the system notification:
+    /// [`PRESENTER_GUI`] when a desktop app is connected, else
+    /// [`PRESENTER_TUI`] when a TUI is, else none; every client shows the
+    /// reminder in its own window.
     pub presenter: Option<String>,
+    /// That connection itself, as its `state.bootstrap` named it
+    /// (`connection`): the one client whose connection this is notifies, so
+    /// two clients of one kind raise one notification.
+    #[serde(default)]
+    pub presenter_connection: Option<u64>,
 }
 
 /// The `params` of `calendar.reminders`.

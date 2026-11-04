@@ -179,6 +179,10 @@ const CONTACTS: &str = include_str!("../../fixtures/contacts.json");
 const CONFIG: &str = include_str!("../../fixtures/config.json");
 const CONFIG_TOML: &str = include_str!("../../fixtures/config.toml");
 
+/// The connection id the fixture's `state.bootstrap` names, and the
+/// `presenter_connection` of the reminders it fires: this app presents them.
+const CONNECTION: u64 = 1;
+
 /// The daemon's dated log file the fixture writes and `diagnostic.log_path`
 /// names, under `<root>/logs/`.
 pub const FIXTURE_LOG_NAME: &str = "mailypoppins-2026-09-30.log";
@@ -646,6 +650,7 @@ impl State {
         let mut b = self.bootstrap.clone();
         b["instance_id"] = json!(self.instance_id());
         b["revision"] = json!(self.revision);
+        b["connection"] = json!(CONNECTION);
         let accounts: Vec<String> = self.messages.keys().cloned().collect();
         for account in accounts {
             b["snapshot"]["mailboxes"][&account] = Value::Array(self.mailbox_rows(&account));
@@ -5599,10 +5604,8 @@ impl Fixture {
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 
-    /// Another window edited the signature `work`: a line appended to it and
-    /// its file, and the watcher's `signature.changed`.
     /// The first timed server event's reminder fell due, presented by this
-    /// app, as the daemon's `calendar.reminder` would say.
+    /// app's connection, as the daemon's `calendar.reminder` would say.
     fn simulate_reminder(&self) -> Result<()> {
         let mut s = self.state();
         let reminder = s
@@ -5619,6 +5622,7 @@ impl Fixture {
                     online_meeting_url: e.online_meeting_url.clone(),
                     minutes_before: e.reminder.unwrap_or(15),
                     presenter: Some(PRESENTER_GUI.into()),
+                    presenter_connection: Some(CONNECTION),
                 }),
                 CalendarEventTime::AllDay { .. } => None,
             })
@@ -5631,6 +5635,8 @@ impl Fixture {
         Ok(())
     }
 
+    /// Another window edited the signature `work`: a line appended to it and
+    /// its file, and the watcher's `signature.changed`.
     fn simulate_signature_changed(&self) -> Result<()> {
         let mut s = self.state();
         let current = s.signatures["signatures"]["work"]
@@ -6884,6 +6890,11 @@ mod tests {
         let fired = next_event(&rx);
         assert_eq!(fired.kind, "calendar.reminder");
         assert_eq!(fired.payload["presenter"], "gui");
+        assert_eq!(fired.payload["presenter_connection"], CONNECTION);
+        assert_eq!(
+            f.call("state.bootstrap", json!({})).unwrap()["connection"],
+            CONNECTION
+        );
         let (account, event) = (
             fired.payload["account"].as_str().unwrap().to_string(),
             fired.payload["event"].as_str().unwrap().to_string(),

@@ -1183,6 +1183,7 @@ export function simulateReminder(): CalendarReminder {
     ...(e.location ? { location: e.location } : {}),
     minutes_before: e.reminder ?? 15,
     presenter: "gui",
+    presenter_connection: 1,
   };
   mock.reminders = [...mock.reminders.filter((r) => !(r.account === reminder.account && r.event === reminder.event)), reminder];
   emitEnvelope("calendar.reminder", reminder);

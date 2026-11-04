@@ -401,15 +401,19 @@ Any other refusal, the Graph one first of all, comes back as a `protocol` error 
 
 ## The reminders
 
-The daemon owns the calendar reminders (PERSO-255): it fires each at its due minute as `calendar.reminder` with a `CalendarReminder` (`account`, `event`, `summary`, `start`, `all_day`, `location`, `online_meeting_url`, `minutes_before`, `presenter`), keeps what was dismissed or snoozed, and names the `presenter`, `gui` whenever this app is connected.
+The daemon owns the calendar reminders (PERSO-255) and fires each at its due minute as `calendar.reminder`, a `CalendarReminder` (`account`, `event`, `summary`, `start`, `all_day`, `location`, `online_meeting_url`, `minutes_before`, `presenter`, `presenter_connection`).
+It keeps what was dismissed or snoozed, and while this app is connected and bootstrapped its `presenter` is `gui` and its `presenter_connection` is this app's connection, the `connection` its `state.bootstrap` answered.
 `calendar_reminders` is `calendar.reminders {}`: the reminders that fired and wait, every account's, the earliest start first.
-`reminder_dismiss` is `calendar.dismiss_reminder {account, event}` and `reminder_snooze` is `calendar.snooze_reminder {account, event, minutes}`, commands that answer at once; the daemon publishes `calendar.reminders_changed {account}`, which reads the banner again in every window, and an event without a reminder is the daemon's `-32602` sentence.
+`reminder_dismiss` is `calendar.dismiss_reminder {account, event}` and `reminder_snooze` is `calendar.snooze_reminder {account, event, minutes}`, commands that answer at once.
+The daemon then publishes `calendar.reminders_changed {account}`, and every window reads its banner again.
+An event without a reminder is refused with the daemon's `-32602` sentence.
 The three methods are in `REQUIRED_CAPABILITIES`.
 
-`src/reminders.rs` raises the system notification from Rust through `tauri-plugin-notification`, so the webview holds no `notification:*` permission: the session's observer hands it every applied event, and a `calendar.reminder` whose `presenter` is `gui` is notified, titled by the summary, its body when and where (`mp_client::format::reminder_notification`).
+`src/reminders.rs` raises the system notification from Rust through `tauri-plugin-notification`, so the webview holds no `notification:*` permission: the session's observer hands it every applied event with this app's connection id (`SessionHandle::connection`, kept from the latest bootstrap), and a `calendar.reminder` whose `presenter_connection` is that id is notified, titled by the summary, its body when and where (`mp_client::format::reminder_notification`).
 At launch the reminders already waiting are notified once, on a thread that waits for the session.
 The notification has no action buttons: the plugin delivers through macOS's `NSUserNotificationCenter`, where two buttons collapse into an "Options" menu and a click is lost once the app restarts.
 A click on its body arrives as the action `tap` with the `ReminderTarget` (`account`, `event`, `start`) in its extra payload; the layer shows, unminimizes and focuses the main window and emits the app event `reminder:open` with it, and the frontend opens the event in the Calendar view.
+The palette's test notification names no account, so a click on it only brings the window forward.
 Snooze and Dismiss live in the frontend's reminder banner, which lists every waiting reminder over every view, since macOS shows no notification banner for the frontmost app.
 `reminder_notify_test` raises the notification of a made-up reminder five minutes out, the palette's "Show a test reminder notification", which tells whether macOS shows this app's notifications; nothing reaches the daemon.
 
@@ -1153,7 +1157,7 @@ With a `candidate` it signs that block in instead (refusing one named otherwise 
 Otherwise it starts an operation and 0.3 s later publishes its one `operation.progress`, phase `device_code`, message `https://microsoft.com/devicelogin FXTR-CODE`, which `operation.status` keeps as its `progress`.
 The sign-in then waits: `oauth_approve` settles every waiting one with `{stored: true, account, kind: "graph", key: "oauth2-token-<account>"}`, and `oauth_deny` fails it with the provider's "Authorization was declined by the user.".
 
-`reminder` fires the reminder of the first timed server event, presented by the app (`presenter: "gui"`), and `calendar.reminders` lists it until `calendar.dismiss_reminder` or `calendar.snooze_reminder` takes it off with `calendar.reminders_changed`.
+`reminder` fires the reminder of the first timed server event, presented by the app (`presenter: "gui"`, `presenter_connection` the fixture bootstrap's `connection`, `1`), and `calendar.reminders` lists it until `calendar.dismiss_reminder` or `calendar.snooze_reminder` takes it off with `calendar.reminders_changed`.
 Either is an error when no sign-in waits; `operation.cancel` ends one `cancelled`, and `restart` forgets it.
 
 `config.probe` refuses as the daemon does: an unknown parameter, a missing `account`, an unknown `check`, a check the account cannot take, a password account with no `password`, a Graph candidate named like a configured account with no staged sign-in, and a candidate naming the retired `oauth2` mode, with the daemon's sentence on how to switch.

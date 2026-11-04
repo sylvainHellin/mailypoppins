@@ -412,6 +412,10 @@ pub struct Bootstrap {
     /// What this connection agreed on at its handshake.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The daemon's id of this connection, which a `calendar.reminder`
+    /// names as its `presenter_connection` when this client is to notify.
+    #[serde(default)]
+    pub connection: u64,
     /// The state itself.
     #[serde(default)]
     pub snapshot: Snapshot,
@@ -446,6 +450,7 @@ mod tests {
 
         assert_eq!(bootstrap.instance_id, "01J8Z6Q9X4V3N2M1K0H7G5F4D3");
         assert_eq!(bootstrap.revision, 4217);
+        assert_eq!(bootstrap.connection, 7);
         assert!(bootstrap.has_capability("state.bootstrap"));
         assert!(!bootstrap.has_capability("draft.send"));
 
@@ -575,6 +580,7 @@ mod tests {
             instance_id: "abcd".to_string(),
             revision: 7,
             capabilities: vec!["state.bootstrap".to_string()],
+            connection: 3,
             snapshot: Snapshot {
                 accounts: vec![AccountSnapshot {
                     name: "work".to_string(),

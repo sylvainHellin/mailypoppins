@@ -31,8 +31,15 @@ online_meeting_url?: string,
  */
 minutes_before: number,
 /**
- * Which kind of client raises the system notification: [`PRESENTER_GUI`]
- * when a desktop app is connected, else [`PRESENTER_TUI`] when a TUI is,
- * else none; every client shows the reminder in its own window.
+ * The kind of the connection that raises the system notification:
+ * [`PRESENTER_GUI`] when a desktop app is connected, else
+ * [`PRESENTER_TUI`] when a TUI is, else none; every client shows the
+ * reminder in its own window.
  */
-presenter: string | null, };
+presenter: string | null,
+/**
+ * That connection itself, as its `state.bootstrap` named it
+ * (`connection`): the one client whose connection this is notifies, so
+ * two clients of one kind raise one notification.
+ */
+presenter_connection: number | null, };

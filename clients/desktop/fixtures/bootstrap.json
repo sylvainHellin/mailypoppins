@@ -1,6 +1,7 @@
 {
   "instance_id": "fixture-instance-1",
   "revision": 100,
+  "connection": 1,
   "capabilities": [
     "state.bootstrap",
     "account.list",

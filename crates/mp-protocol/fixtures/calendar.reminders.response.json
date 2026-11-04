@@ -11,6 +11,7 @@
         "minutes_before": 15,
         "online_meeting_url": "https://teams.microsoft.com/l/meetup-join/abc",
         "presenter": "gui",
+        "presenter_connection": 7,
         "start": "2026-07-09T07:00:00Z",
         "summary": "Project review"
       }

@@ -709,6 +709,7 @@ mod reminder_tests {
             online_meeting_url: None,
             minutes_before: 15,
             presenter: None,
+            presenter_connection: None,
         }
     }
 

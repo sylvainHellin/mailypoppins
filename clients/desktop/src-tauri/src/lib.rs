@@ -181,8 +181,9 @@ pub fn run() {
             // notified and a click on it is reported (src/reminders.rs).
             reminders::install(app.handle());
             let notify_app = app.handle().clone();
+            let notify_session = setup_session.clone();
             setup_session.observe(Box::new(move |event| {
-                reminders::on_event(&notify_app, event)
+                reminders::on_event(&notify_app, notify_session.connection(), event)
             }));
             setup_session.start();
             reminders::notify_waiting(app.handle(), setup_session.clone());

@@ -134,7 +134,7 @@ impl ReminderMethod {
         };
         let now = self.reminders.now();
         let viewer = crate::calendar_view::local_zone();
-        let presenter = self.canonical.presenter().map(str::to_string);
+        let presenter = self.canonical.presenter();
         let mut reminders = Vec::new();
         for account in selected {
             let store = open_store(&account.name)?;
@@ -144,7 +144,7 @@ impl ReminderMethod {
         }
         reminders.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.event.cmp(&b.event)));
         for reminder in &mut reminders {
-            reminder.presenter = presenter.clone();
+            engine::present(reminder, presenter);
         }
         serde_json::to_value(CalendarRemindersResult { reminders })
             .map_err(|e| internal(format!("serialising an answer: {e}")))

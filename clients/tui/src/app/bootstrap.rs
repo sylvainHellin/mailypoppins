@@ -153,6 +153,10 @@ impl App {
         // socket was down, which no event would ever remove.
         self.holds = bootstrap.snapshot.holds.clone();
         self.hold = self.holds.last().cloned();
+        // The connection this snapshot was taken on, which a reminder names
+        // when this TUI is the one to notify (PERSO-255); `0` is a daemon
+        // that does not say.
+        self.connection = (bootstrap.connection != 0).then_some(bootstrap.connection);
         if orphaned > 0 {
             // The daemon that was running them is gone, so the spinner they
             // are holding up would never come down.
@@ -443,6 +447,7 @@ mod tests {
             instance_id: "test".to_string(),
             revision: 1,
             capabilities: vec!["state.bootstrap".to_string()],
+            connection: 1,
             snapshot: Snapshot {
                 accounts: vec![AccountSnapshot {
                     name: name.to_string(),

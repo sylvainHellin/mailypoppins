@@ -24,6 +24,11 @@ revision: number,
  */
 capabilities: Array<string>,
 /**
+ * The daemon's id of this connection, which a `calendar.reminder`
+ * names as its `presenter_connection` when this client is to notify.
+ */
+connection: number,
+/**
  * The state itself.
  */
 snapshot: Snapshot, };

@@ -297,6 +297,10 @@ struct Endpoint {
     /// The kind of client on the connection, once its `initialize` settled
     /// it: what elects the reminders' presenter ([`CanonicalState::presenter`]).
     kind: Option<ClientKind>,
+    /// The order of the connection's latest `bootstrap` among every
+    /// connection's, `0` before its first: the most recent one of a kind is
+    /// the presenter.
+    bootstrapped: u64,
 }
 
 /// One connection's place in the fan-out, owned by its [`EventQueue`].
@@ -357,6 +361,9 @@ struct Inner {
     drafts: BTreeMap<String, Vec<DraftView>>,
     outbox: BTreeMap<String, OutboxView>,
     subscribers: BTreeMap<ConnectionId, Endpoint>,
+    /// How many bootstraps attached a connection, which orders them for
+    /// [`CanonicalState::presenter`].
+    bootstraps: u64,
 }
 
 impl CanonicalState {
@@ -372,6 +379,7 @@ impl CanonicalState {
             drafts: BTreeMap::new(),
             outbox: BTreeMap::new(),
             subscribers: BTreeMap::new(),
+            bootstraps: 0,
         };
         for seed in accounts {
             inner.mailboxes.insert(
@@ -673,6 +681,7 @@ impl CanonicalState {
                 ready: Arc::clone(&ready),
                 attached: false,
                 kind: None,
+                bootstrapped: 0,
             },
         );
         EventQueue {
@@ -694,25 +703,26 @@ impl CanonicalState {
         }
     }
 
-    /// Which kind of client raises a reminder's system notification
-    /// (PERSO-255): `gui` when a bootstrapped desktop app is connected, else
-    /// `tui` when a bootstrapped TUI is, else none. Every client shows the
-    /// reminder in its own window; only the presenter's kind notifies, so a
-    /// desktop app and a TUI open together raise one notification.
-    pub fn presenter(&self) -> Option<&'static str> {
+    /// The one connection that raises a reminder's system notification
+    /// (PERSO-255), with its kind's wire name: the most recently bootstrapped
+    /// desktop app, else the most recently bootstrapped TUI, else none. Every
+    /// client shows the reminder in its own window; only the presenter
+    /// notifies, so two TUIs, or a desktop app and a TUI, open together raise
+    /// one notification.
+    pub fn presenter(&self) -> Option<(ConnectionId, &'static str)> {
         let inner = lock(&self.inner);
-        let attached = |kind: ClientKind| {
+        let latest = |kind: ClientKind| {
             inner
                 .subscribers
-                .values()
-                .any(|subscriber| subscriber.attached && subscriber.kind == Some(kind))
+                .iter()
+                .filter(|(_, subscriber)| subscriber.attached && subscriber.kind == Some(kind))
+                .max_by_key(|(_, subscriber)| subscriber.bootstrapped)
+                .map(|(conn, _)| *conn)
         };
-        if attached(ClientKind::Gui) {
-            Some(mp_protocol::reminder::PRESENTER_GUI)
-        } else if attached(ClientKind::Tui) {
-            Some(mp_protocol::reminder::PRESENTER_TUI)
+        if let Some(conn) = latest(ClientKind::Gui) {
+            Some((conn, mp_protocol::reminder::PRESENTER_GUI))
         } else {
-            None
+            latest(ClientKind::Tui).map(|conn| (conn, mp_protocol::reminder::PRESENTER_TUI))
         }
     }
 
@@ -734,8 +744,14 @@ impl CanonicalState {
         let _gate = self.gate.enter();
 
         self.fire(Boundary::BeforeRegister);
-        if let Some(subscriber) = lock(&self.inner).subscribers.get_mut(&conn) {
-            subscriber.attached = true;
+        {
+            let mut inner = lock(&self.inner);
+            inner.bootstraps += 1;
+            let order = inner.bootstraps;
+            if let Some(subscriber) = inner.subscribers.get_mut(&conn) {
+                subscriber.attached = true;
+                subscriber.bootstrapped = order;
+            }
         }
         self.fire(Boundary::AfterRegister);
 
