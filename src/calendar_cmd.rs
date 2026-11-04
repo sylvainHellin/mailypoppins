@@ -15,7 +15,9 @@
 use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use chrono_tz::Tz;
 use colored::*;
-use mp_protocol::calendar::{CalendarEvent, CalendarEventTime, CalendarInfo, CalendarViewParams};
+use mp_protocol::calendar::{
+    CalendarEvent, CalendarEventTime, CalendarInfo, CalendarTimeSlot, CalendarViewParams,
+};
 use serde_json::Value;
 
 /// The line printed before one account's fold.
@@ -512,6 +514,35 @@ pub fn render_event(event: &CalendarEvent, zone: Tz, names: &CalendarNames) -> S
         out.push('\n');
     }
     out
+}
+
+/// The time `address` proposed for `event`, which `mp event update
+/// --use-proposal` moves the meeting to (PERSO-255), or why there is none:
+/// an address that is no attendee, or an attendee who proposed nothing.
+pub fn proposal_of(event: &CalendarEvent, address: &str) -> Result<CalendarTimeSlot, String> {
+    let address = address.trim();
+    let attendee = event
+        .attendees
+        .iter()
+        .find(|a| a.email.eq_ignore_ascii_case(address))
+        .ok_or_else(|| format!("{address} is not an attendee of {}", event.summary))?;
+    attendee.proposed_time.clone().ok_or_else(|| {
+        let others: Vec<&str> = event
+            .attendees
+            .iter()
+            .filter(|a| a.proposed_time.is_some())
+            .map(|a| a.email.as_str())
+            .collect();
+        if others.is_empty() {
+            format!("Nobody proposed a new time for {}", event.summary)
+        } else {
+            format!(
+                "{address} proposed no new time for {}; {} did",
+                event.summary,
+                others.join(", ")
+            )
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1208,30 @@ mod tests {
                  \x20 online      Teams meeting  https://teams.example/l/jf\n"
             ),
             "{card}"
+        );
+
+        // The organizer takes Bob's proposal by his address, in any case.
+        let slot = proposal_of(&meeting, " BOB@example.com").unwrap();
+        assert_eq!(slot.start, "2026-07-09T12:00:00Z");
+        assert_eq!(
+            proposal_of(&meeting, "ada@example.com").unwrap_err(),
+            "ada@example.com is not an attendee of Jour fixe"
+        );
+        meeting.attendees.push(CalendarAttendee {
+            name: None,
+            email: "ada@example.com".into(),
+            role: "optional".into(),
+            status: "accepted".into(),
+            proposed_time: None,
+        });
+        assert_eq!(
+            proposal_of(&meeting, "ada@example.com").unwrap_err(),
+            "ada@example.com proposed no new time for Jour fixe; bob@example.com did"
+        );
+        meeting.attendees[0].proposed_time = None;
+        assert_eq!(
+            proposal_of(&meeting, "ada@example.com").unwrap_err(),
+            "Nobody proposed a new time for Jour fixe"
         );
     }
 

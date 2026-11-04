@@ -1,5 +1,5 @@
 {
-  "_comment": "The server calendar the fixture serves (PERSO-200): calendar.list, calendar.view, event.get, event.respond and the event changes. The week of 2099-10-12 holds a timed event, overlapping ones, an all-day one and the first occurrence of a weekly series whose second, moved apart from the series, falls on 2099-10-20, and a Teams design review Robin proposed another time for; imip:1008 is work's steering committee, the invitation mail of messages.json. invites names the server event message.invite answers as event_id on an account with a backend. series holds that weekly series' master, which event.get answers for it and a change in the series scope writes to, and its rule.",
+  "_comment": "The server calendar the fixture serves (PERSO-200): calendar.list, calendar.view, event.get, event.respond and the event changes. The week of 2099-10-12 holds a timed event, overlapping ones, an all-day one and the first occurrence of a weekly series whose second, moved apart from the series, falls on 2099-10-20, a Teams design review Robin proposed another time for, and the user's 1:1 with Robin, who proposed another time too; imip:1008 is work's steering committee, the invitation mail of messages.json. invites names the server event message.invite answers as event_id on an account with a backend. series holds that weekly series' master, which event.get answers for it and a change in the series scope writes to, and its rule.",
   "calendars": [
     {
       "account": "home",
@@ -13,6 +13,7 @@
       "features": [
         "write",
         "online-meeting",
+        "propose-time",
         "free-busy"
       ]
     },
@@ -28,6 +29,7 @@
       "features": [
         "write",
         "online-meeting",
+        "propose-time",
         "free-busy"
       ]
     },
@@ -209,7 +211,11 @@
           "name": "Robin Roe",
           "email": "robin@example.com",
           "role": "required",
-          "status": "accepted"
+          "status": "tentative",
+          "proposed_time": {
+            "start": "2099-10-14T12:00:00Z",
+            "end": "2099-10-14T12:30:00Z"
+          }
         }
       ],
       "own_response": "organizer",

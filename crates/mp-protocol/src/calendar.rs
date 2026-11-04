@@ -479,6 +479,35 @@ pub struct EventRespondParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub send_response: Option<bool>,
+    /// A new time to propose to the organizer, with `tentative` or
+    /// `decline` on a server event whose organizer accepts proposals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub proposed_time: Option<EventProposedTime>,
+}
+
+/// The time an answer proposes instead of the event's, as a client types
+/// it; the daemon reads it against the event's current time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventProposedTime {
+    /// A time (`2026-11-18T14:00`, read in `zone`, or RFC 3339 with an
+    /// offset), or a bare date (`2026-11-18`) for whole days.
+    pub start: String,
+    /// The same form as `start`, a bare date the last day, included.
+    /// Exclusive with `duration`; neither keeps the event's length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub end: Option<String>,
+    /// `1h30m` or ISO 8601 `PT1H30M`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub duration: Option<String>,
+    /// The IANA zone a time without an offset is read in; the event's own
+    /// zone when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub zone: Option<String>,
 }
 
 /// What a settled `event.respond` reports.
@@ -497,6 +526,10 @@ pub struct EventRespondResult {
     /// the answer with `send_response`, the delivery of the iMIP reply
     /// otherwise, `false` when nothing was sent.
     pub delivered: bool,
+    /// The time the answer proposed, as UTC instants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub proposed_time: Option<CalendarTimeSlot>,
 }
 
 /// One person or room a new event invites.
@@ -973,7 +1006,11 @@ mod tests {
             "../fixtures/event.respond.request.json"
         )))
         .expect("event.respond params");
-        assert_eq!(respond.send_response, Some(false));
+        assert_eq!(respond.send_response, Some(true));
+        let proposed = respond.proposed_time.expect("a proposed time");
+        assert_eq!(proposed.start, "2026-11-18T15:00");
+        assert_eq!(proposed.zone.as_deref(), Some("Europe/Berlin"));
+        assert_eq!(proposed.duration, None);
         let started = result(include_str!("../fixtures/event.respond.response.json"));
         assert!(started["operation_id"].is_string());
 

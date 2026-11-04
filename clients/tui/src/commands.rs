@@ -353,16 +353,17 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             choice,
             comment,
             send_response,
+            proposed,
         } => {
-            respond(
-                app,
-                commands,
+            let params = mp_client::queries::event_respond_params(
                 account,
                 event,
-                *choice,
+                choice.wire(),
                 comment.as_deref(),
                 *send_response,
+                proposed.as_ref(),
             );
+            respond(app, commands, account, *choice, params);
             true
         }
         Action::RefreshContacts => {
@@ -759,15 +760,14 @@ fn send_approved(app: &mut App, commands: &dyn Queries) {
 /// `imip:<row_id>`. Which accounts can answer and how is the daemon's call,
 /// so nothing is refused here: a Graph account answers through its server
 /// calendar, an iMIP account by reply mail, and the daemon words its own
-/// refusal for anything else.
+/// refusal for anything else, a proposed time's included. `params` are the
+/// answer's, built by [`mp_client::queries::event_respond_params`].
 fn respond(
     app: &mut App,
     commands: &dyn Queries,
     account: &str,
-    event: &str,
     choice: RsvpChoice,
-    comment: Option<&str>,
-    send_response: bool,
+    params: Value,
 ) {
     let account_index = app
         .accounts
@@ -782,13 +782,7 @@ fn respond(
         app,
         commands,
         "event.respond",
-        mp_client::queries::event_respond_params(
-            account,
-            event,
-            choice.wire(),
-            comment,
-            send_response,
-        ),
+        params,
         Awaited::Rsvp { account_index },
     );
 }
@@ -1109,6 +1103,10 @@ fn rsvp_line(settled: &Value) -> Result<String, String> {
         "accept" => "Accepted",
         "tentative" => "Tentatively accepted",
         _ => "Declined",
+    };
+    let answer = match outcome.proposed_time {
+        Some(_) => format!("{answer}, proposing a new time"),
+        None => answer.to_string(),
     };
     match (outcome.send_response, outcome.delivered) {
         (_, true) => Ok(format!("{answer}; the organizer was told")),

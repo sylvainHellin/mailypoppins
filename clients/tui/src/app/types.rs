@@ -1967,6 +1967,28 @@ pub struct RemindersOverlay {
 pub struct EventCardOverlay {
     pub event: CalendarEvent,
     pub scroll: u16,
+    /// Which attendee's proposed time `p` takes, counted among the
+    /// proposals (PERSO-255); `Tab` moves it to the next.
+    pub proposal: usize,
+}
+
+impl EventCardOverlay {
+    pub fn new(event: CalendarEvent) -> Self {
+        Self {
+            event,
+            scroll: 0,
+            proposal: 0,
+        }
+    }
+
+    /// The attendees who proposed a new time, in the card's order.
+    pub fn proposals(&self) -> Vec<&mp_protocol::calendar::CalendarAttendee> {
+        self.event
+            .attendees
+            .iter()
+            .filter(|attendee| attendee.proposed_time.is_some())
+            .collect()
+    }
 }
 
 /// The `D` confirmation of the Calendar view (PERSO-255): cancel a meeting
@@ -2196,6 +2218,8 @@ pub enum Action {
         choice: RsvpChoice,
         comment: Option<String>,
         send_response: bool,
+        /// The new time a tentative or a decline proposes (PERSO-255).
+        proposed: Option<mp_protocol::calendar::EventProposedTime>,
     },
     /// Compose a new draft to a contact (#0033). Opens the compose wizard
     /// (Overlay) seeded with `to`; the overlay floats above whatever view is
@@ -2416,13 +2440,37 @@ impl RsvpChoice {
 }
 
 /// The rows of the respond overlay (PERSO-200), in the order `Tab` walks
-/// them: the three answers, the comment line, and the send-response toggle
-/// on a server event.
+/// them: the three answers, the comment line, the proposed start and end of
+/// a tentative or a decline that may propose a new time (PERSO-255), and the
+/// send-response toggle on a server event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RsvpRow {
     Choice(usize),
     Comment,
+    ProposeStart,
+    ProposeEnd,
     SendResponse,
+}
+
+impl RsvpRow {
+    /// The section `Tab` jumps between: the answers, the comment, the
+    /// proposed time, the toggle.
+    pub fn section(self) -> usize {
+        match self {
+            RsvpRow::Choice(_) => 0,
+            RsvpRow::Comment => 1,
+            RsvpRow::ProposeStart | RsvpRow::ProposeEnd => 2,
+            RsvpRow::SendResponse => 3,
+        }
+    }
+
+    /// Whether the row takes typed text.
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            RsvpRow::Comment | RsvpRow::ProposeStart | RsvpRow::ProposeEnd
+        )
+    }
 }
 
 /// State for the respond overlay opened with `V` on a received invite or an
@@ -2449,10 +2497,23 @@ pub struct RsvpOverlay {
     /// The event is a server event, so the send-response toggle is shown;
     /// an invitation mail's answer is a reply mail and always goes out.
     pub server: bool,
+    /// The answer may propose a new time: a server event whose organizer,
+    /// as far as the client knows, accepts proposals (PERSO-255).
+    pub propose: bool,
+    /// The proposed start as typed, empty for no proposal: a time
+    /// (`2026-11-18T15:00`) read in `zone`, or a bare date.
+    pub proposed_start: String,
+    /// The proposed end, empty to keep the event's length.
+    pub proposed_end: String,
+    /// The IANA zone the proposed times are read in: the Calendar view's.
+    pub zone: String,
+    /// Why `Enter` did not answer, shown under the rows.
+    pub error: Option<String>,
 }
 
 impl RsvpOverlay {
-    /// A fresh overlay on Accept, with no comment and the response sent.
+    /// A fresh overlay on Accept, with no comment and the response sent; a
+    /// server event may propose a new time until the caller says otherwise.
     pub fn new(account: String, event: String, summary: String) -> Self {
         let server = !event.starts_with(mp_protocol::calendar::IMIP_EVENT_PREFIX);
         Self {
@@ -2464,10 +2525,22 @@ impl RsvpOverlay {
             comment: String::new(),
             send_response: true,
             server,
+            propose: server,
+            proposed_start: String::new(),
+            proposed_end: String::new(),
+            zone: String::new(),
+            error: None,
         }
     }
 
-    /// The rows `Tab` walks, the toggle only on a server event.
+    /// Whether the proposed-time rows show: on a tentative or a decline of
+    /// an event that may propose one.
+    pub fn proposing(&self) -> bool {
+        self.propose && RsvpChoice::at(self.selected) != RsvpChoice::Accept
+    }
+
+    /// The rows `Tab` walks: the proposed time on a tentative or a decline
+    /// that may propose one, the toggle only on a server event.
     pub fn rows(&self) -> Vec<RsvpRow> {
         let mut rows = vec![
             RsvpRow::Choice(0),
@@ -2475,10 +2548,56 @@ impl RsvpOverlay {
             RsvpRow::Choice(2),
             RsvpRow::Comment,
         ];
+        if self.proposing() {
+            rows.extend([RsvpRow::ProposeStart, RsvpRow::ProposeEnd]);
+        }
         if self.server {
             rows.push(RsvpRow::SendResponse);
         }
         rows
+    }
+
+    /// The text of the row under the cursor, when it takes typing.
+    pub fn text_mut(&mut self) -> Option<&mut String> {
+        match self.row {
+            RsvpRow::Comment => Some(&mut self.comment),
+            RsvpRow::ProposeStart => Some(&mut self.proposed_start),
+            RsvpRow::ProposeEnd => Some(&mut self.proposed_end),
+            RsvpRow::Choice(_) | RsvpRow::SendResponse => None,
+        }
+    }
+
+    /// The new time the answer proposes, `None` with no start typed or on
+    /// an accept; refused when the organizer would not be told.
+    pub fn proposal(&self) -> Result<Option<mp_protocol::calendar::EventProposedTime>, String> {
+        let start = self.proposed_start.trim();
+        if !self.proposing() || start.is_empty() {
+            return Ok(None);
+        }
+        if !self.send_response {
+            return Err("A proposed time needs Send response on".to_string());
+        }
+        let end = self.proposed_end.trim();
+        Ok(Some(mp_protocol::calendar::EventProposedTime {
+            start: start.to_string(),
+            end: (!end.is_empty()).then(|| end.to_string()),
+            duration: None,
+            zone: (!self.zone.is_empty()).then(|| self.zone.clone()),
+        }))
+    }
+
+    /// The comment the answer carries, `None` when blank; refused when the
+    /// organizer would not be told, as the daemon refuses it (Graph takes
+    /// no comment on an answer it does not send).
+    pub fn answer_comment(&self) -> Result<Option<String>, String> {
+        let comment = self.comment.trim();
+        if comment.is_empty() {
+            return Ok(None);
+        }
+        if self.server && !self.send_response {
+            return Err("A comment needs Send response on".to_string());
+        }
+        Ok(Some(comment.to_string()))
     }
 }
 

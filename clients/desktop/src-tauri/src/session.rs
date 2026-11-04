@@ -1477,6 +1477,7 @@ mod tests {
             "accept",
             None,
             None,
+            None,
         )
         .expect("started");
         let id = started.operation_id;
@@ -1517,6 +1518,7 @@ mod tests {
             "decline",
             None,
             Some(false),
+            None,
         )
         .expect("started");
         fixture.simulate("restart").expect("restart");
@@ -1688,6 +1690,7 @@ mod tests {
                     "work",
                     &format!("imip:{}", crate::fixture::INVITE_ROW),
                     "accept",
+                    None,
                     None,
                     None,
                 )

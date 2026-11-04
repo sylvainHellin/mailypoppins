@@ -512,6 +512,7 @@ Visibility is filtered here, from `calendar_prefs`, for server calendars and `im
 
 `event.respond` (`src/daemon/methods/calendar.rs`) routes on the event id.
 A server event is answered through the account's backend, Graph's `accept`, `tentativelyAccept` or `decline` with the comment and `sendResponse`, and the account's calendar is synced at once.
+A comment with `send_response: false` is refused before the backend is reached, since Graph answers that pair with HTTP 400 and an answer nobody is told of has no reader for it.
 An invitation mail's event (`imip:<row_id>`) is answered with the iMIP reply `calendar.rsvp` sends, over SMTP through the durable outbox, the comment following the reply's body; `send_response: false` is refused there, because the iMIP path reads the user's answer back from the reply mail it sent.
 `message.invite` names an invitation mail's server event (`event_id`) on an account with a backend, so the reader's invitation card answers the server event in its place.
 The CLI's `mp event respond` and `mp invite`, the TUI's respond overlay and the desktop app's event card all answer through `event.respond`; `calendar.rsvp` stays as the iMIP path's own address.

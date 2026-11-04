@@ -23,7 +23,8 @@
 //!                             settles EventWriteResult
 //! event.get               {account, event}
 //!                             -> {account, event: CalendarEvent, series?}
-//! event.respond           {account, event, response, comment?, send_response?}
+//! event.respond           {account, event, response, comment?, send_response?,
+//!                          proposed_time?: EventProposedTime}
 //!                             -> {operation_id}
 //!                             settles EventRespondResult
 //! event.update            {account, event, scope?, fields: EventPatchParams}
@@ -59,6 +60,16 @@
 //! iMIP path's own address, though every client answers through `event.respond`.
 //! An answer through the backend is followed by an immediate calendar sync,
 //! and every answer that went through announces `calendar.changed`.
+//!
+//! A tentative or a decline may propose a new time (`proposed_time`), read
+//! against the cached event ([`crate::calendar_write::resolve_proposal`]) and
+//! sent with the answer. It is refused before an operation starts, `-32602`:
+//! with an accept, with `send_response: false`, on an invitation mail's event
+//! (mp builds no iCalendar `COUNTER`), on an event the cache does not hold,
+//! one that was cancelled, one the user organizes, one whose organizer
+//! accepts no proposals, and on a backend that cannot propose. A comment
+//! with `send_response: false` is refused the same way on every backend,
+//! since Graph takes no comment on an answer it does not send.
 //!
 //! `event.create` (PERSO-255) resolves the event a client typed and its
 //! calendar before an operation exists, and answers the operation id with
@@ -147,9 +158,10 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{
     CalendarChanged, CalendarEvent, CalendarInfo, CalendarListResult, CalendarRange,
-    CalendarViewParams, CalendarViewResult, EventCancelParams, EventCancelResult,
-    EventCreateParams, EventDeleteParams, EventDeleteResult, EventGetResult, EventRespondParams,
-    EventRespondResult, EventUpdateParams, EventUpdateResult, EventWriteResult, IMIP_CALENDAR_ID,
+    CalendarTimeSlot, CalendarViewParams, CalendarViewResult, EventCancelParams, EventCancelResult,
+    EventCreateParams, EventDeleteParams, EventDeleteResult, EventGetResult, EventProposedTime,
+    EventRespondParams, EventRespondResult, EventUpdateParams, EventUpdateResult, EventWriteResult,
+    IMIP_CALENDAR_ID,
 };
 use mp_protocol::events::KIND_CALENDAR_CHANGED;
 use mp_protocol::RpcError;
@@ -164,7 +176,10 @@ use crate::calendar_model::{
 use crate::calendar_view::{
     imip_row_id, local_zone, parse_zone, Sourced, ViewFilter, IMIP_CALENDAR_NAME,
 };
-use crate::calendar_write::{resolve_input, resolve_patch, EventInput, EventPatch, EventScope};
+use crate::calendar_write::{
+    resolve_input, resolve_patch, resolve_proposal, EventInput, EventPatch, EventScope,
+    ProposedTime,
+};
 use crate::config::{AccountConfig, AuthMethod};
 use crate::invite::Rsvp;
 use crate::reconcile::reconcile_account;
@@ -570,6 +585,7 @@ struct RespondWork {
     word: String,
     comment: Option<String>,
     send_response: bool,
+    proposed: Option<ProposedTime>,
 }
 
 impl Method for CalendarMethod {
@@ -1164,7 +1180,14 @@ fn plan_respond(
     only_params(
         "event.respond",
         params,
-        &["account", "comment", "event", "response", "send_response"],
+        &[
+            "account",
+            "comment",
+            "event",
+            "proposed_time",
+            "response",
+            "send_response",
+        ],
     )?;
     let request: EventRespondParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.respond: {e}")))?;
@@ -1176,9 +1199,15 @@ fn plan_respond(
         .comment
         .clone()
         .filter(|comment| !comment.trim().is_empty());
+    if request.proposed_time.is_some() && response == Response::Accept {
+        return Err(invalid_params(PROPOSAL_WITH_ACCEPT_REFUSAL));
+    }
 
     if let Some(row_id) = imip_row_id(&request.event) {
         refuse_graph_rsvp(&account)?;
+        if request.proposed_time.is_some() {
+            return Err(invalid_params(IMIP_PROPOSAL_REFUSAL));
+        }
         if !send_response {
             return Err(RpcError {
                 code: super::INVALID_PARAMS,
@@ -1221,6 +1250,18 @@ fn plan_respond(
     // A sign-in without the calendar scope is refused here, before an
     // operation exists, and without a call to the server.
     preflight_scope(&account).map_err(|e| backend_error(&name, e))?;
+    if !send_response && request.proposed_time.is_some() {
+        return Err(invalid_params(SILENT_PROPOSAL_REFUSAL));
+    }
+    // Graph refuses a comment on an answer it does not send (HTTP 400), and
+    // an answer nobody is told of has no one to read one.
+    if !send_response && comment.is_some() {
+        return Err(invalid_params(SILENT_COMMENT_REFUSAL));
+    }
+    let proposed = match &request.proposed_time {
+        Some(proposal) => Some(planned_proposal(&account, &request.event, proposal)?),
+        None => None,
+    };
     Ok(Work::Respond(Box::new(RespondWork {
         account,
         event: request.event,
@@ -1228,7 +1269,82 @@ fn plan_respond(
         word: request.response,
         comment,
         send_response,
+        proposed,
     })))
+}
+
+/// The refusal of a proposed time with an accept, which Graph takes no
+/// proposal on and which would agree to the time it proposes to move.
+pub const PROPOSAL_WITH_ACCEPT_REFUSAL: &str =
+    "A new time is proposed with tentative or decline, not with accept";
+
+/// The refusal of a proposed time that would not reach the organizer.
+pub const SILENT_PROPOSAL_REFUSAL: &str =
+    "A proposed time goes to the organizer, so it needs send_response; drop the proposal to \
+     answer without telling them";
+
+/// The refusal of a comment on an answer that would not reach the
+/// organizer.
+pub const SILENT_COMMENT_REFUSAL: &str =
+    "A comment goes to the organizer, so it needs send_response; drop the comment to answer \
+     without telling them";
+
+/// The refusal of a proposed time on an invitation mail's event: the iMIP
+/// path builds no iCalendar `COUNTER`.
+pub const IMIP_PROPOSAL_REFUSAL: &str =
+    "mp cannot propose a new time by mail yet (no iCalendar COUNTER); answer tentative or \
+     decline with a comment naming the time you suggest";
+
+/// The new time `proposal` names for the cached server event `id` of
+/// `account`, refused before an operation starts: an event the cache does
+/// not hold, one that was cancelled, one the user organizes, one whose
+/// organizer accepts no proposals, and a calendar whose backend cannot
+/// propose.
+fn planned_proposal(
+    account: &AccountConfig,
+    id: &str,
+    proposal: &EventProposedTime,
+) -> Result<ProposedTime, RpcError> {
+    let name = account.name.as_str();
+    let store = open_store(name)?;
+    let event = cache::get_event(&store, name, id)
+        .map_err(|e| server_error(name, &e))?
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "{name} has no event {id} to propose a new time for (not synced yet, or gone)"
+            ))
+        })?;
+    if event.cancelled {
+        return Err(invalid_params(format!(
+            "{} was cancelled by its organizer; there is no time to move",
+            event.summary
+        )));
+    }
+    if event.is_organizer {
+        return Err(invalid_params(format!(
+            "You organize {}; change its time with event.update instead of proposing one",
+            event.summary
+        )));
+    }
+    if !event.allow_new_time_proposals {
+        return Err(invalid_params(format!(
+            "The organizer of {} does not accept new time proposals",
+            event.summary
+        )));
+    }
+    let proposes = cache::list_calendars(&store, name)
+        .map_err(|e| server_error(name, &e))?
+        .into_iter()
+        .find(|calendar| calendar.id == event.calendar)
+        .is_some_and(|calendar| {
+            calendar_features(account, &calendar).contains(&CalendarFeature::ProposeTime)
+        });
+    if !proposes {
+        return Err(invalid_params(format!(
+            "The calendar backend of {name} cannot propose a new time"
+        )));
+    }
+    resolve_proposal(proposal, &event, local_zone()).map_err(invalid_params)
 }
 
 /// `ANO-4`: no iMIP reply from a Graph account, which sends no SMTP.
@@ -1635,10 +1751,15 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
         word,
         comment,
         send_response,
+        proposed,
     } = work;
     let name = account.name.clone();
     let token = handle.token.clone();
     let (answer_event, answer_comment) = (event.clone(), comment.clone());
+    let proposed_time = proposed.as_ref().map(|proposed| CalendarTimeSlot {
+        start: rfc3339(proposed.slot.start),
+        end: rfc3339(proposed.slot.end),
+    });
     let answered = off_thread("the event response", move || async move {
         let backend = backend_for(&account)
             .await?
@@ -1647,7 +1768,13 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
             return Ok(false);
         }
         backend
-            .respond(&answer_event, response, answer_comment, send_response)
+            .respond(
+                &answer_event,
+                response,
+                answer_comment,
+                send_response,
+                proposed,
+            )
             .await?;
         let synced = async {
             let store = Store::open(crate::config::store_path(&account.name))?;
@@ -1682,6 +1809,7 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
                     send_response,
                     via: "server".into(),
                     delivered: send_response,
+                    proposed_time,
                 },
             );
         }
@@ -1865,6 +1993,7 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
                         send_response: true,
                         via: "imip".into(),
                         delivered: outcome.send_result.any_succeeded(),
+                        proposed_time: None,
                     },
                 );
             }

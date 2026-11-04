@@ -3453,3 +3453,12 @@ The removal is recorded in `calendar_removed_events` in the same transaction as 
 ## A limit counted on UTC instants shifts by an hour across a DST change (2026-11-04, PERSO-255)
 
 A limit counted on UTC instants shifts by an hour across a DST change: count a user-facing range in the zone's calendar days, and keep a day of margin under a server limit that can only measure elapsed time.
+
+## A silent answer to a meeting carries neither a comment nor a proposal (2026-11-04, PERSO-255)
+
+Graph refuses `accept`, `tentativelyAccept` and `decline` with HTTP 400 when `sendResponse` is false and the body carries a `comment` or a `proposedNewTime` ("'SendResponse' must be true when 'Comment' is not null"), so the daemon refuses either pair before the call.
+
+## Exchange mails a proposed time as an iCalendar COUNTER (2026-11-04, PERSO-255)
+
+Exchange mails an attendee's proposal to the organizer as `METHOD:COUNTER`, written in the attendee mailbox's own zone with the instants exact and the original slot in `X-MS-OLK-ORIGINALSTART` and `X-MS-OLK-ORIGINALEND`.
+A decline that carries a proposal still removes the meeting from the attendee's calendar, as any decline does.

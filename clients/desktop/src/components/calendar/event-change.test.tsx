@@ -10,6 +10,8 @@ import {
   openEventScope,
   openEventSeriesForm,
   ORGANIZER_ONLY,
+  proposalDialogFor,
+  proposalRefusal,
   removeDialogFor,
   RESTARTED_REMOVE,
 } from "@/app/eventChange";
@@ -131,6 +133,57 @@ describe("the event change model", () => {
     expect(removeDialogFor(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars, "series")).toMatchObject({ cancel: true, scope: "series" });
     expect(removeDialogFor(event({ calendar: "ro" }), calendars)).toMatch(/takes no changes/);
     expect(editDialogFor(event({ id: "imip:7" }), calendars)).toMatch(/can only be answered/);
+  });
+});
+
+describe("taking a proposed time (PERSO-255)", () => {
+  it("opens the edit form at the proposal in this window's zone, which Save sends as the new time", () => {
+    const slot = { start: "2099-10-15T12:00:00Z", end: "2099-10-15T13:30:00Z" };
+    const dialog = proposalDialogFor(event(), calendars, slot);
+    if (typeof dialog === "string") throw new Error(dialog);
+    expect(dialog.fields.start).toBe("2099-10-15T14:00");
+    expect(dialog.fields.end).toBe("2099-10-15T15:30");
+    expect(changedFields(dialog, "Europe/Berlin")).toEqual({ start: "2099-10-15T14:00", end: "2099-10-15T15:30", all_day: false, zone: "Europe/Berlin" });
+    const holiday = proposalDialogFor(event({ time: { kind: "all-day", start: "2099-10-14", end: "2099-10-15" } }), calendars, slot);
+    if (typeof holiday === "string") throw new Error(holiday);
+    expect(holiday.fields.allDay).toBe(false);
+  });
+
+  it("refuses an attendee, an occurrence and a read-only calendar with the edit form's reasons", () => {
+    expect(proposalRefusal(event(), calendars)).toBeNull();
+    expect(proposalRefusal(event({ own_response: "accepted", is_organizer: false }), calendars)).toBe("Only the organizer takes a proposed time");
+    expect(proposalRefusal(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars)).toBe(
+      "Budget is part of a recurring series, which mp cannot change yet",
+    );
+    expect(proposalRefusal(event({ calendar: "ro" }), calendars)).toBe("The calendar Shared takes no changes from mp");
+  });
+
+  it("Use this time on the organizer's card opens the form at Robin's proposal, and Save sends event_update", async () => {
+    const r = await calendarOn("AAMkAD-robin");
+    const card = screen.getByRole("region", { name: "Event" });
+    expect(within(card).getByText(/Proposes Wed 14 Oct 2099, 14:00 to 14:30/)).toBeInTheDocument();
+    await r.user.click(within(card).getByRole("button", { name: "Use this time, proposed by Robin Roe" }));
+    const form = await screen.findByRole("dialog", { name: "Edit event" });
+    await r.user.click(within(form).getByRole("button", { name: /Save changes/ }));
+    await waitFor(() => expect(callsOf("event_update")).toHaveLength(1));
+    expect(callsOf("event_update")).toEqual([
+      {
+        params: {
+          account: "home",
+          event: "AAMkAD-robin",
+          fields: { start: "2099-10-14T14:00", end: "2099-10-14T14:30", all_day: false, zone: "Europe/Berlin" },
+        },
+      },
+    ]);
+    act(() => void settleEventChange());
+    await noticed("Updated 1:1 with Robin");
+  });
+
+  it("an attendee's card offers no Use this time", async () => {
+    await calendarOn("AAMkAD-design");
+    const card = screen.getByRole("region", { name: "Event" });
+    expect(within(card).getByText(/Proposes/)).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Use this time/ })).toBeNull();
   });
 });
 

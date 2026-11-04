@@ -71,6 +71,7 @@ fn export_into(dir: &Path) -> usize {
         calendar::CalendarViewResult,
         calendar::EventGetResult,
         calendar::EventRespondParams,
+        calendar::EventProposedTime,
         calendar::EventRespondResult,
         calendar::EventAttendeeInput,
         calendar::EventInputParams,

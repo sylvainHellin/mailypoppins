@@ -1775,7 +1775,9 @@ impl App {
             )
         });
         let account = self.account_config.name.clone();
-        self.overlay = Overlay::Rsvp(RsvpOverlay::new(account, event_id, summary));
+        let mut overlay = RsvpOverlay::new(account, event_id, summary);
+        overlay.zone = self.calendar_view.zone.name().to_string();
+        self.overlay = Overlay::Rsvp(overlay);
     }
 
     /// Build and open the conversation overlay for the cursor message (#0008).
@@ -1895,42 +1897,50 @@ impl App {
         None
     }
 
-    /// The respond overlay's keys (#0029, PERSO-200). The arrows walk every
-    /// row (the answers, the comment, the send-response toggle), `Tab` and
-    /// `Shift+Tab` jump between those three sections keeping the answer; off
-    /// the comment `j`/`k` walk too and `a`/`t`/`d` pick an answer; on the
-    /// comment every character is typed; `Space` flips the toggle; `Enter`
-    /// answers from any row and `Esc` cancels.
+    /// The respond overlay's keys (#0029, PERSO-200, PERSO-255). The arrows
+    /// walk every row (the answers, the comment, the proposed start and end
+    /// of a tentative or a decline, the send-response toggle), `Tab` and
+    /// `Shift+Tab` jump between those sections keeping the answer; off the
+    /// text rows `j`/`k` walk too and `a`/`t`/`d` pick an answer; on a text
+    /// row every character is typed; `Space` flips the toggle; `Enter`
+    /// answers from any row, unless the proposal or the comment would not
+    /// reach the organizer, which the overlay says until a key changes the
+    /// answer, the text or the toggle; `Esc` cancels.
     fn handle_rsvp_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
         let overlay = self.rsvp_overlay_mut()?;
         let rows = overlay.rows();
         let at = rows.iter().position(|row| *row == overlay.row).unwrap_or(0);
-        let typing = overlay.row == RsvpRow::Comment;
+        let typing = overlay.row.is_text();
         let step = |overlay: &mut RsvpOverlay, to: usize| {
             overlay.row = rows[to];
             if let RsvpRow::Choice(choice) = overlay.row {
                 overlay.selected = choice;
+                // Another answer may drop the proposal the error was about.
+                overlay.error = None;
             }
         };
-        // `Tab` jumps between the three sections (the answers, the comment,
-        // the toggle) and keeps the answer; the arrows walk every row.
-        let section = |row: RsvpRow| match row {
-            RsvpRow::Choice(_) => 0,
-            RsvpRow::Comment => 1,
-            RsvpRow::SendResponse => 2,
-        };
-        let current = section(overlay.row);
-        let last = section(rows[rows.len() - 1]);
-        let jump = |overlay: &mut RsvpOverlay, to: usize| {
-            overlay.row = match to {
-                0 => RsvpRow::Choice(overlay.selected),
-                1 => RsvpRow::Comment,
-                _ => RsvpRow::SendResponse,
+        // `Tab` jumps to the first row of the next or the previous section
+        // and keeps the answer; the arrows walk every row.
+        let current = overlay.row.section();
+        let jump = |overlay: &mut RsvpOverlay, forward: bool| {
+            let target = if forward {
+                rows.iter().find(|row| row.section() > current)
+            } else {
+                rows.iter()
+                    .filter(|row| row.section() < current)
+                    .map(|row| row.section())
+                    .max()
+                    .and_then(|section| rows.iter().find(|row| row.section() == section))
+            };
+            overlay.row = match target {
+                Some(RsvpRow::Choice(_)) => RsvpRow::Choice(overlay.selected),
+                Some(row) => *row,
+                None => overlay.row,
             };
         };
         match key.code {
-            KeyCode::Tab => jump(overlay, (current + 1).min(last)),
-            KeyCode::BackTab => jump(overlay, current.saturating_sub(1)),
+            KeyCode::Tab => jump(overlay, true),
+            KeyCode::BackTab => jump(overlay, false),
             KeyCode::Down => step(overlay, (at + 1).min(rows.len() - 1)),
             KeyCode::Up => step(overlay, at.saturating_sub(1)),
             KeyCode::Char('j') if !typing => step(overlay, (at + 1).min(rows.len() - 1)),
@@ -1940,23 +1950,42 @@ impl App {
             KeyCode::Char('d') if !typing => step(overlay, 2),
             KeyCode::Char(' ') if overlay.row == RsvpRow::SendResponse => {
                 overlay.send_response = !overlay.send_response;
+                overlay.error = None;
             }
-            KeyCode::Char(c) if typing => overlay.comment.push(c),
+            KeyCode::Char(c) if typing => {
+                if let Some(text) = overlay.text_mut() {
+                    text.push(c);
+                }
+                overlay.error = None;
+            }
             KeyCode::Backspace if typing => {
-                overlay.comment.pop();
+                if let Some(text) = overlay.text_mut() {
+                    text.pop();
+                }
+                overlay.error = None;
             }
             KeyCode::Enter => {
+                let checked = overlay
+                    .proposal()
+                    .and_then(|proposed| Ok((proposed, overlay.answer_comment()?)));
+                let (proposed, comment) = match checked {
+                    Ok(checked) => checked,
+                    Err(why) => {
+                        overlay.error = Some(why);
+                        return None;
+                    }
+                };
                 let Overlay::Rsvp(overlay) = std::mem::replace(&mut self.overlay, Overlay::None)
                 else {
                     return None;
                 };
-                let comment = overlay.comment.trim();
                 self.push_action(Action::Rsvp {
                     account: overlay.account,
                     event: overlay.event,
                     choice: RsvpChoice::at(overlay.selected),
-                    comment: (!comment.is_empty()).then(|| comment.to_string()),
+                    comment,
                     send_response: !overlay.server || overlay.send_response,
+                    proposed,
                 });
                 // Consume-and-close: promote any error queued behind it.
                 self.promote_pending_error();
@@ -2152,8 +2181,9 @@ impl App {
     }
 
     /// The event card's keys (PERSO-200): `j`/`k` scroll, `V` answers,
-    /// `m` opens the invitation mail and `e` its `.ics`, `Esc`, `q` and
-    /// `Enter` close it.
+    /// `m` opens the invitation mail and `e` its `.ics`, `p` opens the event
+    /// form at the attendee's proposed time and `Tab` picks the next
+    /// proposal (PERSO-255), `Esc`, `q` and `Enter` close it.
     fn handle_event_card_key(&mut self, key: KeyEvent) -> Option<Message> {
         let Overlay::EventCard(card) = &mut self.overlay else {
             return None;
@@ -2184,6 +2214,17 @@ impl App {
                 let event = card.event.clone();
                 self.close_overlay();
                 self.open_event_remove_for(&event);
+            }
+            KeyCode::Tab => {
+                let count = card.proposals().len();
+                if count > 1 {
+                    card.proposal = (card.proposal + 1) % count;
+                }
+            }
+            KeyCode::Char('p') => {
+                let event = card.event.clone();
+                let chosen = card.proposal;
+                self.open_event_edit_at_proposal(&event, chosen);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.close_overlay(),
             _ => {}
@@ -6250,15 +6291,19 @@ mod tests {
 
     /// The respond overlay: `t` picks Tentative on an answer row rather than
     /// moving the Calendar to today, the comment row takes typed text, Space
-    /// flips the toggle, and Enter queues `event.respond`'s answer.
+    /// flips the toggle, a comment with the response off is refused on the
+    /// error line, which another answer clears, and Enter queues
+    /// `event.respond`'s answer.
     #[test]
     fn the_respond_overlay_takes_an_answer_a_comment_and_the_toggle() {
         let mut app = app_in_calendar();
-        app.overlay = Overlay::Rsvp(RsvpOverlay::new(
+        let mut overlay = RsvpOverlay::new(
             "evoqs".to_string(),
             "ev-jour-1".to_string(),
             "Jour fixe".to_string(),
-        ));
+        );
+        overlay.propose = false;
+        app.overlay = Overlay::Rsvp(overlay);
         let anchor = app.calendar_view.anchor;
         app.handle_key(KeyEvent::from(KeyCode::Char('t')));
         assert_eq!(app.calendar_view.anchor, anchor, "t is the overlay's");
@@ -6284,6 +6329,24 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Tab)); // the toggle
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
         app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let error = |app: &App| match &app.overlay {
+            Overlay::Rsvp(overlay) => overlay.error.clone(),
+            _ => panic!("the overlay stays open"),
+        };
+        assert_eq!(
+            error(&app).as_deref(),
+            Some("A comment needs Send response on"),
+            "a comment nobody is told of is refused"
+        );
+        assert!(app.pending_actions.is_empty());
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(error(&app), None, "another answer clears the error");
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        // Turned back on, the comment goes out with the answer.
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the comment
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the toggle
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(matches!(app.overlay, Overlay::None));
         match app.pending_actions.pop_front() {
             Some(Action::Rsvp {
@@ -6292,15 +6355,129 @@ mod tests {
                 choice,
                 comment,
                 send_response,
+                proposed,
             }) => {
                 assert_eq!(account, "evoqs");
                 assert_eq!(event, "ev-jour-1");
                 assert_eq!(choice, RsvpChoice::Tentative);
                 assert_eq!(comment.as_deref(), Some("late, sorry"));
-                assert!(!send_response);
+                assert!(send_response);
+                assert_eq!(proposed, None);
             }
             other => panic!("expected Rsvp, got {other:?}"),
         }
+
+        // Off, with the comment cleared, the answer goes out untold.
+        let mut overlay = RsvpOverlay::new(
+            "evoqs".to_string(),
+            "ev-jour-1".to_string(),
+            "Jour fixe".to_string(),
+        );
+        overlay.send_response = false;
+        overlay.comment = "  ".into();
+        assert_eq!(overlay.answer_comment(), Ok(None));
+        overlay.comment = "late".into();
+        assert!(overlay.answer_comment().is_err());
+        // An invitation mail's answer is the reply mail, always sent.
+        let mut mail = RsvpOverlay::new(
+            "evoqs".to_string(),
+            "imip:7".to_string(),
+            "Jour fixe".to_string(),
+        );
+        mail.send_response = false;
+        mail.comment = "late".into();
+        assert_eq!(mail.answer_comment(), Ok(Some("late".into())));
+    }
+
+    /// A tentative or a decline may propose a new time (PERSO-255): the
+    /// proposed rows show once the answer is not Accept, `Tab` reaches them
+    /// after the comment, a proposal with the response off is refused on the
+    /// overlay's error line, and `Enter` sends the start, the end and the
+    /// view's zone; an accept sends none of it.
+    #[test]
+    fn the_respond_overlay_proposes_a_new_time_on_a_tentative_or_a_decline() {
+        let mut app = app_in_calendar();
+        let mut overlay = RsvpOverlay::new(
+            "evoqs".to_string(),
+            "ev-jour-1".to_string(),
+            "Jour fixe".to_string(),
+        );
+        overlay.zone = "Europe/Berlin".to_string();
+        app.overlay = Overlay::Rsvp(overlay);
+        let rows = |app: &App| match &app.overlay {
+            Overlay::Rsvp(overlay) => overlay.rows(),
+            _ => panic!("the overlay stays open"),
+        };
+        assert!(
+            !rows(&app).contains(&RsvpRow::ProposeStart),
+            "not on Accept"
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(rows(&app).contains(&RsvpRow::ProposeStart));
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the comment
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the proposed start
+        for c in "2026-08-05T15:00".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Down)); // the proposed end
+        for c in "16:30".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        for c in "2026-08-05T16:30".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // the toggle
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Overlay::Rsvp(overlay) = &app.overlay else {
+            panic!("a proposal that tells nobody keeps the overlay open");
+        };
+        assert!(overlay
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("needs Send response on")));
+        assert!(app.pending_actions.is_empty());
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match app.pending_actions.pop_front() {
+            Some(Action::Rsvp {
+                choice,
+                send_response,
+                proposed,
+                ..
+            }) => {
+                assert_eq!(choice, RsvpChoice::Decline);
+                assert!(send_response);
+                assert_eq!(
+                    proposed,
+                    Some(mp_protocol::calendar::EventProposedTime {
+                        start: "2026-08-05T15:00".into(),
+                        end: Some("2026-08-05T16:30".into()),
+                        duration: None,
+                        zone: Some("Europe/Berlin".into()),
+                    })
+                );
+            }
+            other => panic!("expected Rsvp, got {other:?}"),
+        }
+
+        // What was typed stays off an accept.
+        let mut overlay = RsvpOverlay::new(
+            "evoqs".to_string(),
+            "ev-jour-1".to_string(),
+            "Jour fixe".to_string(),
+        );
+        overlay.proposed_start = "2026-08-05T15:00".into();
+        assert_eq!(overlay.proposal(), Ok(None));
+        overlay.selected = 1;
+        assert!(overlay.proposal().unwrap().is_some());
+        overlay.propose = false;
+        assert_eq!(overlay.proposal(), Ok(None));
     }
 
     /// Calendar keys must not fire in Mail: `V` there is the mail-list RSVP

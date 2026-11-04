@@ -968,6 +968,8 @@ length unless --end or --duration names a new one, and an --end or a
 unless --zone names another. --to, --optional and --room name the whole new
 attendee list. An attendee may change only --reminder, --no-reminder and
 --show-as on their own copy of a meeting; the rest is the organizer's.
+--use-proposal moves the meeting to the time an attendee proposed, which
+mp event show lists under the attendee.
 
 An occurrence of a series needs --scope: occurrence changes it alone, series
 changes the whole series, its times read against the series' first
@@ -977,7 +979,8 @@ their own. --repeat takes the flags of mp event create, with --scope series.
 Examples:
   mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
   mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs
-  mp event update AAMkADocc --scope series --summary 'Standup, new room' -A evoqs")]
+  mp event update AAMkADocc --scope series --summary 'Standup, new room' -A evoqs
+  mp event update AAMkADev1 --use-proposal ada@example.com -A evoqs")]
     Update {
         /// The event id, as `mp calendar view --json` prints it
         #[arg(value_name = "EVENT")]
@@ -1041,6 +1044,20 @@ occurrence deletes it alone, series deletes the whole series.")]
     },
     /// Answer an invitation: through the server for a server event, by iMIP
     /// reply for an invitation mail's event
+    #[command(after_help = "\
+A tentative or a decline of a server event may propose a new time to the
+organizer: --propose takes the forms of mp event create's WHEN, read in the
+event's own zone (the local zone for an all-day event) unless --zone names
+another, and the proposal keeps the event's length unless --propose-end or
+--propose-duration names another; a bare date alone on a timed meeting
+proposes that whole day. The organizer sees it on the event and takes it
+with mp event update EVENT --use-proposal ADDR. A proposal must reach the
+organizer, so it is refused with --no-send-response, as a --comment is, and
+an invitation mail's event (imip:<row_id>) takes none: mp builds no
+iCalendar COUNTER.
+
+Example:
+  mp event respond AAMkADev1 tentative --propose 2026-11-18T15:00 -A evoqs")]
     Respond {
         /// The event id: a server id, or imip:<row_id> for an invitation mail's event
         #[arg(value_name = "EVENT")]
@@ -1050,6 +1067,8 @@ occurrence deletes it alone, series deletes the whole series.")]
         response: EventResponse,
         #[command(flatten)]
         answer: AnswerFlags,
+        #[command(flatten)]
+        propose: ProposeFlags,
         /// Print the settled `event.respond` result as JSON on stdout
         #[arg(long)]
         json: bool,
@@ -1175,10 +1194,47 @@ struct AnswerFlags {
     /// A comment for the organizer
     #[arg(long, value_name = "TEXT")]
     comment: Option<String>,
-    /// Record the answer without telling the organizer (server events only:
-    /// an iMIP reply is the answer itself)
+    /// Record the answer without telling the organizer, and so without a
+    /// comment (server events only: an iMIP reply is the answer itself)
     #[arg(long)]
     no_send_response: bool,
+}
+
+/// The new time `mp event respond` proposes with a tentative or a decline.
+#[derive(clap::Args)]
+struct ProposeFlags {
+    /// Propose a new start to the organizer (tentative or decline)
+    #[arg(long, value_name = "WHEN")]
+    propose: Option<String>,
+    /// The proposed end (default: the event's length)
+    #[arg(
+        long,
+        value_name = "WHEN",
+        requires = "propose",
+        conflicts_with = "propose_duration"
+    )]
+    propose_end: Option<String>,
+    /// The proposed length (1h30m, PT1H30M)
+    #[arg(long, value_name = "D", requires = "propose")]
+    propose_duration: Option<String>,
+    /// The IANA zone the proposed times are read in (default the event's
+    /// own, the local zone for an all-day event)
+    #[arg(long, value_name = "ZONE", requires = "propose")]
+    zone: Option<String>,
+}
+
+impl ProposeFlags {
+    /// `event.respond`'s `proposed_time`, when `--propose` names one.
+    fn proposed(&self) -> Option<mp_protocol::calendar::EventProposedTime> {
+        self.propose
+            .as_ref()
+            .map(|start| mp_protocol::calendar::EventProposedTime {
+                start: start.clone(),
+                end: self.propose_end.clone(),
+                duration: self.propose_duration.clone(),
+                zone: self.zone.clone(),
+            })
+    }
 }
 
 /// What `mp event create` sends as `event.create`'s event.
@@ -1353,6 +1409,14 @@ struct UpdateFlags {
     show_as: Option<String>,
     #[command(flatten)]
     repeat: RepeatFlags,
+    /// Move the meeting to the time the attendee ADDR proposed, as
+    /// `mp event show` lists it
+    #[arg(
+        long,
+        value_name = "ADDR",
+        conflicts_with_all = ["start", "end", "duration", "all_day", "zone"]
+    )]
+    use_proposal: Option<String>,
 }
 
 impl UpdateFlags {
@@ -4215,7 +4279,15 @@ async fn routed_rsvp(
         (false, None, Some(row_id)) => mailypoppins::calendar_view::imip_event_id(row_id),
     };
     let shown = event_get(&mut connection, account, &event).await?;
-    let settled = respond(&mut connection, account, &event, response, &invite.answer).await?;
+    let settled = respond(
+        &mut connection,
+        account,
+        &event,
+        response,
+        &invite.answer,
+        None,
+    )
+    .await?;
     let organizer = shown
         .organizer
         .as_ref()
@@ -4274,6 +4346,7 @@ async fn respond(
     event: &str,
     response: EventResponse,
     answer: &AnswerFlags,
+    proposed: Option<&mp_protocol::calendar::EventProposedTime>,
 ) -> Result<mp_protocol::calendar::EventRespondResult> {
     let params = mp_client::queries::event_respond_params(
         account,
@@ -4281,6 +4354,7 @@ async fn respond(
         response.word(),
         answer.comment.as_deref(),
         !answer.no_send_response,
+        proposed,
     );
     let result = run_admin_operation(connection, "event.respond", params, account).await?;
     serde_json::from_value(result).context("reading the settled event.respond result")
@@ -4631,7 +4705,15 @@ async fn routed_event_update(
     } else {
         None
     };
-    let params = serde_json::to_value(flags.params(account, event, scope, first)?)?;
+    let mut params = flags.params(account, event, scope, first)?;
+    if let Some(address) = &flags.use_proposal {
+        let shown = event_get(&mut connection, account, event).await?;
+        let slot =
+            mailypoppins::calendar_cmd::proposal_of(&shown, address).map_err(|e| anyhow!(e))?;
+        params.fields.start = Some(slot.start);
+        params.fields.end = Some(slot.end);
+    }
+    let params = serde_json::to_value(params)?;
     let result = run_admin_operation(&mut connection, "event.update", params, account).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -4768,16 +4850,27 @@ async fn routed_event_delete(
     Ok(())
 }
 
-/// `mp event respond`: the settled answer, and how it reached the organizer.
+/// `mp event respond`: the settled answer, the time it proposed, and how it
+/// reached the organizer.
 async fn routed_event_respond(
     account: &str,
     event: &str,
     response: EventResponse,
     answer: &AnswerFlags,
+    propose: &ProposeFlags,
     json: bool,
 ) -> Result<()> {
     let mut connection = operation_session().await;
-    let settled = respond(&mut connection, account, event, response, answer).await?;
+    let proposed = propose.proposed();
+    let settled = respond(
+        &mut connection,
+        account,
+        event,
+        response,
+        answer,
+        proposed.as_ref(),
+    )
+    .await?;
     // An iMIP reply that did not leave is a failure, as `mp rsvp` reports it:
     // no tick line before the error, and with `--json` the object still
     // printed, so a script reads `"delivered": false` and exit status 1.
@@ -4807,6 +4900,16 @@ async fn routed_event_respond(
     );
     if let Some(comment) = settled.comment.as_deref() {
         println!("  comment: {comment}");
+    }
+    if let Some(slot) = &settled.proposed_time {
+        println!(
+            "  proposed: {}",
+            mp_client::format::time_span(
+                &slot.start,
+                &slot.end,
+                &mailypoppins::calendar_view::local_zone()
+            )
+        );
     }
     Ok(())
 }
@@ -6646,9 +6749,11 @@ async fn main() -> Result<()> {
                     event,
                     response,
                     answer,
+                    propose,
                     json,
                 } => {
-                    routed_event_respond(&account, &event, response, &answer, json).await?;
+                    routed_event_respond(&account, &event, response, &answer, &propose, json)
+                        .await?;
                 }
             }
         }

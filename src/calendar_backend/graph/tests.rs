@@ -654,11 +654,17 @@ async fn respond_posts_the_answer_with_its_comment_and_send_choice() {
         .route(&format!("{BASE}/me/events/"), status(202, ""));
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
     backend
-        .respond("AAMk/ev=", Response::Tentative, Some("Late".into()), false)
+        .respond(
+            "AAMk/ev=",
+            Response::Tentative,
+            Some("Late".into()),
+            false,
+            None,
+        )
         .await
         .unwrap();
     backend
-        .respond("AAMk/ev=", Response::Decline, None, true)
+        .respond("AAMk/ev=", Response::Decline, None, true, None)
         .await
         .unwrap();
     let sent = backend.fetch.sent();
@@ -676,6 +682,94 @@ async fn respond_posts_the_answer_with_its_comment_and_send_choice() {
         sent[1].body,
         Some(serde_json::json!({"sendResponse": true}))
     );
+}
+
+/// A proposed time rides on `tentativelyAccept` and `decline` as
+/// `proposedNewTime`, a timeSlot in the wall time and Windows name of the
+/// zone it was typed in, or in UTC for a zone the table lacks; an accept
+/// carries none, since Graph takes no proposal there.
+#[tokio::test]
+async fn a_proposal_rides_on_the_answer_as_its_proposed_new_time() {
+    let fetch = ScriptedFetch::default()
+        .route(&format!("{BASE}/me/events/"), status(202, ""))
+        .route(&format!("{BASE}/me/events/"), status(202, ""))
+        .route(&format!("{BASE}/me/events/"), status(202, ""));
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let slot = TimeSlot {
+        start: Utc.with_ymd_and_hms(2026, 11, 18, 14, 0, 0).unwrap(),
+        end: Utc.with_ymd_and_hms(2026, 11, 18, 15, 30, 0).unwrap(),
+    };
+    let proposed = |zone: &str| {
+        Some(ProposedTime {
+            slot,
+            zone: zone.into(),
+        })
+    };
+    backend
+        .respond(
+            "AAMk/ev=",
+            Response::Tentative,
+            Some("Later?".into()),
+            true,
+            proposed("Europe/Berlin"),
+        )
+        .await
+        .unwrap();
+    backend
+        .respond(
+            "AAMk/ev=",
+            Response::Decline,
+            None,
+            true,
+            proposed("Antarctica/Troll"),
+        )
+        .await
+        .unwrap();
+    backend
+        .respond(
+            "AAMk/ev=",
+            Response::Accept,
+            None,
+            true,
+            proposed("Europe/Berlin"),
+        )
+        .await
+        .unwrap();
+    let sent = backend.fetch.sent();
+    assert_eq!(
+        sent[0].url,
+        format!("{BASE}/me/events/AAMk%2Fev=/tentativelyAccept")
+    );
+    assert_eq!(
+        sent[0].body,
+        Some(serde_json::json!({
+            "comment": "Later?",
+            "sendResponse": true,
+            "proposedNewTime": {
+                "start": {"dateTime": "2026-11-18T15:00:00", "timeZone": "W. Europe Standard Time"},
+                "end": {"dateTime": "2026-11-18T16:30:00", "timeZone": "W. Europe Standard Time"},
+            },
+        }))
+    );
+    assert_eq!(sent[1].url, format!("{BASE}/me/events/AAMk%2Fev=/decline"));
+    assert_eq!(
+        sent[1].body,
+        Some(serde_json::json!({
+            "sendResponse": true,
+            "proposedNewTime": {
+                "start": {"dateTime": "2026-11-18T14:00:00", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-18T15:30:00", "timeZone": "UTC"},
+            },
+        }))
+    );
+    assert_eq!(sent[2].url, format!("{BASE}/me/events/AAMk%2Fev=/accept"));
+    assert_eq!(
+        sent[2].body,
+        Some(serde_json::json!({"sendResponse": true}))
+    );
+    assert!(sent
+        .iter()
+        .all(|request| request.prefer.starts_with(r#"IdType="ImmutableId""#)));
 }
 
 /// An `eventMessage` names its event, a plain message names none, and a

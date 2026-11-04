@@ -20,6 +20,7 @@ import type {
   EventCreateParams,
   EventCreateStarted,
   EventGetResult,
+  EventProposedTime,
   EventUpdateParams,
   HoldListing,
   OutboxListing,
@@ -481,7 +482,8 @@ export const eventGet = (account: string, event: string): Promise<EventGetResult
 /**
  * Answer an event; the end arrives as `rsvp`, its result an
  * `EventRespondResult`. `send_response` is null on an invitation mail's
- * event, whose answer is the reply mail itself.
+ * event, whose answer is the reply mail itself; `proposed_time` is the new
+ * time a tentative or a decline proposes, null for none.
  */
 export const eventRespond = (
   account: string,
@@ -489,7 +491,8 @@ export const eventRespond = (
   response: "accept" | "tentative" | "decline",
   comment: string | null,
   send_response: boolean | null,
-): Promise<OperationStarted> => invoke<OperationStarted>("event_respond", { account, event, response, comment, send_response });
+  proposed_time: EventProposedTime | null = null,
+): Promise<OperationStarted> => invoke<OperationStarted>("event_respond", { account, event, response, comment, send_response, proposed_time });
 
 /** The daemon's Graph sentence for a Graph account, null for one that can send invitations. */
 export const inviteRefusal = (account: string): Promise<InviteRefusal> =>

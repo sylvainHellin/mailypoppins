@@ -77,7 +77,7 @@ use crate::calendar_model::{
     Frequency, OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus, Sensitivity,
     ShowAs, WeekIndex, Weekday,
 };
-use crate::calendar_write::{AttendeeInput, EventInput, EventPatch};
+use crate::calendar_write::{AttendeeInput, EventInput, EventPatch, ProposedTime};
 
 /// The reminder a created event gets when its input leaves it to the
 /// mailbox default, Outlook's own default.
@@ -138,6 +138,9 @@ pub struct RecordedResponse {
     pub response: Response,
     pub comment: Option<String>,
     pub send_response: bool,
+    /// The new time the answer proposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_time: Option<ProposedTime>,
 }
 
 /// One recorded write, in the order the calls came.
@@ -949,6 +952,7 @@ impl CalendarBackend for FakeCalendarBackend {
         response: Response,
         comment: Option<String>,
         send_response: bool,
+        proposed: Option<ProposedTime>,
     ) -> BackendResult<()> {
         self.check_scope()?;
         if !self.state().events.iter().any(|known| known.id == event) {
@@ -959,6 +963,7 @@ impl CalendarBackend for FakeCalendarBackend {
             response,
             comment,
             send_response,
+            proposed_time: proposed,
         })
     }
 
@@ -1288,11 +1293,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("respond.jsonl");
         let fake = FakeCalendarBackend::canned().with_log(log.clone());
+        let proposed = ProposedTime {
+            slot: crate::calendar_model::TimeSlot {
+                start: Utc.with_ymd_and_hms(2026, 11, 18, 14, 0, 0).unwrap(),
+                end: Utc.with_ymd_and_hms(2026, 11, 18, 15, 0, 0).unwrap(),
+            },
+            zone: "Europe/Berlin".into(),
+        };
         fake.respond(
             "ev-meeting",
             Response::Tentative,
             Some("late".into()),
-            false,
+            true,
+            Some(proposed.clone()),
         )
         .await
         .unwrap();
@@ -1300,14 +1313,17 @@ mod tests {
             event: "ev-meeting".into(),
             response: Response::Tentative,
             comment: Some("late".into()),
-            send_response: false,
+            send_response: true,
+            proposed_time: Some(proposed),
         };
         assert_eq!(fake.responses(), std::slice::from_ref(&expected));
         let line = std::fs::read_to_string(&log).unwrap();
         let logged: RecordedResponse = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(logged, expected);
 
-        let unknown = fake.respond("nope", Response::Accept, None, true).await;
+        let unknown = fake
+            .respond("nope", Response::Accept, None, true, None)
+            .await;
         assert!(matches!(unknown, Err(CalendarBackendError::Other(_))));
         assert_eq!(fake.responses().len(), 1);
     }
@@ -1322,7 +1338,7 @@ mod tests {
         ));
         assert!(err.to_string().contains("Calendars.ReadWrite"));
         assert!(fake
-            .respond("ev-meeting", Response::Accept, None, true)
+            .respond("ev-meeting", Response::Accept, None, true, None)
             .await
             .is_err());
         assert!(fake.responses().is_empty());

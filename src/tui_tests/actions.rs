@@ -535,6 +535,7 @@ fn one_of_each_action() -> Vec<Action> {
             choice: RsvpChoice::Accept,
             comment: None,
             send_response: true,
+            proposed: None,
         },
         Action::CreateEvent(Box::new(crate::tui::app::EventForm::new(
             vec![crate::tui::app::EventCalendarChoice {

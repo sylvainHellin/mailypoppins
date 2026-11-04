@@ -36,11 +36,11 @@ use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
 use crate::calendar_model::{
     parse_zone, AttendeeRole, Event, EventTime, Frequency, Recurrence, Sensitivity, ShowAs,
-    WeekIndex, Weekday,
+    TimeSlot, WeekIndex, Weekday,
 };
 use crate::invite::{resolve_span_in, EventSpan};
 use mp_protocol::calendar::{
-    CalendarRecurrence, EventAttendeeInput, EventInputParams, EventPatchParams,
+    CalendarRecurrence, EventAttendeeInput, EventInputParams, EventPatchParams, EventProposedTime,
 };
 
 /// What a change to one occurrence of a series reaches: that occurrence, or
@@ -633,6 +633,103 @@ pub fn recurrence_to_wire(rule: &Recurrence) -> CalendarRecurrence {
         start: rule.start.map(|d| d.to_string()),
         until: rule.until.map(|d| d.to_string()),
         count: rule.count,
+    }
+}
+
+/// A new time an answer proposes to the organizer: the span as instants,
+/// and the IANA zone it was read in, whose wall times the backend sends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedTime {
+    pub slot: TimeSlot,
+    pub zone: String,
+}
+
+/// The [`ProposedTime`] a client's `event.respond` names for `current`, or
+/// the sentence that says what is wrong with it.
+///
+/// The times take the forms of [`resolve_input`], read in `params.zone`,
+/// else the event's own zone (`host` for an all-day event); a start alone
+/// keeps the event's length when it is of the event's kind; a bare date
+/// alone on a timed event proposes that day, and a time alone on an
+/// all-day event is refused, since no length follows from it.
+/// Bare dates propose whole days, from the first midnight in the zone to
+/// the one after the last day. A proposal of the
+/// time the event already has is refused, since it proposes nothing.
+pub fn resolve_proposal(
+    params: &EventProposedTime,
+    current: &Event,
+    host: Tz,
+) -> Result<ProposedTime, String> {
+    let start = params.start.trim();
+    if start.is_empty() {
+        return Err("A proposed time needs a start".to_string());
+    }
+    let named = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let (end, duration) = (named(&params.end), named(&params.duration));
+    let zone = resolve_zone(params.zone.as_deref(), current.time.zone().unwrap_or(host))?;
+    let duration = match (&end, duration) {
+        (None, None) if is_date(start) == current.is_all_day() => {
+            Some(current_length(&current.time))
+        }
+        (None, None) if current.is_all_day() => {
+            return Err(
+                "A proposed time on an all-day event needs an end or a duration".to_string(),
+            );
+        }
+        (_, duration) => duration,
+    };
+    let time = resolve_time(start, end.as_deref(), duration.as_deref(), None, zone)?;
+    let slot = match &time {
+        EventTime::Timed { start, end, .. } => TimeSlot {
+            start: *start,
+            end: *end,
+        },
+        EventTime::AllDay { .. } => {
+            let (first, after) = time
+                .all_day_midnights()
+                .expect("an all-day time has its midnights");
+            let instant = |at: chrono::NaiveDateTime| {
+                at.and_local_timezone(zone)
+                    .earliest()
+                    .map(|at| at.with_timezone(&chrono::Utc))
+                    .ok_or_else(|| format!("{at} does not exist in {}", zone.name()))
+            };
+            TimeSlot {
+                start: instant(first)?,
+                end: instant(after)?,
+            }
+        }
+    };
+    if slot.end <= slot.start {
+        return Err("A proposed time must end after it starts".to_string());
+    }
+    if same_slot(&slot, &current.time, zone) {
+        return Err(format!(
+            "{} already takes place then; propose another time",
+            current.summary
+        ));
+    }
+    Ok(ProposedTime {
+        slot,
+        zone: zone.name().to_string(),
+    })
+}
+
+/// Whether `slot` is the span `time` already covers, an all-day time's
+/// midnights read in `zone`.
+fn same_slot(slot: &TimeSlot, time: &EventTime, zone: Tz) -> bool {
+    match time {
+        EventTime::Timed { start, end, .. } => slot.start == *start && slot.end == *end,
+        EventTime::AllDay { .. } => time.all_day_midnights().is_some_and(|(first, after)| {
+            let local = |at: chrono::DateTime<chrono::Utc>| at.with_timezone(&zone).naive_local();
+            local(slot.start) == first && local(slot.end) == after
+        }),
     }
 }
 
@@ -1319,6 +1416,83 @@ mod tests {
         assert!(EventScope::from_word("following")
             .unwrap_err()
             .contains("occurrence, series"));
+    }
+
+    /// A proposal is read in the event's own zone unless it names one (the
+    /// host's for an all-day event), a start alone of the event's kind keeps
+    /// its length, a bare date alone on a timed event proposes that day, bare
+    /// dates propose whole days from midnight in the zone, and the event's
+    /// own time, an empty start or a time alone on an all-day event is
+    /// refused.
+    #[test]
+    fn a_proposal_reads_its_time_against_the_event() {
+        let current = made(&EventInput::new("Review", time()));
+        let propose = |value: serde_json::Value| {
+            let params: EventProposedTime = serde_json::from_value(value).unwrap();
+            resolve_proposal(&params, &current, chrono_tz::UTC)
+        };
+        let at = |d, h, m| Utc.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap();
+        let later = propose(json!({"start": "2026-11-03T15:30"})).unwrap();
+        assert_eq!(
+            later,
+            ProposedTime {
+                slot: TimeSlot {
+                    start: at(3, 14, 30),
+                    end: at(3, 15, 30)
+                },
+                zone: "Europe/Berlin".into(),
+            }
+        );
+        let ended = propose(json!({"start": "2026-11-04T09:00", "end": "2026-11-04T09:45"}));
+        assert_eq!(ended.unwrap().slot.end, at(4, 8, 45));
+        let lasting = propose(json!({"start": "2026-11-04T09:00", "duration": "2h"}));
+        assert_eq!(lasting.unwrap().slot.end, at(4, 10, 0));
+        let london =
+            propose(json!({"start": "2026-11-04T09:00", "zone": "Europe/London"})).unwrap();
+        assert_eq!(london.slot.start, at(4, 9, 0));
+        assert_eq!(london.zone, "Europe/London");
+        let days = propose(json!({"start": "2026-11-05", "end": "2026-11-06"})).unwrap();
+        assert_eq!(days.slot.start, at(4, 23, 0));
+        assert_eq!(days.slot.end, at(6, 23, 0));
+        let day = propose(json!({"start": "2026-11-19"})).unwrap();
+        assert_eq!(day.slot.start, at(18, 23, 0));
+        assert_eq!(day.slot.end, at(19, 23, 0));
+
+        let holiday = made(&EventInput::new(
+            "Offsite",
+            EventTime::all_day(
+                NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 11, 12).unwrap(),
+            )
+            .unwrap(),
+        ));
+        let on_holiday = |value: serde_json::Value| {
+            let params: EventProposedTime = serde_json::from_value(value).unwrap();
+            resolve_proposal(&params, &holiday, chrono_tz::UTC)
+        };
+        let moved = on_holiday(json!({"start": "2026-11-17"})).unwrap();
+        assert_eq!(moved.slot.start, at(17, 0, 0));
+        assert_eq!(moved.slot.end, at(19, 0, 0));
+        assert_eq!(
+            on_holiday(json!({"start": "2026-11-17T09:00"})).unwrap_err(),
+            "A proposed time on an all-day event needs an end or a duration"
+        );
+        let timed = on_holiday(json!({"start": "2026-11-17T09:00", "duration": "1h"})).unwrap();
+        assert_eq!(timed.slot.end, at(17, 10, 0));
+
+        assert!(propose(json!({"start": "2026-11-03T10:00"}))
+            .unwrap_err()
+            .contains("already takes place then"));
+        assert_eq!(
+            propose(json!({"start": " "})).unwrap_err(),
+            "A proposed time needs a start"
+        );
+        assert!(propose(json!({"start": "2026-11-04T09:00", "end": "2026-11-04T08:00"})).is_err());
+        assert!(
+            propose(json!({"start": "2026-11-04T09:00", "zone": "Mars/Base"}))
+                .unwrap_err()
+                .contains("unknown time zone")
+        );
     }
 
     fn value_with(input: &EventInput, key: &str, value: serde_json::Value) -> EventInput {

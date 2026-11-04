@@ -90,6 +90,10 @@ describe("an RSVP this window started", () => {
   it("settles with the TUI-style line: an unsent answer says so, and a reply the organizer was not told of is a failure", () => {
     const r: RsvpRun = { token: 1, account: "work", event: "imip:1008", response: "tentative", summary: "Steering committee", operation_id: "op" };
     expect(rsvpText(r, settled("tentative"))).toBe("Replied tentative to Steering committee");
+    const slot = { start: "2099-10-14T13:00:00Z", end: "2099-10-14T14:00:00Z" };
+    expect(rsvpText(r, settled("tentative", true, { via: "server", proposed_time: slot }))).toBe(
+      "Replied tentative to Steering committee, proposing a new time",
+    );
     expect(rsvpText(r, settled("tentative", false))).toBe(
       "RSVP failed: Replied tentative to Steering committee, but the organizer could not be told; the outbox says why",
     );
@@ -106,7 +110,7 @@ describe("an RSVP this window started", () => {
   });
 
   it("closes the choice, awaits its id, then says so and reads the agenda and the account's cards again", () => {
-    let s = run(withAgendaAndCard(), { type: "open_rsvp", dialog: { account: "work", event: "imip:1008", summary: "Steering committee", server: false } });
+    let s = run(withAgendaAndCard(), { type: "open_rsvp", dialog: { account: "work", event: "imip:1008", summary: "Steering committee", server: false, propose: false } });
     expect(s.overlay).toBe("rsvp");
     s = run(s, requested(), { type: "rsvp_started", token: 1, operation_id: "op-r" });
     expect(s.overlay).toBeNull();
