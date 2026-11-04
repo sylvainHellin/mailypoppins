@@ -969,7 +969,9 @@ unless --zone names another. --to, --optional and --room name the whole new
 attendee list. An attendee may change only --reminder, --no-reminder and
 --show-as on their own copy of a meeting; the rest is the organizer's.
 --use-proposal moves the meeting to the time an attendee proposed, which
-mp event show lists under the attendee.
+mp event show lists under the attendee: on an occurrence of a series it
+moves that occurrence alone, since the attendee proposed for that one
+meeting, and on a series master the whole series.
 
 An occurrence of a series needs --scope: occurrence changes it alone, series
 changes the whole series, its times read against the series' first
@@ -1414,7 +1416,7 @@ struct UpdateFlags {
     #[arg(
         long,
         value_name = "ADDR",
-        conflicts_with_all = ["start", "end", "duration", "all_day", "zone"]
+        conflicts_with_all = ["start", "end", "duration", "all_day", "zone", "scope"]
     )]
     use_proposal: Option<String>,
 }
@@ -4712,6 +4714,9 @@ async fn routed_event_update(
             mailypoppins::calendar_cmd::proposal_of(&shown, address).map_err(|e| anyhow!(e))?;
         params.fields.start = Some(slot.start);
         params.fields.end = Some(slot.end);
+        if shown.is_occurrence() {
+            params.scope = Some(EventScopeArg::Occurrence.word().to_string());
+        }
     }
     let params = serde_json::to_value(params)?;
     let result = run_admin_operation(&mut connection, "event.update", params, account).await?;

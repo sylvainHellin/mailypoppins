@@ -1103,7 +1103,9 @@ unless --zone names another. --to, --optional and --room name the whole new
 attendee list. An attendee may change only --reminder, --no-reminder and
 --show-as on their own copy of a meeting; the rest is the organizer's.
 --use-proposal moves the meeting to the time an attendee proposed, which
-mp event show lists under the attendee.
+mp event show lists under the attendee: on an occurrence of a series it
+moves that occurrence alone, since the attendee proposed for that one
+meeting, and on a series master the whole series.
 
 An occurrence of a series needs --scope: occurrence changes it alone, series
 changes the whole series, its times read against the series' first

@@ -421,6 +421,7 @@ Status: accepted
 Why: Graph has no call for "this and all following occurrences", so mp would have to end the series before the chosen occurrence and create a new series from there, which sends every attendee a cancellation and a new invitation.
 The change is rare enough that Outlook covers it, and the plan lists it under "Later".
 An occurrence's id needs `scope` in every client, a series master's id is the series and a single event takes none, since a default would make a choice the user did not.
+Taking an attendee's proposed time is the one change that asks no scope: an attendee proposes for the one meeting, so the clients send it in the `occurrence` scope on an occurrence and the series' on a series master, and the daemon still requires the scope on the wire.
 Rejected: a third choice "This and all following occurrences" in phase 2 (a series split touching the create and the cancel paths at once, with its own live test against Outlook); defaulting an occurrence's scope to the occurrence.
 Source: report comment export of 2026-11-03 on `.sync/reports/calendar-phase-2-design`.
 Status: accepted

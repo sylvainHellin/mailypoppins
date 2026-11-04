@@ -386,6 +386,15 @@ pub struct CalendarEvent {
     pub source: Option<CalendarEventSource>,
 }
 
+impl CalendarEvent {
+    /// Whether the event is one occurrence of a series, which a change
+    /// addresses with a scope: an occurrence, an exception, or any event
+    /// naming its series master.
+    pub fn is_occurrence(&self) -> bool {
+        matches!(self.kind.as_str(), "occurrence" | "exception") || self.series_master_id.is_some()
+    }
+}
+
 fn single() -> String {
     "single".to_string()
 }

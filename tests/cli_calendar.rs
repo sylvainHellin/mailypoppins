@@ -134,6 +134,26 @@ fn proposed() -> Event {
     budget
 }
 
+/// An occurrence of a weekly retrospective the server account organizes,
+/// twenty-two days out, for which Ada proposed the next morning.
+fn proposed_occurrence() -> Event {
+    use mailypoppins::calendar_model::{EventKind, TimeSlot};
+    let mut retro = proposed();
+    retro.id = "ev-retro-22".into();
+    retro.uid = "retro@example.com".into();
+    retro.summary = "Retrospective".into();
+    retro.kind = EventKind::Occurrence;
+    retro.series_master_id = Some("ev-retro".into());
+    retro.recurrence_id = Some(at(22, 14).to_rfc3339());
+    retro.recurrence = Some("Weekly".into());
+    retro.time = EventTime::timed(at(22, 14), at(22, 15), "Europe/Berlin").unwrap();
+    retro.attendees[0].proposed_time = Some(TimeSlot {
+        start: at(23, 8),
+        end: at(23, 9),
+    });
+    retro
+}
+
 /// A seeded root, its daemon, and the logs of the two fakes.
 struct Slice {
     tmp: TempDir,
@@ -151,7 +171,7 @@ impl Slice {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tempfile::tempdir().unwrap();
         seed_outlook(tmp.path());
-        let events = [weekly(), vec![proposed()]].concat();
+        let events = [weekly(), vec![proposed(), proposed_occurrence()]].concat();
         let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, events);
         let transport =
             send_fixture::fake_transport_rejecting(&ledger.path().join("transport.log"), rejected);
@@ -308,7 +328,7 @@ fn calendar_list_view_hide_and_show_through_the_cli() {
     let rebuilt = slice.ok(&["calendar", "rebuild", "-A", SERVER]);
     assert!(
         rebuilt.contains(
-            "server calendar: 2 calendar(s), 5 event(s) synced, 0 removed, 2 baseline(s)"
+            "server calendar: 2 calendar(s), 6 event(s) synced, 0 removed, 2 baseline(s)"
         ),
         "{rebuilt}"
     );
@@ -582,7 +602,7 @@ fn event_show_and_respond_through_the_cli() {
 /// decline, keeping the meeting's length, and prints it; the daemon's
 /// refusals reach stderr with exit 1. The organizer's `mp event show` lists
 /// the attendee's proposal, and `mp event update --use-proposal` moves the
-/// meeting to it.
+/// meeting to it, on an occurrence of a series that occurrence alone.
 #[test]
 fn a_new_time_is_proposed_and_taken_through_the_cli() {
     let slice = Slice::start();
@@ -687,6 +707,40 @@ fn a_new_time_is_proposed_and_taken_through_the_cli() {
     };
     assert_eq!((instant("start"), instant("end")), (at(21, 8), at(21, 9)));
     assert_eq!(taken["event"]["time"]["zone"], "Europe/Berlin");
+
+    // On an occurrence of a series the proposal moves that occurrence
+    // alone, with no --scope, and a --scope beside it is refused.
+    let scoped = slice.err(&[
+        "event",
+        "update",
+        "ev-retro-22",
+        "--use-proposal",
+        "ada@example.com",
+        "--scope",
+        "series",
+        "-A",
+        SERVER,
+    ]);
+    assert!(scoped.contains("cannot be used with"), "{scoped}");
+    let one = slice.json(&[
+        "event",
+        "update",
+        "ev-retro-22",
+        "--use-proposal",
+        "ada@example.com",
+        "-A",
+        SERVER,
+        "--json",
+    ]);
+    assert_eq!(one["scope"], "occurrence", "{one}");
+    assert_eq!(one["event"]["id"], "ev-retro-22");
+    assert_eq!(one["event"]["kind"], "exception");
+    let moved = |key: &str| {
+        chrono::DateTime::parse_from_rfc3339(one["event"]["time"][key].as_str().unwrap())
+            .unwrap()
+            .to_utc()
+    };
+    assert_eq!((moved("start"), moved("end")), (at(23, 8), at(23, 9)));
 }
 
 /// `mp invite` on an account without a backend still sends the iMIP reply,

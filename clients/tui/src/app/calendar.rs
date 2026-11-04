@@ -630,7 +630,7 @@ impl App {
             self.set_status(why);
             return;
         }
-        if is_occurrence(event) {
+        if event.is_occurrence() {
             self.overlay = Overlay::EventScope(Box::new(EventScopeChooser {
                 event: event.clone(),
                 remove: false,
@@ -705,6 +705,9 @@ impl App {
     /// time of its `chosen`th proposal, so `Enter` moves the meeting there
     /// through `event.update` and the server tells every attendee. Only the
     /// organizer takes a proposal, and an event mp cannot change says why.
+    /// On an occurrence of a series the form is the occurrence's alone, with
+    /// no scope asked, since the attendee proposed for that one meeting; on
+    /// a series master the change is the series'.
     pub fn open_event_edit_at_proposal(&mut self, event: &CalendarEvent, chosen: usize) {
         let proposals: Vec<_> = event
             .attendees
@@ -750,7 +753,11 @@ impl App {
             teams: calendar.features.iter().any(|f| f == "online-meeting"),
         };
         let zone = self.calendar_view.zone;
-        let mut form = EventForm::edit(event, choice, zone);
+        let mut form = if event.is_occurrence() {
+            EventForm::edit_occurrence(event, choice, zone)
+        } else {
+            EventForm::edit(event, choice, zone)
+        };
         form.move_to(&slot.start, &slot.end, zone);
         form.row = EventFormRow::Start;
         let who = attendee
@@ -797,7 +804,7 @@ impl App {
             self.set_status(why);
             return;
         }
-        if is_occurrence(event) {
+        if event.is_occurrence() {
             self.overlay = Overlay::EventScope(Box::new(EventScopeChooser {
                 event: event.clone(),
                 remove: true,
@@ -867,12 +874,6 @@ fn removal_kind(event: &CalendarEvent) -> Result<bool, String> {
             event.summary
         ))
     }
-}
-
-/// Whether `event` is one occurrence of a series, which a change names the
-/// scope of.
-fn is_occurrence(event: &CalendarEvent) -> bool {
-    matches!(event.kind.as_str(), "occurrence" | "exception") || event.series_master_id.is_some()
 }
 
 #[cfg(test)]

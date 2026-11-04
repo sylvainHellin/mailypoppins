@@ -149,12 +149,24 @@ describe("taking a proposed time (PERSO-255)", () => {
     expect(holiday.fields.allDay).toBe(false);
   });
 
-  it("refuses an attendee, an occurrence and a read-only calendar with the edit form's reasons", () => {
+  it("takes a proposal on an occurrence for it alone, with no chooser, and on a series master for the series", () => {
+    const slot = { start: "2099-10-15T12:00:00Z", end: "2099-10-15T13:30:00Z" };
+    const occurrence = event({ kind: "occurrence", series_master_id: "ev-series", recurrence: "Weekly on Wednesday" });
+    expect(proposalRefusal(occurrence, calendars)).toBeNull();
+    const one = proposalDialogFor(occurrence, calendars, slot);
+    if (typeof one === "string") throw new Error(one);
+    expect(one.edit?.scope).toBe("occurrence");
+    expect(one.fields.repeat.series).toBe("Weekly on Wednesday");
+    expect(changedFields(one, "Europe/Berlin")).toEqual({ start: "2099-10-15T14:00", end: "2099-10-15T15:30", all_day: false, zone: "Europe/Berlin" });
+    const series = proposalDialogFor(event({ kind: "series-master", recurrence: "Weekly on Wednesday" }), calendars, slot);
+    if (typeof series === "string") throw new Error(series);
+    expect(series.edit?.scope).toBeNull();
+    expect(changedFields(series, "Europe/Berlin")).toMatchObject({ start: "2099-10-15T14:00", end: "2099-10-15T15:30" });
+  });
+
+  it("refuses an attendee and a read-only calendar with the edit form's reasons", () => {
     expect(proposalRefusal(event(), calendars)).toBeNull();
     expect(proposalRefusal(event({ own_response: "accepted", is_organizer: false }), calendars)).toBe("Only the organizer takes a proposed time");
-    expect(proposalRefusal(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars)).toBe(
-      "Budget is part of a recurring series, which mp cannot change yet",
-    );
     expect(proposalRefusal(event({ calendar: "ro" }), calendars)).toBe("The calendar Shared takes no changes from mp");
   });
 

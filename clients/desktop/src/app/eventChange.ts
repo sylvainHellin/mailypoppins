@@ -141,10 +141,19 @@ export function editDialogFor(
   };
 }
 
+/**
+ * The scope a proposal on `event` is taken in: an occurrence's alone, since
+ * the attendee proposed for that one meeting, with no chooser; none on any
+ * other event, the daemon reading a series master's change as the series'.
+ */
+function proposalScope(event: CalendarEvent): EventScope | null {
+  return isOccurrence(event) ? "occurrence" : null;
+}
+
 /** Why the organizer cannot take a proposal on `event` from here (the edit form's refusals); null when they can. */
 export function proposalRefusal(event: CalendarEvent, calendars: readonly CalendarInfo[] | null): string | null {
   if (!isOrganizer(event)) return "Only the organizer takes a proposed time";
-  const dialog = editDialogFor(event, calendars);
+  const dialog = editDialogFor(event, calendars, proposalScope(event));
   return typeof dialog === "string" ? dialog : null;
 }
 
@@ -152,12 +161,13 @@ export function proposalRefusal(event: CalendarEvent, calendars: readonly Calend
  * The organizer's "Use this time" (PERSO-255): the edit form on `event` at
  * the time an attendee proposed, in this window's zone, so Save sends the
  * new time through `event_update` and the server tells every attendee; or
- * why the proposal cannot be taken here.
+ * why the proposal cannot be taken here. On an occurrence of a series the
+ * form is the occurrence's alone and asks no scope.
  */
 export function proposalDialogFor(event: CalendarEvent, calendars: readonly CalendarInfo[] | null, slot: CalendarTimeSlot): EventDialog | string {
   const refusal = proposalRefusal(event, calendars);
   if (refusal) return refusal;
-  const dialog = editDialogFor(event, calendars);
+  const dialog = editDialogFor(event, calendars, proposalScope(event));
   if (typeof dialog === "string") return dialog;
   return { ...dialog, fields: { ...dialog.fields, allDay: false, start: wallTime(new Date(slot.start)), end: wallTime(new Date(slot.end)) } };
 }

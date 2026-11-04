@@ -269,8 +269,11 @@ fn golden_calendar_event_card_with_proposals() {
 
 /// `p` on the organizer's card opens the edit form at the chosen proposal,
 /// `Tab` choosing the next, so `Enter` sends the new time as `event.update`;
-/// an attendee's card, an occurrence and a meeting nobody proposed for are
-/// refused on the status line.
+/// on an occurrence of a series the form is the occurrence's alone, its
+/// update in the occurrence scope with no chooser, and on a series master
+/// the update names no scope, which the daemon reads as the series'; an
+/// attendee's card and a meeting nobody proposed for are refused on the
+/// status line.
 #[test]
 fn p_on_the_card_opens_the_edit_form_at_the_proposed_time() {
     let mut app = calendar_fixture();
@@ -334,8 +337,44 @@ fn p_on_the_card_opens_the_edit_form_at_the_proposed_time() {
     let mut occurrence = handover.clone();
     occurrence.kind = "occurrence".into();
     occurrence.series_master_id = Some("ev-series".into());
-    let line = refused(&mut app, occurrence);
-    assert!(line.contains("part of a recurring series"), "{line}");
+    occurrence.recurrence = Some("Weekly on Monday".into());
+    app.overlay = Overlay::EventCard(Box::new(crate::tui::app::EventCardOverlay::new(
+        occurrence.clone(),
+    )));
+    app.handle_key(key('p'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!(
+            "p on an occurrence opens its form, no chooser: {:?}",
+            app.status_message
+        );
+    };
+    assert_eq!(form.scope(), Some("occurrence"));
+    assert_eq!(
+        (form.date.as_str(), form.start.as_str(), form.end.as_str()),
+        ("2026-08-04", "14:00", "15:00")
+    );
+    let params = form.update_params().expect("the occurrence's update");
+    assert_eq!(params.event, occurrence.id);
+    assert_eq!(params.scope.as_deref(), Some("occurrence"));
+    assert_eq!(params.fields.start.as_deref(), Some("2026-08-04T14:00"));
+    assert_eq!(params.fields.end.as_deref(), Some("2026-08-04T15:00"));
+    assert_eq!(params.fields.recurrence, None);
+
+    let mut master = handover.clone();
+    master.kind = "series-master".into();
+    master.recurrence = Some("Weekly on Monday".into());
+    app.overlay = Overlay::EventCard(Box::new(crate::tui::app::EventCardOverlay::new(master)));
+    app.handle_key(key('p'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("p on a series master opens its form");
+    };
+    let params = form.update_params().expect("the series' update");
+    assert_eq!(
+        params.scope, None,
+        "the daemon reads a master's change as the series'"
+    );
+    assert_eq!(params.fields.start.as_deref(), Some("2026-08-04T14:00"));
+
     let mut nobody = handover;
     for attendee in &mut nobody.attendees {
         attendee.proposed_time = None;
