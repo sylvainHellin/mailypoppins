@@ -1,0 +1,62 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "operation.finished",
+    "payload": {
+      "operation_id": "4b7e0c2a9d1f4e38b6a5c3d2e1f0a987",
+      "result": {
+        "account": "evoqs",
+        "end": "2026-11-04T23:00:00Z",
+        "interval_minutes": 30,
+        "schedules": [
+          {
+            "address": "s.hellin@evoqs.com",
+            "items": [
+              {
+                "end": "2026-11-04T10:00:00Z",
+                "start": "2026-11-04T08:00:00Z",
+                "status": "busy",
+                "subject": "Team meeting"
+              }
+            ],
+            "view": "000000000000000000222200000000000000000000000000"
+          },
+          {
+            "address": "ada@evoqs.com",
+            "items": [
+              {
+                "end": "2026-11-04T13:00:00Z",
+                "location": "Room 2",
+                "start": "2026-11-04T12:00:00Z",
+                "status": "tentative",
+                "subject": "Lunch talk"
+              },
+              {
+                "end": "2026-11-04T15:00:00Z",
+                "start": "2026-11-04T13:00:00Z",
+                "status": "oof"
+              }
+            ],
+            "view": "000000000000000000000000001133330000000000000000"
+          },
+          {
+            "address": "room-1@evoqs.com",
+            "items": [],
+            "view": "000000000000000000000000000000000000000000000000"
+          },
+          {
+            "address": "someone@gmail.com",
+            "error": "Proxy web request failed (5016)",
+            "items": [],
+            "view": ""
+          }
+        ],
+        "start": "2026-11-03T23:00:00Z"
+      },
+      "state": "succeeded"
+    },
+    "revision": 4302
+  }
+}

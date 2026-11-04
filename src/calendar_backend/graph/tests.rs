@@ -16,6 +16,9 @@ const MASTER: &str = include_str!("../../../tests/fixtures/graph_calendar/series
 /// The writes (`write.rs`), against the same scripted Graph.
 mod write;
 
+/// Free/busy (`freebusy.rs`), against the same scripted Graph.
+mod freebusy;
+
 const MASTER_UID: &str = "040000008200E00074C5B7101A82E00800000000WEEKLY";
 const BASE: &str = "https://graph.microsoft.com/v1.0";
 

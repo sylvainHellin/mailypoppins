@@ -152,6 +152,18 @@ const REMINDER_FIXTURES: &[&str] = &[
     "notification.calendar_reminders_changed.json",
 ];
 
+/// The fixtures PERSO-255 adds for free/busy: `calendar.freebusy`, the
+/// operation id it answers with, and the `operation.finished` carrying its
+/// settled schedules.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const FREEBUSY_FIXTURES: &[&str] = &[
+    "calendar.freebusy.request.json",
+    "calendar.freebusy.response.json",
+    "notification.calendar_freebusy_finished.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -222,6 +234,7 @@ fn every_required_fixture_is_committed() {
         .chain(CALENDAR_FIXTURES)
         .chain(CALENDAR_WRITE_FIXTURES)
         .chain(REMINDER_FIXTURES)
+        .chain(FREEBUSY_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();

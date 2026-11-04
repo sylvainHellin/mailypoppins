@@ -866,7 +866,7 @@ fn bound_to(selector: &str, account: &AccountConfig) -> Result<(), RpcError> {
 
 /// A backend failure as the error a client shows: the re-login prompt for a
 /// missing scope, the failure itself otherwise.
-fn backend_error(account: &str, error: CalendarBackendError) -> RpcError {
+pub(super) fn backend_error(account: &str, error: CalendarBackendError) -> RpcError {
     match error {
         CalendarBackendError::MissingScope { scope } => RpcError {
             code: INTERNAL_ERROR,

@@ -1,0 +1,92 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(microsoft.graph.scheduleInformation)",
+  "value": [
+    {
+      "availabilityView": "000000000000000000222200000000000000000000000000",
+      "scheduleId": "s.hellin@evoqs.com",
+      "scheduleItems": [
+        {
+          "end": {
+            "dateTime": "2026-11-04T10:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "isException": false,
+          "isMeeting": false,
+          "isPrivate": false,
+          "isRecurring": true,
+          "isReminderSet": true,
+          "location": "",
+          "start": {
+            "dateTime": "2026-11-04T08:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "status": "busy",
+          "subject": "Team meeting"
+        }
+      ],
+      "workingHours": {
+        "daysOfWeek": [
+          "monday",
+          "tuesday",
+          "wednesday",
+          "thursday",
+          "friday"
+        ],
+        "endTime": "17:00:00.0000000",
+        "startTime": "08:00:00.0000000",
+        "timeZone": {
+          "name": "Romance Standard Time"
+        }
+      }
+    },
+    {
+      "availabilityView": "000000000000000000000000001133330000000000000000",
+      "scheduleId": "Ada@Evoqs.com",
+      "scheduleItems": [
+        {
+          "end": {
+            "dateTime": "2026-11-04T15:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "isPrivate": true,
+          "start": {
+            "dateTime": "2026-11-04T13:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "status": "oof"
+        },
+        {
+          "end": {
+            "dateTime": "2026-11-04T13:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "isPrivate": false,
+          "location": "Room 2",
+          "start": {
+            "dateTime": "2026-11-04T12:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "status": "tentative",
+          "subject": "Lunch talk"
+        }
+      ],
+      "workingHours": {
+        "daysOfWeek": [
+          "monday"
+        ],
+        "endTime": "17:00:00.0000000",
+        "startTime": "08:00:00.0000000",
+        "timeZone": {
+          "name": "W. Europe Standard Time"
+        }
+      }
+    },
+    {
+      "error": {
+        "message": "Proxy web request failed. ",
+        "responseCode": "5016"
+      },
+      "scheduleId": "someone@gmail.com"
+    }
+  ]
+}
