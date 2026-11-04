@@ -389,8 +389,11 @@ pub struct ProposedTime {
 ///
 /// The times take the forms of [`resolve_input`], read in `params.zone`,
 /// else the event's own zone (`host` for an all-day event); a start alone
-/// keeps the event's length. Bare dates propose whole days, from the first
-/// midnight in the zone to the one after the last day. A proposal of the
+/// keeps the event's length when it is of the event's kind; a bare date
+/// alone on a timed event proposes that day, and a time alone on an
+/// all-day event is refused, since no length follows from it.
+/// Bare dates propose whole days, from the first midnight in the zone to
+/// the one after the last day. A proposal of the
 /// time the event already has is refused, since it proposes nothing.
 pub fn resolve_proposal(
     params: &EventProposedTime,
@@ -411,7 +414,14 @@ pub fn resolve_proposal(
     let (end, duration) = (named(&params.end), named(&params.duration));
     let zone = resolve_zone(params.zone.as_deref(), current.time.zone().unwrap_or(host))?;
     let duration = match (&end, duration) {
-        (None, None) => Some(current_length(&current.time)),
+        (None, None) if is_date(start) == current.is_all_day() => {
+            Some(current_length(&current.time))
+        }
+        (None, None) if current.is_all_day() => {
+            return Err(
+                "A proposed time on an all-day event needs an end or a duration".to_string(),
+            );
+        }
         (_, duration) => duration,
     };
     let time = resolve_time(start, end.as_deref(), duration.as_deref(), None, zone)?;
@@ -1019,10 +1029,12 @@ mod tests {
         );
     }
 
-    /// A proposal is read in the event's own zone unless it names one, a
-    /// start alone keeps the event's length, bare dates propose whole days
-    /// from midnight in the zone, and the event's own time or an empty start
-    /// is refused.
+    /// A proposal is read in the event's own zone unless it names one (the
+    /// host's for an all-day event), a start alone of the event's kind keeps
+    /// its length, a bare date alone on a timed event proposes that day, bare
+    /// dates propose whole days from midnight in the zone, and the event's
+    /// own time, an empty start or a time alone on an all-day event is
+    /// refused.
     #[test]
     fn a_proposal_reads_its_time_against_the_event() {
         let current = made(&EventInput::new("Review", time()));
@@ -1053,6 +1065,31 @@ mod tests {
         let days = propose(json!({"start": "2026-11-05", "end": "2026-11-06"})).unwrap();
         assert_eq!(days.slot.start, at(4, 23, 0));
         assert_eq!(days.slot.end, at(6, 23, 0));
+        let day = propose(json!({"start": "2026-11-19"})).unwrap();
+        assert_eq!(day.slot.start, at(18, 23, 0));
+        assert_eq!(day.slot.end, at(19, 23, 0));
+
+        let holiday = made(&EventInput::new(
+            "Offsite",
+            EventTime::all_day(
+                NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 11, 12).unwrap(),
+            )
+            .unwrap(),
+        ));
+        let on_holiday = |value: serde_json::Value| {
+            let params: EventProposedTime = serde_json::from_value(value).unwrap();
+            resolve_proposal(&params, &holiday, chrono_tz::UTC)
+        };
+        let moved = on_holiday(json!({"start": "2026-11-17"})).unwrap();
+        assert_eq!(moved.slot.start, at(17, 0, 0));
+        assert_eq!(moved.slot.end, at(19, 0, 0));
+        assert_eq!(
+            on_holiday(json!({"start": "2026-11-17T09:00"})).unwrap_err(),
+            "A proposed time on an all-day event needs an end or a duration"
+        );
+        let timed = on_holiday(json!({"start": "2026-11-17T09:00", "duration": "1h"})).unwrap();
+        assert_eq!(timed.slot.end, at(17, 10, 0));
 
         assert!(propose(json!({"start": "2026-11-03T10:00"}))
             .unwrap_err()
