@@ -293,6 +293,7 @@ pub fn run() {
             calendar::event_update,
             calendar::event_cancel,
             calendar::event_delete,
+            calendar::event_get,
             calendar::event_respond,
             calendar::invite_source_open,
             calendar::invite_get,

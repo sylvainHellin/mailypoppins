@@ -10,18 +10,35 @@
 // safely. A failed or vanished cancel or delete opens its confirmation again
 // with the comment; the daemon counts a repeat of one that went through as
 // done. Either comes back over the view when nothing else is open, else it
-// is kept for Edit or `D` on the event and a notice says so. Pure functions over the model, which the reducer routes to, and at
-// the bottom the commands.
+// is kept for Edit or `D` on the event and a notice says so. On an
+// occurrence of a series, Edit and `D` first ask whether the change reaches
+// this occurrence or the whole series (`event_scope`); the series form holds
+// the master's values, read through `event_get`, and its rule. Pure
+// functions over the model, which the reducer routes to, and at the bottom
+// the commands.
 
 import type { Dispatch } from "react";
-import type { CalendarEvent, CalendarInfo, EventCancelResult, EventPatchParams } from "@/protocol/types";
+import type { CalendarEvent, CalendarInfo, CalendarRecurrence, EventCancelResult, EventPatchParams } from "@/protocol/types";
 import { asGuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
 import { pushNotice } from "@/app/pending";
 import { cursorEntry, eventTitle, isOrganizer, staleCalendar } from "@/app/calendar";
 import { addresses, eventProblem, localZone, openEventDialog } from "@/app/eventForm";
-import type { AppState, EventCalendar, EventChangeRun, EventDialog, EventFields, EventRemoveDialog, OperationEnd } from "@/app/state";
+import { NO_REPEAT, repeatFromRule, ruleOf, sameRule } from "@/app/recurrence";
+import type {
+  AppState,
+  EventCalendar,
+  EventChangeRun,
+  EventDialog,
+  EventFields,
+  EventRemoveDialog,
+  EventScopeDialog,
+  OperationEnd,
+} from "@/app/state";
+
+/** A scope of a change to a recurring event. */
+export type EventScope = "occurrence" | "series";
 
 const CHANGE_EARLY_CAP = 16;
 
@@ -69,21 +86,36 @@ export function editFields(event: CalendarEvent, calendar: EventCalendar): Event
     noReminder: event.reminder == null,
     showAs: event.show_as,
     body: event.body ?? "",
+    repeat: NO_REPEAT,
   };
 }
 
-/** Why `event` cannot be changed from mp: an invitation mail's, one of a series, or one on a calendar that takes no writes; null when it can. */
+/** Whether `event` is one occurrence of a series, whose change names its scope. */
+export function isOccurrence(event: CalendarEvent): boolean {
+  return event.kind === "occurrence" || event.kind === "exception" || Boolean(event.series_master_id);
+}
+
+/** Why `event` cannot be changed from mp: an invitation mail's, or one on a calendar that takes no writes; null when it can. */
 export function unchangeable(event: CalendarEvent, calendars: readonly CalendarInfo[] | null): string | null {
   if (event.id.startsWith("imip:")) return "An invitation mail's event can only be answered (V)";
-  if (event.kind !== "single" || event.series_master_id) return `${eventTitle(event)} is part of a recurring series, which mp cannot change yet`;
   const calendar = (calendars ?? []).find((c) => c.account === event.account && c.id === event.calendar);
   if (!calendar) return `${event.account} has no calendar ${event.calendar}`;
   if (!calendar.can_edit || !calendar.features.includes("write")) return `The calendar ${calendar.name} takes no changes from mp`;
   return null;
 }
 
-/** The edit form on `event`, or why it cannot be changed. */
-export function editDialogFor(event: CalendarEvent, calendars: readonly CalendarInfo[] | null): EventDialog | string {
+/**
+ * The edit form on `event`, or why it cannot be changed. In the
+ * `occurrence` scope the Repeat section names the series the occurrence
+ * stays part of; in the `series` scope `event` is the master and `rule` the
+ * series' own, which fills the Repeat section.
+ */
+export function editDialogFor(
+  event: CalendarEvent,
+  calendars: readonly CalendarInfo[] | null,
+  scope: EventScope | null = null,
+  rule: CalendarRecurrence | null = null,
+): EventDialog | string {
   if (event.cancelled) return `${eventTitle(event)} was cancelled by its organizer; Delete removes your copy`;
   const why = unchangeable(event, calendars);
   if (why) return why;
@@ -98,12 +130,14 @@ export function editDialogFor(event: CalendarEvent, calendars: readonly Calendar
     freeBusy: info.features.includes("free-busy"),
   };
   const fields = editFields(event, calendar);
+  if (scope === "occurrence") fields.repeat = { ...NO_REPEAT, series: event.recurrence ?? "A recurring series" };
+  if (scope === "series" && rule) fields.repeat = repeatFromRule(rule, fields.start);
   return {
     fields,
     calendars: [calendar],
     transactionId: null,
     error: null,
-    edit: { account: event.account, event: event.id, organizer: isOrganizer(event), online: event.is_online_meeting, original: fields },
+    edit: { account: event.account, event: event.id, organizer: isOrganizer(event), online: event.is_online_meeting, original: fields, scope },
   };
 }
 
@@ -113,7 +147,11 @@ export function editDialogFor(event: CalendarEvent, calendars: readonly Calendar
  * user's copy of a cancelled meeting); someone else's live meeting is
  * declined instead, which this says.
  */
-export function removeDialogFor(event: CalendarEvent, calendars: readonly CalendarInfo[] | null): EventRemoveDialog | string {
+export function removeDialogFor(
+  event: CalendarEvent,
+  calendars: readonly CalendarInfo[] | null,
+  scope: EventScope | null = null,
+): EventRemoveDialog | string {
   const why = unchangeable(event, calendars);
   if (why) return why;
   const meeting = event.attendees.length > 0;
@@ -122,7 +160,8 @@ export function removeDialogFor(event: CalendarEvent, calendars: readonly Calend
   else if (isOrganizer(event)) cancel = meeting;
   else if (!event.organizer && !meeting) cancel = false;
   else return `${eventTitle(event)} is someone else's meeting: decline it (Respond) to tell the organizer`;
-  return { account: event.account, event: event.id, summary: eventTitle(event), cancel, attendees: event.attendees.length };
+  const dialog: EventRemoveDialog = { account: event.account, event: event.id, summary: eventTitle(event), cancel, attendees: event.attendees.length };
+  return scope ? { ...dialog, scope } : dialog;
 }
 
 /** The start and end as the daemon reads them; an all-day event with no last day lasts one day. */
@@ -166,6 +205,14 @@ export function changedFields(dialog: EventDialog, zone: string): EventPatchPara
   if (f.teams && !was.teams) fields.online_meeting = true;
   if (reminderOf(f) !== reminderOf(was)) fields.reminder = reminderOf(f);
   if (f.showAs !== was.showAs) fields.show_as = f.showAs;
+  if (dialog.edit?.scope === "series") {
+    const rule = (fields: EventFields) => {
+      const made = ruleOf(fields.repeat, fields.start);
+      return "rule" in made ? made.rule : null;
+    };
+    const now = rule(f);
+    if (now && !sameRule(now, rule(was))) fields.recurrence = now;
+  }
   return fields;
 }
 
@@ -195,6 +242,24 @@ export function openEventRemove(s: AppState, dialog: EventRemoveDialog): AppStat
     eventRemoveDialog: dialog,
     keptEventRemove: same ? null : kept,
     eventDialog: null,
+    eventScopeDialog: null,
+    dialog: null,
+    composeDialog: null,
+    attachDialog: null,
+    rsvpDialog: null,
+    inviteDialog: null,
+    signaturesDialog: null,
+  };
+}
+
+/** The choice between an occurrence and its whole series over the view. */
+export function openEventScope(s: AppState, dialog: EventScopeDialog): AppState {
+  return {
+    ...s,
+    overlay: "event_scope",
+    eventScopeDialog: dialog,
+    eventDialog: null,
+    eventRemoveDialog: null,
     dialog: null,
     composeDialog: null,
     attachDialog: null,
@@ -296,20 +361,29 @@ export function eventChangeFailed(s: AppState, token: number): AppState {
 
 let nextChange = 1;
 
-/** `E` in the Calendar view and the card's Edit: the form a failed update of the cursor event kept, else the event form on it, or why it cannot be changed. */
+/**
+ * `E` in the Calendar view and the card's Edit: the form a failed update of
+ * the cursor event (or of its series) kept, else the event form on it, or
+ * why it cannot be changed; an occurrence of a series asks its scope first.
+ */
 export function editEvent(s: AppState, dispatch: Dispatch<Action>): void {
   const event = cursorEntry(s)?.event;
   if (!event) return dispatch({ type: "notice", text: "No event under the cursor" });
   const kept = s.keptEventDialog;
-  if (kept?.edit && kept.edit.account === event.account && kept.edit.event === event.id) {
+  if (kept?.edit && kept.edit.account === event.account && (kept.edit.event === event.id || kept.edit.event === event.series_master_id)) {
     return dispatch({ type: "open_event_form", dialog: kept });
   }
   const dialog = editDialogFor(event, s.calendars.data);
   if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+  if (isOccurrence(event)) return dispatch({ type: "open_event_scope", dialog: { event, remove: false } });
   dispatch({ type: "open_event_form", dialog });
 }
 
-/** `D` in the Calendar view and the card's Cancel meeting or Delete: the confirmation a failed cancel or delete of the cursor event kept, else a fresh one, or why not. */
+/**
+ * `D` in the Calendar view and the card's Cancel meeting or Delete: the
+ * confirmation a failed cancel or delete of the cursor event kept, else a
+ * fresh one, or why not; an occurrence of a series asks its scope first.
+ */
 export function removeEvent(s: AppState, dispatch: Dispatch<Action>): void {
   const event = cursorEntry(s)?.event;
   if (!event) return dispatch({ type: "notice", text: "No event under the cursor" });
@@ -317,7 +391,39 @@ export function removeEvent(s: AppState, dispatch: Dispatch<Action>): void {
   if (kept && kept.account === event.account && kept.event === event.id) return dispatch({ type: "open_event_remove", dialog: kept });
   const dialog = removeDialogFor(event, s.calendars.data);
   if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+  if (isOccurrence(event)) return dispatch({ type: "open_event_scope", dialog: { event, remove: true } });
   dispatch({ type: "open_event_remove", dialog });
+}
+
+/**
+ * The scope chooser's answer: the cancel or delete confirmation in that
+ * scope; the form on the occurrence alone; or the form on the whole series,
+ * its master and rule read through `event_get`, whose failure is a notice.
+ */
+export async function chooseEventScope(s: AppState, dispatch: Dispatch<Action>, scope: EventScope): Promise<void> {
+  const chosen = s.eventScopeDialog;
+  if (!chosen) return;
+  const { event, remove } = chosen;
+  if (remove) {
+    const dialog = removeDialogFor(event, s.calendars.data, scope);
+    if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+    return dispatch({ type: "open_event_remove", dialog });
+  }
+  let dialog: EventDialog | string;
+  if (scope === "occurrence") {
+    dialog = editDialogFor(event, s.calendars.data, "occurrence");
+  } else {
+    const master = event.series_master_id;
+    if (!master) return dispatch({ type: "notice", text: `${eventTitle(event)} names no series` });
+    try {
+      const got = await cmd.eventGet(event.account, master);
+      dialog = editDialogFor(got.event, s.calendars.data, "series", got.series?.recurrence ?? null);
+    } catch (e: unknown) {
+      return dispatch({ type: "notice", text: `The series of ${eventTitle(event)} could not be read: ${asGuiError(e).message}` });
+    }
+  }
+  if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+  dispatch({ type: "open_event_form", dialog });
 }
 
 /** Save an edit form: what it lacks is refused here; a refusal of the daemon comes back as its sentence. Null once the update started. */
@@ -330,7 +436,8 @@ export async function submitEdit(dispatch: Dispatch<Action>, dialog: EventDialog
   const summary = dialog.fields.title.trim() || "(no title)";
   dispatch({ type: "event_change_requested", token, account: edit.account, summary, kind: "update", dialog, removal: null });
   try {
-    const started = await cmd.eventUpdate({ account: edit.account, event: edit.event, fields: changedFields(dialog, localZone()) });
+    const params = { account: edit.account, event: edit.event, fields: changedFields(dialog, localZone()) };
+    const started = await cmd.eventUpdate(edit.scope ? { ...params, scope: edit.scope } : params);
     dispatch({ type: "event_change_started", token, operation_id: started.operation_id });
     return null;
   } catch (e: unknown) {
@@ -344,11 +451,13 @@ export async function submitRemove(dispatch: Dispatch<Action>, dialog: EventRemo
   const token = nextChange++;
   const kind = dialog.cancel ? "cancel" : "delete";
   const removal: EventRemoveDialog = { ...dialog, comment, error: null };
-  dispatch({ type: "event_change_requested", token, account: dialog.account, summary: dialog.summary, kind, dialog: null, removal });
+  const scope = dialog.scope ?? null;
+  const summary = scope === "series" ? `the series ${dialog.summary}` : scope === "occurrence" ? `one occurrence of ${dialog.summary}` : dialog.summary;
+  dispatch({ type: "event_change_requested", token, account: dialog.account, summary, kind, dialog: null, removal });
   try {
     const started = dialog.cancel
-      ? await cmd.eventCancel(dialog.account, dialog.event, comment.trim() || null)
-      : await cmd.eventDelete(dialog.account, dialog.event);
+      ? await cmd.eventCancel(dialog.account, dialog.event, comment.trim() || null, scope)
+      : await cmd.eventDelete(dialog.account, dialog.event, scope);
     dispatch({ type: "event_change_started", token, operation_id: started.operation_id });
     return null;
   } catch (e: unknown) {

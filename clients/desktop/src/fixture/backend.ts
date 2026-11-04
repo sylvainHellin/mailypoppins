@@ -25,6 +25,7 @@ import type {
   CalendarFreeBusyParams,
   CalendarFreeBusyResult,
   CalendarInfo,
+  CalendarRecurrence,
   CalendarReminder,
   CalendarScheduleItem,
   DraftCreated,
@@ -45,6 +46,7 @@ import type {
 } from "@/protocol/types";
 import { FakeBridge } from "@/fixture/terminal-bridge";
 import { kindOfRole } from "@/components/sidebar/icons";
+import { describeRecurrence, filled } from "@/app/recurrence";
 import type {
   AccountDraft,
   AccountInfo,
@@ -86,6 +88,7 @@ export const fixtures = {
     calendars: CalendarInfo[];
     events: CalendarEvent[];
     invites: Record<string, Record<string, string>>;
+    series?: FixtureSeries[];
   },
   contacts: contactsFx as unknown as Record<string, Omit<ContactRow, "recipient">[]>,
   config: configFx as unknown as ConfigSnapshot["config"],
@@ -96,6 +99,45 @@ export class Channel<T> {
 }
 
 const clone = <T,>(v: T): T => structuredClone(v);
+
+/** A series the fixture's server holds: its master, which no view lists and `event_get` answers, and its rule. */
+type FixtureSeries = { master: CalendarEvent; recurrence?: CalendarRecurrence };
+
+/** How many occurrences the fixture expands a rule without a count into. */
+const FIXTURE_OCCURRENCES = 3;
+
+/**
+ * fixture.rs's expansion of a series: occurrences from the master's start
+ * at the rule's step (every `interval` days, weeks, months or years; the
+ * weekdays and the week of the month are the daemon's), `count` of them or
+ * three, none past `until`, each named by the master's id and its date.
+ */
+function expandSeries(master: CalendarEvent, rule: CalendarRecurrence): CalendarEvent[] {
+  const step = (text: string, n: number): string => {
+    const at = new Date(text.length === 10 ? `${text}T00:00:00Z` : text);
+    const by = Math.max(1, rule.interval) * n;
+    if (rule.frequency === "daily") at.setUTCDate(at.getUTCDate() + by);
+    else if (rule.frequency === "weekly") at.setUTCDate(at.getUTCDate() + by * 7);
+    else at.setUTCMonth(at.getUTCMonth() + (rule.frequency === "monthly" ? by : by * 12));
+    return text.length === 10 ? at.toISOString().slice(0, 10) : at.toISOString();
+  };
+  const out: CalendarEvent[] = [];
+  for (let n = 0; n < (rule.count ?? FIXTURE_OCCURRENCES); n++) {
+    const t = master.time;
+    const time: CalendarEvent["time"] =
+      t.kind === "timed" ? { ...t, start: step(t.start, n), end: step(t.end, n) } : { kind: "all-day", start: step(t.start, n), end: step(t.end, n) };
+    const day = time.start.slice(0, 10);
+    if (rule.until && day > rule.until) break;
+    out.push({ ...clone(master), id: `${master.id}-${day.split("-").join("")}`, kind: "occurrence", series_master_id: master.id, recurrence_id: time.start, time });
+  }
+  return out;
+}
+
+/** The fields of an update the occurrences of a series not changed apart take: its details, not its time. */
+function reachedFields(changed: CalendarEvent): Partial<CalendarEvent> {
+  const { summary, location, body, attendees, reminder, show_as, is_online_meeting } = changed;
+  return { summary, location, body, attendees, reminder, show_as, is_online_meeting };
+}
 
 /**
  * The outbox rows the fixture seeds from the bootstrap's counts: `home`
@@ -242,6 +284,8 @@ export const mock = {
   calendars: clone(fixtures.calendarServer.calendars),
   /** The events `calendar_view` answers. */
   events: clone(fixtures.calendarServer.events),
+  /** The series the server holds, each master with its rule. */
+  series: clone(fixtures.calendarServer.series ?? []),
   /** The reminders `calendar_reminders` answers (`simulateReminder` fires one). */
   reminders: [] as CalendarReminder[],
   /** How many test notifications `reminder_notify_test` raised. */
@@ -255,15 +299,26 @@ export const mock = {
   /** The next invitation's operation id counter. */
   nextInvite: 1,
   /** The creates `event_create` started and no test settled yet, oldest first, each with the event it makes. */
-  eventCreates: [] as { operation_id: string; account: string; transaction_id: string; event: CalendarEvent }[],
+  eventCreates: [] as { operation_id: string; account: string; transaction_id: string; event: CalendarEvent; series?: FixtureSeries; occurrences?: CalendarEvent[] }[],
   /** The next create's operation id counter. */
   nextEventCreate: 1,
   /** The updates, cancels and deletes `event_update`, `event_cancel` and `event_delete` started and no test settled yet, oldest first, each with what it does. */
-  eventChanges: [] as { operation_id: string; account: string; id: string; kind: "update" | "cancel" | "delete"; event: CalendarEvent | null; retried?: unknown }[],
+  eventChanges: [] as {
+    operation_id: string;
+    account: string;
+    id: string;
+    kind: "update" | "cancel" | "delete";
+    event: CalendarEvent | null;
+    retried?: unknown;
+    /** `occurrence` or `series` on an occurrence of a series; with `series`, `target` is its master's id. */
+    scope?: "occurrence" | "series" | null;
+    target?: string;
+    rule?: CalendarRecurrence;
+  }[],
   /** The next change's operation id counter. */
   nextEventChange: 1,
   /** The cancels and deletes that took an event off the server and the cache, with what each settled with, as the daemon's `calendar_removed_events`: a repeat of the same call counts as done with that result. */
-  removedEvents: [] as { account: string; id: string; kind: "cancel" | "delete"; result: unknown }[],
+  removedEvents: [] as { account: string; id: string; kind: "cancel" | "delete"; result: unknown; scope?: string | null }[],
   /** Each account's contact index, ranked, as `contact.search` rows. */
   contacts: clone(fixtures.contacts),
   /** The rebuilds `contact_rebuild` started and no test settled yet, oldest first. */
@@ -524,6 +579,7 @@ export function resetMock(): void {
   mock.invites = {};
   mock.calendars = clone(fixtures.calendarServer.calendars);
   mock.events = clone(fixtures.calendarServer.events);
+  mock.series = clone(fixtures.calendarServer.series ?? []);
   mock.reminders = [];
   mock.testNotifications = 0;
   mock.rsvps = [];
@@ -647,7 +703,12 @@ export function settleEventCreate(opts: { fail?: boolean } = {}): string {
     });
     return run.operation_id;
   }
-  if (!mock.events.some((e) => e.account === run.account && e.transaction_id === run.transaction_id)) mock.events.push(run.event);
+  if (run.series) {
+    if (!mock.series.some((x) => x.master.account === run.account && x.master.transaction_id === run.transaction_id)) {
+      mock.series.push(run.series);
+      mock.events.push(...(run.occurrences ?? []));
+    }
+  } else if (!mock.events.some((e) => e.account === run.account && e.transaction_id === run.transaction_id)) mock.events.push(run.event);
   emitEnvelope("calendar.changed", { account: run.account });
   emitEnvelope("operation.finished", {
     operation_id: run.operation_id,
@@ -682,20 +743,40 @@ export function settleEventChange(opts: { fail?: boolean; dropped?: boolean } = 
     emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "succeeded", result: run.retried });
     return run.operation_id;
   }
-  const at = mock.events.findIndex((e) => e.account === run.account && e.id === run.id);
-  const before = at >= 0 ? mock.events[at] : null;
-  if (run.event && at >= 0) mock.events[at] = run.event;
-  else if (!run.event && at >= 0) mock.events.splice(at, 1);
+  const scope = run.scope ?? null;
+  let before: CalendarEvent | null;
+  if (scope === "series") {
+    const master = run.target ?? run.id;
+    const series = mock.series.find((x) => x.master.account === run.account && x.master.id === master);
+    before = series?.master ?? null;
+    if (run.event && series) {
+      series.master = run.event;
+      if (run.rule) series.recurrence = run.rule;
+      const reached = reachedFields(run.event);
+      mock.events = mock.events.map((e) =>
+        e.account === run.account && e.series_master_id === master && e.kind === "occurrence" ? { ...e, ...reached } : e,
+      );
+    } else if (!run.event) {
+      mock.series = mock.series.filter((x) => x !== series);
+      mock.events = mock.events.filter((e) => !(e.account === run.account && e.series_master_id === master));
+    }
+  } else {
+    const at = mock.events.findIndex((e) => e.account === run.account && e.id === run.id);
+    before = at >= 0 ? mock.events[at] : null;
+    if (run.event && at >= 0) mock.events[at] = run.event;
+    else if (!run.event && at >= 0) mock.events.splice(at, 1);
+  }
   emitEnvelope("calendar.changed", { account: run.account });
+  const scoped = scope ? { scope } : {};
   const result =
     run.kind === "update"
-      ? { account: run.account, event: run.event }
+      ? { account: run.account, event: run.event, ...scoped }
       : run.kind === "cancel"
-        ? { account: run.account, event: run.id, notified: (before?.attendees ?? []).map((a) => a.email) }
-        : { account: run.account, event: run.id };
+        ? { account: run.account, event: run.id, notified: (before?.attendees ?? []).map((a) => a.email), ...scoped }
+        : { account: run.account, event: run.id, ...scoped };
   if (run.kind !== "update") {
     mock.removedEvents = mock.removedEvents.filter((r) => !(r.account === run.account && r.id === run.id));
-    mock.removedEvents.push({ account: run.account, id: run.id, kind: run.kind, result });
+    mock.removedEvents.push({ account: run.account, id: run.id, kind: run.kind, result, scope });
   }
   if (opts.dropped) {
     emit({ type: "operation_dropped", operation_id: run.operation_id, kind: "event_change", reason: "the daemon restarted" });
@@ -2312,8 +2393,29 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         response_requested: true,
         transaction_id,
       };
+      if (e.recurrence) {
+        const made = mock.series.find((x) => x.master.account === account && x.master.transaction_id === transaction_id);
+        const rule = made?.recurrence ?? { ...filled(e.recurrence, e.start.slice(0, 10)), start: e.start.slice(0, 10) };
+        const master: CalendarEvent = made?.master ?? { ...event, kind: "series-master", recurrence: describeRecurrence(rule) };
+        const series = made ?? { master, recurrence: rule };
+        mock.eventCreates.push({ operation_id, account, transaction_id, event: master, series, occurrences: made ? [] : expandSeries(master, rule) });
+        return { operation_id, transaction_id };
+      }
       mock.eventCreates.push({ operation_id, account, transaction_id, event });
       return { operation_id, transaction_id };
+    }
+    case "event_get": {
+      knownAccount(cmd, account);
+      const id = String(args.event);
+      const event = mock.events.find((e) => e.account === account && e.id === id) ?? mock.series.find((x) => x.master.account === account && x.master.id === id)?.master;
+      if (!event) throw { kind: "not_found", code: -32602, message: `event.get: the daemon refused the call: ${account} has no event ${id} (-32602)` };
+      const masterId = event.series_master_id ?? (event.kind === "series-master" ? event.id : null);
+      const series = masterId ? mock.series.find((x) => x.master.account === account && x.master.id === masterId) : undefined;
+      return {
+        account,
+        event: clone(event),
+        ...(masterId ? { series: { master_id: masterId, summary: series?.master.summary, recurrence: series?.recurrence } } : {}),
+      };
     }
     case "event_update":
     case "event_cancel":
@@ -2325,9 +2427,12 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const refuse = (message: string) => ({ kind: "protocol", code: -32602, message });
       const method = cmd.replace("_", ".");
       if (id.startsWith("imip:")) throw refuse(`${id} is an invitation mail's event, which can only be answered (event.respond); ${method} changes a server event`);
-      const event = mock.events.find((e) => e.account === account && e.id === id);
-      const removed = mock.removedEvents.find((r) => r.account === account && r.id === id && `event_${r.kind}` === cmd);
-      if (!event && removed) {
+      const asked = (params ? params.scope : args.scope) as string | null | undefined;
+      const named = mock.events.find((e) => e.account === account && e.id === id) ?? mock.series.find((x) => x.master.account === account && x.master.id === id)?.master;
+      const removed = mock.removedEvents.find(
+        (r) => r.account === account && r.id === id && `event_${r.kind}` === cmd && (asked == null || r.scope === asked),
+      );
+      if (!named && removed) {
         // The daemon's counted-as-done retry: the same call took the event
         // off the server and the cache already, so it settles with that
         // call's result and reaches the server no more.
@@ -2335,9 +2440,26 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         mock.eventChanges.push({ operation_id, account, id, kind: removed.kind, event: null, retried: removed.result });
         return { operation_id };
       }
-      if (!event) throw refuse(`${account} has no event ${id} (cancelled or deleted already, or not synced yet)`);
-      if (event.kind !== "single" || event.series_master_id) {
-        throw refuse(`${event.summary} is part of a recurring series, which mp cannot change yet; change it in Outlook`);
+      if (!named) throw refuse(`${account} has no event ${id} (cancelled or deleted already, or not synced yet)`);
+      if (asked != null && asked !== "occurrence" && asked !== "series") throw refuse(`"${asked}" is not a scope; use one of occurrence, series`);
+      // The daemon's scope rules: an occurrence names its scope, a master is the series, a single event has none.
+      let event = named;
+      let scope: "occurrence" | "series" | null = null;
+      if (named.kind === "series-master") {
+        if (asked === "occurrence") throw refuse(`${named.summary} is a whole series; the occurrence scope names one of its occurrences`);
+        scope = "series";
+      } else if (named.kind === "occurrence" || named.kind === "exception" || named.series_master_id) {
+        if (asked == null) throw refuse(`${named.summary} is one occurrence of a series: name the scope, occurrence or series`);
+        scope = asked;
+        if (scope === "series") {
+          const master = mock.series.find((x) => x.master.account === account && x.master.id === named.series_master_id)?.master;
+          if (!master) throw refuse(`mp has not read the series of ${named.summary} yet; try again after the next sync`);
+          event = master;
+        }
+      } else if (asked === "occurrence") {
+        throw refuse(`${named.summary} is not an occurrence of a series`);
+      } else if (asked === "series") {
+        throw refuse(`${named.summary} is not part of a series`);
       }
       const calendar = mock.calendars.find((c) => c.account === account && c.id === event.calendar);
       if (calendar && !calendar.can_edit) throw refuse(`The calendar ${calendar.name} of ${account} is read-only`);
@@ -2350,6 +2472,13 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         const f = params.fields;
         const keys = Object.keys(f);
         if (keys.length === 0) throw refuse("Nothing to change: name at least one field of the event");
+        if (f.recurrence && scope !== "series") {
+          throw refuse(
+            scope === "occurrence"
+              ? "An occurrence repeats by its series' rule; change the rule in the series scope"
+              : `${event.summary} does not repeat, and mp cannot turn it into a series; create a recurring event instead`,
+          );
+        }
         if (!organizer && keys.some((k) => k !== "reminder" && k !== "show_as")) throw refuse("Only the organizer can change this event");
         if (f.body !== undefined && event.is_online_meeting) {
           throw refuse(`The description of ${event.summary} cannot be changed from mp yet: the server would drop its Teams join details; change it in Outlook`);
@@ -2374,6 +2503,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
           const end = f.end ? new Date(f.end) : new Date(start.getTime() + length);
           changed.time = { ...changed.time, start: start.toISOString(), end: end.toISOString() };
         }
+        if (f.recurrence) changed.recurrence = describeRecurrence(f.recurrence);
+        if (scope === "occurrence" && changed.kind === "occurrence") changed.kind = "exception";
       } else if (cmd === "event_cancel") {
         kind = "cancel";
         if (!organizer) throw refuse(`Only the organizer can cancel ${event.summary}; decline it instead`);
@@ -2386,7 +2517,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         }
       }
       const operation_id = `fixture-change-${mock.nextEventChange++}`;
-      mock.eventChanges.push({ operation_id, account, id, kind, event: changed });
+      mock.eventChanges.push({ operation_id, account, id, kind, event: changed, scope, target: event.id, rule: params?.fields.recurrence });
       return { operation_id };
     }
     case "invite_source_open": {

@@ -159,8 +159,8 @@ use mp_client::events::Incoming;
 use mp_core::draft::{DraftRecipientEdit, SourceMessage};
 use mp_core::selector::{message_key, Selector};
 use mp_protocol::calendar::{
-    AgendaEvent, CalendarEvent, CalendarEventTime, CalendarInfo, EventFrontmatter,
-    IMIP_EVENT_PREFIX,
+    AgendaEvent, CalendarEvent, CalendarEventTime, CalendarInfo, CalendarRecurrence,
+    CalendarSeries, EventFrontmatter, IMIP_EVENT_PREFIX,
 };
 use mp_protocol::draft::{
     DraftCreated, DraftEntry, DraftHtml, DraftKind, DraftListing, DraftLocation, DraftMessage,
@@ -404,6 +404,119 @@ struct ServerCalendarSeed {
     calendars: Vec<CalendarInfo>,
     events: Vec<CalendarEvent>,
     invites: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    series: Vec<SeriesSeed>,
+}
+
+/// A series the fixture's server holds: its master, which no view lists
+/// and `event.get` answers, and its rule.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SeriesSeed {
+    master: CalendarEvent,
+    #[serde(default)]
+    recurrence: Option<CalendarRecurrence>,
+}
+
+/// How many occurrences the fixture expands a rule without a count into.
+const FIXTURE_OCCURRENCES: u32 = 3;
+
+/// The occurrences of the series `master` repeats by `rule`: from its start
+/// at the rule's step (every `interval` days, weeks, months or years; the
+/// fixture leaves the weekdays and the week of the month to the daemon),
+/// `count` of them or [`FIXTURE_OCCURRENCES`], none past `until`. Each is
+/// named by the master's id and its date and carries the master's details.
+fn expanded_occurrences(master: &CalendarEvent, rule: &CalendarRecurrence) -> Vec<CalendarEvent> {
+    // A text starting with `YYYY-MM-DD` moved by the rule's `n`th step, the
+    // rest (a time of day and its offset) kept: the fixture's times are UTC.
+    let step = |text: &str, n: u32| -> Option<String> {
+        let (date, rest) = (text.get(..10)?, text.get(10..)?);
+        let part = |range: std::ops::Range<usize>| date.get(range)?.parse::<i64>().ok();
+        let (year, month, day) = (part(0..4)?, part(5..7)?, part(8..10)?);
+        let by = i64::from(rule.interval.max(1) * n);
+        let (year, month, day) = match rule.frequency.as_str() {
+            "daily" | "weekly" => {
+                let days = if rule.frequency == "daily" {
+                    by
+                } else {
+                    by * 7
+                };
+                civil_from_days(days_from_civil(year, month, day) + days)
+            }
+            frequency => {
+                let months =
+                    year * 12 + month - 1 + if frequency == "monthly" { by } else { by * 12 };
+                let (year, month) = (months.div_euclid(12), months.rem_euclid(12) + 1);
+                let last = civil_from_days(days_from_civil(year, month + 1, 1) - 1).2;
+                (year, month, day.min(last))
+            }
+        };
+        Some(format!("{year:04}-{month:02}-{day:02}{rest}"))
+    };
+    let until = rule.until.clone();
+    (0..rule.count.unwrap_or(FIXTURE_OCCURRENCES))
+        .filter_map(|n| {
+            let mut occurrence = master.clone();
+            occurrence.time = match &master.time {
+                CalendarEventTime::Timed { start, end, zone } => CalendarEventTime::Timed {
+                    start: step(start, n)?,
+                    end: step(end, n)?,
+                    zone: zone.clone(),
+                },
+                CalendarEventTime::AllDay { start, end } => CalendarEventTime::AllDay {
+                    start: step(start, n)?,
+                    end: step(end, n)?,
+                },
+            };
+            let first = match &occurrence.time {
+                CalendarEventTime::Timed { start, .. } => start.clone(),
+                CalendarEventTime::AllDay { start, .. } => start.clone(),
+            };
+            if until
+                .as_deref()
+                .is_some_and(|until| first.get(..10) > Some(until))
+            {
+                return None;
+            }
+            occurrence.id = format!("{}-{}", master.id, first.get(..10)?.replace('-', ""));
+            occurrence.kind = "occurrence".into();
+            occurrence.series_master_id = Some(master.id.clone());
+            occurrence.recurrence_id = Some(first);
+            Some(occurrence)
+        })
+        .collect()
+}
+
+/// The days from 1970-01-01 to `year`-`month`-`day` of the proleptic
+/// Gregorian calendar, a month past December rolling into the next year.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let (year, month) = (
+        year + (month - 1).div_euclid(12),
+        (month - 1).rem_euclid(12) + 1,
+    );
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year - era * 400;
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let of_era_days = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    era * 146_097 + of_era_days - 719_468
+}
+
+/// The date `days` after 1970-01-01, as `(year, month, day)`.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let of_era = days - era * 146_097;
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 /// The fixture accounts' own address, their `default_from`, which a
@@ -587,6 +700,9 @@ fn patched_event(
     if let Some(sensitivity) = patch.sensitivity {
         value["sensitivity"] = serde_json::to_value(sensitivity)?;
     }
+    if let Some(rule) = &patch.recurrence {
+        value["recurrence"] = json!(rule.describe());
+    }
     if let Some(object) = value.as_object_mut() {
         object.retain(|_, v| !v.is_null());
     }
@@ -748,6 +864,8 @@ struct State {
     server_calendars: Vec<CalendarInfo>,
     /// The events `calendar.view` answers, in start order.
     server_events: Vec<CalendarEvent>,
+    /// The series the server holds, each master with its rule.
+    server_series: Vec<SeriesSeed>,
     /// (account, event id) -> the method and the result of the cancel or
     /// delete that took the event off the server, as the daemon's
     /// `calendar_removed_events`: a repeat of that call settles with it.
@@ -981,8 +1099,12 @@ impl State {
     }
 
     /// `event.update`, `event.cancel` or `event.delete` of `account`'s server
-    /// event `id`, refused in the daemon's words, else made on the server
-    /// calendar at once; the result the operation settles with.
+    /// event `id` in the call's `scope`, refused in the daemon's words, else
+    /// made on the server calendar at once; the result the operation settles
+    /// with. An occurrence's id needs its scope: `occurrence` writes to it
+    /// alone (an update making it an exception), `series` to its master,
+    /// whose update reaches the occurrences not changed apart and whose
+    /// cancel or delete takes every occurrence.
     fn change_server_event(
         &mut self,
         method: &str,
@@ -990,15 +1112,73 @@ impl State {
         id: &str,
         params: &Value,
     ) -> Result<Value> {
+        use mp_core::calendar_write::EventScope;
         let refusal = |message: String| refused(method, -32602, &message);
-        let event = self.server_event(method, account, id)?;
-        if event.kind != "single" || event.series_master_id.is_some() {
-            return Err(refusal(format!(
-                "{} is part of a recurring series, which mp cannot change yet; change it \
-                 in Outlook",
-                event.summary
-            )));
-        }
+        let scope = params["scope"]
+            .as_str()
+            .map(EventScope::from_word)
+            .transpose()
+            .map_err(refusal)?;
+        let held = self.server_event(method, account, id).ok();
+        let named = match held {
+            Some(event) => event,
+            None => self
+                .series_master(account, id)
+                .ok_or_else(|| refusal(format!("{account} has no event {id}")))?,
+        };
+        let instance = matches!(named.kind.as_str(), "occurrence" | "exception")
+            || named.series_master_id.is_some();
+        let (event, scope) = if named.kind == "series-master" {
+            if scope == Some(EventScope::Occurrence) {
+                return Err(refusal(format!(
+                    "{} is a whole series; the occurrence scope names one of its occurrences",
+                    named.summary
+                )));
+            }
+            (named, Some(EventScope::Series))
+        } else if instance {
+            match scope {
+                None => {
+                    return Err(refusal(format!(
+                        "{} is one occurrence of a series: name the scope, occurrence or series",
+                        named.summary
+                    )))
+                }
+                Some(EventScope::Occurrence) => (named, scope),
+                Some(EventScope::Series) => {
+                    let master = named
+                        .series_master_id
+                        .as_deref()
+                        .and_then(|master| self.series_master(account, master))
+                        .ok_or_else(|| {
+                            refusal(format!(
+                                "mp has not read the series of {} yet; try again after the \
+                                 next sync",
+                                named.summary
+                            ))
+                        })?;
+                    (master, scope)
+                }
+            }
+        } else {
+            match scope {
+                None => (named, None),
+                Some(EventScope::Occurrence) => {
+                    return Err(refusal(format!(
+                        "{} is not an occurrence of a series",
+                        named.summary
+                    )))
+                }
+                Some(EventScope::Series) => {
+                    return Err(refusal(format!(
+                        "{} is not part of a series",
+                        named.summary
+                    )))
+                }
+            }
+        };
+        let series = scope == Some(EventScope::Series);
+        let master_id = event.id.clone();
         let calendar = self
             .server_calendars
             .iter()
@@ -1011,11 +1191,23 @@ impl State {
                 calendar.name
             )));
         }
-        let result = match method {
+        let mut result = match method {
             "event.update" => {
                 let fields: mp_protocol::calendar::EventPatchParams =
                     serde_json::from_value(params["fields"].clone())
                         .map_err(|e| refusal(format!("event.update: {e}")))?;
+                if fields.recurrence.is_some() && !series {
+                    return Err(refusal(match scope {
+                        Some(_) => "An occurrence repeats by its series' rule; change the rule \
+                                    in the series scope"
+                            .to_string(),
+                        None => format!(
+                            "{} does not repeat, and mp cannot turn it into a series; create \
+                             a recurring event instead",
+                            event.summary
+                        ),
+                    }));
+                }
                 let berlin = mp_core::calendar_model::parse_zone("Europe/Berlin")
                     .ok_or_else(|| refused(method, -32603, "no Europe/Berlin zone"))?;
                 let model =
@@ -1049,14 +1241,47 @@ impl State {
                         event.summary
                     )));
                 }
-                let changed = patched_event(&event, &patch)
+                let mut changed = patched_event(&event, &patch)
                     .map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
-                if let Some(slot) = self
-                    .server_events
-                    .iter_mut()
-                    .find(|e| e.account == account && e.id == id)
-                {
-                    *slot = changed.clone();
+                if series {
+                    // The fixture keeps the occurrences' times: only the
+                    // details reach the ones not changed apart.
+                    let reach = mp_core::calendar_write::EventPatch {
+                        time: None,
+                        zone: None,
+                        recurrence: None,
+                        ..patch.clone()
+                    };
+                    for occurrence in self.server_events.iter_mut().filter(|e| {
+                        e.account == account
+                            && e.series_master_id.as_deref() == Some(master_id.as_str())
+                            && e.kind == "occurrence"
+                    }) {
+                        if let Ok(reached) = patched_event(occurrence, &reach) {
+                            *occurrence = reached;
+                        }
+                    }
+                    if let Some(seed) = self
+                        .server_series
+                        .iter_mut()
+                        .find(|seed| seed.master.account == account && seed.master.id == master_id)
+                    {
+                        seed.master = changed.clone();
+                        if let Some(rule) = &fields.recurrence {
+                            seed.recurrence = Some(rule.clone());
+                        }
+                    }
+                } else {
+                    if changed.kind == "occurrence" {
+                        changed.kind = "exception".into();
+                    }
+                    if let Some(slot) = self
+                        .server_events
+                        .iter_mut()
+                        .find(|e| e.account == account && e.id == event.id)
+                    {
+                        *slot = changed.clone();
+                    }
                 }
                 json!({"account": account, "event": changed})
             }
@@ -1074,8 +1299,7 @@ impl State {
                         event.summary
                     )));
                 }
-                self.server_events
-                    .retain(|e| !(e.account == account && e.id == id));
+                self.take_off(account, &event.id, series);
                 let notified: Vec<String> =
                     event.attendees.iter().map(|a| a.email.clone()).collect();
                 json!({"account": account, "event": id, "notified": notified})
@@ -1096,13 +1320,66 @@ impl State {
                         event.summary
                     )));
                 }
-                self.server_events
-                    .retain(|e| !(e.account == account && e.id == id));
+                self.take_off(account, &event.id, series);
                 json!({"account": account, "event": id})
             }
         };
-
+        if let Some(scope) = scope {
+            result["scope"] = json!(scope.as_str());
+        }
         Ok(result)
+    }
+
+    /// Take `account`'s event `id` off the server: with `series`, the
+    /// master `id` and every occurrence of it.
+    fn take_off(&mut self, account: &str, id: &str, series: bool) {
+        if series {
+            self.server_series
+                .retain(|seed| !(seed.master.account == account && seed.master.id == id));
+            self.server_events
+                .retain(|e| !(e.account == account && e.series_master_id.as_deref() == Some(id)));
+        } else {
+            self.server_events
+                .retain(|e| !(e.account == account && e.id == id));
+        }
+    }
+
+    /// The master of `account`'s series `id`, when the server holds it.
+    fn series_master(&self, account: &str, id: &str) -> Option<CalendarEvent> {
+        self.server_series
+            .iter()
+            .find(|seed| seed.master.account == account && seed.master.id == id)
+            .map(|seed| seed.master.clone())
+    }
+
+    /// `event.get`: a server event or a series master, with the series of
+    /// an occurrence and of a master.
+    fn event_get(&self, method: &str, account: &str, id: &str) -> Result<Value> {
+        let event = match self.server_event(method, account, id) {
+            Ok(event) => event,
+            Err(refusal) => self.series_master(account, id).ok_or(refusal)?,
+        };
+        let master_id = match (&event.series_master_id, event.kind.as_str()) {
+            (Some(master), _) => Some(master.clone()),
+            (None, "series-master") => Some(event.id.clone()),
+            _ => None,
+        };
+        let series = master_id.map(|master_id| {
+            let seed = self
+                .server_series
+                .iter()
+                .find(|seed| seed.master.account == account && seed.master.id == master_id);
+            CalendarSeries {
+                master_id,
+                summary: seed.map(|seed| seed.master.summary.clone()),
+                recurrence: seed.and_then(|seed| seed.recurrence.clone()),
+            }
+        });
+        let mut answer = json!({"account": account, "event": event});
+        if let Some(series) = series {
+            answer["series"] = serde_json::to_value(series)?;
+        }
+        Ok(answer)
     }
 
     /// The server event `id` of `account`, what `event.respond` answers; an
@@ -3305,6 +3582,7 @@ impl Fixture {
             invites: BTreeMap::new(),
             server_calendars: server.calendars,
             server_events: server.events,
+            server_series: server.series,
             removed_events: BTreeMap::new(),
             reminders: Vec::new(),
             invite_events,
@@ -4740,17 +5018,48 @@ impl Fixture {
                     .clone()
                     .filter(|t| !t.trim().is_empty())
                     .unwrap_or_else(|| format!("mp-{id}"));
+                let made_series = s
+                    .server_series
+                    .iter()
+                    .find(|seed| {
+                        seed.master.account == account
+                            && seed.master.transaction_id.as_deref()
+                                == Some(transaction_id.as_str())
+                    })
+                    .map(|seed| seed.master.clone());
                 let existing = s
                     .server_events
                     .iter()
                     .find(|e| {
                         e.account == account
+                            && e.series_master_id.is_none()
                             && e.transaction_id.as_deref() == Some(transaction_id.as_str())
                     })
                     .cloned();
-                let event = match existing {
-                    Some(event) => event,
-                    None => {
+                let event = match (made_series, existing) {
+                    (Some(master), _) => master,
+                    (None, Some(event)) => event,
+                    (None, None) if input.recurrence.is_some() => {
+                        let rule = input.recurrence.clone().expect("checked above");
+                        let mut master = created_event(
+                            &calendar,
+                            &format!("AAMk-{id}"),
+                            &input,
+                            &transaction_id,
+                        )
+                        .map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
+                        master.kind = "series-master".into();
+                        master.recurrence = Some(rule.describe());
+                        let wire = mp_core::calendar_write::recurrence_to_wire(&rule);
+                        s.server_events.extend(expanded_occurrences(&master, &wire));
+                        s.server_series.push(SeriesSeed {
+                            master: master.clone(),
+                            recurrence: Some(wire),
+                        });
+                        self.emit_locked(&mut s, "calendar.changed", json!({"account": account}));
+                        master
+                    }
+                    (None, None) => {
                         let event = created_event(
                             &calendar,
                             &format!("AAMk-{id}"),
@@ -4788,11 +5097,18 @@ impl Fixture {
                 });
                 Ok(json!({"operation_id": id, "transaction_id": transaction_id}))
             }
+            "event.get" => {
+                only(method, &params, &["account", "event"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                let id = param_str(method, &params, "event")?.to_string();
+                s.account_ready(method, &account)?;
+                s.event_get(method, &account, &id)
+            }
             "event.update" | "event.cancel" | "event.delete" => {
                 let keys: &[&str] = match method {
-                    "event.update" => &["account", "event", "fields"],
-                    "event.cancel" => &["account", "comment", "event"],
-                    _ => &["account", "event"],
+                    "event.update" => &["account", "event", "fields", "scope"],
+                    "event.cancel" => &["account", "comment", "event", "scope"],
+                    _ => &["account", "event", "scope"],
                 };
                 only(method, &params, keys)?;
                 let account = param_str(method, &params, "account")?.to_string();
@@ -4812,11 +5128,17 @@ impl Fixture {
                 let held = s
                     .server_events
                     .iter()
-                    .any(|e| e.account == account && e.id == id);
+                    .any(|e| e.account == account && e.id == id)
+                    || s.series_master(&account, &id).is_some();
+                let scope = params["scope"].as_str();
                 let retried = s
                     .removed_events
                     .get(&(account.clone(), id.clone()))
-                    .filter(|(removed_by, _)| !held && removed_by == method)
+                    .filter(|(removed_by, result)| {
+                        !held
+                            && removed_by == method
+                            && scope.is_none_or(|scope| result["scope"] == scope)
+                    })
                     .map(|(_, result)| result.clone());
                 let result = match retried {
                     Some(result) => result,

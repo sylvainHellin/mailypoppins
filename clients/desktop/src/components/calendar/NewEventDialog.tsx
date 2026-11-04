@@ -7,7 +7,12 @@
 // Opened on an event (`dialog.edit`), it holds the event's values and Save
 // sends `event.update` with what changed; the calendar stays the event's, a
 // Teams meeting stays one, and an attendee changes the reminder and the
-// show-as only.
+// show-as only. Its Repeats section makes a series: a pattern read against
+// the first day, its interval, a weekly series' days and its end, with the
+// rule in words under it. On one occurrence of a series it names the series
+// the occurrence stays part of; on the whole series it holds the series'
+// rule, a rule the form does not write kept as it is until a pattern
+// replaces it.
 
 import { useEffect, useId, useRef, useState, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -17,6 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { eventProblem, localZone, SHOW_AS, submitEvent } from "@/app/eventForm";
 import { editProblem, submitEdit } from "@/app/eventChange";
+import { describeRecurrence, NO_REPEAT, patternLabel, REPEAT_PATTERNS, repeatLabel, WEEKDAYS, type RepeatFields, type RepeatPattern } from "@/app/recurrence";
 import { AvailabilityGrid } from "@/components/calendar/AvailabilityGrid";
 import { useDispatch } from "@/app/store";
 import type { EventDialog, EventFields } from "@/app/state";
@@ -54,7 +60,18 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
   const retry = dialog?.transactionId != null;
   // An attendee changes their copy's reminder and show-as and nothing else.
   const locked = edit !== null && !edit.organizer;
-  const title = edit ? (locked ? "Edit event (your reminder and show-as)" : "Edit event") : retry ? "New event (retry)" : "New event";
+  const scope = edit?.scope ?? null;
+  const title = edit
+    ? locked
+      ? "Edit event (your reminder and show-as)"
+      : scope === "series"
+        ? "Edit the whole series"
+        : scope === "occurrence"
+          ? "Edit this occurrence"
+          : "Edit event"
+    : retry
+      ? "New event (retry)"
+      : "New event";
   // A word the server gave that the list does not name (`unknown`) shows until another is picked.
   const showAs = fields?.showAs ?? "busy";
   const showAsOptions = SHOW_AS.some((o) => o.word === showAs) ? SHOW_AS : [...SHOW_AS, { word: showAs, label: showAs }];
@@ -129,6 +146,47 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
   );
 
   const allDay = fields?.allDay ?? false;
+  const repeat = fields?.repeat ?? NO_REPEAT;
+  const day = (fields?.start ?? "").slice(0, 10);
+  const setRepeat = (next: Partial<RepeatFields>) => change({ repeat: { ...repeat, ...next } });
+  const units: Record<RepeatPattern, string> = { daily: "days", weekly: "weeks", "monthly-date": "months", "monthly-weekday": "months", yearly: "years" };
+  const selectClass =
+    "h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
+  // A new event repeats or not; a series always repeats; an occurrence keeps its series' rule.
+  const repeats =
+    edit === null || scope !== null
+      ? row(
+          "repeat",
+          "Repeats",
+          scope === "occurrence" ? (
+            <span data-slot="repeat-series" className="text-sm">
+              {repeatLabel(repeat, day)}
+            </span>
+          ) : (
+            <select
+              id={`${id}-repeat`}
+              data-field="repeat"
+              disabled={locked}
+              value={repeat.pattern ?? (repeat.kept ? "kept" : "none")}
+              onChange={(e) => {
+                const value = e.currentTarget.value;
+                if (value === "kept") return;
+                setRepeat({ pattern: value === "none" ? null : (value as RepeatPattern), kept: null });
+              }}
+              className={selectClass}
+            >
+              {scope === null ? <option value="none">Does not repeat</option> : null}
+              {repeat.kept ? <option value="kept">{describeRecurrence(repeat.kept)}</option> : null}
+              {REPEAT_PATTERNS.map((p) => (
+                <option key={p} value={p}>
+                  {patternLabel(p, day)}
+                </option>
+              ))}
+            </select>
+          ),
+        )
+      : null;
+  const pattern = scope === "occurrence" ? null : repeat.pattern;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent initialFocus={titleRef} data-slot="new-event" className="sm:max-w-lg">
@@ -234,6 +292,94 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
               ))}
             </select>,
           )}
+          {repeats}
+          {pattern ? (
+            <>
+              {row(
+                "every",
+                "Every",
+                <span className="flex items-center gap-2">
+                  <Input
+                    id={`${id}-every`}
+                    data-field="every"
+                    className="w-20"
+                    inputMode="numeric"
+                    value={repeat.every}
+                    disabled={locked}
+                    onChange={(e) => setRepeat({ every: e.currentTarget.value })}
+                  />
+                  <span className="text-sm text-muted-foreground">{units[pattern]}</span>
+                </span>,
+              )}
+              {pattern === "weekly"
+                ? row(
+                    "on",
+                    "On",
+                    <span id={`${id}-on`} className="flex flex-wrap gap-2" data-slot="repeat-on">
+                      {WEEKDAYS.map((weekday) => (
+                        <label key={weekday} className="flex items-center gap-1 text-sm">
+                          <input
+                            type="checkbox"
+                            data-weekday={weekday}
+                            checked={repeat.on.includes(weekday)}
+                            disabled={locked}
+                            onChange={(e) =>
+                              setRepeat({ on: e.currentTarget.checked ? [...repeat.on, weekday] : repeat.on.filter((d) => d !== weekday) })
+                            }
+                          />
+                          {weekday.charAt(0).toUpperCase() + weekday.slice(1, 3)}
+                        </label>
+                      ))}
+                    </span>,
+                  )
+                : null}
+              {row(
+                "ends",
+                "Ends",
+                <span className="flex items-center gap-2">
+                  <select
+                    id={`${id}-ends`}
+                    data-field="ends"
+                    value={repeat.ends}
+                    disabled={locked}
+                    onChange={(e) => setRepeat({ ends: e.currentTarget.value as RepeatFields["ends"] })}
+                    className={selectClass}
+                  >
+                    <option value="never">Never</option>
+                    <option value="until">On</option>
+                    <option value="count">After</option>
+                  </select>
+                  {repeat.ends === "until" ? (
+                    <Input
+                      type="date"
+                      aria-label="Last day"
+                      data-field="until"
+                      className="w-44"
+                      value={repeat.until}
+                      disabled={locked}
+                      onChange={(e) => setRepeat({ until: e.currentTarget.value })}
+                    />
+                  ) : repeat.ends === "count" ? (
+                    <>
+                      <Input
+                        aria-label="Occurrences"
+                        data-field="count"
+                        className="w-20"
+                        inputMode="numeric"
+                        value={repeat.count}
+                        disabled={locked}
+                        onChange={(e) => setRepeat({ count: e.currentTarget.value })}
+                      />
+                      <span className="text-sm text-muted-foreground">times</span>
+                    </>
+                  ) : null}
+                </span>,
+              )}
+              <p data-slot="repeat-summary" className="pl-[6.5rem] text-xs text-muted-foreground">
+                {repeatLabel(repeat, day)}
+              </p>
+            </>
+          ) : null}
           {row(
             "body",
             "Description",

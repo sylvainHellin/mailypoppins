@@ -5,8 +5,9 @@
 // daemon checks every field again, and its refusal lands on the form with
 // what was typed. A create that failed or vanished in a daemon restart opens
 // the form again with the transaction id it was sent with, so Retry sends the
-// same one and the server makes the event at most once. Pure functions over
-// the model, which the reducer routes to, and at the bottom the commands.
+// same one and the server makes the event at most once. The Repeat section
+// makes a series (src/app/recurrence.ts). Pure functions over the model,
+// which the reducer routes to, and at the bottom the commands.
 
 import type { Dispatch } from "react";
 import type { CalendarInfo, EventCreateParams, EventWriteResult } from "@/protocol/types";
@@ -15,6 +16,7 @@ import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
 import { pushNotice } from "@/app/pending";
 import { cursorEntry, staleCalendar, today } from "@/app/calendar";
+import { NO_REPEAT, ruleOf } from "@/app/recurrence";
 import type { AppState, EventCalendar, EventCreateRun, EventDialog, EventFields, OperationEnd } from "@/app/state";
 
 const EVENT_EARLY_CAP = 16;
@@ -72,6 +74,7 @@ export function freshFields(calendars: EventCalendar[], account: string | null, 
     noReminder: false,
     showAs: DEFAULT_SHOW_AS,
     body: "",
+    repeat: NO_REPEAT,
   };
 }
 
@@ -115,6 +118,8 @@ export function eventProblem(fields: EventFields, calendars: EventCalendar[], ha
   if (!fields.noReminder && fields.reminder.trim() && !/^\d+$/.test(fields.reminder.trim())) {
     return "The reminder is a number of minutes, or empty for the mailbox default";
   }
+  const rule = ruleOf(fields.repeat, fields.start);
+  if ("problem" in rule) return rule.problem;
   return null;
 }
 
@@ -144,6 +149,8 @@ export function eventParams(dialog: EventDialog, zone: string): EventCreateParam
   if (f.teams && calendar?.teams) event.online_meeting = true;
   if (reminder !== undefined) event.reminder = reminder;
   if (f.showAs !== DEFAULT_SHOW_AS) event.show_as = f.showAs;
+  const rule = ruleOf(f.repeat, f.start);
+  if ("rule" in rule && rule.rule) event.recurrence = rule.rule;
   const params: EventCreateParams = { account: calendar?.account ?? "", calendar: calendar?.id, event };
   if (dialog.transactionId) params.transaction_id = dialog.transactionId;
   return params;
@@ -167,6 +174,7 @@ export function openEventDialog(s: AppState, dialog: EventDialog): AppState {
     overlay: "event",
     eventDialog: dialog,
     eventRemoveDialog: null,
+    eventScopeDialog: null,
     keptEventDialog: sameForm(dialog, s.keptEventDialog) ? null : s.keptEventDialog,
     dialog: null,
     composeDialog: null,

@@ -12,6 +12,12 @@ import type { EventRemoveDialog as EventRemoveState } from "@/app/state";
 
 export type EventRemoveDialogProps = { dialog: EventRemoveState | null; onOpenChange: (open: boolean) => void };
 
+/** The question, which names an occurrence alone or its whole series. */
+function title(cancel: boolean, scope: EventRemoveState["scope"]): string {
+  const what = scope === "series" ? "the whole series" : scope === "occurrence" ? "this occurrence" : cancel ? "the meeting" : "the event";
+  return `${cancel ? "Cancel" : "Delete"} ${what}?`;
+}
+
 /**
  * A cancel names how many people it tells and takes a comment for them,
  * which has the focus; Enter cancels the meeting. A delete says it tells
@@ -78,7 +84,7 @@ export function EventRemoveDialog({ dialog, onOpenChange }: EventRemoveDialogPro
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent initialFocus={cancel ? commentRef : confirmRef} showCloseButton={false} data-slot="event-remove">
         <DialogHeader>
-          <DialogTitle>{cancel ? "Cancel the meeting?" : "Delete the event?"}</DialogTitle>
+          <DialogTitle>{title(cancel, dialog?.scope ?? null)}</DialogTitle>
           <DialogDescription className="break-words">{dialog?.summary ?? ""}</DialogDescription>
           <p className="text-sm text-muted-foreground">
             {cancel ? `The server sends ${people} the cancellation.` : "The server tells nobody."}
