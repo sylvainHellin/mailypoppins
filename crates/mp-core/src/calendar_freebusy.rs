@@ -5,14 +5,17 @@
 //! [`resolve_query`] turns `calendar.freebusy`'s params into a
 //! [`FreeBusyQuery`]: the range as UTC instants, the slot length, and the
 //! addresses with the account's own first, each once, within the server's
-//! limits (Graph's `getSchedule`: at most 62 days, slots of 5 to 1440
-//! minutes; mp asks for at most [`MAX_ADDRESSES`]). A backend answers one
+//! limits (Graph's `getSchedule`: at most 62 days, which mp keeps to
+//! [`MAX_RANGE_DAYS`] calendar days, and slots of 5 to 1440 minutes; mp asks
+//! for at most [`MAX_ADDRESSES`]). A backend answers one
 //! [`Schedule`] per address: the view, one digit per slot as Graph's
 //! `availabilityView` spells it, and the blocks that are not free; an address
 //! the server has no free/busy for (outside the organisation, unknown) is a
 //! schedule with its `error`, so the others still stand.
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc};
+use chrono::{
+    DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, TimeZone, Utc,
+};
 use chrono_tz::Tz;
 use mp_protocol::calendar::{
     CalendarFreeBusyParams, CalendarFreeBusyResult, CalendarSchedule, CalendarScheduleItem,
@@ -25,9 +28,15 @@ use crate::invite::{parse_date, parse_datetime_in};
 /// The most addresses one query asks about, the account's own included.
 pub const MAX_ADDRESSES: usize = 20;
 
-/// The longest range one query covers, Graph's own limit: 62 days pass, 63
-/// are refused with `ErrorTimeIntervalTooBig`.
-pub const MAX_RANGE_DAYS: i64 = 62;
+/// The longest range one query covers, in calendar days of the query's
+/// zone, so the clocks changing inside it neither shorten nor lengthen it.
+/// Graph's `getSchedule` takes 62 days (62 pass live, 63 are refused with
+/// `ErrorTimeIntervalTooBig`) and can only measure them as elapsed time,
+/// since the request carries UTC instants; 62 calendar days across the
+/// autumn change are 62 days and an hour, which it may refuse. One day less
+/// keeps any run of calendar days inside Graph's limit, whatever the clocks
+/// do in between (a change is at most two hours).
+pub const MAX_RANGE_DAYS: i64 = 61;
 
 /// The slot length when the params name none, the event form's.
 pub const DEFAULT_INTERVAL: u32 = 30;
@@ -208,12 +217,16 @@ pub fn resolve_query(
         })?,
         _ => host,
     };
-    let start = bound(&params.start, zone, false).map_err(|e| format!("start: {e}"))?;
-    let end = bound(&params.end, zone, true).map_err(|e| format!("end: {e}"))?;
+    let (start, start_wall) =
+        bound(&params.start, zone, false).map_err(|e| format!("start: {e}"))?;
+    let (end, end_wall) = bound(&params.end, zone, true).map_err(|e| format!("end: {e}"))?;
     if end <= start {
         return Err("The end of the free/busy range must come after its start".into());
     }
-    if end - start > Duration::days(MAX_RANGE_DAYS) {
+    // The range's length on the zone's clock: a day is a day, 23 or 25
+    // hours long on the days the clocks change.
+    let span = end_wall - start_wall;
+    if span > Duration::days(MAX_RANGE_DAYS) {
         return Err(format!(
             "Free/busy covers at most {MAX_RANGE_DAYS} days at a time"
         ));
@@ -224,7 +237,7 @@ pub fn resolve_query(
             "The slot length is {MIN_INTERVAL} to {MAX_INTERVAL} minutes, not {interval}"
         ));
     }
-    if i64::from(interval) > (end - start).num_minutes() {
+    if i64::from(interval) > span.num_minutes() {
         return Err(format!(
             "A slot of {interval} minutes is longer than the free/busy range"
         ));
@@ -265,9 +278,10 @@ pub fn resolve_query(
     })
 }
 
-/// One end of the range: a bare date's midnight in `zone`, the midnight
-/// after it for the `end` (the last day, included), or a time.
-fn bound(raw: &str, zone: Tz, end: bool) -> Result<DateTime<Utc>, String> {
+/// One end of the range, as an instant and as the wall time it reads in
+/// `zone`: a bare date's midnight, the midnight after it for the `end` (the
+/// last day, included), or a time.
+fn bound(raw: &str, zone: Tz, end: bool) -> Result<(DateTime<Utc>, NaiveDateTime), String> {
     match parse_date(raw) {
         Some(date) => {
             let date = if end {
@@ -276,9 +290,12 @@ fn bound(raw: &str, zone: Tz, end: bool) -> Result<DateTime<Utc>, String> {
             } else {
                 date
             };
-            midnight(date, zone)
+            Ok((midnight(date, zone)?, date.and_time(NaiveTime::MIN)))
         }
-        None => parse_datetime_in(raw, zone).map_err(|e| format!("{e:#}")),
+        None => {
+            let at = parse_datetime_in(raw, zone).map_err(|e| format!("{e:#}"))?;
+            Ok((at, at.with_timezone(&zone).naive_local()))
+        }
     }
 }
 
@@ -375,16 +392,16 @@ mod tests {
         assert_eq!(query.slots(), 13);
     }
 
-    /// Graph's limits are refused before any call: 62 days pass and 63 do
+    /// Graph's limits are refused before any call: 61 days pass and 62 do
     /// not, a slot is 5 to 1440 minutes and no longer than the range, and
     /// at most twenty addresses go, the account's own among them.
     #[test]
     fn the_servers_limits_are_refused_before_the_call() {
         let own = "me@example.com";
         let host = berlin();
-        assert!(resolve_query(&params(&[], "2026-11-01", "2027-01-01"), own, host).is_ok());
-        let err = resolve_query(&params(&[], "2026-11-01", "2027-01-02"), own, host).unwrap_err();
-        assert!(err.contains("62 days"), "{err}");
+        assert!(resolve_query(&params(&[], "2026-11-01", "2026-12-31"), own, host).is_ok());
+        let err = resolve_query(&params(&[], "2026-11-01", "2027-01-01"), own, host).unwrap_err();
+        assert!(err.contains("61 days"), "{err}");
         let err = resolve_query(&params(&[], "2026-11-18", "2026-11-17"), own, host).unwrap_err();
         assert!(err.contains("after its start"), "{err}");
         for (interval, words) in [(4, "5 to 1440"), (1441, "5 to 1440")] {
@@ -413,6 +430,44 @@ mod tests {
         assert!(resolve_query(&asked, own, host)
             .unwrap_err()
             .contains("unknown time zone"));
+    }
+
+    /// The range is counted in the zone's calendar days, so the clocks
+    /// changing inside it move neither limit: 61 days across the autumn
+    /// change (61 days and an hour) pass, and so does a slot of a whole day
+    /// on the spring change's 23-hour day; every range that passes stays
+    /// within Graph's 62 days of elapsed time.
+    #[test]
+    fn the_limits_count_calendar_days_across_a_clock_change() {
+        let own = "me@example.com";
+        let host = berlin();
+        for (first, last) in [
+            ("2026-09-01", "2026-10-31"),
+            ("2026-03-01", "2026-04-30"),
+            ("2026-09-01T00:00", "2026-11-01T00:00"),
+        ] {
+            let query = resolve_query(&params(&[], first, last), own, host)
+                .unwrap_or_else(|err| panic!("{first} to {last}: {err}"));
+            assert!(query.window.end - query.window.start < Duration::days(62));
+        }
+        let autumn = resolve_query(&params(&[], "2026-09-01", "2026-10-31"), own, host).unwrap();
+        assert_eq!(
+            autumn.window.end - autumn.window.start,
+            Duration::days(61) + Duration::hours(1)
+        );
+        for (first, last) in [
+            ("2026-09-01", "2026-11-01"),
+            ("2026-03-01", "2026-05-01"),
+            ("2026-09-01T00:00", "2026-11-01T00:01"),
+        ] {
+            let err = resolve_query(&params(&[], first, last), own, host).unwrap_err();
+            assert!(err.contains("61 days"), "{first} to {last}: {err}");
+        }
+        let mut asked = params(&[], "2026-03-29", "2026-03-29");
+        asked.interval_minutes = Some(1440);
+        let query = resolve_query(&asked, own, host).unwrap();
+        assert_eq!(query.window.end - query.window.start, Duration::hours(23));
+        assert_eq!(query.slots(), 1);
     }
 
     /// The view of a fake's items is each slot's heaviest status, a partial

@@ -239,7 +239,7 @@ async fn calendar_freebusy_refuses_before_an_operation_starts() {
     long["end"] = at(70, 0).date_naive().to_string().into();
     let refused = call_err(&mut conn, "calendar.freebusy", long).await;
     assert_eq!(refused.code, -32602);
-    assert!(refused.message.contains("62 days"), "{}", refused.message);
+    assert!(refused.message.contains("61 days"), "{}", refused.message);
 
     let mut slot = day_params(&[ADA]);
     slot["interval_minutes"] = 2.into();

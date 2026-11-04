@@ -1000,7 +1000,7 @@ mod tests {
         assert!(err.message().contains("no calendar backend"), "{err:?}");
         let err = calendar_freebusy_on(&session, &door, &params("home", "2100-01-01"))
             .expect_err("too long");
-        assert!(err.message().contains("62 days"), "{err:?}");
+        assert!(err.message().contains("61 days"), "{err:?}");
     }
 
     fn fields() -> InviteFields {
