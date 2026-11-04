@@ -1145,7 +1145,13 @@ fn initialize_is_the_only_unnamespaced_method() {
 /// this row instead of regenerating a fixture that agrees with the new code.
 #[test]
 fn the_bootstrap_fixtures_carry_the_documented_fields() {
-    const RESULT: &[&str] = &["capabilities", "instance_id", "revision", "snapshot"];
+    const RESULT: &[&str] = &[
+        "capabilities",
+        "connection",
+        "instance_id",
+        "revision",
+        "snapshot",
+    ];
     const SNAPSHOT: &[&str] = &[
         "accounts",
         "diagnostics",
