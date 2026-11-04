@@ -18,7 +18,9 @@ use crate::tui::app::{App, Overlay, View};
 use crate::tui::events::Applied;
 use crate::tui::queries::Queries;
 use crate::tui::session::Session;
-use crate::tui::ui::golden_frames::{calendar_fixture, frame_snapshot, HEIGHT, WIDTH};
+use crate::tui::ui::golden_frames::{
+    calendar_fixture, frame_snapshot, render_buffer, text_rows, HEIGHT, WIDTH,
+};
 
 use super::daemon::CallLog;
 
@@ -121,10 +123,44 @@ fn golden_reminders_overlay() {
     assert_eq!(methods(&log)[0], ("calendar.reminders".into(), json!({})));
     assert_eq!(app.reminders.len(), 2);
     let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
-    assert!(frame.contains("\u{25f7} 2 reminders (R)"), "{frame}");
+    assert!(frame.contains("\u{25f7} 2 (R)  j/k Events"), "{frame}");
     app.handle_key(key('R'));
     assert!(matches!(app.overlay, Overlay::Reminders(_)));
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The Calendar view's hint bar on a 100-column terminal: with a reminder
+/// waiting, the compact badge takes the place of `a/d/w Layout`, so
+/// `c Calendars` and `n New` stay in full either way, with no ellipsis.
+#[test]
+fn the_calendar_hint_bar_fits_100_columns_with_a_reminder() {
+    let bar = |waiting: Vec<Value>| {
+        let (mut app, _) = app_with(waiting);
+        let rows = text_rows(&render_buffer(&mut app, 100, 30));
+        rows.lines()
+            .find(|row| row.contains(" CALENDAR "))
+            .unwrap_or_else(|| panic!("no hint bar in\n{rows}"))
+            .to_string()
+    };
+    let idle = bar(Vec::new());
+    let waiting = bar(vec![reminder(
+        "ev-loc",
+        "LOC Day",
+        "2026-08-05T22:00:00Z",
+        true,
+        None,
+    )]);
+    for row in [&idle, &waiting] {
+        assert!(row.contains("c Calendars  n New"), "{row}");
+        assert!(!row.contains('\u{2026}'), "{row}");
+    }
+    assert!(idle.contains("a/d/w Layout"), "{idle}");
+    assert!(!idle.contains('\u{25f7}'), "{idle}");
+    assert!(
+        waiting.contains("CALENDAR   \u{25f7} 1 (R)  j/k Events  h/l Day/week  Enter Card"),
+        "{waiting}"
+    );
+    assert!(!waiting.contains("a/d/w"), "{waiting}");
 }
 
 /// `s` snoozes the reminder under the cursor for five minutes, `d`

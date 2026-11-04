@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::super::app::{hint_bindings, prefix_continuations, App, KeyCtx, View};
+use super::super::app::{hint_bindings, prefix_continuations, App, KeyAction, KeyCtx, View};
 use super::super::theme;
 use super::util::display_width;
 
@@ -82,8 +82,13 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         // keys (`1-9 Jump to mailbox`, `/ Filter by metadata`) in Contacts /
         // Calendar. Pane contexts (Contacts list) are unaffected.
         let off_mail = app.view != View::Mail;
+        // The reminder badge takes the room of the Calendar view's `a/d/w
+        // Layout` pair, so `c Calendars` and `n New` still fit a 100-column
+        // terminal; the help overlay keeps the layout keys.
+        let crowded = ctx == KeyCtx::Calendar && !app.reminders.is_empty();
         let mut hs: Vec<(&str, &str)> = hint_bindings(ctx)
             .filter(|kb| !(off_mail && ctx == KeyCtx::Global && !kb.action.is_view_agnostic()))
+            .filter(|kb| !(crowded && kb.action == KeyAction::CalendarAgenda))
             .map(|kb| (kb.keys, kb.hint_label()))
             .collect();
         if msg_pane {
@@ -109,13 +114,10 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
     ));
     spans.push(Span::styled("  ", Style::default().bg(bg)));
     // The waiting calendar reminders (PERSO-255), from every view: the count
-    // and the key that opens them, ahead of the hints it may crowd out.
+    // and the key that opens them, ahead of the hints it may crowd out, so it
+    // stays short and lets the clock glyph say what the count is.
     if !app.reminders.is_empty() {
-        let count = app.reminders.len();
-        let badge = format!(
-            "\u{25f7} {count} reminder{} (R) ",
-            if count == 1 { "" } else { "s" }
-        );
+        let badge = format!("\u{25f7} {} (R) ", app.reminders.len());
         used += display_width(&badge) + 1;
         spans.push(Span::styled(
             badge,
