@@ -1624,8 +1624,18 @@ async fn bootstrap_returns_the_documented_shape() {
     let result = bootstrap(&mut conn).await;
     assert_keys(
         &result,
-        &["instance_id", "revision", "capabilities", "snapshot"],
+        &[
+            "instance_id",
+            "revision",
+            "capabilities",
+            "connection",
+            "snapshot",
+        ],
         "the state.bootstrap result",
+    );
+    assert!(
+        result["connection"].as_u64().is_some_and(|id| id > 0),
+        "the bootstrap names this connection, never 0: {result}"
     );
 
     assert_eq!(

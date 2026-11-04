@@ -136,6 +136,22 @@ const CALENDAR_FIXTURES: &[&str] = &[
 const CALENDAR_WRITE_FIXTURES: &[&str] =
     &["event.create.request.json", "event.create.response.json"];
 
+/// The fixtures PERSO-255 adds for the calendar reminders: a pair per
+/// method, one `calendar.reminder` and one `calendar.reminders_changed`.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const REMINDER_FIXTURES: &[&str] = &[
+    "calendar.dismiss_reminder.request.json",
+    "calendar.dismiss_reminder.response.json",
+    "calendar.reminders.request.json",
+    "calendar.reminders.response.json",
+    "calendar.snooze_reminder.request.json",
+    "calendar.snooze_reminder.response.json",
+    "notification.calendar_reminder.json",
+    "notification.calendar_reminders_changed.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -205,6 +221,7 @@ fn every_required_fixture_is_committed() {
         .chain(CONVERSATION_FIXTURES)
         .chain(CALENDAR_FIXTURES)
         .chain(CALENDAR_WRITE_FIXTURES)
+        .chain(REMINDER_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
@@ -1137,7 +1154,13 @@ fn initialize_is_the_only_unnamespaced_method() {
 /// this row instead of regenerating a fixture that agrees with the new code.
 #[test]
 fn the_bootstrap_fixtures_carry_the_documented_fields() {
-    const RESULT: &[&str] = &["capabilities", "instance_id", "revision", "snapshot"];
+    const RESULT: &[&str] = &[
+        "capabilities",
+        "connection",
+        "instance_id",
+        "revision",
+        "snapshot",
+    ];
     const SNAPSHOT: &[&str] = &[
         "accounts",
         "diagnostics",

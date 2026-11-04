@@ -1,0 +1,10 @@
+{
+  "id": 83,
+  "jsonrpc": "2.0",
+  "method": "calendar.snooze_reminder",
+  "params": {
+    "account": "evoqs",
+    "event": "AAMkADev2",
+    "minutes": 5
+  }
+}

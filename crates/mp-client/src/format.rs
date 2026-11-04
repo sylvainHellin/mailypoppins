@@ -496,6 +496,7 @@ pub fn oauth2_stored_line(account: &str) -> String {
 // ---------------------------------------------------------------------------
 
 use mp_protocol::calendar::{CalendarEvent, CalendarInfo};
+use mp_protocol::reminder::CalendarReminder;
 
 /// The calendars' names by account and id, for the tag an event line
 /// carries in `mp calendar view` and in the TUI's agenda.
@@ -588,6 +589,97 @@ pub fn online_meeting_line(event: &CalendarEvent) -> Option<String> {
     })
 }
 
+/// When a reminder's event starts, from `now` and read in `zone`: `in 15 min
+/// (09:00)`, `now (09:00)`, `started 5 min ago (09:00)`, or for an all-day
+/// event `all day today`, `all day tomorrow` or `all day Mon 9 Nov`. The line
+/// the CLI, the TUI and the desktop notification show under the summary.
+pub fn reminder_when<Z: chrono::TimeZone>(
+    reminder: &CalendarReminder,
+    now: chrono::DateTime<chrono::Utc>,
+    zone: &Z,
+) -> String
+where
+    Z::Offset: std::fmt::Display,
+{
+    let Ok(start) = chrono::DateTime::parse_from_rfc3339(&reminder.start) else {
+        return reminder.start.clone();
+    };
+    let start = start.with_timezone(zone);
+    if reminder.all_day {
+        let today = now.with_timezone(zone).date_naive();
+        let day = start.date_naive();
+        return match (day - today).num_days() {
+            0 => "all day today".to_string(),
+            1 => "all day tomorrow".to_string(),
+            _ => format!("all day {}", start.format("%a %-d %b")),
+        };
+    }
+    let clock = start.format("%H:%M");
+    let minutes = (start.with_timezone(&chrono::Utc) - now).num_seconds() / 60;
+    let span = |minutes: i64| match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    };
+    match minutes {
+        0 => format!("now ({clock})"),
+        m if m > 0 => format!("in {} ({clock})", span(m)),
+        m => format!("started {} ago ({clock})", span(-m)),
+    }
+}
+
+/// The body of a reminder's notification: when its event starts and, when
+/// it has one, where.
+pub fn reminder_body<Z: chrono::TimeZone>(
+    reminder: &CalendarReminder,
+    now: chrono::DateTime<chrono::Utc>,
+    zone: &Z,
+) -> String
+where
+    Z::Offset: std::fmt::Display,
+{
+    let mut body = reminder_when(reminder, now, zone);
+    if let Some(location) = reminder
+        .location
+        .as_deref()
+        .filter(|l| !l.trim().is_empty())
+    {
+        body.push_str(&format!(", {location}"));
+    }
+    body
+}
+
+/// A reminder's notification now, read in the local zone: its summary as the
+/// title (`(no title)` when it has none) and [`reminder_body`].
+pub fn reminder_notification(reminder: &CalendarReminder) -> (String, String) {
+    let title = if reminder.summary.trim().is_empty() {
+        "(no title)".to_string()
+    } else {
+        reminder.summary.clone()
+    };
+    (
+        title,
+        reminder_body(reminder, chrono::Utc::now(), &chrono::Local),
+    )
+}
+
+/// One reminder as a line: the summary, when, and where.
+pub fn reminder_line<Z: chrono::TimeZone>(
+    reminder: &CalendarReminder,
+    now: chrono::DateTime<chrono::Utc>,
+    zone: &Z,
+) -> String
+where
+    Z::Offset: std::fmt::Display,
+{
+    let summary = if reminder.summary.trim().is_empty() {
+        "(no title)"
+    } else {
+        reminder.summary.as_str()
+    };
+    format!("{summary}, {}", reminder_body(reminder, now, zone))
+}
+
 /// The one-character mark of the user's own answer to an event.
 pub fn response_mark(own_response: &str) -> char {
     match own_response {
@@ -597,6 +689,64 @@ pub fn response_mark(own_response: &str) -> char {
         "needs-action" => '?',
         "organizer" => '\u{2605}',
         _ => ' ',
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::{reminder_body, reminder_line, reminder_notification, reminder_when};
+    use chrono::{TimeZone, Utc};
+    use mp_protocol::reminder::CalendarReminder;
+
+    fn reminder(start: &str, all_day: bool) -> CalendarReminder {
+        CalendarReminder {
+            account: "evoqs".into(),
+            event: "ev".into(),
+            summary: "Standup".into(),
+            start: start.into(),
+            all_day,
+            location: Some("Room 2.14".into()),
+            online_meeting_url: None,
+            minutes_before: 15,
+            presenter: None,
+            presenter_connection: None,
+        }
+    }
+
+    /// Ahead, at, and past the start, in the viewer's zone, and an all-day
+    /// event by its day.
+    #[test]
+    fn a_reminder_says_when_its_event_starts() {
+        let berlin = chrono::FixedOffset::east_opt(3600).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 8, 45, 0).unwrap();
+        let at = |start: &str| reminder_when(&reminder(start, false), now, &berlin);
+        assert_eq!(at("2026-11-04T09:00:00Z"), "in 15 min (10:00)");
+        assert_eq!(at("2026-11-04T10:30:00Z"), "in 1 h 45 min (11:30)");
+        assert_eq!(at("2026-11-04T09:45:00Z"), "in 1 h (10:45)");
+        assert_eq!(at("2026-11-04T08:45:30Z"), "now (09:45)");
+        assert_eq!(at("2026-11-04T08:40:00Z"), "started 5 min ago (09:40)");
+        let day = |start: &str| reminder_when(&reminder(start, true), now, &berlin);
+        assert_eq!(day("2026-11-03T23:00:00Z"), "all day today");
+        assert_eq!(day("2026-11-04T23:00:00Z"), "all day tomorrow");
+        assert_eq!(day("2026-11-08T23:00:00Z"), "all day Mon 9 Nov");
+        assert_eq!(
+            reminder_line(&reminder("2026-11-04T09:00:00Z", false), now, &berlin),
+            "Standup, in 15 min (10:00), Room 2.14"
+        );
+        let mut nowhere = reminder("2026-11-04T09:00:00Z", false);
+        nowhere.location = Some(" ".into());
+        assert_eq!(reminder_body(&nowhere, now, &berlin), "in 15 min (10:00)");
+    }
+
+    /// The notification is titled by the summary, or says it has none.
+    #[test]
+    fn a_reminder_notification_is_titled_by_its_summary() {
+        let mut untitled = reminder("2026-11-04T09:00:00Z", false);
+        assert_eq!(reminder_notification(&untitled).0, "Standup");
+        untitled.summary = " ".into();
+        let (title, body) = reminder_notification(&untitled);
+        assert_eq!(title, "(no title)");
+        assert!(body.ends_with(", Room 2.14"), "{body}");
     }
 }
 

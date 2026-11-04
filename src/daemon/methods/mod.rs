@@ -32,6 +32,7 @@ pub mod mailbox;
 pub mod message;
 pub mod message_eml;
 pub mod message_server;
+pub mod reminder;
 pub mod send;
 pub mod signature;
 pub mod state;
@@ -83,6 +84,8 @@ pub struct Shared {
     pub diagnostics: Arc<super::diagnostics::Diagnostics>,
     /// The server copies of messages downloaded lately (PERSO-155).
     pub copies: Arc<super::server_copies::ServerCopies>,
+    /// The calendar reminders (PERSO-255).
+    pub reminders: Arc<super::reminders::Reminders>,
 }
 
 /// Register every domain method this build serves.
@@ -103,6 +106,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         holds,
         diagnostics,
         copies,
+        reminders,
     } = shared;
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
@@ -177,6 +181,12 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&config),
         Arc::clone(&operations),
         Arc::clone(&canonical),
+    );
+    self::reminder::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&canonical),
+        reminders,
     );
     self::hook::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::signature::register(dispatcher, Arc::clone(&config), Arc::clone(&canonical));

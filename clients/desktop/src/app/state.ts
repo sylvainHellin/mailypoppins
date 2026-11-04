@@ -10,6 +10,7 @@ import type {
   AccountCredentials,
   Bootstrap,
   CalendarInfo,
+  CalendarReminder,
   ConfigInvalid,
   ConversationRow,
   DraftEntry,
@@ -921,6 +922,12 @@ export type AppState = {
   /** The Calendar view's layout, days and cursor, kept while another view shows. */
   calendarView: CalendarView | null;
   /**
+   * The calendar reminders that fired and wait (`calendar_reminders`,
+   * app/reminders.ts): read at every bootstrap and again at every
+   * `calendar.reminders_changed`, a `calendar.reminder` added as it fires.
+   */
+  reminders: Loadable<CalendarReminder[]>;
+  /**
    * The reader's invitation cards (`invite_get`), by `readerKey`: created
    * when the reader shows an invitation, stale again with the account's
    * calendar; only the shown one is read.
@@ -1091,6 +1098,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     calendar: emptyLoadable<CalendarLoad>(),
     calendars: emptyLoadable<CalendarInfo[]>(),
     calendarView: null,
+    reminders: emptyLoadable<CalendarReminder[]>(),
     invites: {},
     inviteRefusals: {},
     rsvpDialog: null,

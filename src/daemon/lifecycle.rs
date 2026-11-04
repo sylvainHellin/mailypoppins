@@ -408,6 +408,14 @@ async fn run(foreground_logs: bool) -> Result<()> {
         state.shutdown.watchers_stopped(),
     );
     spawn_diagnostic_sweep(Arc::clone(&state));
+    // The reminder task reads the calendar cache and takes no engine lock,
+    // so it starts beside the runtimes and stops with the watchers.
+    super::reminders::spawn(
+        Arc::clone(&state.reminders),
+        Arc::clone(&state.canonical),
+        Arc::clone(&state.config),
+        state.shutdown.watchers_stopped(),
+    );
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(Arc::clone(&state), shutdown.clone())?;
 

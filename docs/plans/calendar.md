@@ -62,8 +62,9 @@ After phase 1 and the first slices of phase 2:
 - A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
 - Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
 - The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get`, `event.respond` and `event.create` for single events, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
-- The CLI has `mp calendar list|view|show|hide|rebuild` and `mp event create|show|respond`, and `mp invite` answers through `event.respond`.
+- The CLI has `mp calendar list|view|show|hide|reminders|rebuild`, `mp calendar reminder dismiss|snooze` and `mp event create|show|respond`, and `mp invite` answers through `event.respond`.
 - The TUI's `n` and the desktop app's New event open an event form that creates a single event on a Graph account through `event.create`.
+- The daemon fires each server event's reminder as `calendar.reminder`, records it in `calendar_reminders`, serves `calendar.reminders`, `calendar.dismiss_reminder` and `calendar.snooze_reminder` with the decision written through to Graph, and names one presenter connection that raises the system notification; the TUI shows the count and its `R` overlay, the desktop app a banner and a macOS notification.
 - The TUI and the desktop app show agenda, day and week layouts with an event card, a calendars panel and a respond dialog with a comment and the send-response choice.
 - `GRAPH_SCOPES` holds `Calendars.ReadWrite`; a token without it gets a re-login prompt in every client, and mail keeps working.
 - Graph accounts are still refused for iMIP answers and for sending invitations by mail; they create events on the server instead.

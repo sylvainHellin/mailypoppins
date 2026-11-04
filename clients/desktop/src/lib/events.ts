@@ -5,7 +5,7 @@
 
 import { Channel, listen, type UnlistenFn } from "@/lib/tauri";
 import { subscribeEvents } from "@/lib/commands";
-import type { GuiEvent, UpdateAvailable } from "@/lib/gui-types";
+import type { GuiEvent, ReminderTarget, UpdateAvailable } from "@/lib/gui-types";
 
 export function subscribe(onEvent: (event: GuiEvent) => void): Promise<Channel<GuiEvent>> {
   const channel = new Channel<GuiEvent>();
@@ -18,6 +18,13 @@ export const MENU_EVENT = "menu";
 
 export function onMenu(handler: (id: string) => void): Promise<UnlistenFn> {
   return listen<string>(MENU_EVENT, (e) => handler(e.payload));
+}
+
+/** A click on a reminder's system notification (src-tauri/src/reminders.rs): open its event. */
+export const REMINDER_OPEN_EVENT = "reminder:open";
+
+export function onReminderOpen(handler: (target: ReminderTarget) => void): Promise<UnlistenFn> {
+  return listen<ReminderTarget>(REMINDER_OPEN_EVENT, (e) => handler(e.payload));
 }
 
 /** The silent startup check found a version the user did not skip (src-tauri/src/updates.rs). */

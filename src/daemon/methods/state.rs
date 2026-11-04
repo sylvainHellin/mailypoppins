@@ -205,6 +205,9 @@ impl Method for StateBootstrap {
                 // What this connection agreed on at the handshake, not the
                 // daemon's whole list: a client acts on what it may use here.
                 "capabilities": ctx.capabilities,
+                // Which connection this is, so the client knows a
+                // `calendar.reminder` whose `presenter_connection` names it.
+                "connection": ctx.connection_id,
                 "snapshot": snapshot.to_json(),
             })))
         })
@@ -241,9 +244,9 @@ mod tests {
     }
 
     /// The result names the instance, the capture revision, this connection's
-    /// capabilities and the snapshot, and nothing else.
+    /// capabilities and id, and the snapshot, and nothing else.
     #[tokio::test]
-    async fn the_result_carries_the_four_documented_members() {
+    async fn the_result_carries_the_five_documented_members() {
         let method = method();
         let outcome = method
             .call(&ctx(&["daemon.status"]), json!({}), CancelToken::new())
@@ -259,9 +262,16 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["capabilities", "instance_id", "revision", "snapshot"]
+            vec![
+                "capabilities",
+                "connection",
+                "instance_id",
+                "revision",
+                "snapshot"
+            ]
         );
         assert_eq!(outcome.result["instance_id"], json!("abcd"));
+        assert_eq!(outcome.result["connection"], json!(4));
         assert_eq!(outcome.result["capabilities"], json!(["daemon.status"]));
         assert_eq!(
             outcome.result["snapshot"]["accounts"][0]["state"],

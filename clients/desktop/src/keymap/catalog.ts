@@ -130,6 +130,10 @@ export type ActionId =
   | "reader_html"
   | "reader_text"
   | "check_updates"
+  /** `R`: the reminder banner's first reminder, to snooze or dismiss it (PERSO-255). */
+  | "focus_reminders"
+  /** A made-up reminder's system notification, to check that the system shows them. */
+  | "reminder_notify_test"
   | "update_install"
   | "update_restart";
 
@@ -158,6 +162,9 @@ const BY_ACTION: Record<string, Binding> = {
   // The desktop has no bottom log pane: `!` hides or shows the activity
   // area's notices, never a live hold card (D12).
   "Toggle activity log": { id: "toggle_activity" },
+  // The TUI's reminders overlay is the desktop's reminder banner, which `R`
+  // focuses from every view; the outbox view keeps `R` for its retry.
+  "Calendar reminders (snooze, dismiss, open)": { id: "focus_reminders" },
   "Send current draft (approve + send)": { id: "send" },
   // `ff` opens the TUI's Server Search form (PERSO-115).
   "Search all mail (sender, subject, body)": { id: "open_server_search" },
@@ -370,6 +377,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   // for Updates…" runs it too. "Update to vX.Y.Z" and "Restart to finish the
   // update" join it while an update is known (`updatePaletteEntries`).
   { section: "APP", label: "Check for updates", keys: [], id: "check_updates", badge: null },
+  // A made-up reminder raised as a system notification (src-tauri/src/reminders.rs),
+  // which says whether macOS shows this app's notifications; no key of its own.
+  { section: "APP", label: "Show a test reminder notification", keys: [], id: "reminder_notify_test", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["Shift+Enter"], id: "search_server", badge: null },
   // The Server Search form's own keys (ServerSearchDialog.tsx), the TUI
   // overlay's form keys; `ff` opens it ("Search all mail").

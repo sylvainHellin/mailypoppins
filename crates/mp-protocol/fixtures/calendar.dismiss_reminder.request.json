@@ -1,0 +1,9 @@
+{
+  "id": 82,
+  "jsonrpc": "2.0",
+  "method": "calendar.dismiss_reminder",
+  "params": {
+    "account": "evoqs",
+    "event": "AAMkADev2"
+  }
+}

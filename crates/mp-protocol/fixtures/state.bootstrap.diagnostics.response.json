@@ -7,6 +7,7 @@
       "account.list",
       "diagnostic.health"
     ],
+    "connection": 7,
     "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
     "revision": 4233,
     "snapshot": {

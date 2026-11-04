@@ -590,7 +590,10 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 /// The calendar tables ([`super::calendar`], PERSO-200) are a disposable cache
 /// of the server calendar; losing them costs one baseline sync, and a hidden
 /// calendar shows again. Tables an earlier build created gain their later
-/// columns here too ([`super::calendar::ensure_columns`]).
+/// columns here too ([`super::calendar::ensure_columns`]). The reminder record
+/// beside them ([`super::reminders`], PERSO-255) is not part of that cache:
+/// losing it fires once more each reminder already fired for an event that
+/// has not ended.
 fn additive_tables() -> Vec<(&'static str, String)> {
     let mut tables = vec![
         (
@@ -627,6 +630,7 @@ fn additive_tables() -> Vec<(&'static str, String)> {
         ),
     ];
     tables.extend(super::calendar::create_sql());
+    tables.push((super::reminders::TABLE, super::reminders::create_sql()));
     tables
 }
 

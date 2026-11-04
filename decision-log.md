@@ -432,3 +432,25 @@ Whether a dismissal made in Outlook or by the other mp daemon reaches mp through
 Rejected: reminders kept local only (simplest and identical on every server, but Outlook and a second mp daemon still remind after a dismissal in mp).
 Source: Sylvain in chat, 2026-11-03, answering the open question of the design page `.sync/reports/calendar-phase-2-design`.
 Status: accepted
+
+## 2026-11-04 - The desktop app raises reminder notifications from Rust through tauri-plugin-notification, with no action buttons, and keeps Snooze and Dismiss in its own banner
+
+Why: `tauri-plugin-notification` 2.8 delivers on macOS through the deprecated `NSUserNotificationCenter`, where two action buttons collapse into an "Options" menu and a click is lost once the app restarts, while a click on the body arrives reliably as the action `tap`.
+A click on the body shows, unminimizes and focuses the main window and opens the event, named in the notification's extra payload.
+Snooze and Dismiss live in the app's reminder banner and call the daemon, which owns the reminder state, the snooze timers and the de-duplication across clients; the notification is a best-effort view of that state.
+At launch the app asks the daemon for the reminders already waiting and notifies them once, and the banner lists every waiting reminder, since macOS shows no banner for the frontmost app.
+The bundle is signed ad hoc (`bundle.macOS.signingIdentity = "-"`, in `tauri.bundle.conf.json`, which `scripts/install-local.sh` builds with), so the signature's identifier is the bundle id `dev.mailypoppins.desktop` the notification centre files the app under.
+Rejected: real Snooze and Dismiss buttons through `UNUserNotificationCenter` (`objc2-user-notifications`), which needs a properly signed bundle and a permission prompt; revisit once the app has Developer ID signing.
+Source: Sylvain in chat, 2026-11-04
+Status: accepted
+
+## 2026-11-04 - One client per reminder raises the system notification: the daemon elects the most recently bootstrapped desktop app, else the most recently bootstrapped TUI
+
+Why: every client connected to the daemon receives `calendar.reminder`, so a reminder would raise one notification per open client, a desktop app and two TUIs notifying three times.
+The daemon elects one presenter among the bootstrapped connections at each firing (`CanonicalState::presenter`): the desktop app's connection that bootstrapped last, else the TUI's that bootstrapped last, else none.
+The reminder names that connection (`presenter_connection`, the `connection` its `state.bootstrap` answered) and its kind, and only the client on that connection raises a system notification, so one reminder gives exactly one notification; every client still shows the reminder in its own window.
+The desktop app comes first because its notification opens the event on a click; the last bootstrapped is the client the user opened most recently.
+With only the CLI connected nobody notifies, and the reminder waits in `mp calendar reminders`.
+Rejected: each client notifying on its own (one notification per open client) and the clients agreeing among themselves (a second channel between clients the daemon already is).
+Source: implementation of PERSO-255 on branch `calendar-p2-p2s8`, 2026-11-04.
+Status: accepted

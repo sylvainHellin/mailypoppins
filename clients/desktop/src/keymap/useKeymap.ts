@@ -290,14 +290,16 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         return;
       }
 
+      // A control marked as such (the calendars panel's checkboxes, the
+      // reminder banner's buttons) takes its own Enter and Space, in every
+      // view: no pane opens, selects or arms the Space prefix on them.
+      if ((e.key === "Enter" || e.key === " ") && e.target instanceof Element && e.target.closest("[data-own-keys]")) return;
+
       // A full-pane view reads its own keys before any prefix arms, so it can
       // bind `c`, `t` or `r` without arming the mail families; only the
       // prefixes it names still arm, and what it neither binds nor shares
       // does nothing, as the TUI's views ignore the mail keys.
       if (view) {
-        // A control marked as such (the calendars panel's checkboxes) takes
-        // its own Enter and Space, whatever the view binds them to.
-        if ((e.key === "Enter" || e.key === " ") && e.target instanceof Element && e.target.closest("[data-own-keys]")) return;
         // Enter on a sidebar mailbox brings Mail back with it, whatever the view binds Enter to.
         if (e.key === "Enter" && s.focus === "sidebar") return handled(), run("select_mailbox");
         const id = view.keys[e.key];
@@ -379,6 +381,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         // The TUI's toggle of its log pane: here the activity area's notices.
         case "!":
           return handled(), run("toggle_activity");
+        // The TUI's reminders overlay, from every view: here the reminder banner.
+        case "R":
+          return handled(), run("focus_reminders");
         case "Escape":
           handled();
           // The view hides the marks, so it closes before they clear.

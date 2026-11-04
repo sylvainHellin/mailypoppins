@@ -49,6 +49,8 @@ pub use snapshot::{
 
 use snapshot::{AccountView, DraftView, MailboxView, OutboxView};
 
+use super::dispatch::ClientKind;
+
 /// Test-only hook: milliseconds after the **first** `state.bootstrap` at which
 /// every configured account flips to `ready`, one committed change each, in
 /// `config.toml` order.
@@ -292,6 +294,13 @@ struct Endpoint {
     /// False between `subscribe` and `bootstrap`: the endpoint exists, but the
     /// fan-out does not write to it yet.
     attached: bool,
+    /// The kind of client on the connection, once its `initialize` settled
+    /// it: what elects the reminders' presenter ([`CanonicalState::presenter`]).
+    kind: Option<ClientKind>,
+    /// The order of the connection's latest `bootstrap` among every
+    /// connection's, `0` before its first: the most recent one of a kind is
+    /// the presenter.
+    bootstrapped: u64,
 }
 
 /// One connection's place in the fan-out, owned by its [`EventQueue`].
@@ -330,6 +339,9 @@ pub struct CanonicalState {
     operations: Mutex<Option<Arc<crate::daemon::operations::OperationRegistry>>>,
     holds: Mutex<Option<Arc<crate::daemon::hold::HoldScheduler>>>,
     diagnostics: Mutex<Option<Arc<crate::daemon::diagnostics::Diagnostics>>>,
+    /// The reminder task, woken by every `calendar.changed` this state
+    /// publishes (PERSO-255).
+    reminders: Mutex<Option<Arc<crate::daemon::reminders::Reminders>>>,
     /// When each account's last tick finished and its error, `None` for a
     /// clean one. Not part of the state a change reduces into, for the reason
     /// [`CanonicalState::last_sync`] gives; the snapshot projects the outcome
@@ -349,6 +361,9 @@ struct Inner {
     drafts: BTreeMap<String, Vec<DraftView>>,
     outbox: BTreeMap<String, OutboxView>,
     subscribers: BTreeMap<ConnectionId, Endpoint>,
+    /// How many bootstraps attached a connection, which orders them for
+    /// [`CanonicalState::presenter`].
+    bootstraps: u64,
 }
 
 impl CanonicalState {
@@ -364,6 +379,7 @@ impl CanonicalState {
             drafts: BTreeMap::new(),
             outbox: BTreeMap::new(),
             subscribers: BTreeMap::new(),
+            bootstraps: 0,
         };
         for seed in accounts {
             inner.mailboxes.insert(
@@ -395,6 +411,7 @@ impl CanonicalState {
             operations: Mutex::new(None),
             holds: Mutex::new(None),
             diagnostics: Mutex::new(None),
+            reminders: Mutex::new(None),
             last_sync: Mutex::new(BTreeMap::new()),
         }
     }
@@ -430,6 +447,13 @@ impl CanonicalState {
     /// the flips that happened after this client connected.
     pub fn attach_diagnostics(&self, diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>) {
         *lock(&self.diagnostics) = Some(diagnostics);
+    }
+
+    /// Wake the reminder task at every `calendar.changed` (PERSO-255): a
+    /// change to the calendar cache is what moves a reminder's due minute,
+    /// and every writer of the cache already announces it here.
+    pub fn attach_reminders(&self, reminders: Arc<crate::daemon::reminders::Reminders>) {
+        *lock(&self.reminders) = Some(reminders);
     }
 
     /// When `account`'s last tick finished and how it went, `None` until one
@@ -528,13 +552,22 @@ impl CanonicalState {
             "mp_protocol::events::DOMAIN_KINDS classifies {} the other way",
             event.kind()
         );
-        let _gate = self.gate.enter();
-        let mut inner = lock(&self.inner);
-        inner.revision += 1;
-        let revision = Revision(inner.revision);
-        for subscriber in inner.subscribers.values().filter(|s| s.attached) {
-            lock(&subscriber.lifecycle).push_back((revision, event.clone()));
-            subscriber.ready.notify_waiters();
+        let calendar_moved = event.kind() == mp_protocol::events::KIND_CALENDAR_CHANGED;
+        let revision = {
+            let _gate = self.gate.enter();
+            let mut inner = lock(&self.inner);
+            inner.revision += 1;
+            let revision = Revision(inner.revision);
+            for subscriber in inner.subscribers.values().filter(|s| s.attached) {
+                lock(&subscriber.lifecycle).push_back((revision, event.clone()));
+                subscriber.ready.notify_waiters();
+            }
+            revision
+        };
+        if calendar_moved {
+            if let Some(reminders) = lock(&self.reminders).as_ref() {
+                reminders.poke();
+            }
         }
         revision
     }
@@ -647,6 +680,8 @@ impl CanonicalState {
                 lifecycle: Arc::clone(&lifecycle),
                 ready: Arc::clone(&ready),
                 attached: false,
+                kind: None,
+                bootstrapped: 0,
             },
         );
         EventQueue {
@@ -657,6 +692,37 @@ impl CanonicalState {
                 conn,
                 inner: Arc::downgrade(&self.inner),
             }),
+        }
+    }
+
+    /// Record the kind of client on `conn`, which its `initialize` settled.
+    /// A connection that never subscribed has no endpoint and records nothing.
+    pub fn set_client_kind(&self, conn: ConnectionId, kind: ClientKind) {
+        if let Some(subscriber) = lock(&self.inner).subscribers.get_mut(&conn) {
+            subscriber.kind = Some(kind);
+        }
+    }
+
+    /// The one connection that raises a reminder's system notification
+    /// (PERSO-255), with its kind's wire name: the most recently bootstrapped
+    /// desktop app, else the most recently bootstrapped TUI, else none. Every
+    /// client shows the reminder in its own window; only the presenter
+    /// notifies, so two TUIs, or a desktop app and a TUI, open together raise
+    /// one notification.
+    pub fn presenter(&self) -> Option<(ConnectionId, &'static str)> {
+        let inner = lock(&self.inner);
+        let latest = |kind: ClientKind| {
+            inner
+                .subscribers
+                .iter()
+                .filter(|(_, subscriber)| subscriber.attached && subscriber.kind == Some(kind))
+                .max_by_key(|(_, subscriber)| subscriber.bootstrapped)
+                .map(|(conn, _)| *conn)
+        };
+        if let Some(conn) = latest(ClientKind::Gui) {
+            Some((conn, mp_protocol::reminder::PRESENTER_GUI))
+        } else {
+            latest(ClientKind::Tui).map(|conn| (conn, mp_protocol::reminder::PRESENTER_TUI))
         }
     }
 
@@ -678,8 +744,14 @@ impl CanonicalState {
         let _gate = self.gate.enter();
 
         self.fire(Boundary::BeforeRegister);
-        if let Some(subscriber) = lock(&self.inner).subscribers.get_mut(&conn) {
-            subscriber.attached = true;
+        {
+            let mut inner = lock(&self.inner);
+            inner.bootstraps += 1;
+            let order = inner.bootstraps;
+            if let Some(subscriber) = inner.subscribers.get_mut(&conn) {
+                subscriber.attached = true;
+                subscriber.bootstrapped = order;
+            }
         }
         self.fire(Boundary::AfterRegister);
 

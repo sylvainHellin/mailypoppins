@@ -147,7 +147,8 @@ import {
   staleAllOutboxes,
   staleOutbox,
 } from "@/app/outbox";
-import type { CalendarInfo, MessageListRow, OutboxListing } from "@/protocol/types";
+import type { CalendarInfo, CalendarReminder, MessageListRow, OutboxListing } from "@/protocol/types";
+import { openReminderEvent, reminderDecided, reminderFired, remindersFailed, remindersLoaded, staleReminders } from "@/app/reminders";
 import {
   calendarFailed,
   calendarGoTo,
@@ -435,6 +436,11 @@ export type Action =
   | { type: "calendar_layout"; layout: CalendarLayout }
   | { type: "calendar_toggle_calendars" }
   | { type: "calendar_refresh" }
+  // The calendar reminders (app/reminders.ts).
+  | { type: "reminders_loaded"; gen: number; reminders: CalendarReminder[] }
+  | { type: "reminders_failed"; gen: number; error: GuiError }
+  | { type: "reminder_decided"; account: string; event: string }
+  | { type: "reminder_open"; account: string; event: string; start: string }
   /** The event card's "Open mail": the invitation mail in the Mail view. */
   | { type: "open_event_mail"; account: string; mailbox: string; row_id: number; selector: string }
   // The invitations (app/rsvp.ts): the reader's cards, the New invitation form's Graph refusal, the answers.
@@ -1415,6 +1421,12 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const account = (payload as { account?: unknown }).account;
       return typeof account === "string" ? staleInvitations(s, account) : staleCalendar(s);
     }
+    // A reminder fell due, or one was dismissed, snoozed or cleared in any
+    // client (PERSO-255): the banner adds it, or reads the list again.
+    case "calendar.reminder":
+      return reminderFired(s, payload);
+    case "calendar.reminders_changed":
+      return staleReminders(s);
     case "contact.changed": {
       const account = (payload as { account?: unknown }).account;
       return typeof account === "string" ? staleContacts(s, account) : s;
@@ -1496,8 +1508,10 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // Row ids are per daemon instance, and the reloaded lists are the
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
-      const next = staleAllSignatures(
-        staleAllContacts(bootstrapInvites(staleCalendar(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance)),
+      const next = staleReminders(
+        staleAllSignatures(
+          staleAllContacts(bootstrapInvites(staleCalendar(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance)),
+        ),
       );
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
@@ -2196,6 +2210,14 @@ function reduce(s: AppState, a: Action): AppState {
       return calendarSetLayout(s, a.layout);
     case "calendar_toggle_calendars":
       return toggleCalendarsPanel(s);
+    case "reminders_loaded":
+      return remindersLoaded(s, a.gen, a.reminders);
+    case "reminders_failed":
+      return remindersFailed(s, a.gen, a.error);
+    case "reminder_decided":
+      return reminderDecided(s, a.account, a.event);
+    case "reminder_open":
+      return openReminderEvent(reducer(s, { type: "switch_view", view: "calendar" }), a.account, a.event, a.start);
     case "calendar_refresh":
       return refreshCalendar(s);
     case "open_event_mail": {

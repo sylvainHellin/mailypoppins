@@ -1,0 +1,20 @@
+{
+  "id": 81,
+  "jsonrpc": "2.0",
+  "result": {
+    "reminders": [
+      {
+        "account": "evoqs",
+        "all_day": false,
+        "event": "AAMkADev2",
+        "location": "Room 2.14",
+        "minutes_before": 15,
+        "online_meeting_url": "https://teams.microsoft.com/l/meetup-join/abc",
+        "presenter": "gui",
+        "presenter_connection": 7,
+        "start": "2026-07-09T07:00:00Z",
+        "summary": "Project review"
+      }
+    ]
+  }
+}

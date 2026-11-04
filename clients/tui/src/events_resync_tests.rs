@@ -79,6 +79,7 @@ fn snapshot(revision: u64, inbox_total: u64) -> Bootstrap {
         instance_id: "resync".to_string(),
         revision,
         capabilities: vec!["state.bootstrap".to_string()],
+        connection: 1,
         snapshot: Snapshot {
             accounts: vec![AccountSnapshot {
                 name: ACCOUNT.to_string(),

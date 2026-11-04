@@ -21,6 +21,7 @@ pub mod hooks;
 pub mod lifecycle;
 pub mod methods;
 pub mod operations;
+pub mod reminders;
 pub mod runtime;
 pub mod server;
 pub mod server_copies;

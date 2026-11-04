@@ -19,6 +19,7 @@ pub mod events;
 pub mod frame;
 pub mod listing;
 pub mod operation;
+pub mod reminder;
 pub mod rendition;
 pub mod send;
 pub mod signature;

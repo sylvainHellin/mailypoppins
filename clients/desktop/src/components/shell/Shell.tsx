@@ -11,6 +11,7 @@ import { StatusRegion } from "@/components/shell/StatusRegion";
 import { ActivityStack } from "@/components/mutations/ActivityStack";
 import { EditingBanner } from "@/components/compose/EditingBanner";
 import { ConfigProblemBanner } from "@/components/settings/ConfigProblemBanner";
+import { ReminderBanner } from "@/components/reminders/ReminderBanner";
 import { ViewHost } from "@/components/views/ViewHost";
 import { VIEW_TITLES } from "@/app/views";
 import { useAppState, useDispatch } from "@/app/store";
@@ -76,6 +77,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
         <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
           <StatusRegion state={s} />
           <ConfigProblemBanner />
+          <ReminderBanner />
           <EditingBanner />
           {narrow ? (
             <NarrowBar view={view ? "list" : s.focus} title={view ? VIEW_TITLES[view] : undefined} onUp={() => dispatch({ type: "up" })} />

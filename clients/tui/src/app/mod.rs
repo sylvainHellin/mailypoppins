@@ -4,6 +4,7 @@ mod event_form;
 pub(crate) mod jump_date;
 mod keymap;
 mod keys;
+mod reminders;
 mod types;
 
 pub use calendar::{day_part, DayPart};
@@ -13,6 +14,7 @@ pub use keymap::{
     palette_actions, palette_match_text, prefix_continuations, resolve, Guard, KeyAction,
     KeyBinding, KeyCtx, KEYMAP,
 };
+pub use reminders::SNOOZE_MINUTES;
 pub use types::*;
 
 use std::collections::{HashSet, VecDeque};
@@ -38,6 +40,13 @@ pub struct App {
     /// `calendar.view` answers, in an agenda, a day or a week layout. Loaded
     /// lazily on first switch.
     pub calendar_view: CalendarView,
+    /// The calendar reminders that fired and wait for the user (PERSO-255),
+    /// as `calendar.reminders` last answered and `calendar.reminder` added.
+    pub reminders: Vec<mp_protocol::reminder::CalendarReminder>,
+    /// The daemon's id of this TUI's connection, from the latest
+    /// `state.bootstrap`: a `calendar.reminder` naming it as its
+    /// `presenter_connection` is this TUI's to notify.
+    pub connection: Option<u64>,
     pub running: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -365,6 +374,8 @@ impl App {
             mail_view: MailView::default(),
             contacts_view: ContactsView::default(),
             calendar_view: CalendarView::default(),
+            reminders: Vec::new(),
+            connection: None,
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -446,6 +457,8 @@ impl App {
             mail_view: MailView::default(),
             contacts_view: ContactsView::default(),
             calendar_view: CalendarView::default(),
+            reminders: Vec::new(),
+            connection: None,
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -767,6 +780,7 @@ impl App {
             | Overlay::EventForm(_)
             | Overlay::Calendars(_)
             | Overlay::EventCard(_)
+            | Overlay::Reminders(_)
             | Overlay::Thread(_)
             | Overlay::Palette(_)
             | Overlay::Error(_) => None,

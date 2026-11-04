@@ -643,7 +643,7 @@ async fn cancel_and_delete_name_the_event_and_count_a_gone_one_as_done() {
     assert_eq!(sent[5].url, format!("{BASE}/me/events/gone"));
 }
 
-/// A dismiss posts no body, a snooze the new reminder time in UTC; a gone
+/// A dismiss posts `{}` (an empty POST is HTTP 411 at Exchange), a snooze the new reminder time in UTC; a gone
 /// event has no reminder left, which counts as done.
 #[tokio::test]
 async fn reminders_are_dismissed_and_snoozed_on_the_server() {
@@ -674,7 +674,7 @@ async fn reminders_are_dismissed_and_snoozed_on_the_server() {
         sent[0].url,
         format!("{BASE}/me/events/AAMk%2Fev=/dismissReminder")
     );
-    assert_eq!(sent[0].body, Some(serde_json::Value::Null));
+    assert_eq!(sent[0].body, Some(json!({})));
     assert_eq!(
         sent[1].url,
         format!("{BASE}/me/events/AAMk%2Fev=/snoozeReminder")
@@ -686,7 +686,8 @@ async fn reminders_are_dismissed_and_snoozed_on_the_server() {
 }
 
 /// The production seam asks for immutable ids on all four verbs, sends the
-/// token, posts JSON, and posts an empty body for a `null` one.
+/// token, and posts JSON with its length, an empty object included, which
+/// is what `dismissReminder` takes.
 #[test]
 fn every_verb_of_the_seam_asks_for_immutable_ids() {
     let http = GraphHttp {
@@ -709,13 +710,8 @@ fn every_verb_of_the_seam_asks_for_immutable_ids() {
             http.build(reqwest::Method::DELETE, &url, &[], None),
         ),
         (
-            "POST (no body)",
-            http.build(
-                reqwest::Method::POST,
-                &url,
-                &[],
-                Some(serde_json::Value::Null),
-            ),
+            "POST (empty object)",
+            http.build(reqwest::Method::POST, &url, &[], Some(json!({}))),
         ),
     ];
     for (what, request) in requests {
@@ -743,9 +739,9 @@ fn every_verb_of_the_seam_asks_for_immutable_ids() {
                 assert!(body.is_none());
             }
             "DELETE" => assert!(body.is_none(), "{what}"),
-            "POST (no body)" => {
-                assert_eq!(body, Some(&b""[..]));
-                assert_eq!(header("Content-Type"), None);
+            "POST (empty object)" => {
+                assert_eq!(body, Some(&b"{}"[..]));
+                assert_eq!(header("Content-Type").as_deref(), Some("application/json"));
             }
             _ => {
                 assert_eq!(body, Some(&br#"{"a":1}"#[..]), "{what}");

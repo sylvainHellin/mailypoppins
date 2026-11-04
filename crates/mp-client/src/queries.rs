@@ -72,6 +72,9 @@ use mp_protocol::listing::{
     ConversationListing, MessageListRow, MessageListing, ThreadListing,
     METHOD_MESSAGE_LIST_CONVERSATIONS,
 };
+use mp_protocol::reminder::{
+    CalendarReminder, CalendarRemindersParams, CalendarRemindersResult, ReminderSnoozed,
+};
 use mp_protocol::rendition::{MessageHtml, MessageHtmlParams, METHOD_MESSAGE_HTML};
 use mp_protocol::state::MailboxRow;
 use mp_protocol::EventEnvelope;
@@ -514,6 +517,48 @@ pub fn event_respond_params(
 }
 
 // ---------------------------------------------------------------------------
+// The calendar reminders (PERSO-255)
+// ---------------------------------------------------------------------------
+
+/// The fired reminders waiting for the user, of every account or of
+/// `accounts`, through `calendar.reminders`.
+pub fn calendar_reminders(
+    q: &dyn Queries,
+    accounts: Option<&[String]>,
+) -> Result<Vec<CalendarReminder>> {
+    let params = CalendarRemindersParams {
+        accounts: accounts.map(<[String]>::to_vec),
+    };
+    let answer: CalendarRemindersResult =
+        serde_json::from_value(q.call("calendar.reminders", serde_json::to_value(params)?)?)?;
+    Ok(answer.reminders)
+}
+
+/// Dismiss the reminder of `event`, through `calendar.dismiss_reminder`.
+pub fn calendar_dismiss_reminder(q: &dyn Queries, account: &str, event: &str) -> Result<()> {
+    q.call(
+        "calendar.dismiss_reminder",
+        json!({"account": account, "event": event}),
+    )?;
+    Ok(())
+}
+
+/// Snooze the reminder of `event` for `minutes`, through
+/// `calendar.snooze_reminder`; answers when it fires again.
+pub fn calendar_snooze_reminder(
+    q: &dyn Queries,
+    account: &str,
+    event: &str,
+    minutes: u32,
+) -> Result<ReminderSnoozed> {
+    let answer = q.call(
+        "calendar.snooze_reminder",
+        json!({"account": account, "event": event, "minutes": minutes}),
+    )?;
+    Ok(serde_json::from_value(answer)?)
+}
+
+// ---------------------------------------------------------------------------
 // Row deltas
 // ---------------------------------------------------------------------------
 
@@ -727,6 +772,50 @@ mod tests {
                 false
             ),
             request["params"]
+        );
+    }
+
+    /// The reminder calls ask with the committed request shapes and decode
+    /// the committed answers.
+    #[test]
+    fn the_reminder_calls_match_the_committed_fixtures() {
+        let request = |raw: &str| -> Value {
+            serde_json::from_str::<Value>(raw).expect("fixture is JSON")["params"].clone()
+        };
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.reminders.response.json"
+        )));
+        let accounts = ["evoqs".to_string()];
+        let reminders = calendar_reminders(&door, Some(&accounts)).expect("reminders");
+        assert_eq!(reminders[0].event, "AAMkADev2");
+        assert_eq!(
+            door.seen.borrow()[0].1,
+            request(include_str!(
+                "../../mp-protocol/fixtures/calendar.reminders.request.json"
+            ))
+        );
+
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.dismiss_reminder.response.json"
+        )));
+        calendar_dismiss_reminder(&door, "evoqs", "AAMkADev2").expect("dismissed");
+        assert_eq!(
+            door.seen.borrow()[0].1,
+            request(include_str!(
+                "../../mp-protocol/fixtures/calendar.dismiss_reminder.request.json"
+            ))
+        );
+
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.snooze_reminder.response.json"
+        )));
+        let snoozed = calendar_snooze_reminder(&door, "evoqs", "AAMkADev2", 5).expect("snoozed");
+        assert_eq!(snoozed.until, "2026-07-09T06:50:00Z");
+        assert_eq!(
+            door.seen.borrow()[0].1,
+            request(include_str!(
+                "../../mp-protocol/fixtures/calendar.snooze_reminder.request.json"
+            ))
         );
     }
 

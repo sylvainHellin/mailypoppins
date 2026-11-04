@@ -153,6 +153,10 @@ impl App {
         // socket was down, which no event would ever remove.
         self.holds = bootstrap.snapshot.holds.clone();
         self.hold = self.holds.last().cloned();
+        // The connection this snapshot was taken on, which a reminder names
+        // when this TUI is the one to notify (PERSO-255); `0` is a daemon
+        // that does not say.
+        self.connection = (bootstrap.connection != 0).then_some(bootstrap.connection);
         if orphaned > 0 {
             // The daemon that was running them is gone, so the spinner they
             // are holding up would never come down.
@@ -185,6 +189,10 @@ impl App {
             .filter(|check| check.status != mp_protocol::diagnostic::CheckStatus::Ok)
             .map(|check| (check.name.clone(), (check.status, check.detail.clone())))
             .collect();
+        // The reminders that fired before this client started or while it
+        // was away (PERSO-255) are the daemon's to list, as no event brings
+        // them back.
+        self.reload_reminders();
         for account in &bootstrap.snapshot.accounts {
             let Some(index) = self
                 .accounts
@@ -439,6 +447,7 @@ mod tests {
             instance_id: "test".to_string(),
             revision: 1,
             capabilities: vec!["state.bootstrap".to_string()],
+            connection: 1,
             snapshot: Snapshot {
                 accounts: vec![AccountSnapshot {
                     name: name.to_string(),

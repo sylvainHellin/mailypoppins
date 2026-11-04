@@ -35,7 +35,7 @@ Commands:
   config          Manage configuration
   contacts        Contact index operations
   signature       Manage the signatures drafts carry, and each account's default
-  calendar        The calendar: list, view, show and hide calendars, rebuild
+  calendar        The calendar: list, view, show and hide calendars, reminders, rebuild
   event           One calendar event: create it, show it, answer it
   hooks           Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
   outbox          Inspect and unblock the durable send queue
@@ -763,17 +763,19 @@ Options:
   -h, --help               Print help
 
 $ mp calendar --help
-The calendar: list, view, show and hide calendars, rebuild
+The calendar: list, view, show and hide calendars, reminders, rebuild
 
 Usage: mp calendar [OPTIONS] <COMMAND>
 
 Commands:
-  list     List the calendars: account, name, id, backend, visibility, colour
-  view     Show the events of an agenda, a day or a week
-  show     Make a calendar's events visible in the views again
-  hide     Hide a calendar's events from the views (a local preference)
-  rebuild  Report what the stored attendee REPLY emails resolve on the stored invitations, and resync the server calendar of an account that has one. The fold writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
-  help     Print this message or the help of the given subcommand(s)
+  list       List the calendars: account, name, id, backend, visibility, colour
+  view       Show the events of an agenda, a day or a week
+  show       Make a calendar's events visible in the views again
+  hide       Hide a calendar's events from the views (a local preference)
+  reminders  List the reminders that fired and wait for you: summary, when, where, account and event id
+  reminder   Dismiss or snooze one event's reminder, in every client and in Outlook
+  rebuild    Report what the stored attendee REPLY emails resolve on the stored invitations, and resync the server calendar of an account that has one. The fold writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
   -A, --account <ACCOUNT>  Account to use
@@ -873,6 +875,70 @@ Arguments:
   <CALENDAR>  The calendar id, as `mp calendar list` prints it
 
 Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp calendar reminders --help
+List the reminders that fired and wait for you: summary, when, where, account and event id
+
+Every account unless -A names one. The daemon fires a reminder at its due minute (the event's start minus its reminder setting), and the desktop app or the TUI raises the notification; this lists what is still waiting.
+
+Usage: mp calendar reminders [OPTIONS]
+
+Options:
+      --json
+          Print the `calendar.reminders` answer as JSON on stdout
+
+  -A, --account <ACCOUNT>
+          Account to use
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+$ mp calendar reminder --help
+Dismiss or snooze one event's reminder, in every client and in Outlook
+
+Usage: mp calendar reminder [OPTIONS] <COMMAND>
+
+Commands:
+  dismiss  Dismiss the reminder: it does not fire again for this meeting
+  snooze   Snooze the reminder: it fires again in --minutes
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+A dismissal or a snooze reaches every open client, and on a Microsoft 365
+account Outlook too. A reminder may be dismissed before it fires, which keeps
+it from firing.
+
+Examples:
+  mp calendar reminder dismiss AAMkADev2 -A evoqs
+  mp calendar reminder snooze AAMkADev2 --minutes 10 -A evoqs
+
+$ mp calendar reminder dismiss --help
+Dismiss the reminder: it does not fire again for this meeting
+
+Usage: mp calendar reminder dismiss [OPTIONS] <EVENT>
+
+Arguments:
+  <EVENT>  The event id, as `mp calendar reminders` prints it
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp calendar reminder snooze --help
+Snooze the reminder: it fires again in --minutes
+
+Usage: mp calendar reminder snooze [OPTIONS] <EVENT>
+
+Arguments:
+  <EVENT>  The event id, as `mp calendar reminders` prints it
+
+Options:
+      --minutes <N>        How long until it fires again [default: 5]
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 

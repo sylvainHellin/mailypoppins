@@ -104,7 +104,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `contact.*` for listing, ranking, rebuilding, statistics, and the vCard draft.
   This build serves `contact.rebuild`, `contact.search`, `contact.stats` and `contact.vcard_draft`; the rows are `{address, display_name, sent_to, sent_cc, received, first_seen, last_seen, score}`, `contact.search` answers `rebuild`, the `mp_protocol::contact::RefusedRebuild` of a build of a missing or stale index the cache guard refused (`null` otherwise), and `contact.vcard_draft` `{account, name, address, display_name}` writes a draft addressed to the contact, subject `Contact: <name>`, no signature, with the contact's vCard under the drafts directory's `_vcards/` attached, answering `mp_protocol::contact::VcardDraft` `{draft, vcf}`.
   Every write of an index is announced as `contact.changed`.
-- `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.list`, `calendar.rebuild`, `calendar.rsvp`, `calendar.set_visibility` and `calendar.view` ([The server calendar](#the-server-calendar)).
+- `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.list`, `calendar.rebuild`, `calendar.rsvp`, `calendar.set_visibility` and `calendar.view` ([The server calendar](#the-server-calendar)), and `calendar.reminders`, `calendar.dismiss_reminder` and `calendar.snooze_reminder` ([The calendar reminders](#the-calendar-reminders)).
 - `event.*` for one event of the server calendar: `event.create`, `event.get` and `event.respond` ([The server calendar](#the-server-calendar)).
 - `signature.*` for list, read, create, rename, delete, and per-account default selection. This build serves six methods (`mp_protocol::signature`): `signature.list` `{account}` -> `{account, names, default}`, a query any configured account answers, store or not, the sorted names under `<config>/signatures/` and the account's default, `null` when it has none or its file is gone; `signature.read` `{name}` -> `{name, path, content}`, a query; and four commands, `signature.create` `{name}` -> `{name, path, content: ""}`, `signature.rename` `{account, old, new}`, `signature.delete` `{account, name}` and `signature.set_default` `{account, name|null}`, the last three answering `account`'s listing after the change. A refusal is `-32602` with `mp_core::signatures`' sentence; no method writes a signature's content, which is the editor's, on `path`.
 - `hook.*` for the mail hooks of `[[accounts.hooks]]` (#0135). This build serves `hook.list`, `hook.replay` and `hook.test`.
@@ -121,7 +121,7 @@ Every method registered on the dispatcher declares a kind, and the kind fixes wh
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.list`, `calendar.view`, `event.get`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft`, `calendar.set_visibility` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft`, `calendar.set_visibility`, `calendar.dismiss_reminder`, `calendar.snooze_reminder` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `event.create`, `event.respond`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -188,6 +188,7 @@ SIGTERM and SIGINT run the same eight steps with the default grace, so a unit st
   "instance_id": "1f0c…",
   "revision": 4217,
   "capabilities": ["state.bootstrap", "account.list"],
+  "connection": 7,
   "snapshot": {
     "accounts": [{"name": "work", "state": "opening", "sync_health": {"state": "unknown", "reason": null, "at": null}}],
     "mailboxes": {"work": [{"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0}]},
@@ -202,6 +203,7 @@ SIGTERM and SIGINT run the same eight steps with the default grace, so a unit st
 
 `capabilities` is what **this connection** agreed on at its handshake, not the daemon's whole list: a client acts on what it may use, and the offer is already in the `initialize` result.
 `revision` is never `0`, which the client keeps as its own pre-bootstrap sentinel.
+`connection` is the daemon's id of this connection, never `0` and unique for the life of the daemon process; a client keeps it to recognise a `calendar.reminder` that names this connection as its presenter (`presenter_connection`, "The calendar reminders").
 
 `mailboxes`, `drafts` and `outbox` carry one key per listed account, always, so a client indexes them by account name without a null check.
 A daemon with no configured account answers an empty `accounts` array and three empty objects.
@@ -1114,7 +1116,7 @@ The wire types are `mp_protocol::calendar`; an event is `CalendarEvent`, the neu
 `calendar.list` `{account?}` -> `{calendars: [CalendarInfo]}` is a query.
 A row is `{account, id, name, color, is_default, can_edit, visible, backend, features}`, `color` `null` when the server names none and `backend` the account's `calendar_backend` as the configuration spells it.
 `features` lists what the backend lets a client do beyond reading and answering, so a client greys out what an account lacks: `write`, `online-meeting`, `propose-time`, `free-busy` and `server-reminders` (PERSO-255), each listed once the daemon serves it there.
-This build serves `write` (`event.create`) on a Graph calendar and `online-meeting` (a Teams link on a new event) on one whose `allowedOnlineMeetingProviders` names `teamsForBusiness`, and none on the invitation calendar, which answers `[]`.
+This build serves `write` (`event.create`) and `server-reminders` (a dismissal or a snooze written through) on every Graph calendar, `online-meeting` (a Teams link on a new event) on one whose `allowedOnlineMeetingProviders` names `teamsForBusiness`, and none on the invitation calendar, which answers `[]`.
 A mailbox without a Teams licence answers that list empty and Graph drops a request for a meeting link there without a word, so its calendars list no `online-meeting` and a client hides or disables its Teams toggle on them.
 An account with a backend lists its server calendars in the server's order, as the last sync stored them, so an account that never synced lists none.
 Every account holding an invitation mail lists one more, the virtual invitation calendar `{id: "imip", name: "Invitations", backend: "none"}`, so its events can be hidden like a server calendar's.
@@ -1168,6 +1170,27 @@ The fold settles the operation either way, so `mp calendar rebuild` over every a
 An account without a backend gets no such key.
 
 The daemon syncs an account's calendar after the mail pass of each of its ticks, under one lock per account it shares with `calendar.rebuild`, `event.create` and `event.respond`, and publishes `calendar.changed` when the sync moved the cache; a sign-in without the calendar scope is skipped quietly there, since the `calendar:<name>` health check already prompts for the re-login.
+
+### The calendar reminders
+
+PERSO-255 has the daemon remind of the server events of every account with a calendar backend; the wire types are `mp_protocol::reminder`.
+A reminder falls due at its event's start minus the event's `reminder` minutes, and the daemon fires it at that minute as `calendar.reminder`, once, whichever clients are connected.
+A cancelled event, a declined one, one without a reminder and one in a hidden calendar never remind, nor does an invitation mail's event; a reminder that fell due while the daemon was stopped fires once at its start if its event has not ended.
+The daemon records what fired, was dismissed or is snoozed per account and event, for the due minute it fired at, so a moved event or a changed setting reminds again at its new minute; the record survives `calendar.rebuild` and a store rebuilt for a new schema version, and an entry goes once its event has ended.
+
+A reminder is `CalendarReminder` `{account, event, summary, start, all_day, location?, online_meeting_url?, minutes_before, presenter, presenter_connection}`: `event` the id `event.get` takes, `start` an RFC 3339 instant in UTC (an all-day event's first midnight in the daemon's zone), and `minutes_before` the event's setting.
+The presenter is the one connection that raises the system notification: the most recently bootstrapped desktop app, else the most recently bootstrapped TUI, else none.
+`presenter_connection` is that connection's id, the `connection` its `state.bootstrap` answered, and `presenter` its kind, `gui` or `tui`; both are `null` when no desktop app or TUI is bootstrapped.
+Every client shows the reminder in its own window, and only the client whose connection `presenter_connection` names notifies, so a reminder raises one notification however many clients are open.
+
+`calendar.reminders` `{accounts?}` -> `{reminders: [CalendarReminder]}` (`CalendarRemindersParams`, `CalendarRemindersResult`) is a query: the reminders that fired and wait, neither dismissed nor snoozed, of every reminding account or of those named, the earliest start first, each with the presenter as it stands at the call.
+A reminder whose event stops reminding (cancelled, declined, hidden, its reminder turned off, which is what a dismissal in Outlook reads as at the next sync) leaves the list, and one whose event reminds again without a new firing (its calendar shown again) comes back to it.
+The daemon publishes `calendar.reminders_changed` whenever the list changes other than by a firing, which `calendar.reminder` announces itself.
+
+`calendar.dismiss_reminder` `{account, event}` -> `{account, event}` (`ReminderDismissed`) and `calendar.snooze_reminder` `{account, event, minutes}` -> `{account, event, until}` (`ReminderSnoozed`) are commands that affect `reminder:<account>/<event>` and publish `calendar.reminders_changed`, so every client clears or moves the reminder together.
+Either may come before the reminder fired: a dismissal ahead of time keeps it from firing, and a snooze makes it fire at `until`, `minutes` (1 to 20160) after the call.
+On a backend whose `features` list `server-reminders` the daemon then sends the decision to the server (Graph's `dismissReminder` and `snoozeReminder`), after the answer; a failure is logged and leaves the local record in place.
+An event the cache does not hold, one that does not remind, a `minutes` out of range and a snooze of a dismissed reminder are `-32602`.
 
 ### Long-running operations
 
@@ -1317,6 +1340,8 @@ It is a lifecycle event and reduces into no snapshot: signatures are global rath
 `contact.changed` says that an account's contact index was written, with a payload of `{account, contacts}`, the count the index holds now (`mp_protocol::events::ContactChanged`): a `contact.rebuild` the cache guard let through, the build a `contact.search` or `contact.stats` ran because the account had no current index, and the bump a sync (the runtime's tick included) or a send gives the addresses it saw. It is a lifecycle event, and a client showing the contacts reads them again with `contact.search`.
 
 `calendar.changed` says that an account's calendars or events moved, with a payload of `{account}` (`mp_protocol::calendar::CalendarChanged`): a calendar sync that changed the cache (a tick's, a `calendar.rebuild`'s, or the one after an `event.respond` or an `event.create`), an answer to an invitation, a new event, or a `calendar.set_visibility`. It is a lifecycle event, and a client showing the calendar reads it again with `calendar.list` and `calendar.view`.
+
+`calendar.reminder` says that a reminder fell due, with a `CalendarReminder` as its payload ([The calendar reminders](#the-calendar-reminders)); `calendar.reminders_changed` `{account}` (`CalendarRemindersChanged`) says that one was dismissed, snoozed or left the list, and a client showing reminders reads `calendar.reminders` again. Both are lifecycle events.
 
 `message.server_hit` carries one hit of a live `message.search_server`, with a payload of `{operation_id, hit}`.
 It is a lifecycle event: a hit is a fact about a moment in one search, two hits never merge, and no snapshot brings one back, exactly as an `operation.progress` report does not.
@@ -1483,6 +1508,8 @@ Both have their member set pinned down to one account and one check entry, and b
 The conversation listing has five: `message.list_conversations.request.json`, `message.list_conversations.response.json`, which decodes as `MessageListStreamStarted`, `notification.message_conversations.json`, which decodes as `ConversationRowsChunk` and whose rows' `latest` are the rows of `message.list.response.json` unchanged, and `message.thread.drafts.{request,response}.json`, the expansion with its two parameters and a draft member.
 
 The server calendar has thirteen: a request and a response for each of `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.create`, `event.get` and `event.respond`, and `notification.calendar_changed.json`; `mp_protocol::calendar`'s own test decodes them into their types, and `calendar.view.response.json` re-encodes to itself, so the wire event cannot drift from the daemon's serialisation.
+
+The calendar reminders have eight: a request and a response for each of `calendar.reminders`, `calendar.dismiss_reminder` and `calendar.snooze_reminder`, `notification.calendar_reminder.json` and `notification.calendar_reminders_changed.json`; `mp_protocol::reminder`'s own test decodes them into their types.
 
 The streamed listing has three fixtures: `message.list_stream.request.json`, `message.list_stream.response.json`, which decodes as `mp_protocol::listing::MessageListStreamStarted`, and `notification.message_rows.json`, which decodes as `MessageRowsChunk` and carries the rows of `message.list.response.json` unchanged, so the two row shapes cannot drift apart.
 
@@ -1729,3 +1756,8 @@ The capability list lost the name and the desktop no longer requires it, so a cl
 The fixtures of the `event.*` family are named `event.<method>.request.json` and `.response.json`, which the fixture suite reads as a call and its answer before it reads the `event.` prefix as a bare envelope.
 
 PERSO-255 (the server calendar, phase 2) added `event.create`, an operation, with the types `EventCreateParams`, `EventInputParams`, `EventAttendeeInput`, `EventCreateStarted` and `EventWriteResult`, additively; `calendar.list` rows list `write` in `features` on a Graph calendar and `online-meeting` on one that offers Teams, and the capability list carries the name.
+
+PERSO-255 (the calendar reminders, phase 2) added three methods, two lifecycle kinds, one feature and one member of the `state.bootstrap` result, all additively; no field was renamed, none was dropped, and no command's output moved.
+`calendar.reminders` is a query and `calendar.dismiss_reminder` and `calendar.snooze_reminder` are commands, with the shapes of [The calendar reminders](#the-calendar-reminders) and the types of `mp_protocol::reminder`; `calendar.reminder` and `calendar.reminders_changed` are the lifecycle kinds.
+A Graph calendar's `features` list `server-reminders`, and the desktop app requires the three methods at the handshake.
+`state.bootstrap` answers `connection`, the id of the calling connection, which a reminder's `presenter_connection` names so that one client notifies; a client of an older daemon reads it as `0`, no connection, and notifies nothing.

@@ -39,7 +39,7 @@ import { codeTheme } from '../styles/code-theme';
       <h2>Full Example</h2>
       <p>A complete single-account configuration with comments explaining each section.</p>
       <ConfigExample code={`theme = "mailypoppins"  # TUI color theme (see Theme section)
-notifications = false       # Desktop notifications for new mail (see Notifications section)
+notifications = false       # TUI notifications for new mail and reminders (see Notifications section)
 
 [email]
 font_family = "Helvetica, Arial, sans-serif"  # HTML email font
@@ -129,6 +129,11 @@ policy = "ignore"           # sync | status-only | ignore`} />
         <code>N new emails</code> when several arrive at once. Read-status
         updates, duplicate cleanup, and mailboxes other than the inbox never
         trigger a notification.
+      </p>
+      <p>
+        The same key turns on the TUI's notification of a calendar reminder
+        that fires while no desktop app is open; the desktop app always
+        notifies of reminders, so a TUI and the app open together notify once.
       </p>
       <p>
         Notifications use the platform's native tooling &mdash;

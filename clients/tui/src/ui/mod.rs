@@ -13,6 +13,7 @@ mod headers;
 mod list;
 mod overlays;
 pub mod preview;
+mod reminders;
 mod search;
 mod sidebar;
 mod status;
@@ -319,6 +320,9 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::EventForm(form) => overlays::render_event_form(form, frame, area),
         Overlay::Calendars(overlay) => calendar::render_calendars_overlay(overlay, frame, area),
         Overlay::EventCard(card) => calendar::render_event_card(app, card, frame, area),
+        Overlay::Reminders(overlay) => {
+            reminders::render_reminders_overlay(app, overlay, frame, area)
+        }
         Overlay::Thread(overlay) => overlays::render_thread_overlay(overlay, frame, area),
         Overlay::Palette(palette) => overlays::render_command_palette(palette, frame, area),
         Overlay::Error(error) => overlays::render_persistent_error(error, frame, area),

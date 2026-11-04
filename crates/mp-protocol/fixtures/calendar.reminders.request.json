@@ -1,0 +1,10 @@
+{
+  "id": 81,
+  "jsonrpc": "2.0",
+  "method": "calendar.reminders",
+  "params": {
+    "accounts": [
+      "evoqs"
+    ]
+  }
+}

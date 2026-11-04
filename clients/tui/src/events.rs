@@ -48,11 +48,11 @@ use serde_json::json;
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
     AccountStateChanged, Arrival, MutationsRolledBack, SyncCompleted, KIND_ACCOUNT_STATE_CHANGED,
-    KIND_CALENDAR_CHANGED, KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN,
-    KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
-    KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
-    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
+    KIND_CALENDAR_CHANGED, KIND_CALENDAR_REMINDER, KIND_CALENDAR_REMINDERS_CHANGED,
+    KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
+    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
+    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
+    KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -396,6 +396,18 @@ impl App {
             // every account, so it reads its days again whichever it was.
             KIND_CALENDAR_CHANGED => {
                 self.on_calendar_changed();
+                Applied::Ignored
+            }
+            // A reminder fell due (PERSO-255): the status line, the list the
+            // hint bar counts, and the notification when this TUI presents.
+            KIND_CALENDAR_REMINDER => {
+                self.on_reminder_fired(&event.payload);
+                Applied::Ignored
+            }
+            // A reminder was dismissed or snoozed, here or in another client,
+            // or stopped reminding: the list is read again.
+            KIND_CALENDAR_REMINDERS_CHANGED => {
+                self.reload_reminders();
                 Applied::Ignored
             }
             _ => match MessageRowDelta::decode(event) {

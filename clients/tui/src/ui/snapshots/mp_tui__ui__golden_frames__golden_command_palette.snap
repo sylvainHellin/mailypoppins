@@ -21,16 +21,16 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 15 |││                            │Toggle this help                                          │────────────────────────────╯│
 16 |││                            │Zoom / unzoom the focused pane                            │────────────────────────────╮│
 17 |││                            │Toggle activity log                                       │                            ││
-18 |││                            │Send current draft (approve + send)                       │                            ││
-19 |││                            │Search all mail (sender, subject, body)                   │                            ││
-20 |││                            │New draft                                                 │                            ││
-21 |││                            │Manage signatures                                         │                            ││
-22 |││                            │Go to mailboxes (sidebar)                                 │                            ││
-23 |││                            │Go to message list                                        │                            ││
-24 |││                            │Go to reader (body)                                       │                            ││
-25 |││                            │Go to mailbox (fuzzy picker)                              │                            ││
-26 |│╰────────────────────────────│Switch account                                            │                            ││
-27 |│╭ Activity ──────────────────│Quick sync                                                │                            ││
+18 |││                            │Calendar reminders (snooze, dismiss, open)                │                            ││
+19 |││                            │Send current draft (approve + send)                       │                            ││
+20 |││                            │Search all mail (sender, subject, body)                   │                            ││
+21 |││                            │New draft                                                 │                            ││
+22 |││                            │Manage signatures                                         │                            ││
+23 |││                            │Go to mailboxes (sidebar)                                 │                            ││
+24 |││                            │Go to message list                                        │                            ││
+25 |││                            │Go to reader (body)                                       │                            ││
+26 |│╰────────────────────────────│Go to mailbox (fuzzy picker)                              │                            ││
+27 |│╭ Activity ──────────────────│Switch account                                            │                            ││
 28 |││  No activity yet           │type filter  ↑/↓ nav  Enter run  Esc cancel               │                            ││
 29 |││                            ╰──────────────────────────────────────────────────────────╯                            ││
 30 |││                                       ││                                                                           ││
