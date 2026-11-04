@@ -411,6 +411,178 @@ fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
     assert!(frame.contains("Enter create"), "{frame}");
 }
 
+/// The edit form (`E`) on the user's meeting of Tuesday 4 August 2026, 15:00
+/// to 16:00 in Berlin, with Ada and a room, moved to 17:00 to 18:00.
+fn edit_form() -> EventForm {
+    let event: mp_protocol::calendar::CalendarEvent = serde_json::from_value(json!({
+        "account": "evoqs", "calendar": "cal-main", "id": "ev-budget", "uid": "u",
+        "summary": "Budget review",
+        "time": {"kind": "timed", "start": "2026-08-04T13:00:00Z",
+                 "end": "2026-08-04T14:00:00Z", "zone": "Europe/Berlin"},
+        "attendees": [
+            {"email": "ada@example.org", "role": "required", "status": "accepted"},
+            {"email": "room-1@example.org", "role": "resource", "status": "accepted"},
+        ],
+        "own_response": "organizer", "is_organizer": true,
+        "is_online_meeting": false, "reminder": 15,
+        "sensitivity": "normal", "show_as": "busy",
+    }))
+    .unwrap();
+    let choice = EventCalendarChoice {
+        account: "evoqs".into(),
+        id: "cal-main".into(),
+        name: "Kalender".into(),
+        teams: true,
+    };
+    let mut form = EventForm::edit(&event, choice, "Europe/Berlin".parse().unwrap());
+    form.start = "17:00".into();
+    form.end = "18:00".into();
+    form
+}
+
+/// The edit form's answer: the user busy 15:00 to 16:00, which is the
+/// meeting itself, Ada too, the room free.
+fn edit_answer() -> CalendarFreeBusyResult {
+    let schedule = |address: &str, view: String| CalendarSchedule {
+        address: address.into(),
+        view,
+        items: Vec::new(),
+        error: None,
+    };
+    CalendarFreeBusyResult {
+        account: "evoqs".into(),
+        start: "2026-08-03T22:00:00Z".into(),
+        end: "2026-08-04T22:00:00Z".into(),
+        interval_minutes: 30,
+        schedules: vec![
+            schedule("sylvain@example.org", view(&[(30, '2'), (31, '2')])),
+            schedule("ada@example.org", view(&[(30, '2'), (31, '2')])),
+            schedule("room-1@example.org", view(&[])),
+        ],
+    }
+}
+
+/// An edit form follows its query as the create form does: it asks once the
+/// event's day and people have stood still for the debounce, and again
+/// when an address changes.
+#[test]
+fn the_edit_form_asks_free_busy_once_its_query_stands_still() {
+    let mut app = App::default_for_tests();
+    app.calendar_view.calendars = calendars(true);
+    app.overlay = Overlay::EventForm(Box::new(edit_form()));
+    let t0 = Instant::now();
+    app.tick_availability(t0);
+    app.tick_availability(t0 + Duration::from_millis(100));
+    assert!(queries(&mut app).is_empty(), "not before the debounce");
+    assert!(app.tick_availability(t0 + AVAILABILITY_DEBOUNCE));
+    let asked = queries(&mut app);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].account, "evoqs");
+    assert_eq!(
+        asked[0].addresses,
+        ["ada@example.org", "room-1@example.org"]
+    );
+    assert_eq!(
+        (asked[0].start.as_str(), asked[0].end.as_str()),
+        ("2026-08-04", "2026-08-04")
+    );
+    let door = Door::default();
+    assert!(dispatch(
+        &mut app,
+        &door,
+        &Action::QueryFreeBusy(Box::new(asked[0].clone()))
+    ));
+    land(&mut app, "op-fb-1", &edit_answer());
+    assert_eq!(
+        app.calendar_view.availability.answer,
+        Some(Ok(edit_answer()))
+    );
+
+    if let Overlay::EventForm(form) = &mut app.overlay {
+        form.to = "ada@example.org, kim@example.org".into();
+    }
+    let t1 = t0 + Duration::from_secs(2);
+    app.tick_availability(t1);
+    assert!(queries(&mut app).is_empty(), "the debounce runs again");
+    app.tick_availability(t1 + AVAILABILITY_DEBOUNCE);
+    let asked = queries(&mut app);
+    assert_eq!(
+        asked[0].addresses,
+        ["ada@example.org", "kim@example.org", "room-1@example.org"]
+    );
+}
+
+/// The edit form's rows: the slots the meeting holds now (15:00 to 16:00)
+/// in the event's own colour on every row, with the legend beside the
+/// ruler, and the chosen time (17:00 to 18:00) underlined as in the create
+/// form; at 80x24 the problem line and the keys keep their rows and the
+/// availability is the count of its rows.
+#[test]
+fn golden_calendar_event_edit_form_availability() {
+    let mut app = calendar_fixture();
+    let form = edit_form();
+    let key = form.free_busy_key().unwrap();
+    app.overlay = Overlay::EventForm(Box::new(form));
+    app.calendar_view.availability = Availability {
+        seen: Some((key.clone(), Instant::now())),
+        asked: Some(key),
+        operation: None,
+        answer: Some(Ok(edit_answer())),
+    };
+    let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
+    assert_snapshot!("event_edit_form_availability", frame);
+    assert!(frame.contains("\u{2588} this event"), "{frame}");
+
+    // The colour the style runs do not record: the meeting's two slots on
+    // each row with a view, the chosen slots underlined in the accent.
+    let buffer = crate::tui::ui::golden_frames::render_buffer(&mut app, WIDTH, HEIGHT);
+    let theme = crate::tui::theme::active();
+    let text = crate::tui::ui::golden_frames::text_rows(&buffer);
+    for address in [
+        "sylvain@example.org",
+        "ada@example.org",
+        "room-1@example.org",
+    ] {
+        let y = text
+            .lines()
+            .position(|line| {
+                line.contains(&format!("{address}  "))
+                    && !line.contains("Attendees")
+                    && !line.contains("Rooms")
+            })
+            .unwrap_or_else(|| panic!("no row for {address} in\n{text}")) as u16;
+        let row: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
+        // The label column is 22 wide and a space follows it.
+        let x0 = row[..row.find(address).unwrap()].chars().count() as u16 + 23;
+        let coloured: Vec<u16> = (0..26)
+            .filter(|n| buffer[(x0 + n, y)].fg == theme.accent_alt)
+            .collect();
+        assert_eq!(coloured, [16, 17], "{address}");
+        let underlined: Vec<u16> = (0..26)
+            .filter(|n| {
+                buffer[(x0 + n, y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED)
+            })
+            .collect();
+        assert_eq!(underlined, [20, 21], "{address}");
+        assert_eq!(buffer[(x0 + 20, y)].fg, theme.accent, "{address}");
+    }
+
+    let frame = frame_snapshot(&mut app, 80, 24);
+    assert_snapshot!("event_edit_form_availability_80x24", frame);
+    let text = text_rows(&frame);
+    let at = |needle: &str| text.iter().position(|line| line.contains(needle));
+    let description = at("Description").expect("the last field");
+    let more = at("+3 more").unwrap_or_else(|| panic!("no count in\n{frame}"));
+    let problem = at("Times in Europe/Berlin").expect("the problem line");
+    let keys = at("Enter save").expect("the keys");
+    assert!(
+        description < more && more < problem && problem < keys,
+        "{frame}"
+    );
+}
+
 /// A refusal too long for the row is cut with an ellipsis.
 #[test]
 fn a_long_refusal_is_cut_with_an_ellipsis() {

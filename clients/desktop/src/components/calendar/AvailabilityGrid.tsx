@@ -6,7 +6,9 @@
 // AVAILABILITY_DEBOUNCE_MS; until the answer for the query the form names
 // comes, the last answer's rows stay, dimmed and marked as checking, so the
 // grid does not collapse under the field being typed in. A calendar whose
-// backend serves no free/busy shows nothing.
+// backend serves no free/busy shows nothing. On the edit form the slots the
+// event holds now are ringed, with a legend, so the organizer's busy block
+// there reads as the event itself rather than a clash.
 
 import { useEffect, useState } from "react";
 import type { CalendarFreeBusyParams, CalendarFreeBusyResult } from "@/protocol/types";
@@ -18,6 +20,7 @@ import {
   STATUS_WORD,
   availabilityRows,
   chosenSlots,
+  currentSlots,
   freeBusyParams,
   type SlotStatus,
 } from "@/app/availability";
@@ -37,9 +40,10 @@ const CELL: Record<SlotStatus, string> = {
 /** An answer and the query it answers: its key and the day its rows read. */
 type Answer = { key: string; day: string; result: CalendarFreeBusyResult | null; error: string | null };
 
-export type AvailabilityGridProps = { fields: EventFields | null; calendar: EventCalendar | null };
+/** `current` is an edited event's fields as the form opened, whose time the grid rings. */
+export type AvailabilityGridProps = { fields: EventFields | null; calendar: EventCalendar | null; current?: EventFields | null };
 
-export function AvailabilityGrid({ fields, calendar }: AvailabilityGridProps) {
+export function AvailabilityGrid({ fields, calendar, current = null }: AvailabilityGridProps) {
   const params = fields && calendar?.freeBusy ? freeBusyParams(fields, calendar.account, localZone()) : null;
   const key = params ? JSON.stringify(params) : null;
   const [answer, setAnswer] = useState<Answer | null>(null);
@@ -87,9 +91,18 @@ export function AvailabilityGrid({ fields, calendar }: AvailabilityGridProps) {
   const day = answer?.day ?? params.start;
   const rows = result ? availabilityRows(result, day) : [];
   const picked = result ? chosenSlots(fields, result, day) : null;
+  const now = result ? currentSlots(current, result, day) : null;
   return (
     <section aria-label="Availability" aria-busy={stale} className="grid grid-cols-[6rem_1fr] items-start gap-2">
-      {header}
+      <span className="flex flex-col gap-1">
+        {header}
+        {now ? (
+          <span data-slot="availability-legend" className="flex items-center gap-1 text-xs text-muted-foreground">
+            <span aria-hidden="true" className="inline-block h-3 w-3 rounded-[1px] ring-2 ring-inset ring-link" />
+            this event
+          </span>
+        ) : null}
+      </span>
       <div data-slot="availability-rows" data-stale={stale ? "" : undefined} className={`flex flex-col gap-1 overflow-hidden ${dim}`}>
         <div className="grid grid-cols-[repeat(13,1fr)] text-[10px] text-muted-foreground" aria-hidden="true">
           {hours.map((h) => (
@@ -106,16 +119,18 @@ export function AvailabilityGrid({ fields, calendar }: AvailabilityGridProps) {
                 no free/busy
               </span>
             ) : (
-              <div className="flex h-3 gap-px" role="img" aria-label={`${row.address}: ${summary(row.slots)}`}>
+              <div className="flex h-3 gap-px" role="img" aria-label={`${row.address}: ${summary(row.slots, now)}`}>
                 {row.slots.map((status, n) => {
                   const chosen = picked !== null && n >= picked[0] && n <= picked[1];
+                  const held = now !== null && n >= now[0] && n <= now[1];
                   return (
                     <span
                       key={n}
                       data-status={status}
                       data-chosen={chosen ? "" : undefined}
-                      title={`${slotTime(n)} ${STATUS_WORD[status]}`}
-                      className={`flex-1 rounded-[1px] ${CELL[status]} ${chosen ? "outline outline-1 outline-foreground" : ""}`}
+                      data-current={held ? "" : undefined}
+                      title={`${slotTime(n)} ${STATUS_WORD[status]}${held ? ", this event" : ""}`}
+                      className={`flex-1 rounded-[1px] ${CELL[status]} ${chosen ? "outline outline-1 outline-foreground" : ""} ${held ? "ring-2 ring-inset ring-link" : ""}`}
                     />
                   );
                 })}
@@ -134,8 +149,9 @@ function slotTime(n: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-/** A row in words for a screen reader: the slots that are not free. */
-function summary(slots: SlotStatus[]): string {
+/** A row in words for a screen reader: the slots that are not free, and when the edited event is now. */
+function summary(slots: SlotStatus[], now: [number, number] | null): string {
   const busy = slots.map((s, n) => (s === "free" ? null : `${slotTime(n)} ${STATUS_WORD[s]}`)).filter(Boolean);
-  return busy.length === 0 ? "free all day" : busy.join(", ");
+  const words = busy.length === 0 ? "free all day" : busy.join(", ");
+  return now ? `${words}; this event at ${slotTime(now[0])}` : words;
 }

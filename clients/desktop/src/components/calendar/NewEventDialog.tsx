@@ -178,7 +178,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
           </div>
           {field("start", allDay ? "First day" : "Start", { type: allDay ? "date" : "datetime-local" })}
           {field("end", allDay ? "Last day" : "End", { type: allDay ? "date" : "datetime-local" })}
-          <AvailabilityGrid fields={fields} calendar={chosen} />
+          <AvailabilityGrid fields={fields} calendar={chosen} current={edit?.original ?? null} />
           {field("location", "Location")}
           {field("to", "Attendees", { placeholder: "ada@example.com, bob@example.com" })}
           {field("optional", "Optional")}

@@ -563,7 +563,7 @@ A backend answers one `Schedule` per address in that order: the view, one digit 
 The fake answers the blocks its spec's `free_busy` names, computing the view from them (`Schedule::from_items`), and no free/busy for any other address.
 The operation is `ClientScoped` and writes nothing, so it takes no account lock and abandons the server call when its token shuts, a form that closed or a client that went taking its query with it.
 It is offered where `calendar.list` lists `free-busy`, which `graph::FEATURES` names on every Graph calendar; an account without a backend and a backend without the feature are refused.
-The TUI form (`clients/tui/src/app/availability.rs`) and the desktop form (`AvailabilityGrid.tsx`) ask for the day of the form's start in the form's zone at 30-minute slots, once the day and the addresses have stood still for 500 ms, show 07:00 to 20:00 with the chosen time marked, and drop an answer for a query the form no longer names; the desktop's `calendar_freebusy` command blocks on the settle (`SessionHandle::await_operation`).
+The TUI form (`clients/tui/src/app/availability.rs`) and the desktop form (`AvailabilityGrid.tsx`) ask for the day of the form's start in the form's zone at 30-minute slots, once the day and the addresses have stood still for 500 ms, show 07:00 to 20:00 with the chosen time marked (and on an edit form the time the event holds now, so the organizer's own busy block reads as the event), and drop an answer for a query the form no longer names; the desktop's `calendar_freebusy` command blocks on the settle (`SessionHandle::await_operation`).
 
 ### Reminders
 

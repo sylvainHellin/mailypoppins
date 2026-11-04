@@ -2,7 +2,9 @@
 //! person and room over the form's day from 07:00 to 20:00, one character
 //! per 30-minute slot (`·` free, `▒` tentative, `█` busy, `▓` away, `░`
 //! working elsewhere, `?` unknown), the chosen time's slots underlined, and
-//! "no free/busy" for an address the server cannot read.
+//! "no free/busy" for an address the server cannot read. An edit form's
+//! rows also colour the slots the event holds now, so the organizer's busy
+//! block there reads as the event itself, with a legend beside the ruler.
 
 use chrono::{NaiveDateTime, NaiveTime, TimeZone, Utc};
 use mp_client::format::{availability_row, slot_of};
@@ -147,6 +149,25 @@ pub(super) fn availability_lines(
         Span::styled(checking.to_string(), muted),
     ])];
     let picked = chosen(form, first, &answer.start, interval);
+    // The time the event being edited holds now, on the shown day.
+    let current = form
+        .editing
+        .as_ref()
+        .and_then(|edit| chosen(&edit.original, first, &answer.start, interval))
+        .filter(|(from, to)| *to >= 0 && *from < slots as i64);
+    let own = Style::default().fg(theme::active().accent_alt);
+    if current.is_some() {
+        let legend = ["  \u{2588}", " this event"];
+        let used: usize = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        if used + legend.iter().map(|s| s.chars().count()).sum::<usize>() <= width {
+            lines[0].spans.push(Span::styled(legend[0], own));
+            lines[0].spans.push(Span::styled(legend[1], muted));
+        }
+    }
     let normal = Style::default().fg(theme::active().text);
     let marked = Style::default()
         .fg(theme::active().accent)
@@ -162,11 +183,16 @@ pub(super) fn availability_lines(
             .chars()
             .collect();
         for (at, glyph) in row.into_iter().enumerate() {
-            let on = picked.is_some_and(|(from, to)| (from..=to).contains(&(at as i64)));
-            spans.push(Span::styled(
-                glyph.to_string(),
-                if on { marked } else { normal },
-            ));
+            let within = |range: Option<(i64, i64)>| {
+                range.is_some_and(|(from, to)| (from..=to).contains(&(at as i64)))
+            };
+            let style = match (within(picked), within(current)) {
+                (true, true) => marked.patch(own),
+                (true, false) => marked,
+                (false, true) => own,
+                (false, false) => normal,
+            };
+            spans.push(Span::styled(glyph.to_string(), style));
         }
         lines.push(Line::from(spans));
     }

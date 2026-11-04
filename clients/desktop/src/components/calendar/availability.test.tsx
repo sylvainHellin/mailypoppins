@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { mock } from "@/test/tauri-mock";
@@ -68,6 +68,54 @@ describe("the event form's availability grid", () => {
     await waitFor(() => expect(rowOf(grid, "ada@example.org")).not.toBeNull(), { timeout: 3000 });
     expect(body().hasAttribute("data-stale")).toBe(false);
     expect(rowOf(grid, "robin@example.com")).not.toBeNull();
+  });
+
+  it("shows on the edit form too, asking as the create form does, the event's current time ringed beside the chosen one", async () => {
+    const r = renderApp(1400);
+    await shellReady();
+    await r.user.keyboard(" a");
+    await screen.findByRole("region", { name: "Calendar" });
+    await r.user.keyboard("gt");
+    await waitFor(() => expect(document.activeElement).toHaveAttribute("aria-label", "Jump to date"));
+    await r.user.keyboard("2099-10-14{Enter}");
+    const list = await screen.findByRole("listbox", { name: "Agenda" });
+    await within(list).findByRole("option", { name: /1:1 with Robin/ });
+    const cursor = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-event-id");
+    for (let i = 0; i < 6 && cursor() !== "AAMkAD-robin"; i++) await r.user.keyboard("j");
+    expect(cursor()).toBe("AAMkAD-robin");
+    await r.user.keyboard("E");
+    const dialog = await screen.findByRole("dialog", { name: "Edit event" });
+    const grid = await within(dialog).findByRole("region", { name: "Availability" });
+    await waitFor(() => expect(rowOf(grid, "robin@example.com")).not.toBeNull(), { timeout: 3000 });
+    const first = asked();
+    expect(first[first.length - 1]).toMatchObject({ account: "home", addresses: ["robin@example.com"], start: "2099-10-14", end: "2099-10-14" });
+
+    // 10:00 to 10:30 is the meeting itself: busy on the user's row, ringed
+    // on every row, and chosen while the time is unchanged.
+    const marks = (address: string, attr: string) =>
+      [...rowOf(grid, address)!.querySelectorAll("[data-status]")].map((c, n) => (c.hasAttribute(attr) ? n : null)).filter((n) => n !== null);
+    const own = [...rowOf(grid, "me@example.com")!.querySelectorAll("[data-status]")];
+    expect(own[6].getAttribute("data-status")).toBe("busy");
+    expect(own[6].getAttribute("title")).toBe("10:00 busy, this event");
+    expect(marks("me@example.com", "data-current")).toEqual([6]);
+    expect(marks("robin@example.com", "data-current")).toEqual([6]);
+    expect(marks("me@example.com", "data-chosen")).toEqual([6]);
+    expect(within(grid).getByText("this event")).toBeInTheDocument();
+
+    // Moving it to 11:00 moves the outline; the ring stays on the time it holds now.
+    const start = within(dialog).getByLabelText("Start");
+    const end = within(dialog).getByLabelText("End");
+    fireEvent.change(start, { target: { value: "2099-10-14T11:00" } });
+    fireEvent.change(end, { target: { value: "2099-10-14T11:30" } });
+    await waitFor(() => expect(marks("me@example.com", "data-chosen")).toEqual([8]));
+    expect(marks("me@example.com", "data-current")).toEqual([6]);
+
+    // A new attendee asks again after the same debounce.
+    const before = asked().length;
+    await r.user.type(within(dialog).getByLabelText("Attendees"), ", ada@example.org");
+    expect(asked().length).toBe(before);
+    await waitFor(() => expect(rowOf(grid, "ada@example.org")).not.toBeNull(), { timeout: 3000 });
+    expect(asked()[asked().length - 1].addresses).toEqual(["robin@example.com", "ada@example.org"]);
   });
 
   it("is not shown on a calendar whose backend serves no free/busy", async () => {

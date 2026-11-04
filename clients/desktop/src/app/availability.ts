@@ -94,3 +94,13 @@ export function chosenSlots(fields: EventFields, result: CalendarFreeBusyResult,
   const to = Math.ceil((new Date(fields.end).getTime() - Date.parse(result.start)) / (Math.max(result.interval_minutes, 1) * 60000)) - 1 - first;
   return Number.isFinite(from) && Number.isFinite(to) ? [from, to] : null;
 }
+
+/**
+ * The slots an edited event holds now (its fields as the form opened), so
+ * the organizer's busy block there reads as the event itself; null for an
+ * all-day event or one that starts on another day.
+ */
+export function currentSlots(original: EventFields | null | undefined, result: CalendarFreeBusyResult, day: string): [number, number] | null {
+  if (!original || !original.start.startsWith(day)) return null;
+  return chosenSlots(original, result, day);
+}

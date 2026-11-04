@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availabilityRows, chosenSlots, freeBusyParams, slotStatus } from "@/app/availability";
+import { availabilityRows, chosenSlots, currentSlots, freeBusyParams, slotStatus } from "@/app/availability";
 import type { CalendarFreeBusyResult } from "@/protocol/types";
 import type { EventFields } from "@/app/state";
 
@@ -68,5 +68,13 @@ describe("the availability grid's model", () => {
     expect(chosenSlots(fields({ end: "2099-10-14T15:00" }), r, "2099-10-14")).toEqual([14, 15]);
     expect(chosenSlots(fields({ allDay: true }), r, "2099-10-14")).toBeNull();
     expect(chosenSlots(fields({ end: "2099-10-14T13:00" }), r, "2099-10-14")).toBeNull();
+  });
+
+  it("marks the slots an edited event holds now, none on another day, for an all-day event or a new one", () => {
+    const r = result({});
+    expect(currentSlots(fields({ start: "2099-10-14T10:00", end: "2099-10-14T11:00" }), r, "2099-10-14")).toEqual([6, 7]);
+    expect(currentSlots(fields({ start: "2099-10-15T10:00", end: "2099-10-15T11:00" }), r, "2099-10-14")).toBeNull();
+    expect(currentSlots(fields({ allDay: true, start: "2099-10-14", end: "" }), r, "2099-10-14")).toBeNull();
+    expect(currentSlots(null, r, "2099-10-14")).toBeNull();
   });
 });
