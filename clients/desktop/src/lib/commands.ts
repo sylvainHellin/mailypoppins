@@ -17,6 +17,7 @@ import type {
   DraftValidation,
   EventCreateParams,
   EventCreateStarted,
+  EventUpdateParams,
   HoldListing,
   OutboxListing,
   ThreadListing,
@@ -440,6 +441,22 @@ export const inviteGet = (account: string, row_id: number): Promise<InviteCard |
  */
 export const eventCreate = (params: EventCreateParams): Promise<EventCreateStarted> =>
   invoke<EventCreateStarted>("event_create", { params });
+
+/**
+ * Change the fields `params` names on an event (`event.update`, PERSO-255);
+ * the end arrives as `event_change`, its result an `EventUpdateResult`. A
+ * refusal's message is the daemon's sentence.
+ */
+export const eventUpdate = (params: EventUpdateParams): Promise<OperationStarted> =>
+  invoke<OperationStarted>("event_update", { params });
+
+/** Cancel a meeting the user organizes, telling its attendees (`event.cancel`); the end arrives as `event_change`. */
+export const eventCancel = (account: string, event: string, comment: string | null): Promise<OperationStarted> =>
+  invoke<OperationStarted>("event_cancel", { account, event, comment });
+
+/** Delete an event that tells nobody (`event.delete`); the end arrives as `event_change`. */
+export const eventDelete = (account: string, event: string): Promise<OperationStarted> =>
+  invoke<OperationStarted>("event_delete", { account, event });
 
 /**
  * Answer an event; the end arrives as `rsvp`, its result an

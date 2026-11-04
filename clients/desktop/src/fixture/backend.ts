@@ -31,6 +31,7 @@ import type {
   DraftMessage,
   DraftPreview,
   EventCreateParams,
+  EventUpdateParams,
   EventFrontmatter,
   HoldStatus,
   MessageListRow,
@@ -254,6 +255,10 @@ export const mock = {
   eventCreates: [] as { operation_id: string; account: string; transaction_id: string; event: CalendarEvent }[],
   /** The next create's operation id counter. */
   nextEventCreate: 1,
+  /** The updates, cancels and deletes `event_update`, `event_cancel` and `event_delete` started and no test settled yet, oldest first, each with what it does. */
+  eventChanges: [] as { operation_id: string; account: string; id: string; kind: "update" | "cancel" | "delete"; event: CalendarEvent | null }[],
+  /** The next change's operation id counter. */
+  nextEventChange: 1,
   /** Each account's contact index, ranked, as `contact.search` rows. */
   contacts: clone(fixtures.contacts),
   /** The rebuilds `contact_rebuild` started and no test settled yet, oldest first. */
@@ -522,6 +527,8 @@ export function resetMock(): void {
   mock.nextInvite = 1;
   mock.eventCreates = [];
   mock.nextEventCreate = 1;
+  mock.eventChanges = [];
+  mock.nextEventChange = 1;
   mock.contacts = clone(fixtures.contacts);
   mock.rebuilds = [];
   mock.nextRebuild = 1;
@@ -641,6 +648,38 @@ export function settleEventCreate(opts: { fail?: boolean } = {}): string {
     state: "succeeded",
     result: { account: run.account, event: run.event, transaction_id: run.transaction_id, invited: run.event.attendees.map((a) => a.email) },
   });
+  return run.operation_id;
+}
+
+/**
+ * fixture.rs's `event.update`, `event.cancel` and `event.delete` end: the
+ * oldest change not settled yet lands on the server calendar with
+ * `calendar.changed` and settles the daemon's result, or with `fail` fails
+ * with the server's refusal.
+ */
+export function settleEventChange(opts: { fail?: boolean } = {}): string {
+  const run = mock.eventChanges.shift();
+  if (!run) throw new Error("no event change is waiting to settle");
+  if (opts.fail) {
+    emitEnvelope("operation.finished", {
+      operation_id: run.operation_id,
+      state: "failed",
+      error: { code: -32603, message: "Graph refused the update: HTTP 503" },
+    });
+    return run.operation_id;
+  }
+  const at = mock.events.findIndex((e) => e.account === run.account && e.id === run.id);
+  const before = at >= 0 ? mock.events[at] : null;
+  if (run.event && at >= 0) mock.events[at] = run.event;
+  else if (!run.event && at >= 0) mock.events.splice(at, 1);
+  emitEnvelope("calendar.changed", { account: run.account });
+  const result =
+    run.kind === "update"
+      ? { account: run.account, event: run.event }
+      : run.kind === "cancel"
+        ? { account: run.account, event: run.id, notified: (before?.attendees ?? []).map((a) => a.email) }
+        : { account: run.account, event: run.id };
+  emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "succeeded", result });
   return run.operation_id;
 }
 
@@ -1995,7 +2034,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "operation_cancel": {
       // Every operation the mock keeps running until a test settles it.
       const id = String(args.operation_id);
-      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent, mock.eventCreates];
+      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent, mock.eventCreates, mock.eventChanges];
       const list = runs.find((l) => l.some((r) => r.operation_id === id));
       if (!list) return "already_settled";
       list.splice(
@@ -2171,6 +2210,71 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       };
       mock.eventCreates.push({ operation_id, account, transaction_id, event });
       return { operation_id, transaction_id };
+    }
+    case "event_update":
+    case "event_cancel":
+    case "event_delete": {
+      const params = cmd === "event_update" ? (args.params as EventUpdateParams) : null;
+      const account = params ? params.account : String(args.account);
+      const id = params ? params.event : String(args.event);
+      knownAccount(cmd, account);
+      const refuse = (message: string) => ({ kind: "protocol", code: -32602, message });
+      const method = cmd.replace("_", ".");
+      if (id.startsWith("imip:")) throw refuse(`${id} is an invitation mail's event, which can only be answered (event.respond); ${method} changes a server event`);
+      const event = mock.events.find((e) => e.account === account && e.id === id);
+      if (!event) throw refuse(`${account} has no event ${id} (cancelled or deleted already, or not synced yet)`);
+      if (event.kind !== "single" || event.series_master_id) {
+        throw refuse(`${event.summary} is part of a recurring series, which mp cannot change yet; change it in Outlook`);
+      }
+      const calendar = mock.calendars.find((c) => c.account === account && c.id === event.calendar);
+      if (calendar && !calendar.can_edit) throw refuse(`The calendar ${calendar.name} of ${account} is read-only`);
+      const organizer = event.is_organizer || event.own_response === "organizer";
+      const meeting = event.attendees.length > 0;
+      let changed: CalendarEvent | null = null;
+      let kind: "update" | "cancel" | "delete";
+      if (params) {
+        kind = "update";
+        const f = params.fields;
+        const keys = Object.keys(f);
+        if (keys.length === 0) throw refuse("Nothing to change: name at least one field of the event");
+        if (!organizer && keys.some((k) => k !== "reminder" && k !== "show_as")) throw refuse("Only the organizer can change this event");
+        if (f.body !== undefined && event.is_online_meeting) {
+          throw refuse(`The description of ${event.summary} cannot be changed from mp yet: the server would drop its Teams join details; change it in Outlook`);
+        }
+        changed = clone(event);
+        if (f.summary !== undefined) changed.summary = f.summary.trim();
+        if (f.location !== undefined) changed.location = f.location?.trim() || undefined;
+        if (f.body !== undefined) changed.body = f.body ?? undefined;
+        if (f.reminder !== undefined) changed.reminder = f.reminder ?? undefined;
+        if (f.show_as !== undefined) changed.show_as = f.show_as;
+        if (f.online_meeting) changed.is_online_meeting = true;
+        if (f.attendees) {
+          changed.attendees = f.attendees.map((a) => ({
+            email: a.email,
+            role: a.role ?? "required",
+            status: event.attendees.find((x) => x.email.toLowerCase() === a.email.toLowerCase())?.status ?? "needs-action",
+          }));
+        }
+        if (f.start !== undefined && changed.time.kind === "timed" && !f.all_day) {
+          const length = new Date(changed.time.end).getTime() - new Date(changed.time.start).getTime();
+          const start = new Date(f.start);
+          const end = f.end ? new Date(f.end) : new Date(start.getTime() + length);
+          changed.time = { ...changed.time, start: start.toISOString(), end: end.toISOString() };
+        }
+      } else if (cmd === "event_cancel") {
+        kind = "cancel";
+        if (!organizer) throw refuse(`Only the organizer can cancel ${event.summary}; decline it instead`);
+        if (!meeting) throw refuse(`${event.summary} invites nobody, so there is nobody to tell; delete it instead`);
+      } else {
+        kind = "delete";
+        if (!event.cancelled && organizer && meeting) throw refuse(`${event.summary} is a meeting with attendees; cancel it to tell them`);
+        if (!event.cancelled && !organizer && (event.organizer || meeting)) {
+          throw refuse(`${event.summary} is a meeting you were invited to; decline it to tell the organizer`);
+        }
+      }
+      const operation_id = `fixture-change-${mock.nextEventChange++}`;
+      mock.eventChanges.push({ operation_id, account, id, kind, event: changed });
+      return { operation_id };
     }
     case "invite_source_open": {
       knownAccount(cmd, account);

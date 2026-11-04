@@ -172,7 +172,8 @@ export const LIST_WIDTH_STEP = 40;
  * `attachments` is the open, save or attach dialog `attachDialog` describes;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
  * invitation form `inviteDialog` describes; `event` is the event form
- * `eventDialog` describes; `signatures` is the Signatures
+ * `eventDialog` describes; `event_remove` is the cancel or delete
+ * confirmation `eventRemoveDialog` describes; `signatures` is the Signatures
  * dialog `signaturesDialog` describes; `activity` is the activity log;
  * `password` is the password dialog `passwordDialog` describes;
  * `account_wizard` is the account wizard `accountWizard` describes;
@@ -200,6 +201,7 @@ export type Overlay =
   | "server_search"
   | "account_picker"
   | "folder_picker"
+  | "event_remove"
   | null;
 
 /**
@@ -702,7 +704,36 @@ export type EventFields = {
  * (which a retry sends again, so the server makes one event), and why the
  * last attempt failed.
  */
-export type EventDialog = { fields: EventFields; calendars: EventCalendar[]; transactionId: string | null; error: string | null };
+export type EventDialog = { fields: EventFields; calendars: EventCalendar[]; transactionId: string | null; error: string | null; edit?: EventEdit | null };
+
+/**
+ * What an edit of the event form changes (PERSO-255): the event, whether
+ * the user organizes it (an attendee changes the reminder only), whether it
+ * is a Teams meeting (which stays one), and the fields as the form opened,
+ * which the change is read against.
+ */
+export type EventEdit = { account: string; event: string; organizer: boolean; online: boolean; original: EventFields };
+
+/**
+ * The `D` confirmation (PERSO-255): cancel a meeting the user organizes,
+ * which tells its `attendees`, with a comment, or delete an event that
+ * tells nobody.
+ */
+export type EventRemoveDialog = { account: string; event: string; summary: string; cancel: boolean; attendees: number };
+
+/**
+ * A change this window started, until it settles or is dropped:
+ * `operation_id` is null until its start answers. An update keeps the form
+ * as it was sent, which a failure opens again.
+ */
+export type EventChangeRun = {
+  token: number;
+  account: string;
+  summary: string;
+  kind: "update" | "cancel" | "delete";
+  dialog: EventDialog | null;
+  operation_id: string | null;
+};
 
 /** A calendar a new event can go to (`account/id` as its key), and whether it can have a Teams link. */
 export type EventCalendar = { key: string; account: string; id: string; label: string; teams: boolean };
@@ -961,6 +992,12 @@ export type AppState = {
   eventCreates: EventCreateRun[];
   /** Operation ends that arrived while an `event_create` was unanswered, for its id. */
   eventCreateEarly: OperationEnd[];
+  /** What the `event_remove` overlay shows; null whenever another overlay or none is open. */
+  eventRemoveDialog: EventRemoveDialog | null;
+  /** Updates, cancels and deletes this window started, in start order. */
+  eventChanges: EventChangeRun[];
+  /** Operation ends that arrived while a change's start was unanswered, for its id. */
+  eventChangeEarly: OperationEnd[];
   /**
    * Each account's contacts (`contact_search` of the view's query), created
    * on the first open of the Contacts view for it, stale again on every
@@ -1112,6 +1149,9 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     keptEventDialog: null,
     eventCreates: [],
     eventCreateEarly: [],
+    eventRemoveDialog: null,
+    eventChanges: [],
+    eventChangeEarly: [],
     contacts: {},
     contactsView: null,
     rebuilds: [],

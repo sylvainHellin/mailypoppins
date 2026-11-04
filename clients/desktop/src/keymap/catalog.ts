@@ -111,6 +111,10 @@ export type ActionId =
   | "new_invitation"
   /** `n` in the Calendar view, the toolbar and the palette: the event form (PERSO-255). */
   | "new_event"
+  /** `E` in the Calendar view and the card's Edit: the event form on the cursor event. */
+  | "edit_event"
+  /** `D` in the Calendar view and the card's Cancel meeting or Delete. */
+  | "remove_event"
   | "contacts_search"
   | "contacts_compose"
   | "contacts_vcard"
@@ -259,6 +263,8 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Open the invitation's .ics in $EDITOR": { id: "calendar_open_source" },
     "Respond (accept / tentative / decline, comment)": { id: "calendar_rsvp" },
     "New event (the event form, on the cursor's day)": { id: "new_event" },
+    "Edit the event (the event form with its values)": { id: "edit_event" },
+    "Cancel the meeting (tells the attendees) or delete the event": { id: "remove_event" },
     "Show or hide calendars": { id: "calendar_calendars" },
     "Read the events again": { id: "calendar_refresh" },
   },
