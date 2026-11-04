@@ -159,7 +159,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `calendar_freebusy` | `params` (`CalendarFreeBusyParams`) | `CalendarFreeBusyResult`, once the query has settled |
 | `event_respond` | `account`, `event`, `response: "accept" \| "tentative" \| "decline"`, `comment?`, `send_response?` | `{ operation_id }` |
 | `event_create` | `params: EventCreateParams` | `EventCreateStarted` (`{ operation_id, transaction_id }`) |
-| `event_update` | `params: EventUpdateParams` (`{account, event, fields}`, the fields that changed) | `{ operation_id }` |
+| `event_update` | `params: EventUpdateParams` (`{account, event, scope?, fields}`, the fields that changed) | `{ operation_id }` |
 | `event_cancel` | `account`, `event`, `comment?`, `scope?` (`occurrence` or `series`) | `{ operation_id }` |
 | `event_delete` | `account`, `event`, `scope?` | `{ operation_id }` |
 | `event_get` | `account`, `event` | `EventGetResult` (an event or a series master, with `series` on an occurrence and a master) |

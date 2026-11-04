@@ -146,7 +146,10 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 - Ids: every request sends `Prefer: IdType="ImmutableId"`, so an occurrence or an event moved between folders keeps its id.
 - Respond: `POST /me/events/{id}/accept|tentativelyAccept|decline` with `comment` and `sendResponse`; `tentativelyAccept` and `decline` take `proposedNewTime` for proposing a new time.
 - Write: `POST /me/calendars/{id}/events` (the server sends the invitations), `PATCH /me/events/{id}`, `POST /me/events/{id}/cancel` with a comment for the organizer, `DELETE` for an event without attendees.
-- Single occurrence: `PATCH`, `cancel` or `DELETE` on the occurrence id the cache holds, which `calendarView/delta` returns for every occurrence of the window and which survives the occurrence becoming an exception; the whole series through its master's id. `GET /instances` is not called, since no client can address an occurrence outside the window. The delta never names an occurrence that left its series, so the write-through removes the ones mp cancels or deletes and re-baselines a series' calendar after a change to it (`.agents/research/2026-11-04-graph-recurrence-probes.md`).
+- Single occurrence: `PATCH`, `cancel` or `DELETE` on the occurrence id the cache holds, which `calendarView/delta` returns for every occurrence of the window and which survives the occurrence becoming an exception; the whole series through its master's id.
+  `GET /instances` is not called, since no client can address an occurrence outside the window.
+  The delta never names an occurrence that left its series, so the write-through removes the ones mp cancels or deletes and re-baselines a series' calendar after a change to it (`.agents/research/2026-11-04-graph-recurrence-probes.md`).
+  For a change made elsewhere, the sync drops a removed master's occurrences, and a series the delta re-sends keeps only the occurrences that came.
 - Teams link: `isOnlineMeeting` with `onlineMeetingProvider: teamsForBusiness`.
 - Free/busy: `POST /me/calendar/getSchedule`.
 - Reminders: `isReminderOn` and `reminderMinutesBeforeStart`, fired by the daemon as desktop notifications.
