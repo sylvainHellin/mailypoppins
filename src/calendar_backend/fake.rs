@@ -102,6 +102,9 @@ struct FakeState {
     transactions: HashMap<String, (String, EventInput)>,
     /// How many events the creates made, for their ids.
     created: u64,
+    /// The busy blocks [`CalendarBackend::free_busy`] answers, by address
+    /// lowercased.
+    free_busy: HashMap<String, Vec<ScheduleItem>>,
 }
 
 impl FakeState {
@@ -197,9 +200,6 @@ pub struct FakeCalendarBackend {
     /// The series masters a baseline reports resolved, as Graph's does
     /// ([`SyncResult::series`]), so the store's series cache fills.
     series: Vec<SeriesInfo>,
-    /// The busy blocks [`CalendarBackend::free_busy`] answers, by address
-    /// lowercased.
-    free_busy: HashMap<String, Vec<ScheduleItem>>,
 }
 
 impl FakeCalendarBackend {
@@ -287,7 +287,7 @@ impl FakeCalendarBackend {
         fake.message_events = spec.message_events;
         fake.features = spec.features;
         fake.series = spec.series;
-        fake.free_busy = spec
+        fake.state().free_busy = spec
             .free_busy
             .into_iter()
             .map(|(address, items)| (address.to_ascii_lowercase(), items))
@@ -330,8 +330,10 @@ impl FakeCalendarBackend {
     }
 
     /// Answer `items` as `address`'s busy blocks in a free/busy query.
-    pub fn with_free_busy(mut self, address: &str, items: Vec<ScheduleItem>) -> Self {
-        self.free_busy.insert(address.to_ascii_lowercase(), items);
+    pub fn with_free_busy(self, address: &str, items: Vec<ScheduleItem>) -> Self {
+        self.state()
+            .free_busy
+            .insert(address.to_ascii_lowercase(), items);
         self
     }
 
@@ -850,11 +852,12 @@ impl CalendarBackend for FakeCalendarBackend {
     /// free/busy.
     async fn free_busy(&self, query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {
         self.check_scope()?;
+        let state = self.state();
         Ok(query
             .addresses
             .iter()
             .map(
-                |address| match self.free_busy.get(&address.to_ascii_lowercase()) {
+                |address| match state.free_busy.get(&address.to_ascii_lowercase()) {
                     Some(items) => Schedule::from_items(address, items.clone(), query),
                     None => Schedule::unavailable(address, FAKE_NO_FREE_BUSY),
                 },
