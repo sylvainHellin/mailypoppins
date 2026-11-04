@@ -50,6 +50,17 @@ describe("the palette's ranking", () => {
     expect(labels("dismiss not").slice(0, 2)).toEqual(["Dismiss the newest notice", "Dismiss all notices"]);
   });
 
+  it("finds the Calendar view's edit and its cancel or delete by their verbs", () => {
+    const edit = "Edit the event (the event form with its values)";
+    const remove = "Cancel the meeting (tells the attendees) or delete the event";
+    expect(labels("edit").slice(0, 2)).toEqual(["Edit recipients (in Drafts or a conversation)", edit]);
+    expect(labels("cancel")[0]).toBe(remove);
+    expect(labels("delete").slice(0, 2)).toEqual(["Delete", remove]);
+    expect(labels("edit event")).toEqual([edit]);
+    expect(labels("cancel meeting")).toEqual([remove]);
+    expect(labels("delete event")).toEqual([remove]);
+  });
+
   it("matches a row by its key, below a label match", () => {
     expect(labels("ff")).toContain("Search all mail (sender, subject, body)");
     expect(labels("x")[0]).toBe("Send current draft (approve + send)");
