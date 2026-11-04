@@ -985,7 +985,7 @@ pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut 
         let keys = if card.event.source.is_some() {
             "  V respond \u{b7} m open the mail \u{b7} e open the .ics \u{b7} j/k scroll \u{b7} Esc close"
         } else {
-            "  V respond \u{b7} j/k scroll \u{b7} Esc close"
+            "  V respond \u{b7} E edit \u{b7} X cancel or delete \u{b7} j/k scroll \u{b7} Esc close"
         };
         frame.render_widget(
             Paragraph::new(Span::styled(

@@ -28,6 +28,7 @@ impl App {
             Overlay::Signatures(_) => return self.handle_signatures_key(key),
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
             Overlay::EventForm(_) => return self.handle_event_form_key(key),
+            Overlay::EventRemove(_) => return self.handle_event_remove_key(key),
             Overlay::Calendars(_) => return self.handle_calendars_overlay_key(key),
             Overlay::EventCard(_) => return self.handle_event_card_key(key),
             Overlay::Reminders(_) => return self.handle_reminders_overlay_key(key),
@@ -534,6 +535,14 @@ impl App {
             A::CalendarNewEvent => {
                 self.pending_prefix = None;
                 self.open_event_form();
+            }
+            A::CalendarEditEvent => {
+                self.pending_prefix = None;
+                self.open_event_edit();
+            }
+            A::CalendarRemoveEvent => {
+                self.pending_prefix = None;
+                self.open_event_remove();
             }
             A::CalendarCalendars => {
                 self.pending_prefix = None;
@@ -1962,8 +1971,9 @@ impl App {
     /// walk the rows; a text row takes every character typed; `Space` flips
     /// the all-day and Teams switches; `Left` and `Right` change the
     /// calendar; `Enter` on the description opens `$EDITOR` and anywhere else
-    /// creates the event, unless a field is wrong, which the form names;
-    /// `Esc` closes the form and drops what was typed.
+    /// creates the event (or, on an edit form, sends what changed), unless a
+    /// field is wrong, which the form names; `Esc` closes the form and drops
+    /// what was typed.
     fn handle_event_form_key(&mut self, key: KeyEvent) -> Option<Message> {
         let Overlay::EventForm(form) = &mut self.overlay else {
             return None;
@@ -1975,7 +1985,7 @@ impl App {
             KeyCode::Left if form.row == EventFormRow::Calendar => form.cycle_calendar(false),
             KeyCode::Right if form.row == EventFormRow::Calendar => form.cycle_calendar(true),
             KeyCode::Char(' ') if form.row == EventFormRow::AllDay => form.toggle_all_day(),
-            KeyCode::Char(' ') if form.row == EventFormRow::Teams => form.teams = !form.teams,
+            KeyCode::Char(' ') if form.row == EventFormRow::Teams => form.toggle_teams(),
             KeyCode::Char(c) if typing => {
                 if let Some(text) = form.text_mut() {
                     text.push(c);
@@ -2000,12 +2010,56 @@ impl App {
                 else {
                     return None;
                 };
-                self.push_action(Action::CreateEvent(form));
+                if form.editing.is_some() {
+                    self.push_action(Action::UpdateEvent(form));
+                } else {
+                    self.push_action(Action::CreateEvent(form));
+                }
                 self.promote_pending_error();
             }
             KeyCode::Esc => self.close_overlay(),
             KeyCode::Char('q') if !typing => self.close_overlay(),
             _ => {}
+        }
+        None
+    }
+
+    /// The cancel or delete confirmation's keys (PERSO-255). A cancel takes
+    /// its comment as typed, `Enter` cancels the meeting and `Esc` keeps it;
+    /// a delete takes `y` or `Enter`, and `n`, `q` or `Esc` keep the event.
+    fn handle_event_remove_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::EventRemove(overlay) = &mut self.overlay else {
+            return None;
+        };
+        let cancel = overlay.cancel;
+        let confirm = match key.code {
+            KeyCode::Enter => true,
+            KeyCode::Esc => {
+                self.close_overlay();
+                return None;
+            }
+            KeyCode::Char(c) if cancel => {
+                overlay.comment.push(c);
+                false
+            }
+            KeyCode::Backspace if cancel => {
+                overlay.comment.pop();
+                false
+            }
+            KeyCode::Char('y') => true,
+            KeyCode::Char('n') | KeyCode::Char('q') => {
+                self.close_overlay();
+                return None;
+            }
+            _ => false,
+        };
+        if confirm {
+            let Overlay::EventRemove(overlay) = std::mem::replace(&mut self.overlay, Overlay::None)
+            else {
+                return None;
+            };
+            self.push_action(Action::RemoveEvent(overlay));
+            self.promote_pending_error();
         }
         None
     }
@@ -2082,6 +2136,16 @@ impl App {
                 let event = card.event.clone();
                 self.close_overlay();
                 self.open_event_ics(&event);
+            }
+            KeyCode::Char('E') => {
+                let event = card.event.clone();
+                self.close_overlay();
+                self.open_event_edit_for(&event);
+            }
+            KeyCode::Char('X') => {
+                let event = card.event.clone();
+                self.close_overlay();
+                self.open_event_remove_for(&event);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.close_overlay(),
             _ => {}

@@ -7,11 +7,33 @@
 //! error line with the content kept. A create that failed after it started,
 //! or whose daemon restarted under it, reopens the form with the transaction
 //! id it was sent with, so `Enter` retries it and the server makes one event.
+//!
+//! `E` opens the same form on an event the user may change
+//! ([`EventForm::edit`]), filled with its values; `Enter` sends
+//! `event.update` with the fields that differ from what the form opened
+//! with, so a change made in Outlook to another field survives. The
+//! calendar stays the event's, and a Teams meeting stays one.
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{Days, NaiveDate, NaiveTime};
 use mp_protocol::calendar::{
-    CalendarInfo, EventAttendeeInput, EventCreateParams, EventInputParams,
+    CalendarEvent, CalendarEventTime, CalendarInfo, EventAttendeeInput, EventCreateParams,
+    EventInputParams, EventPatchParams, EventUpdateParams,
 };
+
+use super::Tz;
+
+/// What an edit form changes: the event, and the form as it opened, which
+/// the change is read against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventEdit {
+    pub account: String,
+    pub event: String,
+    /// The event is the user's own: an attendee changes only the reminder.
+    pub is_organizer: bool,
+    /// The event is a Teams meeting, which stays one.
+    pub online: bool,
+    pub original: Box<EventForm>,
+}
 
 /// One calendar a new event can go to: a server calendar the user may write
 /// to on an account whose backend serves `write`.
@@ -126,6 +148,8 @@ pub struct EventForm {
     pub transaction_id: Option<String>,
     /// Why the last attempt failed, shown under the rows.
     pub error: Option<String>,
+    /// The event the form changes, for an edit form; `None` for a new event.
+    pub editing: Option<EventEdit>,
 }
 
 impl EventForm {
@@ -160,7 +184,93 @@ impl EventForm {
             zone: zone.to_string(),
             transaction_id: None,
             error: None,
+            editing: None,
         }
+    }
+
+    /// A form on `event`, which `calendar` holds, filled with its values in
+    /// `zone`, the Calendar view's: `Enter` sends what changed.
+    pub fn edit(event: &CalendarEvent, calendar: EventCalendarChoice, zone: Tz) -> Self {
+        let day = |raw: &str| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
+        let local = |raw: &str| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|at| at.with_timezone(&zone).naive_local())
+        };
+        let (all_day, date, start, end) = match &event.time {
+            CalendarEventTime::AllDay { start, end } => {
+                let first = day(start);
+                let last = day(end).and_then(|end| end.checked_sub_days(Days::new(1)));
+                let end = match (first, last) {
+                    (Some(first), Some(last)) if last > first => last.to_string(),
+                    _ => String::new(),
+                };
+                (true, start.clone(), String::new(), end)
+            }
+            CalendarEventTime::Timed { start, end, .. } => {
+                let (start, end) = (local(start), local(end));
+                let date = start.map(|s| s.date().to_string()).unwrap_or_default();
+                let start_clock = start.map(|s| s.format("%H:%M").to_string());
+                let end = match (start, end) {
+                    (Some(s), Some(e)) if s.date() == e.date() => e.format("%H:%M").to_string(),
+                    (_, Some(e)) => e.format("%Y-%m-%dT%H:%M").to_string(),
+                    _ => String::new(),
+                };
+                (false, date, start_clock.unwrap_or_default(), end)
+            }
+        };
+        let people = |role: &str| {
+            event
+                .attendees
+                .iter()
+                .filter(|a| a.role == role)
+                .map(|a| a.email.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut form = EventForm {
+            calendars: vec![calendar],
+            calendar: 0,
+            row: EventFormRow::Title,
+            title: event.summary.clone(),
+            all_day,
+            date,
+            start,
+            end,
+            location: event.location.clone().unwrap_or_default(),
+            to: people("required"),
+            optional: people("optional"),
+            rooms: people("resource"),
+            teams: event.is_online_meeting,
+            reminder: match event.reminder {
+                Some(minutes) => minutes.to_string(),
+                None => "none".into(),
+            },
+            body: event.body.clone().unwrap_or_default(),
+            zone: zone.name().to_string(),
+            transaction_id: None,
+            error: None,
+            editing: None,
+        };
+        if !event.is_organizer {
+            form.row = EventFormRow::Reminder;
+        }
+        form.editing = Some(EventEdit {
+            account: event.account.clone(),
+            event: event.id.clone(),
+            is_organizer: event.is_organizer,
+            online: event.is_online_meeting,
+            original: Box::new(form.clone()),
+        });
+        form
+    }
+
+    /// Flip the Teams switch, which a Teams meeting being edited keeps on.
+    pub fn toggle_teams(&mut self) {
+        if self.editing.as_ref().is_some_and(|edit| edit.online) {
+            return;
+        }
+        self.teams = !self.teams;
     }
 
     /// The calendar the event goes to.
@@ -190,7 +300,7 @@ impl EventForm {
         .into_iter()
         .filter(|row| match row {
             Start => !self.all_day,
-            Teams => self.chosen().teams,
+            Teams => self.chosen().teams || self.editing.as_ref().is_some_and(|e| e.online),
             _ => true,
         })
         .collect()
@@ -249,8 +359,30 @@ impl EventForm {
     }
 
     /// What is wrong with the fields as typed, the first thing only; `None`
-    /// when the form can be sent. The daemon checks everything again.
+    /// when the form can be sent. The daemon checks everything again. An
+    /// edit form that changes nothing, or an attendee's that changes more
+    /// than the reminder, says so.
     pub fn problem(&self) -> Option<String> {
+        if let Some(problem) = self.fields_problem() {
+            return Some(problem);
+        }
+        let edit = self.editing.as_ref()?;
+        let fields = self.changed_fields();
+        if fields == EventPatchParams::default() {
+            return Some("Nothing changed yet".into());
+        }
+        let own = EventPatchParams {
+            reminder: fields.reminder,
+            ..Default::default()
+        };
+        if !edit.is_organizer && fields != own {
+            return Some("Only the organizer can change this event; the reminder is yours".into());
+        }
+        None
+    }
+
+    /// [`Self::problem`] of the fields alone.
+    fn fields_problem(&self) -> Option<String> {
         if self.title.trim().is_empty() {
             return Some("The event needs a title".into());
         }
@@ -301,21 +433,22 @@ impl EventForm {
     }
 
     /// The reminder as `event.create` takes it: absent, `null`, or minutes.
+    /// An edit form has no mailbox default to fall back on, so an empty
+    /// reminder is none there.
     fn reminder_minutes(&self) -> Result<Option<Option<u32>>, ()> {
         match self.reminder.trim() {
+            "" if self.editing.is_some() => Ok(Some(None)),
             "" => Ok(None),
             "none" | "off" => Ok(Some(None)),
             minutes => minutes.parse().map(|m| Some(Some(m))).map_err(|_| ()),
         }
     }
 
-    /// `event.create`'s params, or the form's problem.
-    pub fn params(&self) -> Result<EventCreateParams, String> {
-        if let Some(problem) = self.problem() {
-            return Err(problem);
-        }
+    /// The start and the end as the daemon reads them: a date-time and an
+    /// end on a timed event, the first and the last day on an all-day one.
+    fn span(&self) -> (String, Option<String>) {
         let date = self.date.trim();
-        let (start, end) = if self.all_day {
+        if self.all_day {
             let last = self.end.trim();
             (
                 date.to_string(),
@@ -329,8 +462,12 @@ impl EventForm {
                 end.to_string()
             };
             (format!("{date}T{}", self.start.trim()), Some(end))
-        };
-        let attendees = [
+        }
+    }
+
+    /// The attendees of the three lists, each in its role.
+    fn attendees(&self) -> Vec<EventAttendeeInput> {
+        [
             (&self.to, "required"),
             (&self.optional, "optional"),
             (&self.rooms, "resource"),
@@ -343,7 +480,79 @@ impl EventForm {
                 role: Some(role.to_string()),
             })
         })
-        .collect();
+        .collect()
+    }
+
+    /// The fields an edit form changed against the form it opened with;
+    /// empty on a new-event form.
+    pub fn changed_fields(&self) -> EventPatchParams {
+        let Some(edit) = &self.editing else {
+            return EventPatchParams::default();
+        };
+        let was = &edit.original;
+        let text = |value: &str| Some(value.trim().to_string()).filter(|v| !v.is_empty());
+        let mut fields = EventPatchParams::default();
+        if self.title.trim() != was.title.trim() {
+            fields.summary = Some(self.title.trim().to_string());
+        }
+        if self.all_day != was.all_day || self.span() != was.span() {
+            let (start, end) = self.span();
+            fields.start = Some(start);
+            fields.end = end;
+            fields.all_day = Some(self.all_day);
+            fields.zone = Some(self.zone.clone());
+        }
+        if text(&self.location) != text(&was.location) {
+            fields.location = Some(text(&self.location));
+        }
+        if self.body.trim_end() != was.body.trim_end() {
+            fields.body = Some(Some(self.body.clone()).filter(|b| !b.trim().is_empty()));
+        }
+        let people = |form: &EventForm| {
+            let mut listed: Vec<(String, Option<String>)> = form
+                .attendees()
+                .into_iter()
+                .map(|a| (a.email.to_ascii_lowercase(), a.role))
+                .collect();
+            listed.sort();
+            listed
+        };
+        if people(self) != people(was) {
+            fields.attendees = Some(self.attendees());
+        }
+        if self.teams && !was.teams {
+            fields.online_meeting = Some(true);
+        }
+        let reminder = self.reminder_minutes().unwrap_or(None);
+        if reminder != was.reminder_minutes().unwrap_or(None) {
+            fields.reminder = reminder;
+        }
+        fields
+    }
+
+    /// `event.update`'s params for an edit form, or the form's problem.
+    pub fn update_params(&self) -> Result<EventUpdateParams, String> {
+        if let Some(problem) = self.problem() {
+            return Err(problem);
+        }
+        let edit = self
+            .editing
+            .as_ref()
+            .ok_or_else(|| "This form makes a new event".to_string())?;
+        Ok(EventUpdateParams {
+            account: edit.account.clone(),
+            event: edit.event.clone(),
+            fields: self.changed_fields(),
+        })
+    }
+
+    /// `event.create`'s params, or the form's problem.
+    pub fn params(&self) -> Result<EventCreateParams, String> {
+        if let Some(problem) = self.problem() {
+            return Err(problem);
+        }
+        let (start, end) = self.span();
+        let attendees = self.attendees();
         let text = |value: &str| Some(value.trim().to_string()).filter(|v| !v.is_empty());
         let chosen = self.chosen();
         Ok(EventCreateParams {
@@ -499,6 +708,89 @@ mod tests {
         form.reminder = "soon".into();
         assert!(form.problem().unwrap().starts_with("The reminder"));
         assert!(form.params().is_err());
+    }
+
+    fn meeting(organizer: bool) -> CalendarEvent {
+        serde_json::from_value(serde_json::json!({
+            "account": "evoqs", "calendar": "main", "id": "ev-1", "uid": "u",
+            "summary": "Budget",
+            "time": {"kind": "timed", "start": "2026-11-18T13:00:00Z",
+                     "end": "2026-11-18T14:30:00Z", "zone": "Europe/Berlin"},
+            "location": "Room 1",
+            "attendees": [
+                {"email": "ada@example.com", "role": "required", "status": "accepted"},
+                {"email": "room-1@example.com", "role": "resource", "status": "accepted"},
+            ],
+            "own_response": if organizer { "organizer" } else { "accepted" },
+            "is_organizer": organizer, "is_online_meeting": true, "reminder": 15,
+            "sensitivity": "normal", "show_as": "busy",
+        }))
+        .unwrap()
+    }
+
+    fn edit_form(organizer: bool) -> EventForm {
+        let main = form().calendars[0].clone();
+        EventForm::edit(&meeting(organizer), main, "Europe/Berlin".parse().unwrap())
+    }
+
+    /// An edit form opens with the event's values in the view's zone, its
+    /// people in their lists, and nothing to send until a field changes;
+    /// then it sends only what changed, a time with its zone.
+    #[test]
+    fn an_edit_form_sends_only_what_changed() {
+        let mut form = edit_form(true);
+        assert_eq!(form.title, "Budget");
+        assert_eq!(
+            (form.date.as_str(), form.start.as_str()),
+            ("2026-11-18", "14:00")
+        );
+        assert_eq!(form.end, "15:30");
+        assert_eq!(form.to, "ada@example.com");
+        assert_eq!(form.rooms, "room-1@example.com");
+        assert_eq!(form.reminder, "15");
+        assert!(form.teams);
+        assert_eq!(form.problem().as_deref(), Some("Nothing changed yet"));
+
+        form.start = "15:00".into();
+        form.end = "16:00".into();
+        form.location.clear();
+        let params = form.update_params().unwrap();
+        assert_eq!(
+            (params.account.as_str(), params.event.as_str()),
+            ("evoqs", "ev-1")
+        );
+        assert_eq!(
+            serde_json::to_value(&params.fields).unwrap(),
+            serde_json::json!({
+                "start": "2026-11-18T15:00", "end": "2026-11-18T16:00",
+                "zone": "Europe/Berlin", "all_day": false, "location": null,
+            })
+        );
+
+        let mut people = edit_form(true);
+        people.optional = "bob@example.com".into();
+        let fields = people.update_params().unwrap().fields;
+        assert_eq!(fields.attendees.as_ref().map(Vec::len), Some(3));
+        assert_eq!(fields.start, None);
+
+        let mut teams = edit_form(true);
+        teams.toggle_teams();
+        assert!(teams.teams, "a Teams meeting stays one");
+    }
+
+    /// An attendee's form changes the reminder and nothing else, and an
+    /// empty reminder there is none rather than the mailbox default.
+    #[test]
+    fn an_attendee_edits_only_the_reminder() {
+        let mut form = edit_form(false);
+        assert_eq!(form.row, EventFormRow::Reminder);
+        form.reminder.clear();
+        assert_eq!(
+            serde_json::to_value(form.update_params().unwrap().fields).unwrap(),
+            serde_json::json!({"reminder": null})
+        );
+        form.title = "Mine now".into();
+        assert!(form.problem().unwrap().starts_with("Only the organizer"));
     }
 
     /// Moving to a calendar without online meetings drops the Teams switch

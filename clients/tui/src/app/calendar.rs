@@ -1,7 +1,9 @@
 //! The Calendar view's model (#0034, PERSO-200): which days a layout shows,
 //! what part of a day an event covers, the cursor's rows, and the reads and
 //! writes the view makes through the daemon (`calendar.view`, `calendar.list`,
-//! `calendar.set_visibility`), and the event form `n` opens (`event.create`).
+//! `calendar.set_visibility`), the event form `n` opens (`event.create`) and
+//! `E` opens on an event (`event.update`), and the cancel or delete `X`
+//! confirms (`event.cancel`, `event.delete`).
 //!
 //! The pure half ([`day_part`], [`calendar_entries`]) takes the events, the
 //! days and the zone and nothing else, so the layouts the renderer draws are
@@ -13,8 +15,8 @@ use mp_protocol::calendar::{CalendarViewParams, IMIP_EVENT_PREFIX};
 
 use super::{
     App, CalendarEntry, CalendarEvent, CalendarEventTime, CalendarLayout, CalendarsOverlay,
-    EventCalendarChoice, EventCardOverlay, EventForm, MessageRef, Overlay, RsvpOverlay,
-    StatusLevel, Tz, View,
+    EventCalendarChoice, EventCardOverlay, EventForm, EventRemoveOverlay, MessageRef, Overlay,
+    RsvpOverlay, StatusLevel, Tz, View,
 };
 
 /// The part of one day an event covers.
@@ -502,9 +504,16 @@ impl App {
     /// `n`: the event form on the cursor's day, or the form a failed create
     /// kept, which still carries what was typed and its transaction id.
     pub fn open_event_form(&mut self) {
-        if let Some(form) = self.calendar_view.kept_form.take() {
-            self.overlay = Overlay::EventForm(Box::new(form));
-            return;
+        if self
+            .calendar_view
+            .kept_form
+            .as_ref()
+            .is_some_and(|form| form.editing.is_none())
+        {
+            if let Some(form) = self.calendar_view.kept_form.take() {
+                self.overlay = Overlay::EventForm(Box::new(form));
+                return;
+            }
         }
         if let Some(queries) = self.queries() {
             self.calendar_view.calendars = super::super::queries::calendar_list(queries);
@@ -536,15 +545,142 @@ impl App {
     pub fn reopen_event_form(&mut self, mut form: EventForm, why: String) {
         form.error = Some(why.clone());
         if self.overlay.is_active() {
+            let key = if form.editing.is_some() {
+                "E on the event"
+            } else {
+                "n"
+            };
             self.calendar_view.kept_form = Some(form);
             self.set_status_level(
-                format!("{why}; n reopens the event form"),
+                format!("{why}; {key} reopens the event form"),
                 StatusLevel::Error,
             );
         } else {
             self.overlay = Overlay::EventForm(Box::new(form));
             self.set_status_level(why, StatusLevel::Error);
         }
+    }
+
+    /// Why `event` cannot be changed from here, before the daemon is asked:
+    /// an invitation mail's event, an occurrence or a series, or a calendar
+    /// that takes no writes. The daemon checks again.
+    fn unchangeable(&mut self, event: &CalendarEvent) -> Option<String> {
+        if event.id.starts_with(IMIP_EVENT_PREFIX) {
+            return Some("An invitation mail's event can only be answered (V)".into());
+        }
+        if event.kind != "single" || event.series_master_id.is_some() {
+            return Some(format!(
+                "{} is part of a recurring series, which mp cannot change yet",
+                event.summary
+            ));
+        }
+        if let Some(queries) = self.queries() {
+            self.calendar_view.calendars = super::super::queries::calendar_list(queries);
+        }
+        let calendar = self
+            .calendar_view
+            .calendars
+            .iter()
+            .find(|c| c.account == event.account && c.id == event.calendar);
+        match calendar {
+            Some(c) if c.can_edit && c.features.iter().any(|f| f == "write") => None,
+            Some(c) => Some(format!("The calendar {} takes no changes from mp", c.name)),
+            None => Some(format!(
+                "{} has no calendar {}",
+                event.account, event.calendar
+            )),
+        }
+    }
+
+    /// `E`: the event form on the event under the cursor.
+    pub fn open_event_edit(&mut self) {
+        if let Some(event) = self.selected_event().cloned() {
+            self.open_event_edit_for(&event);
+        }
+    }
+
+    /// The event form on `event`, filled with its values, or the edit form a
+    /// failed change of it kept; an event mp cannot change says why.
+    pub fn open_event_edit_for(&mut self, event: &CalendarEvent) {
+        let kept = self.calendar_view.kept_form.as_ref().is_some_and(|form| {
+            form.editing
+                .as_ref()
+                .is_some_and(|edit| edit.account == event.account && edit.event == event.id)
+        });
+        if kept {
+            if let Some(form) = self.calendar_view.kept_form.take() {
+                self.overlay = Overlay::EventForm(Box::new(form));
+                return;
+            }
+        }
+        if event.cancelled {
+            self.set_status(format!(
+                "{} was cancelled by its organizer; X deletes your copy",
+                event.summary
+            ));
+            return;
+        }
+        if let Some(why) = self.unchangeable(event) {
+            self.set_status(why);
+            return;
+        }
+        let Some(calendar) = self
+            .calendar_view
+            .calendars
+            .iter()
+            .find(|c| c.account == event.account && c.id == event.calendar)
+        else {
+            return;
+        };
+        let choice = EventCalendarChoice {
+            account: calendar.account.clone(),
+            id: calendar.id.clone(),
+            name: calendar.name.clone(),
+            teams: calendar.features.iter().any(|f| f == "online-meeting"),
+        };
+        let form = EventForm::edit(event, choice, self.calendar_view.zone);
+        self.overlay = Overlay::EventForm(Box::new(form));
+    }
+
+    /// `X`: cancel or delete the event under the cursor.
+    pub fn open_event_remove(&mut self) {
+        if let Some(event) = self.selected_event().cloned() {
+            self.open_event_remove_for(&event);
+        }
+    }
+
+    /// The confirmation `X` asks on `event`: cancel a meeting the user
+    /// organizes, which tells its attendees, with a comment; delete an event
+    /// that tells nobody (one without attendees, or the user's copy of a
+    /// cancelled meeting); and for someone else's live meeting, the answer
+    /// that tells its organizer instead.
+    pub fn open_event_remove_for(&mut self, event: &CalendarEvent) {
+        if let Some(why) = self.unchangeable(event) {
+            self.set_status(why);
+            return;
+        }
+        let meeting = !event.attendees.is_empty();
+        let cancel = if event.cancelled {
+            false
+        } else if event.is_organizer {
+            meeting
+        } else if event.organizer.is_none() && !meeting {
+            false
+        } else {
+            self.set_status(format!(
+                "{} is someone else's meeting: decline it with V to tell the organizer",
+                event.summary
+            ));
+            return;
+        };
+        self.overlay = Overlay::EventRemove(Box::new(EventRemoveOverlay {
+            account: event.account.clone(),
+            event: event.id.clone(),
+            summary: event.summary.clone(),
+            cancel,
+            attendees: event.attendees.len(),
+            comment: String::new(),
+        }));
     }
 
     /// `V` in the Calendar view: answer the event under the cursor.

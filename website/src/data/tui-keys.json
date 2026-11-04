@@ -136,6 +136,8 @@
       { "key": "V", "action": "Respond (accept / tentative / decline, comment)" },
       { "key": "c", "action": "Show or hide calendars" },
       { "key": "n", "action": "New event (the event form, on the cursor's day)" },
+      { "key": "E", "action": "Edit the event (the event form with its values)" },
+      { "key": "X", "action": "Cancel the meeting (tells the attendees) or delete the event" },
       { "key": "r", "action": "Read the events again" }
     ]
   },

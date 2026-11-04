@@ -1173,6 +1173,12 @@ pub enum BgResult {
         operation_id: String,
         result: Result<String, String>,
     },
+    /// `event.update`, `event.cancel` or `event.delete` settled (PERSO-255):
+    /// the status line, or why it failed.
+    EventChanged {
+        operation_id: String,
+        result: Result<String, String>,
+    },
     SendApproved {
         account_index: usize,
         result: Result<String, String>,
@@ -1944,6 +1950,23 @@ pub struct EventCardOverlay {
     pub scroll: u16,
 }
 
+/// The `X` confirmation of the Calendar view (PERSO-255): cancel a meeting
+/// the user organizes, with a comment for its attendees, or delete an event
+/// that tells nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventRemoveOverlay {
+    pub account: String,
+    pub event: String,
+    pub summary: String,
+    /// Cancel the meeting, which tells its attendees, rather than delete an
+    /// event that tells nobody.
+    pub cancel: bool,
+    /// How many people and rooms a cancel tells.
+    pub attendees: usize,
+    /// The comment a cancel sends, empty for none.
+    pub comment: String,
+}
+
 /// Messages that drive state transitions (TEA pattern).
 #[derive(Debug)]
 pub enum Message {
@@ -2115,6 +2138,12 @@ pub enum Action {
     /// Create the event the event form holds (PERSO-255) through
     /// `event.create`.
     CreateEvent(Box<super::EventForm>),
+    /// Change the event an edit form holds (PERSO-255) through
+    /// `event.update`, with the fields that changed.
+    UpdateEvent(Box<super::EventForm>),
+    /// Cancel a meeting through `event.cancel`, or delete an event through
+    /// `event.delete` (PERSO-255), as the `X` confirmation decided.
+    RemoveEvent(Box<EventRemoveOverlay>),
     /// Edit the open event form's description in `$EDITOR` (PERSO-255).
     EditEventDescription,
     /// Answer an invitation (#0029, PERSO-200) through `event.respond`: the
@@ -2274,6 +2303,8 @@ impl Action {
             | Action::ComposeWizardCancel
             | Action::Rsvp { .. }
             | Action::CreateEvent(_)
+            | Action::UpdateEvent(_)
+            | Action::RemoveEvent(_)
             | Action::ComposeToContact { .. }
             | Action::CopyContactEmail { .. }
             | Action::LoadContacts { .. }
@@ -2567,8 +2598,10 @@ pub enum Overlay {
     Signatures(SignaturesOverlay),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
-    /// The event form (`n` in the Calendar view, PERSO-255).
+    /// The event form (`n` in the Calendar view, `E` on an event, PERSO-255).
     EventForm(Box<super::EventForm>),
+    /// The cancel or delete confirmation (`X` on an event, PERSO-255).
+    EventRemove(Box<EventRemoveOverlay>),
     /// The calendars shown or hidden in the Calendar view (`c`, PERSO-200).
     Calendars(CalendarsOverlay),
     /// One event of the Calendar view in full (`Enter`, PERSO-200).

@@ -176,6 +176,8 @@ pub fn route(action: &Action) -> ActionRoute {
         }
         Action::Rsvp { .. } => ActionRoute::Daemon(&["event.respond"]),
         Action::CreateEvent(_) => ActionRoute::Daemon(&["event.create"]),
+        Action::UpdateEvent(_) => ActionRoute::Daemon(&["event.update"]),
+        Action::RemoveEvent(_) => ActionRoute::Daemon(&["event.cancel", "event.delete"]),
         Action::EditEventDescription => {
             ActionRoute::ClientOnly("$EDITOR, over the event form's description")
         }
@@ -370,6 +372,14 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             create_event(app, commands, form);
             true
         }
+        Action::UpdateEvent(form) => {
+            update_event(app, commands, form);
+            true
+        }
+        Action::RemoveEvent(removal) => {
+            remove_event(app, commands, removal);
+            true
+        }
         Action::BatchToggleFlag(msgs) => {
             let any_unflagged = msgs
                 .iter()
@@ -497,6 +507,10 @@ pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
         Awaited::EventCreate { operation_id } => BgResult::EventCreated {
             operation_id: operation_id.clone(),
             result: result.and_then(|settled| created_line(&settled)),
+        },
+        Awaited::EventChange { operation_id, done } => BgResult::EventChanged {
+            operation_id: operation_id.clone(),
+            result: result.map(|settled| changed_line(done, &settled)),
         },
         Awaited::ServerSearch { generation } => BgResult::ServerSearch {
             generation: *generation,
@@ -807,6 +821,98 @@ fn create_event(app: &mut App, commands: &dyn Queries, form: &super::app::EventF
             operation_id: id.to_string(),
         },
     );
+}
+
+/// `event.update` for an edit form (PERSO-255): the fields that changed.
+///
+/// The form is kept under the operation's id while it runs, so a failure
+/// reopens it as typed, and its `Enter` sends the same change again. A
+/// refusal comes back at once and reopens the form with the daemon's
+/// sentence.
+fn update_event(app: &mut App, commands: &dyn Queries, form: &super::app::EventForm) {
+    let mut form = form.clone();
+    let params = match form.update_params() {
+        Ok(params) => params,
+        Err(problem) => return app.reopen_event_form(form, problem),
+    };
+    let params = match serde_json::to_value(&params) {
+        Ok(params) => params,
+        Err(e) => return app.reopen_event_form(form, format!("{e}")),
+    };
+    let started = match commands.call("event.update", params) {
+        Ok(started) => started,
+        Err(e) => return app.reopen_event_form(form, format!("{e:#}")),
+    };
+    let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
+        return app.reopen_event_form(form, "event.update answered no operation id".into());
+    };
+    form.error = None;
+    let title = form.title.trim().to_string();
+    app.set_status_level(format!("Updating {title}..."), StatusLevel::Progress);
+    app.calendar_view.pending_forms.insert(id.clone(), form);
+    app.bg_count += 1;
+    app.events.started(
+        id.clone(),
+        Awaited::EventChange {
+            operation_id: id,
+            done: format!("Updated {title}"),
+        },
+    );
+}
+
+/// `event.cancel` or `event.delete`, as the `X` confirmation decided
+/// (PERSO-255). A refusal is the daemon's sentence on the status line.
+fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::EventRemoveOverlay) {
+    let (method, params, verb) = if removal.cancel {
+        let comment = Some(removal.comment.trim().to_string()).filter(|c| !c.is_empty());
+        (
+            "event.cancel",
+            json!({"account": removal.account, "event": removal.event, "comment": comment}),
+            ("Cancelling", "Cancelled"),
+        )
+    } else {
+        (
+            "event.delete",
+            json!({"account": removal.account, "event": removal.event}),
+            ("Deleting", "Deleted"),
+        )
+    };
+    let started = match commands.call(method, params) {
+        Ok(started) => started,
+        Err(e) => return app.set_status_level(format!("{e:#}"), StatusLevel::Error),
+    };
+    let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
+        return app.set_status_level(
+            format!("{method} answered no operation id"),
+            StatusLevel::Error,
+        );
+    };
+    app.set_status_level(
+        format!("{} {}...", verb.0, removal.summary),
+        StatusLevel::Progress,
+    );
+    app.bg_count += 1;
+    app.events.started(
+        id.clone(),
+        Awaited::EventChange {
+            operation_id: id,
+            done: format!("{} {}", verb.1, removal.summary),
+        },
+    );
+}
+
+/// A settled change as the status line: `done`, and for a cancel who was
+/// told.
+fn changed_line(done: &str, settled: &Value) -> String {
+    let notified: Vec<&str> = settled["notified"]
+        .as_array()
+        .map(|people| people.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    match notified.as_slice() {
+        [] => done.to_string(),
+        [one] => format!("{done}; told {one}"),
+        many => format!("{done}; told {} people", many.len()),
+    }
 }
 
 /// `event.create`'s settled event as the status line: what was created, and
