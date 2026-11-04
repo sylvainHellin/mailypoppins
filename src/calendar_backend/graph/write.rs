@@ -13,6 +13,8 @@
 //! - Delete: `DELETE /me/events/{id}`.
 //! - Reminders: `POST /me/events/{id}/dismissReminder` and
 //!   `snoozeReminder` with the new reminder time.
+//! - A proposed time: the `proposedNewTime` timeSlot of `tentativelyAccept`
+//!   and `decline`, which the answer in `graph.rs` sends.
 //!
 //! Each time goes out as the event's wall time plus the Windows name of its
 //! zone, the form Graph takes, through CLDR's IANA-to-Windows table (every
@@ -39,7 +41,7 @@ use crate::calendar_backend::{
     BackendResult, CalendarBackend, CalendarBackendError, SeriesInfo, Written,
 };
 use crate::calendar_model::{AttendeeRole, Calendar, EventTime, Sensitivity, ShowAs, Tz};
-use crate::calendar_write::{AttendeeInput, EventInput, EventPatch};
+use crate::calendar_write::{AttendeeInput, EventInput, EventPatch, ProposedTime};
 use crate::graph::{encode_id, GRAPH_BASE};
 
 use anyhow::{anyhow, Context};
@@ -63,6 +65,16 @@ fn instant_in(at: DateTime<Utc>, zone: &str) -> Value {
         Some((windows, tz)) => date_time_zone(at.with_timezone(&tz).naive_local(), windows),
         None => date_time_zone(at.naive_utc(), "UTC"),
     }
+}
+
+/// A proposed time as Graph's `timeSlot`: its two instants in the zone it
+/// was typed in, the form `tentativelyAccept` and `decline` take as
+/// `proposedNewTime`.
+pub(super) fn time_slot_json(proposed: &ProposedTime) -> Value {
+    json!({
+        "start": instant_in(proposed.slot.start, &proposed.zone),
+        "end": instant_in(proposed.slot.end, &proposed.zone),
+    })
 }
 
 /// The Windows name an all-day event's midnights go out under: that of

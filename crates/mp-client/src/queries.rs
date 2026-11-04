@@ -64,7 +64,7 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{
     CalendarInfo, CalendarListResult, CalendarViewParams, CalendarViewResult, EventFrontmatter,
-    EventRespondParams,
+    EventProposedTime, EventRespondParams,
 };
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
@@ -498,13 +498,15 @@ pub fn calendar_view(q: &dyn Queries, params: &CalendarViewParams) -> Result<Cal
 }
 
 /// The `params` of `event.respond`, an operation a client starts through its
-/// own operation path and watches to its `EventRespondResult`.
+/// own operation path and watches to its `EventRespondResult`; `proposed`
+/// is the new time a tentative or a decline proposes.
 pub fn event_respond_params(
     account: &str,
     event: &str,
     response: &str,
     comment: Option<&str>,
     send_response: bool,
+    proposed: Option<&EventProposedTime>,
 ) -> Value {
     serde_json::to_value(EventRespondParams {
         account: account.to_string(),
@@ -512,6 +514,7 @@ pub fn event_respond_params(
         response: response.to_string(),
         comment: comment.map(str::to_string),
         send_response: Some(send_response),
+        proposed_time: proposed.cloned(),
     })
     .unwrap_or_else(|_| json!({"account": account, "event": event, "response": response}))
 }
@@ -763,13 +766,20 @@ mod tests {
             "../../mp-protocol/fixtures/event.respond.request.json"
         ))
         .unwrap();
+        let proposed = EventProposedTime {
+            start: "2026-11-18T15:00".into(),
+            end: Some("2026-11-18T16:00".into()),
+            duration: None,
+            zone: Some("Europe/Berlin".into()),
+        };
         assert_eq!(
             event_respond_params(
                 "evoqs",
                 "AAMkADev1",
                 "tentative",
                 Some("I may be late"),
-                false
+                true,
+                Some(&proposed),
             ),
             request["params"]
         );

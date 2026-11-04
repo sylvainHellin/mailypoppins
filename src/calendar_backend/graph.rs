@@ -77,7 +77,7 @@ use crate::calendar_model::{
     EventTime, Frequency, OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus,
     Sensitivity, ShowAs, TimeSlot, WeekIndex, Weekday,
 };
-use crate::calendar_write::{EventInput, EventPatch};
+use crate::calendar_write::{EventInput, EventPatch, ProposedTime};
 use crate::config::{AccountConfig, GraphConfig};
 use crate::graph::{encode_id, GraphClient, GRAPH_BASE, PREFER_IMMUTABLE_ID};
 
@@ -97,10 +97,12 @@ const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
 /// whose `allowedOnlineMeetingProviders` names Teams
 /// ([`super::calendar_features`]), `calendar.dismiss_reminder` and
 /// `calendar.snooze_reminder` write a reminder's dismissal and snooze through,
-/// and `calendar.freebusy` reads `getSchedule` (`freebusy.rs`).
+/// `calendar.freebusy` reads `getSchedule` (`freebusy.rs`), and
+/// `event.respond` proposes a new time with `proposedNewTime`.
 pub const FEATURES: &[CalendarFeature] = &[
     CalendarFeature::Write,
     CalendarFeature::OnlineMeeting,
+    CalendarFeature::ProposeTime,
     CalendarFeature::FreeBusy,
     CalendarFeature::ServerReminders,
 ];
@@ -1492,6 +1494,7 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
         response: Response,
         comment: Option<String>,
         send_response: bool,
+        proposed: Option<ProposedTime>,
     ) -> BackendResult<()> {
         let action = match response {
             Response::Accept => "accept",
@@ -1502,6 +1505,11 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
         let mut body = serde_json::json!({ "sendResponse": send_response });
         if let Some(comment) = comment.filter(|c| !c.trim().is_empty()) {
             body["comment"] = serde_json::Value::String(comment);
+        }
+        // Graph takes a proposal on tentativelyAccept and decline only, as
+        // a timeSlot in the wall time of the zone it was typed in.
+        if let Some(proposed) = proposed.filter(|_| response != Response::Accept) {
+            body["proposedNewTime"] = write::time_slot_json(&proposed);
         }
         let answer = self.fetch.post(&url, body).await?;
         if (200..300).contains(&answer.status) {

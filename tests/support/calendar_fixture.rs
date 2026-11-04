@@ -211,7 +211,7 @@ fn request_ics_with(
 
 /// What the fake claims to serve, which `calendar.list` reports on its
 /// calendars that offer Teams; the others lack `online-meeting`.
-pub const FAKE_FEATURES: [&str; 2] = ["write", "online-meeting"];
+pub const FAKE_FEATURES: [&str; 3] = ["write", "online-meeting", "propose-time"];
 
 /// The weekly series of [`series_occurrences`] as the fake's baseline
 /// resolves it: its master, a Teams meeting, and its rule of two weeks.

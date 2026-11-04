@@ -27,7 +27,7 @@ use crate::calendar_freebusy::{FreeBusyQuery, Schedule};
 use crate::calendar_model::{
     Calendar, CalendarFeature, CalendarWindow, Event, EventId, Recurrence,
 };
-use crate::calendar_write::{EventInput, EventPatch};
+use crate::calendar_write::{EventInput, EventPatch, ProposedTime};
 use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
 
 use fake::FakeCalendarBackend;
@@ -219,13 +219,16 @@ pub trait CalendarBackend {
 
     /// Answer the invitation `event` is, with an optional comment to the
     /// organizer; `send_response = false` records the answer without telling
-    /// the organizer.
+    /// the organizer. `proposed` is a new time a tentative or a decline
+    /// proposes to the organizer, which the engine has already checked the
+    /// organizer accepts.
     fn respond(
         &self,
         event: &str,
         response: Response,
         comment: Option<String>,
         send_response: bool,
+        proposed: Option<ProposedTime>,
     ) -> impl Future<Output = BackendResult<()>> + Send;
 
     /// Create `input` in `calendar`; the server invites its attendees.
@@ -432,10 +435,17 @@ impl CalendarBackend for AccountBackend {
         response: Response,
         comment: Option<String>,
         send_response: bool,
+        proposed: Option<ProposedTime>,
     ) -> BackendResult<()> {
         match self {
-            AccountBackend::Fake(b) => b.respond(event, response, comment, send_response).await,
-            AccountBackend::Graph(b) => b.respond(event, response, comment, send_response).await,
+            AccountBackend::Fake(b) => {
+                b.respond(event, response, comment, send_response, proposed)
+                    .await
+            }
+            AccountBackend::Graph(b) => {
+                b.respond(event, response, comment, send_response, proposed)
+                    .await
+            }
         }
     }
 

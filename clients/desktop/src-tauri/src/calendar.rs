@@ -60,7 +60,7 @@ use mp_client::queries;
 use mp_protocol::calendar::{
     CalendarFreeBusyParams, CalendarFreeBusyResult, CalendarInfo, CalendarViewParams,
     CalendarViewResult, EventCancelParams, EventCreateParams, EventCreateStarted,
-    EventDeleteParams, EventFrontmatter, EventUpdateParams,
+    EventDeleteParams, EventFrontmatter, EventProposedTime, EventUpdateParams,
 };
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
@@ -189,10 +189,13 @@ pub fn calendar_view_on(
 /// Answer `event` with `response`, the TUI's respond overlay: an operation
 /// awaited as `rsvp`, whose `result` is an `EventRespondResult`. A blank
 /// comment is no comment, and `send_response` is the daemon's default (tell
-/// the organizer) when absent. A response word the daemon does not take is
-/// refused here, before any call; a daemon refusal (`send_response: false`
-/// on an invitation mail, a Graph account on the iMIP path) comes back as
+/// the organizer) when absent; `proposed` is the new time a tentative or a
+/// decline proposes (PERSO-255), none when its start is blank. A response
+/// word the daemon does not take is refused here, before any call; a daemon
+/// refusal (`send_response: false` on an invitation mail, a Graph account on
+/// the iMIP path, a proposal the organizer does not accept) comes back as
 /// its own sentence.
+#[allow(clippy::too_many_arguments)]
 pub fn event_respond_on(
     session: &SessionHandle,
     door: &Door,
@@ -201,6 +204,7 @@ pub fn event_respond_on(
     response: &str,
     comment: Option<&str>,
     send_response: Option<bool>,
+    proposed: Option<&EventProposedTime>,
 ) -> Result<OperationStarted, GuiError> {
     if !RESPONSES.contains(&response) {
         return Err(GuiError::protocol(format!(
@@ -208,12 +212,14 @@ pub fn event_respond_on(
         )));
     }
     let comment = comment.map(str::trim).filter(|c| !c.is_empty());
+    let proposed = proposed.filter(|p| !p.start.trim().is_empty());
     let params = queries::event_respond_params(
         account,
         event,
         response,
         comment,
         send_response.unwrap_or(true),
+        proposed,
     );
     let operation_id = session
         .start_operation(
@@ -697,6 +703,7 @@ pub async fn event_respond(
     response: String,
     comment: Option<String>,
     send_response: Option<bool>,
+    proposed_time: Option<EventProposedTime>,
 ) -> Result<OperationStarted, GuiError> {
     with_door(&session, move |session, door| {
         event_respond_on(
@@ -707,6 +714,7 @@ pub async fn event_respond(
             &response,
             comment.as_deref(),
             send_response,
+            proposed_time.as_ref(),
         )
     })
     .await
@@ -968,7 +976,7 @@ mod tests {
         let (door, f) = fixture_door();
         let session = SessionHandle::new(true);
         let imip = format!("imip:{INVITE_ROW}");
-        let err = event_respond_on(&session, &door, "work", &imip, "maybe", None, None)
+        let err = event_respond_on(&session, &door, "work", &imip, "maybe", None, None, None)
             .expect_err("refused");
         assert!(matches!(err, GuiError::Protocol { .. }), "{err:?}");
         assert!(f.calls().is_empty());
@@ -980,6 +988,7 @@ mod tests {
             "decline",
             Some("  On leave "),
             Some(false),
+            None,
         )
         .expect("started");
         assert_eq!(
@@ -998,13 +1007,56 @@ mod tests {
                 &imip,
                 "accept",
                 Some(" "),
-                Some(false)
+                Some(false),
+                None,
             ),
             Err(GuiError::Protocol {
                 message: crate::fixture::IMIP_SILENT_REFUSAL.to_string(),
                 code: Some(-32602)
             })
         );
+
+        // A proposal rides along with its start, its end and its zone; a
+        // blank start is no proposal.
+        let proposed = EventProposedTime {
+            start: "2099-10-14T15:00".into(),
+            end: Some("2099-10-14T16:00".into()),
+            duration: None,
+            zone: Some("Europe/Berlin".into()),
+        };
+        event_respond_on(
+            &session,
+            &door,
+            "home",
+            "AAMkAD-design",
+            "tentative",
+            None,
+            None,
+            Some(&proposed),
+        )
+        .expect("started");
+        let (_, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(
+            params["proposed_time"],
+            json!({"start": "2099-10-14T15:00", "end": "2099-10-14T16:00", "zone": "Europe/Berlin"})
+        );
+        let blank = EventProposedTime {
+            start: " ".into(),
+            ..proposed
+        };
+        event_respond_on(
+            &session,
+            &door,
+            "home",
+            "AAMkAD-design",
+            "tentative",
+            None,
+            None,
+            Some(&blank),
+        )
+        .expect("started");
+        let (_, params) = f.calls().last().cloned().expect("a call");
+        assert!(params.get("proposed_time").is_none(), "{params}");
     }
 
     fn new_event(summary: &str) -> EventCreateParams {

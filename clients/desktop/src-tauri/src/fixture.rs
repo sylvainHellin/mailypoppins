@@ -264,6 +264,20 @@ pub const IMIP_SILENT_REFUSAL: &str =
     "send_response: false needs a calendar backend: an invitation mail is answered by the reply \
      mail itself, and without one nothing would record the answer";
 
+/// The daemon's `PROPOSAL_WITH_ACCEPT_REFUSAL`, word for word.
+pub const PROPOSAL_WITH_ACCEPT_REFUSAL: &str =
+    "A new time is proposed with tentative or decline, not with accept";
+
+/// The daemon's `SILENT_PROPOSAL_REFUSAL`, word for word.
+pub const SILENT_PROPOSAL_REFUSAL: &str =
+    "A proposed time goes to the organizer, so it needs send_response; drop the proposal to \
+     answer without telling them";
+
+/// The daemon's `IMIP_PROPOSAL_REFUSAL`, word for word.
+pub const IMIP_PROPOSAL_REFUSAL: &str =
+    "mp cannot propose a new time by mail yet (no iCalendar COUNTER); answer tentative or \
+     decline with a comment naming the time you suggest";
+
 /// The window `calendar.view` reports the fixture's server cache holds.
 const SERVER_WINDOW: (&str, &str) = ("2099-09-14T00:00:00Z", "2100-10-14T00:00:00Z");
 
@@ -525,6 +539,47 @@ pub const ORGANIZER_ONLY_REFUSAL: &str = "Only the organizer can change this eve
 
 /// `event` in the neutral model's terms, as much of it as
 /// `resolve_patch` reads: its time and its kind.
+/// The slot a proposal on `event` names, after the daemon's refusals: the
+/// organizer not told, the user's own meeting, a cancelled one, one whose
+/// organizer accepts no proposals, and a time that does not read, all
+/// `-32602`, the times read in the event's zone or Europe/Berlin.
+fn proposed_slot(
+    method: &str,
+    event: &CalendarEvent,
+    proposal: &mp_protocol::calendar::EventProposedTime,
+    send_response: bool,
+) -> Result<mp_protocol::calendar::CalendarTimeSlot> {
+    let refusal = |message: &str| refused(method, -32602, message);
+    if !send_response {
+        return Err(refusal(SILENT_PROPOSAL_REFUSAL));
+    }
+    let title = &event.summary;
+    if event.cancelled {
+        return Err(refusal(&format!(
+            "{title} was cancelled by its organizer; there is no time to move"
+        )));
+    }
+    if event.is_organizer || event.own_response == "organizer" {
+        return Err(refusal(&format!(
+            "You organize {title}; change its time with event.update instead of proposing one"
+        )));
+    }
+    if !event.allow_new_time_proposals {
+        return Err(refusal(&format!(
+            "The organizer of {title} does not accept new time proposals"
+        )));
+    }
+    let berlin = mp_core::calendar_model::parse_zone("Europe/Berlin")
+        .ok_or_else(|| refused(method, -32603, "no Europe/Berlin zone"))?;
+    let model = model_event(event).map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
+    let proposed = mp_core::calendar_write::resolve_proposal(proposal, &model, berlin)
+        .map_err(|why| refusal(&why))?;
+    // The model's instants serialise as the daemon's RFC 3339 UTC.
+    serde_json::to_value(proposed.slot)
+        .and_then(serde_json::from_value)
+        .map_err(|e| refused(method, -32603, &format!("{e:#}")))
+}
+
 fn model_event(event: &CalendarEvent) -> Result<mp_core::calendar_model::Event> {
     Ok(serde_json::from_value(json!({
         "account": event.account,
@@ -602,6 +657,8 @@ struct EventAnswer {
     status: &'static str,
     comment: Option<String>,
     send_response: bool,
+    /// The time the answer proposed, as UTC instants.
+    proposed_time: Option<mp_protocol::calendar::CalendarTimeSlot>,
 }
 
 /// An RSVP the fixture is submitting.
@@ -4638,11 +4695,25 @@ impl Fixture {
                 only(
                     method,
                     &params,
-                    &["account", "comment", "event", "response", "send_response"],
+                    &[
+                        "account",
+                        "comment",
+                        "event",
+                        "proposed_time",
+                        "response",
+                        "send_response",
+                    ],
                 )?;
                 let account = param_str(method, &params, "account")?.to_string();
                 let event = param_str(method, &params, "event")?.to_string();
                 let response = param_str(method, &params, "response")?.to_string();
+                let proposal: Option<mp_protocol::calendar::EventProposedTime> =
+                    match params.get("proposed_time").filter(|p| !p.is_null()) {
+                        Some(raw) => Some(serde_json::from_value(raw.clone()).map_err(|e| {
+                            refused(method, -32602, &format!("event.respond: {e}"))
+                        })?),
+                        None => None,
+                    };
                 s.account_ready(method, &account)?;
                 let status = match response.as_str() {
                     "accept" => "accepted",
@@ -4658,11 +4729,22 @@ impl Fixture {
                         ))
                     }
                 };
-                s.server_event(method, &account, &event)?;
+                if proposal.is_some() && response == "accept" {
+                    return Err(refused(method, -32602, PROPOSAL_WITH_ACCEPT_REFUSAL));
+                }
+                let held = s.server_event(method, &account, &event)?;
+                let imip = event.starts_with(IMIP_EVENT_PREFIX);
+                if proposal.is_some() && imip {
+                    return Err(refused(method, -32602, IMIP_PROPOSAL_REFUSAL));
+                }
                 let send_response = params["send_response"].as_bool().unwrap_or(true);
-                if !send_response && event.starts_with(IMIP_EVENT_PREFIX) {
+                if !send_response && imip {
                     return Err(refused(method, -32602, IMIP_SILENT_REFUSAL));
                 }
+                let proposed_time = match &proposal {
+                    Some(proposal) => Some(proposed_slot(method, &held, proposal, send_response)?),
+                    None => None,
+                };
                 let comment = params["comment"]
                     .as_str()
                     .map(str::trim)
@@ -4686,6 +4768,7 @@ impl Fixture {
                     status,
                     comment,
                     send_response,
+                    proposed_time,
                 };
                 let fixture = Arc::clone(self);
                 let op = id.clone();
@@ -5378,6 +5461,7 @@ impl Fixture {
             status,
             comment,
             send_response,
+            proposed_time,
         } = answer;
         let mut s = self.state();
         if let Some(e) = s
@@ -5417,6 +5501,7 @@ impl Fixture {
             "send_response": send_response,
             "via": if imip.is_some() { "imip" } else { "server" },
             "delivered": send_response,
+            "proposed_time": proposed_time,
         });
         self.settle(op, "succeeded", Some(result));
     }
@@ -7141,6 +7226,58 @@ mod tests {
             .server_event("event.respond", "home", "AAMkAD-design")
             .expect("the event");
         assert_eq!(design.own_response, "declined");
+    }
+
+    /// A proposed time takes the daemon's refusals word for word, before an
+    /// operation exists, and settles with the slot as UTC instants.
+    #[test]
+    fn event_respond_proposes_a_new_time_and_refuses_what_the_daemon_refuses() {
+        let (f, rx) = fixture();
+        f.set_rsvp_delay(Duration::ZERO);
+        let later = json!({"start": "2099-10-14T15:00", "zone": "Europe/Berlin"});
+        let sentence = |params: Value| {
+            let e = f.call("event.respond", params).expect_err("refused");
+            crate::error::refusal_sentence(&format!("{e:#}"))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(
+            sentence(
+                json!({"account": "home", "event": "AAMkAD-design", "response": "accept",
+                            "proposed_time": later})
+            ),
+            PROPOSAL_WITH_ACCEPT_REFUSAL
+        );
+        assert_eq!(
+            sentence(
+                json!({"account": "work", "event": "imip:1008", "response": "tentative",
+                            "proposed_time": later})
+            ),
+            IMIP_PROPOSAL_REFUSAL
+        );
+        assert_eq!(
+            sentence(
+                json!({"account": "home", "event": "AAMkAD-design", "response": "decline",
+                            "send_response": false, "proposed_time": later})
+            ),
+            SILENT_PROPOSAL_REFUSAL
+        );
+        assert_eq!(f.operation_count(), 0);
+        let started = f
+            .call(
+                "event.respond",
+                json!({"account": "home", "event": "AAMkAD-design", "response": "tentative",
+                       "proposed_time": later}),
+            )
+            .expect("started");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+        assert_eq!(next_event(&rx).kind, "calendar.changed");
+        let finished = next_event(&rx);
+        assert_eq!(finished.payload["operation_id"], id.as_str());
+        let result: mp_protocol::calendar::EventRespondResult =
+            serde_json::from_value(finished.payload["result"].clone()).expect("a result");
+        let slot = result.proposed_time.expect("the proposed slot");
+        assert_eq!(slot.start, "2099-10-14T13:00:00Z");
     }
 
     #[test]

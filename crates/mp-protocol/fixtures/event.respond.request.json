@@ -6,7 +6,12 @@
     "account": "evoqs",
     "comment": "I may be late",
     "event": "AAMkADev1",
+    "proposed_time": {
+      "end": "2026-11-18T16:00",
+      "start": "2026-11-18T15:00",
+      "zone": "Europe/Berlin"
+    },
     "response": "tentative",
-    "send_response": false
+    "send_response": true
   }
 }

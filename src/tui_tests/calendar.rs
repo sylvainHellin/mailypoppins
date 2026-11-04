@@ -202,6 +202,193 @@ fn golden_calendar_event_form() {
     assert_snapshot!("event_form_retry", frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
+/// The respond overlay on a decline proposing a new time (PERSO-255): the
+/// proposed start being typed, the end left to the meeting's length; and the
+/// same overlay refusing the proposal with the response off, on its error
+/// line.
+#[test]
+fn golden_calendar_respond_overlay_proposing() {
+    let mut app = calendar_fixture();
+    let mut overlay = RsvpOverlay::new(
+        "evoqs".to_string(),
+        "ev-jour-1".to_string(),
+        "Jour fixe".to_string(),
+    );
+    overlay.selected = 2;
+    overlay.row = RsvpRow::ProposeStart;
+    overlay.proposed_start = "2026-08-04T14:00".to_string();
+    overlay.zone = "Europe/Berlin".to_string();
+    app.overlay = Overlay::Rsvp(overlay);
+    assert_snapshot!("respond_propose", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    if let Overlay::Rsvp(overlay) = &mut app.overlay {
+        overlay.send_response = false;
+        overlay.row = RsvpRow::SendResponse;
+        overlay.error = overlay.proposal().err();
+    }
+    assert_snapshot!(
+        "respond_propose_refused",
+        frame_snapshot(&mut app, WIDTH, HEIGHT)
+    );
+}
+
+/// The fixture's handover as the user's own meeting, two attendees having
+/// proposed other times.
+fn proposed_handover(app: &App) -> mp_protocol::calendar::CalendarEvent {
+    let mut handover = app.calendar_view.events[0].clone();
+    assert_eq!(handover.id, "ev-handover");
+    handover.is_organizer = true;
+    handover.own_response = "organizer".into();
+    handover.organizer = Some(mp_protocol::calendar::CalendarPerson {
+        name: None,
+        email: "sylvain@example.org".into(),
+    });
+    handover.attendees[0].email = "bob@example.org".into();
+    handover.attendees[0].name = Some("Bob".into());
+    handover.attendees[0].proposed_time = Some(mp_protocol::calendar::CalendarTimeSlot {
+        start: "2026-08-04T12:00:00Z".into(),
+        end: "2026-08-04T13:00:00Z".into(),
+    });
+    handover
+}
+
+/// The organizer's card of a meeting with two proposals: the one `p` takes
+/// is marked, `Tab` moved to the second, and the keys name `p`.
+#[test]
+fn golden_calendar_event_card_with_proposals() {
+    let mut app = calendar_fixture();
+    let mut card = crate::tui::app::EventCardOverlay::new(proposed_handover(&app));
+    card.proposal = 1;
+    app.overlay = Overlay::EventCard(Box::new(card));
+    assert_snapshot!(
+        "event_card_proposals",
+        frame_snapshot(&mut app, WIDTH, HEIGHT)
+    );
+}
+
+/// `p` on the organizer's card opens the edit form at the chosen proposal,
+/// `Tab` choosing the next, so `Enter` sends the new time as `event.update`;
+/// an attendee's card, an occurrence and a meeting nobody proposed for are
+/// refused on the status line.
+#[test]
+fn p_on_the_card_opens_the_edit_form_at_the_proposed_time() {
+    let mut app = calendar_fixture();
+    for calendar in &mut app.calendar_view.calendars {
+        calendar.features = vec!["write".into()];
+    }
+    let handover = proposed_handover(&app);
+    app.overlay = Overlay::EventCard(Box::new(crate::tui::app::EventCardOverlay::new(
+        handover.clone(),
+    )));
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    app.handle_key(key('p'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("p opens the form: {:?}", app.status_message);
+    };
+    assert_eq!(
+        (form.date.as_str(), form.start.as_str(), form.end.as_str()),
+        ("2026-08-04", "14:00", "15:00"),
+        "two Tabs come back to the first proposal, Bob's, in the view's zone"
+    );
+    assert_eq!(form.row, EventFormRow::Start);
+    assert!(app
+        .status_message
+        .as_deref()
+        .is_some_and(|m| m.starts_with("The form holds Bob's proposed time")));
+    let fields = form.changed_fields();
+    assert_eq!(fields.start.as_deref(), Some("2026-08-04T14:00"));
+    assert_eq!(fields.end.as_deref(), Some("2026-08-04T15:00"));
+    assert_eq!(fields.summary, None);
+
+    app.overlay = Overlay::EventCard(Box::new(crate::tui::app::EventCardOverlay::new(
+        handover.clone(),
+    )));
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    app.handle_key(key('p'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("p opens the form");
+    };
+    assert_eq!(
+        (form.date.as_str(), form.start.as_str()),
+        ("2026-08-03", "11:00")
+    );
+
+    let refused = |app: &mut App, event: mp_protocol::calendar::CalendarEvent| {
+        app.overlay = Overlay::EventCard(Box::new(crate::tui::app::EventCardOverlay::new(event)));
+        app.handle_key(key('p'));
+        assert!(
+            matches!(app.overlay, Overlay::EventCard(_)),
+            "the card stays"
+        );
+        app.status_message.clone().unwrap_or_default()
+    };
+    let mut theirs = handover.clone();
+    theirs.is_organizer = false;
+    let line = refused(&mut app, theirs);
+    assert!(
+        line.starts_with("Only the organizer takes a proposed time"),
+        "{line}"
+    );
+    let mut occurrence = handover.clone();
+    occurrence.kind = "occurrence".into();
+    occurrence.series_master_id = Some("ev-series".into());
+    let line = refused(&mut app, occurrence);
+    assert!(line.contains("part of a recurring series"), "{line}");
+    let mut nobody = handover;
+    for attendee in &mut nobody.attendees {
+        attendee.proposed_time = None;
+    }
+    let line = refused(&mut app, nobody);
+    assert!(line.starts_with("Nobody proposed a new time"), "{line}");
+}
+
+/// `V` offers a proposed time on a server event whose organizer accepts
+/// proposals on a calendar that offers them, and on no other; the overlay
+/// reads its times in the view's zone.
+#[test]
+fn v_offers_a_proposed_time_where_the_organizer_and_the_calendar_take_one() {
+    let mut app = calendar_fixture();
+    let jour = app.calendar_view.events[1].clone();
+    assert_eq!(jour.id, "ev-jour-1");
+    let propose = |app: &mut App, event: &mp_protocol::calendar::CalendarEvent| {
+        app.overlay = Overlay::None;
+        app.open_rsvp_overlay_for(event);
+        match &app.overlay {
+            Overlay::Rsvp(overlay) => (overlay.propose, overlay.zone.clone()),
+            _ => panic!("V opens the overlay: {:?}", app.status_message),
+        }
+    };
+    for calendar in &mut app.calendar_view.calendars {
+        calendar.features = vec!["propose-time".into()];
+    }
+    assert_eq!(
+        propose(&mut app, &jour),
+        (true, "Europe/Berlin".to_string())
+    );
+    let mut fixed = jour.clone();
+    fixed.allow_new_time_proposals = false;
+    assert!(!propose(&mut app, &fixed).0);
+    for calendar in &mut app.calendar_view.calendars {
+        calendar.features.clear();
+    }
+    assert!(
+        !propose(&mut app, &jour).0,
+        "the backend offers no proposals"
+    );
+    let colloquium = app
+        .calendar_view
+        .events
+        .iter()
+        .find(|e| e.id == "imip:3")
+        .cloned()
+        .unwrap();
+    assert!(
+        !propose(&mut app, &colloquium).0,
+        "an invitation mail's event"
+    );
+}
+
 /// A comment longer than its row shows its tail while it is typed, after an
 /// ellipsis, so the last characters and the caret stay in view.
 #[test]
@@ -551,6 +738,7 @@ fn an_answer_is_one_event_respond_with_its_comment_and_choice() {
             choice: RsvpChoice::Tentative,
             comment: Some("running late".to_string()),
             send_response: false,
+            proposed: None,
         },
     ));
     let made = door.0.lock().unwrap().clone();
