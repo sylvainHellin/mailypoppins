@@ -262,6 +262,11 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         handled();
         return run("back");
       }
+      // Desktop only: Cmd+P opens the palette beside the TUI's `:` and Ctrl+p,
+      // the macOS habit; no menu item takes it (src-tauri/src/menu.rs).
+      if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "p") {
+        return handled(), run("open_palette");
+      }
       if (e.metaKey || e.altKey) return;
 
       if (e.ctrlKey) {

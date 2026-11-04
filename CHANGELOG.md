@@ -69,6 +69,7 @@ All notable changes to this project are documented in this file.
 - Event cards in the CLI, the TUI and the desktop app show a series' rule in words and whether an occurrence was changed, the Teams meeting, each attendee's proposed time, and whether the organizer accepts new times or asks for an answer; an invitation mail's series reads in the same words as the server's (PERSO-255).
   `mp event show --json` adds the occurrence kind, the meeting flags and the occurrence's series with its structured rule, and `calendar.list` reports each calendar's features.
 - Calendar backend: a Graph calendar can create, update, cancel and delete events and dismiss or snooze their reminders on the server, sending each time in its Windows zone, looked up for any IANA zone in a table built from every CLDR territory row and alias; event creation and the reminders call it, and the update, cancel and delete wait for their slices (PERSO-255).
+- Desktop: Cmd+P opens the command palette, beside `:` and Ctrl+P; the palette row and the key help list it.
 
 ### Changed
 - `mp delete`, and any delete a client asks to settle, of a message another client already moved or deleted before the next sync (the phone, Outlook) now succeeds and the message stays deleted, on IMAP and on Microsoft 365 (Graph) accounts, instead of failing with "not found" (PERSO-245).
@@ -111,6 +112,7 @@ All notable changes to this project are documented in this file.
   The desktop's account totals count synced mailboxes only.
 - A mailbox name matches a store key first, then a sidebar label, then a server name, in every client, so a folder called Trash is reached by its name rather than the folder the server marks as trash (#0141).
 - Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
+- Desktop: a palette search ranks a match in an action's name above the same match in its section or keys, hides actions whose letters only turn up scattered (`test` no longer lists Toggle flag/star), and lists the action you ran from the palette most recently first among equal matches, also after a restart.
 
 ### Fixed
 - A store synced by an earlier build re-reads its server calendar in full at the first sync after the upgrade, so an occurrence shows its series rule and kind and a Teams meeting shows as one without `mp calendar rebuild`; the cached events stay on screen until the new baseline replaces them (PERSO-255).

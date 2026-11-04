@@ -1183,7 +1183,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `Tab`/`Shift+Tab`: cycle panes; `gm`, `gl`, `gr`: the sidebar, the list and the reader, as in the TUI; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: the account picker (see Model, "Accounts in the sidebar").
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
-- `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts and on a conversation's draft member the draft's file path (PERSO-100, #0142).
+- `:`, `Ctrl+p` or `Cmd+p`: the command palette, `Cmd+p` a desktop key, which the palette row and the key help's DESKTOP section list (`DESKTOP_KEYS` in `src/keymap/catalog.ts`); `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts and on a conversation's draft member the draft's file path (PERSO-100, #0142).
 - `Escape`: in a full-pane view, back to Mail; with the outbox shown and the focus outside the reader, back to the mailbox list; else clear the marks when any are set and the outbox is not shown; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
 - `Enter` in the field: search the store, or the server for a query only it can answer; `Shift+Enter`: search the server; `ff`: the Server Search form (see Search).
 - `Cmd+[` or `Alt+Left`: back through the focus history.
@@ -1213,6 +1213,13 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
 A held key repeats, in the list and in the embedded editor alike: on macOS the Rust layer registers `ApplePressAndHoldEnabled = false` in the app's `NSUserDefaults` registration domain at startup, since the press-and-hold accent popup otherwise swallows key repeat in WKWebView; a user's own `defaults write dev.mailypoppins.desktop ApplePressAndHoldEnabled -bool true` still wins, and brings the accent popup back.
 The key help (`?`) opens with its filter focused and narrows its rows as the user types to those whose section, key or description contains the text, ignoring case, as the TUI's filter does.
+`Cmd+p` follows `Ctrl+p`: a text field and the embedded editor keep it, and the View menu's "Command Palette…" carries no accelerator, which would take it from them before the page sees it.
+
+The palette lists every action under its section; a search flattens the sections, names each row's section, and ranks the rows with `rankPalette` (`components/palette/rank.ts`), cmdk's own filter off.
+Each word of the query must match the start of a word of the row's label or section, or, at three letters or more, a run inside a word of its label; the whole query equal to one of the row's keys (`ff`, `x`, `Ctrl+p`) matches too, case-exact above another case (`X` the dismiss, `x` the send).
+A row whose letters only turn up scattered is hidden, so `test` lists "Show a test reminder notification" alone, never "Toggle flag/star".
+A match in the label counts twice the same match in the section or the keys, a whole word above a word's start above a run inside a word, and the scores of the query's words add up: `cal` lists "Switch to Calendar view" and "Show or hide calendars" before the rest of the CALENDAR rows, and `go` the Go rows before "Open outbox", matched by its key.
+Equal scores list the action last run from the palette first (`prefs.paletteRecent`, the last 30, stored with the other prefs), then in catalog order.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
 A KEYMAP key the desktop does not bind (such as `gt`, the TUI's jump to date) shows a notice saying so; the palette lists the same actions disabled, with the badge.
 No row carries an M3 or M4 badge any more.

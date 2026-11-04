@@ -310,6 +310,15 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   },
 };
 
+/**
+ * The desktop's own keys for a KEYMAP row, by its description, after the
+ * TUI's: the palette row shows them, and the key help's DESKTOP section.
+ */
+export const DESKTOP_KEYS: Record<string, string[]> = {
+  // The macOS habit (useKeymap.ts); no menu item claims it.
+  "Command palette (run an action by name)": ["Cmd+p"],
+};
+
 export function bindingFor(section: string, action: string): Binding {
   return (
     SECTION_OVERRIDES[section]?.[action] ??
@@ -328,7 +337,8 @@ export type PaletteEntry = {
 
 /**
  * Every KEYMAP row, one entry per description within a section (`:` and
- * `Ctrl+p` are one entry with two keys), in KEYMAP order.
+ * `Ctrl+p` are one entry with two keys), in KEYMAP order, with the
+ * desktop's own keys (`DESKTOP_KEYS`) last.
  */
 export function paletteEntries(sections: KeymapSection[] = SECTIONS): PaletteEntry[] {
   const out: PaletteEntry[] = [];
@@ -352,6 +362,7 @@ export function paletteEntries(sections: KeymapSection[] = SECTIONS): PaletteEnt
       seen.set(b.action, entry);
       out.push(entry);
     }
+    for (const [action, keys] of Object.entries(DESKTOP_KEYS)) seen.get(action)?.keys.push(...keys);
   }
   return out;
 }

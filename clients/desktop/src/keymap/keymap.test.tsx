@@ -130,7 +130,7 @@ describe("keyboard routing", () => {
     expect(await screen.findByRole("listbox", { name: "Archive messages" })).toBeInTheDocument();
   });
 
-  it(": and Ctrl+p open the palette, ? the key help", async () => {
+  it(":, Ctrl+p and Cmd+p open the palette, ? the key help", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.keyboard(":");
@@ -139,6 +139,12 @@ describe("keyboard routing", () => {
     await user.keyboard("{Control>}p{/Control}");
     expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
+    await user.keyboard("{Meta>}p{/Meta}");
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    // Cmd+Shift+P is not the palette's.
+    await user.keyboard("{Meta>}{Shift>}P{/Shift}{/Meta}");
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
     await user.keyboard("?");
     expect(await screen.findByRole("dialog", { name: "Keys" })).toBeInTheDocument();
   });
@@ -153,6 +159,10 @@ describe("keyboard routing", () => {
     expect(selectedSubject()).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(input).toHaveValue("j:");
+    // The palette's Ctrl+p and Cmd+p stay the field's, as `:` does.
+    await user.keyboard("{Control>}p{/Control}{Meta>}p{/Meta}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(input).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(input).not.toHaveFocus();
   });

@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/command";
 import { BadgeFor } from "@/components/palette/BadgeFor";
 import { Kbd } from "@/components/ui/kbd";
-import { bindingFor, GUI_ENTRIES, SECTIONS, type Badge } from "@/keymap/catalog";
+import { bindingFor, DESKTOP_KEYS, GUI_ENTRIES, SECTIONS, type Badge } from "@/keymap/catalog";
 
 export type KeyHelpProps = { open: boolean; onOpenChange: (open: boolean) => void };
 
@@ -35,11 +35,14 @@ const HELP_SECTIONS: Section[] = [
   })),
   {
     title: "DESKTOP",
-    rows: GUI_ENTRIES.filter((e) => e.keys.length > 0).map((e) => ({
-      key: e.keys.join(" / "),
-      label: e.label,
-      badge: null,
-    })),
+    rows: [
+      ...Object.entries(DESKTOP_KEYS).map(([label, keys]) => ({ key: keys.join(" / "), label, badge: null })),
+      ...GUI_ENTRIES.filter((e) => e.keys.length > 0).map((e) => ({
+        key: e.keys.join(" / "),
+        label: e.label,
+        badge: null,
+      })),
+    ],
   },
 ];
 
