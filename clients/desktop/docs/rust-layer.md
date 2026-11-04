@@ -159,9 +159,10 @@ The type blocks in this document are for reading, and the generated files are th
 | `calendar_freebusy` | `params` (`CalendarFreeBusyParams`) | `CalendarFreeBusyResult`, once the query has settled |
 | `event_respond` | `account`, `event`, `response: "accept" \| "tentative" \| "decline"`, `comment?`, `send_response?` | `{ operation_id }` |
 | `event_create` | `params: EventCreateParams` | `EventCreateStarted` (`{ operation_id, transaction_id }`) |
-| `event_update` | `params: EventUpdateParams` (`{account, event, fields}`, the fields that changed) | `{ operation_id }` |
-| `event_cancel` | `account`, `event`, `comment?` | `{ operation_id }` |
-| `event_delete` | `account`, `event` | `{ operation_id }` |
+| `event_update` | `params: EventUpdateParams` (`{account, event, scope?, fields}`, the fields that changed) | `{ operation_id }` |
+| `event_cancel` | `account`, `event`, `comment?`, `scope?` (`occurrence` or `series`) | `{ operation_id }` |
+| `event_delete` | `account`, `event`, `scope?` | `{ operation_id }` |
+| `event_get` | `account`, `event` | `EventGetResult` (an event or a series master, with `series` on an occurrence and a master) |
 | `invite_source_open` | `account`, `row_id` (an invitation mail's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
 | `invite_get` | `account`, `row_id` | `InviteCard` (the event and its server `event_id`), or `null` for a message with no invitation |
 | `invite_refusal` | `account` | `InviteRefusal` |
@@ -398,7 +399,8 @@ A daemon refusal of the start comes back as the daemon's own sentence with its c
 The daemon refuses nothing about the event itself: an answer to the user's own or to a cancelled event is the frontend's to prevent, as it is the TUI's; no probe runs ahead of the call.
 
 `event_update`, `event_cancel` and `event_delete` (PERSO-255) start `event.update`, `event.cancel` and `event.delete` and await each as `kind: "event_change"`.
-A blank cancel comment is none; every refusal (an attendee's change beyond the reminder, a cancel of someone else's meeting, a delete of a live meeting, an event of a series) is the daemon's own sentence with its code, and nothing is checked ahead of the call.
+A blank cancel comment is none, and `scope` (on `event_update` inside its params) names an occurrence alone or its whole series; every refusal (an attendee's change beyond the reminder, a cancel of someone else's meeting, a delete of a live meeting, an occurrence without a scope) is the daemon's own sentence with its code, and nothing is checked ahead of the call.
+`event_get` is a query on the door's short budget: the whole series' form reads the master and its rule through it.
 
 `invite_refusal` answers whether an account can send invitations at all, for the New invitation form.
 The daemon refuses `send.invite` on a Graph account (`ANO-4`) before it looks at anything else, and `calendar.rsvp` too, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.
@@ -1126,6 +1128,7 @@ The server calendar (PERSO-200) comes from `calendar-server.json`: `home` has a 
 The week of Monday 12 October 2099 holds the first occurrence of a weekly planning on Tuesday (its second on Tuesday the 20th), on Wednesday a design review with a Teams link, the steering committee of row 1008 as `imip:1008` and a one-to-one the user organizes, the three overlapping, and on Friday an all-day company holiday; the dentist of row 9201 is on 1 December.
 `calendar.list` answers the calendars, of one account with `account`; `calendar.set_visibility` flips one, refuses an unknown one with `-32602`, and publishes `calendar.changed`.
 `calendar.view` answers the events of the visible calendars (every calendar with `include_hidden`) that overlap the range, a timed one by its instants and an all-day one by its dates in the range's own offset, in start order, with the range in UTC and a fixed window.
+`series` holds the weekly planning's master (`AAMkAD-weekly`) and its rule: `event.get` answers it, and an occurrence with its series; `event.update`, `event.cancel` and `event.delete` take the daemon's `scope` with its refusals, an occurrence's update making it an exception and a series' reaching the occurrences not changed apart, a series' cancel or delete taking every occurrence; a recurring `event.create` makes a master and its occurrences from the start at the rule's step (`count`, else three, none past `until`), each named by the master's id and its date.
 `event.respond` refuses a word it does not take, an unknown event, `send_response: false` on an `imip:` event, and `send_response: false` with a proposed time or a comment, with the daemon's sentence; otherwise the operation runs for the RSVP delay, the event's `own_response` and the user's attendee status (and an `imip:` event's agenda row) become the answer, `calendar.changed` says so, and it settles with an `EventRespondResult`, `delivered` as `send_response`; `rsvp_fail` fails the next one with the transport error.
 
 `send.invite` refuses in `plan_invite`'s order with the daemon's words: `home` with the Graph sentence, then a missing subject, a missing start, both or neither of `end` and `duration`, and no recipient in `to` or `cc`; it does not parse the times.

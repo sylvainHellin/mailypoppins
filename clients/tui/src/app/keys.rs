@@ -29,6 +29,7 @@ impl App {
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
             Overlay::EventForm(_) => return self.handle_event_form_key(key),
             Overlay::EventRemove(_) => return self.handle_event_remove_key(key),
+            Overlay::EventScope(_) => return self.handle_event_scope_key(key),
             Overlay::Calendars(_) => return self.handle_calendars_overlay_key(key),
             Overlay::EventCard(_) => return self.handle_event_card_key(key),
             Overlay::Reminders(_) => return self.handle_reminders_overlay_key(key),
@@ -1999,7 +2000,8 @@ impl App {
     /// The event form's keys (PERSO-255). `Tab`, `Shift+Tab` and the arrows
     /// walk the rows; a text row takes every character typed; `Space` flips
     /// the all-day and Teams switches; `Left` and `Right` change the
-    /// calendar and the show-as; `Enter` on the description opens `$EDITOR`
+    /// calendar, the show-as and the repeat pattern; `Enter` on the
+    /// description opens `$EDITOR`
     /// and anywhere else creates the event (or, on an edit form, sends what
     /// changed), unless a field is wrong, which the form names; `Esc` closes
     /// the form and drops what was typed.
@@ -2015,6 +2017,8 @@ impl App {
             KeyCode::Right if form.row == EventFormRow::Calendar => form.cycle_calendar(true),
             KeyCode::Left if form.row == EventFormRow::ShowAs => form.cycle_show_as(false),
             KeyCode::Right if form.row == EventFormRow::ShowAs => form.cycle_show_as(true),
+            KeyCode::Left if form.row == EventFormRow::Repeat => form.cycle_repeat(false),
+            KeyCode::Right if form.row == EventFormRow::Repeat => form.cycle_repeat(true),
             KeyCode::Char(' ') if form.row == EventFormRow::AllDay => form.toggle_all_day(),
             KeyCode::Char(' ') if form.row == EventFormRow::Teams => form.toggle_teams(),
             KeyCode::Char(c) if typing => {
@@ -2094,6 +2098,36 @@ impl App {
             self.push_action(Action::RemoveEvent(overlay));
             self.promote_pending_error();
         }
+        None
+    }
+
+    /// The scope chooser's keys (PERSO-255): `o` picks this occurrence and
+    /// `s` the whole series at once; the arrows, `j` and `k` move between
+    /// the two and `Enter` takes the one under the cursor; `Esc` and `q`
+    /// leave the event as it is.
+    fn handle_event_scope_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::EventScope(chooser) = &mut self.overlay else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') => {
+                chooser.series = !chooser.series;
+                return None;
+            }
+            KeyCode::Char('o') => chooser.series = false,
+            KeyCode::Char('s') => chooser.series = true,
+            KeyCode::Enter => {}
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_overlay();
+                return None;
+            }
+            _ => return None,
+        }
+        let Overlay::EventScope(chooser) = std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return None;
+        };
+        self.choose_event_scope(*chooser);
         None
     }
 

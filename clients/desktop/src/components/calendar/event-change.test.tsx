@@ -1,21 +1,23 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { mock, settleEventChange } from "@/test/tauri-mock";
+import { mock, settleEventChange, settleEventCreate } from "@/test/tauri-mock";
 import {
   changedFields,
   editDialogFor,
   editProblem,
   NOTHING_CHANGED,
+  openEventScope,
+  openEventSeriesForm,
   ORGANIZER_ONLY,
   proposalDialogFor,
   proposalRefusal,
   removeDialogFor,
   RESTARTED_REMOVE,
 } from "@/app/eventChange";
-import { NO_TITLE } from "@/app/eventForm";
-import type { CalendarEvent, CalendarInfo } from "@/protocol/types";
-import type { EventDialog } from "@/app/state";
+import { NO_TITLE, openEventDialog } from "@/app/eventForm";
+import type { CalendarEvent, CalendarInfo, CalendarRecurrence } from "@/protocol/types";
+import { initialState, type EventDialog } from "@/app/state";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const cursorEvent = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-event-id");
@@ -128,7 +130,7 @@ describe("the event change model", () => {
       cancel: false,
     });
     expect(removeDialogFor(event({ is_organizer: false, own_response: "accepted", organizer: { email: "kim@example.com" } }), calendars)).toMatch(/someone else's meeting/);
-    expect(removeDialogFor(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars)).toMatch(/recurring series/);
+    expect(removeDialogFor(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars, "series")).toMatchObject({ cancel: true, scope: "series" });
     expect(removeDialogFor(event({ calendar: "ro" }), calendars)).toMatch(/takes no changes/);
     expect(editDialogFor(event({ id: "imip:7" }), calendars)).toMatch(/can only be answered/);
   });
@@ -147,12 +149,24 @@ describe("taking a proposed time (PERSO-255)", () => {
     expect(holiday.fields.allDay).toBe(false);
   });
 
-  it("refuses an attendee, an occurrence and a read-only calendar with the edit form's reasons", () => {
+  it("takes a proposal on an occurrence for it alone, with no chooser, and on a series master for the series", () => {
+    const slot = { start: "2099-10-15T12:00:00Z", end: "2099-10-15T13:30:00Z" };
+    const occurrence = event({ kind: "occurrence", series_master_id: "ev-series", recurrence: "Weekly on Wednesday" });
+    expect(proposalRefusal(occurrence, calendars)).toBeNull();
+    const one = proposalDialogFor(occurrence, calendars, slot);
+    if (typeof one === "string") throw new Error(one);
+    expect(one.edit?.scope).toBe("occurrence");
+    expect(one.fields.repeat.series).toBe("Weekly on Wednesday");
+    expect(changedFields(one, "Europe/Berlin")).toEqual({ start: "2099-10-15T14:00", end: "2099-10-15T15:30", all_day: false, zone: "Europe/Berlin" });
+    const series = proposalDialogFor(event({ kind: "series-master", recurrence: "Weekly on Wednesday" }), calendars, slot);
+    if (typeof series === "string") throw new Error(series);
+    expect(series.edit?.scope).toBeNull();
+    expect(changedFields(series, "Europe/Berlin")).toMatchObject({ start: "2099-10-15T14:00", end: "2099-10-15T15:30" });
+  });
+
+  it("refuses an attendee and a read-only calendar with the edit form's reasons", () => {
     expect(proposalRefusal(event(), calendars)).toBeNull();
     expect(proposalRefusal(event({ own_response: "accepted", is_organizer: false }), calendars)).toBe("Only the organizer takes a proposed time");
-    expect(proposalRefusal(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars)).toBe(
-      "Budget is part of a recurring series, which mp cannot change yet",
-    );
     expect(proposalRefusal(event({ calendar: "ro" }), calendars)).toBe("The calendar Shared takes no changes from mp");
   });
 
@@ -318,5 +332,129 @@ describe("changing an event in the Calendar view", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Cancel the meeting?" })).toBeNull());
     act(() => void settleEventChange());
     await noticed(/Cancelled 1:1 with Robin; told /);
+  });
+});
+
+describe("an occurrence of a series", () => {
+  const weekly: CalendarRecurrence = { frequency: "weekly", interval: 1, weekdays: ["wednesday"], count: 4 };
+
+  it("opens the form on the occurrence naming its series, or on the series with its rule, sent only when it changed", () => {
+    const occurrence = event({ kind: "occurrence", series_master_id: "ev-series", recurrence: "Weekly on Wednesday" });
+    const alone = editDialogFor(occurrence, calendars, "occurrence") as EventDialog;
+    expect(alone.edit?.scope).toBe("occurrence");
+    expect(alone.fields.repeat.series).toBe("Weekly on Wednesday");
+    const moved: EventDialog = { ...alone, fields: { ...alone.fields, location: "Room 2" } };
+    expect(changedFields(moved, "Europe/Berlin")).toEqual({ location: "Room 2" });
+
+    const master = event({ id: "ev-series", kind: "series-master", recurrence: "Weekly on Wednesday (4 times)" });
+    const series = editDialogFor(master, calendars, "series", weekly) as EventDialog;
+    expect(series.edit?.scope).toBe("series");
+    expect(series.fields.repeat).toMatchObject({ pattern: "weekly", on: ["wednesday"], ends: "count", count: "4" });
+    expect(editProblem(series)).toBe(NOTHING_CHANGED);
+    const renamed: EventDialog = { ...series, fields: { ...series.fields, title: "Budget, weekly" } };
+    expect(changedFields(renamed, "Europe/Berlin")).toEqual({ summary: "Budget, weekly" });
+    const shorter: EventDialog = { ...series, fields: { ...series.fields, repeat: { ...series.fields.repeat, count: "2" } } };
+    expect(changedFields(shorter, "Europe/Berlin")).toEqual({ recurrence: { frequency: "weekly", interval: 1, weekdays: ["wednesday"], count: 2 } });
+
+    const odd: CalendarRecurrence = { frequency: "yearly", interval: 1, weekdays: ["thursday"], week_index: "fourth", month: 11 };
+    const kept = editDialogFor(master, calendars, "series", odd) as EventDialog;
+    expect(kept.fields.repeat).toMatchObject({ pattern: null, kept: odd });
+    expect(changedFields({ ...kept, fields: { ...kept.fields, title: "Thanksgiving" } }, "Europe/Berlin")).toEqual({ summary: "Thanksgiving" });
+  });
+
+  it("opens the series form event_get answered only while its chooser is still open", () => {
+    const occurrence = event({ kind: "occurrence", series_master_id: "ev-series" });
+    const chosen = { event: occurrence, remove: false };
+    const asking = openEventScope(initialState(), chosen);
+    const series = editDialogFor(event({ id: "ev-series", kind: "series-master" }), calendars, "series", weekly) as EventDialog;
+    expect(openEventSeriesForm(asking, chosen, series)).toMatchObject({ overlay: "event", eventDialog: series, eventScopeDialog: null });
+    // Escape closed the chooser before the reply came.
+    const kept = { ...asking, overlay: null, eventScopeDialog: null };
+    expect(openEventSeriesForm(kept, chosen, series)).toBe(kept);
+    // `o` opened the occurrence's form before the reply came.
+    const alone = openEventDialog(asking, editDialogFor(occurrence, calendars, "occurrence") as EventDialog);
+    expect(openEventSeriesForm(alone, chosen, series)).toBe(alone);
+  });
+
+  it("E on an occurrence asks its scope; the whole series reads the master through event_get and saves it in the series scope", async () => {
+    const r = await calendarOn("AAMkAD-weekly-20991020");
+    await r.user.keyboard("E");
+    const ask = await screen.findByRole("dialog", { name: "Edit a recurring event" });
+    expect(ask).toHaveTextContent("Weekly planning, Weekly on Tuesday");
+    await r.user.click(within(ask).getByRole("button", { name: /The whole series/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit event (your reminder and show-as)" });
+    expect(callsOf("event_get")).toEqual([{ account: "home", event: "AAMkAD-weekly" }]);
+    expect(dialog.querySelector('[data-slot="repeat-summary"]')).toHaveTextContent("Weekly on Tuesday");
+    await r.user.click(within(dialog).getByLabelText("None"));
+    await r.user.type(within(dialog).getByLabelText("Reminder"), "30");
+    await r.user.click(within(dialog).getByRole("button", { name: /Save changes/ }));
+    await waitFor(() => expect(callsOf("event_update")).toHaveLength(1));
+    expect(callsOf("event_update")[0]).toEqual({ params: { account: "home", event: "AAMkAD-weekly", scope: "series", fields: { reminder: 30 } } });
+    act(() => void settleEventChange());
+    await waitFor(() => expect(mock.events.find((e) => e.id === "AAMkAD-weekly-20991013")?.reminder).toBe(30));
+    expect(mock.events.find((e) => e.id === "AAMkAD-weekly-20991020")?.reminder).toBeUndefined();
+
+    await r.user.keyboard("E");
+    const again = await screen.findByRole("dialog", { name: "Edit a recurring event" });
+    await r.user.keyboard("o");
+    const alone = await screen.findByRole("dialog", { name: "Edit event (your reminder and show-as)" });
+    expect(alone.querySelector('[data-slot="repeat-series"]')).toHaveTextContent("Weekly on Tuesday (this occurrence only)");
+    expect(again).not.toBeInTheDocument();
+    await r.user.click(within(alone).getByLabelText("None"));
+    await r.user.type(within(alone).getByLabelText("Reminder"), "5");
+    await r.user.click(within(alone).getByRole("button", { name: /Save changes/ }));
+    await waitFor(() => expect(callsOf("event_update")).toHaveLength(2));
+    expect(callsOf("event_update")[1]).toEqual({ params: { account: "home", event: "AAMkAD-weekly-20991020", scope: "occurrence", fields: { reminder: 5 } } });
+  });
+
+  it("D on someone else's occurrence says to decline it before asking any scope", async () => {
+    const r = await calendarOn("AAMkAD-weekly-20991020");
+    await r.user.keyboard("D");
+    await noticed(/Weekly planning is someone else's meeting/);
+    expect(screen.queryByRole("dialog", { name: /recurring event/ })).toBeNull();
+  });
+
+  it("the form makes a weekly series whose occurrences join the calendar, and D on one cancels the whole series", async () => {
+    const r = renderApp(1400);
+    await shellReady();
+    await r.user.keyboard(" a");
+    await screen.findByRole("region", { name: "Calendar" });
+    await r.user.click(screen.getByRole("button", { name: "New event" }));
+    const dialog = await screen.findByRole("dialog", { name: /New event/ });
+    await r.user.type(within(dialog).getByLabelText("Title"), "Standup");
+    const start = within(dialog).getByLabelText("Start");
+    await r.user.clear(start);
+    await r.user.type(start, "2099-10-14T09:00");
+    const end = within(dialog).getByLabelText("End");
+    await r.user.clear(end);
+    await r.user.type(end, "2099-10-14T09:15");
+    await r.user.type(within(dialog).getByLabelText("Attendees"), "robin@example.com");
+    await r.user.selectOptions(within(dialog).getByLabelText("Repeats"), "Weekly on Wednesday");
+    await r.user.selectOptions(within(dialog).getByLabelText("Ends"), "After");
+    await r.user.type(within(dialog).getByLabelText("Occurrences"), "3");
+    expect(dialog.querySelector('[data-slot="repeat-summary"]')).toHaveTextContent("Weekly on Wednesday (3 times)");
+    await r.user.click(within(dialog).getByRole("button", { name: /Create event/ }));
+    await waitFor(() => expect(callsOf("event_create")).toHaveLength(1));
+    const params = (callsOf("event_create")[0] as { params: { event: { recurrence?: CalendarRecurrence } } }).params;
+    expect(params.event.recurrence).toEqual({ frequency: "weekly", interval: 1, weekdays: [], count: 3 });
+    act(() => void settleEventCreate());
+    await waitFor(() => expect(mock.events.filter((e) => e.series_master_id?.startsWith("AAMk-created-")).length).toBe(3));
+    const first = mock.events.find((e) => e.series_master_id?.startsWith("AAMk-created-")) as CalendarEvent;
+    expect(first.recurrence).toBe("Weekly on Wednesday (3 times)");
+
+    await r.user.keyboard("gt");
+    await waitFor(() => expect(document.activeElement).toHaveAttribute("aria-label", "Jump to date"));
+    await r.user.keyboard("2099-10-14{Enter}");
+    await moveTo(r.user, first.id);
+    await r.user.keyboard("D");
+    const ask = await screen.findByRole("dialog", { name: "Cancel or delete a recurring event" });
+    await r.user.click(within(ask).getByRole("button", { name: /The whole series/ }));
+    const confirm = await screen.findByRole("dialog", { name: "Cancel the whole series?" });
+    await r.user.click(within(confirm).getByRole("button", { name: /Cancel meeting/ }));
+    await waitFor(() => expect(callsOf("event_cancel")).toHaveLength(1));
+    expect(callsOf("event_cancel")[0]).toEqual({ account: "home", event: first.id, comment: null, scope: "series" });
+    act(() => void settleEventChange());
+    await noticed(/Cancelled the series Standup; told robin@example.com/);
+    expect(mock.events.some((e) => e.series_master_id === first.series_master_id)).toBe(false);
   });
 });

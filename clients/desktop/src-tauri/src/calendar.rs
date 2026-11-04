@@ -60,7 +60,7 @@ use mp_client::queries;
 use mp_protocol::calendar::{
     CalendarFreeBusyParams, CalendarFreeBusyResult, CalendarInfo, CalendarViewParams,
     CalendarViewResult, EventCancelParams, EventCreateParams, EventCreateStarted,
-    EventDeleteParams, EventFrontmatter, EventProposedTime, EventUpdateParams,
+    EventDeleteParams, EventFrontmatter, EventGetResult, EventProposedTime, EventUpdateParams,
 };
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
@@ -333,17 +333,20 @@ pub fn event_update_on(
 }
 
 /// Cancel a meeting the user organizes, telling its attendees with an
-/// optional comment (a blank one is none), awaited as `event_change`.
+/// optional comment (a blank one is none), awaited as `event_change`;
+/// `scope` names an occurrence alone or its whole series.
 pub fn event_cancel_on(
     session: &SessionHandle,
     door: &Door,
     account: &str,
     event: &str,
     comment: Option<&str>,
+    scope: Option<&str>,
 ) -> Result<OperationStarted, GuiError> {
     let params = EventCancelParams {
         account: account.to_string(),
         event: event.to_string(),
+        scope: scope.map(str::to_string),
         comment: comment
             .map(str::trim)
             .filter(|c| !c.is_empty())
@@ -354,20 +357,36 @@ pub fn event_cancel_on(
     start_change(session, door, "event.cancel", params)
 }
 
-/// Delete an event that tells nobody, awaited as `event_change`.
+/// Delete an event that tells nobody, awaited as `event_change`; `scope`
+/// names an occurrence alone or its whole series.
 pub fn event_delete_on(
     session: &SessionHandle,
     door: &Door,
     account: &str,
     event: &str,
+    scope: Option<&str>,
 ) -> Result<OperationStarted, GuiError> {
     let params = EventDeleteParams {
         account: account.to_string(),
         event: event.to_string(),
+        scope: scope.map(str::to_string),
     };
     let params = serde_json::to_value(params)
         .map_err(|e| GuiError::protocol(format!("event.delete params: {e}")))?;
     start_change(session, door, "event.delete", params)
+}
+
+/// One event, or a series master, with the series of an occurrence: what
+/// the form on a whole series is filled from. An id the daemon does not
+/// hold is its sentence.
+pub fn event_get_on(door: &Door, account: &str, event: &str) -> Result<EventGetResult, GuiError> {
+    let q = Budgeted {
+        door,
+        budget: EVENT_BUDGET,
+    };
+    queries::event_get(&q, account, event)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+        .map_err(daemon_sentence)
 }
 
 /// Where row `row_id`'s `invite.ics` is written: one file per row, so the
@@ -654,29 +673,53 @@ pub async fn event_update(
     .await
 }
 
-/// Cancel a meeting, awaited as `event_change`.
+/// Cancel a meeting, an occurrence or a series in `scope`, awaited as
+/// `event_change`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn event_cancel(
     session: State<'_, SessionHandle>,
     account: String,
     event: String,
     comment: Option<String>,
+    scope: Option<String>,
 ) -> Result<OperationStarted, GuiError> {
     with_door(&session, move |session, door| {
-        event_cancel_on(session, door, &account, &event, comment.as_deref())
+        event_cancel_on(
+            session,
+            door,
+            &account,
+            &event,
+            comment.as_deref(),
+            scope.as_deref(),
+        )
     })
     .await
 }
 
-/// Delete an event, awaited as `event_change`.
+/// Delete an event, an occurrence or a series in `scope`, awaited as
+/// `event_change`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn event_delete(
     session: State<'_, SessionHandle>,
     account: String,
     event: String,
+    scope: Option<String>,
 ) -> Result<OperationStarted, GuiError> {
     with_door(&session, move |session, door| {
-        event_delete_on(session, door, &account, &event)
+        event_delete_on(session, door, &account, &event, scope.as_deref())
+    })
+    .await
+}
+
+/// One event or a series master, with its series.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn event_get(
+    session: State<'_, SessionHandle>,
+    account: String,
+    event: String,
+) -> Result<EventGetResult, GuiError> {
+    with_door(&session, move |_, door| {
+        event_get_on(door, &account, &event)
     })
     .await
 }
@@ -1206,6 +1249,7 @@ mod tests {
         let fields = |value: serde_json::Value| EventUpdateParams {
             account: "home".into(),
             event: "AAMkAD-robin".into(),
+            scope: None,
             fields: serde_json::from_value(value).expect("fields"),
         };
         let started = event_update_on(
@@ -1246,10 +1290,11 @@ mod tests {
                 code: Some(-32602)
             }
         );
-        let foreign =
-            event_cancel_on(&session, &door, "home", "AAMkAD-design", None).expect_err("refused");
+        let foreign = event_cancel_on(&session, &door, "home", "AAMkAD-design", None, None)
+            .expect_err("refused");
         assert!(foreign.message().contains("Only the organizer can cancel"));
-        let live = event_delete_on(&session, &door, "home", "AAMkAD-robin").expect_err("refused");
+        let live =
+            event_delete_on(&session, &door, "home", "AAMkAD-robin", None).expect_err("refused");
         assert!(live.message().contains("cancel it to tell them"));
 
         event_cancel_on(
@@ -1258,6 +1303,7 @@ mod tests {
             "home",
             "AAMkAD-robin",
             Some("  Postponed "),
+            None,
         )
         .expect("started");
         let (method, params) = f.calls().last().cloned().expect("a call");
@@ -1280,9 +1326,114 @@ mod tests {
             .expect("the new event")
             .id
             .clone();
-        event_delete_on(&session, &door, "home", &solo).expect("started");
+        event_delete_on(&session, &door, "home", &solo, None).expect("started");
         let week = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("week");
         assert!(week.events.iter().all(|e| e.id != solo));
+    }
+
+    /// The fixture's weekly series: `event_get` answers an occurrence with
+    /// its series and the master with itself; an occurrence's change names
+    /// its scope, an occurrence's own change makes it an exception and the
+    /// series' reaches the occurrences not changed apart; a recurring create
+    /// makes a series whose occurrences the week shows, and its cancel in the
+    /// series scope takes them all.
+    #[test]
+    fn a_series_is_read_and_changed_in_its_scope() {
+        let (door, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let got = event_get_on(&door, "home", "AAMkAD-weekly-20991013").expect("the occurrence");
+        let series = got.series.expect("its series");
+        assert_eq!(series.master_id, "AAMkAD-weekly");
+        assert_eq!(series.recurrence.expect("its rule").frequency, "weekly");
+        let master = event_get_on(&door, "home", "AAMkAD-weekly").expect("the master");
+        assert_eq!(master.event.kind, "series-master");
+
+        let update =
+            |event: &str, scope: Option<&str>, fields: serde_json::Value| EventUpdateParams {
+                account: "home".into(),
+                event: event.into(),
+                scope: scope.map(str::to_string),
+                fields: serde_json::from_value(fields).expect("fields"),
+            };
+        let unscoped = event_update_on(
+            &session,
+            &door,
+            &update("AAMkAD-weekly-20991013", None, json!({"reminder": 5})),
+        )
+        .expect_err("refused");
+        assert!(
+            unscoped.message().contains("name the scope"),
+            "{unscoped:?}"
+        );
+        event_update_on(
+            &session,
+            &door,
+            &update(
+                "AAMkAD-weekly-20991013",
+                Some("occurrence"),
+                json!({"reminder": 5}),
+            ),
+        )
+        .expect("started");
+        let (method, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(method, "event.update");
+        assert_eq!(params["scope"], "occurrence");
+        event_update_on(
+            &session,
+            &door,
+            &update(
+                "AAMkAD-weekly-20991013",
+                Some("series"),
+                json!({"reminder": 30}),
+            ),
+        )
+        .expect("started");
+        let (start, end) = ("2099-10-12T00:00:00+02:00", "2099-10-26T00:00:00+02:00");
+        let weeks = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("weeks");
+        let reminder = |id: &str| {
+            weeks
+                .events
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.reminder)
+        };
+        assert_eq!(
+            reminder("AAMkAD-weekly-20991013"),
+            Some(5),
+            "an exception now"
+        );
+        assert_eq!(
+            reminder("AAMkAD-weekly-20991020"),
+            None,
+            "an exception already"
+        );
+
+        let mut weekly = new_event("Standup");
+        weekly.event.recurrence = Some(
+            serde_json::from_value(json!({"frequency": "weekly", "interval": 1, "count": 2}))
+                .expect("a rule"),
+        );
+        let created = event_create_on(&session, &door, &weekly).expect("created");
+        let weeks = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("weeks");
+        let made: Vec<_> = weeks
+            .events
+            .iter()
+            .filter(|e| e.transaction_id.as_deref() == Some(created.transaction_id.as_str()))
+            .collect();
+        assert_eq!(made.len(), 2, "{made:?}");
+        assert!(made.iter().all(|e| e.kind == "occurrence"));
+        let first = made[0].id.clone();
+        event_cancel_on(&session, &door, "home", &first, None, Some("series")).expect("started");
+        let (method, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(
+            (method.as_str(), &params["scope"]),
+            ("event.cancel", &json!("series"))
+        );
+        let weeks = calendar_view_on(&door, start, end, Some("Europe/Berlin")).expect("weeks");
+        assert!(weeks
+            .events
+            .iter()
+            .all(|e| e.transaction_id.as_deref() != Some(created.transaction_id.as_str())));
     }
 
     fn fields() -> InviteFields {

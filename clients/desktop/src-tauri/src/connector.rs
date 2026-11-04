@@ -151,6 +151,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "event.update",
     "event.cancel",
     "event.delete",
+    "event.get",
     "event.respond",
     "send.invite",
     "contact.search",
@@ -1310,6 +1311,7 @@ mod tests {
             "event.update",
             "event.cancel",
             "event.delete",
+            "event.get",
             "event.respond",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");

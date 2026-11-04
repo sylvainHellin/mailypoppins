@@ -198,6 +198,9 @@ fn mode_label(app: &App, ctx: KeyCtx) -> String {
         KeyCtx::ServerSearch => "SEARCH",
         KeyCtx::Contacts => "CONTACTS",
         KeyCtx::Calendar => "CALENDAR",
+        // Like Message, never what `key_context()` returns: the card's keys
+        // are catalogued for the help overlay only.
+        KeyCtx::EventCard => "CALENDAR",
         KeyCtx::Activity => "ACTIVITY",
         KeyCtx::Help => "HELP",
     };

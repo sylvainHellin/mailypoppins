@@ -456,6 +456,60 @@ mod tests {
         assert_eq!(state.baselined_at, at(2, 2));
     }
 
+    /// An occurrence deleted in Outlook leaves the cache with the next
+    /// sync, though the delta re-sends its series without naming it, and a
+    /// series deleted there takes every occurrence along.
+    #[tokio::test]
+    async fn a_deletion_made_in_outlook_leaves_no_ghost_occurrence() {
+        let (_dir, store) = open();
+        let canned = FakeCalendarBackend::canned();
+        let mut master = event(&canned, "ev-weekly-2");
+        master.id = "ev-weekly".into();
+        master.kind = crate::calendar_model::EventKind::SeriesMaster;
+        master.series_master_id = None;
+        let series = crate::calendar_backend::SeriesInfo {
+            master_id: "ev-weekly".into(),
+            uid: "ev-weekly@example.com".into(),
+            recurrence: None,
+            master: Some(Box::new(master)),
+            zone: Some("Europe/Berlin".into()),
+        };
+        let fake = canned.with_series(vec![series]);
+        let mut next = event(&fake, "ev-weekly-2");
+        next.id = "ev-weekly-3".into();
+        next.time = EventTime::timed(at(17, 14), at(17, 15), "Europe/Berlin").unwrap();
+        fake.put_event(next);
+        sync_account(&store, &fake, "evoqs", at(1, 8))
+            .await
+            .unwrap();
+        assert_eq!(
+            cached(&store, false),
+            ["ev-meeting", "ev-holiday", "ev-weekly-2", "ev-weekly-3"]
+        );
+
+        fake.delete_in_outlook("ev-weekly-3");
+        let one = sync_account(&store, &fake, "evoqs", at(1, 9))
+            .await
+            .unwrap();
+        assert_eq!(one.baselines, 0);
+        assert!(one.changed());
+        assert_eq!(
+            cached(&store, false),
+            ["ev-meeting", "ev-holiday", "ev-weekly-2"]
+        );
+
+        fake.delete_in_outlook("ev-weekly");
+        let all = sync_account(&store, &fake, "evoqs", at(1, 10))
+            .await
+            .unwrap();
+        assert_eq!(all.baselines, 0);
+        assert_eq!(cached(&store, false), ["ev-meeting", "ev-holiday"]);
+        assert_eq!(
+            cache::get_series(&store, "evoqs", "ev-weekly").unwrap(),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn a_missing_scope_fails_the_account_and_writes_nothing() {
         let (_dir, store) = open();

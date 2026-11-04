@@ -39,6 +39,19 @@
 //! backend does with Graph's answer), an update patches it, a cancel or a
 //! delete removes it, and the next incremental sync reports each change.
 //!
+//! A series behaves as Graph's does (`.agents/research/
+//! 2026-11-04-graph-recurrence-probes.md`): a create with a rule makes a
+//! master, kept with the series (`series` in the spec), and expands its
+//! occurrences, each with an id of the master's plus its date, the master
+//! moved to the first of them; a write to the master's id answers the
+//! series, a new time or rule expanding the occurrences afresh (an exception
+//! reset, an occurrence the rule keeps keeping its id) and any other change
+//! reaching the occurrences that were not changed apart; a write to an
+//! occurrence makes it an exception. A sync after a change to a series
+//! reports its master and every occurrence again, and never an occurrence
+//! that left it: a cancelled or deleted occurrence, or one the new rule
+//! dropped. A cancelled or deleted series reports its master removed only.
+//!
 //! The daemon serves every account whose `calendar_backend` is not `none`
 //! from the fake, through [`FakeCalendarBackend::armed`]: one server per
 //! account, built from the spec once and kept for the life of the process,
@@ -52,7 +65,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::anyhow;
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Days, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -61,7 +74,8 @@ use super::{
 use crate::calendar_freebusy::{FreeBusyQuery, Schedule, ScheduleItem};
 use crate::calendar_model::{
     Attendee, AttendeeRole, Calendar, CalendarFeature, CalendarWindow, Event, EventKind, EventTime,
-    OnlineMeetingProvider, OwnResponse, Person, ResponseStatus, Sensitivity, ShowAs,
+    Frequency, OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus, Sensitivity,
+    ShowAs, WeekIndex, Weekday,
 };
 use crate::calendar_write::{AttendeeInput, EventInput, EventPatch, ProposedTime};
 
@@ -105,6 +119,10 @@ struct FakeState {
     /// The busy blocks [`CalendarBackend::free_busy`] answers, by address
     /// lowercased.
     free_busy: HashMap<String, Vec<ScheduleItem>>,
+    /// The series the fake holds, their masters with them: what a baseline
+    /// reports resolved, as Graph's does ([`SyncResult::series`]), so the
+    /// store's series cache fills.
+    series: Vec<SeriesInfo>,
 }
 
 impl FakeState {
@@ -200,9 +218,6 @@ pub struct FakeCalendarBackend {
     /// What the fake claims to serve ([`super::features`]): the spec's
     /// `features`, none unless a test names some.
     features: Vec<CalendarFeature>,
-    /// The series masters a baseline reports resolved, as Graph's does
-    /// ([`SyncResult::series`]), so the store's series cache fills.
-    series: Vec<SeriesInfo>,
 }
 
 impl FakeCalendarBackend {
@@ -237,6 +252,14 @@ impl FakeCalendarBackend {
         let mut state = self.state();
         state.events.retain(|known| known.id != id);
         state.changes.push(id.to_string());
+    }
+
+    /// Delete the event with `id` as Outlook does, as a server-side change:
+    /// a series master with all its occurrences, the next sync naming the
+    /// master alone; one occurrence silently, the next sync re-sending its
+    /// series without it.
+    pub fn delete_in_outlook(&self, id: &str) {
+        self.state().take_off(id);
     }
 
     /// Refuse every token handed out so far, as a server whose sync state
@@ -289,7 +312,7 @@ impl FakeCalendarBackend {
         fake.write_log = spec.write_log;
         fake.message_events = spec.message_events;
         fake.features = spec.features;
-        fake.series = spec.series;
+        fake.state().series = spec.series;
         fake.state().free_busy = spec
             .free_busy
             .into_iter()
@@ -340,10 +363,16 @@ impl FakeCalendarBackend {
         self
     }
 
-    /// Report `series` resolved at every baseline.
-    pub fn with_series(mut self, series: Vec<SeriesInfo>) -> Self {
-        self.series = series;
+    /// Hold `series`, which every baseline reports resolved and a write to
+    /// a master's id reaches.
+    pub fn with_series(self, series: Vec<SeriesInfo>) -> Self {
+        self.state().series = series;
         self
+    }
+
+    /// The series the fake holds now.
+    pub fn series(&self) -> Vec<SeriesInfo> {
+        self.state().series.clone()
     }
 
     /// Append each answer to `path` as a JSON line, besides keeping it.
@@ -591,6 +620,126 @@ fn created_event(calendar: &Calendar, id: &str, input: &EventInput, transaction_
     event
 }
 
+/// The most occurrences the fake expands a series into.
+const FAKE_MAX_OCCURRENCES: usize = 60;
+
+/// How far past its first day the fake expands a series without end.
+const FAKE_HORIZON_DAYS: u64 = 3 * 366;
+
+/// Whether `date` is a day `rule` places when the series starts on `first`.
+fn on_rule(rule: &Recurrence, first: NaiveDate, date: NaiveDate) -> bool {
+    use chrono::Datelike;
+    let interval = i64::from(rule.interval.max(1));
+    let weekday = Weekday::of_date(date);
+    let on_day = || match rule.week_index {
+        None => Some(date.day()) == rule.day_of_month,
+        Some(index) => {
+            rule.weekdays.contains(&weekday)
+                && match index {
+                    WeekIndex::Last => (date + Days::new(7)).month() != date.month(),
+                    _ => (date.day() - 1) / 7 + 1 == index.position() as u32,
+                }
+        }
+    };
+    let months = |d: NaiveDate| i64::from(d.year()) * 12 + i64::from(d.month0());
+    match rule.frequency {
+        Frequency::Daily => (date - first).num_days() % interval == 0,
+        Frequency::Weekly => {
+            let start_of_week = |d: NaiveDate| {
+                let from = rule.first_day_of_week.unwrap_or(Weekday::Monday);
+                let offset = (Weekday::ALL
+                    .iter()
+                    .position(|w| *w == Weekday::of_date(d))
+                    .unwrap()
+                    + 7
+                    - Weekday::ALL.iter().position(|w| *w == from).unwrap())
+                    % 7;
+                d - Days::new(offset as u64)
+            };
+            let weeks = (start_of_week(date) - start_of_week(first)).num_days() / 7;
+            rule.weekdays.contains(&weekday) && weeks % interval == 0
+        }
+        Frequency::Monthly => (months(date) - months(first)) % interval == 0 && on_day(),
+        Frequency::Yearly => {
+            i64::from(date.year() - first.year()) % interval == 0
+                && Some(date.month()) == rule.month
+                && on_day()
+        }
+    }
+}
+
+/// The days `rule` places from `first` on, within its end and the fake's
+/// bounds.
+fn occurrence_dates(rule: &Recurrence, first: NaiveDate) -> Vec<NaiveDate> {
+    let horizon = first + Days::new(FAKE_HORIZON_DAYS);
+    let last = rule.until.map_or(horizon, |until| until.min(horizon));
+    let limit = rule
+        .count
+        .map_or(FAKE_MAX_OCCURRENCES, |count| count as usize)
+        .min(FAKE_MAX_OCCURRENCES);
+    let mut dates = Vec::new();
+    let mut date = first;
+    while date <= last && dates.len() < limit {
+        if on_rule(rule, first, date) {
+            dates.push(date);
+        }
+        date = date + Days::new(1);
+    }
+    dates
+}
+
+/// `time` moved to `date`, keeping its wall clock in its zone and its
+/// length.
+fn time_on(time: &EventTime, date: NaiveDate) -> EventTime {
+    match time {
+        EventTime::Timed { start, end, zone } => {
+            let tz: chrono_tz::Tz = zone.parse().unwrap_or(chrono_tz::UTC);
+            let clock = start.with_timezone(&tz).time();
+            let moved = tz
+                .from_local_datetime(&date.and_time(clock))
+                .earliest()
+                .map_or(*start, |at| at.with_timezone(&Utc));
+            EventTime::Timed {
+                start: moved,
+                end: moved + (*end - *start),
+                zone: zone.clone(),
+            }
+        }
+        EventTime::AllDay { start, end } => EventTime::AllDay {
+            start: date,
+            end: date + (*end - *start),
+        },
+    }
+}
+
+/// The occurrences of the series `master` repeats by `rule`, ids of the
+/// master's plus their date, with the master moved to the first of them.
+fn expand(master: &mut Event, rule: &Recurrence) -> Vec<Event> {
+    let zone = master.time.zone().unwrap_or(chrono_tz::UTC);
+    let first = crate::calendar_write::first_day(&master.time, zone);
+    let dates = occurrence_dates(rule, rule.start.unwrap_or(first).max(first));
+    if let Some(date) = dates.first() {
+        master.time = time_on(&master.time, *date);
+    }
+    dates
+        .into_iter()
+        .map(|date| {
+            let mut occurrence = master.clone();
+            occurrence.id = format!("{}-{}", master.id, date.format("%Y%m%d"));
+            occurrence.kind = EventKind::Occurrence;
+            occurrence.series_master_id = Some(master.id.clone());
+            occurrence.time = time_on(&master.time, date);
+            occurrence.recurrence_id = Some(match &occurrence.time {
+                EventTime::Timed { start, .. } => {
+                    start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                }
+                EventTime::AllDay { start, .. } => start.to_string(),
+            });
+            occurrence
+        })
+        .collect()
+}
+
 /// `event` with the fields `patch` names changed.
 fn apply_patch(event: &mut Event, patch: &EventPatch) {
     if let Some(summary) = &patch.summary {
@@ -627,6 +776,86 @@ fn apply_patch(event: &mut Event, patch: &EventPatch) {
     if let Some(allow) = patch.allow_new_time_proposals {
         event.allow_new_time_proposals = allow;
     }
+    if let Some(rule) = &patch.recurrence {
+        event.recurrence = Some(rule.describe());
+    }
+}
+
+impl FakeState {
+    /// The series whose master is `id`.
+    fn series_of(&self, id: &str) -> Option<usize> {
+        self.series.iter().position(|series| series.master_id == id)
+    }
+
+    /// Replace the occurrences of the series at `at` with the ones its rule
+    /// places now, the master moved to the first of them.
+    fn expand_series(&mut self, at: usize) {
+        let series = &mut self.series[at];
+        let (Some(rule), Some(master)) = (series.recurrence.clone(), series.master.as_mut()) else {
+            return;
+        };
+        let occurrences = expand(master, &rule);
+        let id = series.master_id.clone();
+        self.events
+            .retain(|event| event.series_master_id.as_deref() != Some(id.as_str()));
+        self.events.extend(occurrences);
+    }
+
+    /// Patch the series at `at` through its master: a new time or rule
+    /// expands it afresh, any other change reaches the occurrences not
+    /// changed apart. Recorded as a change of the master, which a sync
+    /// answers with the series and its occurrences.
+    fn patch_series(&mut self, at: usize, patch: &EventPatch) -> BackendResult<SeriesInfo> {
+        let series = &mut self.series[at];
+        let master = series
+            .master
+            .as_mut()
+            .ok_or_else(|| anyhow!("the fake holds no master for {}", series.master_id))?;
+        apply_patch(master, patch);
+        if let Some(rule) = &patch.recurrence {
+            series.recurrence = Some(rule.clone());
+        }
+        let id = series.master_id.clone();
+        if patch.time.is_some() || patch.recurrence.is_some() {
+            self.expand_series(at);
+        } else {
+            let master = self.series[at].master.clone().expect("checked above");
+            for event in &mut self.events {
+                if event.series_master_id.as_deref() == Some(id.as_str())
+                    && event.kind == EventKind::Occurrence
+                {
+                    event.inherit_from(&master);
+                }
+            }
+        }
+        self.changes.push(id);
+        Ok(self.series[at].clone())
+    }
+
+    /// Take the event `id` off the server, as a cancel or a delete does: a
+    /// series with all its occurrences, recorded as its master removed; one
+    /// occurrence silently, its series recorded as changed, as Graph's delta
+    /// re-sends the series and never names the occurrence; any other event
+    /// as removed.
+    fn take_off(&mut self, id: &str) {
+        if let Some(at) = self.series_of(id) {
+            self.series.remove(at);
+            self.events
+                .retain(|event| event.series_master_id.as_deref() != Some(id));
+            self.changes.push(id.to_string());
+            return;
+        }
+        let master = self
+            .events
+            .iter()
+            .find(|event| event.id == id)
+            .and_then(|event| event.series_master_id.clone());
+        self.events.retain(|event| event.id != id);
+        match master {
+            Some(master) => self.changes.push(master),
+            None => self.changes.push(id.to_string()),
+        }
+    }
 }
 
 impl CalendarBackend for FakeCalendarBackend {
@@ -638,7 +867,8 @@ impl CalendarBackend for FakeCalendarBackend {
     /// A baseline (no token) returns the calendar's events in the window, all
     /// day ones seen from UTC; one of the fake's own tokens returns what
     /// changed since it was handed out, an event changed out of the calendar
-    /// or the window as removed; any other token, or one from before
+    /// or the window as removed and a changed series whole, as re-sent
+    /// ([`SyncResult::resent_series`]); any other token, or one from before
     /// [`FakeCalendarBackend::expire_tokens`], is refused the way Graph
     /// answers 410, with a baseline.
     async fn sync_window(
@@ -675,7 +905,7 @@ impl CalendarBackend for FakeCalendarBackend {
                 token: next_token,
                 full_resync: true,
                 path: Some("fake".into()),
-                series: self.series.clone(),
+                series: state.series.clone(),
                 ..Default::default()
             });
         };
@@ -691,8 +921,25 @@ impl CalendarBackend for FakeCalendarBackend {
             ..Default::default()
         };
         for id in changed {
+            if let Some(at) = state.series_of(id) {
+                result.series.push(state.series[at].clone());
+                result.resent_series.push(id.to_string());
+                for event in &state.events {
+                    if event.series_master_id.as_deref() == Some(id)
+                        && belongs(event)
+                        && !result.upserts.iter().any(|known| known.id == event.id)
+                    {
+                        result.upserts.push(event.clone());
+                    }
+                }
+                continue;
+            }
             match state.events.iter().find(|e| e.id == id && belongs(e)) {
-                Some(event) => result.upserts.push(event.clone()),
+                Some(event) => {
+                    if !result.upserts.iter().any(|known| known.id == event.id) {
+                        result.upserts.push(event.clone());
+                    }
+                }
                 None => result.removed.push(id.to_string()),
             }
         }
@@ -732,6 +979,57 @@ impl CalendarBackend for FakeCalendarBackend {
         self.check_scope()?;
         if !calendar.can_edit {
             return Err(anyhow!("the calendar {} is read-only", calendar.name).into());
+        }
+        let series = {
+            let mut state = self.state();
+            let made = state
+                .transactions
+                .get(transaction_id)
+                .and_then(|(id, last)| Some((state.series_of(id)?, last == input)));
+            match made {
+                Some((at, true)) => Some(state.series[at].clone()),
+                Some((at, false)) => {
+                    let series = state.patch_series(at, &input.as_patch())?;
+                    state.transactions.insert(
+                        transaction_id.to_string(),
+                        (series.master_id.clone(), input.clone()),
+                    );
+                    Some(series)
+                }
+                None if input.recurrence.is_some() => {
+                    state.created += 1;
+                    let id = format!("fake-created-{}", state.created);
+                    let mut master = created_event(calendar, &id, input, transaction_id);
+                    master.kind = EventKind::SeriesMaster;
+                    let rule = input.recurrence.clone().expect("checked above");
+                    master.recurrence = Some(rule.describe());
+                    let zone = master.time.zone().map(|tz| tz.name().to_string());
+                    state.series.push(SeriesInfo {
+                        master_id: id.clone(),
+                        uid: master.uid.clone(),
+                        recurrence: Some(rule),
+                        master: Some(Box::new(master)),
+                        zone: zone.or_else(|| input.zone.clone()),
+                    });
+                    let at = state.series.len() - 1;
+                    state.expand_series(at);
+                    state
+                        .transactions
+                        .insert(transaction_id.to_string(), (id.clone(), input.clone()));
+                    state.changes.push(id);
+                    Some(state.series[at].clone())
+                }
+                None => None,
+            }
+        };
+        if let Some(series) = series {
+            self.record_write(RecordedWrite::Create {
+                calendar: calendar.id.clone(),
+                transaction_id: transaction_id.to_string(),
+                input: input.clone(),
+                event: series.master_id.clone(),
+            })?;
+            return Ok(Written::Series(Box::new(series)));
         }
         let event = {
             let mut state = self.state();
@@ -784,6 +1082,21 @@ impl CalendarBackend for FakeCalendarBackend {
         patch: &EventPatch,
     ) -> BackendResult<Written> {
         self.check_scope()?;
+        let series = {
+            let mut state = self.state();
+            match state.series_of(event) {
+                Some(at) => Some(state.patch_series(at, patch)?),
+                None => None,
+            }
+        };
+        if let Some(series) = series {
+            self.record_write(RecordedWrite::Update {
+                calendar: calendar.to_string(),
+                event: event.to_string(),
+                patch: patch.clone(),
+            })?;
+            return Ok(Written::Series(Box::new(series)));
+        }
         let mut updated = self
             .state()
             .events
@@ -792,6 +1105,9 @@ impl CalendarBackend for FakeCalendarBackend {
             .cloned()
             .ok_or_else(|| anyhow!("no event with id {event}"))?;
         apply_patch(&mut updated, patch);
+        if updated.kind == EventKind::Occurrence {
+            updated.kind = EventKind::Exception;
+        }
         self.put_event(updated.clone());
         self.record_write(RecordedWrite::Update {
             calendar: calendar.to_string(),
@@ -805,17 +1121,22 @@ impl CalendarBackend for FakeCalendarBackend {
     /// cancelled event leaves the calendar.
     async fn cancel_event(&self, event: &str, comment: Option<String>) -> BackendResult<()> {
         self.check_scope()?;
-        let organizer = self
-            .state()
-            .events
-            .iter()
-            .find(|known| known.id == event)
-            .map(|known| known.is_organizer);
-        if organizer == Some(false) {
-            return Err(anyhow!("only the organizer can cancel {event}").into());
-        }
-        if organizer.is_some() {
-            self.remove_event(event);
+        {
+            let mut state = self.state();
+            let organizer = match state.series_of(event) {
+                Some(at) => state.series[at].master.as_ref().map(|m| m.is_organizer),
+                None => state
+                    .events
+                    .iter()
+                    .find(|known| known.id == event)
+                    .map(|known| known.is_organizer),
+            };
+            if organizer == Some(false) {
+                return Err(anyhow!("only the organizer can cancel {event}").into());
+            }
+            if organizer.is_some() {
+                state.take_off(event);
+            }
         }
         self.record_write(RecordedWrite::Cancel {
             event: event.to_string(),
@@ -825,8 +1146,11 @@ impl CalendarBackend for FakeCalendarBackend {
 
     async fn delete_event(&self, event: &str) -> BackendResult<()> {
         self.check_scope()?;
-        if self.state().events.iter().any(|known| known.id == event) {
-            self.remove_event(event);
+        {
+            let mut state = self.state();
+            if state.series_of(event).is_some() || state.events.iter().any(|e| e.id == event) {
+                state.take_off(event);
+            }
         }
         self.record_write(RecordedWrite::Delete {
             event: event.to_string(),
@@ -1227,6 +1551,175 @@ mod tests {
             .collect();
         assert_eq!(logged, expected);
         assert!(fake.responses().is_empty());
+    }
+
+    /// A weekly series on Monday and Wednesday from Wednesday 4 November to
+    /// the 16th, with one attendee.
+    fn series_input() -> EventInput {
+        let mut input = input();
+        input.online_meeting = false;
+        input.summary = "Standup".into();
+        input.recurrence = Some(Recurrence {
+            frequency: Frequency::Weekly,
+            interval: 1,
+            weekdays: vec![Weekday::Monday, Weekday::Wednesday],
+            day_of_month: None,
+            week_index: None,
+            month: None,
+            first_day_of_week: Some(Weekday::Monday),
+            start: Some(NaiveDate::from_ymd_opt(2026, 11, 4).unwrap()),
+            until: Some(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap()),
+            count: None,
+        });
+        input
+    }
+
+    fn occurrence_ids(fake: &FakeCalendarBackend, master: &str) -> Vec<String> {
+        let mut ids: Vec<String> = fake
+            .events()
+            .into_iter()
+            .filter(|e| e.series_master_id.as_deref() == Some(master))
+            .map(|e| e.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// A create with a rule makes a series, its master with the series and
+    /// its occurrences in the calendar, which a sync reports with the
+    /// series; a replay of its transaction finds it.
+    #[tokio::test]
+    async fn a_recurring_create_makes_a_series_and_its_occurrences() {
+        let fake = FakeCalendarBackend::canned();
+        let main = fake.list_calendars().await.unwrap().remove(0);
+        let baseline = fake.sync_window(&main, november(), None).await.unwrap();
+        let Written::Series(series) = fake
+            .create_event(&main, &series_input(), "tx-s")
+            .await
+            .unwrap()
+        else {
+            panic!("expected a series");
+        };
+        let master = series.master.as_deref().unwrap();
+        assert_eq!(master.kind, EventKind::SeriesMaster);
+        assert_eq!(
+            master.recurrence.as_deref(),
+            Some("Weekly on Monday, Wednesday until 2026-11-16")
+        );
+        let id = series.master_id.clone();
+        assert_eq!(
+            occurrence_ids(&fake, &id),
+            [
+                format!("{id}-20261104"),
+                format!("{id}-20261109"),
+                format!("{id}-20261111"),
+                format!("{id}-20261116"),
+            ]
+        );
+        let delta = fake
+            .sync_window(&main, november(), baseline.token)
+            .await
+            .unwrap();
+        assert_eq!(delta.series.len(), 1);
+        assert_eq!(delta.upserts.len(), 4);
+        assert!(delta
+            .upserts
+            .iter()
+            .all(|e| e.kind == EventKind::Occurrence));
+        let Written::Series(again) = fake
+            .create_event(&main, &series_input(), "tx-s")
+            .await
+            .unwrap()
+        else {
+            panic!("expected the series again");
+        };
+        assert_eq!(again.master_id, id);
+        assert_eq!(fake.series().len(), 1);
+    }
+
+    /// A rename of the series reaches its occurrences but the one changed
+    /// apart, a new rule expands it afresh and resets that one, and the
+    /// sync after either reports the series again without naming the
+    /// occurrence the rule dropped; a cancelled occurrence leaves without a
+    /// word, and a cancelled series is its master removed.
+    #[tokio::test]
+    async fn series_writes_behave_as_graph() {
+        let fake = FakeCalendarBackend::canned();
+        let main = fake.list_calendars().await.unwrap().remove(0);
+        let Written::Series(series) = fake
+            .create_event(&main, &series_input(), "tx-s")
+            .await
+            .unwrap()
+        else {
+            panic!("expected a series");
+        };
+        let id = series.master_id.clone();
+        let second = format!("{id}-20261109");
+        let moved = written(
+            fake.update_event(
+                "cal-main",
+                &second,
+                &EventPatch {
+                    summary: Some("Standup, moved".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(moved.kind, EventKind::Exception);
+        let renamed = EventPatch {
+            summary: Some("Daily standup".into()),
+            ..Default::default()
+        };
+        let Written::Series(_) = fake.update_event("cal-main", &id, &renamed).await.unwrap() else {
+            panic!("expected the series");
+        };
+        let summary = |event_id: &str| {
+            fake.events()
+                .into_iter()
+                .find(|e| e.id == event_id)
+                .map(|e| e.summary)
+        };
+        assert_eq!(summary(&second).as_deref(), Some("Standup, moved"));
+        assert_eq!(
+            summary(&format!("{id}-20261111")).as_deref(),
+            Some("Daily standup")
+        );
+
+        let token = fake
+            .sync_window(&main, november(), None)
+            .await
+            .unwrap()
+            .token;
+        let mut rule = series_input().recurrence.unwrap();
+        rule.weekdays = vec![Weekday::Monday];
+        let reruled = EventPatch {
+            recurrence: Some(rule),
+            ..Default::default()
+        };
+        fake.update_event("cal-main", &id, &reruled).await.unwrap();
+        assert_eq!(
+            occurrence_ids(&fake, &id),
+            [second.clone(), format!("{id}-20261116")]
+        );
+        assert_eq!(summary(&second).as_deref(), Some("Daily standup"));
+        let delta = fake.sync_window(&main, november(), token).await.unwrap();
+        assert_eq!(delta.upserts.len(), 2);
+        assert!(delta.removed.is_empty(), "{:?}", delta.removed);
+
+        fake.cancel_event(&second, None).await.unwrap();
+        assert_eq!(occurrence_ids(&fake, &id), [format!("{id}-20261116")]);
+        let token = fake
+            .sync_window(&main, november(), None)
+            .await
+            .unwrap()
+            .token;
+        fake.delete_event(&id).await.unwrap();
+        assert!(occurrence_ids(&fake, &id).is_empty());
+        assert!(fake.series().is_empty());
+        let delta = fake.sync_window(&main, november(), token).await.unwrap();
+        assert_eq!(delta.removed, [id]);
     }
 
     #[tokio::test]

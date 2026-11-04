@@ -25,6 +25,19 @@
 //! and midnights sent as UTC cover 01:00 to 01:00 for a Berlin user in every
 //! range query and free/busy read.
 //!
+//! A recurring event goes out with its `recurrence`, Graph's
+//! `patternedRecurrence`: the pattern (`daily`, `weekly`, `absoluteMonthly`,
+//! `relativeMonthly`, `absoluteYearly`, `relativeYearly`) and the range
+//! (`endDate`, `numbered` or `noEnd`) with its `recurrenceTimeZone`, the
+//! Windows name of the event's zone: a recurrence patch without one resets
+//! it to UTC (`.agents/research/2026-11-04-graph-recurrence-probes.md`). A
+//! write to one occurrence goes to the occurrence's own id, a write to the
+//! whole series to its master's; Graph answers the one with the occurrence
+//! (an `exception` once changed, keeping its id) and the other with the
+//! master. An occurrence moved onto or past the day of its neighbour is
+//! refused with `ErrorOccurrenceCrossingBoundary`, worded as
+//! [`CROSSING_REFUSAL`].
+//!
 //! A cancel, a delete, a dismiss or a snooze of an event Graph no longer has
 //! (404) counts as done, the rule mp applies to deleting a mail already gone
 //! from its folder; an update of one fails, since the change did not land.
@@ -40,7 +53,9 @@ use super::{
 use crate::calendar_backend::{
     BackendResult, CalendarBackend, CalendarBackendError, SeriesInfo, Written,
 };
-use crate::calendar_model::{AttendeeRole, Calendar, EventTime, Sensitivity, ShowAs, Tz};
+use crate::calendar_model::{
+    AttendeeRole, Calendar, EventTime, Frequency, Recurrence, Sensitivity, ShowAs, Tz,
+};
 use crate::calendar_write::{AttendeeInput, EventInput, EventPatch, ProposedTime};
 use crate::graph::{encode_id, GRAPH_BASE};
 
@@ -186,6 +201,91 @@ fn put_online_meeting(body: &mut Map<String, Value>) {
     body.insert("onlineMeetingProvider".into(), "teamsForBusiness".into());
 }
 
+/// The sentence Graph's `ErrorOccurrenceCrossingBoundary` is worded as.
+pub const CROSSING_REFUSAL: &str =
+    "An occurrence cannot move to or past the day of the next or previous one";
+
+/// The Windows zone a series' rule is held in: a timed time's own zone,
+/// else the write's `zone` (the host's when absent), else UTC for a zone
+/// the table lacks.
+fn rule_zone(time: Option<&EventTime>, zone: Option<&str>) -> &'static str {
+    match time {
+        Some(EventTime::Timed { zone, .. }) => {
+            crate::windows_zones::iana_to_windows_zone(zone).unwrap_or("UTC")
+        }
+        _ => all_day_zone(zone),
+    }
+}
+
+/// Graph's `patternedRecurrence` of `rule`, its range held in `zone`, a
+/// Windows name. Each pattern names only the fields its type reads.
+pub(super) fn recurrence_json(rule: &Recurrence, zone: &str) -> Value {
+    let days = || -> Value {
+        rule.weekdays
+            .iter()
+            .map(|day| Value::from(day.word()))
+            .collect()
+    };
+    let mut pattern = Map::new();
+    let kind = match (rule.frequency, rule.week_index) {
+        (Frequency::Daily, _) => "daily",
+        (Frequency::Weekly, _) => "weekly",
+        (Frequency::Monthly, Some(_)) => "relativeMonthly",
+        (Frequency::Monthly, None) => "absoluteMonthly",
+        (Frequency::Yearly, Some(_)) => "relativeYearly",
+        (Frequency::Yearly, None) => "absoluteYearly",
+    };
+    pattern.insert("type".into(), kind.into());
+    pattern.insert("interval".into(), rule.interval.into());
+    match rule.frequency {
+        Frequency::Daily => {}
+        Frequency::Weekly => {
+            pattern.insert("daysOfWeek".into(), days());
+            let first = rule
+                .first_day_of_week
+                .unwrap_or(crate::calendar_model::Weekday::Monday);
+            pattern.insert("firstDayOfWeek".into(), first.word().into());
+        }
+        Frequency::Monthly | Frequency::Yearly => {
+            match rule.week_index {
+                Some(index) => {
+                    pattern.insert("daysOfWeek".into(), days());
+                    pattern.insert("index".into(), index.word().into());
+                }
+                None => {
+                    if let Some(day) = rule.day_of_month {
+                        pattern.insert("dayOfMonth".into(), day.into());
+                    }
+                }
+            }
+            if rule.frequency == Frequency::Yearly {
+                if let Some(month) = rule.month {
+                    pattern.insert("month".into(), month.into());
+                }
+            }
+        }
+    }
+    let mut range = Map::new();
+    match (rule.until, rule.count) {
+        (Some(until), _) => {
+            range.insert("type".into(), "endDate".into());
+            range.insert("endDate".into(), until.to_string().into());
+        }
+        (None, Some(count)) => {
+            range.insert("type".into(), "numbered".into());
+            range.insert("numberOfOccurrences".into(), count.into());
+        }
+        (None, None) => {
+            range.insert("type".into(), "noEnd".into());
+        }
+    }
+    if let Some(start) = rule.start {
+        range.insert("startDate".into(), start.to_string().into());
+    }
+    range.insert("recurrenceTimeZone".into(), zone.into());
+    json!({ "pattern": pattern, "range": range })
+}
+
 /// The body of `POST /me/calendars/{id}/events`: what `input` sets, the
 /// server's defaults left to the server.
 pub(super) fn create_body(input: &EventInput, transaction_id: &str) -> Value {
@@ -217,6 +317,10 @@ pub(super) fn create_body(input: &EventInput, transaction_id: &str) -> Value {
     }
     if let Some(allow) = input.allow_new_time_proposals {
         body.insert("allowNewTimeProposals".into(), allow.into());
+    }
+    if let Some(rule) = &input.recurrence {
+        let zone = rule_zone(Some(&input.time), input.zone.as_deref());
+        body.insert("recurrence".into(), recurrence_json(rule, zone));
     }
     Value::Object(body)
 }
@@ -255,6 +359,10 @@ pub(super) fn patch_body(patch: &EventPatch) -> Value {
     }
     if let Some(allow) = patch.allow_new_time_proposals {
         body.insert("allowNewTimeProposals".into(), allow.into());
+    }
+    if let Some(rule) = &patch.recurrence {
+        let zone = rule_zone(patch.time.as_ref(), patch.zone.as_deref());
+        body.insert("recurrence".into(), recurrence_json(rule, zone));
     }
     Value::Object(body)
 }
@@ -385,6 +493,10 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
             .patch(&event_url(event, None), patch_body(patch))
             .await?;
         if !success(&answer) {
+            if super::error_code(&answer.body).as_deref() == Some("ErrorOccurrenceCrossingBoundary")
+            {
+                return Err(anyhow!(CROSSING_REFUSAL).into());
+            }
             return Err(refused("update", &answer));
         }
         self.written(calendar, "update", &answer).await

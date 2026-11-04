@@ -546,6 +546,96 @@ pub fn proposal_of(event: &CalendarEvent, address: &str) -> Result<CalendarTimeS
 }
 
 // ---------------------------------------------------------------------------
+// Repeat
+// ---------------------------------------------------------------------------
+
+/// What `mp event create --repeat` and `mp event update --repeat` were
+/// asked: the frequency word and the flags that shape it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepeatRequest {
+    /// `daily`, `weekly`, `monthly` or `yearly`.
+    pub frequency: String,
+    pub every: Option<u32>,
+    /// `--on`: weekday codes (`MO`) or names.
+    pub on: Vec<String>,
+    /// `--monthly-by weekday`: the start's weekday in the same week of the
+    /// month, rather than its day of the month.
+    pub by_weekday: bool,
+    pub until: Option<String>,
+    pub count: Option<u32>,
+}
+
+impl RepeatRequest {
+    /// Whether the rule needs the series' first day: a monthly rule by
+    /// weekday names the week of the month that day falls in.
+    pub fn needs_first_day(&self) -> bool {
+        self.by_weekday
+    }
+
+    /// The rule `event.create` or `event.update` takes, the series' first
+    /// day naming the week of a monthly rule by weekday; the daemon fills
+    /// what else the pattern leaves out from that day and checks the rest.
+    pub fn rule(
+        &self,
+        first: Option<NaiveDate>,
+    ) -> Result<mp_protocol::calendar::CalendarRecurrence, String> {
+        use mp_core::calendar_model::{WeekIndex, Weekday};
+        let frequency = self.frequency.as_str();
+        let mut weekdays = Vec::new();
+        for word in &self.on {
+            let day = Weekday::from_code(word)
+                .or_else(|| Weekday::from_name(word))
+                .ok_or_else(|| {
+                    format!("{word:?} is not a weekday; use MO, TU, WE, TH, FR, SA or SU")
+                })?;
+            weekdays.push(day.word().to_string());
+        }
+        if self.by_weekday && frequency != "monthly" {
+            return Err("--monthly-by is for --repeat monthly".into());
+        }
+        let takes_days = frequency == "weekly" || self.by_weekday;
+        if !weekdays.is_empty() && !takes_days {
+            return Err(
+                "--on names the days of a weekly series, or with --monthly-by weekday the \
+                 weekday of a monthly one"
+                    .into(),
+            );
+        }
+        let week_index = match (self.by_weekday, first) {
+            (false, _) => None,
+            (true, Some(first)) => Some(WeekIndex::of_date(first).word().to_string()),
+            (true, None) => return Err("the series' first day is unknown".into()),
+        };
+        Ok(mp_protocol::calendar::CalendarRecurrence {
+            frequency: frequency.to_string(),
+            interval: self.every.unwrap_or(1),
+            weekdays,
+            day_of_month: None,
+            week_index,
+            month: None,
+            first_day_of_week: None,
+            start: None,
+            until: self.until.clone(),
+            count: self.count,
+        })
+    }
+}
+
+/// The day `start`, a `--start` WHEN, falls on in `zone`.
+pub fn start_day(start: &str, zone: Tz) -> Result<NaiveDate, String> {
+    if let Ok(date) = NaiveDate::parse_from_str(start.trim(), "%Y-%m-%d") {
+        return Ok(date);
+    }
+    match mp_core::invite::resolve_span_in(start, None, Some("PT1M"), zone) {
+        Ok(mp_core::invite::EventSpan::Timed { start, .. }) => {
+            Ok(start.with_timezone(&zone).date_naive())
+        }
+        Ok(mp_core::invite::EventSpan::AllDay { first, .. }) => Ok(first),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Free/busy
 // ---------------------------------------------------------------------------
 
@@ -790,6 +880,57 @@ mod tests {
             let err = parse(bad).unwrap_err();
             assert!(err.contains("YYYY-MM-DD"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn repeat_rules_name_their_days_and_refuse_what_does_not_fit() {
+        let weekly = RepeatRequest {
+            frequency: "weekly".into(),
+            on: vec!["mo".into(), "Wednesday".into()],
+            until: Some("2026-12-18".into()),
+            ..Default::default()
+        };
+        let rule = weekly.rule(None).unwrap();
+        assert_eq!(rule.weekdays, ["monday", "wednesday"]);
+        assert_eq!(
+            (rule.interval, rule.until.as_deref()),
+            (1, Some("2026-12-18"))
+        );
+        let by_weekday = RepeatRequest {
+            frequency: "monthly".into(),
+            by_weekday: true,
+            every: Some(2),
+            ..Default::default()
+        };
+        assert!(by_weekday.needs_first_day());
+        let rule = by_weekday.rule(Some(d("2026-11-26"))).unwrap();
+        assert_eq!(rule.week_index.as_deref(), Some("fourth"));
+        assert_eq!(rule.interval, 2);
+        assert!(rule.weekdays.is_empty());
+        let refused = |request: RepeatRequest| request.rule(Some(d("2026-11-26"))).unwrap_err();
+        assert!(refused(RepeatRequest {
+            frequency: "daily".into(),
+            on: vec!["MO".into()],
+            ..Default::default()
+        })
+        .starts_with("--on names"));
+        assert!(refused(RepeatRequest {
+            frequency: "weekly".into(),
+            by_weekday: true,
+            ..Default::default()
+        })
+        .contains("--repeat monthly"));
+        assert!(refused(RepeatRequest {
+            frequency: "weekly".into(),
+            on: vec!["XX".into()],
+            ..Default::default()
+        })
+        .contains("not a weekday"));
+        assert_eq!(
+            start_day("2026-11-26T23:30", "Europe/Berlin".parse().unwrap()),
+            Ok(d("2026-11-26"))
+        );
+        assert_eq!(start_day("2026-11-26", chrono_tz::UTC), Ok(d("2026-11-26")));
     }
 
     #[test]

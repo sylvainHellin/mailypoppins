@@ -6,9 +6,11 @@ import type { Dismissal } from "@/app/health";
 import type { ReaderMode } from "@/app/readerMode";
 import type { Action } from "@/app/reducer";
 import type { CalendarLoad } from "@/app/calendar";
+import type { RepeatFields } from "@/app/recurrence";
 import type {
   AccountCredentials,
   Bootstrap,
+  CalendarEvent,
   CalendarInfo,
   CalendarReminder,
   ConfigInvalid,
@@ -186,7 +188,9 @@ export const LIST_WIDTH_STEP = 40;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
  * invitation form `inviteDialog` describes; `event` is the event form
  * `eventDialog` describes; `event_remove` is the cancel or delete
- * confirmation `eventRemoveDialog` describes; `signatures` is the Signatures
+ * confirmation `eventRemoveDialog` describes; `event_scope` is the choice
+ * between an occurrence and its whole series `eventScopeDialog` describes;
+ * `signatures` is the Signatures
  * dialog `signaturesDialog` describes; `activity` is the activity log;
  * `password` is the password dialog `passwordDialog` describes;
  * `account_wizard` is the account wizard `accountWizard` describes;
@@ -215,6 +219,7 @@ export type Overlay =
   | "account_picker"
   | "folder_picker"
   | "event_remove"
+  | "event_scope"
   | null;
 
 /**
@@ -719,6 +724,8 @@ export type EventFields = {
   noReminder: boolean;
   showAs: string;
   body: string;
+  /** How the event repeats (PERSO-255). */
+  repeat: RepeatFields;
 };
 
 /**
@@ -734,7 +741,22 @@ export type EventDialog = { fields: EventFields; calendars: EventCalendar[]; tra
  * only), whether it is a Teams meeting (which stays one), and the fields as
  * the form opened, which the change is read against.
  */
-export type EventEdit = { account: string; event: string; organizer: boolean; online: boolean; original: EventFields };
+export type EventEdit = {
+  account: string;
+  event: string;
+  organizer: boolean;
+  online: boolean;
+  original: EventFields;
+  /** `occurrence` or `series` for a change to a recurring event, which `event` names: the occurrence, or the series master. */
+  scope?: "occurrence" | "series" | null;
+};
+
+/**
+ * The choice `E`, `D`, the card's Edit and Cancel meeting or Delete ask on
+ * an occurrence of a series (PERSO-255): the change reaches this occurrence
+ * or the whole series, as Outlook asks.
+ */
+export type EventScopeDialog = { event: CalendarEvent; remove: boolean };
 
 /**
  * The `D` confirmation (PERSO-255): cancel a meeting the user organizes,
@@ -742,7 +764,17 @@ export type EventEdit = { account: string; event: string; organizer: boolean; on
  * tells nobody. A confirmation a failed cancel or delete opens again
  * carries the `comment` it was sent with and why it failed.
  */
-export type EventRemoveDialog = { account: string; event: string; summary: string; cancel: boolean; attendees: number; comment?: string; error?: string | null };
+export type EventRemoveDialog = {
+  account: string;
+  event: string;
+  summary: string;
+  cancel: boolean;
+  attendees: number;
+  comment?: string;
+  error?: string | null;
+  /** `occurrence` or `series` on an occurrence of a series. */
+  scope?: "occurrence" | "series" | null;
+};
 
 /**
  * A change this window started, until it settles or is dropped:
@@ -1025,6 +1057,8 @@ export type AppState = {
   eventRemoveDialog: EventRemoveDialog | null;
   /** A confirmation whose cancel or delete failed while another overlay was open: `D` on that event opens it again. */
   keptEventRemove: EventRemoveDialog | null;
+  /** What the `event_scope` overlay asks about; null whenever another overlay or none is open. */
+  eventScopeDialog: EventScopeDialog | null;
   /** Updates, cancels and deletes this window started, in start order. */
   eventChanges: EventChangeRun[];
   /** Operation ends that arrived while a change's start was unanswered, for its id. */
@@ -1182,6 +1216,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     eventCreates: [],
     eventCreateEarly: [],
     eventRemoveDialog: null,
+    eventScopeDialog: null,
     eventChanges: [],
     eventChangeEarly: [],
     contacts: {},

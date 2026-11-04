@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { availabilityRows, chosenSlots, currentSlots, freeBusyParams, slotStatus } from "@/app/availability";
 import type { CalendarFreeBusyResult } from "@/protocol/types";
+import { NO_REPEAT } from "@/app/recurrence";
 import type { EventFields } from "@/app/state";
 
 const fields = (over: Partial<EventFields> = {}): EventFields => ({
@@ -18,6 +19,7 @@ const fields = (over: Partial<EventFields> = {}): EventFields => ({
   noReminder: false,
   showAs: "busy",
   body: "",
+  repeat: NO_REPEAT,
   ...over,
 });
 

@@ -593,6 +593,7 @@ fn a_restart_asks_again_for_a_dropped_cancel_with_its_comment() {
             attendees: 2,
             comment: "Postponed".to_string(),
             error: None,
+            scope: None,
         },
     );
     let door = OpsDoor::new(restarted_snapshot(3), Err("never asked".to_string()));

@@ -395,6 +395,15 @@ pub fn calendar_view(
     wire::calendar_view(q, params)
 }
 
+/// One event, or a series master, with its series, through `event.get`.
+pub fn event_get(
+    q: &dyn Queries,
+    account: &str,
+    event: &str,
+) -> Result<mp_protocol::calendar::EventGetResult> {
+    wire::event_get(q, account, event)
+}
+
 /// Every account's calendars, through `calendar.list`; none on a refusal,
 /// which only costs the tags their calendar names.
 pub fn calendar_list(q: &dyn Queries) -> Vec<CalendarInfo> {

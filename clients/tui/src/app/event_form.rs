@@ -13,11 +13,22 @@
 //! `event.update` with the fields that differ from what the form opened
 //! with, so a change made in Outlook to another field survives. The
 //! calendar stays the event's, and a Teams meeting stays one.
+//!
+//! A new event repeats through the Repeat row (`Left` and `Right` walk the
+//! patterns Outlook's repeat menu offers, read against the form's date)
+//! with its interval, its weekdays and its end on the rows under it; the
+//! row shows the rule in words. `E` on an occurrence of a series asks first
+//! whether the change is to that occurrence ([`EventForm::edit_occurrence`],
+//! whose Repeat row only names its series) or to the whole series
+//! ([`EventForm::edit_series`], the master's values and rule, which a new
+//! pattern replaces as a whole).
 
-use chrono::{Days, NaiveDate, NaiveTime};
+use chrono::{Datelike, Days, NaiveDate, NaiveTime};
+use mp_core::calendar_model::{WeekIndex, Weekday};
+use mp_core::calendar_write::resolve_recurrence;
 use mp_protocol::calendar::{
-    CalendarEvent, CalendarEventTime, CalendarInfo, EventAttendeeInput, EventCreateParams,
-    EventInputParams, EventPatchParams, EventUpdateParams,
+    CalendarEvent, CalendarEventTime, CalendarInfo, CalendarRecurrence, EventAttendeeInput,
+    EventCreateParams, EventInputParams, EventPatchParams, EventUpdateParams,
 };
 
 use super::Tz;
@@ -33,7 +44,44 @@ pub struct EventEdit {
     pub is_organizer: bool,
     /// The event is a Teams meeting, which stays one.
     pub online: bool,
+    /// `occurrence` or `series` for a change to a recurring event, which
+    /// `event` names: the occurrence, or the series master.
+    pub scope: Option<String>,
     pub original: Box<EventForm>,
+}
+
+/// The patterns the Repeat row walks, Outlook's repeat menu's, each read
+/// against the form's date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatPattern {
+    Daily,
+    Weekly,
+    /// On the date's day of the month.
+    MonthlyByDate,
+    /// On the date's weekday in the same week of the month.
+    MonthlyByWeekday,
+    /// On the date's day and month.
+    Yearly,
+}
+
+impl RepeatPattern {
+    /// In the order `Right` walks them.
+    pub const ALL: [RepeatPattern; 5] = [
+        RepeatPattern::Daily,
+        RepeatPattern::Weekly,
+        RepeatPattern::MonthlyByDate,
+        RepeatPattern::MonthlyByWeekday,
+        RepeatPattern::Yearly,
+    ];
+
+    fn frequency(self) -> &'static str {
+        match self {
+            RepeatPattern::Daily => "daily",
+            RepeatPattern::Weekly => "weekly",
+            RepeatPattern::MonthlyByDate | RepeatPattern::MonthlyByWeekday => "monthly",
+            RepeatPattern::Yearly => "yearly",
+        }
+    }
 }
 
 /// One calendar a new event can go to: a server calendar the user may write
@@ -100,6 +148,14 @@ pub enum EventFormRow {
     Teams,
     Reminder,
     ShowAs,
+    /// The pattern, or the series an occurrence belongs to.
+    Repeat,
+    /// Every how many days, weeks, months or years.
+    Every,
+    /// The weekdays of a weekly series.
+    RepeatOn,
+    /// The series' last day, its number of occurrences, or never.
+    Ends,
     Description,
 }
 
@@ -112,6 +168,7 @@ impl EventFormRow {
                 | EventFormRow::AllDay
                 | EventFormRow::Teams
                 | EventFormRow::ShowAs
+                | EventFormRow::Repeat
                 | EventFormRow::Description
         )
     }
@@ -183,6 +240,24 @@ pub struct EventForm {
     pub show_as: String,
     /// The description, edited in `$EDITOR`.
     pub body: String,
+    /// How the event repeats; `None` for a single event, and for a series
+    /// whose rule no pattern names ([`Self::kept_rule`]).
+    pub repeat: Option<RepeatPattern>,
+    /// Every how many units of the pattern, `1` by default.
+    pub every: String,
+    /// A weekly series' days as two-letter codes (`MO, WE`); empty for the
+    /// date's own.
+    pub repeat_on: String,
+    /// The series' end: empty for never, `YYYY-MM-DD` for its last day, a
+    /// number for its count of occurrences.
+    pub ends: String,
+    /// The rule of a series being edited that no pattern of the form names
+    /// (the Nth weekday of a month every year, several weekdays of a
+    /// month), kept as it is until a pattern replaces it.
+    pub kept_rule: Option<CalendarRecurrence>,
+    /// The series an occurrence being edited on its own belongs to, in
+    /// words.
+    pub series_rule: Option<String>,
     /// The IANA zone the times are read in: the Calendar view's.
     pub zone: String,
     /// The id the create was last sent with, which a retry sends again.
@@ -223,6 +298,12 @@ impl EventForm {
             reminder: String::new(),
             show_as: DEFAULT_SHOW_AS.into(),
             body: String::new(),
+            repeat: None,
+            every: "1".into(),
+            repeat_on: String::new(),
+            ends: String::new(),
+            kept_rule: None,
+            series_rule: None,
             zone: zone.to_string(),
             transaction_id: None,
             error: None,
@@ -278,6 +359,12 @@ impl EventForm {
             },
             show_as: event.show_as.clone(),
             body: event.body.clone().unwrap_or_default(),
+            repeat: None,
+            every: "1".into(),
+            repeat_on: String::new(),
+            ends: String::new(),
+            kept_rule: None,
+            series_rule: None,
             zone: zone.name().to_string(),
             transaction_id: None,
             error: None,
@@ -291,9 +378,219 @@ impl EventForm {
             event: event.id.clone(),
             is_organizer: event.is_organizer,
             online: event.is_online_meeting,
+            scope: None,
             original: Box::new(form.clone()),
         });
         form
+    }
+
+    /// A form on the occurrence `event` alone: its own values, its Repeat
+    /// row naming the series it stays part of.
+    pub fn edit_occurrence(event: &CalendarEvent, calendar: EventCalendarChoice, zone: Tz) -> Self {
+        let mut form = EventForm::edit(event, calendar, zone);
+        form.series_rule = Some(
+            event
+                .recurrence
+                .clone()
+                .unwrap_or_else(|| "A recurring series".into()),
+        );
+        form.rescope("occurrence");
+        form
+    }
+
+    /// A form on the whole series whose master is `master`, filled with the
+    /// master's values and `rule`, the series' own: a pattern the form
+    /// names fills the Repeat rows, any other is kept as it is until a
+    /// pattern replaces it.
+    pub fn edit_series(
+        master: &CalendarEvent,
+        rule: Option<&CalendarRecurrence>,
+        calendar: EventCalendarChoice,
+        zone: Tz,
+    ) -> Self {
+        let mut form = EventForm::edit(master, calendar, zone);
+        if let Some(rule) = rule {
+            form.take_rule(rule);
+        }
+        form.rescope("series");
+        form
+    }
+
+    /// Mark the edit as one in `scope`, the form as it is now its original.
+    fn rescope(&mut self, scope: &str) {
+        let mut snapshot = self.clone();
+        snapshot.editing = None;
+        if let Some(edit) = self.editing.as_mut() {
+            edit.scope = Some(scope.to_string());
+            *edit.original = snapshot;
+        }
+    }
+
+    /// Fill the Repeat rows from `rule`, or keep it whole when no pattern
+    /// of the form names it.
+    fn take_rule(&mut self, rule: &CalendarRecurrence) {
+        let date = NaiveDate::parse_from_str(self.date.trim(), "%Y-%m-%d").ok();
+        let weekday = date.map(Weekday::of_date);
+        let one_own_day =
+            rule.weekdays.len() == 1 && weekday.is_some_and(|day| rule.weekdays[0] == day.word());
+        let pattern = match (rule.frequency.as_str(), rule.week_index.as_deref()) {
+            ("daily", _) => Some(RepeatPattern::Daily),
+            ("weekly", _) => Some(RepeatPattern::Weekly),
+            ("monthly", None)
+                if rule.day_of_month.is_none() || rule.day_of_month == date.map(|d| d.day()) =>
+            {
+                Some(RepeatPattern::MonthlyByDate)
+            }
+            ("monthly", Some(index))
+                if one_own_day && date.map(|d| WeekIndex::of_date(d).word()) == Some(index) =>
+            {
+                Some(RepeatPattern::MonthlyByWeekday)
+            }
+            ("yearly", None)
+                if (rule.day_of_month.is_none() || rule.day_of_month == date.map(|d| d.day()))
+                    && (rule.month.is_none() || rule.month == date.map(|d| d.month())) =>
+            {
+                Some(RepeatPattern::Yearly)
+            }
+            _ => None,
+        };
+        self.every = rule.interval.max(1).to_string();
+        self.ends = match (&rule.until, rule.count) {
+            (Some(until), _) => until.clone(),
+            (None, Some(count)) => count.to_string(),
+            (None, None) => String::new(),
+        };
+        match pattern {
+            Some(pattern) => {
+                self.repeat = Some(pattern);
+                if pattern == RepeatPattern::Weekly {
+                    self.repeat_on = rule
+                        .weekdays
+                        .iter()
+                        .filter_map(|word| Weekday::from_name(word))
+                        .map(|day| title_code(day.code()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                }
+            }
+            None => self.kept_rule = Some(rule.clone()),
+        }
+    }
+
+    /// The scope of an edit, `None` on a new event and a single event.
+    pub fn scope(&self) -> Option<&str> {
+        self.editing.as_ref().and_then(|edit| edit.scope.as_deref())
+    }
+
+    /// Move to the next or the previous repeat pattern: a new event walks
+    /// "does not repeat" too, a series always repeats, and an occurrence
+    /// repeats by its series.
+    pub fn cycle_repeat(&mut self, forward: bool) {
+        let mut options: Vec<Option<RepeatPattern>> =
+            RepeatPattern::ALL.into_iter().map(Some).collect();
+        match self.scope() {
+            Some("occurrence") => return,
+            Some(_) => {}
+            None => options.insert(0, None),
+        }
+        let len = options.len();
+        let at = options.iter().position(|option| *option == self.repeat);
+        let to = match (at, forward) {
+            (Some(at), true) => (at + 1) % len,
+            (Some(at), false) => (at + len - 1) % len,
+            (None, true) => 0,
+            (None, false) => len - 1,
+        };
+        self.repeat = options[to];
+        self.kept_rule = None;
+        self.error = None;
+    }
+
+    /// The rule the Repeat rows name, read against the form's date: `None`
+    /// for an event that does not repeat and for an occurrence, which keeps
+    /// its series'; the sentence that says what is wrong otherwise.
+    pub fn rule(&self) -> Result<Option<CalendarRecurrence>, String> {
+        if self.scope() == Some("occurrence") {
+            return Ok(None);
+        }
+        let Some(pattern) = self.repeat else {
+            return Ok(self.kept_rule.clone());
+        };
+        let interval = self
+            .every
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=99).contains(n))
+            .ok_or_else(|| "Every is a number from 1 to 99".to_string())?;
+        let mut weekdays = Vec::new();
+        if pattern == RepeatPattern::Weekly {
+            for code in addresses(&self.repeat_on) {
+                let day = Weekday::from_code(code)
+                    .or_else(|| Weekday::from_name(code))
+                    .ok_or_else(|| {
+                        format!("{code:?} is not a weekday; use MO, TU, WE, TH, FR, SA or SU")
+                    })?;
+                weekdays.push(day.word().to_string());
+            }
+        }
+        let ends = self.ends.trim();
+        let (until, count) =
+            if ends.is_empty() || ends.eq_ignore_ascii_case("never") {
+                (None, None)
+            } else if NaiveDate::parse_from_str(ends, "%Y-%m-%d").is_ok() {
+                (Some(ends.to_string()), None)
+            } else {
+                let digits = ends.trim_end_matches(|c: char| !c.is_ascii_digit());
+                match digits.parse::<u32>() {
+                    Ok(count) if count > 0 => (None, Some(count)),
+                    _ => return Err(
+                        "Ends is a last day (YYYY-MM-DD), a number of times, or empty for never"
+                            .into(),
+                    ),
+                }
+            };
+        let date = NaiveDate::parse_from_str(self.date.trim(), "%Y-%m-%d")
+            .map_err(|_| "The date is YYYY-MM-DD".to_string())?;
+        let rule = CalendarRecurrence {
+            frequency: pattern.frequency().to_string(),
+            interval,
+            weekdays,
+            day_of_month: None,
+            week_index: (pattern == RepeatPattern::MonthlyByWeekday)
+                .then(|| WeekIndex::of_date(date).word().to_string()),
+            month: None,
+            first_day_of_week: None,
+            start: None,
+            until,
+            count,
+        };
+        resolve_recurrence(&rule, date)?;
+        Ok(Some(rule))
+    }
+
+    /// The Repeat row's words: the rule as the event cards print it, the
+    /// series an occurrence stays part of, or that the event does not
+    /// repeat.
+    pub fn repeat_label(&self) -> String {
+        if let Some(series) = &self.series_rule {
+            return format!("{series} (this occurrence only)");
+        }
+        let date = NaiveDate::parse_from_str(self.date.trim(), "%Y-%m-%d").ok();
+        match (self.rule(), date) {
+            (Ok(Some(rule)), Some(date)) => resolve_recurrence(&rule, date)
+                .map(|rule| rule.describe())
+                .unwrap_or_else(|why| why),
+            (Ok(None), _) => "Does not repeat".to_string(),
+            (Ok(Some(_)), None) | (Err(_), _) => match self.repeat {
+                Some(RepeatPattern::Daily) => "Daily".into(),
+                Some(RepeatPattern::Weekly) => "Weekly".into(),
+                Some(RepeatPattern::MonthlyByDate) => "Monthly on its day".into(),
+                Some(RepeatPattern::MonthlyByWeekday) => "Monthly on its weekday".into(),
+                Some(RepeatPattern::Yearly) => "Yearly".into(),
+                None => "Does not repeat".into(),
+            },
+        }
     }
 
     /// Move the form's time to the span from `start` to `end`, RFC 3339
@@ -323,7 +620,9 @@ impl EventForm {
     }
 
     /// The rows `Tab` walks: no start time on an all-day event, no Teams row
-    /// where the backend has no online meetings.
+    /// where the backend has no online meetings, the Repeat row on a new
+    /// event and a recurring one, with the rows that shape a rule under it
+    /// while the form makes one.
     pub fn rows(&self) -> Vec<EventFormRow> {
         use EventFormRow::*;
         [
@@ -340,12 +639,19 @@ impl EventForm {
             Teams,
             Reminder,
             ShowAs,
+            Repeat,
+            Every,
+            RepeatOn,
+            Ends,
             Description,
         ]
         .into_iter()
         .filter(|row| match row {
             Start => !self.all_day,
             Teams => self.chosen().teams || self.editing.as_ref().is_some_and(|e| e.online),
+            Repeat => self.editing.is_none() || self.scope().is_some(),
+            Every | Ends => self.repeat.is_some() && self.scope() != Some("occurrence"),
+            RepeatOn => self.repeat == Some(RepeatPattern::Weekly),
             _ => true,
         })
         .collect()
@@ -371,6 +677,9 @@ impl EventForm {
             EventFormRow::Optional => &mut self.optional,
             EventFormRow::Rooms => &mut self.rooms,
             EventFormRow::Reminder => &mut self.reminder,
+            EventFormRow::Every => &mut self.every,
+            EventFormRow::RepeatOn => &mut self.repeat_on,
+            EventFormRow::Ends => &mut self.ends,
             _ => return None,
         })
     }
@@ -494,6 +803,9 @@ impl EventForm {
         if self.reminder_minutes().is_err() {
             return Some("The reminder is minutes, none, or empty for the default".into());
         }
+        if let Err(problem) = self.rule() {
+            return Some(problem);
+        }
         None
     }
 
@@ -609,6 +921,10 @@ impl EventForm {
         if self.show_as != was.show_as {
             fields.show_as = Some(self.show_as.clone());
         }
+        let rule = self.rule().unwrap_or(None);
+        if self.scope() == Some("series") && rule != was.rule().unwrap_or(None) {
+            fields.recurrence = rule;
+        }
         fields
     }
 
@@ -624,6 +940,7 @@ impl EventForm {
         Ok(EventUpdateParams {
             account: edit.account.clone(),
             event: edit.event.clone(),
+            scope: edit.scope.clone(),
             fields: self.changed_fields(),
         })
     }
@@ -653,6 +970,7 @@ impl EventForm {
                 online_meeting: (self.teams && chosen.teams).then_some(true),
                 reminder: self.reminder_minutes().unwrap_or(None),
                 show_as: (self.show_as != DEFAULT_SHOW_AS).then(|| self.show_as.clone()),
+                recurrence: self.rule().unwrap_or(None),
                 ..Default::default()
             },
         })
@@ -662,6 +980,15 @@ impl EventForm {
 /// What the form says when an attendee changes the organizer's fields.
 pub const ORGANIZER_ONLY: &str =
     "Only the organizer can change this event; the reminder and show-as are yours";
+
+/// A weekday code as the form shows it (`Mo`).
+fn title_code(code: &str) -> String {
+    let mut chars = code.chars();
+    match chars.next() {
+        Some(first) => first.to_string() + &chars.as_str().to_ascii_lowercase(),
+        None => String::new(),
+    }
+}
 
 /// `HH:MM`.
 fn time(raw: &str) -> Option<NaiveTime> {
@@ -958,6 +1285,123 @@ mod tests {
             cleared.problem().as_deref(),
             Some("The event needs a title")
         );
+    }
+
+    /// The Repeat row walks "does not repeat" and the five patterns, the
+    /// rows that shape a rule showing only while the form makes one; the
+    /// rule goes to `event.create` read against the form's date, and a
+    /// wrong interval or end is the form's problem.
+    #[test]
+    fn a_new_event_repeats_by_the_pattern_it_names() {
+        let mut form = form();
+        form.title = "Standup".into();
+        assert!(form.rows().contains(&EventFormRow::Repeat));
+        assert!(!form.rows().contains(&EventFormRow::Every));
+        assert_eq!(form.repeat_label(), "Does not repeat");
+        assert_eq!(form.params().unwrap().event.recurrence, None);
+        form.cycle_repeat(false);
+        assert_eq!(form.repeat, Some(RepeatPattern::Yearly));
+        assert_eq!(form.repeat_label(), "Yearly on 18 November");
+        form.cycle_repeat(false);
+        assert_eq!(form.repeat_label(), "Monthly on the third Wednesday");
+        let rule = form.params().unwrap().event.recurrence.unwrap();
+        assert_eq!(rule.week_index.as_deref(), Some("third"));
+        form.cycle_repeat(false);
+        form.cycle_repeat(false);
+        assert_eq!(form.repeat, Some(RepeatPattern::Weekly));
+        assert!(form.rows().contains(&EventFormRow::RepeatOn));
+        form.repeat_on = "mo, fr".into();
+        form.every = "2".into();
+        form.ends = "6 times".into();
+        assert_eq!(
+            form.repeat_label(),
+            "Every 2 weeks on Monday, Friday (6 times)"
+        );
+        let rule = form.params().unwrap().event.recurrence.unwrap();
+        assert_eq!(rule.weekdays, ["monday", "friday"]);
+        assert_eq!((rule.interval, rule.count), (2, Some(6)));
+        form.every = "0".into();
+        assert_eq!(
+            form.problem().as_deref(),
+            Some("Every is a number from 1 to 99")
+        );
+        form.every = "1".into();
+        form.ends = "2026-11-01".into();
+        assert!(form
+            .problem()
+            .unwrap()
+            .contains("ends before its first day"));
+        form.ends = "soon".into();
+        assert!(form.problem().unwrap().starts_with("Ends is"));
+    }
+
+    /// A series form fills its Repeat rows from the series' rule and sends
+    /// a new one only when it changed; a rule no pattern names is kept as
+    /// it is until a pattern replaces it; an occurrence's form names its
+    /// series and sends no rule.
+    #[test]
+    fn a_series_form_sends_its_rule_only_when_it_changed() {
+        let main = form().calendars[0].clone();
+        let zone: Tz = "Europe/Berlin".parse().unwrap();
+        let mut master = meeting(true);
+        master.kind = "series-master".into();
+        let weekly: CalendarRecurrence = serde_json::from_value(serde_json::json!({
+            "frequency": "weekly", "interval": 1, "weekdays": ["wednesday"], "count": 4,
+        }))
+        .unwrap();
+        let mut form = EventForm::edit_series(&master, Some(&weekly), main.clone(), zone);
+        assert_eq!(form.scope(), Some("series"));
+        assert_eq!(form.repeat, Some(RepeatPattern::Weekly));
+        assert_eq!((form.repeat_on.as_str(), form.ends.as_str()), ("We", "4"));
+        assert_eq!(form.problem().as_deref(), Some("Nothing changed yet"));
+        form.title = "Budget, weekly".into();
+        let params = form.update_params().unwrap();
+        assert_eq!(params.scope.as_deref(), Some("series"));
+        assert_eq!(params.fields.recurrence, None);
+        form.ends = "2".into();
+        let rule = form.update_params().unwrap().fields.recurrence.unwrap();
+        assert_eq!(rule.count, Some(2));
+        form.cycle_repeat(true);
+        form.cycle_repeat(false);
+        form.cycle_repeat(false);
+        assert_eq!(
+            form.repeat,
+            Some(RepeatPattern::Daily),
+            "a series always repeats"
+        );
+
+        let odd: CalendarRecurrence = serde_json::from_value(serde_json::json!({
+            "frequency": "yearly", "interval": 1, "weekdays": ["thursday"],
+            "week_index": "fourth", "month": 11,
+        }))
+        .unwrap();
+        let mut kept = EventForm::edit_series(&master, Some(&odd), main.clone(), zone);
+        assert_eq!(kept.repeat, None);
+        assert_eq!(
+            kept.repeat_label(),
+            "Yearly on the fourth Thursday of November"
+        );
+        kept.title = "Thanksgiving".into();
+        assert_eq!(kept.update_params().unwrap().fields.recurrence, None);
+        kept.cycle_repeat(true);
+        assert_eq!(kept.repeat, Some(RepeatPattern::Daily));
+        assert!(kept.update_params().unwrap().fields.recurrence.is_some());
+
+        let mut occurrence = meeting(true);
+        occurrence.kind = "occurrence".into();
+        occurrence.recurrence = Some("Weekly on Wednesday".into());
+        let mut alone = EventForm::edit_occurrence(&occurrence, main, zone);
+        assert_eq!(
+            alone.repeat_label(),
+            "Weekly on Wednesday (this occurrence only)"
+        );
+        assert!(!alone.rows().contains(&EventFormRow::Every));
+        alone.cycle_repeat(true);
+        assert_eq!(alone.repeat, None);
+        alone.title = "Budget, moved".into();
+        let params = alone.update_params().unwrap();
+        assert_eq!(params.scope.as_deref(), Some("occurrence"));
+        assert_eq!(params.fields.recurrence, None);
     }
 
     /// Moving to a calendar without online meetings drops the Teams switch

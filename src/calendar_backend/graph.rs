@@ -37,6 +37,11 @@
 //! with the series ([`SeriesInfo::master`]), and is listed in
 //! [`SyncResult::inheriting`], so the store re-derives it when only the
 //! master changes ([`Event::inherit_from`]).
+//! A delta never names an occurrence that left its series (deleted, or ended
+//! by a new rule) but re-sends the series whole: a master that comes with
+//! some of its occurrences is listed in [`SyncResult::resent_series`], and
+//! the store drops its cached occurrences that did not come; a removed
+//! master takes its occurrences along in the store.
 //!
 //! Every request sends `Prefer: IdType="ImmutableId"`. No
 //! `Prefer: outlook.timezone` is sent, so times come back in UTC and the
@@ -1321,6 +1326,31 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                      occurrences keep their own iCalUId until the next sync",
                     self.account
                 ),
+            }
+        }
+
+        // A delta re-sends a series whole when anything in it changed: the
+        // master and every occurrence of the window, never naming one that
+        // left (probes of 2026-11-04, `.agents/research/`). A master that came
+        // with at least one of its occurrences is such a series, whose cached
+        // occurrences the store holds to what came; a master alone prunes
+        // nothing, so a delta that re-sent no occurrence drops none.
+        if !full_resync {
+            for id in &order {
+                let Some(Item::Upsert(event)) = last.get(id) else {
+                    continue;
+                };
+                if event.kind.as_deref() != Some("seriesMaster") {
+                    continue;
+                }
+                let brought = last.values().any(|item| {
+                    matches!(item, Item::Upsert(occurrence)
+                        if is_instance(occurrence.kind.as_deref())
+                            && occurrence.series_master_id.as_deref() == Some(id.as_str()))
+                });
+                if brought {
+                    result.resent_series.push(id.clone());
+                }
             }
         }
 

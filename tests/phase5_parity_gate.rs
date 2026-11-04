@@ -786,6 +786,7 @@ fn surface_headings(section: &str) -> &'static [&'static str] {
     match section {
         "SERVER SEARCH" => &["Server search overlay"],
         "ACTIVITY LOG" => &["Activity overlay"],
+        "EVENT CARD" => &["Event card overlay"],
         other => panic!(
             "no `docs/baselines/pre-daemon/manual-keys.md` surface is mapped to the dump-keys \
              section {other:?}; a new KeyAction::Manual family needs a mapping here and a section \
@@ -842,7 +843,10 @@ fn the_manual_rows_are_exactly_what_this_runs_binary_dumps() {
             .as_str()
             .expect("a section title")
             .to_string();
-        if !matches!(title.as_str(), "SERVER SEARCH" | "ACTIVITY LOG") {
+        if !matches!(
+            title.as_str(),
+            "SERVER SEARCH" | "ACTIVITY LOG" | "EVENT CARD"
+        ) {
             continue;
         }
         for binding in section["bindings"].as_array().expect("a bindings array") {
@@ -855,16 +859,17 @@ fn the_manual_rows_are_exactly_what_this_runs_binary_dumps() {
 
     assert_eq!(
         derived, printed,
-        "the `KeyAction::Manual` rows of `KEYMAP` and the two hand-dispatched sections of \
+        "the `KeyAction::Manual` rows of `KEYMAP` and the three hand-dispatched sections of \
          `mp dump-keys --json` must be the same set: the checklist below is built from the first \
          and the gate is stated over the second"
     );
     assert_eq!(
         derived.len(),
-        22,
-        "Phase 0 counted 20 documented-only Manual rows (15 server search, 5 activity log), and \
-         PERSO-174 added the server search's `cF` and `te`; a new one needs a \
-         `docs/baselines/pre-daemon/manual-keys.md` row and a checklist row"
+        25,
+        "Phase 0 counted 20 documented-only Manual rows (15 server search, 5 activity log), \
+         PERSO-174 added the server search's `cF` and `te`, and PERSO-255 the event card's `p`, \
+         `Tab` and `m`; a new one needs a `docs/baselines/pre-daemon/manual-keys.md` row and a \
+         checklist row"
     );
 }
 

@@ -12,23 +12,23 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 06 |││Tue 2026-08-04  (today)                ││Calendar    evoqs/Calendar                                                 ││
 07 |││  10:00-11:00 ? Jour fixe              ││Organizer   planung@example.org                                            ││
 08 |││                [evoqs/Calendar]       ││Attendees   Sylvain <sylvain@example.org>  accepted                        ││
-09 |││  10:30-12:00 ? PhD Kolloquium         ││            Ada <ada@example.org>  tentative                               ││
-10 |││                [perso╭──────────────────────────────────────────────────────────────────────╮                      ││
-11 |││                      │New event (retry)                                                     │                      ││
-12 |││Wed 2026-08-05        │                                                                      │ev-handover           ││
-13 |││  all day       Sommer│  Calendar     ‹ evoqs/Kalender ›                                     │                      ││
-14 |││                [evoqs│  Title        Budget review▏                                         │                      ││
-15 |││                      │  All day      [ ]                                                    │                      ││
-16 |││Thu 2026-08-06        │  Date         2026-08-04                                             │                      ││
-17 |││  all day       Sommer│  Start        14:00                                                  │                      ││
-18 |││                [evoqs│  End          15:30                                                  │                      ││
-19 |││  10:00-11:00 ? Jour f│  Location     Room 1                                                 │                      ││
-20 |││                [evoqs│  Attendees    ada@example.com, bob@example.com                       │                      ││
-21 |││                      │  Optional                                                            │                      ││
-22 |││Fri 2026-08-07        │  Rooms        room-1@example.com                                     │                      ││
-23 |││  14:00-15:00 ✓ Abgesa│  Teams        [x]                                                    │                      ││
-24 |││                [evoqs│  Reminder     (the mailbox default; minutes or none)                 │                      ││
-25 |││                      │  Show as      ‹ Busy ›                                               │                      ││
+09 |││  10:30-12:00 ? PhD Ko╭──────────────────────────────────────────────────────────────────────╮                      ││
+10 |││                [perso│New event (retry)                                                     │                      ││
+11 |││                      │                                                                      │                      ││
+12 |││Wed 2026-08-05        │  Calendar     ‹ evoqs/Kalender ›                                     │ev-handover           ││
+13 |││  all day       Sommer│  Title        Budget review▏                                         │                      ││
+14 |││                [evoqs│  All day      [ ]                                                    │                      ││
+15 |││                      │  Date         2026-08-04                                             │                      ││
+16 |││Thu 2026-08-06        │  Start        14:00                                                  │                      ││
+17 |││  all day       Sommer│  End          15:30                                                  │                      ││
+18 |││                [evoqs│  Location     Room 1                                                 │                      ││
+19 |││  10:00-11:00 ? Jour f│  Attendees    ada@example.com, bob@example.com                       │                      ││
+20 |││                [evoqs│  Optional                                                            │                      ││
+21 |││                      │  Rooms        room-1@example.com                                     │                      ││
+22 |││Fri 2026-08-07        │  Teams        [x]                                                    │                      ││
+23 |││  14:00-15:00 ✓ Abgesa│  Reminder     (the mailbox default; minutes or none)                 │                      ││
+24 |││                [evoqs│  Show as      ‹ Busy ›                                               │                      ││
+25 |││                      │  Repeats      ‹ Does not repeat ›                                    │                      ││
 26 |││                      │  Description  Agenda (+2 lines)                                      │                      ││
 27 |││                      │                                                                      │                      ││
 28 |││                      │  The event was not created: Graph refused the new event: HTTP 403; E…│                      ││
@@ -48,9 +48,9 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 03 |bg:surface+fg:selection+bold@2..41
 04 |bg:surface+fg:selection+bold@2..41
 06 |bold@2..25
-11 |bold@25..42
+10 |bold@25..42
 12 |bold@2..16
-14 |fg:selection+bold@25..54
+13 |fg:selection+bold@25..54
 16 |bold@2..16
 22 |bold@2..16
 23 |strike@2..24

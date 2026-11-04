@@ -19,6 +19,7 @@ import type {
   DraftValidation,
   EventCreateParams,
   EventCreateStarted,
+  EventGetResult,
   EventProposedTime,
   EventUpdateParams,
   HoldListing,
@@ -463,13 +464,20 @@ export const calendarFreeBusy = (params: CalendarFreeBusyParams): Promise<Calend
 export const eventUpdate = (params: EventUpdateParams): Promise<OperationStarted> =>
   invoke<OperationStarted>("event_update", { params });
 
-/** Cancel a meeting the user organizes, telling its attendees (`event.cancel`); the end arrives as `event_change`. */
-export const eventCancel = (account: string, event: string, comment: string | null): Promise<OperationStarted> =>
-  invoke<OperationStarted>("event_cancel", { account, event, comment });
+/**
+ * Cancel a meeting the user organizes, telling its attendees
+ * (`event.cancel`); `scope` names an occurrence alone or its whole series.
+ * The end arrives as `event_change`.
+ */
+export const eventCancel = (account: string, event: string, comment: string | null, scope: "occurrence" | "series" | null = null): Promise<OperationStarted> =>
+  invoke<OperationStarted>("event_cancel", scope ? { account, event, comment, scope } : { account, event, comment });
 
-/** Delete an event that tells nobody (`event.delete`); the end arrives as `event_change`. */
-export const eventDelete = (account: string, event: string): Promise<OperationStarted> =>
-  invoke<OperationStarted>("event_delete", { account, event });
+/** Delete an event that tells nobody (`event.delete`), an occurrence alone or its whole series in `scope`; the end arrives as `event_change`. */
+export const eventDelete = (account: string, event: string, scope: "occurrence" | "series" | null = null): Promise<OperationStarted> =>
+  invoke<OperationStarted>("event_delete", scope ? { account, event, scope } : { account, event });
+
+/** One event, or a series master, with the series of an occurrence (`event.get`), which the whole series' form reads. */
+export const eventGet = (account: string, event: string): Promise<EventGetResult> => invoke<EventGetResult>("event_get", { account, event });
 
 /**
  * Answer an event; the end arrives as `rsvp`, its result an

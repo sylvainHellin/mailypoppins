@@ -4,6 +4,7 @@ import { renderApp, shellReady } from "@/test/render";
 import { emit, mock, settleEventCreate } from "@/test/tauri-mock";
 import { eventParams, eventProblem, writableCalendars } from "@/app/eventForm";
 import type { CalendarInfo } from "@/protocol/types";
+import { NO_REPEAT } from "@/app/recurrence";
 import type { EventDialog } from "@/app/state";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
@@ -57,6 +58,7 @@ describe("the event form's model", () => {
         noReminder: true,
         showAs: "busy",
         body: "",
+        repeat: NO_REPEAT,
       },
     };
     expect(eventProblem(dialog.fields, calendars)).toBeNull();

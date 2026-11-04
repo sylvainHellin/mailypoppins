@@ -171,8 +171,10 @@ pub fn view(
     Ok(events)
 }
 
-/// One event of `account` by its id: a cached server event, or the event of
-/// an invitation mail (`imip:<row_id>`). `None` when neither knows it.
+/// One event of `account` by its id: a cached server event, a series master
+/// the series cache holds (what a change to the whole series is read
+/// against), or the event of an invitation mail (`imip:<row_id>`). `None`
+/// when none knows it.
 pub fn get(account: &AccountConfig, id: &str, viewer: Tz) -> Result<Option<Sourced>> {
     let store = open_store(&account.name)?;
     if let Some(row_id) = imip_row_id(id) {
@@ -180,20 +182,26 @@ pub fn get(account: &AccountConfig, id: &str, viewer: Tz) -> Result<Option<Sourc
             .into_iter()
             .find(|sourced| sourced.source.as_ref().map(|s| s.row_id) == Some(row_id)));
     }
-    Ok(
-        cache::get_event(&store, &account.name, id)?.map(|event| Sourced {
-            event,
-            source: None,
-        }),
-    )
+    let event = match cache::get_event(&store, &account.name, id)? {
+        Some(event) => Some(event),
+        None => cache::get_series(&store, &account.name, id)?
+            .and_then(|series| series.master)
+            .map(|master| *master),
+    };
+    Ok(event.map(|event| Sourced {
+        event,
+        source: None,
+    }))
 }
 
 /// The series `event` is an occurrence of, as `event.get` answers it: the
-/// master's id, with its summary and rule when the series cache holds them.
-/// `None` for an event in no series.
+/// master's id, with its summary and rule when the series cache holds them;
+/// a series master's own. `None` for an event in no series.
 pub fn series(account: &AccountConfig, event: &Event) -> Result<Option<CalendarSeries>> {
-    let Some(master_id) = event.series_master_id.as_deref() else {
-        return Ok(None);
+    let master_id = match (event.series_master_id.as_deref(), event.kind) {
+        (Some(master_id), _) => master_id,
+        (None, EventKind::SeriesMaster) => event.id.as_str(),
+        (None, _) => return Ok(None),
     };
     let store = open_store(&account.name)?;
     let cached = cache::get_series(&store, &account.name, master_id)?;

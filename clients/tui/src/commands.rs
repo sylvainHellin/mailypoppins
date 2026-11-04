@@ -911,7 +911,7 @@ fn update_event(app: &mut App, commands: &dyn Queries, form: &super::app::EventF
 fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::EventRemoveOverlay) {
     let mut removal = removal.clone();
     removal.error = None;
-    let (method, params, verb) = if removal.cancel {
+    let (method, mut params, verb) = if removal.cancel {
         let comment = Some(removal.comment.trim().to_string()).filter(|c| !c.is_empty());
         (
             "event.cancel",
@@ -925,6 +925,9 @@ fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::Eve
             ("Deleting", "Deleted"),
         )
     };
+    if let Some(scope) = &removal.scope {
+        params["scope"] = scope.as_str().into();
+    }
     let started = match commands.call(method, params) {
         Ok(started) => started,
         Err(e) => return app.reopen_event_remove(removal, format!("{e:#}")),
@@ -932,11 +935,13 @@ fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::Eve
     let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
         return app.reopen_event_remove(removal, format!("{method} answered no operation id"));
     };
-    app.set_status_level(
-        format!("{} {}...", verb.0, removal.summary),
-        StatusLevel::Progress,
-    );
-    let done = format!("{} {}", verb.1, removal.summary);
+    let what = match removal.scope.as_deref() {
+        Some("series") => format!("the series {}", removal.summary),
+        Some("occurrence") => format!("one occurrence of {}", removal.summary),
+        _ => removal.summary.clone(),
+    };
+    app.set_status_level(format!("{} {what}...", verb.0), StatusLevel::Progress);
+    let done = format!("{} {what}", verb.1);
     app.calendar_view
         .pending_removals
         .insert(id.clone(), removal);

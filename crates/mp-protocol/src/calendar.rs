@@ -386,6 +386,15 @@ pub struct CalendarEvent {
     pub source: Option<CalendarEventSource>,
 }
 
+impl CalendarEvent {
+    /// Whether the event is one occurrence of a series, which a change
+    /// addresses with a scope: an occurrence, an exception, or any event
+    /// naming its series master.
+    pub fn is_occurrence(&self) -> bool {
+        matches!(self.kind.as_str(), "occurrence" | "exception") || self.series_master_id.is_some()
+    }
+}
+
 fn single() -> String {
     "single".to_string()
 }
@@ -610,6 +619,13 @@ pub struct EventInputParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub allow_new_time_proposals: Option<bool>,
+    /// Repeat the event: a series by this rule. What the pattern leaves out
+    /// comes from the event's first day (the weekday of a weekly rule, the
+    /// day or the weekday of a monthly one, the month of a yearly one), and
+    /// the range starts on that day whatever `start` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub recurrence: Option<CalendarRecurrence>,
 }
 
 /// A key that is present, `null` included, as `Some`, so the three states of
@@ -819,6 +835,11 @@ pub struct EventPatchParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub allow_new_time_proposals: Option<bool>,
+    /// The series' new rule, read as [`EventInputParams::recurrence`]
+    /// against the series' first day; only with the `series` scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub recurrence: Option<CalendarRecurrence>,
 }
 
 /// The `params` of `event.update`.
@@ -826,8 +847,15 @@ pub struct EventPatchParams {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventUpdateParams {
     pub account: String,
-    /// A [`CalendarEvent::id`] of a server event.
+    /// A [`CalendarEvent::id`] of a server event, or a series master's id.
     pub event: String,
+    /// `occurrence` or `series`, which an occurrence's id needs: the change
+    /// reaches that occurrence alone, or the whole series through its
+    /// master. Absent on a single event; a series master's id is the
+    /// series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<String>,
     pub fields: EventPatchParams,
 }
 
@@ -836,8 +864,14 @@ pub struct EventUpdateParams {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventUpdateResult {
     pub account: String,
-    /// The event as the server holds it after the change, now in the cache.
+    /// The event as the server holds it after the change, now in the cache:
+    /// the occurrence for the `occurrence` scope, the series master for the
+    /// `series` one.
     pub event: CalendarEvent,
+    /// The scope the change was made in; absent on a single event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<String>,
 }
 
 /// The `params` of `event.cancel`.
@@ -845,8 +879,13 @@ pub struct EventUpdateResult {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventCancelParams {
     pub account: String,
-    /// A [`CalendarEvent::id`] of a meeting the user organizes.
+    /// A [`CalendarEvent::id`] of a meeting the user organizes, or a series
+    /// master's id.
     pub event: String,
+    /// `occurrence` or `series`, as on [`EventUpdateParams::scope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<String>,
     /// A message for the attendees, sent with the cancellation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -861,6 +900,10 @@ pub struct EventCancelResult {
     pub event: String,
     /// The addresses the server sent the cancellation to, rooms included.
     pub notified: Vec<String>,
+    /// The scope the cancel was made in; absent on a single event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<String>,
 }
 
 /// The `params` of `event.delete`.
@@ -868,8 +911,13 @@ pub struct EventCancelResult {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventDeleteParams {
     pub account: String,
-    /// A [`CalendarEvent::id`] of an event that tells nobody.
+    /// A [`CalendarEvent::id`] of an event that tells nobody, or a series
+    /// master's id.
     pub event: String,
+    /// `occurrence` or `series`, as on [`EventUpdateParams::scope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<String>,
 }
 
 /// What a settled `event.delete` reports.
@@ -878,6 +926,10 @@ pub struct EventDeleteParams {
 pub struct EventDeleteResult {
     pub account: String,
     pub event: String,
+    /// The scope the delete was made in; absent on a single event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<String>,
 }
 
 /// The payload of a `calendar.changed` event: an account's calendars or
@@ -976,6 +1028,13 @@ mod tests {
             serde_json::from_value(raw.clone()).expect("event.create params");
         assert_eq!(create.event.reminder, Some(Some(10)));
         assert_eq!(create.event.attendees[1].role.as_deref(), Some("resource"));
+        let rule = create
+            .event
+            .recurrence
+            .as_ref()
+            .expect("a recurring create");
+        assert_eq!(rule.weekdays, ["monday", "wednesday"]);
+        assert_eq!(rule.until.as_deref(), Some("2026-12-16"));
         assert_eq!(serde_json::to_value(&create).unwrap(), raw);
         let started: EventCreateStarted = serde_json::from_value(result(include_str!(
             "../fixtures/event.create.response.json"
@@ -989,10 +1048,12 @@ mod tests {
         assert_eq!(update.fields.location, Some(None));
         assert_eq!(update.fields.reminder, Some(Some(5)));
         assert_eq!(update.fields.body, None);
+        assert_eq!(update.scope.as_deref(), Some("occurrence"));
         assert_eq!(serde_json::to_value(&update).unwrap(), raw);
         let raw = params(include_str!("../fixtures/event.cancel.request.json"));
         let cancel: EventCancelParams =
             serde_json::from_value(raw.clone()).expect("event.cancel params");
+        assert_eq!(cancel.scope.as_deref(), Some("series"));
         assert_eq!(serde_json::to_value(&cancel).unwrap(), raw);
         let raw = params(include_str!("../fixtures/event.delete.request.json"));
         let delete: EventDeleteParams =

@@ -7,8 +7,8 @@ use ratatui::Frame;
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
     ConfirmDialog, DirPicker, DirPickerMode, EventForm, EventFormRow, EventRemoveOverlay,
-    MailboxPicker, PersistentError, PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode,
-    SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    EventScopeChooser, MailboxPicker, PersistentError, PickerPurpose, RsvpOverlay, RsvpRow,
+    SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -140,6 +140,10 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
 /// daemon's refusal) under them, and the keys. The problem line and the
 /// keys keep their own bottom rows, and the availability rows get only the
 /// height the fields leave, so a short terminal hides rows, never them.
+/// A terminal too short for every field (80x24 has room for the title and
+/// fifteen lines) still keeps one line for the availability, its count of
+/// the rows, and shows a window of the fields that holds the cursor row, an
+/// arrow after the title telling which way the hidden ones lie.
 pub(super) fn render_event_form(
     form: &EventForm,
     availability: &crate::app::Availability,
@@ -177,19 +181,14 @@ pub(super) fn render_event_form(
 
     let title = match (&form.editing, &form.transaction_id) {
         (Some(edit), _) if !edit.is_organizer => "Edit event (your reminder and show-as)",
+        (Some(_), _) if form.scope() == Some("series") => "Edit the whole series",
+        (Some(_), _) if form.scope() == Some("occurrence") => "Edit this occurrence",
         (Some(_), _) => "Edit event",
         (None, Some(_)) => "New event (retry)",
         (None, None) => "New event",
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(theme::active().accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
+    let mut fields: Vec<Line> = Vec::with_capacity(rows.len());
+    let cursor = rows.iter().position(|row| *row == form.row).unwrap_or(0);
     let switch = |on: bool| if on { "[x]" } else { "[ ]" };
     for row in rows {
         let on = form.row == row;
@@ -219,6 +218,16 @@ pub(super) fn render_event_form(
                 "Show as",
                 format!("\u{2039} {} \u{203a}", form.show_as_label()),
             ),
+            EventFormRow::Repeat if form.scope() == Some("occurrence") => {
+                ("Repeats", form.repeat_label())
+            }
+            EventFormRow::Repeat => (
+                "Repeats",
+                format!("\u{2039} {} \u{203a}", form.repeat_label()),
+            ),
+            EventFormRow::Every => ("Every", form.every.clone()),
+            EventFormRow::RepeatOn => ("On", form.repeat_on.clone()),
+            EventFormRow::Ends => ("Ends", form.ends.clone()),
             EventFormRow::Description => {
                 let first = form.body.lines().next().unwrap_or_default();
                 let more = form.body.lines().count().saturating_sub(1);
@@ -239,6 +248,8 @@ pub(super) fn render_event_form(
                 EventFormRow::Reminder if form.editing.is_some() => "(none)".to_string(),
                 EventFormRow::Reminder => "(the mailbox default; minutes or none)".to_string(),
                 EventFormRow::End if form.all_day => "(one day)".to_string(),
+                EventFormRow::RepeatOn => "(its own weekday; Mo, We, ...)".to_string(),
+                EventFormRow::Ends => "(never; a last day or a number of times)".to_string(),
                 _ => String::new(),
             }
         } else {
@@ -251,18 +262,47 @@ pub(super) fn render_event_form(
         } else {
             normal
         };
-        lines.push(Line::from(vec![
+        fields.push(Line::from(vec![
             Span::styled(prefix, if on { focused } else { muted }),
             Span::styled(shown, value_style),
         ]));
     }
     // The availability takes what the fields leave of the body; the blank
     // lines around it go first when the terminal is short, then the one
-    // under the title, so an 80x24 terminal keeps the count of the rows.
-    if wanted > 0 && lines.len() >= body.height as usize {
-        lines.remove(1);
+    // under the title. Shorter still, the availability keeps one line for
+    // the count of its rows and the fields show the window of them that
+    // holds the cursor.
+    let height = body.height as usize;
+    let reserve = usize::from(wanted > 0);
+    let blank_under_title = 2 + fields.len() + reserve <= height;
+    let room = height.saturating_sub(1 + reserve);
+    let (first, last) = if blank_under_title || fields.len() <= room {
+        (0, fields.len())
+    } else {
+        let first = (cursor + 1).saturating_sub(room);
+        (first, first + room)
+    };
+    let mut heading = vec![Span::styled(
+        title,
+        Style::default()
+            .fg(theme::active().accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let hidden = match (first > 0, last < fields.len()) {
+        (true, true) => Some("\u{2195}"),
+        (true, false) => Some("\u{2191}"),
+        (false, true) => Some("\u{2193}"),
+        (false, false) => None,
+    };
+    if let Some(arrow) = hidden {
+        heading.push(Span::styled(format!("  {arrow} more fields"), muted));
     }
-    let spare = (body.height as usize).saturating_sub(lines.len());
+    let mut lines = vec![Line::from(heading)];
+    if blank_under_title {
+        lines.push(Line::from(""));
+    }
+    lines.extend(fields.drain(first..last));
+    let spare = height.saturating_sub(lines.len());
     let available = super::availability::availability_lines(form, availability, width, spare);
     let blanks = spare - available.len();
     if !available.is_empty() && blanks > 0 {
@@ -289,6 +329,72 @@ pub(super) fn render_event_form(
             "  Enter create \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} choose \u{b7} Esc cancel"
         };
         frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
+    }
+}
+
+/// Render the scope chooser `E` and `D` open on an occurrence of a series
+/// (PERSO-255): this occurrence, selected by default, or the whole series,
+/// each with its key.
+pub(super) fn render_event_scope(chooser: &EventScopeChooser, frame: &mut Frame, area: Rect) {
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        52,
+        9,
+        theme::active().accent,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 0, 1);
+    let width = inner.width as usize;
+    let focused = Style::default()
+        .fg(theme::active().selection)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(theme::active().text);
+    let muted = Style::default().fg(theme::active().text_muted);
+    let title = if chooser.remove {
+        "Cancel or delete a recurring event"
+    } else {
+        "Edit a recurring event"
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            truncate(&chooser.event.summary, width),
+            normal,
+        )),
+        Line::from(""),
+    ];
+    for (series, label, key) in [
+        (false, "This occurrence", "o"),
+        (true, "The whole series", "s"),
+    ] {
+        let on = chooser.series == series;
+        let mark = if on { "(\u{2022})" } else { "( )" };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {mark} {label:<20}"),
+                if on { focused } else { normal },
+            ),
+            Span::styled(key, muted),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), stack.content);
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "  o/s choose \u{b7} Enter take \u{b7} Esc keep",
+                muted,
+            )),
+            footer,
+        );
     }
 }
 
@@ -327,10 +433,13 @@ pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Fram
         .fg(theme::active().selection)
         .add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(theme::active().text_muted);
-    let title = if overlay.cancel {
-        "Cancel the meeting?"
-    } else {
-        "Delete the event?"
+    let title = match (overlay.cancel, overlay.scope.as_deref()) {
+        (true, Some("series")) => "Cancel the whole series?",
+        (true, Some("occurrence")) => "Cancel this occurrence?",
+        (true, _) => "Cancel the meeting?",
+        (false, Some("series")) => "Delete the whole series?",
+        (false, Some("occurrence")) => "Delete this occurrence?",
+        (false, _) => "Delete the event?",
     };
     let mut lines = vec![
         Line::from(Span::styled(

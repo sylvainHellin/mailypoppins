@@ -5,6 +5,11 @@
  */
 export type EventDeleteParams = { account: string,
 /**
- * A [`CalendarEvent::id`] of an event that tells nobody.
+ * A [`CalendarEvent::id`] of an event that tells nobody, or a series
+ * master's id.
  */
-event: string, };
+event: string,
+/**
+ * `occurrence` or `series`, as on [`EventUpdateParams::scope`].
+ */
+scope?: string, };

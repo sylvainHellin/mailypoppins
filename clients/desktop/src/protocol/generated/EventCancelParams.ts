@@ -5,9 +5,14 @@
  */
 export type EventCancelParams = { account: string,
 /**
- * A [`CalendarEvent::id`] of a meeting the user organizes.
+ * A [`CalendarEvent::id`] of a meeting the user organizes, or a series
+ * master's id.
  */
 event: string,
+/**
+ * `occurrence` or `series`, as on [`EventUpdateParams::scope`].
+ */
+scope?: string,
 /**
  * A message for the attendees, sent with the cancellation.
  */

@@ -19,7 +19,8 @@ use mp_protocol::calendar::{
 };
 
 use crate::tui::app::{
-    Action, App, Availability, EventCalendarChoice, EventForm, Overlay, AVAILABILITY_DEBOUNCE,
+    Action, App, Availability, EventCalendarChoice, EventForm, EventFormRow, Overlay,
+    AVAILABILITY_DEBOUNCE,
 };
 use crate::tui::commands::{dispatch, settled};
 use crate::tui::events::Awaited;
@@ -366,15 +367,10 @@ fn text_rows(frame: &str) -> Vec<&str> {
         .collect()
 }
 
-/// On a short terminal the form keeps its fields, its problem line and its
-/// keys, and shows as many availability rows as the height leaves, the rest
-/// counted: at 80x27 the header and one row, at 80x24 the count alone in
-/// the blank under the title, at 80x23 no availability at all.
-#[test]
-fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
+/// The form at the 80x24 test height for `form`, with the availability of
+/// [`answer`] for its day.
+fn short_form_app(form: EventForm) -> App {
     let mut app = calendar_fixture();
-    let mut form = form();
-    form.end = "13:00".into();
     let key = form.free_busy_key().unwrap();
     app.overlay = Overlay::EventForm(Box::new(form));
     app.calendar_view.availability = Availability {
@@ -383,17 +379,37 @@ fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
         operation: None,
         answer: Some(Ok(answer())),
     };
+    app
+}
+
+/// On a short terminal the form keeps its problem line and its keys, and
+/// shows as many availability rows as the height leaves, the rest counted:
+/// at 80x28 the header and one row, at 80x25 the count alone in the blank
+/// under the title, at 80x24 the count alone too, the fields showing the
+/// window that holds the cursor row and an arrow telling more lie below.
+#[test]
+fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
+    let mut form = form();
+    form.end = "13:00".into();
+    let mut app = short_form_app(form);
     let frame = frame_snapshot(&mut app, 80, 24);
     assert_snapshot!("event_form_availability_80x24", frame);
-    for (height, rows, more) in [(27, 1, "+3 more"), (24, 0, "+4 more"), (23, 0, "")] {
+    for (height, rows, more) in [(28, 1, "+3 more"), (25, 0, "+4 more"), (24, 0, "+4 more")] {
         let frame = frame_snapshot(&mut app, 80, height);
         let text = text_rows(&frame);
         let at = |needle: &str| text.iter().position(|line| line.contains(needle));
         let problem = at("The end comes before the start")
             .unwrap_or_else(|| panic!("no problem line at 80x{height}:\n{frame}"));
-        let description = at("Description").expect("the last field");
+        let last = at("Description")
+            .or_else(|| at("Repeats"))
+            .expect("the last field shown");
         let keys = at("Enter create").expect("the keys");
-        assert!(description < problem && problem < keys, "{frame}");
+        assert!(last < problem && problem < keys, "{frame}");
+        assert_eq!(
+            at("Description").is_none(),
+            frame.contains("\u{2193} more fields"),
+            "a hidden field is told at 80x{height}:\n{frame}"
+        );
         let shown = text
             .iter()
             .filter(|line| line.contains("@example.org ") && !line.contains("Attendees"))
@@ -409,6 +425,46 @@ fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
     let frame = frame_snapshot(&mut app, 80, 22);
     assert!(frame.contains("The end comes before the start"), "{frame}");
     assert!(frame.contains("Enter create"), "{frame}");
+}
+
+/// A repeating event's form at 80x24, its Every, On and Ends rows three
+/// more than the height holds: the availability keeps its count, the
+/// problem line and the keys their rows, and the window of the fields
+/// follows the cursor, so a row Tab reaches is always on screen.
+#[test]
+fn a_short_terminal_shows_the_repeat_rows_the_cursor_reaches() {
+    let mut form = form();
+    form.end = "13:00".into();
+    form.cycle_repeat(true);
+    form.cycle_repeat(true);
+    form.repeat_on = "Tu, Th".into();
+    form.row = EventFormRow::RepeatOn;
+    let mut app = short_form_app(form);
+    let frame = frame_snapshot(&mut app, 80, 24);
+    assert_snapshot!("event_form_repeat_80x24", frame);
+    for row in [
+        EventFormRow::Calendar,
+        EventFormRow::Ends,
+        EventFormRow::Description,
+    ] {
+        let Overlay::EventForm(form) = &mut app.overlay else {
+            unreachable!()
+        };
+        form.row = row;
+        let frame = frame_snapshot(&mut app, 80, 24);
+        let text = text_rows(&frame);
+        let at = |needle: &str| text.iter().position(|line| line.contains(needle));
+        let label = match row {
+            EventFormRow::Calendar => "Calendar ",
+            EventFormRow::Ends => "Ends ",
+            _ => "Description ",
+        };
+        let shown = at(label).unwrap_or_else(|| panic!("{row:?} off screen:\n{frame}"));
+        let more = at("+4 more").expect("the availability's count");
+        let problem = at("The end comes before the start").expect("the problem line");
+        let keys = at("Enter create").expect("the keys");
+        assert!(shown < more && more < problem && problem < keys, "{frame}");
+    }
 }
 
 /// The edit form (`E`) on the user's meeting of Tuesday 4 August 2026, 15:00

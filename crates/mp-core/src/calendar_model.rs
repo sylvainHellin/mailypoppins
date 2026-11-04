@@ -533,6 +533,42 @@ impl Weekday {
         }
     }
 
+    /// Every day, Monday first.
+    pub const ALL: [Weekday; 7] = [
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+        Weekday::Sunday,
+    ];
+
+    /// The day `date` falls on.
+    pub fn of_date(date: NaiveDate) -> Self {
+        use chrono::Datelike;
+        Weekday::ALL[date.weekday().num_days_from_monday() as usize]
+    }
+
+    /// The day by its iCalendar two-letter code, any case (`we`).
+    pub fn from_code(code: &str) -> Option<Self> {
+        let code = code.trim().to_ascii_uppercase();
+        Weekday::ALL.into_iter().find(|day| day.code() == code)
+    }
+
+    /// The word the wire and Graph spell the day with (`wednesday`).
+    pub fn word(self) -> &'static str {
+        match self {
+            Weekday::Monday => "monday",
+            Weekday::Tuesday => "tuesday",
+            Weekday::Wednesday => "wednesday",
+            Weekday::Thursday => "thursday",
+            Weekday::Friday => "friday",
+            Weekday::Saturday => "saturday",
+            Weekday::Sunday => "sunday",
+        }
+    }
+
     /// The English name, capitalised (`Wednesday`).
     pub fn name(self) -> &'static str {
         match self {
@@ -572,6 +608,19 @@ impl WeekIndex {
         })
     }
 
+    /// The week of its month `date` falls in, as a rule on its weekday names
+    /// it: the first to fourth for the 1st to the 28th, the last after.
+    pub fn of_date(date: NaiveDate) -> Self {
+        use chrono::Datelike;
+        match (date.day() - 1) / 7 {
+            0 => WeekIndex::First,
+            1 => WeekIndex::Second,
+            2 => WeekIndex::Third,
+            3 => WeekIndex::Fourth,
+            _ => WeekIndex::Last,
+        }
+    }
+
     /// The iCalendar `BYSETPOS` value: 1 to 4, or -1 for the last.
     pub fn position(self) -> i8 {
         match self {
@@ -583,7 +632,8 @@ impl WeekIndex {
         }
     }
 
-    fn word(self) -> &'static str {
+    /// Graph's and the wire's word for the index (`last`).
+    pub fn word(self) -> &'static str {
         match self {
             WeekIndex::First => "first",
             WeekIndex::Second => "second",
@@ -673,21 +723,6 @@ fn until_date(value: &str, zone: Tz) -> Option<NaiveDate> {
         .map(|at| at.date())
 }
 
-/// The weekday an iCalendar two-letter code (`WE`) names.
-fn weekday_of_code(code: &str) -> Option<Weekday> {
-    [
-        Weekday::Monday,
-        Weekday::Tuesday,
-        Weekday::Wednesday,
-        Weekday::Thursday,
-        Weekday::Friday,
-        Weekday::Saturday,
-        Weekday::Sunday,
-    ]
-    .into_iter()
-    .find(|day| day.code() == code)
-}
-
 fn month_name(month: u32) -> Option<&'static str> {
     MONTH_NAMES.get(month.checked_sub(1)? as usize).copied()
 }
@@ -742,7 +777,7 @@ impl Recurrence {
                         let day = day.trim().to_ascii_uppercase();
                         let split = day.len().checked_sub(2)?;
                         let (position, code) = day.split_at(split);
-                        rule.weekdays.push(weekday_of_code(code)?);
+                        rule.weekdays.push(Weekday::from_code(code)?);
                         let position = match position {
                             "" => None,
                             raw => Some(raw.trim_start_matches('+').parse::<i8>().ok()?),
@@ -760,7 +795,7 @@ impl Recurrence {
                 "BYMONTH" => {
                     rule.month = Some(value.parse().ok().filter(|m| (1..=12).contains(m))?)
                 }
-                "WKST" => first_day = Some(weekday_of_code(&value.to_ascii_uppercase())?),
+                "WKST" => first_day = Some(Weekday::from_code(value)?),
                 _ => return None,
             }
         }
@@ -818,6 +853,32 @@ impl Recurrence {
             }
         }
         Some(rule)
+    }
+
+    /// Whether `other` repeats the same way: the same pattern and the same
+    /// end. The range start and the first day of the week are left out,
+    /// since a server moves the one to the first day the pattern names and
+    /// fills the other with its default, and the weekdays match in any
+    /// order.
+    pub fn same_rule(&self, other: &Recurrence) -> bool {
+        let days = |rule: &Recurrence| {
+            let mut days: Vec<usize> = rule
+                .weekdays
+                .iter()
+                .map(|day| Weekday::ALL.iter().position(|d| d == day).unwrap_or(7))
+                .collect();
+            days.sort_unstable();
+            days.dedup();
+            days
+        };
+        self.frequency == other.frequency
+            && self.interval == other.interval
+            && days(self) == days(other)
+            && self.day_of_month == other.day_of_month
+            && self.week_index == other.week_index
+            && self.month == other.month
+            && self.until == other.until
+            && self.count == other.count
     }
 
     /// The rule in words, as the event cards print it: `Weekly on

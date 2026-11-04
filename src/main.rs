@@ -939,9 +939,19 @@ WHEN is a time read in --zone (2026-11-18T14:00), a time with an offset
 (2026-11-18T14:00:00+01:00), or a bare date (2026-11-18) for an all-day event,
 whose --end is its last day, included. --duration takes 1h30m or PT1H30M.
 
+--repeat makes a series: --every N for every N days, weeks, months or years,
+--on MO,WE for the days of a weekly series (default the start's), --monthly-by
+weekday for a monthly series on the start's weekday in the same week of the
+month (default its day of the month), and --until DATE or --count N for its
+end (default none). A yearly series falls on the start's day and month.
+
 The command prints the create's transaction id when it cannot confirm the
 event; rerun it with --transaction-id and the server creates the event at
-most once.")]
+most once.
+
+Examples:
+  mp event create -A evoqs --summary Standup --start 2026-11-23T09:00 --duration 15m --repeat weekly --on MO,WE,FR --until 2026-12-18
+  mp event create -A evoqs --summary Review --start 2026-11-26T14:00 --duration 1h --repeat monthly --monthly-by weekday --count 6")]
     Create {
         #[command(flatten)]
         event: Box<CreateFlags>,
@@ -959,16 +969,28 @@ unless --zone names another. --to, --optional and --room name the whole new
 attendee list. An attendee may change only --reminder, --no-reminder and
 --show-as on their own copy of a meeting; the rest is the organizer's.
 --use-proposal moves the meeting to the time an attendee proposed, which
-mp event show lists under the attendee.
+mp event show lists under the attendee: on an occurrence of a series it
+moves that occurrence alone, since the attendee proposed for that one
+meeting, and on a series master the whole series.
+
+An occurrence of a series needs --scope: occurrence changes it alone, series
+changes the whole series, its times read against the series' first
+occurrence; a series' new time or --repeat resets the occurrences changed on
+their own. --repeat takes the flags of mp event create, with --scope series.
 
 Examples:
   mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
   mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs
+  mp event update AAMkADocc --scope series --summary 'Standup, new room' -A evoqs
   mp event update AAMkADev1 --use-proposal ada@example.com -A evoqs")]
     Update {
         /// The event id, as `mp calendar view --json` prints it
         #[arg(value_name = "EVENT")]
         event: String,
+        /// What a change to an occurrence of a series reaches: it alone, or
+        /// the whole series
+        #[arg(long, value_enum, value_name = "SCOPE")]
+        scope: Option<EventScopeArg>,
         #[command(flatten)]
         fields: Box<UpdateFlags>,
         /// Print the settled `event.update` result as JSON on stdout
@@ -978,11 +1000,16 @@ Examples:
     /// Cancel a meeting you organize: every attendee gets the cancellation
     #[command(after_help = "\
 A meeting that invites nobody is deleted with mp event delete, and a meeting
-someone else organizes is declined with mp event respond EVENT decline.")]
+someone else organizes is declined with mp event respond EVENT decline. An
+occurrence of a series needs --scope: occurrence cancels it alone, series
+cancels the whole series.")]
     Cancel {
         /// The event id, as `mp calendar view --json` prints it
         #[arg(value_name = "EVENT")]
         event: String,
+        /// What a cancel of an occurrence of a series reaches
+        #[arg(long, value_enum, value_name = "SCOPE")]
+        scope: Option<EventScopeArg>,
         /// A message for the attendees, sent with the cancellation
         #[arg(long, value_name = "TEXT")]
         comment: Option<String>,
@@ -995,11 +1022,15 @@ someone else organizes is declined with mp event respond EVENT decline.")]
     #[command(after_help = "\
 A live meeting is not deleted: its organizer cancels it (mp event cancel), so
 the attendees are told, and an attendee declines it (mp event respond EVENT
-decline), so the organizer is.")]
+decline), so the organizer is. An occurrence of a series needs --scope:
+occurrence deletes it alone, series deletes the whole series.")]
     Delete {
         /// The event id, as `mp calendar view --json` prints it
         #[arg(value_name = "EVENT")]
         event: String,
+        /// What a delete of an occurrence of a series reaches
+        #[arg(long, value_enum, value_name = "SCOPE")]
+        scope: Option<EventScopeArg>,
         /// Print the settled `event.delete` result as JSON on stdout
         #[arg(long)]
         json: bool,
@@ -1044,6 +1075,90 @@ Example:
         #[arg(long)]
         json: bool,
     },
+}
+
+/// What a change to an occurrence of a series reaches.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum EventScopeArg {
+    Occurrence,
+    Series,
+}
+
+impl EventScopeArg {
+    /// The word the daemon takes.
+    fn word(self) -> &'static str {
+        match self {
+            EventScopeArg::Occurrence => "occurrence",
+            EventScopeArg::Series => "series",
+        }
+    }
+}
+
+/// How often a series repeats.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum RepeatFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+/// What a monthly series falls on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum MonthlyBy {
+    Date,
+    Weekday,
+}
+
+/// How `mp event create` and `mp event update --scope series` repeat an
+/// event.
+#[derive(clap::Args, Clone, Debug, Default)]
+struct RepeatFlags {
+    /// Repeat the event as a series
+    #[arg(long, value_enum, value_name = "FREQ")]
+    repeat: Option<RepeatFrequency>,
+    /// Every N days, weeks, months or years (default 1)
+    #[arg(long, value_name = "N", requires = "repeat")]
+    every: Option<u32>,
+    /// The days of a weekly series, or the weekday of a monthly one by
+    /// weekday (MO,WE; default the start's)
+    #[arg(long, value_name = "DAYS", value_delimiter = ',', requires = "repeat")]
+    on: Vec<String>,
+    /// What a monthly series falls on: the start's day of the month (date,
+    /// the default) or its weekday in the same week of the month
+    #[arg(long, value_enum, value_name = "BY", requires = "repeat")]
+    monthly_by: Option<MonthlyBy>,
+    /// The series' last day (YYYY-MM-DD)
+    #[arg(
+        long,
+        value_name = "DATE",
+        requires = "repeat",
+        conflicts_with = "count"
+    )]
+    until: Option<String>,
+    /// How many occurrences the series has
+    #[arg(long, value_name = "N", requires = "repeat")]
+    count: Option<u32>,
+}
+
+impl RepeatFlags {
+    /// What the flags ask, when `--repeat` is given.
+    fn request(&self) -> Option<mailypoppins::calendar_cmd::RepeatRequest> {
+        let frequency = match self.repeat? {
+            RepeatFrequency::Daily => "daily",
+            RepeatFrequency::Weekly => "weekly",
+            RepeatFrequency::Monthly => "monthly",
+            RepeatFrequency::Yearly => "yearly",
+        };
+        Some(mailypoppins::calendar_cmd::RepeatRequest {
+            frequency: frequency.to_string(),
+            every: self.every,
+            on: self.on.clone(),
+            by_weekday: self.monthly_by == Some(MonthlyBy::Weekday),
+            until: self.until.clone(),
+            count: self.count,
+        })
+    }
 }
 
 /// The three answers to an invitation.
@@ -1179,6 +1294,8 @@ struct CreateFlags {
     /// The id of an earlier run of this create, which the server makes once
     #[arg(long, value_name = "ID")]
     transaction_id: Option<String>,
+    #[command(flatten)]
+    repeat: RepeatFlags,
 }
 
 impl CreateFlags {
@@ -1190,6 +1307,21 @@ impl CreateFlags {
             None => self.body.clone(),
         };
         let attendees = attendee_inputs(&self.to, &self.optional, &self.room);
+        let recurrence = match self.repeat.request() {
+            Some(request) => {
+                let first = if request.needs_first_day() {
+                    let zone = viewer_zone(self.zone.as_deref())?;
+                    Some(
+                        mailypoppins::calendar_cmd::start_day(&self.start, zone)
+                            .map_err(|e| anyhow!(e))?,
+                    )
+                } else {
+                    None
+                };
+                Some(request.rule(first).map_err(|e| anyhow!(e))?)
+            }
+            None => None,
+        };
         Ok(EventCreateParams {
             account: account.to_string(),
             calendar: self.calendar.clone(),
@@ -1210,6 +1342,7 @@ impl CreateFlags {
                     (Some(minutes), false) => Some(Some(minutes)),
                     (None, false) => None,
                 },
+                recurrence,
                 ..Default::default()
             },
         })
@@ -1276,22 +1409,28 @@ struct UpdateFlags {
     /// working-elsewhere
     #[arg(long, value_name = "WORD")]
     show_as: Option<String>,
+    #[command(flatten)]
+    repeat: RepeatFlags,
     /// Move the meeting to the time the attendee ADDR proposed, as
     /// `mp event show` lists it
     #[arg(
         long,
         value_name = "ADDR",
-        conflicts_with_all = ["start", "end", "duration", "all_day", "zone"]
+        conflicts_with_all = ["start", "end", "duration", "all_day", "zone", "scope"]
     )]
     use_proposal: Option<String>,
 }
 
 impl UpdateFlags {
-    /// `event.update`'s params for `event` of `account`.
+    /// `event.update`'s params for `event` of `account` in `scope`; `first`
+    /// is the series' first day, which a monthly `--repeat` by weekday
+    /// needs when no `--start` names a new one.
     fn params(
         &self,
         account: &str,
         event: &str,
+        scope: Option<EventScopeArg>,
+        first: Option<chrono::NaiveDate>,
     ) -> Result<mp_protocol::calendar::EventUpdateParams> {
         use mp_protocol::calendar::{EventPatchParams, EventUpdateParams};
         let body = match (&self.body_file, self.clear_body) {
@@ -1301,9 +1440,26 @@ impl UpdateFlags {
         };
         let attendees = (!self.to.is_empty() || !self.optional.is_empty() || !self.room.is_empty())
             .then(|| attendee_inputs(&self.to, &self.optional, &self.room));
+        let recurrence = match self.repeat.request() {
+            Some(request) => {
+                let first = match (&self.start, request.needs_first_day()) {
+                    (Some(start), true) => {
+                        let zone = viewer_zone(self.zone.as_deref())?;
+                        Some(
+                            mailypoppins::calendar_cmd::start_day(start, zone)
+                                .map_err(|e| anyhow!(e))?,
+                        )
+                    }
+                    _ => first,
+                };
+                Some(request.rule(first).map_err(|e| anyhow!(e))?)
+            }
+            None => None,
+        };
         Ok(EventUpdateParams {
             account: account.to_string(),
             event: event.to_string(),
+            scope: scope.map(|scope| scope.word().to_string()),
             fields: EventPatchParams {
                 summary: self.summary.clone(),
                 start: self.start.clone(),
@@ -1325,9 +1481,20 @@ impl UpdateFlags {
                     (None, false) => None,
                 },
                 show_as: self.show_as.clone(),
+                recurrence,
                 ..Default::default()
             },
         })
+    }
+
+    /// Whether the series' first day must be read from the daemon: a
+    /// monthly `--repeat` by weekday without a new `--start`.
+    fn needs_series_day(&self) -> bool {
+        self.start.is_none()
+            && self
+                .repeat
+                .request()
+                .is_some_and(|request| request.needs_first_day())
     }
 }
 
@@ -4530,17 +4697,26 @@ async fn routed_event_create(account: &str, flags: &CreateFlags, json: bool) -> 
 async fn routed_event_update(
     account: &str,
     event: &str,
+    scope: Option<EventScopeArg>,
     flags: &UpdateFlags,
     json: bool,
 ) -> Result<()> {
-    let mut params = flags.params(account, event)?;
     let mut connection = operation_session().await;
+    let first = if flags.needs_series_day() {
+        series_first_day(&mut connection, account, event).await?
+    } else {
+        None
+    };
+    let mut params = flags.params(account, event, scope, first)?;
     if let Some(address) = &flags.use_proposal {
         let shown = event_get(&mut connection, account, event).await?;
         let slot =
             mailypoppins::calendar_cmd::proposal_of(&shown, address).map_err(|e| anyhow!(e))?;
         params.fields.start = Some(slot.start);
         params.fields.end = Some(slot.end);
+        if shown.is_occurrence() {
+            params.scope = Some(EventScopeArg::Occurrence.word().to_string());
+        }
     }
     let params = serde_json::to_value(params)?;
     let result = run_admin_operation(&mut connection, "event.update", params, account).await?;
@@ -4569,16 +4745,55 @@ async fn routed_event_update(
     Ok(())
 }
 
+/// The first day of the series `event` belongs to, as `event.get` answers
+/// it: the rule's start, else the event's own first day.
+async fn series_first_day(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    event: &str,
+) -> Result<Option<chrono::NaiveDate>> {
+    let answer = daemon_try_call(
+        connection,
+        "event.get",
+        serde_json::json!({"account": account, "event": event}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    let got: mp_protocol::calendar::EventGetResult =
+        serde_json::from_value(answer).context("reading the daemon's event.get answer")?;
+    let rule_start = got
+        .series
+        .and_then(|series| series.recurrence)
+        .and_then(|rule| rule.start)
+        .and_then(|start| chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d").ok());
+    if rule_start.is_some() {
+        return Ok(rule_start);
+    }
+    let zone = mailypoppins::calendar_view::local_zone();
+    Ok(match &got.event.time {
+        mp_protocol::calendar::CalendarEventTime::AllDay { start, .. } => {
+            chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").ok()
+        }
+        mp_protocol::calendar::CalendarEventTime::Timed { start, .. } => {
+            chrono::DateTime::parse_from_rfc3339(start)
+                .ok()
+                .map(|at| at.with_timezone(&zone).date_naive())
+        }
+    })
+}
+
 /// `mp event cancel`: the meeting cancelled, and who was told.
 async fn routed_event_cancel(
     account: &str,
     event: &str,
+    scope: Option<EventScopeArg>,
     comment: Option<String>,
     json: bool,
 ) -> Result<()> {
     let params = serde_json::to_value(mp_protocol::calendar::EventCancelParams {
         account: account.to_string(),
         event: event.to_string(),
+        scope: scope.map(|scope| scope.word().to_string()),
         comment,
     })?;
     let mut connection = operation_session().await;
@@ -4589,18 +4804,39 @@ async fn routed_event_cancel(
     }
     let cancelled: mp_protocol::calendar::EventCancelResult =
         serde_json::from_value(result).context("reading the settled event.cancel result")?;
-    println!("{} Cancelled {}", "\u{2713}".green(), cancelled.event);
+    println!(
+        "{} Cancelled {}{}",
+        "\u{2713}".green(),
+        scope_prefix(cancelled.scope.as_deref()),
+        cancelled.event
+    );
     if !cancelled.notified.is_empty() {
         println!("  told: {}", cancelled.notified.join(", "));
     }
     Ok(())
 }
 
+/// What a scoped cancel or delete names before the event id: `the series of`
+/// or `the occurrence`.
+fn scope_prefix(scope: Option<&str>) -> &'static str {
+    match scope {
+        Some("series") => "the series of ",
+        Some("occurrence") => "the occurrence ",
+        _ => "",
+    }
+}
+
 /// `mp event delete`.
-async fn routed_event_delete(account: &str, event: &str, json: bool) -> Result<()> {
+async fn routed_event_delete(
+    account: &str,
+    event: &str,
+    scope: Option<EventScopeArg>,
+    json: bool,
+) -> Result<()> {
     let params = serde_json::to_value(mp_protocol::calendar::EventDeleteParams {
         account: account.to_string(),
         event: event.to_string(),
+        scope: scope.map(|scope| scope.word().to_string()),
     })?;
     let mut connection = operation_session().await;
     let result = run_admin_operation(&mut connection, "event.delete", params, account).await?;
@@ -4610,7 +4846,12 @@ async fn routed_event_delete(account: &str, event: &str, json: bool) -> Result<(
     }
     let deleted: mp_protocol::calendar::EventDeleteResult =
         serde_json::from_value(result).context("reading the settled event.delete result")?;
-    println!("{} Deleted {}", "\u{2713}".green(), deleted.event);
+    println!(
+        "{} Deleted {}{}",
+        "\u{2713}".green(),
+        scope_prefix(deleted.scope.as_deref()),
+        deleted.event
+    );
     Ok(())
 }
 
@@ -6489,20 +6730,22 @@ async fn main() -> Result<()> {
                 }
                 EventAction::Update {
                     event,
+                    scope,
                     fields,
                     json,
                 } => {
-                    routed_event_update(&account, &event, &fields, json).await?;
+                    routed_event_update(&account, &event, scope, &fields, json).await?;
                 }
                 EventAction::Cancel {
                     event,
+                    scope,
                     comment,
                     json,
                 } => {
-                    routed_event_cancel(&account, &event, comment, json).await?;
+                    routed_event_cancel(&account, &event, scope, comment, json).await?;
                 }
-                EventAction::Delete { event, json } => {
-                    routed_event_delete(&account, &event, json).await?;
+                EventAction::Delete { event, scope, json } => {
+                    routed_event_delete(&account, &event, scope, json).await?;
                 }
                 EventAction::Show { event, json } => {
                     routed_event_show(&account, &event, json).await?;

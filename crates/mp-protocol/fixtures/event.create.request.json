@@ -21,6 +21,15 @@
       "duration": "1h",
       "location": "Room 1",
       "online_meeting": true,
+      "recurrence": {
+        "frequency": "weekly",
+        "interval": 1,
+        "until": "2026-12-16",
+        "weekdays": [
+          "monday",
+          "wednesday"
+        ]
+      },
       "reminder": 10,
       "start": "2026-11-18T14:00",
       "summary": "Project review",

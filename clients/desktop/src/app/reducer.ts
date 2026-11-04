@@ -117,6 +117,7 @@ import {
   type EventChangeRun,
   type EventDialog,
   type EventRemoveDialog,
+  type EventScopeDialog,
   type Layout,
   type Loadable,
   type MessageRef,
@@ -209,6 +210,8 @@ import {
   eventChanging,
   isEventChangeOperation,
   openEventRemove,
+  openEventScope,
+  openEventSeriesForm,
 } from "@/app/eventChange";
 import {
   contactsFailed,
@@ -477,6 +480,8 @@ export type Action =
   | { type: "event_create_failed"; token: number }
   // Changing, cancelling and deleting an event (app/eventChange.ts).
   | { type: "open_event_remove"; dialog: EventRemoveDialog }
+  | { type: "open_event_scope"; dialog: EventScopeDialog }
+  | { type: "open_event_series_form"; chosen: EventScopeDialog; dialog: EventDialog }
   | { type: "event_change_requested"; token: number; account: string; summary: string; kind: EventChangeRun["kind"]; dialog: EventDialog | null; removal: EventRemoveDialog | null }
   | { type: "event_change_started"; token: number; operation_id: string }
   | { type: "event_change_failed"; token: number }
@@ -1234,6 +1239,7 @@ function closeDialogs(s: AppState): AppState {
     inviteDialog: null,
     eventDialog: null,
     eventRemoveDialog: null,
+    eventScopeDialog: null,
     signaturesDialog: null,
   };
 }
@@ -2003,6 +2009,7 @@ function reduce(s: AppState, a: Action): AppState {
         inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
         eventDialog: a.overlay === "event" ? s.eventDialog : null,
         eventRemoveDialog: a.overlay === "event_remove" ? s.eventRemoveDialog : null,
+        eventScopeDialog: a.overlay === "event_scope" ? s.eventScopeDialog : null,
         serverSearchDialog: a.overlay === "server_search" ? s.serverSearchDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
@@ -2300,6 +2307,10 @@ function reduce(s: AppState, a: Action): AppState {
       return eventCreateFailed(s, a.token);
     case "open_event_remove":
       return openEventRemove(s, a.dialog);
+    case "open_event_scope":
+      return openEventScope(s, a.dialog);
+    case "open_event_series_form":
+      return openEventSeriesForm(s, a.chosen, a.dialog);
     case "event_change_requested":
       return eventChangeRequested(s, { token: a.token, account: a.account, summary: a.summary, kind: a.kind, dialog: a.dialog, removal: a.removal });
     case "event_change_started":

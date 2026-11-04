@@ -420,7 +420,9 @@ Status: accepted
 
 Why: Graph has no call for "this and all following occurrences", so mp would have to end the series before the chosen occurrence and create a new series from there, which sends every attendee a cancellation and a new invitation.
 The change is rare enough that Outlook covers it, and the plan lists it under "Later".
-Rejected: a third choice "This and all following occurrences" in phase 2 (a series split touching the create and the cancel paths at once, with its own live test against Outlook).
+An occurrence's id needs `scope` in every client, a series master's id is the series and a single event takes none, since a default would make a choice the user did not.
+Taking an attendee's proposed time is the one change that asks no scope: an attendee proposes for the one meeting, so the clients send it in the `occurrence` scope on an occurrence and the series' on a series master, and the daemon still requires the scope on the wire.
+Rejected: a third choice "This and all following occurrences" in phase 2 (a series split touching the create and the cancel paths at once, with its own live test against Outlook); defaulting an occurrence's scope to the occurrence.
 Source: report comment export of 2026-11-03 on `.sync/reports/calendar-phase-2-design`.
 Status: accepted
 
@@ -462,4 +464,15 @@ Why: Cmd+P is the macOS habit for a command palette, beside the TUI's `:` and Ct
 Each query word must match the start of a word of the label or section, or, at three letters or more, a run inside a word of the label; the whole query equal to a key matches that row; a label match counts twice the same match in the section or keys; equal scores list the action last run from the palette first (the last 30, kept in the desktop's localStorage prefs), then catalog order.
 Rejected: a threshold on cmdk's command-score (a magic number over a score that still mixes label, section and keys); a menu accelerator for Cmd+P (it would take the key from text fields and the embedded editor).
 Source: Sylvain in chat, 2026-11-04
+Status: accepted
+
+## 2026-11-04 - A change to a whole series re-baselines the calendar that holds it, and a rule's pattern is filled from the event's first day
+
+Why: the live probes of slice 5 (`.agents/research/2026-11-04-graph-recurrence-probes.md`) show Graph's delta re-sending a series whole (its master and every occurrence of the window) after a change to it but never naming an occurrence that left it (one cancelled or deleted, or one a shorter rule dropped), and only the master's removal when the series goes.
+So mp's write-through removes the occurrence it cancels or deletes, removes every occurrence with the series it cancels or deletes, and after an update of a whole series (or a create retry that patches one) drops the sync token of the series' calendar, so the sync right after is a baseline of that calendar's window.
+The sync cleans what a change made elsewhere leaves: a removed master takes its cached occurrences and its series row along, and a master that comes with some of its occurrences keeps only the cached occurrences that came, while a master alone prunes nothing.
+A new rule is only accepted in the series scope, and a single event does not become a series through `event.update` in phase 2.
+What a rule's pattern leaves out is filled from the event's first day (the weekday, the day of the month, the month), a weekly week starts on Monday, and a recurrence patch names its `recurrenceTimeZone`, without which Graph resets it to UTC.
+Rejected: trusting the delta to drop the occurrences (ghost occurrences until the daily baseline); reading `GET /instances` after every series write (a second read path, and the design keeps phase 2 off it); reading a master's `cancelledOccurrences` to find an occurrence deleted in Outlook (the delta does not carry it, so one more read per changed series).
+Source: implementation of PERSO-255 on branch `calendar-p2-p2s5`, 2026-11-04.
 Status: accepted

@@ -4,7 +4,7 @@
   "method": "event.update",
   "params": {
     "account": "evoqs",
-    "event": "AAMkADev1",
+    "event": "AAMkADocc2",
     "fields": {
       "attendees": [
         {
@@ -17,6 +17,7 @@
       "reminder": 5,
       "start": "2026-11-18T15:00",
       "summary": "Project review, moved"
-    }
+    },
+    "scope": "occurrence"
   }
 }

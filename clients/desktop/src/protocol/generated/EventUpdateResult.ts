@@ -6,6 +6,12 @@ import type { CalendarEvent } from "./CalendarEvent";
  */
 export type EventUpdateResult = { account: string,
 /**
- * The event as the server holds it after the change, now in the cache.
+ * The event as the server holds it after the change, now in the cache:
+ * the occurrence for the `occurrence` scope, the series master for the
+ * `series` one.
  */
-event: CalendarEvent, };
+event: CalendarEvent,
+/**
+ * The scope the change was made in; absent on a single event.
+ */
+scope?: string, };

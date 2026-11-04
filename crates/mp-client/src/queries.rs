@@ -497,6 +497,17 @@ pub fn calendar_view(q: &dyn Queries, params: &CalendarViewParams) -> Result<Cal
     Ok(serde_json::from_value(answer)?)
 }
 
+/// One event, or a series master, with the series of an occurrence, through
+/// `event.get`.
+pub fn event_get(
+    q: &dyn Queries,
+    account: &str,
+    event: &str,
+) -> Result<mp_protocol::calendar::EventGetResult> {
+    let answer = q.call("event.get", json!({"account": account, "event": event}))?;
+    Ok(serde_json::from_value(answer)?)
+}
+
 /// The `params` of `event.respond`, an operation a client starts through its
 /// own operation path and watches to its `EventRespondResult`; `proposed`
 /// is the new time a tentative or a decline proposes.

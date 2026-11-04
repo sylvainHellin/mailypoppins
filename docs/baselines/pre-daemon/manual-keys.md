@@ -109,6 +109,17 @@ Same function, the `else` branch.
 - `Esc` / `L` / `q` (1307) closes the overlay and resets scroll and filter.
   Only `Esc` is catalogued or advertised; `L` is the pre-#0092 opener kept as a closer.
 
+## Event card overlay
+
+`handle_event_card_key`, added by PERSO-200 and PERSO-255 after the freeze.
+Catalogued as `EVENT CARD` for its own keys; the CALENDAR `V`, `e`, `E` and `D` act on the card too, and its footer names what applies.
+
+- `p` opens the edit form at the marked attendee's proposed time, on the organizer's card; on an occurrence of a series the form is the occurrence's alone.
+- `Tab` marks the next proposed time when several attendees proposed one.
+- `m` opens the invitation mail an `imip:` event came from.
+- `j` / `Down` and `k` / `Up` scroll the card.
+- `Esc` / `q` / `Enter` close it.
+
 ## Compose wizard
 
 `handle_compose_wizard_key` (1326). The field footers in `src/tui/ui/compose.rs:55-67` advertise most
