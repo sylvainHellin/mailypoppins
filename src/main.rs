@@ -512,9 +512,11 @@ Examples:
         #[command(subcommand)]
         action: CalendarAction,
     },
-    /// One calendar event: show it, answer it
+    /// One calendar event: create it, show it, answer it
     #[command(after_help = "\
 Examples:
+  mp event create -A evoqs --summary \"Project review\" --start 2026-11-18T14:00 --duration 1h --to ada@example.com --teams
+  mp event create -A evoqs --summary Away --start 2026-12-24 --end 2026-12-31 --no-reminder
   mp event show AAMkADev2 -A evoqs
   mp event respond AAMkADev2 accept --comment \"See you there\" -A evoqs
   mp event respond imip:42 decline -A perso")]
@@ -843,6 +845,23 @@ impl From<ViewLayout> for mailypoppins::calendar_cmd::Layout {
 /// `mp calendar view --json` prints.
 #[derive(Subcommand)]
 enum EventAction {
+    /// Create an event in the account's server calendar; the server sends
+    /// the invitations
+    #[command(after_help = "\
+WHEN is a time read in --zone (2026-11-18T14:00), a time with an offset
+(2026-11-18T14:00:00+01:00), or a bare date (2026-11-18) for an all-day event,
+whose --end is its last day, included. --duration takes 1h30m or PT1H30M.
+
+The command prints the create's transaction id when it cannot confirm the
+event; rerun it with --transaction-id and the server creates the event at
+most once.")]
+    Create {
+        #[command(flatten)]
+        event: Box<CreateFlags>,
+        /// Print the settled `event.create` result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one event: when, where, organizer, attendees, your answer
     Show {
         /// The event id: a server id, or imip:<row_id> for an invitation mail's event
@@ -908,6 +927,120 @@ struct AnswerFlags {
     /// an iMIP reply is the answer itself)
     #[arg(long)]
     no_send_response: bool,
+}
+
+/// What `mp event create` sends as `event.create`'s event.
+#[derive(clap::Args)]
+struct CreateFlags {
+    /// The calendar id, as `mp calendar list` prints it (default the
+    /// account's default calendar)
+    #[arg(long, value_name = "ID")]
+    calendar: Option<String>,
+    /// The title
+    #[arg(long, value_name = "TEXT")]
+    summary: String,
+    /// When the event starts
+    #[arg(long, value_name = "WHEN")]
+    start: String,
+    /// When it ends; on an all-day event the last day, included
+    #[arg(long, value_name = "WHEN", conflicts_with = "duration")]
+    end: Option<String>,
+    /// How long it lasts (1h30m, PT1H30M; whole days on an all-day event)
+    #[arg(long, value_name = "D")]
+    duration: Option<String>,
+    /// An all-day event: --start and --end are bare dates
+    #[arg(long)]
+    all_day: bool,
+    /// The IANA zone the event is held in (default the local zone)
+    #[arg(long, value_name = "ZONE")]
+    zone: Option<String>,
+    /// Where it takes place
+    #[arg(long, value_name = "TEXT")]
+    location: Option<String>,
+    /// The description
+    #[arg(long, value_name = "TEXT", conflicts_with = "body_file")]
+    body: Option<String>,
+    /// The description, read from a file (- for stdin)
+    #[arg(long, value_name = "PATH")]
+    body_file: Option<std::path::PathBuf>,
+    /// A required attendee (repeatable)
+    #[arg(long = "to", value_name = "ADDR")]
+    to: Vec<String>,
+    /// An optional attendee (repeatable)
+    #[arg(long = "optional", value_name = "ADDR")]
+    optional: Vec<String>,
+    /// A room mailbox (repeatable)
+    #[arg(long = "room", value_name = "ADDR")]
+    room: Vec<String>,
+    /// Add a Teams meeting link
+    #[arg(long)]
+    teams: bool,
+    /// Minutes before the start the reminder fires (default the mailbox's)
+    #[arg(long, value_name = "MIN", conflicts_with = "no_reminder")]
+    reminder: Option<u32>,
+    /// No reminder
+    #[arg(long)]
+    no_reminder: bool,
+    /// The id of an earlier run of this create, which the server makes once
+    #[arg(long, value_name = "ID")]
+    transaction_id: Option<String>,
+}
+
+impl CreateFlags {
+    /// `event.create`'s params for `account`.
+    fn params(&self, account: &str) -> Result<mp_protocol::calendar::EventCreateParams> {
+        use mp_protocol::calendar::{EventAttendeeInput, EventCreateParams, EventInputParams};
+        let body = match &self.body_file {
+            Some(path) if path.as_os_str() == "-" => {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                    .context("reading the description from stdin")?;
+                Some(text)
+            }
+            Some(path) => Some(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading the description from {}", path.display()))?,
+            ),
+            None => self.body.clone(),
+        };
+        let attendees = [
+            (&self.to, "required"),
+            (&self.optional, "optional"),
+            (&self.room, "resource"),
+        ]
+        .into_iter()
+        .flat_map(|(emails, role)| {
+            emails.iter().map(move |email| EventAttendeeInput {
+                email: email.clone(),
+                name: None,
+                role: Some(role.to_string()),
+            })
+        })
+        .collect();
+        Ok(EventCreateParams {
+            account: account.to_string(),
+            calendar: self.calendar.clone(),
+            transaction_id: self.transaction_id.clone(),
+            event: EventInputParams {
+                summary: self.summary.clone(),
+                start: self.start.clone(),
+                end: self.end.clone(),
+                duration: self.duration.clone(),
+                zone: self.zone.clone(),
+                all_day: self.all_day.then_some(true),
+                location: self.location.clone(),
+                body,
+                attendees,
+                online_meeting: self.teams.then_some(true),
+                reminder: match (self.reminder, self.no_reminder) {
+                    (_, true) => Some(None),
+                    (Some(minutes), false) => Some(Some(minutes)),
+                    (None, false) => None,
+                },
+                ..Default::default()
+            },
+        })
+    }
 }
 
 /// RSVP actions for `mp invite <accept|tentative|decline> <selector>`.
@@ -3880,6 +4013,56 @@ async fn routed_event_show(account: &str, event: &str, json: bool) -> Result<()>
     Ok(())
 }
 
+/// `mp event create`: the settled event, printed as `mp event show` prints
+/// it, and the people the server invited. A create the daemon could not
+/// confirm names its transaction id, which a rerun passes back so the server
+/// makes the event once.
+async fn routed_event_create(account: &str, flags: &CreateFlags, json: bool) -> Result<()> {
+    let params = serde_json::to_value(flags.params(account)?)?;
+    let mut connection = operation_session().await;
+    let started = daemon_try_call(&mut connection, "event.create", params)
+        .await
+        .map_err(|e| refusal(account, e))?;
+    let transaction_id = started["transaction_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let rerun = format!("rerun with --transaction-id {transaction_id} to create it at most once");
+    let result = match connection.settle(&started).await {
+        Ok(Settled::Done(result)) => result,
+        Ok(Settled::Failed(message)) => return Err(anyhow!("{message}; {rerun}")),
+        Err(_) => daemon_unavailable(&format!(
+            "the daemon closed the connection before the new event was confirmed; {rerun}"
+        )),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let created: mp_protocol::calendar::EventWriteResult =
+        serde_json::from_value(result).context("reading the settled event.create result")?;
+    println!(
+        "{} Created {} ({})",
+        "\u{2713}".green(),
+        created.event.summary,
+        created.event.id
+    );
+    if !created.invited.is_empty() {
+        println!("  invited: {}", created.invited.join(", "));
+    }
+    let names = calendar_list(&mut connection, Some(account)).await?;
+    let names = mailypoppins::calendar_cmd::calendar_names(&calendar_infos(&names)?);
+    print!(
+        "{}",
+        mailypoppins::calendar_cmd::render_event(
+            &created.event,
+            mailypoppins::calendar_view::local_zone(),
+            &names
+        )
+    );
+    Ok(())
+}
+
 /// `mp event respond`: the settled answer, and how it reached the organizer.
 async fn routed_event_respond(
     account: &str,
@@ -5693,6 +5876,9 @@ async fn main() -> Result<()> {
                 .name
                 .clone();
             match action {
+                EventAction::Create { event, json } => {
+                    routed_event_create(&account, &event, json).await?;
+                }
                 EventAction::Show { event, json } => {
                     routed_event_show(&account, &event, json).await?;
                 }
@@ -6106,6 +6292,17 @@ mod tests {
             &["mp", "calendar", "list", "-A", "x"][..],
             &["mp", "calendar", "hide", "cal-1", "-A", "x"][..],
             &["mp", "event", "show", "ev-1", "-A", "x"][..],
+            &[
+                "mp",
+                "event",
+                "create",
+                "--summary",
+                "s",
+                "--start",
+                "2026-11-18",
+                "-A",
+                "x",
+            ][..],
             &["mp", "event", "respond", "ev-1", "accept", "-A", "x"][..],
             &["mp", "cutover", "--dry-run", "-A", "x"][..],
             &["mp", "config", "set-password", "smtp", "-A", "x"][..],
