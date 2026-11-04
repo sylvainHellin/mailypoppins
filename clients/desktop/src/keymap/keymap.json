@@ -463,6 +463,23 @@
     ]
   },
   {
+    "title": "EVENT CARD",
+    "bindings": [
+      {
+        "key": "p",
+        "action": "Use the marked proposed time (organizer only)"
+      },
+      {
+        "key": "Tab",
+        "action": "Mark the next proposed time"
+      },
+      {
+        "key": "m",
+        "action": "Open the invitation mail"
+      }
+    ]
+  },
+  {
     "title": "HEADERS",
     "bindings": [
       {

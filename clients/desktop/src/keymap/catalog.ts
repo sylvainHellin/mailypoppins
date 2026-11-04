@@ -268,6 +268,15 @@ export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Show or hide calendars": { id: "calendar_calendars" },
     "Read the events again": { id: "calendar_refresh" },
   },
+  // The TUI's event card overlay keys (PERSO-255). The desktop's card is
+  // always shown beside the Calendar view, so `m` works in the view; each
+  // proposal on the organizer's card has its own "Use this time" button,
+  // which Tab reaches, rather than a mark that `p` takes.
+  "EVENT CARD": {
+    "Use the marked proposed time (organizer only)": { badge: "key", keys: [] },
+    "Mark the next proposed time": { badge: "key" },
+    "Open the invitation mail": { id: "calendar_open_mail" },
+  },
   // The Contacts view's own keys (src/keymap/viewKeys.ts); its moves are
   // the list's, which reach the view's cursor.
   CONTACTS: {
@@ -438,9 +447,6 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "CALENDAR", label: "Next day or week", keys: ["l", "]"], id: "calendar_next", badge: null },
   { section: "CALENDAR", label: "Day layout", keys: ["d"], id: "calendar_layout_day", badge: null },
   { section: "CALENDAR", label: "Week layout", keys: ["w"], id: "calendar_layout_week", badge: null },
-  // The TUI's event card overlay has `m`; the desktop's card is always shown,
-  // so `m` works in the view.
-  { section: "CALENDAR", label: "Open the invitation mail", keys: ["m"], id: "calendar_open_mail", badge: null },
   { section: "OUTBOX", label: "Open outbox", keys: ["go"], id: "open_outbox", badge: null },
   { section: "OUTBOX", label: "Retry outbox row", keys: ["R"], id: "outbox_retry", badge: null },
   { section: "OUTBOX", label: "Discard outbox row", keys: ["d"], id: "outbox_discard", badge: null },

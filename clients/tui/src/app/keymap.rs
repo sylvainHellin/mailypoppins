@@ -80,6 +80,10 @@ pub enum KeyCtx {
     Contacts,
     /// Calendar view agenda (#0034): local-first event list + detail card.
     Calendar,
+    /// The event card overlay's own keys (PERSO-255), hand-dispatched by
+    /// `handle_event_card_key`; the card also takes the CALENDAR `V`, `e`,
+    /// `E` and `D`.
+    EventCard,
     /// Activity-log overlay.
     Activity,
     /// Help overlay.
@@ -97,6 +101,7 @@ impl KeyCtx {
             KeyCtx::ServerSearch => "SERVER SEARCH",
             KeyCtx::Contacts => "CONTACTS",
             KeyCtx::Calendar => "CALENDAR",
+            KeyCtx::EventCard => "EVENT CARD",
             KeyCtx::Headers => "HEADERS",
             KeyCtx::Preview => "BODY",
             KeyCtx::Activity => "ACTIVITY LOG",
@@ -113,6 +118,7 @@ impl KeyCtx {
         KeyCtx::ServerSearch,
         KeyCtx::Contacts,
         KeyCtx::Calendar,
+        KeyCtx::EventCard,
         KeyCtx::Headers,
         KeyCtx::Preview,
         KeyCtx::Activity,
@@ -1793,6 +1799,22 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Read the events again",
         false,
     ),
+    // -- EVENT CARD (PERSO-255) -------------------------------------------
+    // The card overlay's own keys, beside the CALENDAR keys it also takes;
+    // hand-dispatched by `handle_event_card_key`, and named in its footer.
+    manual(
+        "p",
+        KeyCtx::EventCard,
+        "Use the marked proposed time (organizer only)",
+        false,
+    ),
+    manual(
+        "Tab",
+        KeyCtx::EventCard,
+        "Mark the next proposed time",
+        false,
+    ),
+    manual("m", KeyCtx::EventCard, "Open the invitation mail", false),
     // -- HEADERS ----------------------------------------------------------
     // The headers pane scrolls; every message action (open attachment, browser,
     // reply, triage, next/prev, Esc) comes from the shared MESSAGE context, so
@@ -2143,6 +2165,7 @@ mod tests {
             KeyCtx::ServerSearch,
             KeyCtx::Contacts,
             KeyCtx::Calendar,
+            KeyCtx::EventCard,
             KeyCtx::Activity,
             KeyCtx::Help,
         ] {
@@ -2158,6 +2181,22 @@ mod tests {
                 assert!(width <= 120, "{ctx:?} hint row is {width} columns");
             }
         }
+    }
+
+    /// The help lists the event card's own keys right after the CALENDAR
+    /// keys the card also takes, and none of them reaches the resolver.
+    #[test]
+    fn the_help_lists_the_event_cards_own_keys_after_the_calendar() {
+        let sections = help_sections();
+        let titles: Vec<&str> = sections.iter().map(|(title, _)| *title).collect();
+        let calendar = titles.iter().position(|t| *t == "CALENDAR").unwrap();
+        assert_eq!(titles.get(calendar + 1), Some(&"EVENT CARD"));
+        let keys: Vec<&str> = sections[calendar + 1].1.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["p", "Tab", "m"]);
+        assert!(KEYMAP
+            .iter()
+            .filter(|kb| kb.ctx == KeyCtx::EventCard)
+            .all(|kb| kb.action == KeyAction::Manual));
     }
 
     /// No two live bindings share the same (context, keys, prefix) triple:
