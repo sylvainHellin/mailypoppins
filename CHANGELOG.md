@@ -111,6 +111,7 @@ All notable changes to this project are documented in this file.
 - Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
 
 ### Fixed
+- A store synced by an earlier build re-reads its server calendar in full at the first sync after the upgrade, so an occurrence shows its series rule and kind and a Teams meeting shows as one without `mp calendar rebuild`; the cached events stay on screen until the new baseline replaces them (PERSO-255).
 - A move, delete, read toggle or star of a message the server folder holds twice under one Message-ID acts on the copy the store row stands for, by its UID, instead of whichever copy the server listed first, and a reply or forward marks every copy of its source answered or forwarded (PERSO-238).
   A copy whose UID went stale, because another client moved the message out and back, is still found when it is the folder's only copy; a copy another row stands for is never taken in its place, and a move or delete that cannot tell which copy is the row's changes nothing on the server and is undone and reported as failed, from the TUI and the desktop as from `mp` (PERSO-238).
 - `mp move`, `mp archive` and `mp delete` of a message one mailbox holds twice list each copy as its own selector, `mp://<account>/<mailbox>/<message-id>/<uid>`, which names that copy, instead of two identical selectors no command could act on (PERSO-239).

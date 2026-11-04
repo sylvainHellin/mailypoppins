@@ -365,6 +365,7 @@ pub fn create(conn: &Connection) -> Result<()> {
     // what keeps the sweep to the one-shot it is meant to be.
     set_meta(conn, META_ARRIVAL_MARK_SWEPT, "1")?;
     set_meta(conn, META_INLINE_ONLY_SWEPT, "1")?;
+    super::calendar::stamp_model_version(conn)?;
     Ok(())
 }
 

@@ -495,6 +495,8 @@ Dropping the cache is a `DELETE` of every table but `calendar_prefs`, so a hidde
 
 `src/calendar_sync.rs` syncs one account: it lists the calendars, stores them, and syncs each calendar's window from its stored token.
 A token is passed only while it is good for the window, since a Graph delta link is bound to the window its first request named, so a moved window or a baseline older than a day starts a fresh baseline.
+A store stamped with another `MODEL_VERSION` (`src/store/calendar.rs`, in `meta` as `calendar_model_version`) drops every calendar's token on open, so its next sync is a baseline that reads every event and series master again.
+A backend that starts reading a field from the server bumps `MODEL_VERSION`, since a delta sync leaves the rows an older build wrote without it until their event changes.
 The daemon runs `poll_account` after the mail pass of every tick and `sync_account` right after an answer, both under `account_lock`, the per-account lock `calendar.rebuild` takes too, so two syncs never run one account from the same token.
 A sync publishes `calendar.changed` only when it moved the cached rows, so a calendar read in full every tick stays quiet; a sign-in without the calendar scope is skipped quietly there, since the health check already prompts.
 

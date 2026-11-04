@@ -176,6 +176,57 @@ pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
     super::schema::add_columns(conn, &ADDED_COLUMNS)
 }
 
+/// Version of what a server sync reads into the cache: the fields of
+/// [`Event`] and [`SeriesInfo`] a backend fills from the server.
+///
+/// Bump it whenever a backend starts reading a field it did not read before.
+/// The cache is delta-synced, so a row an older build wrote keeps the old
+/// default of every new field until its event changes on the server; a store
+/// stamped with another version drops its sync tokens on open
+/// ([`rebaseline_on_model_change`]), and the next sync of each calendar is a
+/// baseline that reads every event and every series master again.
+///
+/// 1 is the read side of PERSO-255: the occurrence kind, the online meeting
+/// and its provider, the proposal and answer flags, the transaction id, each
+/// attendee's proposed time and the structured series rule. A store with no
+/// stamp predates it.
+pub const MODEL_VERSION: i64 = 1;
+
+/// `meta` key holding the [`MODEL_VERSION`] the cache was last baselined
+/// under.
+pub const META_MODEL_VERSION: &str = "calendar_model_version";
+
+/// Stamp [`MODEL_VERSION`], on a store whose cache holds nothing an older
+/// model wrote (a fresh file).
+pub fn stamp_model_version(conn: &rusqlite::Connection) -> Result<()> {
+    super::schema::set_meta(conn, META_MODEL_VERSION, &MODEL_VERSION.to_string())
+}
+
+/// Drop every calendar's sync token when the store was stamped under another
+/// [`MODEL_VERSION`] (or none), and stamp the current one; `true` when it did.
+///
+/// Only [`SYNC_TABLE`] is cleared: a sync with no stored state is a baseline
+/// ([`crate::calendar_sync::sync_account`]), which replaces every cached event
+/// of the calendar and reads each series master again, so the cached events
+/// stay readable until it lands. The clear and its stamp commit together, so
+/// a failure leaves the file to try again at the next open; a store whose
+/// calendar tables could not be created fails here and is retried the same
+/// way.
+pub fn rebaseline_on_model_change(conn: &rusqlite::Connection) -> Result<bool> {
+    let stamped = super::schema::get_meta(conn, META_MODEL_VERSION)?;
+    if stamped.as_deref() == Some(MODEL_VERSION.to_string().as_str()) {
+        return Ok(false);
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("beginning the calendar re-baseline")?;
+    tx.execute(&format!("DELETE FROM {SYNC_TABLE}"), [])
+        .context("dropping the calendar sync tokens")?;
+    stamp_model_version(&tx)?;
+    tx.commit().context("committing the calendar re-baseline")?;
+    Ok(true)
+}
+
 /// A calendar's sync state: the token of its last sync and what it is bound
 /// to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,6 +1074,97 @@ mod tests {
         apply_sync(&store, "evoqs", "a", &result, november(), utc(1, 0)).unwrap();
         assert!(get_event(&store, "evoqs", "e1").unwrap().is_some());
         assert_eq!(load_series(&store, "evoqs").unwrap(), result.series);
+    }
+
+    /// A store an older model synced (no [`META_MODEL_VERSION`] stamp, or
+    /// another version) comes out of its next open with no sync token, so the
+    /// next sync is a baseline that reads every event with the newer fields;
+    /// its cached events stay readable meanwhile, and a fresh store and the
+    /// opens after the re-baseline keep their token.
+    #[test]
+    fn a_store_of_an_older_model_drops_its_tokens_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let token = |store: &Store| {
+            load_sync_state(store, "evoqs", "a")
+                .unwrap()
+                .and_then(|state| state.token)
+        };
+
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                super::super::schema::get_meta(store.conn(), META_MODEL_VERSION).unwrap(),
+                Some(MODEL_VERSION.to_string()),
+                "a fresh store is stamped"
+            );
+            apply_sync(
+                &store,
+                "evoqs",
+                "a",
+                &baseline(vec![timed("e1", "a", 3, 9)]),
+                november(),
+                utc(1, 0),
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            token(&store).as_deref(),
+            Some("t1"),
+            "same model, same token"
+        );
+        drop(store);
+
+        for stamp in [None, Some("0")] {
+            {
+                let store = Store::open(&path).unwrap();
+                apply_sync(
+                    &store,
+                    "evoqs",
+                    "a",
+                    &baseline(vec![timed("e1", "a", 3, 9)]),
+                    november(),
+                    utc(1, 0),
+                )
+                .unwrap();
+                match stamp {
+                    None => super::super::schema::clear_meta(store.conn(), META_MODEL_VERSION),
+                    Some(v) => super::super::schema::set_meta(store.conn(), META_MODEL_VERSION, v),
+                }
+                .unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                token(&store),
+                None,
+                "stamp {stamp:?}: the next sync is a baseline"
+            );
+            assert!(
+                get_event(&store, "evoqs", "e1").unwrap().is_some(),
+                "the cached events stay until the baseline replaces them"
+            );
+            assert_eq!(
+                super::super::schema::get_meta(store.conn(), META_MODEL_VERSION).unwrap(),
+                Some(MODEL_VERSION.to_string())
+            );
+            apply_sync(
+                &store,
+                "evoqs",
+                "a",
+                &baseline(vec![timed("e1", "a", 3, 9)]),
+                november(),
+                utc(1, 1),
+            )
+            .unwrap();
+            drop(store);
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                token(&store).as_deref(),
+                Some("t1"),
+                "the re-baseline runs once per model change"
+            );
+        }
     }
 
     /// An invitation's lookup is remembered under the server id it was made

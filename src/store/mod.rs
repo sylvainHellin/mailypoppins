@@ -396,6 +396,21 @@ fn open_validated(path: &Path) -> Result<Connection> {
         ),
     }
 
+    // Not fatal either: until it runs, the cache keeps serving what an older
+    // build read, and the next open tries again (PERSO-255).
+    match calendar::rebaseline_on_model_change(&conn) {
+        Ok(false) => {}
+        Ok(true) => info!(
+            "[store] calendar model v{} in {}: the next calendar sync is a baseline",
+            calendar::MODEL_VERSION,
+            path.display()
+        ),
+        Err(e) => warn!(
+            "[store] could not drop the calendar sync tokens in {}: {e:#}",
+            path.display()
+        ),
+    }
+
     Ok(conn)
 }
 
