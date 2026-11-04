@@ -98,6 +98,19 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     }
     case "toggle_help":
       return dispatch({ type: "overlay", overlay: s.overlay === "help" ? null : "help" });
+    case "focus_reminders": {
+      // The banner's first Snooze button; Tab walks on to Dismiss and the next reminder.
+      const first = document.querySelector<HTMLElement>(`[data-slot="reminders"] button`);
+      if (!first || (s.reminders.data ?? []).length === 0) return dispatch({ type: "notice", text: "No reminders waiting" });
+      first.focus();
+      return;
+    }
+    case "reminder_notify_test":
+      void cmd
+        .reminderNotifyTest()
+        .then(() => dispatch({ type: "notice", text: "A test reminder notification was raised; a click on it brings this window forward" }))
+        .catch((e: unknown) => dispatch({ type: "notice", text: `The test notification failed: ${asGuiError(e).message}`, level: "error" }));
+      return;
     case "open_palette":
       return dispatch({ type: "overlay", overlay: "palette" });
     case "toggle_zoom":

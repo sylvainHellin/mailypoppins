@@ -23,6 +23,7 @@ import type {
   Bootstrap,
   CalendarEvent,
   CalendarInfo,
+  CalendarReminder,
   DraftCreated,
   DraftEntry,
   DraftInvalid,
@@ -236,6 +237,10 @@ export const mock = {
   calendars: clone(fixtures.calendarServer.calendars),
   /** The events `calendar_view` answers. */
   events: clone(fixtures.calendarServer.events),
+  /** The reminders `calendar_reminders` answers (`simulateReminder` fires one). */
+  reminders: [] as CalendarReminder[],
+  /** How many test notifications `reminder_notify_test` raised. */
+  testNotifications: 0,
   /** The answers `event_respond` started and no test settled yet, oldest first. */
   rsvps: [] as { operation_id: string; account: string; event: string; response: string; comment: string | null; send_response: boolean }[],
   /** The next RSVP's operation id counter. */
@@ -504,6 +509,8 @@ export function resetMock(): void {
   mock.invites = {};
   mock.calendars = clone(fixtures.calendarServer.calendars);
   mock.events = clone(fixtures.calendarServer.events);
+  mock.reminders = [];
+  mock.testNotifications = 0;
   mock.rsvps = [];
   mock.nextRsvp = 1;
   mock.invitesSent = [];
@@ -1161,6 +1168,27 @@ function retargetDefaults(old: string, name: string | null): void {
 export const SIGNATURE_EDIT_LINE = "Edited behind the fixture's back.";
 
 /** fixture.rs's `signature_changed`: another window edited `work`, and the watcher says so. */
+/**
+ * The first timed server event's reminder fell due, presented by this app,
+ * as fixture.rs's `reminder` simulation and the daemon's `calendar.reminder` say it.
+ */
+export function simulateReminder(): CalendarReminder {
+  const e = mock.events.find((x) => x.time.kind === "timed")!;
+  const reminder: CalendarReminder = {
+    account: e.account,
+    event: e.id,
+    summary: e.summary,
+    start: e.time.start,
+    all_day: false,
+    ...(e.location ? { location: e.location } : {}),
+    minutes_before: e.reminder ?? 15,
+    presenter: "gui",
+  };
+  mock.reminders = [...mock.reminders.filter((r) => !(r.account === reminder.account && r.event === reminder.event)), reminder];
+  emitEnvelope("calendar.reminder", reminder);
+  return reminder;
+}
+
 export function simulateSignatureChanged(): void {
   mock.signatures.signatures.work = `${mock.signatures.signatures.work.replace(/\n+$/, "")}\n${SIGNATURE_EDIT_LINE}`;
   emitEnvelope("signature.changed", { name: "work", path: signaturePath("work") });
@@ -2019,6 +2047,22 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (only !== null) knownAccount(cmd, only);
       return clone(mock.calendars.filter((c) => only === null || c.account === only));
     }
+    case "calendar_reminders":
+      return clone(mock.reminders);
+    case "reminder_dismiss":
+    case "reminder_snooze": {
+      knownAccount(cmd, account);
+      const event = String(args.event);
+      if (!mock.events.some((e) => e.account === account && e.id === event)) {
+        throw { kind: "protocol", code: -32602, message: `${account} has no event ${event}` };
+      }
+      mock.reminders = mock.reminders.filter((r) => !(r.account === account && r.event === event));
+      emitEnvelope("calendar.reminders_changed", { account });
+      return null;
+    }
+    case "reminder_notify_test":
+      mock.testNotifications += 1;
+      return null;
     case "calendar_set_visibility": {
       knownAccount(cmd, account);
       const c = mock.calendars.find((x) => x.account === account && x.id === String(args.calendar));

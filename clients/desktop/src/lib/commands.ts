@@ -7,6 +7,7 @@ import type {
   AccountCredentials,
   Bootstrap,
   CalendarInfo,
+  CalendarReminder,
   CalendarViewResult,
   DraftCreated,
   DraftKind,
@@ -400,6 +401,22 @@ export const calendarSetVisibility = (account: string, calendar: string, visible
 /** The events of the visible calendars from `start` to `end` (RFC 3339 with an offset, `end` exclusive), every account merged. */
 export const calendarView = (start: string, end: string, zone: string | null): Promise<CalendarViewResult> =>
   invoke<CalendarViewResult>("calendar_view", { start, end, zone });
+
+// The calendar reminders (docs/rust-layer.md, "The reminders").
+
+/** The reminders that fired and wait, every account's. */
+export const calendarReminders = (): Promise<CalendarReminder[]> => invoke<CalendarReminder[]>("calendar_reminders");
+
+/** Dismiss a reminder; the daemon's `calendar.reminders_changed` reads the banner again in every window. */
+export const reminderDismiss = (account: string, event: string): Promise<void> =>
+  invoke<void>("reminder_dismiss", { account, event });
+
+/** Snooze a reminder for `minutes`. */
+export const reminderSnooze = (account: string, event: string, minutes: number): Promise<void> =>
+  invoke<void>("reminder_snooze", { account, event, minutes });
+
+/** Raise the system notification of a made-up reminder, to check that the system shows them. */
+export const reminderNotifyTest = (): Promise<void> => invoke<void>("reminder_notify_test");
 
 /** Open an invitation mail's `invite.ics` in the editor; `not_found` when the row has none. */
 export const inviteSourceOpen = (account: string, row_id: number): Promise<EditorLaunch> =>

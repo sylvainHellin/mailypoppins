@@ -61,15 +61,8 @@ impl App {
         let line = mp_client::format::reminder_line(&reminder, now, &zone);
         if self.global_config.notifications && reminder.presenter.as_deref() == Some(PRESENTER_TUI)
         {
-            let mut when = mp_client::format::reminder_when(&reminder, now, &zone);
-            if let Some(location) = reminder
-                .location
-                .as_deref()
-                .filter(|l| !l.trim().is_empty())
-            {
-                when.push_str(&format!(", {location}"));
-            }
-            mp_core::notify::notify_reminder(&reminder.summary, &when);
+            let body = mp_client::format::reminder_body(&reminder, now, &zone);
+            mp_core::notify::notify_reminder(&reminder.summary, &body);
         }
         self.reminders
             .retain(|r| !(r.account == reminder.account && r.event == reminder.event));

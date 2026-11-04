@@ -628,6 +628,37 @@ where
     }
 }
 
+/// The body of a reminder's notification: when its event starts and, when
+/// it has one, where.
+pub fn reminder_body<Z: chrono::TimeZone>(
+    reminder: &CalendarReminder,
+    now: chrono::DateTime<chrono::Utc>,
+    zone: &Z,
+) -> String
+where
+    Z::Offset: std::fmt::Display,
+{
+    let mut body = reminder_when(reminder, now, zone);
+    if let Some(location) = reminder.location.as_deref().filter(|l| !l.trim().is_empty()) {
+        body.push_str(&format!(", {location}"));
+    }
+    body
+}
+
+/// A reminder's notification now, read in the local zone: its summary as the
+/// title (`(no title)` when it has none) and [`reminder_body`].
+pub fn reminder_notification(reminder: &CalendarReminder) -> (String, String) {
+    let title = if reminder.summary.trim().is_empty() {
+        "(no title)".to_string()
+    } else {
+        reminder.summary.clone()
+    };
+    (
+        title,
+        reminder_body(reminder, chrono::Utc::now(), &chrono::Local),
+    )
+}
+
 /// One reminder as a line: the summary, when, and where.
 pub fn reminder_line<Z: chrono::TimeZone>(
     reminder: &CalendarReminder,
@@ -642,15 +673,7 @@ where
     } else {
         reminder.summary.as_str()
     };
-    let mut line = format!("{summary}, {}", reminder_when(reminder, now, zone));
-    if let Some(location) = reminder
-        .location
-        .as_deref()
-        .filter(|l| !l.trim().is_empty())
-    {
-        line.push_str(&format!(", {location}"));
-    }
-    line
+    format!("{summary}, {}", reminder_body(reminder, now, zone))
 }
 
 /// The one-character mark of the user's own answer to an event.
@@ -667,7 +690,7 @@ pub fn response_mark(own_response: &str) -> char {
 
 #[cfg(test)]
 mod reminder_tests {
-    use super::{reminder_line, reminder_when};
+    use super::{reminder_body, reminder_line, reminder_notification, reminder_when};
     use chrono::{TimeZone, Utc};
     use mp_protocol::reminder::CalendarReminder;
 
@@ -705,6 +728,20 @@ mod reminder_tests {
             reminder_line(&reminder("2026-11-04T09:00:00Z", false), now, &berlin),
             "Standup, in 15 min (10:00), Room 2.14"
         );
+        let mut nowhere = reminder("2026-11-04T09:00:00Z", false);
+        nowhere.location = Some(" ".into());
+        assert_eq!(reminder_body(&nowhere, now, &berlin), "in 15 min (10:00)");
+    }
+
+    /// The notification is titled by the summary, or says it has none.
+    #[test]
+    fn a_reminder_notification_is_titled_by_its_summary() {
+        let mut untitled = reminder("2026-11-04T09:00:00Z", false);
+        assert_eq!(reminder_notification(&untitled).0, "Standup");
+        untitled.summary = " ".into();
+        let (title, body) = reminder_notification(&untitled);
+        assert_eq!(title, "(no title)");
+        assert!(body.ends_with(", Room 2.14"), "{body}");
     }
 }
 

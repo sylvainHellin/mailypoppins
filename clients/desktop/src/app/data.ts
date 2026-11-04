@@ -5,7 +5,7 @@
 import { useEffect, useRef, type Dispatch } from "react";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiEvent } from "@/lib/gui-types";
-import { onMenu, subscribe } from "@/lib/events";
+import { onMenu, onReminderOpen, subscribe } from "@/lib/events";
 import type { Action } from "@/app/reducer";
 import { accountNames, isStale, listsConversations, readerKey, type AppState } from "@/app/state";
 import { refusalsWanted } from "@/app/rsvp";
@@ -29,9 +29,13 @@ export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => 
       .then((status) => live && dispatch({ type: "connection_status", status }))
       .catch(() => {});
     const unlisten = onMenu((id) => menuRef.current(id)).catch(() => undefined);
+    const unlistenReminder = onReminderOpen((target) => {
+      if (live) dispatch({ type: "reminder_open", ...target });
+    }).catch(() => undefined);
     return () => {
       live = false;
       void unlisten.then((f) => f?.());
+      void unlistenReminder.then((f) => f?.());
     };
   }, [dispatch]);
 }
@@ -145,6 +149,21 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .catch((e: unknown) => dispatch({ type: "calendars_failed", gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, calendarShown, calendars, dispatch]);
+
+  // The waiting calendar reminders, whatever the view: the banner lists them
+  // over every view, read at each bootstrap and each
+  // `calendar.reminders_changed`.
+  const reminders = state.reminders;
+  useEffect(() => {
+    if (!hasBootstrap || !isStale(reminders)) return;
+    const gen = reminders.gen;
+    run(`reminders@${gen}`, () =>
+      cmd
+        .calendarReminders()
+        .then((list) => dispatch({ type: "reminders_loaded", gen, reminders: list }))
+        .catch((e: unknown) => dispatch({ type: "reminders_failed", gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, reminders, dispatch]);
 
   // The contacts the Contacts view shows, and only while it shows, for the
   // view's query; a list that went stale behind another view is read when

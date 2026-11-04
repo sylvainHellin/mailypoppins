@@ -432,3 +432,14 @@ Whether a dismissal made in Outlook or by the other mp daemon reaches mp through
 Rejected: reminders kept local only (simplest and identical on every server, but Outlook and a second mp daemon still remind after a dismissal in mp).
 Source: Sylvain in chat, 2026-11-03, answering the open question of the design page `.sync/reports/calendar-phase-2-design`.
 Status: accepted
+
+## 2026-11-04 - The desktop app raises reminder notifications from Rust through tauri-plugin-notification, with no action buttons, and keeps Snooze and Dismiss in its own banner
+
+Why: `tauri-plugin-notification` 2.8 delivers on macOS through the deprecated `NSUserNotificationCenter`, where two action buttons collapse into an "Options" menu and a click is lost once the app restarts, while a click on the body arrives reliably as the action `tap`.
+A click on the body shows, unminimizes and focuses the main window and opens the event, named in the notification's extra payload.
+Snooze and Dismiss live in the app's reminder banner and call the daemon, which owns the reminder state, the snooze timers and the de-duplication across clients; the notification is a best-effort view of that state.
+At launch the app asks the daemon for the reminders already waiting and notifies them once, and the banner lists every waiting reminder, since macOS shows no banner for the frontmost app.
+The bundle is signed ad hoc (`bundle.macOS.signingIdentity = "-"`, in `tauri.bundle.conf.json`, which `scripts/install-local.sh` builds with), so the signature's identifier is the bundle id `dev.mailypoppins.desktop` the notification centre files the app under.
+Rejected: real Snooze and Dismiss buttons through `UNUserNotificationCenter` (`objc2-user-notifications`), which needs a properly signed bundle and a permission prompt; revisit once the app has Developer ID signing.
+Source: chat, 2026-11-04
+Status: accepted

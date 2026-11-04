@@ -66,6 +66,7 @@ export type { PendingKind } from "./PendingKind";
 export type { ProbeAnswer } from "./ProbeAnswer";
 export type { ProbeCheck } from "./ProbeCheck";
 export type { ProtocolRange } from "./ProtocolRange";
+export type { ReminderTarget } from "./ReminderTarget";
 export type { SaveFailure } from "./SaveFailure";
 export type { SavedAttachments } from "./SavedAttachments";
 export type { SavedFile } from "./SavedFile";

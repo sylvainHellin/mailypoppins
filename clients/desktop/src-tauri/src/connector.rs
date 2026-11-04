@@ -171,6 +171,9 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "draft.detach",
     "draft.html",
     "draft.set_headers",
+    "calendar.reminders",
+    "calendar.dismiss_reminder",
+    "calendar.snooze_reminder",
 ];
 
 /// Why a connect failed, for the connection screen.

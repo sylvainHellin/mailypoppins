@@ -20,7 +20,8 @@ export type * from "@/protocol/generated/gui";
  * `signature_changed` edits the signature `work` as another window would;
  * `config_invalid` appends a line to config.toml the next reload refuses;
  * `config_absent` restarts the daemon with no config.toml and no account;
- * `oauth_approve` and `oauth_deny` end every waiting device-code sign-in.
+ * `oauth_approve` and `oauth_deny` end every waiting device-code sign-in;
+ * `reminder` fires the first timed server event's reminder.
  */
 export type FixtureSimulation =
   | "disconnect"
@@ -46,7 +47,8 @@ export type FixtureSimulation =
   | "config_invalid"
   | "config_absent"
   | "oauth_approve"
-  | "oauth_deny";
+  | "oauth_deny"
+  | "reminder";
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {

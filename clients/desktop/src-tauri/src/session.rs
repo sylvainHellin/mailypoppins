@@ -279,6 +279,10 @@ pub enum GuiEvent {
 /// Where events go: the tauri channel in the app, a closure in tests.
 pub type Sink = Box<dyn Fn(GuiEvent) -> bool + Send>;
 
+/// What sees every applied event beside the frontend: the reminders'
+/// notifications, which must not wait on a webview (src/reminders.rs).
+pub type Observer = Box<dyn Fn(&EventEnvelope) + Send>;
+
 // ---------------------------------------------------------------------------
 // The shared state
 // ---------------------------------------------------------------------------
@@ -315,6 +319,7 @@ struct Shared {
     changed: Condvar,
     pump: Mutex<Pump>,
     sink: Mutex<Option<Sink>>,
+    observer: Mutex<Option<Observer>>,
     /// The latest subscription claimed by `subscribe_events`, in call order.
     subscription: AtomicU64,
     fixture_door: Mutex<Option<Arc<Fixture>>>,
@@ -342,6 +347,7 @@ impl SessionHandle {
                 changed: Condvar::new(),
                 pump: Mutex::new(Pump::default()),
                 sink: Mutex::new(None),
+                observer: Mutex::new(None),
                 subscription: AtomicU64::new(0),
                 fixture_door: Mutex::new(None),
             }),
@@ -578,6 +584,12 @@ impl SessionHandle {
     // -----------------------------------------------------------------------
     // Subscription and bootstrap
     // -----------------------------------------------------------------------
+
+    /// Show every applied event to `observer` too, before the frontend sees
+    /// it, replacing any earlier one.
+    pub fn observe(&self, observer: Observer) {
+        *lock(&self.shared.observer) = Some(observer);
+    }
 
     /// Register the frontend's channel, replacing any earlier one.
     pub fn subscribe(&self, sink: Sink) {
@@ -903,6 +915,9 @@ impl SessionHandle {
                                 pump.pending.remove(id);
                             }
                         }
+                        if let Some(observe) = lock(&self.shared.observer).as_ref() {
+                            observe(&event);
+                        }
                         self.emit(GuiEvent::Event { event });
                     }
                     Some(Observe::Duplicate) => {}
@@ -1127,6 +1142,24 @@ mod tests {
         );
         let last = lock(&seen).last().cloned().unwrap_or_default();
         assert_eq!(last["event"]["payload"]["resource"], "mailbox:work/inbox");
+    }
+
+    /// The observer sees each applied event once, a duplicate not at all:
+    /// what raises a reminder's notification however the webview is.
+    #[test]
+    fn the_observer_sees_each_applied_event_once() {
+        let (session, door, fixture, rx, _seen) = harness();
+        let observed: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = Arc::clone(&observed);
+        session.observe(Box::new(move |event| lock(&log).push(event.kind.clone())));
+        fixture.simulate("reminder").expect("a reminder");
+        let Incoming::Event(event) = rx.recv_timeout(Duration::from_secs(1)).expect("an event")
+        else {
+            panic!("an event")
+        };
+        session.handle(&door, Incoming::Event(event.clone()));
+        session.handle(&door, Incoming::Event(event));
+        assert_eq!(*lock(&observed), ["calendar.reminder"]);
     }
 
     #[test]

@@ -379,6 +379,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         // The TUI's toggle of its log pane: here the activity area's notices.
         case "!":
           return handled(), run("toggle_activity");
+        // The TUI's reminders overlay, from every view: here the reminder banner.
+        case "R":
+          return handled(), run("focus_reminders");
         case "Escape":
           handled();
           // The view hides the marks, so it closes before they clear.

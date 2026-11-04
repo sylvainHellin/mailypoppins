@@ -156,6 +156,7 @@ use mp_protocol::events::{
     KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
     KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
+use mp_protocol::reminder::{CalendarReminder, PRESENTER_GUI};
 use mp_protocol::send::{
     ApprovedOutcome, HoldListing, HoldStatus, OutboxCounts, OutboxListing, OutboxRetryOutcome,
     OutboxRow, RecipientOutcome, SendOutcome, SentCopy,
@@ -353,6 +354,7 @@ pub const SIMULATIONS: &[&str] = &[
     "config_absent",
     "oauth_approve",
     "oauth_deny",
+    "reminder",
 ];
 
 /// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
@@ -539,6 +541,8 @@ struct State {
     server_calendars: Vec<CalendarInfo>,
     /// The events `calendar.view` answers, in start order.
     server_events: Vec<CalendarEvent>,
+    /// The reminders `calendar.reminders` answers (`reminder` fires one).
+    reminders: Vec<CalendarReminder>,
     /// (account, row id) -> the server event `message.invite` names.
     invite_events: BTreeMap<(String, i64), String>,
     /// The next RSVP or `event.respond` fails (`rsvp_fail`).
@@ -2964,6 +2968,7 @@ impl Fixture {
             invites: BTreeMap::new(),
             server_calendars: server.calendars,
             server_events: server.events,
+            reminders: Vec::new(),
             invite_events,
             rsvp_fail: false,
             rsvp_delay: RSVP_DELAY,
@@ -4121,6 +4126,44 @@ impl Fixture {
                     .collect();
                 Ok(json!({"calendars": calendars}))
             }
+            "calendar.reminders" => {
+                only(method, &params, &["accounts"])?;
+                Ok(json!({"reminders": s.reminders}))
+            }
+            "calendar.dismiss_reminder" | "calendar.snooze_reminder" => {
+                let snooze = method == "calendar.snooze_reminder";
+                if snooze {
+                    only(method, &params, &["account", "event", "minutes"])?;
+                } else {
+                    only(method, &params, &["account", "event"])?;
+                }
+                let account = param_str(method, &params, "account")?.to_string();
+                let event = param_str(method, &params, "event")?.to_string();
+                s.account_ready(method, &account)?;
+                if !s
+                    .server_events
+                    .iter()
+                    .any(|e| e.account == account && e.id == event)
+                {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("{account} has no event {event}"),
+                    ));
+                }
+                s.reminders
+                    .retain(|r| !(r.account == account && r.event == event));
+                self.emit_locked(
+                    &mut s,
+                    "calendar.reminders_changed",
+                    json!({"account": account}),
+                );
+                Ok(if snooze {
+                    json!({"account": account, "event": event, "until": "2026-07-07T09:05:00Z"})
+                } else {
+                    json!({"account": account, "event": event})
+                })
+            }
             "calendar.set_visibility" => {
                 only(method, &params, &["account", "calendar", "visible"])?;
                 let account = param_str(method, &params, "account")?.to_string();
@@ -5268,6 +5311,7 @@ impl Fixture {
             "config_invalid" => return self.simulate_config_invalid(),
             "config_absent" => return self.simulate_config_absent(),
             "oauth_approve" => return self.simulate_oauth(true),
+            "reminder" => return self.simulate_reminder(),
             "oauth_deny" => return self.simulate_oauth(false),
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
@@ -5557,6 +5601,36 @@ impl Fixture {
 
     /// Another window edited the signature `work`: a line appended to it and
     /// its file, and the watcher's `signature.changed`.
+    /// The first timed server event's reminder fell due, presented by this
+    /// app, as the daemon's `calendar.reminder` would say.
+    fn simulate_reminder(&self) -> Result<()> {
+        let mut s = self.state();
+        let reminder = s
+            .server_events
+            .iter()
+            .find_map(|e| match &e.time {
+                CalendarEventTime::Timed { start, .. } => Some(CalendarReminder {
+                    account: e.account.clone(),
+                    event: e.id.clone(),
+                    summary: e.summary.clone(),
+                    start: start.clone(),
+                    all_day: false,
+                    location: e.location.clone(),
+                    online_meeting_url: e.online_meeting_url.clone(),
+                    minutes_before: e.reminder.unwrap_or(15),
+                    presenter: Some(PRESENTER_GUI.into()),
+                }),
+                CalendarEventTime::AllDay { .. } => None,
+            })
+            .ok_or_else(|| anyhow!("no timed server event to remind of"))?;
+        s.reminders
+            .retain(|r| !(r.account == reminder.account && r.event == reminder.event));
+        s.reminders.push(reminder.clone());
+        let payload = serde_json::to_value(&reminder)?;
+        self.emit_locked(&mut s, "calendar.reminder", payload);
+        Ok(())
+    }
+
     fn simulate_signature_changed(&self) -> Result<()> {
         let mut s = self.state();
         let current = s.signatures["signatures"]["work"]
@@ -6796,6 +6870,41 @@ mod tests {
             "a written index is announced"
         );
         assert_eq!(next_event(&rx).payload["result"]["saved"], "written");
+    }
+
+    /// `reminder` fires the first timed server event's reminder as the
+    /// daemon would, presented by this app; `calendar.reminders` lists it
+    /// and a dismissal takes it off with `calendar.reminders_changed`.
+    #[test]
+    fn a_simulated_reminder_is_listed_and_dismissed() {
+        let (f, rx) = fixture();
+        let listed = f.call("calendar.reminders", json!({})).expect("reminders");
+        assert_eq!(listed["reminders"], json!([]));
+        f.simulate("reminder").expect("a reminder");
+        let fired = next_event(&rx);
+        assert_eq!(fired.kind, "calendar.reminder");
+        assert_eq!(fired.payload["presenter"], "gui");
+        let (account, event) = (
+            fired.payload["account"].as_str().unwrap().to_string(),
+            fired.payload["event"].as_str().unwrap().to_string(),
+        );
+        let listed = f.call("calendar.reminders", json!({})).expect("reminders");
+        assert_eq!(listed["reminders"][0]["event"], event.as_str());
+        f.call(
+            "calendar.dismiss_reminder",
+            json!({"account": account, "event": event}),
+        )
+        .expect("dismissed");
+        assert_eq!(next_event(&rx).kind, "calendar.reminders_changed");
+        let listed = f.call("calendar.reminders", json!({})).expect("reminders");
+        assert_eq!(listed["reminders"], json!([]));
+        let e = f
+            .call(
+                "calendar.snooze_reminder",
+                json!({"account": account, "event": "nope", "minutes": 5}),
+            )
+            .expect_err("no such event");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
     }
 
     /// The next event, within five seconds.

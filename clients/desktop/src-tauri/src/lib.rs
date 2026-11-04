@@ -21,6 +21,7 @@
 //! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
 //! - [`terminal`]: the embedded terminal editor's PTY sessions.
 //! - [`updates`]: the app's own updates from GitHub Releases.
+//! - [`reminders`]: the calendar reminders' system notifications and calls.
 
 pub mod attachments;
 pub mod calendar;
@@ -38,6 +39,7 @@ pub mod menu;
 pub mod navigation;
 pub mod paths;
 pub mod reader;
+pub mod reminders;
 pub mod session;
 pub mod settings;
 pub mod signatures;
@@ -131,6 +133,9 @@ pub fn run() {
         // Driven from Rust only (src/updates.rs); the webview has no
         // `updater:*` permission.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Driven from Rust only (src/reminders.rs); the webview has no
+        // `notification:*` permission.
+        .plugin(tauri_plugin_notification::init())
         .manage(session)
         .manage(updates::Updates::default())
         .menu(menu::build)
@@ -172,7 +177,15 @@ pub fn run() {
             if let Some(file) = updates::record_file(app.handle()) {
                 connector::set_update_record(file);
             }
+            // Before the session starts, so the first reminder it hears is
+            // notified and a click on it is reported (src/reminders.rs).
+            reminders::install(app.handle());
+            let notify_app = app.handle().clone();
+            setup_session.observe(Box::new(move |event| {
+                reminders::on_event(&notify_app, event)
+            }));
             setup_session.start();
+            reminders::notify_waiting(app.handle(), setup_session.clone());
             let dev_origin = if cfg!(debug_assertions) {
                 app.config().build.dev_url.clone()
             } else {
@@ -279,6 +292,10 @@ pub fn run() {
             calendar::invite_get,
             calendar::invite_refusal,
             calendar::send_invite,
+            reminders::calendar_reminders,
+            reminders::reminder_dismiss,
+            reminders::reminder_snooze,
+            reminders::reminder_notify_test,
             contacts::contact_search,
             contacts::contact_rebuild,
             contacts::contact_vcard_draft,

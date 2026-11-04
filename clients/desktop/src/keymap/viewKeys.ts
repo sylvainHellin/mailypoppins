@@ -36,7 +36,7 @@ export const VIEW_AGNOSTIC_COMBOS: Readonly<Record<string, ActionId>> = {
 /**
  * The keys a view leaves to the shared routing: pane cycling, the palette,
  * key help, the notice keys (`X`, and `!`, which hides the notices in every
- * view as the TUI's toggles its log) and the moves, which reach the view's cursor
+ * view as the TUI's toggles its log), the reminders' `R` and the moves, which reach the view's cursor
  * through `move_selection`. Every other printable key does nothing unless
  * the view's table binds it.
  */
@@ -46,6 +46,7 @@ export const VIEW_SHARED_KEYS: ReadonlySet<string> = new Set([
   "?",
   "X",
   "!",
+  "R",
   "j",
   "k",
   "G",
