@@ -113,6 +113,7 @@ import {
   type CalendarLayout,
   type ComposeDialog,
   type ComposeSession,
+  type EventDialog,
   type Layout,
   type Loadable,
   type MessageRef,
@@ -187,6 +188,15 @@ import {
   isInviteOperation,
   openInviteDialog,
 } from "@/app/invite";
+import {
+  eventCreateFailed,
+  eventCreateRequested,
+  eventCreateSignal,
+  eventCreateStarted,
+  eventCreating,
+  isEventCreateOperation,
+  openEventDialog,
+} from "@/app/eventForm";
 import {
   contactsFailed,
   contactsLoaded,
@@ -440,6 +450,11 @@ export type Action =
   | { type: "invite_send_requested"; token: number; account: string; subject: string }
   | { type: "invite_send_started"; token: number; operation_id: string }
   | { type: "invite_send_failed"; token: number }
+  // A new event (app/eventForm.ts).
+  | { type: "open_event_form"; dialog: EventDialog }
+  | { type: "event_create_requested"; token: number; account: string; summary: string; dialog: EventDialog }
+  | { type: "event_create_started"; token: number; operation_id: string; transaction_id: string }
+  | { type: "event_create_failed"; token: number }
   // The Contacts view (app/contacts.ts).
   | { type: "contacts_loaded"; account: string; gen: number; search: ContactSearch }
   | { type: "contacts_failed"; account: string; gen: number; error: GuiError }
@@ -1185,7 +1200,7 @@ function composeFollow(prev: AppState, next: AppState, a: Action): AppState {
 
 /** Every dialog's own state, as an overlay that replaces theirs leaves it. */
 function closeDialogs(s: AppState): AppState {
-  return { ...s, dialog: null, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
+  return { ...s, dialog: null, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, eventDialog: null, signaturesDialog: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,6 +1460,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (isOutboxOperation(s, sig.operation_id)) return outboxSignal(s, end);
       if (isRsvpOperation(s, sig.operation_id)) return rsvpSignal(s, end);
       if (isInviteOperation(s, sig.operation_id)) return inviteSignal(s, end);
+      if (isEventCreateOperation(s, sig.operation_id)) return eventCreateSignal(s, end);
       if (isRebuildOperation(s, sig.operation_id)) return rebuildSignal(s, end);
       if (isSignInOperation(s, sig.operation_id)) return signInSignal(s, end);
       // An unknown id may be a sync, a send, a retry or an RSVP whose start
@@ -1454,6 +1470,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (retryStarting(next)) next = outboxSignal(next, end);
       if (rsvpStarting(next)) next = rsvpSignal(next, end);
       if (inviteSending(next)) next = inviteSignal(next, end);
+      if (eventCreating(next)) next = eventCreateSignal(next, end);
       if (rebuildStarting(next)) next = rebuildSignal(next, end);
       if (signInStarting(next)) next = signInSignal(next, end);
       return signal(next, sig);
@@ -1531,6 +1548,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "outbox_retry") return outboxSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "rsvp") return rsvpSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send_invite") return inviteSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "event_create") return eventCreateSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "contact_rebuild") return rebuildSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "oauth2_login") {
         return signInSignal({ ...s, credentials: markStale(s.credentials) }, settledEnd(e.operation_id, e.status));
@@ -1543,6 +1561,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "outbox_retry") return outboxSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "rsvp") return rsvpSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "send_invite") return inviteSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "event_create") return eventCreateSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "contact_rebuild") return rebuildSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "oauth2_login") return signInSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
@@ -1935,6 +1954,7 @@ function reduce(s: AppState, a: Action): AppState {
         attachDialog: a.overlay === "attachments" ? s.attachDialog : null,
         rsvpDialog: a.overlay === "rsvp" ? s.rsvpDialog : null,
         inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
+        eventDialog: a.overlay === "event" ? s.eventDialog : null,
         serverSearchDialog: a.overlay === "server_search" ? s.serverSearchDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
@@ -2209,6 +2229,14 @@ function reduce(s: AppState, a: Action): AppState {
       return inviteSendStarted(s, a.token, a.operation_id);
     case "invite_send_failed":
       return inviteSendFailed(s, a.token);
+    case "open_event_form":
+      return openEventDialog(s, a.dialog);
+    case "event_create_requested":
+      return eventCreateRequested(s, { token: a.token, account: a.account, summary: a.summary, dialog: a.dialog });
+    case "event_create_started":
+      return eventCreateStarted(s, a.token, a.operation_id, a.transaction_id);
+    case "event_create_failed":
+      return eventCreateFailed(s, a.token);
     case "contacts_loaded":
       return contactsLoaded(s, a.account, a.gen, a.search);
     case "contacts_failed":

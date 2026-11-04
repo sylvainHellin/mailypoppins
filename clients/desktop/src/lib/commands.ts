@@ -14,6 +14,8 @@ import type {
   DraftMessage,
   DraftPreview,
   DraftValidation,
+  EventCreateParams,
+  EventCreateStarted,
   HoldListing,
   OutboxListing,
   ThreadListing,
@@ -418,6 +420,15 @@ export const inviteGet = (account: string, row_id: number): Promise<InviteCard |
  * `EventRespondResult`. `send_response` is null on an invitation mail's
  * event, whose answer is the reply mail itself.
  */
+/**
+ * Create an event (`event.create`, PERSO-255); the end arrives as
+ * `event_create`, its result an `EventWriteResult`. The start answers the
+ * transaction id a retry of the same form sends again. A refusal's message
+ * is the daemon's sentence.
+ */
+export const eventCreate = (params: EventCreateParams): Promise<EventCreateStarted> =>
+  invoke<EventCreateStarted>("event_create", { params });
+
 export const eventRespond = (
   account: string,
   event: string,

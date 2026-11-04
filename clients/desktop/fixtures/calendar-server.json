@@ -10,7 +10,10 @@
       "can_edit": true,
       "visible": true,
       "backend": "graph",
-      "features": []
+      "features": [
+        "write",
+        "online-meeting"
+      ]
     },
     {
       "account": "home",
@@ -21,7 +24,10 @@
       "can_edit": false,
       "visible": true,
       "backend": "graph",
-      "features": []
+      "features": [
+        "write",
+        "online-meeting"
+      ]
     },
     {
       "account": "work",

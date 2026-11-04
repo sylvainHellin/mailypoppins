@@ -168,6 +168,8 @@ pub enum PendingKind {
     Rsvp,
     /// `send.invite`: its `result` is a `SendOutcome`.
     SendInvite,
+    /// `event.create`: its `result` is an `EventWriteResult`.
+    EventCreate,
     /// `contact.rebuild`: its `result` is a `ContactRebuilt`.
     ContactRebuild,
     /// `config.oauth2_login`: its one progress carries the device code, and

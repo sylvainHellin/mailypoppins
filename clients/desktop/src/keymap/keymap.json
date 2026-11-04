@@ -437,6 +437,10 @@
         "action": "Respond (accept / tentative / decline, comment)"
       },
       {
+        "key": "n",
+        "action": "New event (the event form, on the cursor's day)"
+      },
+      {
         "key": "c",
         "action": "Show or hide calendars"
       },

@@ -560,12 +560,8 @@ pub struct EventInputParams {
     pub online_meeting: Option<bool>,
     /// Minutes before the start the reminder fires: absent for the mailbox
     /// default, `null` for none.
-    #[serde(
-        default,
-        deserialize_with = "present",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[cfg_attr(feature = "ts", ts(optional))]
+    #[serde(default, with = "present", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<Option<u32>>"))]
     pub reminder: Option<Option<u32>>,
     /// `free`, `tentative`, `busy`, `oof` or `working-elsewhere`; busy when
     /// absent.
@@ -584,13 +580,27 @@ pub struct EventInputParams {
 }
 
 /// A key that is present, `null` included, as `Some`, so the three states of
-/// a clearable field survive the wire.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
+/// a clearable field survive the wire: absent, `null`, and a value.
+mod present {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(
+        value: &Option<Option<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(inner) => inner.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
 }
 
 /// The `params` of `event.create`.
