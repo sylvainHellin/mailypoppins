@@ -1,0 +1,442 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Configuration · mailypoppins</title><meta name="description" content="Complete configuration reference for mailypoppins email CLI."><meta name="theme-color" content="#F4F1E8" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0C1B33" media="(prefers-color-scheme: dark)"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="canonical" href="https://mailypoppins.com/config/"><link rel="preload" href="/fonts/Inter-Variable.woff2" as="font" type="font/woff2" crossorigin><link rel="preload" href="/fonts/JetBrainsMono-Variable.woff2" as="font" type="font/woff2" crossorigin><!-- Open Graph --><meta property="og:title" content="Configuration · mailypoppins"><meta property="og:description" content="Complete configuration reference for mailypoppins email CLI."><meta property="og:type" content="website"><meta property="og:site_name" content="mailypoppins"><meta property="og:url" content="https://mailypoppins.com/config/"><!-- Twitter Card --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="Configuration · mailypoppins"><meta name="twitter:description" content="Complete configuration reference for mailypoppins email CLI."><link rel="stylesheet" href="/_assets/Footer.RUrG1hNo.css">
+<style>.docs-tabs[data-astro-cid-kegtqog6]{display:flex;gap:var(--space-1);border-bottom:1px solid var(--color-border);margin-bottom:var(--space-8)}.docs-tab[data-astro-cid-kegtqog6]{padding:var(--space-2) var(--space-3);margin-bottom:-1px;font-size:.9375rem;color:var(--color-text-muted);border-bottom:2px solid transparent}.docs-tab[data-astro-cid-kegtqog6]:hover{color:var(--color-text)}.docs-tab[data-astro-cid-kegtqog6].active{color:var(--color-text);border-bottom-color:var(--color-frame)}
+.config-example[data-astro-cid-wtjqanhn]{margin-bottom:var(--space-8)}.config-desc[data-astro-cid-wtjqanhn]{color:var(--color-text-soft);margin-bottom:var(--space-4)}.config-code[data-astro-cid-wtjqanhn]{background:var(--color-code-bg);border:1px solid var(--color-code-border);border-radius:8px;padding:var(--space-4);overflow-x:auto}.config-code[data-astro-cid-wtjqanhn] pre{margin:0;padding:0;border:none;background:transparent!important;font-family:var(--font-mono);font-size:.875rem;line-height:1.6}.config-code[data-astro-cid-wtjqanhn] code{background:none;padding:0;border-radius:0;font-size:inherit;color:inherit}.page[data-astro-cid-kp3sq5ur]{padding-top:var(--space-16);padding-bottom:var(--space-16)}.page-header[data-astro-cid-kp3sq5ur]{margin-bottom:var(--space-12)}.subtitle[data-astro-cid-kp3sq5ur]{font-size:1.125rem;color:var(--color-text-muted)}section[data-astro-cid-kp3sq5ur]{margin-bottom:var(--space-8)}.setup-steps[data-astro-cid-kp3sq5ur]{list-style:decimal;padding-left:var(--space-6);color:var(--color-text-soft);margin-bottom:var(--space-6)}.setup-steps[data-astro-cid-kp3sq5ur] li[data-astro-cid-kp3sq5ur]{margin-bottom:var(--space-3);line-height:1.6}.setup-steps[data-astro-cid-kp3sq5ur] ul[data-astro-cid-kp3sq5ur]{list-style:disc;padding-left:var(--space-6);margin-top:var(--space-2)}.setup-steps[data-astro-cid-kp3sq5ur] ul[data-astro-cid-kp3sq5ur] li[data-astro-cid-kp3sq5ur]{margin-bottom:var(--space-2)}.keyring-list[data-astro-cid-kp3sq5ur]{list-style:disc;padding-left:var(--space-6);color:var(--color-text-soft);margin-bottom:var(--space-4)}.keyring-list[data-astro-cid-kp3sq5ur] li[data-astro-cid-kp3sq5ur]{margin-bottom:var(--space-2)}.code-inline[data-astro-cid-kp3sq5ur]{background:var(--color-code-bg);border:1px solid var(--color-code-border);border-radius:8px;padding:var(--space-3) var(--space-4);overflow-x:auto;margin-bottom:var(--space-4)}.code-inline[data-astro-cid-kp3sq5ur] pre{margin:0;padding:0;border:none;background:transparent;font-family:var(--font-mono);font-size:.875rem;line-height:1.6}.code-inline[data-astro-cid-kp3sq5ur] code{background:none;padding:0;border-radius:0;font-size:inherit;color:inherit}
+</style></head> <body> <a href="#main-content" class="skip-link">Skip to content</a>  <nav class="nav" data-astro-cid-dmqpwcec> <div class="nav-inner content-wide" data-astro-cid-dmqpwcec> <a href="/" class="nav-logo" aria-label="mailypoppins home" data-astro-cid-dmqpwcec> <svg width="28" height="28" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" data-astro-cid-dmqpwcec> <rect width="1024" height="1024" rx="224" fill="#0C1B33" data-astro-cid-dmqpwcec></rect> <g fill="none" stroke="#F4F1E8" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" data-astro-cid-dmqpwcec> <path d="M212 480 C 212 300 350 190 512 190 C 674 190 812 300 812 480 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 Z" data-astro-cid-dmqpwcec></path> <path d="M512 190 V 150" data-astro-cid-dmqpwcec></path> <path d="M512 480 V 560" data-astro-cid-dmqpwcec></path> <path d="M512 880 A 62 62 0 0 1 388 870 V 840" data-astro-cid-dmqpwcec></path> <rect x="232" y="560" width="560" height="320" rx="24" data-astro-cid-dmqpwcec></rect> <path d="M232 584 L512 760 L792 584" data-astro-cid-dmqpwcec></path> </g> <circle cx="512" cy="130" r="34" fill="#FF6700" data-astro-cid-dmqpwcec></circle> </svg> <span class="nav-wordmark" data-astro-cid-dmqpwcec>mailypoppins</span> </a> <div class="nav-links" data-astro-cid-dmqpwcec> <a href="/#download" class="nav-link" data-astro-cid-dmqpwcec> Get started </a><a href="/getting-started/" class="nav-link" data-astro-cid-dmqpwcec> Guide </a><a href="/commands/" class="nav-link active" aria-current="page" data-astro-cid-dmqpwcec> Reference </a><a href="/faq/" class="nav-link" data-astro-cid-dmqpwcec> FAQ </a> </div> <div class="nav-right" data-astro-cid-dmqpwcec> <a href="https://github.com/sylvainHellin/mailypoppins" class="nav-github" aria-label="GitHub repository" target="_blank" rel="noopener noreferrer" data-astro-cid-dmqpwcec> <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" data-astro-cid-dmqpwcec> <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" data-astro-cid-dmqpwcec></path> </svg> </a> <div class="nav-mobile" data-astro-cid-dmqpwcec> <style>astro-island,astro-slot,astro-static-slot{display:contents}</style><script>(()=>{var e=async t=>{await(await t())()};(self.Astro||(self.Astro={})).load=e;window.dispatchEvent(new Event("astro:load"));})();</script><script>(()=>{var A=Object.defineProperty;var C=(i,o,a)=>o in i?A(i,o,{enumerable:!0,configurable:!0,writable:!0,value:a}):i[o]=a;var l=(i,o,a)=>C(i,typeof o!="symbol"?o+"":o,a);var E=new Set(["__proto__","constructor","prototype"]);{let i={0:t=>y(t),1:t=>a(t),2:t=>new RegExp(t),3:t=>new Date(t),4:t=>new Map(a(t)),5:t=>new Set(a(t)),6:t=>BigInt(t),7:t=>new URL(t),8:t=>new Uint8Array(t),9:t=>new Uint16Array(t),10:t=>new Uint32Array(t),11:t=>Number.POSITIVE_INFINITY*t},o=t=>{let[h,e]=t;return h in i?i[h](e):void 0},a=t=>t.map(o),y=t=>typeof t!="object"||t===null?t:Object.fromEntries(Object.entries(t).map(([h,e])=>[h,o(e)]));class f extends HTMLElement{constructor(){super(...arguments);l(this,"Component");l(this,"hydrator");l(this,"hydrate",async()=>{var b;if(!this.hydrator||!this.isConnected)return;let e=(b=this.parentElement)==null?void 0:b.closest("astro-island[ssr]");if(e){e.addEventListener("astro:hydrate",this.hydrate,{once:!0});return}let c=this.querySelectorAll("astro-slot"),n={},p=this.querySelectorAll("template[data-astro-template]");for(let r of p){let s=r.closest(this.tagName);s!=null&&s.isSameNode(this)&&(n[r.getAttribute("data-astro-template")||"default"]=r.innerHTML,r.remove())}for(let r of c){let s=r.closest(this.tagName);s!=null&&s.isSameNode(this)&&(n[r.getAttribute("name")||"default"]=r.innerHTML)}let u;try{u=this.hasAttribute("props")?y(JSON.parse(this.getAttribute("props"))):{}}catch(r){let s=this.getAttribute("component-url")||"<unknown>",v=this.getAttribute("component-export");throw v&&(s+=` (export ${v})`),console.error(`[hydrate] Error parsing props for component ${s}`,this.getAttribute("props"),r),r}let d;await this.hydrator(this)(this.Component,u,n,{client:this.getAttribute("client")}),this.removeAttribute("ssr"),this.dispatchEvent(new CustomEvent("astro:hydrate"))});l(this,"unmount",()=>{this.isConnected||this.dispatchEvent(new CustomEvent("astro:unmount"))})}disconnectedCallback(){document.removeEventListener("astro:after-swap",this.unmount),document.addEventListener("astro:after-swap",this.unmount,{once:!0})}connectedCallback(){if(!this.hasAttribute("await-children")||document.readyState==="interactive"||document.readyState==="complete")this.childrenConnectedCallback();else{let e=()=>{document.removeEventListener("DOMContentLoaded",e),c.disconnect(),this.childrenConnectedCallback()},c=new MutationObserver(()=>{var n;((n=this.lastChild)==null?void 0:n.nodeType)===Node.COMMENT_NODE&&this.lastChild.nodeValue==="astro:end"&&(this.lastChild.remove(),e())});c.observe(this,{childList:!0}),document.addEventListener("DOMContentLoaded",e)}}async childrenConnectedCallback(){let e=this.getAttribute("before-hydration-url");e&&await import(e),this.start()}async start(){let e=JSON.parse(this.getAttribute("opts")),c=this.getAttribute("client");if(Astro[c]===void 0){window.addEventListener(`astro:${c}`,()=>this.start(),{once:!0});return}try{await Astro[c](async()=>{let n=this.getAttribute("renderer-url"),[p,{default:u}]=await Promise.all([import(this.getAttribute("component-url")),n?import(n):()=>()=>{}]),d=this.getAttribute("component-export")||"default";if(d.includes(".")){this.Component=p;for(let m of d.split(".")){if(E.has(m)||!this.Component||typeof this.Component!="object"&&typeof this.Component!="function"||!Object.hasOwn(this.Component,m))throw new Error(`Invalid component export path: ${d}`);this.Component=this.Component[m]}}else{if(E.has(d))throw new Error(`Invalid component export path: ${d}`);this.Component=p[d]}return this.hydrator=u,this.hydrate},e,this)}catch(n){console.error("[astro-island] Error hydrating %s",this.getAttribute("component-url"),n)}}attributeChangedCallback(){this.hydrate()}}l(f,"observedAttributes",["props"]),customElements.get("astro-island")||customElements.define("astro-island",f)}})();</script><astro-island uid="1Wkdd" component-url="/_assets/MobileMenu.CoRXNlir.js" component-export="default" renderer-url="/_assets/client.svelte.BOf8KcuZ.js" props="{&quot;currentPath&quot;:[0,&quot;/config/&quot;],&quot;data-astro-cid-dmqpwcec&quot;:[0,true]}" ssr client="load" opts="{&quot;name&quot;:&quot;MobileMenu&quot;,&quot;value&quot;:true}" await-children><!--[--><button class="hamburger svelte-2pdber" aria-label="Open menu" aria-expanded="false"><!--[-1--><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="5" x2="17" y2="5"></line><line x1="3" y1="10" x2="17" y2="10"></line><line x1="3" y1="15" x2="17" y2="15"></line></svg><!--]--></button> <!--[-1--><!--]--><!--]--><!--astro:end--></astro-island> </div> </div> </div> </nav> <main id="main-content" class="content page" data-astro-cid-kp3sq5ur> <nav class="docs-tabs" aria-label="Reference" data-astro-cid-kegtqog6> <a href="/commands/" class="docs-tab" data-astro-cid-kegtqog6> Commands </a><a href="/draft-format/" class="docs-tab" data-astro-cid-kegtqog6> Drafts </a><a href="/config/" class="docs-tab active" aria-current="page" data-astro-cid-kegtqog6> Config </a> </nav> <header class="page-header" data-astro-cid-kp3sq5ur> <h1 data-astro-cid-kp3sq5ur>Configuration</h1> <p class="subtitle" data-astro-cid-kp3sq5ur>Complete reference for <code data-astro-cid-kp3sq5ur>~/.config/mailypoppins/config.toml</code></p> </header> <!-- Config File Location --> <section data-astro-cid-kp3sq5ur> <h2 data-astro-cid-kp3sq5ur>Config File Location</h2> <p data-astro-cid-kp3sq5ur>
+All configuration lives in a single file: <code data-astro-cid-kp3sq5ur>~/.config/mailypoppins/config.toml</code>.
+        Create it interactively with <code data-astro-cid-kp3sq5ur>mp config init</code>, or write it by hand.
+        View the resolved config at any time with <code data-astro-cid-kp3sq5ur>mp config show</code>.
+        Print the file path with <code data-astro-cid-kp3sq5ur>mp config path</code>.
+</p> <p data-astro-cid-kp3sq5ur>
+A key mailypoppins does not know, such as a typo like <code data-astro-cid-kp3sq5ur>sync_intervall_secs</code>,
+        does not stop the file from loading: it is ignored, and <code data-astro-cid-kp3sq5ur>mp</code> prints a warning
+        naming it and its account on every command, as do the daemon log,
+<code data-astro-cid-kp3sq5ur>mp daemon health</code>, the TUI's activity log and a banner line in the desktop app.
+</p> </section> <!-- Full Example --> <section data-astro-cid-kp3sq5ur> <h2 data-astro-cid-kp3sq5ur>Full Example</h2> <p data-astro-cid-kp3sq5ur>A complete single-account configuration with comments explaining each section.</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#6DB6DA">theme</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">mailypoppins</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">  # TUI color theme (see Theme section)</span></span>
+<span class="line"><span style="color:#6DB6DA">notifications</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> false</span><span style="color:#7D8BA3;font-style:italic">       # TUI notifications for new mail and reminders (see Notifications section)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">email</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">font_family</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Helvetica, Arial, sans-serif</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">  # HTML email font</span></span>
+<span class="line"><span style="color:#6DB6DA">font_size</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">16px</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">                             # HTML email font size</span></span>
+<span class="line"><span style="color:#6DB6DA">include_signature</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> true</span><span style="color:#7D8BA3;font-style:italic">                       # Append signature to outgoing mail</span></span>
+<span class="line"><span style="color:#6DB6DA">send_hold_secs</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 20</span><span style="color:#7D8BA3;font-style:italic">                            # Undo-send window before hand-off (0 = send now)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">smtp</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">postout.lrz.de</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 587</span></span>
+<span class="line"><span style="color:#6DB6DA">username</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">your-id</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">default_from</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">your.name@example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#7D8BA3;font-style:italic"># Password stored in the secrets store, not here</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">imap</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">imap.example.com</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">   # Falls back to smtp.host if omitted</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 993</span></span>
+<span class="line"><span style="color:#6DB6DA">username</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> ""</span><span style="color:#7D8BA3;font-style:italic">               # Falls back to smtp.username if omitted</span></span>
+<span class="line"><span style="color:#6DB6DA">fetch_concurrency</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 4</span><span style="color:#7D8BA3;font-style:italic">       # Mailboxes fetched in parallel per sync (1-8)</span></span>
+<span class="line"><span style="color:#6DB6DA">body_fetch_deadline_secs</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 30</span><span style="color:#7D8BA3;font-style:italic">  # Per-mailbox download budget on a TUI sync (0 = unbounded)</span></span>
+<span class="line"><span style="color:#6DB6DA">sync_interval_secs</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 900</span><span style="color:#7D8BA3;font-style:italic">    # Daemon syncs after this long without a sync (0 = never)</span></span>
+<span class="line"><span style="color:#7D8BA3;font-style:italic"># Password falls back to SMTP password if not set separately</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#7D8BA3;font-style:italic"># Every server folder is found without an entry here; these pin and override.</span></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">inbox</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">INBOX</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">            # IMAP folder name; its messages are stored</span></span>
+<span class="line"><span style="color:#7D8BA3;font-style:italic">                            # under the key "inbox" in the account database</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">archive</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Archive</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">sent</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Sent Items</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">extra</span><span style="color:#B4BFCE">]]</span><span style="color:#7D8BA3;font-style:italic">         # A folder always synced, whatever discovery decides</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Projects</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">override</span><span style="color:#B4BFCE">]]</span><span style="color:#7D8BA3;font-style:italic">      # Change the policy of the folders a glob matches</span></span>
+<span class="line"><span style="color:#6DB6DA">match</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Labels/*</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">policy</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">ignore</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">           # sync | status-only | ignore</span></span></code></pre> </div> </div> <p data-astro-cid-kp3sq5ur>
+The file has no signature keys: each signature is a Markdown file under
+<code data-astro-cid-kp3sq5ur>~/.config/mailypoppins/signatures/</code>. See <a href="#signatures-section" data-astro-cid-kp3sq5ur>Signatures</a>.
+</p> </section> <!-- Section Breakdown --> <section data-astro-cid-kp3sq5ur> <h2 data-astro-cid-kp3sq5ur>Section Breakdown</h2> <!-- theme --> <h3 id="theme-section" data-astro-cid-kp3sq5ur>theme</h3> <p data-astro-cid-kp3sq5ur>
+Selects the TUI color theme by name (helix-style: themes are built in and
+        picked in config, not defined in separate files). The key is top-level, so
+        it must appear before the first <code data-astro-cid-kp3sq5ur>[section]</code> header. Available themes:
+</p> <ul data-astro-cid-kp3sq5ur> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>mailypoppins</code>: the default, used when the key is omitted; the Mac app's dark palette (aliases: <code data-astro-cid-kp3sq5ur>mailypoppins-dark</code>, <code data-astro-cid-kp3sq5ur>default</code>)</li> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>mailypoppins-light</code>: the Mac app's light palette</li> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>catppuccin-mocha</code>: the TUI's original look (alias: <code data-astro-cid-kp3sq5ur>catppuccin</code>)</li> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>catppuccin-latte</code>: its light variant (alias: <code data-astro-cid-kp3sq5ur>latte</code>)</li> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>tokyo-night</code> (alias: <code data-astro-cid-kp3sq5ur>tokyonight</code>)</li> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>terminal</code>: adapts to the terminal's own ANSI palette: the background shows through and colors follow your terminal theme (aliases: <code data-astro-cid-kp3sq5ur>transparent</code>, <code data-astro-cid-kp3sq5ur>ansi</code>)</li> </ul> <p data-astro-cid-kp3sq5ur>
+Names are case-insensitive. An unknown name does not fail: the TUI starts
+        with the default theme and logs a warning to the activity log.
+</p> <p data-astro-cid-kp3sq5ur>
+Every theme except <code data-astro-cid-kp3sq5ur>terminal</code> paints its own background, so the TUI
+        draws a rounded frame around the whole screen in the theme's border colour to
+        mark where it ends and your terminal begins. <code data-astro-cid-kp3sq5ur>terminal</code> has no edge to
+        mark and uses the full window.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#6DB6DA">theme</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">catppuccin-mocha</span><span style="color:#B4BFCE">"</span></span></code></pre> </div> </div> <!-- notifications --> <h3 id="notifications-section" data-astro-cid-kp3sq5ur>notifications</h3> <p data-astro-cid-kp3sq5ur>
+Opt-in desktop notifications for new mail while the TUI is running
+        (default: <code data-astro-cid-kp3sq5ur>false</code>). Like <code data-astro-cid-kp3sq5ur>theme</code>, the key is
+        top-level, so it must appear before the first <code data-astro-cid-kp3sq5ur>[section]</code>
+header. When a background sync (including the automatic IDLE-triggered
+        fetches) saves new emails to the inbox, one notification is shown per
+        sync: <code data-astro-cid-kp3sq5ur>sender: subject</code> for a single new email, or
+<code data-astro-cid-kp3sq5ur>N new emails</code> when several arrive at once. Read-status
+        updates, duplicate cleanup, and mailboxes other than the inbox never
+        trigger a notification.
+</p> <p data-astro-cid-kp3sq5ur>
+The same key turns on the TUI's notification of a calendar reminder
+        that fires while no desktop app is open; the desktop app always
+        notifies of reminders, so a TUI and the app open together notify once.
+</p> <p data-astro-cid-kp3sq5ur>
+Notifications use the platform's native tooling &mdash;
+<code data-astro-cid-kp3sq5ur>osascript</code> on macOS and <code data-astro-cid-kp3sq5ur>notify-send</code> on Linux
+        &mdash; and degrade silently if the tool is unavailable.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#6DB6DA">notifications</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> true</span></span></code></pre> </div> </div> <!-- [email] --> <h3 id="email-section" data-astro-cid-kp3sq5ur>[email]</h3> <p data-astro-cid-kp3sq5ur>
+Controls the HTML rendering of sent emails. The font family and size are applied
+        to the generated HTML when Markdown is converted for sending. <code data-astro-cid-kp3sq5ur>include_signature</code>
+determines whether the account signature is appended to a draft body on compose, reply, and forward.
+<code data-astro-cid-kp3sq5ur>send_hold_secs</code> is the undo-send window: in the TUI a send is held for that many
+        seconds before it is handed to SMTP, and <code data-astro-cid-kp3sq5ur>u</code> cancels it in the meantime, leaving the
+        draft untouched. It defaults to 20 seconds; set it to <code data-astro-cid-kp3sq5ur>0</code> to send immediately.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">email</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">font_family</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Helvetica, Arial, sans-serif</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">font_size</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">16px</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">include_signature</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> true</span></span>
+<span class="line"><span style="color:#6DB6DA">send_hold_secs</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 20</span></span></code></pre> </div> </div> <!-- [smtp] --> <h3 id="smtp-section" data-astro-cid-kp3sq5ur>[smtp]</h3> <p data-astro-cid-kp3sq5ur>
+SMTP settings for sending email. The password is kept in the secrets store under
+        the key <code data-astro-cid-kp3sq5ur>smtp-password-&lt;account&gt;</code> (see <a href="#secrets" data-astro-cid-kp3sq5ur>Password Storage</a>).
+        It is never written to the config file.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">smtp</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">postout.lrz.de</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 587</span></span>
+<span class="line"><span style="color:#6DB6DA">username</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">your-id</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">default_from</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">your.name@example.com</span><span style="color:#B4BFCE">"</span></span></code></pre> </div> </div> <!-- [imap] --> <h3 id="imap-section" data-astro-cid-kp3sq5ur>[imap]</h3> <p data-astro-cid-kp3sq5ur>
+IMAP settings for fetching, syncing, and watching mailboxes. <code data-astro-cid-kp3sq5ur>host</code>,
+<code data-astro-cid-kp3sq5ur>port</code> and <code data-astro-cid-kp3sq5ur>username</code> fall back to their SMTP counterparts
+        if omitted, so you only need to specify them when the IMAP server differs from SMTP.
+</p> <p data-astro-cid-kp3sq5ur> <code data-astro-cid-kp3sq5ur>fetch_concurrency</code> is how many mailboxes a single sync fetches in
+        parallel, each on its own connection (default <code data-astro-cid-kp3sq5ur>4</code>, clamped to the
+        range 1-8). A sync opens one connection per mailbox and overlaps their latency,
+        so more mailboxes finish in about the time of one. Lower it toward <code data-astro-cid-kp3sq5ur>1</code>
+if a server throttles concurrent connections.
+</p> <p data-astro-cid-kp3sq5ur> <code data-astro-cid-kp3sq5ur>body_fetch_deadline_secs</code> is how long a single mailbox may spend
+        downloading message bodies on a sync started by the TUI (default <code data-astro-cid-kp3sq5ur>30</code>,
+        maximum <code data-astro-cid-kp3sq5ur>600</code>, <code data-astro-cid-kp3sq5ur>0</code> for no limit). A mailbox that runs out of
+        budget stops between batches, keeps what it has downloaded, and resumes on the next
+        sync, so a large backlog arrives over several syncs instead of holding one open;
+        newest mail is downloaded first. Nothing is deleted and no flag delta is advanced on
+        a sync that stopped early. <code data-astro-cid-kp3sq5ur>mp sync</code> ignores the budget and always
+        downloads everything it owes.
+</p> <p data-astro-cid-kp3sq5ur> <code data-astro-cid-kp3sq5ur>sync_interval_secs</code> is how long the daemon lets the account go without
+        a sync before it runs a quick one on its own (default <code data-astro-cid-kp3sq5ur>900</code>, fifteen
+        minutes; <code data-astro-cid-kp3sq5ur>0</code> turns it off; values under <code data-astro-cid-kp3sq5ur>60</code> are raised to
+<code data-astro-cid-kp3sq5ur>60</code>). The daemon already syncs when new mail reaches the inbox; this
+        catches what that cannot see, such as changes in other folders, retries of queued
+        changes, and an account with no window open. Any sync, whether you started it or
+        the daemon did, restarts the wait. Microsoft Graph accounts follow the same
+        interval.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">imap</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">imap.example.com</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">   # Falls back to smtp.host</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 993</span></span>
+<span class="line"><span style="color:#6DB6DA">username</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> ""</span><span style="color:#7D8BA3;font-style:italic">               # Falls back to smtp.username</span></span>
+<span class="line"><span style="color:#6DB6DA">fetch_concurrency</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 4</span><span style="color:#7D8BA3;font-style:italic">       # Parallel mailbox fetches per sync (1-8)</span></span>
+<span class="line"><span style="color:#6DB6DA">body_fetch_deadline_secs</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 30</span><span style="color:#7D8BA3;font-style:italic">  # Per-mailbox body download budget, seconds (0 = unbounded)</span></span>
+<span class="line"><span style="color:#6DB6DA">sync_interval_secs</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 900</span><span style="color:#7D8BA3;font-style:italic">    # Seconds without a sync before the daemon runs one (0 = never)</span></span></code></pre> </div> </div> <!-- Where data lives --> <h3 id="data-dir-section" data-astro-cid-kp3sq5ur>Data directory (not configurable)</h3> <p data-astro-cid-kp3sq5ur>
+Mail, drafts, contacts cache, Graph tokens, and logs all live under a single
+        OS-conventional app data directory:
+</p> <ul data-astro-cid-kp3sq5ur> <li data-astro-cid-kp3sq5ur><strong data-astro-cid-kp3sq5ur>macOS:</strong> <code data-astro-cid-kp3sq5ur>~/Library/Application Support/mailypoppins/</code></li> <li data-astro-cid-kp3sq5ur><strong data-astro-cid-kp3sq5ur>Linux (incl. WSL):</strong> <code data-astro-cid-kp3sq5ur>$XDG_DATA_HOME/mailypoppins/</code> (default <code data-astro-cid-kp3sq5ur>~/.local/share/mailypoppins/</code>)</li> </ul> <p data-astro-cid-kp3sq5ur>Layout under the data directory:</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#F4F1E8">mailypoppins/</span></span>
+<span class="line"><span style="color:#F4F1E8">  accounts/&#x3C;name>/store.sqlite3          </span><span style="color:#7D8BA3;font-style:italic"># synced mail: one row per message</span></span>
+<span class="line"><span style="color:#F4F1E8">  accounts/&#x3C;name>/blobs/                 </span><span style="color:#7D8BA3;font-style:italic"># message bodies and attachments, by hash</span></span>
+<span class="line"><span style="color:#F4F1E8">  accounts/&#x3C;name>/drafts/                </span><span style="color:#7D8BA3;font-style:italic"># your drafts, one .md file each</span></span>
+<span class="line"><span style="color:#F4F1E8">  accounts/&#x3C;name>/attachments/&#x3C;msg-id>/  </span><span style="color:#7D8BA3;font-style:italic"># attachments a forward carries into a draft</span></span>
+<span class="line"><span style="color:#F4F1E8">  accounts/&#x3C;name>/contacts-cache.json    </span><span style="color:#7D8BA3;font-style:italic"># contacts index</span></span>
+<span class="line"><span style="color:#F4F1E8">  tokens/&#x3C;name>.enc                      </span><span style="color:#7D8BA3;font-style:italic"># Graph tokens</span></span>
+<span class="line"><span style="color:#F4F1E8">  state.json                             </span><span style="color:#7D8BA3;font-style:italic"># app state: each account's default signature</span></span>
+<span class="line"><span style="color:#F4F1E8">  logs/mailypoppins-YYYY-MM-DD.log       </span><span style="color:#7D8BA3;font-style:italic"># daily logs, 200 MB at most in total</span></span></code></pre> </div> </div> <p data-astro-cid-kp3sq5ur> <code data-astro-cid-kp3sq5ur>mp config show</code> prints the first three paths for every configured account.
+        Synced mail is not a file tree: a message is a row in <code data-astro-cid-kp3sq5ur>store.sqlite3</code> plus
+        content-addressed blobs, and what you read in the TUI is rendered from those. Drafts are
+        the half that is still files, which is what you would symlink into an Obsidian vault:
+<code data-astro-cid-kp3sq5ur>accounts/&lt;name&gt;/drafts/</code>. The location is not user-configurable per
+        account; override the entire data root with
+<code data-astro-cid-kp3sq5ur>MAILYPOPPINS_DATA_DIR=/some/path</code> for tests or portable installs.
+</p> <!-- [mailboxes] --> <h3 id="mailboxes-section" data-astro-cid-kp3sq5ur>[mailboxes]</h3> <p data-astro-cid-kp3sq5ur>
+The daemon lists every folder on the account's server and keeps each one by a policy.
+        Inbox, Sent, Archive and every folder you created sync on every tick. The trash and
+        junk folders and Proton Mail's label folders are <code data-astro-cid-kp3sq5ur>status-only</code>: the sidebar
+        shows the server's counts, and only the newest 50 messages of the trash and junk folders
+        are downloaded, so a message another client moved there keeps a row. Exchange's
+        calendar, contact and task folders, Proton's <code data-astro-cid-kp3sq5ur>All Mail</code> and
+<code data-astro-cid-kp3sq5ur>Starred</code>, and folders that only hold other folders are ignored.
+<code data-astro-cid-kp3sq5ur>mp list-mailboxes</code> prints each folder's policy, and the reason when it is
+        ignored. A folder found this way needs no entry here: <code data-astro-cid-kp3sq5ur>mp sync --mailbox</code>,
+<code data-astro-cid-kp3sq5ur>mp search --mailbox</code>, the sidebar and the <code data-astro-cid-kp3sq5ur>gf</code> picker reach it by
+        name.
+</p> <p data-astro-cid-kp3sq5ur>
+Synced mail lives in the account's store. The roles <code data-astro-cid-kp3sq5ur>inbox</code>,
+<code data-astro-cid-kp3sq5ur>archive</code> and <code data-astro-cid-kp3sq5ur>sent</code> are stored under their role name, which is
+        also the mailbox segment of an <code data-astro-cid-kp3sq5ur>mp://</code> selector; every other folder is stored
+        under its server name. The one directory left under the account's data directory is
+<code data-astro-cid-kp3sq5ur>drafts/</code>.
+</p> <p data-astro-cid-kp3sq5ur> <code data-astro-cid-kp3sq5ur>inbox</code>, <code data-astro-cid-kp3sq5ur>archive</code> and <code data-astro-cid-kp3sq5ur>sent</code> name the folder holding
+        that role, each with a <code data-astro-cid-kp3sq5ur>server</code> field (the IMAP folder name), and always sync.
+<code data-astro-cid-kp3sq5ur>drafts</code>, <code data-astro-cid-kp3sq5ur>trash</code> and <code data-astro-cid-kp3sq5ur>junk</code> name the folder holding
+        that role when the server marks none. A folder the server marks with a special-use
+        attribute (<code data-astro-cid-kp3sq5ur>\Sent</code>, <code data-astro-cid-kp3sq5ur>\Trash</code>, ...) or calls by a usual name is
+        found without them.
+</p> <p data-astro-cid-kp3sq5ur>
+A <code data-astro-cid-kp3sq5ur>[[mailboxes.extra]]</code> entry pins a folder: it syncs on every tick whatever
+        discovery decides, and its key is the server name verbatim, as it always was.
+        A <code data-astro-cid-kp3sq5ur>[[mailboxes.override]]</code> entry gives the folders its <code data-astro-cid-kp3sq5ur>match</code>
+glob names another <code data-astro-cid-kp3sq5ur>policy</code>; <code data-astro-cid-kp3sq5ur>*</code> stands for any run of
+        characters, the hierarchy separator included, the match ignores case, and the first
+        matching entry wins. An override cannot sync a folder that only holds other folders,
+        nor unpin a pinned one.
+</p> <p data-astro-cid-kp3sq5ur> <code data-astro-cid-kp3sq5ur>mp config show</code> lists, under <code data-astro-cid-kp3sq5ur>[folders]</code>, every folder the
+        server listed at the last sync with the policy it gets, ignored folders included.
+        The setup wizards write the <code data-astro-cid-kp3sq5ur>drafts</code>, <code data-astro-cid-kp3sq5ur>trash</code>,
+<code data-astro-cid-kp3sq5ur>junk</code> and override entries; they pin no <code data-astro-cid-kp3sq5ur>extra</code> folder.
+</p> <p data-astro-cid-kp3sq5ur>
+Any other name under <code data-astro-cid-kp3sq5ur>[mailboxes]</code>, such as a
+<code data-astro-cid-kp3sq5ur>[mailboxes.spesen]</code> table written where a <code data-astro-cid-kp3sq5ur>[[mailboxes.extra]]</code>
+entry was meant, is not a mailbox: the config still loads, the table is ignored, and
+        the warning for it says so.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">inbox</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">INBOX</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">archive</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Archive</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">sent</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Sent Items</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">extra</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Projects</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">override</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">match</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Newsletters*</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">policy</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">status-only</span><span style="color:#B4BFCE">"</span></span></code></pre> </div> </div> <!-- signatures --> <h3 id="signatures-section" data-astro-cid-kp3sq5ur>Signatures</h3> <p data-astro-cid-kp3sq5ur>
+A signature is one Markdown file in <code data-astro-cid-kp3sq5ur>~/.config/mailypoppins/signatures/</code>.
+        The file name without its extension is the signature's name, so <code data-astro-cid-kp3sq5ur>work.md</code>
+is the signature <code data-astro-cid-kp3sq5ur>work</code> and creating a signature is creating a file. The
+        account's default is recorded in the app's own state file
+        (<code data-astro-cid-kp3sq5ur>&lt;data_dir&gt;/state.json</code>), so <code data-astro-cid-kp3sq5ur>config.toml</code> carries nothing
+        about signatures at all.
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#F4F1E8">~/.config/mailypoppins/signatures/</span></span>
+<span class="line"><span style="color:#F4F1E8">  work.md</span></span>
+<span class="line"><span style="color:#F4F1E8">  work-external.md</span></span>
+<span class="line"><span style="color:#F4F1E8">  personal.md</span></span></code></pre> </div> </div> <p data-astro-cid-kp3sq5ur>
+Press <code data-astro-cid-kp3sq5ur>cs</code> in the TUI to manage them: the list shows every signature with
+        the default starred, <code data-astro-cid-kp3sq5ur>Enter</code> sets or clears the default,
+<code data-astro-cid-kp3sq5ur>e</code> opens the selected file in <code data-astro-cid-kp3sq5ur>$EDITOR</code>, <code data-astro-cid-kp3sq5ur>n</code> creates
+        one, <code data-astro-cid-kp3sq5ur>r</code> renames, and <code data-astro-cid-kp3sq5ur>d</code> deletes after a confirmation.
+<code data-astro-cid-kp3sq5ur>mp config show</code> prints the directory, the default, and a one-line preview
+        of each file.
+</p> <p data-astro-cid-kp3sq5ur>
+HTML in a signature file (a rich signature exported from another mail client) is
+        converted to Markdown when it is read, links kept as <code data-astro-cid-kp3sq5ur>[text](url)</code>, so the
+        draft you edit and both parts of the sent mail are always Markdown, never raw HTML.
+</p> <p data-astro-cid-kp3sq5ur>
+The signature is appended to the draft body when you compose, reply, or forward,
+        so it is visible and editable in the draft rather than added on send. An account
+        with no default signature adds nothing. Use <code data-astro-cid-kp3sq5ur>-s &lt;name&gt;</code> to pick a
+        signature or <code data-astro-cid-kp3sq5ur>--no-signature</code> to skip it for one draft.
+</p> <p data-astro-cid-kp3sq5ur>
+Signatures used to live in <code data-astro-cid-kp3sq5ur>config.toml</code> under
+<code data-astro-cid-kp3sq5ur>[accounts.signatures.*]</code>, inline as <code data-astro-cid-kp3sq5ur>text</code> or as a
+<code data-astro-cid-kp3sq5ur>path</code>. The first run after the upgrade copies those entries out to files
+        and keeps the old default, then prints a notice. The tables are dead after that and
+        can be deleted by hand; mailypoppins never rewrites <code data-astro-cid-kp3sq5ur>config.toml</code>.
+</p> <p data-astro-cid-kp3sq5ur>
+Two accounts could use the same entry name for different signatures, which the flat
+        directory has no room for, so the second one is copied to
+<code data-astro-cid-kp3sq5ur>&lt;account&gt;-&lt;name&gt;.md</code> and that account's default points there.
+        The same name with the same content stays one file. If an entry cannot be copied,
+        because its name is not a usable file name or its <code data-astro-cid-kp3sq5ur>path</code> no longer reads,
+        the notice names it and stops telling you the tables can be deleted: they still hold
+        the only copy.
+</p> </section> <!-- Drafts mirror --> <section data-astro-cid-kp3sq5ur> <h2 id="drafts-mirror" data-astro-cid-kp3sq5ur>Drafts on the Server</h2> <p data-astro-cid-kp3sq5ur>
+Every account keeps a copy of each draft in its server Drafts folder, so Outlook,
+        Apple Mail, the Proton app and mp on another machine see the same drafts
+        (<a href="/draft-format/#server-drafts" data-astro-cid-kp3sq5ur>how it works</a>). It is on by default; turn it
+        off for an account whose server mangles drafts. Graph accounts are not mirrored yet.
+</p> <div class="config-example" data-astro-cid-wtjqanhn> <h3 data-astro-cid-wtjqanhn>Keep one account&#39;s drafts local</h3>  <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">name</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">personal</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">drafts</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">mirror</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> false</span></span></code></pre> </div> </div> </section> <!-- Multi-Account Setup --> <section data-astro-cid-kp3sq5ur> <h2 data-astro-cid-kp3sq5ur>Multi-Account Setup</h2> <p data-astro-cid-kp3sq5ur>
+To manage multiple email accounts, use the <code data-astro-cid-kp3sq5ur>[[accounts]]</code> array syntax.
+        Each account has its own <code data-astro-cid-kp3sq5ur>smtp</code>, <code data-astro-cid-kp3sq5ur>imap</code>, and <code data-astro-cid-kp3sq5ur>mailboxes</code>
+sections nested under it. The account <code data-astro-cid-kp3sq5ur>name</code> is used to identify it in
+        commands, password keys, and the data-dir layout (<code data-astro-cid-kp3sq5ur>accounts/&lt;name&gt;/</code>).
+</p> <p data-astro-cid-kp3sq5ur>
+In the TUI and the desktop app, <code data-astro-cid-kp3sq5ur>ga</code> opens a list of the accounts:
+<code data-astro-cid-kp3sq5ur>j</code>/<code data-astro-cid-kp3sq5ur>k</code> and <code data-astro-cid-kp3sq5ur>Enter</code>, or a digit, switch to one, and
+<code data-astro-cid-kp3sq5ur>Esc</code> cancels.
+</p> <div class="config-example" data-astro-cid-wtjqanhn> <h3 data-astro-cid-wtjqanhn>Two-account example</h3>  <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">email</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">font_family</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Helvetica, Arial, sans-serif</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">font_size</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">16px</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">include_signature</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> true</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#7D8BA3;font-style:italic"># --- First account ---</span></span>
+<span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">name</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">personal</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">default_from</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">me@example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">auth_method</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">password</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">smtp</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">smtp.example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 587</span></span>
+<span class="line"><span style="color:#6DB6DA">username</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">me@example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">imap</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">imap.example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 993</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">inbox</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">INBOX</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">archive</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Archive</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">sent</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">Sent</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#7D8BA3;font-style:italic"># --- Second account ---</span></span>
+<span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">name</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">work</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">default_from</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">name@company.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">auth_method</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">graph</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">oauth2</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">client_id</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">439d7ebd-7898-4df2-b2d6-88bb61e2597b</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">  # the mailypoppins app</span></span>
+<span class="line"><span style="color:#6DB6DA">tenant_id</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">common</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">inbox</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">inbox</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">archive</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">archive</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">sent</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">sentitems</span><span style="color:#B4BFCE">"</span></span></code></pre> </div> </div> </section> <!-- Authentication Methods --> <section data-astro-cid-kp3sq5ur> <h2 data-astro-cid-kp3sq5ur>Authentication Methods</h2> <p data-astro-cid-kp3sq5ur>
+Each account has an <code data-astro-cid-kp3sq5ur>auth_method</code> field that determines how
+        credentials are handled. Two methods are supported: a password over IMAP and
+        SMTP for every IMAP server, and the Graph API for Microsoft 365.
+</p> <h3 id="auth-password" data-astro-cid-kp3sq5ur>1. Password (default)</h3> <p data-astro-cid-kp3sq5ur>
+Passwords are kept in the secrets store (see <a href="#secrets" data-astro-cid-kp3sq5ur>Password Storage</a>)
+        and never written to the config file. Their keys follow the pattern
+<code data-astro-cid-kp3sq5ur>smtp-password-&lt;name&gt;</code> and <code data-astro-cid-kp3sq5ur>imap-password-&lt;name&gt;</code>.
+        If the IMAP password is not set, it falls back to the SMTP password.
+</p> <p data-astro-cid-kp3sq5ur>Set or update passwords with:</p> <div class="code-inline" data-astro-cid-kp3sq5ur> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-kp3sq5ur data-language="bash"><code><span class="line"><span style="color:#5CC8C8">mp</span><span style="color:#8FD19E"> config</span><span style="color:#8FD19E"> set-password</span><span style="color:#8FD19E"> smtp</span><span style="color:#F2C14E"> --account</span><span style="color:#8FD19E"> personal</span></span></code></pre> </div> <p data-astro-cid-kp3sq5ur>
+An on-premises Exchange server, one your organisation runs itself, is a password
+        account like any other IMAP server.
+</p> <div class="config-example" data-astro-cid-wtjqanhn> <h3 data-astro-cid-wtjqanhn>Password auth config</h3>  <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">name</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">personal</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">default_from</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">me@example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">auth_method</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">password</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">  # This is the default; can be omitted</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">smtp</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">host</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">smtp.example.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">port</span><span style="color:#B4BFCE"> =</span><span style="color:#F2C14E"> 587</span></span>
+<span class="line"><span style="color:#6DB6DA">username</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">me@example.com</span><span style="color:#B4BFCE">"</span></span></code></pre> </div> </div> <h3 id="auth-graph" data-astro-cid-kp3sq5ur>2. Graph API</h3> <p data-astro-cid-kp3sq5ur>
+For every Microsoft 365 (Exchange Online) account. Uses the Microsoft Graph REST API
+        for all mail operations. No app registration of your own is needed: the client ID
+        of the shared mailypoppins app is built in, and the setup wizard
+        (<code data-astro-cid-kp3sq5ur>mp config init</code> or <code data-astro-cid-kp3sq5ur>mp config add-account</code>, option 3) uses it
+        when you press Enter at the client ID prompt. The tenant defaults to
+<code data-astro-cid-kp3sq5ur>common</code>, which takes any work, school or personal Microsoft account;
+        you can still enter your tenant ID or domain instead.
+</p> <p data-astro-cid-kp3sq5ur>
+The first sign-in asks for consent to the app's delegated permissions
+        (<code data-astro-cid-kp3sq5ur>Mail.Read</code>, <code data-astro-cid-kp3sq5ur>Mail.ReadWrite</code>, <code data-astro-cid-kp3sq5ur>Mail.Send</code>,
+<code data-astro-cid-kp3sq5ur>offline_access</code>). Until the mailypoppins publisher is verified with Microsoft,
+        an administrator of your organisation has to approve the app at that first sign-in;
+        personal Microsoft accounts are not affected. An organisation that prefers its own app registration enters its client ID
+        at the prompt instead (see <a href="#azure-app" data-astro-cid-kp3sq5ur>Azure App Registration</a> below).
+</p> <p data-astro-cid-kp3sq5ur>
+Graph accounts use well-known folder names (<code data-astro-cid-kp3sq5ur>inbox</code>,
+<code data-astro-cid-kp3sq5ur>archive</code>, <code data-astro-cid-kp3sq5ur>sentitems</code>) instead of IMAP folder names.
+        SMTP and IMAP sections are not needed.
+</p> <div class="code-inline" data-astro-cid-kp3sq5ur> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-kp3sq5ur data-language="bash"><code><span class="line"><span style="color:#5CC8C8">mp</span><span style="color:#8FD19E"> config</span><span style="color:#8FD19E"> oauth2-login</span><span style="color:#F2C14E"> --account</span><span style="color:#8FD19E"> exchange</span></span></code></pre> </div> <div class="config-example" data-astro-cid-wtjqanhn> <h3 data-astro-cid-wtjqanhn>Graph API config</h3>  <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#B4BFCE">[[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#B4BFCE">]]</span></span>
+<span class="line"><span style="color:#6DB6DA">name</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">exchange</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">default_from</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">name@company.com</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"><span style="color:#6DB6DA">auth_method</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">graph</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">oauth2</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">client_id</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">439d7ebd-7898-4df2-b2d6-88bb61e2597b</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">  # the mailypoppins app</span></span>
+<span class="line"><span style="color:#6DB6DA">tenant_id</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">common</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">          # or your tenant ID or domain</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">inbox</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">inbox</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">              # Graph well-known folder name</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">archive</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">archive</span><span style="color:#B4BFCE">"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B4BFCE">[</span><span style="color:#FF6700;font-weight:bold">accounts</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">mailboxes</span><span style="color:#F4F1E8">.</span><span style="color:#FF6700;font-weight:bold">sent</span><span style="color:#B4BFCE">]</span></span>
+<span class="line"><span style="color:#6DB6DA">server</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">sentitems</span><span style="color:#B4BFCE">"</span><span style="color:#7D8BA3;font-style:italic">          # Not "Sent Items"</span></span></code></pre> </div> </div> <p data-astro-cid-kp3sq5ur>
+Microsoft OAuth2 over IMAP and SMTP (<code data-astro-cid-kp3sq5ur>auth_method = "oauth2"</code>) is retired.
+        A config that still names it loads, and only that account stays blocked: set
+<code data-astro-cid-kp3sq5ur>auth_method = "graph"</code> for Microsoft 365 and run
+<code data-astro-cid-kp3sq5ur>mp config oauth2-login</code>, or remove the line and set a password for
+        on-premises Exchange.
+</p> <p data-astro-cid-kp3sq5ur>
+A Graph account also reads its server calendar, which the calendar views
+        show beside the invitation mails. The account key
+<code data-astro-cid-kp3sq5ur>calendar_backend</code> chooses where an account's calendar comes
+        from, independently of its mail: <code data-astro-cid-kp3sq5ur>"graph"</code> is the default of a
+        Graph account and <code data-astro-cid-kp3sq5ur>"none"</code> the default of every other account,
+        whose invitations are answered by iMIP reply mails. <code data-astro-cid-kp3sq5ur>"ews"</code> and
+<code data-astro-cid-kp3sq5ur>"caldav"</code> are reserved for later releases and read as no
+        calendar for now. Setting <code data-astro-cid-kp3sq5ur>calendar_backend = "none"</code> on a Graph
+        account keeps its sign-in to the mail permissions.
+</p> <p data-astro-cid-kp3sq5ur>
+A Graph account signed in before the calendar arrived has a token without
+        the calendar permission (<code data-astro-cid-kp3sq5ur>Calendars.ReadWrite</code>). Mail keeps
+        working, and every client shows <code data-astro-cid-kp3sq5ur>calendar needs a re-login (mp config
+        oauth2-login -A &lt;name&gt;)</code> until you sign in again.
+</p> </section> <!-- Azure App Registration --> <section data-astro-cid-kp3sq5ur> <h2 id="azure-app" data-astro-cid-kp3sq5ur>Azure App Registration</h2> <p data-astro-cid-kp3sq5ur>
+A Graph account needs an application registered in Azure Entra ID (formerly
+        Azure Active Directory) only when your organisation wants its own app instead of
+        the mailypoppins app. Here is a condensed setup.
+</p> <ol class="setup-steps" data-astro-cid-kp3sq5ur> <li data-astro-cid-kp3sq5ur>
+Go to <a href="https://portal.azure.com" target="_blank" rel="noopener noreferrer" data-astro-cid-kp3sq5ur>portal.azure.com</a>
+and navigate to Microsoft Entra ID &gt; App registrations &gt; New registration.
+</li> <li data-astro-cid-kp3sq5ur>
+Name the app (e.g., "mailypoppins"), set supported account types to
+          "Accounts in this organizational directory only", and leave the redirect URI blank.
+</li> <li data-astro-cid-kp3sq5ur>
+In the app's Authentication settings, scroll to Advanced settings and set
+          "Allow public client flows" to Yes. This enables the device code flow.
+</li> <li data-astro-cid-kp3sq5ur>
+Under API permissions, add the delegated Microsoft Graph permissions
+<code data-astro-cid-kp3sq5ur>Mail.Read</code>, <code data-astro-cid-kp3sq5ur>Mail.ReadWrite</code>, <code data-astro-cid-kp3sq5ur>Mail.Send</code> and
+<code data-astro-cid-kp3sq5ur>offline_access</code>.
+</li> <li data-astro-cid-kp3sq5ur>
+If permissions show "Needs admin consent", request your IT administrator to
+          grant consent via the Azure portal.
+</li> <li data-astro-cid-kp3sq5ur>
+From the app's Overview page, copy the Application (client) ID and
+          Directory (tenant) ID into your config's <code data-astro-cid-kp3sq5ur>[accounts.oauth2]</code> section.
+</li> </ol> </section> <!-- Password Storage --> <section data-astro-cid-kp3sq5ur> <h2 id="secrets" data-astro-cid-kp3sq5ur>Password Storage</h2> <p data-astro-cid-kp3sq5ur>
+Passwords for the <code data-astro-cid-kp3sq5ur>password</code> auth method are stored, by default, in an
+        encrypted file at <code data-astro-cid-kp3sq5ur>~/.config/mailypoppins/secrets.enc</code>. Its key is derived
+        from the machine ID and your user ID, so the file opens only on the machine and for
+        the user that wrote it: a backup or a copy on another computer stays unreadable.
+        Graph token caches under <code data-astro-cid-kp3sq5ur>tokens/</code> in the data directory are encrypted the
+        same way. No password prompt or keychain dialog appears at runtime.
+</p> <p data-astro-cid-kp3sq5ur>Keys follow this naming pattern:</p> <ul class="keyring-list" data-astro-cid-kp3sq5ur> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>smtp-password-&lt;account-name&gt;</code></li> <li data-astro-cid-kp3sq5ur><code data-astro-cid-kp3sq5ur>imap-password-&lt;account-name&gt;</code> (falls back to SMTP password if not set)</li> </ul> <p data-astro-cid-kp3sq5ur>To set or update a password:</p> <div class="code-inline" data-astro-cid-kp3sq5ur> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-kp3sq5ur data-language="bash"><code><span class="line"><span style="color:#5CC8C8">mp</span><span style="color:#8FD19E"> config</span><span style="color:#8FD19E"> set-password</span><span style="color:#8FD19E"> smtp</span><span style="color:#F2C14E"> --account</span><span style="color:#8FD19E"> personal</span></span></code></pre> </div> <p data-astro-cid-kp3sq5ur>
+The argument is <code data-astro-cid-kp3sq5ur>smtp</code> or <code data-astro-cid-kp3sq5ur>imap</code>; without <code data-astro-cid-kp3sq5ur>--account</code>
+the first account is used. The password is entered interactively and never echoed to
+        the terminal.
+</p> <p data-astro-cid-kp3sq5ur>
+On a new machine, or after a restore from a backup, the file no longer decrypts.
+<code data-astro-cid-kp3sq5ur>mp config reset-secrets</code> removes it and the Graph token caches, then asks
+        for each account's passwords again.
+</p> <h3 id="secrets-keyring" data-astro-cid-kp3sq5ur>OS keyring (opt-in)</h3> <p data-astro-cid-kp3sq5ur>
+To keep passwords in the OS keyring instead (macOS Keychain, or Secret Service on
+        Linux, such as GNOME Keyring or KWallet), add this top-level key to
+<code data-astro-cid-kp3sq5ur>config.toml</code>, before the first <code data-astro-cid-kp3sq5ur>[section]</code> header:
+</p> <div class="config-example" data-astro-cid-wtjqanhn>   <div class="config-code" data-astro-cid-wtjqanhn> <pre class="astro-code mailypoppins" style="background-color:#081426;color:#F4F1E8; overflow-x: auto;" tabindex="0" data-astro-cid-wtjqanhn data-language="toml"><code><span class="line"><span style="color:#6DB6DA">secrets_backend</span><span style="color:#B4BFCE"> =</span><span style="color:#B4BFCE"> "</span><span style="color:#8FD19E">keyring</span><span style="color:#B4BFCE">"</span></span></code></pre> </div> </div> <p data-astro-cid-kp3sq5ur>
+The keyring entries use the service name <code data-astro-cid-kp3sq5ur>mailypoppins</code> and the same keys
+        as above. Nothing is migrated: set each password again with
+<code data-astro-cid-kp3sq5ur>mp config set-password</code> after the switch, and run
+<code data-astro-cid-kp3sq5ur>mp daemon restart</code> so a running daemon picks up the new backend. On macOS
+        a build signed with a different identity, which every <code data-astro-cid-kp3sq5ur>cargo install</code>
+produces, asks for keychain access again for every entry.
+</p> </section> </main> <footer class="footer" data-astro-cid-sz7xmlte> <div class="footer-inner content-wide" data-astro-cid-sz7xmlte> <span class="footer-name" data-astro-cid-sz7xmlte>mailypoppins</span> <span class="footer-sep" aria-hidden="true" data-astro-cid-sz7xmlte>&middot;</span> <span data-astro-cid-sz7xmlte>MIT License</span> <span class="footer-sep" aria-hidden="true" data-astro-cid-sz7xmlte>&middot;</span> <a href="https://www.evoqs.com" target="_blank" rel="noopener noreferrer" data-astro-cid-sz7xmlte>EVOQS GmbH</a> <span class="footer-sep" aria-hidden="true" data-astro-cid-sz7xmlte>&middot;</span> <a href="/github/" data-astro-cid-sz7xmlte>Contributing</a> <span class="footer-sep" aria-hidden="true" data-astro-cid-sz7xmlte>&middot;</span> <a href="https://github.com/sylvainHellin/mailypoppins" target="_blank" rel="noopener noreferrer" data-astro-cid-sz7xmlte>
+GitHub
+</a> <span class="footer-sep" aria-hidden="true" data-astro-cid-sz7xmlte>&middot;</span> <a href="/impressum/" data-astro-cid-sz7xmlte>Impressum</a> <span class="footer-sep" aria-hidden="true" data-astro-cid-sz7xmlte>&middot;</span> <a href="/privacy/" data-astro-cid-sz7xmlte>Privacy</a> </div> </footer>  </body></html>

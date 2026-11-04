@@ -756,7 +756,7 @@ Every end makes the Calendar view and the account's invitation cards stale, and 
 
 `n`, the header's "New event" and the palette's "New event (the event form, on the cursor's day)" open the event form (CAL-11, PERSO-255), the overlay `event` (`NewEventDialog.tsx`, a dialog named "New event"), the TUI's event form; outside the Calendar view the palette's row opens it on today.
 It offers the calendars `calendar_list` names that take a new event (`writableCalendars` in `src/app/eventForm.ts`): those the user may edit on a backend whose `features` hold `write`, each account's default first, the selection's account's default selected; with none it says "No calendar takes new events: no account has a server calendar mp writes to".
-Its fields are Calendar, Title, the "All day" checkbox, Start and End (`datetime-local`, or First day and Last day as dates on an all-day event, the last day optional), Location, Attendees, Optional and Rooms (comma separated), the "Teams meeting" checkbox (disabled with "This calendar has no online meetings" where the backend lacks `online-meeting`), Reminder in minutes with "None", and Description.
+Its fields are Calendar, Title, the "All day" checkbox, Start and End (`datetime-local`, or First day and Last day as dates on an all-day event, the last day optional), the Availability grid, Location, Attendees, Optional and Rooms (comma separated), the "Teams meeting" checkbox (disabled with "This calendar has no online meetings" where the backend lacks `online-meeting`), Reminder in minutes with "None", and Description.
 The form starts on 09:00 to 10:00 of the cursor's day with the focus in Title; Enter in a one-line field moves on, Cmd+Enter or Ctrl+Enter creates, Escape cancels and drops what was typed.
 Its alert names the first problem with the fields as typed and Create event stays disabled until there is none; the daemon checks every field again.
 
@@ -765,6 +765,10 @@ Once started the form closes, and `state.eventCreates` keeps each create (`{toke
 The settle says "Created <summary>", then "; invited <address>" or "; invited N people".
 A failure ("The event was not created: <why>") or a create a daemon restart dropped ("The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once") opens the form again as "New event (retry)", with what was typed and Retry.
 With another dialog open the form is kept, and New event opens it.
+
+The Availability grid (CAL-14, `AvailabilityGrid.tsx`, the model in `src/app/availability.ts`) shows the free/busy of the user, the attendees, the optional attendees and the rooms over the day of Start, on a calendar whose `features` hold `free-busy`, and nothing elsewhere.
+It asks `calendar_freebusy` for that day in this window's zone at 30-minute slots, with every whole address of the three lists once, once the day and the addresses have stood still for 500 ms, so typing an address asks once; an answer for a query the form no longer names is dropped.
+Each person or room is a row from 07:00 to 20:00 under the hour labels, the user's own first, each slot coloured by its status (free, tentative, busy, away, working elsewhere, unknown) with the status in its title, the chosen time outlined, and "no free/busy" for an address the server cannot read; until the first answer the label says "(checking…)", and a refusal is "No availability: <why>".
 
 ### New invitation
 

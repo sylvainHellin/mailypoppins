@@ -123,6 +123,7 @@ The table is what routes and through what:
 | `mp calendar list [--account] [--json]` | `calendar.list` | PERSO-200 |
 | `mp calendar view [agenda\|day\|week] [--on\|--from --to] [-A ...] [--calendar ...] [--hidden] [--zone] [--json]` | `calendar.view` over the days read in the client, then `calendar.list` for the calendar names | PERSO-200 |
 | `mp calendar show\|hide <calendar> [--account]` | `calendar.set_visibility` | PERSO-200 |
+| `mp calendar freebusy [--account] [--on\|--from --to] [--interval] [--zone] [<address>...] [--json]` | `calendar.freebusy` over the days read in the client | PERSO-255 |
 | `mp event show <event> [--account] [--json]` | `event.get`, then `calendar.list` for the calendar name | PERSO-200 |
 | `mp event respond <event> <accept\|tentative\|decline> [--comment] [--no-send-response] [--json]` | `event.respond` | PERSO-200 |
 | `mp event create [--account] --summary --start [--end\|--duration] [--calendar] [--all-day] [--zone] [--location] [--body\|--body-file] [--to]... [--optional]... [--room]... [--teams] [--reminder\|--no-reminder] [--transaction-id] [--json]` | `event.create` | PERSO-255 |
@@ -476,6 +477,12 @@ Before it posts, the operation looks for a cached event carrying that transactio
 Otherwise it connects the backend, looks at its cancel token, posts the event, writes the server's answer into the cache under the account's calendar lock and syncs the account at once; a failure of that sync is logged and leaves the event standing, and `calendar.changed` follows.
 Nothing is written to the cache before the server answers, so a refusal the daemon could not predict (a calendar whose access changed) shows no event Graph does not hold.
 
+### Free/busy
+
+`calendar.freebusy` (PERSO-255) is a client-scoped operation in the same journal: the close of the connection that asked cancels it, so a form that closed or a CLI that was interrupted leaves nothing running.
+It resolves the range, the slot length and the addresses (the account's own first) before the operation starts, then connects the backend and asks Graph's `getSchedule`, racing the call against its cancel token; it writes nothing, takes no account lock and publishes no event, and its result is the schedules.
+An address outside the organisation answers its own error inside the result, which is no failure of the operation; a 403 is the re-login prompt, any other refusal the operation's failure with Graph's code.
+
 ### The reminders
 
 One task beside the account runtimes fires the calendar reminders (PERSO-255, `src/daemon/reminders.rs`); it opens each reminding account's store, takes no engine lock, and stops with the draft watcher.
@@ -710,11 +717,11 @@ It is read by whichever process submits, which after P4-U12 is the daemon and on
 Unset, empty or unparseable it does nothing.
 It is what pins the successful sends in `tests/daemon_send_slice.rs`, and its name is `mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV`.
 
-`MAILYPOPPINS_DAEMON_FAKE_CALENDAR=<json>` serves every account whose `calendar_backend` is not `none` from an in-memory calendar server (PERSO-200), so the calendar sync, the views, `event.respond` and `event.create` run without a tenant; one server per account lives as long as the daemon, so a write survives into the next sync.
-Its value is a JSON object, every key optional: `calendars` and `events` are the server's contents in the model's serialisation, each rewritten to the account it serves, `log` a file the fake appends one JSON line `{event, response, comment, send_response}` to per answer, `write_log` a file it appends one JSON line per write to (a `RecordedWrite`, tagged by `call`: `create`, `update`, `cancel`, `delete`, `dismiss_reminder`, `snooze_reminder`), `missing_scope` makes every call fail as a token without `Calendars.ReadWrite` does, `features` the `CalendarFeature` words `calendar.list` reports for the account (none when absent), `series` the series masters (`SeriesInfo`) every baseline reports resolved, and `message_events` maps a mail's Graph id to the event `message.invite` names.
+`MAILYPOPPINS_DAEMON_FAKE_CALENDAR=<json>` serves every account whose `calendar_backend` is not `none` from an in-memory calendar server (PERSO-200), so the calendar sync, the views, `event.respond`, `event.create` and `calendar.freebusy` run without a tenant; one server per account lives as long as the daemon, so a write survives into the next sync.
+Its value is a JSON object, every key optional: `calendars` and `events` are the server's contents in the model's serialisation, each rewritten to the account it serves, `log` a file the fake appends one JSON line `{event, response, comment, send_response}` to per answer, `write_log` a file it appends one JSON line per write to (a `RecordedWrite`, tagged by `call`: `create`, `update`, `cancel`, `delete`, `dismiss_reminder`, `snooze_reminder`), `missing_scope` makes every call fail as a token without `Calendars.ReadWrite` does, `features` the `CalendarFeature` words `calendar.list` reports for the account (none when absent), `series` the series masters (`SeriesInfo`) every baseline reports resolved, `message_events` maps a mail's Graph id to the event `message.invite` names, and `free_busy` maps an address to its busy blocks (`ScheduleItem` `{start, end, status, subject?, location?}`), which `calendar.freebusy` answers with their view, any other address having no free/busy (`Proxy web request failed (5016)`).
 A daemon reads it at every calendar call, so each sync starts from the spec's contents and the cache does the remembering.
 Unset, empty or unparseable it does nothing.
-It is what pins `tests/daemon_calendar_slice.rs`, and its name is `mailypoppins::calendar_backend::fake::FAKE_CALENDAR_ENV`.
+It is what pins `tests/daemon_calendar_slice.rs` and `tests/daemon_freebusy_slice.rs`, and its name is `mailypoppins::calendar_backend::fake::FAKE_CALENDAR_ENV`.
 
 `MAILYPOPPINS_DAEMON_FAKE_CLOCK_SPEED=<n>` runs the reminder task's clock `n` times faster than real time from the daemon's start (PERSO-255), so a snooze of a minute ends within a second at `60`; the calendar window and every other clock of the daemon stay real.
 Unset, unparseable, `0` or `1` means the real clock.
