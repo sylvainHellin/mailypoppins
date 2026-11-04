@@ -467,6 +467,16 @@ On an invitation mail's event (`imip:<row_id>`) it is `calendar.rsvp`'s iMIP rep
 A sign-in without the calendar scope is refused before the operation starts, with the re-login prompt and no call to the server.
 Every answer that went through publishes `calendar.changed`.
 
+### The reminders
+
+One task beside the account runtimes fires the calendar reminders (PERSO-255, `src/daemon/reminders.rs`); it opens each reminding account's store, takes no engine lock, and stops with the draft watcher.
+It computes, for every account with a calendar backend and a store, the due minute (start minus the event's reminder setting) of each event of the coming fifteen days, fires what fell due, records it in the store's `calendar_reminders` table, and sleeps until the next due minute or snooze end, at most a minute of real time, so a laptop that slept past a reminder catches up within a minute of waking.
+Every `calendar.changed` the daemon publishes wakes it at once, as does a dismissal or a snooze, so a moved event or a new one reminds at its new minute.
+A firing is one `calendar.reminder` to every client with the presenter of that moment (`CanonicalState::presenter`, from the `client.type` of each bootstrapped connection), and an info line in the log naming the event and the presenter.
+A reminder that leaves the pending list without a decision (its event cancelled, declined, hidden or its reminder turned off) is announced with `calendar.reminders_changed`.
+A dismissal or a snooze on a backend that serves `server-reminders` reaches the server on a thread of its own after the command answered, and a failure is a warning in the log beside the local record, which stands.
+The table survives `calendar.rebuild`; a store rebuilt for a new schema version starts it empty, which fires once more each reminder already fired for an event that has not ended.
+
 ## Mail hooks
 
 A hook runs a command once for every message that arrives in a mailbox after the hook was first seen and passes the hook's `match` table (#0135).
@@ -636,7 +646,7 @@ A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the g
 
 ## Test-only environment hooks
 
-Sixteen environment variables exist for the contract tests and for the migration.
+Eighteen environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
@@ -697,6 +707,10 @@ A daemon reads it at every calendar call, so each sync starts from the spec's co
 Unset, empty or unparseable it does nothing.
 It is what pins `tests/daemon_calendar_slice.rs`, and its name is `mailypoppins::calendar_backend::fake::FAKE_CALENDAR_ENV`.
 
+`MAILYPOPPINS_DAEMON_FAKE_CLOCK_SPEED=<n>` runs the reminder task's clock `n` times faster than real time from the daemon's start (PERSO-255), so a snooze of a minute ends within a second at `60`; the calendar window and every other clock of the daemon stay real.
+Unset, unparseable, `0` or `1` means the real clock.
+It is what pins `tests/daemon_reminder_slice.rs`, and its name is `mailypoppins::daemon::reminders::FAKE_CLOCK_SPEED_ENV`.
+
 `MAILYPOPPINS_DAEMON_FAKE_OPERATIONS=1` registers one extra method, `test.operation`, so a client can start, watch and cancel a long-running operation.
 Its params are `{"steps": u64, "step_ms": u64, "scope": "durable"|"client_scoped", "fail_at": u64|null}`; it answers immediately with `{"operation_id": str}` and reports `steps` times, `step_ms` apart, before succeeding with `{"steps": steps}`.
 A non-null `fail_at` of `k` fails with `-32603` and `{"failed_at": k}` after the `k`-th report instead of continuing, and a cancelled operation's worker stops before its next report.
@@ -756,8 +770,8 @@ The run that landed the file, its ceilings and the leak it found are in [baselin
 
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
-`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the twelve environment hooks its own `HOOKS` list carries so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
-Four of the sixteen are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
+`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the fifteen environment hooks of its `DAEMON_ENV_HOOKS` list (fourteen of those above, and `MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD`, which holds a worker at its commit point) so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
+Four of the eighteen are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
 The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than three times.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.

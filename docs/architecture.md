@@ -517,11 +517,11 @@ The CLI's `mp event respond` and `mp invite`, the TUI's respond overlay and the 
 
 ### Write seam
 
-`CalendarBackend` has six write methods (PERSO-255): `create_event`, `update_event`, `cancel_event`, `delete_event`, `dismiss_reminder` and `snooze_reminder`; no daemon method calls them yet.
+`CalendarBackend` has six write methods (PERSO-255): `create_event`, `update_event`, `cancel_event`, `delete_event`, `dismiss_reminder` and `snooze_reminder`; the reminder commands call the last two, and no daemon method calls the other four yet.
 `mp-core/calendar_write.rs` holds what a write sends, in the model's terms: `EventInput` for a new event (an `EventTime`, attendees with their role, the Teams flag, a reminder that is absent for the mailbox default and `null` for none) and `EventPatch` for a change, where an absent key stays, a present one changes and `null` clears a location, a description or a reminder.
 A create or an update answers `Written`: the event as the server holds it, an occurrence carrying its series' `UID`, or the series for a write to a series master.
 
-`src/calendar_backend/graph/write.rs` sends `POST /me/calendars/{id}/events` with the `transactionId`, `PATCH /me/events/{id}` with only the fields the patch names, `POST /me/events/{id}/cancel` with the comment, `DELETE /me/events/{id}`, and `dismissReminder` and `snoozeReminder` on the event.
+`src/calendar_backend/graph/write.rs` sends `POST /me/calendars/{id}/events` with the `transactionId`, `PATCH /me/events/{id}` with only the fields the patch names, `POST /me/events/{id}/cancel` with the comment, `DELETE /me/events/{id}`, and `dismissReminder` with `{}` (Exchange answers an empty POST, which goes out without a `Content-Length`, with HTTP 411) and `snoozeReminder` with the new time on the event.
 `GraphFetch` has `get`, `post`, `patch` and `delete`, and all four send `Prefer: IdType="ImmutableId"`, which a test pins on the production requests.
 A timed event goes out as its wall time plus the Windows name of its zone, which `windows_zones::iana_to_windows_zone` reads from a second generated table, `IANA_ZONES`.
 That table maps every IANA zone CLDR lists under a Windows zone for any territory, so `Europe/Vienna` and `America/Toronto` resolve beside each zone's territory 001 entry.
@@ -530,6 +530,17 @@ A zone neither lists (`Antarctica/Troll`) goes out as UTC with the instants exac
 A cancel, a delete, a dismiss or a snooze of an event Graph answers 404 for counts as done; an update of one fails.
 Graph keeps an online meeting online and ignores `isOnlineMeeting: false`, so the backend sends only `true` (with `teamsForBusiness`) and drops `online_meeting: false` from a patch; the daemon's `event.update` (slice 4) must refuse `online_meeting: false` on an event that has a Teams link, so the user is told the link stays rather than seeing the change accepted and not applied.
 The fake applies every write to its events, keeps a Teams link once it has provisioned one, answers a repeated transaction id with the event the first create made, and records each write, appending it to `write_log` when the spec names one.
+
+### Reminders
+
+The daemon reminds of the cached server events (PERSO-255); a client computes nothing, so the CLI, the TUI and the desktop app list, dismiss and snooze through the same three calls.
+`src/daemon/reminders.rs` holds the computation and the task: an event's due minute is its start minus its `reminder` minutes, a cancelled, declined or hidden event and one without a reminder never remind, and a reminder fires once at its minute, or once at start-up when it fell due while the daemon was down and its event has not ended.
+The task sleeps until the next due minute or snooze end, at most a minute, and the canonical state wakes it at every `calendar.changed` it publishes (`CanonicalState::attach_reminders`), so every writer of the cache moves the reminders without knowing of them.
+`src/store/reminders.rs` records per account and event what fired, was dismissed or is snoozed, for the due minute it fired at, in `calendar_reminders`; the table is not part of the disposable cache, so `calendar.rebuild` keeps it, and a row goes once its event has ended.
+A firing is `calendar.reminder` to every client, with the presenter `CanonicalState::presenter` elects from the `client.type` of the bootstrapped connections: `gui` while a desktop app is connected, else `tui`, else none.
+Only the presenter's kind raises a system notification, so a desktop app and a TUI open side by side notify once, and every client shows the reminder in its own window.
+`calendar.dismiss_reminder` and `calendar.snooze_reminder` (`src/daemon/methods/reminder.rs`) record locally first, publish `calendar.reminders_changed`, and then, on a backend whose features list `server-reminders`, send the decision to the server after the answer, so Outlook on the user's other devices stops reminding too; a server failure leaves the local record standing.
+A dismissal in Outlook turns the event's reminder off, which the next sync reads, so the reminder leaves mp's list as well; a snooze in Outlook does not reach mp.
 
 ### Calendar scope prompt
 
@@ -578,6 +589,8 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | `src/calendar_backend/` | The `CalendarBackend` trait, `backend_for` and the statically dispatched `AccountBackend`, the Graph backend over the `GraphFetch` seam, and the in-memory fake tests arm (PERSO-200) |
 | `src/store/calendar.rs` | The account's calendar cache: the six calendar tables, the window queries, the visibility preferences and `drop_calendar_cache` (PERSO-200) |
 | `src/calendar_sync.rs` | One account's calendar sync from its stored tokens, the daily re-baseline, the per-account lock, and the invitation mail to server event lookup (PERSO-200) |
+| `src/daemon/reminders.rs` | The calendar reminders: the due minutes, the firing and the decisions over the cache, the reminder clock, and the task that sleeps until the next due minute (PERSO-255) |
+| `src/store/reminders.rs` | `calendar_reminders`, what fired, was dismissed or is snoozed per account and event, kept apart from the disposable cache (PERSO-255) |
 | `src/calendar_view.rs` | The merged view `calendar.view` and `event.get` serve: the cached server events and the invitation mails' events, deduplicated on `UID` plus `RECURRENCE-ID`, filtered by visibility (PERSO-200) |
 | `mp-core/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
 | `mp-core/sync_health.rs` | `SyncHealth`, the per-account outcome of the last sync, plus the `mp sync` failure summary and exit code (#0071) |

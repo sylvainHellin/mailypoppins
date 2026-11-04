@@ -22,9 +22,10 @@ pub struct GlobalConfig {
     /// Unknown names warn and fall back to the default.
     #[serde(default)]
     pub theme: String,
-    /// Desktop notifications for new mail while the TUI is running
-    /// (macOS: `osascript`, Linux: `notify-send`; missing tools degrade
-    /// silently). Opt-in: defaults to off. See src/notify.rs (#0009).
+    /// Desktop notifications for new mail while the TUI is running, and for
+    /// the calendar reminders it presents when no desktop app is connected
+    /// (PERSO-255) (macOS: `osascript`, Linux: `notify-send`; missing tools
+    /// degrade silently). Opt-in: defaults to off. See src/notify.rs (#0009).
     #[serde(default)]
     pub notifications: bool,
     #[serde(default)]

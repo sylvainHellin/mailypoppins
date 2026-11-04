@@ -1300,6 +1300,16 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: shipped in the CLI, the TUI and the desktop (PERSO-200)
 - Note: `--no-send-response` applies to a server event only, since an iMIP reply is the answer itself; `CAL-01` is the same method reached from the invitation mail.
 
+### CAL-15 Reminders: list, snooze and dismiss
+
+- Classification: GUI parity
+- Source anchor: `mp calendar reminders [-A NAME] [--json]`, `mp calendar reminder dismiss <event> [-A NAME]` and `mp calendar reminder snooze <event> [--minutes N] [-A NAME]` (`src/main.rs`), TUI `R` from any view (the reminders overlay: `s` snooze for five minutes, `d` dismiss, Enter open the event), the hint bar's reminder count and the status line of a reminder that fires
+- Daemon surface: the daemon's reminder task fires `calendar.reminder` at each due minute; `calendar.reminders {accounts?}` lists the waiting ones, and `calendar.dismiss_reminder {account, event}` and `calendar.snooze_reminder {account, event, minutes}` are commands that publish `calendar.reminders_changed` and, on a backend serving `server-reminders`, reach Graph's `dismissReminder` and `snoozeReminder`
+- GUI location: clients/desktop: the reminder banner above the panes, over every view, lists each waiting reminder with Snooze (five minutes) and Dismiss and opens the event in the Calendar view from its summary; `R` focuses it (PERSO-255; rust-layer.md, "The reminders")
+- Validation: `tests/daemon_reminder_slice.rs` (`a_reminder_fires_snoozes_and_dismisses`, `the_presenter_follows_the_clients_connected`, `the_refusals`), `tests/cli_reminders.rs` (`reminders_list_snooze_and_dismiss_through_the_cli`), `src/daemon/reminders.rs` (`a_reminder_fires_once_at_its_due_minute`, `snooze_and_dismiss_decide_the_next_firing`, `cancelled_and_declined_events_never_fire`), `src/store/reminders.rs` (`rows_round_trip_and_survive_a_cache_drop`), `src/tui_tests/reminders.rs` (`golden_reminders_overlay`, `the_overlay_snoozes_dismisses_and_opens`), `crates/mp-client/src/format.rs` (`a_reminder_says_when_its_event_starts`); `clients/desktop/src/components/reminders/reminders.test.tsx` (`lists a reminder as it fires, and Snooze takes it off through the daemon`, `reads the waiting reminders at the bootstrap, and Dismiss takes one off`, `opens the event in the Calendar view from the banner and from a notification click`), `clients/desktop/src/app/reminders.test.ts`, `clients/desktop/src-tauri/src/fixture.rs` (`a_simulated_reminder_is_listed_and_dismissed`)
+- Status: shipped in the CLI, the TUI and the desktop (PERSO-255)
+- Note: the TUI and the desktop snooze for five minutes; the CLI takes `--minutes`. A dismissal in Outlook turns the event's reminder off, which the next sync reads, so the reminder leaves every client's list too.
+
 ## Client-side integrations
 
 ### INT-01 Open `config.toml` in the editor
@@ -1359,6 +1369,15 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: unit tests in `clients/tui/src/app/types.rs`; `clients/desktop/src-tauri/src/editor.rs` (`the_env_and_the_setting_win_over_visual_editor_and_the_probes`, `a_nonzero_exit_inside_the_window_is_a_setup_error`), `clients/desktop/src/components/compose/compose.test.tsx` (`names the draft and the editor; Reopen runs the editor again and Done ends the session`)
 - Status: GUI shipped (M3, #0131) as the external-editor handoff for GUI editors, and (M5, #0130) as the embedded session for terminal editors
 - Note: the GUI replaces suspension with the embedded PTY session.
+
+### INT-07 System notifications for calendar reminders
+
+- Classification: GUI parity
+- Source anchor: `mp_core::notify::notify_reminder` (`crates/mp-core/src/notify.rs`), which the TUI calls on a `calendar.reminder` it presents when `notifications = true`
+- Daemon surface: `calendar.reminder`'s `presenter`, which the daemon elects from the bootstrapped connections' `client.type`: `gui` while a desktop app is connected, else `tui`, else none; only a client of that kind raises the notification, so two clients open together notify once
+- GUI location: clients/desktop: `src-tauri/src/reminders.rs` raises the notification from Rust through `tauri-plugin-notification`, titled by the summary with when and where as its body and no action buttons; a click brings the window forward on the event, the reminders already waiting are notified once at launch, and the palette's "Show a test reminder notification" raises a made-up one (PERSO-255; rust-layer.md, "The reminders"; decision log, 2026-11-04)
+- Validation: `tests/daemon_reminder_slice.rs` (`the_presenter_follows_the_clients_connected`), `src/tui_tests/reminders.rs` (`a_fired_reminder_notifies_only_as_the_presenter`), `crates/mp-core/src/notify.rs` (`a_reminder_shows_its_summary_and_when`), `clients/desktop/src-tauri/src/reminders.rs` (`a_click_names_the_reminders_event`), `clients/desktop/src-tauri/src/session.rs` (`the_observer_sees_each_applied_event_once`); whether macOS 26 shows the plugin's `NSUserNotificationCenter` notification is a live check
+- Status: shipped in the TUI and the desktop (PERSO-255); the CLI never notifies
 
 ## Status, activity, logging, and help
 
