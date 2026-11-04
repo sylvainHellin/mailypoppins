@@ -31,8 +31,8 @@ use crate::calendar_model::{
 use crate::calendar_sync::sync_account;
 use crate::config::{AccountConfig, CalendarBackendKind};
 use crate::tui::app::{
-    AccountState, Action, App, BgResult, CalendarLayout, Credentials, Overlay, RsvpChoice,
-    RsvpOverlay, RsvpRow, View,
+    AccountState, Action, App, BgResult, CalendarLayout, Credentials, EventCalendarChoice,
+    EventForm, EventFormRow, Overlay, RsvpChoice, RsvpOverlay, RsvpRow, View,
 };
 use crate::tui::commands::{dispatch, settled};
 use crate::tui::events::{Applied, Awaited};
@@ -157,6 +157,49 @@ fn golden_calendar_respond_overlay() {
         "PhD Kolloquium".to_string(),
     ));
     assert_snapshot!("respond_imip", frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The event form on the Tuesday, a meeting being typed: the calendar, the
+/// times, two attendees and a room, Teams on, the cursor on the location;
+/// and the same form back after a failed create, its error under the rows.
+#[test]
+fn golden_calendar_event_form() {
+    let mut app = calendar_fixture();
+    let calendars = vec![
+        EventCalendarChoice {
+            account: "evoqs".into(),
+            id: "cal-main".into(),
+            name: "Kalender".into(),
+            teams: true,
+        },
+        EventCalendarChoice {
+            account: "evoqs".into(),
+            id: "cal-loc".into(),
+            name: "LOC".into(),
+            teams: true,
+        },
+    ];
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+    let mut form = EventForm::new(calendars, "evoqs", day, "Europe/Berlin");
+    form.title = "Budget review".into();
+    form.start = "14:00".into();
+    form.end = "15:30".into();
+    form.to = "ada@example.com, bob@example.com".into();
+    form.rooms = "room-1@example.com".into();
+    form.teams = true;
+    form.body = "Agenda\n1. Numbers\n2. Next steps".into();
+    form.row = EventFormRow::Location;
+    form.location = "Room 1".into();
+    app.overlay = Overlay::EventForm(Box::new(form.clone()));
+    assert_snapshot!("event_form", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    form.transaction_id = Some("mp-1".into());
+    form.error = Some(
+        "The event was not created: Graph refused the new event: HTTP 403; Enter retries it".into(),
+    );
+    form.row = EventFormRow::Title;
+    app.overlay = Overlay::EventForm(Box::new(form));
+    assert_snapshot!("event_form_retry", frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
 /// A comment longer than its row shows its tail while it is typed, after an
@@ -546,5 +589,116 @@ fn an_answer_is_one_event_respond_with_its_comment_and_choice() {
     assert_eq!(
         landed(outcome("decline", true, false)),
         Err("Declined, but the organizer could not be told".to_string())
+    );
+}
+
+/// `n` opens the event form on the account's default calendar, which the
+/// daemon's `calendar.list` says writes; `Enter` with no title names the
+/// problem and sends nothing; a typed form is one `event.create` in the
+/// view's zone. A refusal and a failed create bring the form back as typed,
+/// the second with the transaction id the daemon answered, which the retry
+/// sends again.
+#[test]
+fn the_event_form_creates_through_event_create_and_retries_with_its_transaction_id() {
+    let _data = seeded();
+    let mut app = app_over(CallLog::default());
+    app.switch_view(View::Calendar);
+    app.handle_key(key('n'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("n opens the event form");
+    };
+    assert_eq!(form.chosen().label(), "evoqs/Calendar");
+    assert_eq!(form.row, EventFormRow::Title);
+    assert_eq!(
+        form.date,
+        at(2, 0).date_naive().to_string(),
+        "the cursor's day"
+    );
+
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("a form with no title stays open");
+    };
+    assert_eq!(form.error.as_deref(), Some("The event needs a title"));
+    for c in "Planning".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(app.overlay, Overlay::None));
+    let Some(Action::CreateEvent(form)) = app.pending_actions.pop_front() else {
+        panic!("Enter queues the create");
+    };
+
+    /// Refuses the first call, then starts an operation.
+    #[derive(Default)]
+    struct Door(Mutex<Vec<Value>>);
+    impl Queries for Door {
+        fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+            assert_eq!(method, "event.create");
+            let mut calls = self.0.lock().unwrap();
+            calls.push(params);
+            if calls.len() == 1 {
+                anyhow::bail!("The calendar Calendar of evoqs is read-only");
+            }
+            Ok(json!({"operation_id": format!("op-{}", calls.len()), "transaction_id": "mp-tx"}))
+        }
+    }
+    let door = Door::default();
+    assert!(dispatch(&mut app, &door, &Action::CreateEvent(form)));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("a refusal reopens the form");
+    };
+    assert_eq!(form.title, "Planning");
+    assert!(form.error.as_deref().unwrap().contains("read-only"));
+    assert_eq!(form.transaction_id, None);
+
+    let form = form.clone();
+    app.overlay = Overlay::None;
+    assert!(dispatch(&mut app, &door, &Action::CreateEvent(form)));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(app.bg_count, 1, "the create is background work");
+    let sent = door.0.lock().unwrap()[1].clone();
+    assert_eq!(sent["account"], ACCOUNT);
+    assert_eq!(sent["calendar"], "cal-main");
+    assert_eq!(sent["event"]["summary"], "Planning");
+    assert_eq!(sent["event"]["zone"], "UTC");
+    assert!(sent.get("transaction_id").is_none(), "{sent}");
+
+    let failed = settled(
+        &Awaited::EventCreate {
+            operation_id: "op-2".into(),
+        },
+        &json!({"operation_id": "op-2", "state": "failed",
+                "error": {"code": -32603, "message": "Graph refused the new event: HTTP 503"}}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, failed);
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("a failed create reopens the form");
+    };
+    assert_eq!(form.transaction_id.as_deref(), Some("mp-tx"));
+    assert!(form.error.as_deref().unwrap().contains("HTTP 503"));
+    let form = form.clone();
+    app.overlay = Overlay::None;
+    assert!(dispatch(&mut app, &door, &Action::CreateEvent(form)));
+    assert_eq!(door.0.lock().unwrap()[2]["transaction_id"], "mp-tx");
+
+    let created = settled(
+        &Awaited::EventCreate {
+            operation_id: "op-3".into(),
+        },
+        &json!({"operation_id": "op-3", "state": "succeeded", "result": {
+            "account": ACCOUNT, "transaction_id": "mp-tx", "invited": ["ada@example.com"],
+            "event": serde_json::to_value(crate::calendar_view::Sourced {
+                event: server_event("ev-new", "cal-main", "Planning",
+                    EventTime::timed(at(0, 9), at(0, 10), "UTC").unwrap()),
+                source: None,
+            }.to_wire().unwrap()).unwrap(),
+        }}),
+    );
+    crate::tui::bg::handle_bg_result(&mut app, created);
+    assert!(app.calendar_view.pending_forms.is_empty());
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Created Planning; invited ada@example.com")
     );
 }

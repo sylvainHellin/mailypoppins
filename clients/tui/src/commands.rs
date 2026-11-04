@@ -175,6 +175,10 @@ pub fn route(action: &Action) -> ActionRoute {
             ActionRoute::Daemon(&["signature.read", "signature.create"])
         }
         Action::Rsvp { .. } => ActionRoute::Daemon(&["event.respond"]),
+        Action::CreateEvent(_) => ActionRoute::Daemon(&["event.create"]),
+        Action::EditEventDescription => {
+            ActionRoute::ClientOnly("$EDITOR, over the event form's description")
+        }
         Action::ComposeToContact { .. } => ActionRoute::Local,
         Action::SendContactVcard { .. } => ActionRoute::Daemon(&["contact.vcard_draft"]),
         Action::CopyContactEmail { .. } => ActionRoute::ClientOnly("the system clipboard"),
@@ -362,6 +366,10 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             rebuild_contacts(app, commands);
             true
         }
+        Action::CreateEvent(form) => {
+            create_event(app, commands, form);
+            true
+        }
         Action::BatchToggleFlag(msgs) => {
             let any_unflagged = msgs
                 .iter()
@@ -485,6 +493,10 @@ pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
         Awaited::Rsvp { account_index } => BgResult::Rsvp {
             account_index: *account_index,
             result: result.and_then(|settled| rsvp_line(&settled)),
+        },
+        Awaited::EventCreate { operation_id } => BgResult::EventCreated {
+            operation_id: operation_id.clone(),
+            result: result.and_then(|settled| created_line(&settled)),
         },
         Awaited::ServerSearch { generation } => BgResult::ServerSearch {
             generation: *generation,
@@ -753,6 +765,61 @@ fn respond(
         ),
         Awaited::Rsvp { account_index },
     );
+}
+
+/// `event.create` for the event form (PERSO-255).
+///
+/// The form is kept under the operation's id while it runs, with the
+/// transaction id the daemon answered, so a failure reopens it as typed and
+/// its `Enter` retries the same create. A refusal comes back at once and
+/// reopens the form with the daemon's sentence.
+fn create_event(app: &mut App, commands: &dyn Queries, form: &super::app::EventForm) {
+    let mut form = form.clone();
+    let params = match form.params() {
+        Ok(params) => params,
+        Err(problem) => return app.reopen_event_form(form, problem),
+    };
+    let params = match serde_json::to_value(&params) {
+        Ok(params) => params,
+        Err(e) => return app.reopen_event_form(form, format!("{e}")),
+    };
+    let started = match commands.call("event.create", params) {
+        Ok(started) => started,
+        Err(e) => return app.reopen_event_form(form, format!("{e:#}")),
+    };
+    let (Some(id), Some(transaction_id)) = (
+        started["operation_id"].as_str(),
+        started["transaction_id"].as_str(),
+    ) else {
+        return app.reopen_event_form(form, "event.create answered no operation id".into());
+    };
+    form.transaction_id = Some(transaction_id.to_string());
+    form.error = None;
+    app.set_status_level(
+        format!("Creating {}...", form.title.trim()),
+        StatusLevel::Progress,
+    );
+    app.calendar_view.pending_forms.insert(id.to_string(), form);
+    app.bg_count += 1;
+    app.events.started(
+        id.to_string(),
+        Awaited::EventCreate {
+            operation_id: id.to_string(),
+        },
+    );
+}
+
+/// `event.create`'s settled event as the status line: what was created, and
+/// who the server invited.
+fn created_line(settled: &Value) -> Result<String, String> {
+    let created: mp_protocol::calendar::EventWriteResult = serde_json::from_value(settled.clone())
+        .map_err(|e| format!("the new event's outcome did not decode: {e}"))?;
+    let invited = match created.invited.len() {
+        0 => String::new(),
+        1 => format!("; invited {}", created.invited[0]),
+        n => format!("; invited {n} people"),
+    };
+    Ok(format!("Created {}{invited}", created.event.summary))
 }
 
 /// The Contacts view's `r`, as the operation it is since #0126.

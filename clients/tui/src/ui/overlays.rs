@@ -6,8 +6,9 @@ use ratatui::Frame;
 
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
-    ConfirmDialog, DirPicker, DirPickerMode, MailboxPicker, PersistentError, PickerPurpose,
-    RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    ConfirmDialog, DirPicker, DirPickerMode, EventForm, EventFormRow, MailboxPicker,
+    PersistentError, PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay,
+    ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -97,6 +98,116 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
         } else {
             "  Enter answer \u{b7} Tab next \u{b7} Esc cancel"
         };
+        frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
+    }
+}
+
+/// Render the event form (PERSO-255, `n` in the Calendar view): one row
+/// per field, the cursor row highlighted, the first problem with the fields
+/// as typed (or the daemon's refusal) under them, and the keys.
+pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect) {
+    let rows = form.rows();
+    let height = rows.len() as u16 + 7;
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        72,
+        height,
+        theme::active().accent,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 0, 1);
+    let width = inner.width as usize;
+    let normal = Style::default().fg(theme::active().text);
+    let focused = Style::default()
+        .fg(theme::active().selection)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(theme::active().text_muted);
+
+    let title = match &form.transaction_id {
+        Some(_) => "New event (retry)",
+        None => "New event",
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    let switch = |on: bool| if on { "[x]" } else { "[ ]" };
+    for row in rows {
+        let on = form.row == row;
+        let (label, value) = match row {
+            EventFormRow::Calendar => (
+                "Calendar",
+                format!("\u{2039} {} \u{203a}", form.chosen().label()),
+            ),
+            EventFormRow::Title => ("Title", form.title.clone()),
+            EventFormRow::AllDay => ("All day", switch(form.all_day).to_string()),
+            EventFormRow::Date => ("Date", form.date.clone()),
+            EventFormRow::Start => ("Start", form.start.clone()),
+            EventFormRow::End if form.all_day => ("Last day", form.end.clone()),
+            EventFormRow::End => ("End", form.end.clone()),
+            EventFormRow::Location => ("Location", form.location.clone()),
+            EventFormRow::To => ("Attendees", form.to.clone()),
+            EventFormRow::Optional => ("Optional", form.optional.clone()),
+            EventFormRow::Rooms => ("Rooms", form.rooms.clone()),
+            EventFormRow::Teams => ("Teams", switch(form.teams).to_string()),
+            EventFormRow::Reminder => ("Reminder", form.reminder.clone()),
+            EventFormRow::Description => {
+                let first = form.body.lines().next().unwrap_or_default();
+                let more = form.body.lines().count().saturating_sub(1);
+                let value = match (first.is_empty(), more) {
+                    (true, _) => "(none; Enter edits in $EDITOR)".to_string(),
+                    (false, 0) => first.to_string(),
+                    (false, n) => format!("{first} (+{n} lines)"),
+                };
+                ("Description", value)
+            }
+        };
+        let prefix = format!("  {label:<13}");
+        let avail = width.saturating_sub(prefix.chars().count());
+        let shown = if on && row.is_text() {
+            super::util::scrolled_input_value(&format!("{value}\u{258f}"), avail)
+        } else if value.is_empty() {
+            match row {
+                EventFormRow::Reminder => "(the mailbox default; minutes or none)".to_string(),
+                EventFormRow::End if form.all_day => "(one day)".to_string(),
+                _ => String::new(),
+            }
+        } else {
+            truncate(&value, avail)
+        };
+        let value_style = if on {
+            focused
+        } else if value.is_empty() {
+            muted
+        } else {
+            normal
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, if on { focused } else { muted }),
+            Span::styled(shown, value_style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    let (problem, style) = match (&form.error, form.problem()) {
+        (Some(error), _) => (error.clone(), Style::default().fg(theme::active().error)),
+        (None, Some(problem)) => (problem, Style::default().fg(theme::active().warning)),
+        (None, None) => (format!("Times in {}", form.zone), muted),
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  {}", truncate(&problem, width.saturating_sub(2))),
+        style,
+    )));
+    frame.render_widget(Paragraph::new(lines), stack.content);
+    if let Some(footer) = stack.footer {
+        let keys = "  Enter create \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} calendar \u{b7} Esc cancel";
         frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
     }
 }

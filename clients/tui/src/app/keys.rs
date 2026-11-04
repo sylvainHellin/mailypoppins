@@ -6,10 +6,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
     ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog,
-    DirPicker, DirPickerMode, EmailEntry, EntryKey, Focus, MailboxKind, MailboxPicker, Message,
-    MessageRef, Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, RsvpRow, SearchField,
-    SearchOverlayFocus, SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry,
-    ThreadOverlay,
+    DirPicker, DirPickerMode, EmailEntry, EntryKey, EventFormRow, Focus, MailboxKind,
+    MailboxPicker, Message, MessageRef, Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, RsvpRow,
+    SearchField, SearchOverlayFocus, SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel,
+    ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -27,6 +27,7 @@ impl App {
             Overlay::Mailbox(_) => return self.handle_mailbox_picker_key(key),
             Overlay::Signatures(_) => return self.handle_signatures_key(key),
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
+            Overlay::EventForm(_) => return self.handle_event_form_key(key),
             Overlay::Calendars(_) => return self.handle_calendars_overlay_key(key),
             Overlay::EventCard(_) => return self.handle_event_card_key(key),
             Overlay::Thread(_) => return self.handle_thread_overlay_key(key),
@@ -528,6 +529,10 @@ impl App {
             A::CalendarRsvp => {
                 self.pending_prefix = None;
                 self.open_rsvp_overlay_for_event();
+            }
+            A::CalendarNewEvent => {
+                self.pending_prefix = None;
+                self.open_event_form();
             }
             A::CalendarCalendars => {
                 self.pending_prefix = None;
@@ -1939,6 +1944,58 @@ impl App {
                     send_response: !overlay.server || overlay.send_response,
                 });
                 // Consume-and-close: promote any error queued behind it.
+                self.promote_pending_error();
+            }
+            KeyCode::Esc => self.close_overlay(),
+            KeyCode::Char('q') if !typing => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// The event form's keys (PERSO-255). `Tab`, `Shift+Tab` and the arrows
+    /// walk the rows; a text row takes every character typed; `Space` flips
+    /// the all-day and Teams switches; `Left` and `Right` change the
+    /// calendar; `Enter` on the description opens `$EDITOR` and anywhere else
+    /// creates the event, unless a field is wrong, which the form names;
+    /// `Esc` closes the form and drops what was typed.
+    fn handle_event_form_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::EventForm(form) = &mut self.overlay else {
+            return None;
+        };
+        let typing = form.row.is_text();
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => form.step(1),
+            KeyCode::BackTab | KeyCode::Up => form.step(-1),
+            KeyCode::Left if form.row == EventFormRow::Calendar => form.cycle_calendar(false),
+            KeyCode::Right if form.row == EventFormRow::Calendar => form.cycle_calendar(true),
+            KeyCode::Char(' ') if form.row == EventFormRow::AllDay => form.toggle_all_day(),
+            KeyCode::Char(' ') if form.row == EventFormRow::Teams => form.teams = !form.teams,
+            KeyCode::Char(c) if typing => {
+                if let Some(text) = form.text_mut() {
+                    text.push(c);
+                }
+                form.error = None;
+            }
+            KeyCode::Backspace if typing => {
+                if let Some(text) = form.text_mut() {
+                    text.pop();
+                }
+                form.error = None;
+            }
+            KeyCode::Enter if form.row == EventFormRow::Description => {
+                self.push_action(Action::EditEventDescription);
+            }
+            KeyCode::Enter => {
+                if let Some(problem) = form.problem() {
+                    form.error = Some(problem);
+                    return None;
+                }
+                let Overlay::EventForm(form) = std::mem::replace(&mut self.overlay, Overlay::None)
+                else {
+                    return None;
+                };
+                self.push_action(Action::CreateEvent(form));
                 self.promote_pending_error();
             }
             KeyCode::Esc => self.close_overlay(),

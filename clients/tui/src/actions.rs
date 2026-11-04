@@ -1214,6 +1214,10 @@ pub(super) fn handle_action(
             edit_signature_file(app, terminal, &name)?;
         }
 
+        Action::EditEventDescription => {
+            edit_event_description(app, terminal)?;
+        }
+
         // The twenty-one the command layer owns (P5-U6's fifteen, P5-U8's five
         // operations and P6-U2's cancel). Listed rather than wildcarded so a
         // new action still has to be classified here, and unreachable because
@@ -1225,6 +1229,7 @@ pub(super) fn handle_action(
         | Action::SendApproved
         | Action::CancelHeldSend
         | Action::Rsvp { .. }
+        | Action::CreateEvent(_)
         | Action::Approve
         | Action::BatchApprove(_)
         | Action::MarkDraft
@@ -1612,6 +1617,42 @@ fn edit_signature_file(
     app.refresh_signatures_overlay();
     if let Overlay::Signatures(overlay) = &mut app.overlay {
         overlay.select(name);
+    }
+    Ok(())
+}
+
+/// The event form's description in `$EDITOR` (PERSO-255): written to a
+/// temp file, edited, and read back into the form, which stays open
+/// underneath. Nothing reaches the daemon until the form is sent.
+fn edit_event_description(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let Overlay::EventForm(form) = &app.overlay else {
+        return Ok(());
+    };
+    let body = form.body.clone();
+    let path = match render_temp_file("event-form", "description.txt") {
+        Ok(path) => path,
+        Err(e) => {
+            app.set_status_level(format!("Cannot edit: {e:#}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
+    if let Err(e) = std::fs::write(&path, &body) {
+        app.set_status_level(format!("Cannot edit: {e}"), StatusLevel::Error);
+        return Ok(());
+    }
+    suspend_terminal(terminal)?;
+    let edit_result = edit_file(&path);
+    resume_terminal(terminal)?;
+    match edit_result.and_then(|()| Ok(std::fs::read_to_string(&path)?)) {
+        Ok(text) => {
+            if let Overlay::EventForm(form) = &mut app.overlay {
+                form.body = text.trim_end().to_string();
+            }
+        }
+        Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
     }
     Ok(())
 }
@@ -2356,7 +2397,7 @@ mod tests {
             .collect();
         assert_eq!(
             sites.len(),
-            9,
+            10,
             "the number of {needle}) call sites changed (now at lines {sites:?}); \
              re-derive the Action::suspends_terminal mapping before updating this count"
         );
