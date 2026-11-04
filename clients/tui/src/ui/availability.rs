@@ -9,6 +9,7 @@ use mp_client::format::{availability_row, slot_of};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::util::truncate;
 use crate::app::{Availability, EventForm};
 use crate::theme;
 
@@ -18,7 +19,7 @@ const FIRST_HOUR: u32 = 7;
 const LAST_HOUR: u32 = 20;
 /// The label column's width.
 const LABEL: usize = 22;
-/// The most rows shown; the rest are counted.
+/// The most rows shown however tall the terminal; the rest are counted.
 const MAX_ROWS: usize = 8;
 
 /// The hour ruler over the rows: a label every two hours.
@@ -72,14 +73,20 @@ fn chosen(form: &EventForm, first: i64, start: &str, interval: u32) -> Option<(i
     Some((first_slot, last_slot))
 }
 
-/// The lines the form shows under its fields: none while the form's
-/// account has no free/busy, else the header and a row per schedule.
-pub(super) fn availability_lines(form: &EventForm, state: &Availability) -> Vec<Line<'static>> {
-    if state.seen.is_none() {
+/// The lines the form shows under its fields, at most `max` of them in
+/// `width` columns: none while the form's account has no free/busy, else
+/// the header and a row per schedule. Rows that do not fit are counted on
+/// a "+N more" line, so a short terminal keeps the form's problem line.
+pub(super) fn availability_lines(
+    form: &EventForm,
+    state: &Availability,
+    width: usize,
+    max: usize,
+) -> Vec<Line<'static>> {
+    if state.seen.is_none() || max == 0 {
         return Vec::new();
     }
     let muted = Style::default().fg(theme::active().text_muted);
-    let mut lines = vec![Line::from("")];
     let checking = if state.checking() {
         "  checking\u{2026}"
     } else {
@@ -87,21 +94,20 @@ pub(super) fn availability_lines(form: &EventForm, state: &Availability) -> Vec<
     };
     let answer = match &state.answer {
         None => {
-            lines.push(Line::from(Span::styled(
+            return vec![Line::from(Span::styled(
                 format!("{}{}", label("Availability"), checking.trim_start()),
                 muted,
-            )));
-            return lines;
+            ))];
         }
         Some(Err(why)) => {
-            lines.push(Line::from(vec![
+            let room = width.saturating_sub(label("Availability").chars().count());
+            return vec![Line::from(vec![
                 Span::styled(label("Availability"), muted),
                 Span::styled(
-                    format!("unavailable: {why}"),
+                    truncate(&format!("unavailable: {why}"), room),
                     Style::default().fg(theme::active().warning),
                 ),
-            ]));
-            return lines;
+            ])];
         }
         Some(Ok(answer)) => answer,
     };
@@ -118,19 +124,34 @@ pub(super) fn availability_lines(form: &EventForm, state: &Availability) -> Vec<
         })
         .and_then(|at| slot_of(&answer.start, interval, at.with_timezone(&Utc)));
     let Some(first) = first else {
-        return lines;
+        return Vec::new();
     };
-    lines.push(Line::from(vec![
+    let total = answer.schedules.len();
+    // The header, then as many rows as fit with room for the count of the
+    // rest; one line alone is the header's label and that count.
+    let fits = |rows: usize| 1 + rows + usize::from(rows < total) <= max;
+    let shown = (0..=total.min(MAX_ROWS))
+        .rev()
+        .find(|rows| fits(*rows))
+        .unwrap_or(0);
+    let more = |hidden: usize| format!("+{hidden} more");
+    if max == 1 && total > 0 {
+        return vec![Line::from(vec![
+            Span::styled(label("Availability"), muted),
+            Span::styled(more(total), muted),
+        ])];
+    }
+    let mut lines = vec![Line::from(vec![
         Span::styled(label("Availability"), muted),
         Span::styled(ruler(per_hour), muted),
         Span::styled(checking.to_string(), muted),
-    ]));
+    ])];
     let picked = chosen(form, first, &answer.start, interval);
     let normal = Style::default().fg(theme::active().text);
     let marked = Style::default()
         .fg(theme::active().accent)
         .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
-    for schedule in answer.schedules.iter().take(MAX_ROWS) {
+    for schedule in answer.schedules.iter().take(shown) {
         let mut spans = vec![Span::styled(label(&schedule.address), normal)];
         if schedule.error.is_some() {
             spans.push(Span::styled("no free/busy".to_string(), muted));
@@ -149,9 +170,9 @@ pub(super) fn availability_lines(form: &EventForm, state: &Availability) -> Vec<
         }
         lines.push(Line::from(spans));
     }
-    if answer.schedules.len() > MAX_ROWS {
+    if shown < total {
         lines.push(Line::from(Span::styled(
-            format!("  +{} more", answer.schedules.len() - MAX_ROWS),
+            format!("  {}", more(total - shown)),
             muted,
         )));
     }

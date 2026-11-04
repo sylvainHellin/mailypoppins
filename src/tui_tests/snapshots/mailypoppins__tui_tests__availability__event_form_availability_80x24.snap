@@ -1,0 +1,35 @@
+---
+source: src/tui_tests/availability.rs
+expression: frame
+---
+== text 80x24 (trailing spaces trimmed) ==
+00 |╭──────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Agenda ─────────────────╮╭ Event ──────────────────────────────────────────╮│
+02 |││Mo╭──────────────────────────────────────────────────────────────────────╮  ││
+03 |││  │New event                                                             │  ││
+04 |││  │                                                                      │  ││
+05 |││  │  Calendar     ‹ evoqs/Kalender ›                                     │  ││
+06 |││Tu│  Title        Budget review▏                                         │  ││
+07 |││  │  All day      [ ]                                                    │  ││
+08 |││  │  Date         2026-08-04                                             │  ││
+09 |││  │  Start        14:00                                                  │  ││
+10 |││  │  End          13:00                                                  │  ││
+11 |││  │  Location                                                            │00││
+12 |││We│  Attendees    ada@example.org, someone@gmail.com                     │  ││
+13 |││  │  Optional                                                            │  ││
+14 |││  │  Rooms        room-1@example.org                                     │do││
+15 |││  │  Teams        [ ]                                                    │  ││
+16 |│╰──│  Reminder     (the mailbox default; minutes or none)                 │  ││
+17 |│╭ V│  Description  (none; Enter edits in $EDITOR)                         │  ││
+18 |││ m│  Availability           +4 more                                      │  ││
+19 |│╰──│  The end comes before the start                                      │──╯│
+20 |│╭──│  Enter create · Tab next · Space toggle · ←/→ calendar · Esc cancel  │──╮│
+21 |││  ╰──────────────────────────────────────────────────────────────────────╯  ││
+22 |│╰────────────────────────────────────────────────────────────────────────────╯│
+23 |╰──────────────────────────────────────────────────────────────────────────────╯
+== style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
+02 |bold@2..4
+03 |bg:surface+fg:selection+bold@2..4 bold@5..14
+04 |bg:surface+fg:selection+bold@2..4
+06 |bold@2..4 fg:selection+bold@5..34
+12 |bold@2..4

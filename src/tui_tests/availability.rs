@@ -356,3 +356,83 @@ fn no_free_busy_asks_nothing_and_a_refusal_is_the_rows_sentence() {
         "{frame}"
     );
 }
+
+/// The text rows of `frame_snapshot`'s output, without its style runs.
+fn text_rows(frame: &str) -> Vec<&str> {
+    frame
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.starts_with("== style runs"))
+        .collect()
+}
+
+/// On a short terminal the form keeps its fields, its problem line and its
+/// keys, and shows as many availability rows as the height leaves, the rest
+/// counted: at 80x26 the header and one row, at 80x24 the count alone, at
+/// 80x23 no availability at all.
+#[test]
+fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
+    let mut app = calendar_fixture();
+    let mut form = form();
+    form.end = "13:00".into();
+    let key = form.free_busy_key().unwrap();
+    app.overlay = Overlay::EventForm(Box::new(form));
+    app.calendar_view.availability = Availability {
+        seen: Some((key.clone(), Instant::now())),
+        asked: Some(key),
+        operation: None,
+        answer: Some(Ok(answer())),
+    };
+    let frame = frame_snapshot(&mut app, 80, 24);
+    assert_snapshot!("event_form_availability_80x24", frame);
+    for (height, rows, more) in [(26, 1, "+3 more"), (24, 0, "+4 more"), (23, 0, "")] {
+        let frame = frame_snapshot(&mut app, 80, height);
+        let text = text_rows(&frame);
+        let at = |needle: &str| text.iter().position(|line| line.contains(needle));
+        let problem = at("The end comes before the start")
+            .unwrap_or_else(|| panic!("no problem line at 80x{height}:\n{frame}"));
+        let description = at("Description").expect("the last field");
+        let keys = at("Enter create").expect("the keys");
+        assert!(description < problem && problem < keys, "{frame}");
+        let shown = text
+            .iter()
+            .filter(|line| line.contains("@example.org ") && !line.contains("Attendees"))
+            .filter(|line| !line.contains("Rooms"))
+            .count();
+        assert_eq!(shown, rows, "rows at 80x{height}:\n{frame}");
+        assert_eq!(more.is_empty(), !frame.contains("more"), "{frame}");
+        if !more.is_empty() {
+            assert!(frame.contains(more), "{more} at 80x{height}:\n{frame}");
+        }
+    }
+    // Shorter still, the last fields go before the problem line does.
+    let frame = frame_snapshot(&mut app, 80, 22);
+    assert!(frame.contains("The end comes before the start"), "{frame}");
+    assert!(frame.contains("Enter create"), "{frame}");
+}
+
+/// A refusal too long for the row is cut with an ellipsis.
+#[test]
+fn a_long_refusal_is_cut_with_an_ellipsis() {
+    let mut app = calendar_fixture();
+    let form = form();
+    let key = form.free_busy_key().unwrap();
+    app.overlay = Overlay::EventForm(Box::new(form));
+    let why = "The free/busy query failed: the server answered a long sentence \
+               that runs well past the form's right border";
+    app.calendar_view.availability = Availability {
+        seen: Some((key.clone(), Instant::now())),
+        asked: Some(key),
+        operation: None,
+        answer: Some(Err(why.into())),
+    };
+    let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
+    let line = text_rows(&frame)
+        .into_iter()
+        .find(|line| line.contains("unavailable: "))
+        .unwrap_or_else(|| panic!("no refusal in\n{frame}"));
+    assert!(
+        line.contains("unavailable: The free/busy query failed: the\u{2026}"),
+        "{line}"
+    );
+}
