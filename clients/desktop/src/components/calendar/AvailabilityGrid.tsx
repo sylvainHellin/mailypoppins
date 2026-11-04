@@ -3,11 +3,13 @@
 // 30-minute slot coloured by its status, the chosen time outlined, and "no
 // free/busy" for an address the server cannot read. It asks
 // `calendar.freebusy` once the form's day and addresses have stood still for
-// AVAILABILITY_DEBOUNCE_MS; an answer for a query the form no longer names
-// is dropped, and a calendar whose backend serves no free/busy shows nothing.
+// AVAILABILITY_DEBOUNCE_MS; until the answer for the query the form names
+// comes, the last answer's rows stay, dimmed and marked as checking, so the
+// grid does not collapse under the field being typed in. A calendar whose
+// backend serves no free/busy shows nothing.
 
 import { useEffect, useState } from "react";
-import type { CalendarFreeBusyResult } from "@/protocol/types";
+import type { CalendarFreeBusyParams, CalendarFreeBusyResult } from "@/protocol/types";
 import type { EventCalendar, EventFields } from "@/app/state";
 import {
   AVAILABILITY_DEBOUNCE_MS,
@@ -32,7 +34,8 @@ const CELL: Record<SlotStatus, string> = {
   unknown: "bg-muted-foreground/25",
 };
 
-type Answer = { key: string; result: CalendarFreeBusyResult | null; error: string | null };
+/** An answer and the query it answers: its key and the day its rows read. */
+type Answer = { key: string; day: string; result: CalendarFreeBusyResult | null; error: string | null };
 
 export type AvailabilityGridProps = { fields: EventFields | null; calendar: EventCalendar | null };
 
@@ -45,9 +48,11 @@ export function AvailabilityGrid({ fields, calendar }: AvailabilityGridProps) {
     if (!key) return;
     let live = true;
     const timer = setTimeout(() => {
-      cmd.calendarFreeBusy(JSON.parse(key)).then(
-        (result) => live && setAnswer({ key, result, error: null }),
-        (e: unknown) => live && setAnswer({ key, result: null, error: asGuiError(e).message }),
+      const asked = JSON.parse(key) as CalendarFreeBusyParams;
+      const day = asked.start;
+      cmd.calendarFreeBusy(asked).then(
+        (result) => live && setAnswer({ key, day, result, error: null }),
+        (e: unknown) => live && setAnswer({ key, day, result: null, error: asGuiError(e).message }),
       );
     }, AVAILABILITY_DEBOUNCE_MS);
     return () => {
@@ -57,31 +62,35 @@ export function AvailabilityGrid({ fields, calendar }: AvailabilityGridProps) {
   }, [key]);
 
   if (!fields || !params || !key) return null;
-  const current = answer?.key === key ? answer : null;
+  // The last answer, the form's own or, while that is on its way, the one
+  // before it, shown stale.
+  const stale = answer !== null && answer.key !== key;
   const hours = Array.from({ length: LAST_HOUR - FIRST_HOUR }, (_, n) => FIRST_HOUR + n);
   const header = (
     <span className="text-sm text-muted-foreground">
       Availability
-      {current ? null : <span className="ml-1 text-xs">(checking…)</span>}
+      {answer && !stale ? null : <span className="ml-1 text-xs">(checking…)</span>}
     </span>
   );
-  if (current?.error) {
+  const dim = stale ? "opacity-50" : "";
+  if (answer?.error) {
     return (
-      <section aria-label="Availability" className="grid grid-cols-[6rem_1fr] items-start gap-2">
+      <section aria-label="Availability" aria-busy={stale} className="grid grid-cols-[6rem_1fr] items-start gap-2">
         {header}
-        <p data-slot="availability-error" className="text-xs text-warning">
-          {`No availability: ${current.error}`}
+        <p data-slot="availability-error" data-stale={stale ? "" : undefined} className={`text-xs text-warning ${dim}`}>
+          {`No availability: ${answer.error}`}
         </p>
       </section>
     );
   }
-  const result = current?.result ?? null;
-  const rows = result ? availabilityRows(result, params.start) : [];
-  const picked = result ? chosenSlots(fields, result, params.start) : null;
+  const result = answer?.result ?? null;
+  const day = answer?.day ?? params.start;
+  const rows = result ? availabilityRows(result, day) : [];
+  const picked = result ? chosenSlots(fields, result, day) : null;
   return (
-    <section aria-label="Availability" className="grid grid-cols-[6rem_1fr] items-start gap-2">
+    <section aria-label="Availability" aria-busy={stale} className="grid grid-cols-[6rem_1fr] items-start gap-2">
       {header}
-      <div className="flex flex-col gap-1 overflow-hidden">
+      <div data-slot="availability-rows" data-stale={stale ? "" : undefined} className={`flex flex-col gap-1 overflow-hidden ${dim}`}>
         <div className="grid grid-cols-[repeat(13,1fr)] text-[10px] text-muted-foreground" aria-hidden="true">
           {hours.map((h) => (
             <span key={h}>{String(h).padStart(2, "0")}</span>

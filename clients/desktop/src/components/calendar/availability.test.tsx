@@ -47,6 +47,29 @@ describe("the event form's availability grid", () => {
     expect(within(rowOf(grid, "someone@gmail.com") as HTMLElement).getByText("no free/busy")).toBeInTheDocument();
   });
 
+  it("keeps the last answer's rows, dimmed, while a changed query is asked again", async () => {
+    const { user, dialog } = await openForm();
+    const attendees = within(dialog).getByLabelText("Attendees");
+    await user.type(attendees, "robin@example.com");
+    const grid = await within(dialog).findByRole("region", { name: "Availability" });
+    await waitFor(() => expect(rowOf(grid, "robin@example.com")).not.toBeNull(), { timeout: 3000 });
+    const body = () => grid.querySelector('[data-slot="availability-rows"]')!;
+    expect(body().hasAttribute("data-stale")).toBe(false);
+    expect(grid.getAttribute("aria-busy")).toBe("false");
+
+    await user.type(attendees, ", ada@example.org");
+    // The new query waits out the debounce; the old rows stand meanwhile.
+    expect(rowOf(grid, "robin@example.com")).not.toBeNull();
+    expect(rowOf(grid, "ada@example.org")).toBeNull();
+    expect(body().hasAttribute("data-stale")).toBe(true);
+    expect(grid.getAttribute("aria-busy")).toBe("true");
+    expect(within(grid).getByText("(checking…)")).toBeInTheDocument();
+
+    await waitFor(() => expect(rowOf(grid, "ada@example.org")).not.toBeNull(), { timeout: 3000 });
+    expect(body().hasAttribute("data-stale")).toBe(false);
+    expect(rowOf(grid, "robin@example.com")).not.toBeNull();
+  });
+
   it("is not shown on a calendar whose backend serves no free/busy", async () => {
     const { user, dialog } = await openForm(() => {
       mock.calendars = mock.calendars.map((c) => ({ ...c, features: c.features.filter((f) => f !== "free-busy") }));
