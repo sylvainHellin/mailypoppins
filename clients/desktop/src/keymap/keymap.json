@@ -39,10 +39,6 @@
         "action": "Toggle activity log"
       },
       {
-        "key": "R",
-        "action": "Calendar reminders (snooze, dismiss, open)"
-      },
-      {
         "key": "x",
         "action": "Send current draft (approve + send)"
       },
@@ -443,6 +439,10 @@
       {
         "key": "c",
         "action": "Show or hide calendars"
+      },
+      {
+        "key": "n",
+        "action": "New event (the event form, on the cursor's day)"
       },
       {
         "key": "r",

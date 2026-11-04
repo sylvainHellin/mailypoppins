@@ -47,7 +47,8 @@
 //! Writes (`write.rs`, PERSO-255) create, patch, cancel and delete events
 //! and dismiss or snooze their reminders, sending each time as the event's
 //! wall time in its Windows zone ([`crate::windows_zones::iana_to_windows_zone`]),
-//! or in UTC for a zone the table lacks.
+//! or in UTC for a zone the table lacks; an all-day event's midnights go out
+//! in the Windows zone of the write's `zone`, the host's when absent.
 //!
 //! The HTTP layer is the [`GraphFetch`] seam: [`GraphHttp`] over the mail
 //! client's [`GraphClient`] in production, a scripted fake in the tests, so
@@ -87,9 +88,16 @@ const MAX_PAGES: usize = 500;
 const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
 
 /// What this build serves on a Graph calendar beyond reading and answering
-/// ([`super::features`]): every write of phase 2 adds its feature here as its
-/// daemon method ships.
-pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::ServerReminders];
+/// ([`super::features`]), each feature listed once its daemon method ships:
+/// `event.create` writes events, with a Teams link on request on a calendar
+/// whose `allowedOnlineMeetingProviders` names Teams
+/// ([`super::calendar_features`]), and `calendar.dismiss_reminder` and
+/// `calendar.snooze_reminder` write a reminder's dismissal and snooze through.
+pub const FEATURES: &[CalendarFeature] = &[
+    CalendarFeature::Write,
+    CalendarFeature::OnlineMeeting,
+    CalendarFeature::ServerReminders,
+];
 
 // ---------------------------------------------------------------------------
 // The HTTP seam
@@ -301,6 +309,10 @@ mod wire {
         pub is_default_calendar: bool,
         #[serde(default)]
         pub can_edit: bool,
+        /// `teamsForBusiness`, `skypeForBusiness`, `skypeForConsumer` or
+        /// `unknown`; empty for a mailbox without a Teams licence.
+        #[serde(default)]
+        pub allowed_online_meeting_providers: Vec<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -504,6 +516,11 @@ fn calendar_from_graph(account: &str, cal: wire::Calendar) -> Calendar {
         is_default: cal.is_default_calendar,
         can_edit: cal.can_edit,
         visible: true,
+        online_meeting_providers: cal
+            .allowed_online_meeting_providers
+            .iter()
+            .filter_map(|raw| meeting_provider(Some(raw)))
+            .collect(),
     }
 }
 

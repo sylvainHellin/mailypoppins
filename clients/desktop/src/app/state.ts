@@ -171,7 +171,8 @@ export const LIST_WIDTH_STEP = 40;
  * `compose` is the wizard or the recipients dialog `composeDialog` describes;
  * `attachments` is the open, save or attach dialog `attachDialog` describes;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
- * invitation form `inviteDialog` describes; `signatures` is the Signatures
+ * invitation form `inviteDialog` describes; `event` is the event form
+ * `eventDialog` describes; `signatures` is the Signatures
  * dialog `signaturesDialog` describes; `activity` is the activity log;
  * `password` is the password dialog `passwordDialog` describes;
  * `account_wizard` is the account wizard `accountWizard` describes;
@@ -189,6 +190,7 @@ export type Overlay =
   | "attachments"
   | "rsvp"
   | "invite"
+  | "event"
   | "signatures"
   | "activity"
   | "password"
@@ -673,6 +675,46 @@ export type InviteDialog = { account: string };
 export type InviteSendRun = { token: number; account: string; subject: string; operation_id: string | null };
 
 /**
+ * The event form's fields as typed (PERSO-255): `calendar` is the key
+ * `account/id` of the calendar the event goes to, `start` and `end` are
+ * `YYYY-MM-DDTHH:MM` on a timed event and `YYYY-MM-DD` on an all-day one
+ * (the end its last day, empty for one day), the attendee lists are comma
+ * separated, and `reminder` is minutes, empty for the mailbox default.
+ */
+export type EventFields = {
+  calendar: string;
+  title: string;
+  allDay: boolean;
+  start: string;
+  end: string;
+  location: string;
+  to: string;
+  optional: string;
+  rooms: string;
+  teams: boolean;
+  reminder: string;
+  noReminder: boolean;
+  body: string;
+};
+
+/**
+ * The event form: its fields, the calendars it offers, the transaction id the last start answered
+ * (which a retry sends again, so the server makes one event), and why the
+ * last attempt failed.
+ */
+export type EventDialog = { fields: EventFields; calendars: EventCalendar[]; transactionId: string | null; error: string | null };
+
+/** A calendar a new event can go to (`account/id` as its key), and whether it can have a Teams link. */
+export type EventCalendar = { key: string; account: string; id: string; label: string; teams: boolean };
+
+/**
+ * A new event this window started, until it settles or is dropped;
+ * `operation_id` is null until `event_create` answers. `dialog` is the form
+ * as it was sent, which a failure opens again.
+ */
+export type EventCreateRun = { token: number; account: string; summary: string; dialog: EventDialog; operation_id: string | null };
+
+/**
  * The Contacts view: the account whose contacts it lists (the selection's),
  * the query the list was asked for (the search field's, once its typing
  * paused), the row under its cursor by address, and whether the search
@@ -911,6 +953,14 @@ export type AppState = {
   inviteSends: InviteSendRun[];
   /** Operation ends that arrived while a `send_invite` was unanswered, for its id. */
   inviteSendEarly: OperationEnd[];
+  /** What the `event` overlay shows; null whenever another overlay or none is open. */
+  eventDialog: EventDialog | null;
+  /** A form whose create failed while another overlay was open: New event opens it again. */
+  keptEventDialog: EventDialog | null;
+  /** New events this window started, in start order. */
+  eventCreates: EventCreateRun[];
+  /** Operation ends that arrived while an `event_create` was unanswered, for its id. */
+  eventCreateEarly: OperationEnd[];
   /**
    * Each account's contacts (`contact_search` of the view's query), created
    * on the first open of the Contacts view for it, stale again on every
@@ -1058,6 +1108,10 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     serverSearchDialog: null,
     inviteSends: [],
     inviteSendEarly: [],
+    eventDialog: null,
+    keptEventDialog: null,
+    eventCreates: [],
+    eventCreateEarly: [],
     contacts: {},
     contactsView: null,
     rebuilds: [],

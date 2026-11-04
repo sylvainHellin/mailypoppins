@@ -109,6 +109,8 @@ export type ActionId =
   | "calendar_rsvp"
   | "rsvp"
   | "new_invitation"
+  /** `n` in the Calendar view, the toolbar and the palette: the event form (PERSO-255). */
+  | "new_event"
   | "contacts_search"
   | "contacts_compose"
   | "contacts_vcard"
@@ -256,6 +258,7 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Open the event card": { id: "calendar_open_card" },
     "Open the invitation's .ics in $EDITOR": { id: "calendar_open_source" },
     "Respond (accept / tentative / decline, comment)": { id: "calendar_rsvp" },
+    "New event (the event form, on the cursor's day)": { id: "new_event" },
     "Show or hide calendars": { id: "calendar_calendars" },
     "Read the events again": { id: "calendar_refresh" },
   },

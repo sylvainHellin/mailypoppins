@@ -288,6 +288,7 @@ pub fn run() {
             calendar::calendar_list,
             calendar::calendar_set_visibility,
             calendar::calendar_view,
+            calendar::event_create,
             calendar::event_respond,
             calendar::invite_source_open,
             calendar::invite_get,

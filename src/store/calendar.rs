@@ -41,7 +41,9 @@ use rusqlite::{params, OptionalExtension};
 
 use super::Store;
 use crate::calendar_backend::{SeriesInfo, SyncResult};
-use crate::calendar_model::{Calendar, CalendarWindow, Event, EventKey, EventTime};
+use crate::calendar_model::{
+    Calendar, CalendarWindow, Event, EventKey, EventTime, OnlineMeetingProvider,
+};
 
 pub const CALENDARS_TABLE: &str = "calendars";
 pub const PREFS_TABLE: &str = "calendar_prefs";
@@ -65,6 +67,7 @@ pub fn create_sql() -> [(&'static str, String); 6] {
                     is_default INTEGER NOT NULL DEFAULT 0,
                     can_edit   INTEGER NOT NULL DEFAULT 0,
                     position   INTEGER NOT NULL DEFAULT 0,
+                    online_meeting_providers TEXT,
                     PRIMARY KEY (account, id)
                 )"
             ),
@@ -159,14 +162,16 @@ pub fn create_sql() -> [(&'static str, String); 6] {
 
 /// The columns added to a calendar table after a build created it, as
 /// `(table, column, type)`: the series master's details and the mark of an
-/// occurrence that inherits them (PERSO-200), and the structured series rule
-/// (PERSO-255). A table an older build created gains them here; its rows
-/// fill at the next baseline.
-const ADDED_COLUMNS: [(&str, &str, &str); 4] = [
+/// occurrence that inherits them (PERSO-200), the structured series rule and
+/// a calendar's online-meeting services (PERSO-255). A table an older build
+/// created gains them here; its event rows fill at the next baseline, its
+/// calendar rows at the next sync, which lists the calendars in full.
+const ADDED_COLUMNS: [(&str, &str, &str); 5] = [
     (EVENTS_TABLE, "inherits", "INTEGER NOT NULL DEFAULT 0"),
     (SERIES_TABLE, "master_json", "TEXT"),
     (SERIES_TABLE, "zone", "TEXT"),
     (SERIES_TABLE, "recurrence_json", "TEXT"),
+    (CALENDARS_TABLE, "online_meeting_providers", "TEXT"),
 ];
 
 /// Add [`ADDED_COLUMNS`] to the calendar tables that lack them, after
@@ -178,6 +183,8 @@ pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
 
 /// Version of what a server sync reads into the cache: the fields of
 /// [`Event`] and [`SeriesInfo`] a backend fills from the server.
+/// A field of [`Calendar`] needs no bump: every sync lists the calendars in
+/// full and rewrites their rows ([`upsert_calendars`]).
 ///
 /// Bump it whenever a backend starts reading a field it did not read before.
 /// The cache is delta-synced, so a row an older build wrote keeps the old
@@ -276,12 +283,14 @@ pub fn upsert_calendars(store: &Store, account: &str, calendars: &[Calendar]) ->
         tx.execute(
             &format!(
                 "INSERT INTO {CALENDARS_TABLE}
-                    (account, id, name, color, is_default, can_edit, position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    (account, id, name, color, is_default, can_edit, position,
+                     online_meeting_providers)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT (account, id) DO UPDATE SET
                     name = excluded.name, color = excluded.color,
                     is_default = excluded.is_default, can_edit = excluded.can_edit,
-                    position = excluded.position"
+                    position = excluded.position,
+                    online_meeting_providers = excluded.online_meeting_providers"
             ),
             params![
                 account,
@@ -291,6 +300,7 @@ pub fn upsert_calendars(store: &Store, account: &str, calendars: &[Calendar]) ->
                 calendar.is_default,
                 calendar.can_edit,
                 position as i64,
+                serde_json::to_string(&calendar.online_meeting_providers)?,
             ],
         )?;
     }
@@ -386,7 +396,7 @@ pub fn remember_invite_event(
 pub fn list_calendars(store: &Store, account: &str) -> Result<Vec<Calendar>> {
     let mut stmt = store.conn().prepare(&format!(
         "SELECT c.account, c.id, c.name, c.color, c.is_default, c.can_edit,
-                COALESCE(p.visible, 1)
+                COALESCE(p.visible, 1), c.online_meeting_providers
          FROM {CALENDARS_TABLE} c
          LEFT JOIN {PREFS_TABLE} p ON p.account = c.account AND p.calendar_id = c.id
          WHERE c.account = ?1
@@ -402,11 +412,20 @@ pub fn list_calendars(store: &Store, account: &str) -> Result<Vec<Calendar>> {
                 is_default: row.get(4)?,
                 can_edit: row.get(5)?,
                 visible: row.get(6)?,
+                online_meeting_providers: meeting_providers(row.get(7)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("reading the calendar list")?;
     Ok(calendars)
+}
+
+/// A calendar row's online-meeting services: none for a row an older build
+/// wrote (`NULL`) until the next sync rewrites it, and none for one this
+/// build cannot read, so no client offers a meeting the server may drop.
+fn meeting_providers(raw: Option<String>) -> Vec<OnlineMeetingProvider> {
+    raw.and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 /// Fold one sync of `calendar_id` into the cache, with its token, in one
@@ -684,6 +703,37 @@ pub fn event_keys(store: &Store, account: &str) -> Result<HashSet<EventKey>> {
     Ok(keys)
 }
 
+/// Write one event the server answered a write with into the cache (the
+/// write-through of `event.create`), before the delta sync brings the same
+/// row, which the upsert by id then leaves alone.
+pub fn upsert_event(store: &Store, account: &str, event: &Event) -> Result<()> {
+    let json = serde_json::to_string(event).context("serialising a calendar event")?;
+    write_event(store.conn(), account, &event.calendar, event, &json, false)
+}
+
+/// The cached event of `account` a create with `transaction_id` made, if the
+/// cache holds it: what a retried create settles with instead of posting.
+pub fn event_by_transaction(
+    store: &Store,
+    account: &str,
+    transaction_id: &str,
+) -> Result<Option<Event>> {
+    let json: Option<String> = store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT event_json FROM {EVENTS_TABLE}
+                 WHERE account = ?1 AND json_extract(event_json, '$.transaction_id') = ?2
+                 LIMIT 1"
+            ),
+            [account, transaction_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("looking up a calendar event by transaction id")?;
+    Ok(json.as_deref().and_then(parse_event))
+}
+
 /// One cached event of `account` by its server id.
 pub fn get_event(store: &Store, account: &str, id: &str) -> Result<Option<Event>> {
     let json: Option<String> = store
@@ -943,6 +993,7 @@ mod tests {
             is_default,
             can_edit: true,
             visible: true,
+            online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
         }
     }
 
@@ -1012,6 +1063,27 @@ mod tests {
             utc(1, 0),
             Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap(),
         )
+    }
+
+    /// A written event enters the cache before any sync, and a retried
+    /// create finds it by its transaction id, on its own account only.
+    #[test]
+    fn a_written_event_is_found_by_its_transaction_id() {
+        let (_dir, store) = open();
+        upsert_calendars(&store, "evoqs", &[calendar("cal-main", true)]).unwrap();
+        let mut created = timed("ev-new", "cal-main", 4, 9);
+        created.transaction_id = Some("tx-1".into());
+        upsert_event(&store, "evoqs", &created).unwrap();
+        assert_eq!(
+            get_event(&store, "evoqs", "ev-new").unwrap(),
+            Some(created.clone())
+        );
+        assert_eq!(
+            event_by_transaction(&store, "evoqs", "tx-1").unwrap(),
+            Some(created)
+        );
+        assert_eq!(event_by_transaction(&store, "evoqs", "tx-2").unwrap(), None);
+        assert_eq!(event_by_transaction(&store, "perso", "tx-1").unwrap(), None);
     }
 
     fn baseline(upserts: Vec<Event>) -> SyncResult {
@@ -1212,6 +1284,29 @@ mod tests {
         assert!(listed[0].visible && !listed[1].visible);
         assert!(listed[0].is_default);
         assert!(list_calendars(&store, "other").unwrap().is_empty());
+    }
+
+    /// A calendar's online-meeting services survive the store, an empty
+    /// list included, and a row an older build wrote (`NULL`) offers none.
+    #[test]
+    fn calendars_keep_their_online_meeting_services() {
+        let (_dir, store) = open();
+        let mut bare = calendar("b", false);
+        bare.online_meeting_providers = Vec::new();
+        upsert_calendars(&store, "evoqs", &[calendar("a", true), bare]).unwrap();
+        let listed = list_calendars(&store, "evoqs").unwrap();
+        assert!(listed[0].offers_teams());
+        assert!(listed[1].online_meeting_providers.is_empty());
+
+        store
+            .conn()
+            .execute(
+                &format!("UPDATE {CALENDARS_TABLE} SET online_meeting_providers = NULL"),
+                [],
+            )
+            .unwrap();
+        let listed = list_calendars(&store, "evoqs").unwrap();
+        assert!(listed.iter().all(|c| !c.offers_teams()));
     }
 
     #[test]

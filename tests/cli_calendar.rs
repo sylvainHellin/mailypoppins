@@ -35,7 +35,7 @@ use mailypoppins::calendar_backend::fake::{RecordedResponse, FAKE_CALENDAR_ENV};
 use mailypoppins::calendar_backend::Response;
 use mailypoppins::calendar_model::{Event, EventTime};
 
-use support::calendar_fixture::{at, event, fake_spec_with, request_ics, seed, IMIP, SERVER};
+use support::calendar_fixture::{at, day, event, fake_spec_with, request_ics, seed, IMIP, SERVER};
 use support::parity::DaemonFixture;
 use support::{read_fixture, send_fixture};
 
@@ -613,4 +613,111 @@ fn an_undelivered_imip_reply_fails_with_and_without_json() {
 
     let plain_err = slice.err(&["event", "respond", &event, "decline", "-A", IMIP]);
     assert!(plain_err.contains("Failed to send the RSVP"), "{plain_err}");
+}
+
+/// `mp event create` sends the event the flags name through `event.create`,
+/// prints the server's event with the people it invited, and a rerun with
+/// the transaction id the JSON answer carries creates nothing more; a
+/// mistake in the flags is the daemon's sentence and exit 1.
+#[test]
+fn event_create_through_the_cli() {
+    let slice = Slice::start();
+    slice.ok(&["calendar", "rebuild", "-A", SERVER]);
+    let start = format!("{}T14:00", day(10).date_naive());
+
+    let printed = slice.ok(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Planning",
+        "--start",
+        &start,
+        "--duration",
+        "1h",
+        "--zone",
+        "Europe/Berlin",
+        "--to",
+        "ada@example.com",
+        "--room",
+        "room-1@example.com",
+        "--teams",
+        "--reminder",
+        "10",
+    ]);
+    assert!(printed.contains("Created Planning ("), "{printed}");
+    assert!(
+        printed.contains("invited: ada@example.com, room-1@example.com"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("  calendar    evoqs/Calendar"),
+        "{printed}"
+    );
+
+    let created = slice.json(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Away",
+        "--start",
+        &day(12).date_naive().to_string(),
+        "--end",
+        &day(13).date_naive().to_string(),
+        "--no-reminder",
+        "--json",
+    ]);
+    assert_eq!(created["event"]["time"]["kind"], "all-day");
+    assert!(created["event"].get("reminder").is_none(), "{created}");
+    let transaction_id = created["transaction_id"].as_str().unwrap().to_string();
+    let id = created["event"]["id"].as_str().unwrap().to_string();
+    let again = slice.json(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Away",
+        "--start",
+        &day(12).date_naive().to_string(),
+        "--transaction-id",
+        &transaction_id,
+        "--json",
+    ]);
+    assert_eq!(again["event"]["id"], id.as_str());
+
+    let refused = slice.err(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Late",
+        "--start",
+        &start,
+    ]);
+    assert!(refused.contains("needs --end or --duration"), "{refused}");
+
+    let no_teams = slice.err(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--calendar",
+        "cal-second",
+        "--summary",
+        "Call",
+        "--start",
+        &start,
+        "--duration",
+        "30m",
+        "--teams",
+    ]);
+    assert!(
+        no_teams.contains("The calendar Holidays of evoqs offers no Teams meetings"),
+        "{no_teams}"
+    );
 }

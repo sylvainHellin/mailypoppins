@@ -406,6 +406,12 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         true,
     ),
     ("Rsvp", ActionRoute::Daemon(&["event.respond"]), false),
+    ("CreateEvent", ActionRoute::Daemon(&["event.create"]), false),
+    (
+        "EditEventDescription",
+        ActionRoute::ClientOnly("$EDITOR, over the event form's description"),
+        true,
+    ),
     ("ComposeToContact", ActionRoute::Local, false),
     (
         "SendContactVcard",
@@ -519,6 +525,18 @@ fn one_of_each_action() -> Vec<Action> {
             comment: None,
             send_response: true,
         },
+        Action::CreateEvent(Box::new(crate::tui::app::EventForm::new(
+            vec![crate::tui::app::EventCalendarChoice {
+                account: ACCOUNT.to_string(),
+                id: "cal-main".to_string(),
+                name: "Calendar".to_string(),
+                teams: true,
+            }],
+            ACCOUNT,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(),
+            "Europe/Berlin",
+        ))),
+        Action::EditEventDescription,
         Action::ComposeToContact {
             to: "a@example.com".to_string(),
         },
@@ -601,6 +619,8 @@ fn variant_name(action: &Action) -> &'static str {
         Action::ComposeWizardCancel => "ComposeWizardCancel",
         Action::ComposeEditSignature => "ComposeEditSignature",
         Action::Rsvp { .. } => "Rsvp",
+        Action::CreateEvent(_) => "CreateEvent",
+        Action::EditEventDescription => "EditEventDescription",
         Action::ComposeToContact { .. } => "ComposeToContact",
         Action::SendContactVcard { .. } => "SendContactVcard",
         Action::CopyContactEmail { .. } => "CopyContactEmail",

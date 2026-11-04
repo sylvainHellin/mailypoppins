@@ -592,6 +592,7 @@ mod tests {
                 is_default: true,
                 can_edit: true,
                 visible: true,
+                online_meeting_providers: Vec::new(),
             }],
         )
         .unwrap();

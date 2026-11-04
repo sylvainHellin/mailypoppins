@@ -1,7 +1,7 @@
 //! The Calendar view's model (#0034, PERSO-200): which days a layout shows,
 //! what part of a day an event covers, the cursor's rows, and the reads and
 //! writes the view makes through the daemon (`calendar.view`, `calendar.list`,
-//! `calendar.set_visibility`).
+//! `calendar.set_visibility`), and the event form `n` opens (`event.create`).
 //!
 //! The pure half ([`day_part`], [`calendar_entries`]) takes the events, the
 //! days and the zone and nothing else, so the layouts the renderer draws are
@@ -13,7 +13,8 @@ use mp_protocol::calendar::{CalendarViewParams, IMIP_EVENT_PREFIX};
 
 use super::{
     App, CalendarEntry, CalendarEvent, CalendarEventTime, CalendarLayout, CalendarsOverlay,
-    EventCardOverlay, MessageRef, Overlay, RsvpOverlay, StatusLevel, Tz, View,
+    EventCalendarChoice, EventCardOverlay, EventForm, MessageRef, Overlay, RsvpOverlay,
+    StatusLevel, Tz, View,
 };
 
 /// The part of one day an event covers.
@@ -496,6 +497,54 @@ impl App {
             event.id.clone(),
             summary,
         ));
+    }
+
+    /// `n`: the event form on the cursor's day, or the form a failed create
+    /// kept, which still carries what was typed and its transaction id.
+    pub fn open_event_form(&mut self) {
+        if let Some(form) = self.calendar_view.kept_form.take() {
+            self.overlay = Overlay::EventForm(Box::new(form));
+            return;
+        }
+        if let Some(queries) = self.queries() {
+            self.calendar_view.calendars = super::super::queries::calendar_list(queries);
+        }
+        let choices = EventCalendarChoice::writable(&self.calendar_view.calendars);
+        if choices.is_empty() {
+            self.set_status(
+                "No calendar takes new events: no account has a server calendar mp writes to"
+                    .into(),
+            );
+            return;
+        }
+        let day = self
+            .selected_calendar_entry()
+            .map(|entry| entry.day)
+            .unwrap_or(self.calendar_view.anchor);
+        let form = EventForm::new(
+            choices,
+            &self.account_config.name,
+            day,
+            self.calendar_view.zone.name(),
+        );
+        self.overlay = Overlay::EventForm(Box::new(form));
+    }
+
+    /// A create that did not go through: the form comes back with `why` on
+    /// its error line and its transaction id, over the view when nothing else
+    /// is open, else kept for `n`.
+    pub fn reopen_event_form(&mut self, mut form: EventForm, why: String) {
+        form.error = Some(why.clone());
+        if self.overlay.is_active() {
+            self.calendar_view.kept_form = Some(form);
+            self.set_status_level(
+                format!("{why}; n reopens the event form"),
+                StatusLevel::Error,
+            );
+        } else {
+            self.overlay = Overlay::EventForm(Box::new(form));
+            self.set_status_level(why, StatusLevel::Error);
+        }
     }
 
     /// `V` in the Calendar view: answer the event under the cursor.

@@ -36,7 +36,7 @@ Commands:
   contacts        Contact index operations
   signature       Manage the signatures drafts carry, and each account's default
   calendar        The calendar: list, view, show and hide calendars, reminders, rebuild
-  event           One calendar event: show it, answer it
+  event           One calendar event: create it, show it, answer it
   hooks           Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
   outbox          Inspect and unblock the durable send queue
   store           Local store maintenance (retention garbage collection)
@@ -952,11 +952,12 @@ Options:
   -h, --help               Print help
 
 $ mp event --help
-One calendar event: show it, answer it
+One calendar event: create it, show it, answer it
 
 Usage: mp event [OPTIONS] <COMMAND>
 
 Commands:
+  create   Create an event in the account's server calendar; the server sends the invitations
   show     Show one event: when, where, organizer, attendees, your answer
   respond  Answer an invitation: through the server for a server event, by iMIP reply for an invitation mail's event
   help     Print this message or the help of the given subcommand(s)
@@ -966,9 +967,46 @@ Options:
   -h, --help               Print help
 
 Examples:
+  mp event create -A evoqs --summary "Project review" --start 2026-11-18T14:00 --duration 1h --to ada@example.com --teams
+  mp event create -A evoqs --summary Away --start 2026-12-24 --end 2026-12-31 --no-reminder
   mp event show AAMkADev2 -A evoqs
   mp event respond AAMkADev2 accept --comment "See you there" -A evoqs
   mp event respond imip:42 decline -A perso
+
+$ mp event create --help
+Create an event in the account's server calendar; the server sends the invitations
+
+Usage: mp event create [OPTIONS] --summary <TEXT> --start <WHEN>
+
+Options:
+      --calendar <ID>        The calendar id, as `mp calendar list` prints it (default the account's default calendar)
+      --summary <TEXT>       The title
+      --start <WHEN>         When the event starts
+      --end <WHEN>           When it ends; on an all-day event the last day, included
+      --duration <D>         How long it lasts (1h30m, PT1H30M; whole days on an all-day event)
+      --all-day              An all-day event: --start and --end are bare dates
+      --zone <ZONE>          The IANA zone the event is held in (default the local zone)
+      --location <TEXT>      Where it takes place
+      --body <TEXT>          The description
+      --body-file <PATH>     The description, read from a file (- for stdin)
+      --to <ADDR>            A required attendee (repeatable)
+      --optional <ADDR>      An optional attendee (repeatable)
+      --room <ADDR>          A room mailbox (repeatable)
+      --teams                Add a Teams meeting link (when the calendar offers Teams)
+      --reminder <MIN>       Minutes before the start the reminder fires (default the mailbox's)
+      --no-reminder          No reminder
+      --transaction-id <ID>  The id of an earlier run of this create, which the server makes once
+      --json                 Print the settled `event.create` result as JSON on stdout
+  -A, --account <ACCOUNT>    Account to use
+  -h, --help                 Print help
+
+WHEN is a time read in --zone (2026-11-18T14:00), a time with an offset
+(2026-11-18T14:00:00+01:00), or a bare date (2026-11-18) for an all-day event,
+whose --end is its last day, included. --duration takes 1h30m or PT1H30M.
+
+The command prints the create's transaction id when it cannot confirm the
+event; rerun it with --transaction-id and the server creates the event at
+most once.
 
 $ mp event show --help
 Show one event: when, where, organizer, attendees, your answer

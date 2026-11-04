@@ -177,10 +177,11 @@ async fn a_minimal_create_leaves_the_defaults_to_the_server() {
 /// legacy way (Kolkata) go out as their wall time under their Windows name;
 /// a zone the CLDR table has no Windows name for goes out as UTC with the
 /// instants exact, as does a UTC event; an all-day event goes out as its
-/// midnights, the end exclusive.
+/// midnights in its zone, the end exclusive, and in UTC for a zone without a
+/// Windows name.
 #[tokio::test]
 async fn times_go_out_in_their_windows_zone_or_in_utc() {
-    let fetch = (0..5).fold(ScriptedFetch::default(), |fetch, _| {
+    let fetch = (0..6).fold(ScriptedFetch::default(), |fetch, _| {
         fetch.route(&format!("{BASE}/me/calendars/"), status(201, &created("x")))
     });
     let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
@@ -194,12 +195,16 @@ async fn times_go_out_in_their_windows_zone_or_in_utc() {
         timed("Asia/Kolkata"),
     ];
     for (i, time) in times.into_iter().enumerate() {
-        let input = EventInput::new("Slot", time);
+        let mut input = EventInput::new("Slot", time);
+        input.zone = Some("Europe/Berlin".into());
         backend
             .create_event(&cal, &input, &format!("tx-{i}"))
             .await
             .unwrap();
     }
+    let mut troll = EventInput::new("Slot", EventTime::all_day(day(5), day(7)).unwrap());
+    troll.zone = Some("Antarctica/Troll".into());
+    backend.create_event(&cal, &troll, "tx-5").await.unwrap();
     let sent = backend.fetch.sent();
     let utc_pair = (
         json!({"dateTime": "2026-11-03T09:30:00", "timeZone": "UTC"}),
@@ -213,13 +218,21 @@ async fn times_go_out_in_their_windows_zone_or_in_utc() {
     let body = sent[2].body.as_ref().unwrap();
     assert_eq!(
         body["start"],
-        json!({"dateTime": "2026-11-05T00:00:00", "timeZone": "UTC"})
+        json!({"dateTime": "2026-11-05T00:00:00", "timeZone": "W. Europe Standard Time"})
     );
     assert_eq!(
         body["end"],
-        json!({"dateTime": "2026-11-07T00:00:00", "timeZone": "UTC"})
+        json!({"dateTime": "2026-11-07T00:00:00", "timeZone": "W. Europe Standard Time"})
     );
     assert_eq!(body["isAllDay"], true);
+    let body = sent[5].body.as_ref().unwrap();
+    assert_eq!(
+        (body["start"].clone(), body["end"].clone()),
+        (
+            json!({"dateTime": "2026-11-05T00:00:00", "timeZone": "UTC"}),
+            json!({"dateTime": "2026-11-07T00:00:00", "timeZone": "UTC"}),
+        )
+    );
     let zoned = |request: &Sent| {
         let body = request.body.as_ref().unwrap();
         (body["start"].clone(), body["end"].clone())
@@ -279,6 +292,7 @@ async fn an_update_patches_only_the_fields_it_names() {
     let moved = EventPatch {
         summary: Some("Project review, moved".into()),
         time: Some(EventTime::all_day(day(4), day(5)).unwrap()),
+        zone: Some("America/New_York".into()),
         attendees: Some(Vec::new()),
         reminder: Some(Some(30)),
         show_as: Some(ShowAs::Free),
@@ -318,8 +332,8 @@ async fn an_update_patches_only_the_fields_it_names() {
         sent[2].body,
         Some(json!({
             "subject": "Project review, moved",
-            "start": {"dateTime": "2026-11-04T00:00:00", "timeZone": "UTC"},
-            "end": {"dateTime": "2026-11-05T00:00:00", "timeZone": "UTC"},
+            "start": {"dateTime": "2026-11-04T00:00:00", "timeZone": "Eastern Standard Time"},
+            "end": {"dateTime": "2026-11-05T00:00:00", "timeZone": "Eastern Standard Time"},
             "isAllDay": true,
             "attendees": [],
             "isReminderOn": true,
@@ -333,6 +347,109 @@ async fn an_update_patches_only_the_fields_it_names() {
         sent[3].body,
         Some(json!({"isOnlineMeeting": true, "onlineMeetingProvider": "teamsForBusiness"}))
     );
+}
+
+/// A create replayed with its transaction id after its body changed meets
+/// Graph's `ErrorDuplicateTransactionId`: the create adopts the event the
+/// first one made, patches it with every field it sets and the server's
+/// defaults for the ones it leaves out, and answers it as the created event.
+/// A 400 of any other code stays a refusal.
+#[tokio::test]
+async fn a_changed_replay_of_a_transaction_patches_the_event_it_made() {
+    let duplicate = json!({"error": {
+        "code": "ErrorDuplicateTransactionId",
+        "message": "The TransactionId specified in the request has already been used to create a different event.",
+        "innerError": {"code": "ClientIdAlreadyInUseException"},
+        "@event.existingEventId": "AAMk/first=",
+    }});
+    let fetch = ScriptedFetch::default()
+        .route(
+            &format!("{BASE}/me/calendars/"),
+            status(400, &duplicate.to_string()),
+        )
+        .route(&format!("{BASE}/me/events/"), ok(&created("AAMk/first=")))
+        .route(
+            &format!("{BASE}/me/calendars/"),
+            status(400, r#"{"error":{"code":"ErrorInvalidRequest"}}"#),
+        );
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let cal = calendar("cal", true);
+    let mut input = EventInput::new("Project review, later", berlin(10, 11));
+    input.location = Some("Room 2".into());
+    input.attendees = vec![AttendeeInput {
+        email: "ada@example.com".into(),
+        name: None,
+        role: AttendeeRole::Required,
+    }];
+    input.reminder = Some(None);
+
+    let event = written_event(backend.create_event(&cal, &input, "tx-1").await.unwrap());
+    assert_eq!(event.id, "AAMk/first=");
+    assert_eq!(event.calendar, "cal");
+
+    let sent = backend.fetch.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].method, "POST");
+    assert_eq!(sent[1].method, "PATCH");
+    assert_eq!(sent[1].url, format!("{BASE}/me/events/AAMk%2Ffirst="));
+    let mut expected = sent[0].body.clone().unwrap();
+    let fields = expected.as_object_mut().unwrap();
+    fields.remove("transactionId");
+    for (key, value) in [
+        ("body", json!({"contentType": "text", "content": ""})),
+        ("showAs", json!("busy")),
+        ("sensitivity", json!("normal")),
+        ("allowNewTimeProposals", json!(true)),
+    ] {
+        fields.insert(key.into(), value);
+    }
+    assert_eq!(sent[1].body, Some(expected));
+    assert_eq!(
+        sent[1].body.as_ref().unwrap()["location"],
+        json!({"displayName": "Room 2"})
+    );
+
+    let err = backend
+        .create_event(&cal, &input, "tx-2")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Graph refused the new event: HTTP 400: ErrorInvalidRequest"
+    );
+}
+
+/// The patch a replay sends clears what the replay left out, in Graph's
+/// terms: an empty location display name, an empty plain-text body, an empty
+/// attendee list (which uninvites everyone), the reminder off for a replay
+/// with none, and the server's defaults for show-as, sensitivity and new
+/// time proposals. A reminder left to the mailbox default and an online
+/// meeting the replay does not ask for stay off the patch.
+#[test]
+fn a_replay_patch_clears_what_the_replay_left_out() {
+    let input = EventInput::new("Project review", berlin(9, 10));
+    let mut sent = super::super::write::patch_body(&input.as_patch());
+    let fields = sent.as_object_mut().unwrap();
+    for key in ["subject", "start", "end", "isAllDay"] {
+        assert!(fields.remove(key).is_some(), "{key}");
+    }
+    assert_eq!(
+        sent,
+        json!({
+            "location": {"displayName": ""},
+            "body": {"contentType": "text", "content": ""},
+            "attendees": [],
+            "showAs": "busy",
+            "sensitivity": "normal",
+            "allowNewTimeProposals": true,
+        })
+    );
+
+    let mut no_reminder = input;
+    no_reminder.reminder = Some(None);
+    let sent = super::super::write::patch_body(&no_reminder.as_patch());
+    assert_eq!(sent["isReminderOn"], json!(false));
+    assert!(sent.get("reminderMinutesBeforeStart").is_none());
 }
 
 fn exception_answer() -> String {

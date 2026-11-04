@@ -19,6 +19,12 @@
 //! `rsvp`. Which answers an account takes is the daemon's call: a refusal
 //! comes back as its sentence, and nothing is probed ahead of it.
 //!
+//! A new event (CAL-11, PERSO-255) is `event.create`, awaited as
+//! `event_create`: the form's fields go to the daemon as typed, which
+//! resolves the times in the zone the form names and checks every field, so
+//! a refusal comes back as its sentence. Its start answers the transaction id
+//! beside the operation id, which a retry of the same form sends again.
+//!
 //! A new invitation (SND-05) is `send.invite`, awaited as `send_invite`: the
 //! daemon builds the `VEVENT` and the iMIP message and submits it through
 //! its outbox. Its refusals are the CLI's (`--invite requires --subject`),
@@ -39,7 +45,8 @@ use tauri::{AppHandle, State};
 
 use mp_client::queries;
 use mp_protocol::calendar::{
-    CalendarInfo, CalendarViewParams, CalendarViewResult, EventFrontmatter,
+    CalendarInfo, CalendarViewParams, CalendarViewResult, EventCreateParams, EventCreateStarted,
+    EventFrontmatter,
 };
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
@@ -67,6 +74,10 @@ const INVITE_BUDGET: Duration = Duration::from_secs(10);
 /// Starting `event.respond`: its plan reads the event, and on an `imip:`
 /// event the row and its `invite.ics`, first.
 const RESPOND_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// Starting `event.create`: the daemon resolves the event and reads the
+/// account's calendars first.
+const CREATE_START_BUDGET: Duration = Duration::from_secs(10);
 
 /// The Graph probe: a refusal before any read.
 const PROBE_BUDGET: Duration = Duration::from_secs(5);
@@ -190,6 +201,38 @@ pub fn event_respond_on(
         )
         .map_err(daemon_sentence)?;
     Ok(OperationStarted { operation_id })
+}
+
+/// Create the event the form names, an operation awaited as `event_create`,
+/// whose `result` is an `EventWriteResult`; the start answers the
+/// transaction id a retry sends again. Every refusal is the daemon's
+/// sentence: an event typed wrong, a calendar that takes none, an account
+/// without a calendar backend or a sign-in without the calendar scope.
+pub fn event_create_on(
+    session: &SessionHandle,
+    door: &Door,
+    params: &EventCreateParams,
+) -> Result<EventCreateStarted, GuiError> {
+    let params = serde_json::to_value(params)
+        .map_err(|e| GuiError::protocol(format!("event.create params: {e}")))?;
+    let (operation_id, answer) = session
+        .start_operation_answer(
+            door,
+            "event.create",
+            params,
+            PendingKind::EventCreate,
+            CREATE_START_BUDGET,
+        )
+        .map_err(daemon_sentence)?;
+    let transaction_id = answer["transaction_id"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| GuiError::protocol("event.create answered no transaction_id"))?
+        .to_string();
+    Ok(EventCreateStarted {
+        operation_id,
+        transaction_id,
+    })
 }
 
 /// Where row `row_id`'s `invite.ics` is written: one file per row, so the
@@ -436,6 +479,18 @@ pub async fn send_invite(
     };
     with_door(&session, move |session, door| {
         send_invite_on(session, door, &account, &fields)
+    })
+    .await
+}
+
+/// Create an event, awaited as `event_create`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn event_create(
+    session: State<'_, SessionHandle>,
+    params: EventCreateParams,
+) -> Result<EventCreateStarted, GuiError> {
+    with_door(&session, move |session, door| {
+        event_create_on(session, door, &params)
     })
     .await
 }
@@ -769,6 +824,70 @@ mod tests {
                 message: crate::fixture::IMIP_SILENT_REFUSAL.to_string(),
                 code: Some(-32602)
             })
+        );
+    }
+
+    fn new_event(summary: &str) -> EventCreateParams {
+        EventCreateParams {
+            account: "home".into(),
+            calendar: None,
+            transaction_id: None,
+            event: mp_protocol::calendar::EventInputParams {
+                summary: summary.into(),
+                start: "2099-10-14T14:00".into(),
+                duration: Some("1h".into()),
+                zone: Some("Europe/Berlin".into()),
+                attendees: vec![mp_protocol::calendar::EventAttendeeInput {
+                    email: "robin@example.com".into(),
+                    name: None,
+                    role: None,
+                }],
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A create starts `event.create` awaited as `event_create` and answers
+    /// its transaction id; the fixture's event lands in the week, and a
+    /// retry with the transaction id makes no second one; a daemon refusal
+    /// is its sentence.
+    #[test]
+    fn event_create_starts_the_operation_and_answers_its_transaction_id() {
+        let (door, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let started = event_create_on(&session, &door, &new_event("Kick-off")).expect("started");
+        assert_eq!(
+            session.pending_kind(&started.operation_id),
+            Some(PendingKind::EventCreate)
+        );
+        assert!(!started.transaction_id.is_empty());
+        let (method, params) = f.calls().last().cloned().expect("a call");
+        assert_eq!(method, "event.create");
+        assert_eq!(params["event"]["zone"], "Europe/Berlin");
+        let (start, end) = ("2099-10-12T00:00:00+02:00", "2099-10-19T00:00:00+02:00");
+        let count = |summary: &str| {
+            calendar_view_on(&door, start, end, Some("Europe/Berlin"))
+                .expect("week")
+                .events
+                .iter()
+                .filter(|e| e.summary == summary)
+                .count()
+        };
+        assert_eq!(count("Kick-off"), 1);
+
+        let mut retry = new_event("Kick-off");
+        retry.transaction_id = Some(started.transaction_id.clone());
+        let again = event_create_on(&session, &door, &retry).expect("started");
+        assert_eq!(again.transaction_id, started.transaction_id);
+        assert_eq!(count("Kick-off"), 1);
+
+        let err = event_create_on(&session, &door, &new_event(" ")).expect_err("refused");
+        assert_eq!(
+            err,
+            GuiError::Protocol {
+                message: "An event needs a summary".to_string(),
+                code: Some(-32602)
+            }
         );
     }
 

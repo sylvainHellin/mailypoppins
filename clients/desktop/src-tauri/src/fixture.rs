@@ -38,6 +38,12 @@
 //! response changed and `calendar.changed`, or after `rsvp_fail` fails with
 //! the SMTP error. `message.invite` names the server event of a `home`
 //! invitation as `event_id`, as the daemon does on an account with a backend.
+//! `event.create` (PERSO-255) resolves the event with the daemon's own
+//! `mp_core::calendar_write::resolve_input`, refuses a calendar whose
+//! backend does not write or which the user may not write to, puts the
+//! event in the server calendar at once (or finds the one its transaction
+//! id made) with `calendar.changed`, answers `{operation_id,
+//! transaction_id}` and settles an `EventWriteResult` after [`RSVP_DELAY`].
 //!
 //! `contact.search` answers each account's ranked contacts from
 //! `fixtures/contacts.json`: a case-insensitive substring match over the
@@ -388,6 +394,51 @@ struct ServerCalendarSeed {
     calendars: Vec<CalendarInfo>,
     events: Vec<CalendarEvent>,
     invites: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// The server event a fixture `event.create` of `input` makes as `id` in
+/// `calendar`, the user its organizer, as the daemon's cache answers it.
+fn created_event(
+    calendar: &CalendarInfo,
+    id: &str,
+    input: &mp_core::calendar_write::EventInput,
+    transaction_id: &str,
+) -> Result<CalendarEvent> {
+    // The model's own serialisation is the wire's `CalendarEventTime`.
+    let time = serde_json::to_value(&input.time)?;
+    let attendees: Vec<Value> = input
+        .attendees
+        .iter()
+        .map(
+            |a| json!({"name": a.name, "email": a.email, "role": a.role, "status": "needs-action"}),
+        )
+        .collect();
+    let mut event = json!({
+        "account": calendar.account,
+        "calendar": calendar.id,
+        "id": id,
+        "uid": format!("{id}@fixture.example.com"),
+        "kind": "single",
+        "summary": input.summary,
+        "time": time,
+        "location": input.location,
+        "body": input.body,
+        "attendees": attendees,
+        "own_response": "organizer",
+        "reminder": input.reminder.unwrap_or(Some(15)),
+        "is_online_meeting": input.online_meeting,
+        "sensitivity": "normal",
+        "show_as": "busy",
+        "is_organizer": true,
+        "transaction_id": transaction_id,
+    });
+    if input.online_meeting {
+        event["online_meeting_url"] = json!(format!("https://teams.example.com/join/{id}"));
+        event["online_meeting_provider"] = json!("teams-for-business");
+    }
+    let object = event.as_object_mut().expect("an object");
+    object.retain(|_, v| !v.is_null());
+    Ok(serde_json::from_value(event)?)
 }
 
 /// An `event.respond` the fixture is answering.
@@ -4303,6 +4354,97 @@ impl Fixture {
                     }
                 });
                 Ok(json!({"operation_id": id}))
+            }
+            "event.create" => {
+                only(
+                    method,
+                    &params,
+                    &["account", "calendar", "event", "transaction_id"],
+                )?;
+                let request: mp_protocol::calendar::EventCreateParams =
+                    serde_json::from_value(params.clone())
+                        .map_err(|e| refused(method, -32602, &format!("event.create: {e}")))?;
+                let account = request.account.clone();
+                s.account_ready(method, &account)?;
+                let refusal = |message: &str| refused(method, -32602, message);
+                let berlin = mp_core::calendar_model::parse_zone("Europe/Berlin")
+                    .ok_or_else(|| refused(method, -32603, "no Europe/Berlin zone"))?;
+                let input = mp_core::calendar_write::resolve_input(&request.event, berlin)
+                    .map_err(|why| refusal(&why))?;
+                let calendar = s
+                    .server_calendars
+                    .iter()
+                    .filter(|c| c.account == account && c.features.iter().any(|f| f == "write"))
+                    .find(|c| match request.calendar.as_deref() {
+                        Some(id) => c.id == id,
+                        None => c.is_default,
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        refusal(&format!(
+                            "{account} has no calendar {} that takes new events",
+                            request.calendar.as_deref().unwrap_or("by default")
+                        ))
+                    })?;
+                if !calendar.can_edit {
+                    return Err(refusal(&format!(
+                        "The calendar {} of {account} is read-only",
+                        calendar.name
+                    )));
+                }
+                let id = s.next_operation_id("fixture-create");
+                let transaction_id = request
+                    .transaction_id
+                    .clone()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| format!("mp-{id}"));
+                let existing = s
+                    .server_events
+                    .iter()
+                    .find(|e| {
+                        e.account == account
+                            && e.transaction_id.as_deref() == Some(transaction_id.as_str())
+                    })
+                    .cloned();
+                let event = match existing {
+                    Some(event) => event,
+                    None => {
+                        let event = created_event(
+                            &calendar,
+                            &format!("AAMk-{id}"),
+                            &input,
+                            &transaction_id,
+                        )
+                        .map_err(|e| refused(method, -32603, &format!("{e:#}")))?;
+                        s.server_events.push(event.clone());
+                        self.emit_locked(&mut s, "calendar.changed", json!({"account": account}));
+                        event
+                    }
+                };
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                let delay = s.rsvp_delay;
+                drop(s);
+                let invited: Vec<String> =
+                    event.attendees.iter().map(|a| a.email.clone()).collect();
+                let result = json!({
+                    "account": account, "event": event,
+                    "transaction_id": transaction_id, "invited": invited,
+                });
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    if fixture.running(&op) {
+                        fixture.settle(&op, "succeeded", Some(result));
+                    }
+                });
+                Ok(json!({"operation_id": id, "transaction_id": transaction_id}))
             }
             "send.invite" => {
                 only(

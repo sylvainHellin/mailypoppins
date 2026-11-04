@@ -368,6 +368,7 @@ pub enum KeyAction {
     /// `e`: the invitation's `.ics` in `$EDITOR`.
     CalendarOpenSource,
     CalendarRsvp,
+    CalendarNewEvent,
     /// `h` / `[` and `l` / `]`: the previous or next day or week.
     CalendarPrev,
     CalendarNext,
@@ -1667,16 +1668,13 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Jump to top / bottom",
         false,
     ),
-    short(
-        b(
-            "t",
-            Chord::Char('t'),
-            KeyCtx::Calendar,
-            KeyAction::CalendarToday,
-            "Go to today",
-            true,
-        ),
-        "Today",
+    b(
+        "t",
+        Chord::Char('t'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarToday,
+        "Go to today",
+        false,
     ),
     row(
         "gt",
@@ -1755,6 +1753,17 @@ pub static KEYMAP: &[KeyBinding] = &[
             true,
         ),
         "Calendars",
+    ),
+    short(
+        b(
+            "n",
+            Chord::Char('n'),
+            KeyCtx::Calendar,
+            KeyAction::CalendarNewEvent,
+            "New event (the event form, on the cursor's day)",
+            true,
+        ),
+        "New",
     ),
     b(
         "r",

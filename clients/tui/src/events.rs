@@ -184,6 +184,11 @@ pub enum Awaited {
         /// The account the reply was sent from.
         account_index: usize,
     },
+    /// `event.create`, the event form's create (PERSO-255).
+    EventCreate {
+        /// Its own id, which keys the form kept while it runs.
+        operation_id: String,
+    },
     /// `message.search_server`, the overlay's server leg (`LST-08`, #0126).
     ///
     /// Its hits do not arrive here: they stream as `message.server_hit`
@@ -269,6 +274,11 @@ impl EventState {
     /// Remember an operation this client started.
     pub(super) fn started(&mut self, id: String, awaited: Awaited) {
         self.started.insert(id, awaited);
+    }
+
+    /// Whether this client still awaits the operation `id`.
+    pub(super) fn awaits(&self, id: &str) -> bool {
+        self.started.contains_key(id)
     }
 
     /// Whether a pass over `account` is one this client asked for.
@@ -854,6 +864,7 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
         } => {
             log::info!("[events] {instance_id} asked for a resync: {reason}");
             rebootstrap(app, door);
+            orphan_event_forms(app);
         }
         Incoming::Reconnected { instance_id } => {
             log::info!("[events] reconnected to {instance_id}");
@@ -862,12 +873,38 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
             // rather than from this notice: the notice is the client's guess,
             // the answer is the daemon's word.
             rebootstrap(app, door);
+            orphan_event_forms(app);
         }
         Incoming::Disconnected { reason } => {
             log::warn!("[events] the daemon session was lost: {reason}");
             app.set_status_level(
                 "The daemon is not reachable; reconnecting...".to_string(),
                 StatusLevel::Warning,
+            );
+        }
+    }
+}
+
+/// Reopen every event form whose create this client no longer awaits: its
+/// daemon restarted, or forgot the operation, before it settled, so nobody
+/// knows whether the event exists. The form keeps its transaction id, so
+/// `Enter` retries it and the server makes the event at most once.
+fn orphan_event_forms(app: &mut App) {
+    let mut gone: Vec<String> = app
+        .calendar_view
+        .pending_forms
+        .keys()
+        .filter(|id| !app.events.awaits(id))
+        .cloned()
+        .collect();
+    gone.sort();
+    for id in gone {
+        if let Some(form) = app.calendar_view.pending_forms.remove(&id) {
+            app.reopen_event_form(
+                form,
+                "The daemon restarted before the event was confirmed; Enter retries with the \
+                 same transaction id, which creates it at most once"
+                    .to_string(),
             );
         }
     }

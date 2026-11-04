@@ -535,6 +535,7 @@ mod tests {
                 "draft.reply".to_string(),
                 "draft.set_headers".to_string(),
                 "draft.validate".to_string(),
+                "event.create".to_string(),
                 "event.get".to_string(),
                 "event.respond".to_string(),
                 "hook.list".to_string(),

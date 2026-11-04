@@ -30,6 +30,7 @@ import type {
   DraftListing,
   DraftMessage,
   DraftPreview,
+  EventCreateParams,
   EventFrontmatter,
   HoldStatus,
   MessageListRow,
@@ -249,6 +250,10 @@ export const mock = {
   invitesSent: [] as { operation_id: string; account: string; subject: string; to: string[] }[],
   /** The next invitation's operation id counter. */
   nextInvite: 1,
+  /** The creates `event_create` started and no test settled yet, oldest first, each with the event it makes. */
+  eventCreates: [] as { operation_id: string; account: string; transaction_id: string; event: CalendarEvent }[],
+  /** The next create's operation id counter. */
+  nextEventCreate: 1,
   /** Each account's contact index, ranked, as `contact.search` rows. */
   contacts: clone(fixtures.contacts),
   /** The rebuilds `contact_rebuild` started and no test settled yet, oldest first. */
@@ -515,6 +520,8 @@ export function resetMock(): void {
   mock.nextRsvp = 1;
   mock.invitesSent = [];
   mock.nextInvite = 1;
+  mock.eventCreates = [];
+  mock.nextEventCreate = 1;
   mock.contacts = clone(fixtures.contacts);
   mock.rebuilds = [];
   mock.nextRebuild = 1;
@@ -607,6 +614,32 @@ export function settleInvite(opts: { fail?: boolean; refused?: number } = {}): s
       sent_copy: "filed",
       settle_error: null,
     },
+  });
+  return run.operation_id;
+}
+
+/**
+ * fixture.rs's `event.create` end: the oldest create not settled yet joins
+ * the server calendar with `calendar.changed` and settles an
+ * `EventWriteResult`, or with `fail` fails with the server's refusal.
+ */
+export function settleEventCreate(opts: { fail?: boolean } = {}): string {
+  const run = mock.eventCreates.shift();
+  if (!run) throw new Error("no create is waiting to settle");
+  if (opts.fail) {
+    emitEnvelope("operation.finished", {
+      operation_id: run.operation_id,
+      state: "failed",
+      error: { code: -32603, message: "Graph refused the new event: HTTP 503" },
+    });
+    return run.operation_id;
+  }
+  if (!mock.events.some((e) => e.account === run.account && e.transaction_id === run.transaction_id)) mock.events.push(run.event);
+  emitEnvelope("calendar.changed", { account: run.account });
+  emitEnvelope("operation.finished", {
+    operation_id: run.operation_id,
+    state: "succeeded",
+    result: { account: run.account, event: run.event, transaction_id: run.transaction_id, invited: run.event.attendees.map((a) => a.email) },
   });
   return run.operation_id;
 }
@@ -1962,7 +1995,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "operation_cancel": {
       // Every operation the mock keeps running until a test settles it.
       const id = String(args.operation_id);
-      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent];
+      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent, mock.eventCreates];
       const list = runs.find((l) => l.some((r) => r.operation_id === id));
       if (!list) return "already_settled";
       list.splice(
@@ -2095,6 +2128,49 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const operation_id = `fixture-respond-${mock.nextRsvp++}`;
       mock.rsvps.push({ operation_id, account, event, response, comment, send_response: sendResponse });
       return { operation_id };
+    }
+    case "event_create": {
+      const params = args.params as EventCreateParams;
+      const account = params.account;
+      knownAccount(cmd, account);
+      const refuse = (message: string) => ({ kind: "protocol", code: -32602, message });
+      const e = params.event;
+      if (!e.summary.trim()) throw refuse("An event needs a summary");
+      const calendar = mock.calendars.find(
+        (c) => c.account === account && c.features.includes("write") && (params.calendar ? c.id === params.calendar : c.is_default),
+      );
+      if (!calendar) throw refuse(`${account} has no calendar ${params.calendar ?? "by default"} that takes new events`);
+      if (!calendar.can_edit) throw refuse(`The calendar ${calendar.name} of ${account} is read-only`);
+      const n = mock.nextEventCreate++;
+      const operation_id = `fixture-create-${n}`;
+      const transaction_id = params.transaction_id ?? `mp-fixture-${n}`;
+      const time: CalendarEvent["time"] = e.all_day
+        ? { kind: "all-day", start: e.start, end: e.end ?? e.start }
+        : { kind: "timed", start: new Date(e.start).toISOString(), end: new Date(e.end ?? e.start).toISOString(), zone: e.zone ?? "UTC" };
+      const event: CalendarEvent = {
+        account,
+        calendar: calendar.id,
+        id: `AAMk-created-${n}`,
+        uid: `created-${n}@fixture.example.com`,
+        kind: "single",
+        summary: e.summary.trim(),
+        time,
+        location: e.location,
+        body: e.body,
+        attendees: e.attendees.map((a) => ({ email: a.email, role: a.role ?? "required", status: "needs-action" })),
+        own_response: "organizer",
+        reminder: e.reminder === null ? undefined : (e.reminder ?? 15),
+        is_online_meeting: e.online_meeting ?? false,
+        sensitivity: "normal",
+        show_as: "busy",
+        cancelled: false,
+        is_organizer: true,
+        allow_new_time_proposals: true,
+        response_requested: true,
+        transaction_id,
+      };
+      mock.eventCreates.push({ operation_id, account, transaction_id, event });
+      return { operation_id, transaction_id };
     }
     case "invite_source_open": {
       knownAccount(cmd, account);

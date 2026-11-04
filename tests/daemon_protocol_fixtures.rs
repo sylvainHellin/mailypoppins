@@ -128,6 +128,14 @@ const CALENDAR_FIXTURES: &[&str] = &[
     "notification.calendar_changed.json",
 ];
 
+/// The fixtures PERSO-255 adds for the calendar writes: `event.create` and
+/// the operation id and transaction id it answers with at once.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const CALENDAR_WRITE_FIXTURES: &[&str] =
+    &["event.create.request.json", "event.create.response.json"];
+
 /// The fixtures PERSO-255 adds for the calendar reminders: a pair per
 /// method, one `calendar.reminder` and one `calendar.reminders_changed`.
 ///
@@ -212,6 +220,7 @@ fn every_required_fixture_is_committed() {
         .chain(LIST_STREAM_FIXTURES)
         .chain(CONVERSATION_FIXTURES)
         .chain(CALENDAR_FIXTURES)
+        .chain(CALENDAR_WRITE_FIXTURES)
         .chain(REMINDER_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))

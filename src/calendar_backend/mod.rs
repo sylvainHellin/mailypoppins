@@ -314,8 +314,8 @@ pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
     if kind == CalendarBackendKind::None {
         return Ok(BackendChoice::None);
     }
-    if let Some(fake) = FakeCalendarBackend::from_env() {
-        return Ok(BackendChoice::Fake(fake.serving(&account.name)));
+    if let Some(fake) = FakeCalendarBackend::armed(&account.name) {
+        return Ok(BackendChoice::Fake(fake));
     }
     match kind {
         CalendarBackendKind::Graph => Ok(BackendChoice::Graph),
@@ -352,6 +352,18 @@ pub fn features(account: &AccountConfig) -> Vec<CalendarFeature> {
         Ok(BackendChoice::Graph) => graph::FEATURES.to_vec(),
         Ok(BackendChoice::None) | Err(_) => Vec::new(),
     }
+}
+
+/// What `calendar` of `account` lets a client do: the backend's
+/// [`features`], less [`CalendarFeature::OnlineMeeting`] on a calendar that
+/// offers no Teams meeting ([`Calendar::offers_teams`]), since Graph drops a
+/// meeting request there without a word.
+pub fn calendar_features(account: &AccountConfig, calendar: &Calendar) -> Vec<CalendarFeature> {
+    let mut features = features(account);
+    if !calendar.offers_teams() {
+        features.retain(|feature| *feature != CalendarFeature::OnlineMeeting);
+    }
+    features
 }
 
 /// The scope check a write runs before an operation starts: the fake's

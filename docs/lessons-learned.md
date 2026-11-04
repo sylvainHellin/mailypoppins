@@ -3390,3 +3390,31 @@ Each pattern type reads only the fields it names, and a zero or year one reads a
 A delta sync revisits only the events that changed on the server, so after a build starts reading a new field the rows an older build wrote keep that field's default until their event changes.
 Live, a series occurrence read as a single event and a Teams meeting had no Teams flag until `mp calendar rebuild`.
 Bump `store::calendar::MODEL_VERSION` in the same change as the read: a store stamped with another version drops its sync tokens on open, and the next sync of each calendar is a baseline.
+
+## Graph answers a repeated transactionId by body: same event, or a 400 naming it (2026-11-04, PERSO-255)
+
+Probed live on EVOQS: a second POST with the same `transactionId` and an identical body returns 201 with the existing event, and only one event exists.
+A second POST whose body differs gets 400 `ErrorDuplicateTransactionId`, with the existing immutable id under `@event.existingEventId`; after a delete the same id creates a new event.
+The create adopts that id and PATCHes it, and a PATCH replaces each field it carries and keeps each it omits, so the replay sends empty values (`displayName ""`, an empty body, `attendees []`, `isReminderOn false`) to clear what the retry left out.
+A reminder left to the mailbox default cannot be put back by a PATCH and keeps its old value.
+
+## An all-day Graph event sent as UTC midnights spills into the next local day (2026-11-04, PERSO-255)
+
+Graph keeps an all-day event's dates whatever zone it was sent in, but stores the midnights as instants, so midnights sent as UTC are 01:00 to 01:00 for a Berlin user and a calendarView or free/busy range sees them on the next day.
+The write sends the midnights under the Windows name of the event's zone, the host's when none is named; the token has no `MailboxSettings.Read`, so the mailbox's own zone is not read.
+
+## The calendar fake must outlive one call for a write to survive a poll (2026-11-04, PERSO-255)
+
+The daemon used to rebuild the fake backend from `MAILYPOPPINS_DAEMON_FAKE_CALENDAR` at every call, so an event created in one operation vanished at the next poll.
+It keeps one fake per spec and account for the life of the process (`FakeCalendarBackend::armed`).
+
+## cargo insta accept without --workspace leaves the TUI crate's snapshots pending (2026-11-04, PERSO-255)
+
+`cargo insta accept` run at the root accepts only the root crate's snapshots; the TUI golden frames live in `clients/tui` and need `--workspace`.
+ts-rs also warns "failed to parse serde attribute" on `#[serde(deserialize_with = ...)]`; `#[serde(with = "module")]` plus `#[ts(as = "...")]` keeps the generated type right.
+
+## Graph drops isOnlineMeeting on a calendar that allows no online-meeting provider (2026-11-04, PERSO-255)
+
+Graph silently ignores `isOnlineMeeting: true` on a calendar whose `allowedOnlineMeetingProviders` is empty (a mailbox with no Teams licence, as EVOQS): the create succeeds with `isOnlineMeeting: false` and `onlineMeetingProvider: "unknown"`.
+The online-meeting capability is therefore read per calendar from that list, and `calendar.list` reports `online-meeting` only on a calendar that names `teamsForBusiness`.
+The calendar list is read in full at every sync, so a new `Calendar` field needs a store column but no `MODEL_VERSION` bump.

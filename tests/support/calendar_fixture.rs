@@ -88,6 +88,7 @@ pub fn calendar(id: &str, name: &str, is_default: bool) -> Calendar {
         is_default,
         can_edit: true,
         visible: true,
+        online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
     }
 }
 
@@ -124,8 +125,15 @@ pub fn event(id: &str, calendar: &str, uid: &str, summary: &str, time: EventTime
     }
 }
 
-/// The fake's server: a default and a second calendar, a meeting the server
-/// account was also invited to by mail, and an all-day holiday.
+/// Where the fake whose answer log is `log` records its writes.
+pub fn write_log(log: &Path) -> std::path::PathBuf {
+    log.with_extension("writes.jsonl")
+}
+
+/// The fake's server: a default calendar that offers Teams and a second one
+/// that offers no online meeting (as a mailbox without a Teams licence), a
+/// meeting the server account was also invited to by mail, and an all-day
+/// holiday.
 pub fn fake_spec(log: &Path, missing_scope: bool) -> String {
     fake_spec_with(log, missing_scope, Vec::new())
 }
@@ -160,10 +168,13 @@ pub fn fake_spec_with(log: &Path, missing_scope: bool, extra: Vec<Event>) -> Str
         EventTime::all_day((day(5)).date_naive(), (day(7)).date_naive()).unwrap(),
     );
     let events = [vec![meeting, holiday], extra].concat();
+    let mut second = calendar("cal-second", "Holidays", false);
+    second.online_meeting_providers = Vec::new();
     json!({
-        "calendars": [calendar("cal-main", "Calendar", true), calendar("cal-second", "Holidays", false)],
+        "calendars": [calendar("cal-main", "Calendar", true), second],
         "events": events,
         "log": log.to_string_lossy(),
+        "write_log": write_log(log).to_string_lossy(),
         "missing_scope": missing_scope,
         "message_events": {INVITE_GRAPH_ID: "ev-meeting"},
         "features": FAKE_FEATURES,
@@ -199,7 +210,7 @@ fn request_ics_with(
 }
 
 /// What the fake claims to serve, which `calendar.list` reports on its
-/// calendars.
+/// calendars that offer Teams; the others lack `online-meeting`.
 pub const FAKE_FEATURES: [&str; 2] = ["write", "online-meeting"];
 
 /// The weekly series of [`series_occurrences`] as the fake's baseline

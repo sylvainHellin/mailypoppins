@@ -245,6 +245,27 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
+        BgResult::EventCreated {
+            operation_id,
+            result,
+        } => {
+            let form = app.calendar_view.pending_forms.remove(&operation_id);
+            match (result, form) {
+                (Ok(line), _) => {
+                    app.set_status_level(line, StatusLevel::Success);
+                    app.rebuild_calendar_if_loaded();
+                }
+                (Err(e), Some(form)) => app.reopen_event_form(
+                    form,
+                    format!("The event was not created: {e}; Enter retries it"),
+                ),
+                (Err(e), None) => app.set_status_level(
+                    format!("The event was not created: {e}"),
+                    StatusLevel::Error,
+                ),
+            }
+        }
+
         BgResult::SendApproved {
             account_index,
             result,

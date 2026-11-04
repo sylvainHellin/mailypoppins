@@ -1168,6 +1168,11 @@ pub enum BgResult {
         account_index: usize,
         result: Result<String, String>,
     },
+    /// `event.create` settled (PERSO-255): the status line, or why it failed.
+    EventCreated {
+        operation_id: String,
+        result: Result<String, String>,
+    },
     SendApproved {
         account_index: usize,
         result: Result<String, String>,
@@ -1885,6 +1890,12 @@ pub struct CalendarView {
     pub list_index: usize,
     /// Why the last `calendar.view` failed, shown in place of the events.
     pub error: Option<String>,
+    /// The event forms whose `event.create` is running, by operation id,
+    /// kept so a failure reopens the form with what was typed.
+    pub pending_forms: std::collections::HashMap<String, super::EventForm>,
+    /// A form whose create failed while another overlay was up, or whose
+    /// daemon restarted under it: `n` reopens it.
+    pub kept_form: Option<super::EventForm>,
 }
 
 impl Default for CalendarView {
@@ -1902,6 +1913,8 @@ impl Default for CalendarView {
             entries: Vec::new(),
             list_index: 0,
             error: None,
+            pending_forms: std::collections::HashMap::new(),
+            kept_form: None,
         }
     }
 }
@@ -2099,6 +2112,11 @@ pub enum Action {
     /// `path` signature is edited in place, an inline `text` one on a temp copy
     /// applied to this draft only.
     ComposeEditSignature,
+    /// Create the event the event form holds (PERSO-255) through
+    /// `event.create`.
+    CreateEvent(Box<super::EventForm>),
+    /// Edit the open event form's description in `$EDITOR` (PERSO-255).
+    EditEventDescription,
     /// Answer an invitation (#0029, PERSO-200) through `event.respond`: the
     /// server event on an account with a calendar backend, else the
     /// invitation mail's iMIP reply.
@@ -2204,6 +2222,8 @@ impl Action {
             // `edit_compose_signature` / `edit_signature_file`.
             Action::ComposeEditSignature => true,
             Action::EditSignatureFile { .. } => true,
+            // `edit_event_description`.
+            Action::EditEventDescription => true,
             // `submit_compose_wizard` edits the new or forwarded draft.
             Action::ComposeWizardSubmit => true,
             // `handle_search_result_action` -> `open_readonly_view`.
@@ -2253,6 +2273,7 @@ impl Action {
             | Action::OpenComposeWizard(_)
             | Action::ComposeWizardCancel
             | Action::Rsvp { .. }
+            | Action::CreateEvent(_)
             | Action::ComposeToContact { .. }
             | Action::CopyContactEmail { .. }
             | Action::LoadContacts { .. }
@@ -2546,6 +2567,8 @@ pub enum Overlay {
     Signatures(SignaturesOverlay),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
+    /// The event form (`n` in the Calendar view, PERSO-255).
+    EventForm(Box<super::EventForm>),
     /// The calendars shown or hidden in the Calendar view (`c`, PERSO-200).
     Calendars(CalendarsOverlay),
     /// One event of the Calendar view in full (`Enter`, PERSO-200).
@@ -2942,6 +2965,7 @@ mod tests {
             Action::EditSignatureFile {
                 name: "work".to_string(),
             },
+            Action::EditEventDescription,
             Action::ComposeWizardSubmit,
             Action::SearchResultOpen,
             Action::SearchResultReply(false),

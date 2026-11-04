@@ -22,20 +22,28 @@
 //! }
 //! ```
 //!
+//! A spec calendar offers Teams when its `online_meeting_providers` names
+//! `teams-for-business`, as the test fixtures' calendars do unless a test
+//! clears it; `calendar.list` then reports the spec's `online-meeting`
+//! feature on it ([`super::calendar_features`]).
+//!
 //! The writes change the fake's events the way a server does: a create adds
 //! one (or answers the one an earlier create with the same transaction id
-//! made), an update patches it, a cancel or a delete removes it, and the next
-//! incremental sync reports each change.
+//! made, patched with the create's fields when they changed, as the Graph
+//! backend does with Graph's answer), an update patches it, a cancel or a
+//! delete removes it, and the next incremental sync reports each change.
 //!
 //! The daemon serves every account whose `calendar_backend` is not `none`
-//! from the fake, each through [`FakeCalendarBackend::serving`], which
-//! rewrites the calendars' and the events' `account` to that account's name.
+//! from the fake, through [`FakeCalendarBackend::armed`]: one server per
+//! account, built from the spec once and kept for the life of the process,
+//! so what a write changed is still there at the next poll. Its calendars'
+//! and events' `account` is that account's name ([`FakeCalendarBackend::serving`]).
 
 use std::collections::HashMap;
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::anyhow;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -77,9 +85,10 @@ struct FakeState {
     /// Bumped by [`FakeCalendarBackend::expire_tokens`]; a token of an
     /// earlier epoch is refused, as a server's expired sync state.
     epoch: u64,
-    /// The event each create's transaction id made, as Graph keeps the
-    /// `transactionId` to answer a repeated create with the same event.
-    transactions: HashMap<String, String>,
+    /// The event each create's transaction id made and the input it was
+    /// last written with, as Graph keeps the `transactionId` to answer a
+    /// repeated create with the same event.
+    transactions: HashMap<String, (String, EventInput)>,
     /// How many events the creates made, for their ids.
     created: u64,
 }
@@ -222,9 +231,33 @@ impl FakeCalendarBackend {
         self.state().events.clone()
     }
 
-    /// The fake this process runs under, or `None` when the hook is unset or
-    /// unparseable (an environment variable a process did not understand never
-    /// stops it, the rule of every daemon hook).
+    /// The fake serving `account` in this process, or `None` when the hook
+    /// is unset or unparseable (an environment variable a process did not
+    /// understand never stops it, the rule of every daemon hook).
+    ///
+    /// The first call for an account builds its server from the spec
+    /// ([`Self::from_env`], [`Self::serving`]); every later one answers a
+    /// clone of it, which shares its events, so a write survives into the
+    /// next sync as it would on a real server.
+    pub fn armed(account: &str) -> Option<Self> {
+        static SERVERS: OnceLock<Mutex<HashMap<(String, String), FakeCalendarBackend>>> =
+            OnceLock::new();
+        let raw = std::env::var(FAKE_CALENDAR_ENV).ok()?;
+        let mut servers = SERVERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (raw, account.to_string());
+        if let Some(fake) = servers.get(&key) {
+            return Some(fake.clone());
+        }
+        let fake = Self::from_env()?.serving(account);
+        servers.insert(key, fake.clone());
+        Some(fake)
+    }
+
+    /// A fresh fake from the spec this process runs under, or `None` when
+    /// the hook is unset or unparseable.
     pub fn from_env() -> Option<Self> {
         let raw = std::env::var(FAKE_CALENDAR_ENV).ok()?;
         if raw.trim().is_empty() {
@@ -321,6 +354,7 @@ impl FakeCalendarBackend {
             is_default,
             can_edit: true,
             visible: true,
+            online_meeting_providers: vec![OnlineMeetingProvider::TeamsForBusiness],
         };
         let base = |id: &str, calendar: &str, summary: &str, time: EventTime| Event {
             account: "evoqs".into(),
@@ -653,7 +687,8 @@ impl CalendarBackend for FakeCalendarBackend {
     }
 
     /// A read-only calendar refuses the create, as a server does; a create
-    /// whose transaction id made an event already answers with that event.
+    /// whose transaction id made an event already answers with that event,
+    /// patched with this create's fields when they changed since.
     async fn create_event(
         &self,
         calendar: &Calendar,
@@ -669,17 +704,30 @@ impl CalendarBackend for FakeCalendarBackend {
             let earlier = state
                 .transactions
                 .get(transaction_id)
-                .and_then(|id| state.events.iter().find(|e| &e.id == id))
-                .cloned();
+                .and_then(|(id, last)| {
+                    let event = state.events.iter().find(|e| &e.id == id)?;
+                    Some((event.clone(), last == input))
+                });
             match earlier {
-                Some(event) => event,
+                Some((event, true)) => event,
+                Some((mut event, false)) => {
+                    apply_patch(&mut event, &input.as_patch());
+                    state.events.retain(|known| known.id != event.id);
+                    state.changes.push(event.id.clone());
+                    state.events.push(event.clone());
+                    state.transactions.insert(
+                        transaction_id.to_string(),
+                        (event.id.clone(), input.clone()),
+                    );
+                    event
+                }
                 None => {
                     state.created += 1;
                     let id = format!("fake-created-{}", state.created);
                     let event = created_event(calendar, &id, input, transaction_id);
                     state
                         .transactions
-                        .insert(transaction_id.to_string(), id.clone());
+                        .insert(transaction_id.to_string(), (id.clone(), input.clone()));
                     state.changes.push(id);
                     state.events.push(event.clone());
                     event
@@ -972,6 +1020,36 @@ mod tests {
             .await
             .is_err());
         assert_eq!(fake.writes().len(), 2);
+    }
+
+    /// A create replayed with its transaction id after its fields changed
+    /// lands them on the event the first one made, as the Graph backend does
+    /// with Graph's `ErrorDuplicateTransactionId`, and the next sync reports
+    /// the change; it makes no second event.
+    #[tokio::test]
+    async fn a_changed_replay_of_a_transaction_patches_its_event() {
+        let fake = FakeCalendarBackend::canned();
+        let main = fake.list_calendars().await.unwrap().remove(0);
+        let first = written(fake.create_event(&main, &input(), "tx-1").await.unwrap());
+        let baseline = fake.sync_window(&main, november(), None).await.unwrap();
+
+        let mut changed = input();
+        changed.summary = "Planning, moved".into();
+        changed.location = Some("Room 2".into());
+        let again = written(fake.create_event(&main, &changed, "tx-1").await.unwrap());
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.summary, "Planning, moved");
+        assert_eq!(again.location.as_deref(), Some("Room 2"));
+        assert_eq!(again.transaction_id.as_deref(), Some("tx-1"));
+        assert_eq!(fake.events().len(), 4);
+
+        let delta = fake
+            .sync_window(&main, november(), baseline.token)
+            .await
+            .unwrap();
+        assert_eq!(delta.upserts, std::slice::from_ref(&again));
+        let same = written(fake.create_event(&main, &changed, "tx-1").await.unwrap());
+        assert_eq!(same, again);
     }
 
     /// Turning Teams on provisions a link, and turning it off again leaves

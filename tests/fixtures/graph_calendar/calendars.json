@@ -13,6 +13,8 @@
       "canEdit": true,
       "isRemovable": false,
       "isTallyingResponses": true,
+      "allowedOnlineMeetingProviders": ["teamsForBusiness"],
+      "defaultOnlineMeetingProvider": "teamsForBusiness",
       "owner": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" }
     },
     {
@@ -26,6 +28,8 @@
       "canViewPrivateItems": true,
       "canEdit": false,
       "isRemovable": true,
+      "allowedOnlineMeetingProviders": [],
+      "defaultOnlineMeetingProvider": "unknown",
       "owner": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" }
     },
     {
@@ -33,6 +37,7 @@
       "name": "Team",
       "color": "auto",
       "hexColor": "#FF8C00",
+      "allowedOnlineMeetingProviders": ["unknown", "skypeForConsumer"],
       "isDefaultCalendar": false,
       "changeKey": "ck-team",
       "canShare": true,
