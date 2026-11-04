@@ -226,6 +226,7 @@ describe("an invitation on an account with a calendar backend", () => {
     await user.keyboard("tv");
     const dialog = await screen.findByRole("dialog", { name: "RSVP" });
     expect(dialog).toHaveTextContent("Dentist");
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
     await user.keyboard("jj{Tab}");
     await waitFor(() => expect(document.activeElement).toHaveAttribute("aria-label", "Comment"));
     await user.keyboard("Running late");
