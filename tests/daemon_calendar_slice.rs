@@ -819,6 +819,61 @@ async fn event_create_writes_through_and_a_retry_creates_nothing() {
     assert!(announced, "a client was told the calendar changed");
 }
 
+/// A retry whose fields changed since the first try made the event (its
+/// settle lost, the event synced into the cache) patches that event with
+/// the retry's fields instead of settling with the old ones: the summary
+/// changes, and the location and the room the retry dropped are cleared.
+#[tokio::test]
+async fn event_create_retried_with_changes_patches_the_event_it_made() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let first = run_operation(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": meeting_input(), "transaction_id": "tx-edited"}),
+    )
+    .await;
+    let id = succeeded(&first)["event"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut edited = meeting_input();
+    edited["summary"] = json!("Planning, moved");
+    edited.as_object_mut().unwrap().remove("location");
+    edited["attendees"] = json!([{"email": "ada@example.com", "name": "Ada Lovelace"}]);
+    let retry = run_operation(
+        &mut conn,
+        "event.create",
+        json!({"account": SERVER, "event": edited, "transaction_id": "tx-edited"}),
+    )
+    .await;
+    let event = &succeeded(&retry)["event"];
+    assert_eq!(event["id"], id.as_str());
+    assert_eq!(event["summary"], "Planning, moved");
+    assert!(event.get("location").is_none(), "{event}");
+    assert_eq!(event["attendees"].as_array().unwrap().len(), 1, "{event}");
+
+    let recorded = writes(&slice);
+    let [RecordedWrite::Create { .. }, RecordedWrite::Update { event, patch, .. }] =
+        recorded.as_slice()
+    else {
+        panic!("a create then a patch: {recorded:?}");
+    };
+    assert_eq!(event, &id);
+    assert_eq!(patch.summary.as_deref(), Some("Planning, moved"));
+    assert_eq!(patch.location, Some(None));
+
+    let got = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": id}),
+    )
+    .await;
+    assert_eq!(got["event"]["summary"], "Planning, moved");
+}
+
 /// An all-day create of two days is the model's all-day range, the end the
 /// day after the last, and lands in the calendar it names.
 #[tokio::test]

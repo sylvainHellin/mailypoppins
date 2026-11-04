@@ -5,7 +5,7 @@
 //!   repeat of the same body with the event the first one made, and a repeat
 //!   whose body changed with HTTP 400 `ErrorDuplicateTransactionId` naming
 //!   that event in `@event.existingEventId`, which the create adopts and
-//!   patches with its own fields.
+//!   patches to match its own fields.
 //! - Update: `PATCH /me/events/{id}` with the fields the patch names, on an
 //!   occurrence or a series master alike.
 //! - Cancel: `POST /me/events/{id}/cancel`, with the comment for the

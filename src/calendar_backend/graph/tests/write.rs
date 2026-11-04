@@ -351,8 +351,9 @@ async fn an_update_patches_only_the_fields_it_names() {
 
 /// A create replayed with its transaction id after its body changed meets
 /// Graph's `ErrorDuplicateTransactionId`: the create adopts the event the
-/// first one made, patches it with every field it sets, and answers it as
-/// the created event. A 400 of any other code stays a refusal.
+/// first one made, patches it with every field it sets and the server's
+/// defaults for the ones it leaves out, and answers it as the created event.
+/// A 400 of any other code stays a refusal.
 #[tokio::test]
 async fn a_changed_replay_of_a_transaction_patches_the_event_it_made() {
     let duplicate = json!({"error": {
@@ -392,7 +393,16 @@ async fn a_changed_replay_of_a_transaction_patches_the_event_it_made() {
     assert_eq!(sent[1].method, "PATCH");
     assert_eq!(sent[1].url, format!("{BASE}/me/events/AAMk%2Ffirst="));
     let mut expected = sent[0].body.clone().unwrap();
-    expected.as_object_mut().unwrap().remove("transactionId");
+    let fields = expected.as_object_mut().unwrap();
+    fields.remove("transactionId");
+    for (key, value) in [
+        ("body", json!({"contentType": "text", "content": ""})),
+        ("showAs", json!("busy")),
+        ("sensitivity", json!("normal")),
+        ("allowNewTimeProposals", json!(true)),
+    ] {
+        fields.insert(key.into(), value);
+    }
     assert_eq!(sent[1].body, Some(expected));
     assert_eq!(
         sent[1].body.as_ref().unwrap()["location"],
@@ -407,6 +417,39 @@ async fn a_changed_replay_of_a_transaction_patches_the_event_it_made() {
         err.to_string(),
         "Graph refused the new event: HTTP 400: ErrorInvalidRequest"
     );
+}
+
+/// The patch a replay sends clears what the replay left out, in Graph's
+/// terms: an empty location display name, an empty plain-text body, an empty
+/// attendee list (which uninvites everyone), the reminder off for a replay
+/// with none, and the server's defaults for show-as, sensitivity and new
+/// time proposals. A reminder left to the mailbox default and an online
+/// meeting the replay does not ask for stay off the patch.
+#[test]
+fn a_replay_patch_clears_what_the_replay_left_out() {
+    let input = EventInput::new("Project review", berlin(9, 10));
+    let mut sent = super::super::write::patch_body(&input.as_patch());
+    let fields = sent.as_object_mut().unwrap();
+    for key in ["subject", "start", "end", "isAllDay"] {
+        assert!(fields.remove(key).is_some(), "{key}");
+    }
+    assert_eq!(
+        sent,
+        json!({
+            "location": {"displayName": ""},
+            "body": {"contentType": "text", "content": ""},
+            "attendees": [],
+            "showAs": "busy",
+            "sensitivity": "normal",
+            "allowNewTimeProposals": true,
+        })
+    );
+
+    let mut no_reminder = input;
+    no_reminder.reminder = Some(None);
+    let sent = super::super::write::patch_body(&no_reminder.as_patch());
+    assert_eq!(sent["isReminderOn"], json!(false));
+    assert!(sent.get("reminderMinutesBeforeStart").is_none());
 }
 
 fn exception_answer() -> String {

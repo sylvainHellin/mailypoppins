@@ -17,11 +17,16 @@
 //! field in Outlook survives: an absent key stays, a present one changes, and
 //! for the fields that can be emptied (location, description, reminder) a
 //! JSON `null` clears.
+//!
+//! A create replayed with its transaction id lands on the event the first
+//! try made: [`EventInput::matches`] tells whether that event already carries
+//! the replay's fields, and [`EventInput::as_patch`] is the change that makes
+//! it carry them when it does not.
 
 use chrono_tz::Tz;
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
-use crate::calendar_model::{parse_zone, AttendeeRole, EventTime, Sensitivity, ShowAs};
+use crate::calendar_model::{parse_zone, AttendeeRole, Event, EventTime, Sensitivity, ShowAs};
 use crate::invite::{resolve_span_in, EventSpan};
 use mp_protocol::calendar::EventInputParams;
 
@@ -95,23 +100,97 @@ impl EventInput {
         }
     }
 
-    /// The patch that sets every field this input sets and leaves the rest:
-    /// what lands a create's fields on an event that already exists (a
-    /// create replayed with its transaction id after its body changed).
+    /// The patch that makes an event that already exists match this input:
+    /// what lands a create's fields on the event a first try with the same
+    /// transaction id made.
+    ///
+    /// A field the input leaves out is cleared (location, description,
+    /// attendees) or set to the server's default (busy, normal, proposals
+    /// allowed), so a field the replay removed does not keep its old value.
+    /// Two stay as they are, since a patch cannot say them: a reminder left
+    /// to the mailbox default, and an online meeting, whose link no server
+    /// takes back.
     pub fn as_patch(&self) -> EventPatch {
         EventPatch {
             summary: Some(self.summary.clone()),
             time: Some(self.time.clone()),
             zone: self.zone.clone(),
-            location: self.location.clone().map(Some),
-            body: self.body.clone().map(Some),
-            attendees: (!self.attendees.is_empty()).then(|| self.attendees.clone()),
+            location: Some(self.location.clone()),
+            body: Some(self.body.clone()),
+            attendees: Some(self.attendees.clone()),
             online_meeting: self.online_meeting.then_some(true),
             reminder: self.reminder,
-            show_as: self.show_as,
-            sensitivity: self.sensitivity,
-            allow_new_time_proposals: self.allow_new_time_proposals,
+            show_as: Some(self.show_as.unwrap_or(ShowAs::Busy)),
+            sensitivity: Some(self.sensitivity.unwrap_or(Sensitivity::Normal)),
+            allow_new_time_proposals: Some(self.allow_new_time_proposals.unwrap_or(true)),
         }
+    }
+
+    /// Whether `event` already carries what this input sets: a retried
+    /// create settles with the event its transaction id made when it does,
+    /// and patches it with [`EventInput::as_patch`] when it does not.
+    ///
+    /// A field the input leaves to the server matches the server's default
+    /// (busy, normal, proposals allowed), and a mailbox-default reminder any
+    /// reminder. Timed zones match by their Windows name, the one Graph
+    /// keeps; an all-day event's dates are compared and its zone is not, since
+    /// the cached event keeps none. Text matches with its outer whitespace
+    /// trimmed and an empty text as none, and the description with every run
+    /// of whitespace as one space, since the server's copy went through HTML.
+    /// Attendees match by address, in any order, and by role.
+    pub fn matches(&self, event: &Event) -> bool {
+        fn text(value: Option<&str>) -> Option<&str> {
+            value.map(str::trim).filter(|v| !v.is_empty())
+        }
+        let words = |value: Option<&str>| {
+            value
+                .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|v| !v.is_empty())
+        };
+        let attendees = |list: &mut dyn Iterator<Item = (&str, AttendeeRole)>| {
+            let mut keyed: Vec<(String, AttendeeRole)> = list
+                .map(|(email, role)| (email.trim().to_ascii_lowercase(), role))
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            keyed
+        };
+        let wanted = attendees(&mut self.attendees.iter().map(|a| (a.email.as_str(), a.role)));
+        let held = attendees(&mut event.attendees.iter().map(|a| (a.email.as_str(), a.role)));
+        self.summary.trim() == event.summary.trim()
+            && same_time(&self.time, &event.time)
+            && text(self.location.as_deref()) == text(event.location.as_deref())
+            && words(self.body.as_deref()) == words(event.body.as_deref())
+            && wanted == held
+            && self.online_meeting == event.is_online_meeting
+            && self
+                .reminder
+                .is_none_or(|reminder| reminder == event.reminder)
+            && self.show_as.unwrap_or(ShowAs::Busy) == event.show_as
+            && self.sensitivity.unwrap_or(Sensitivity::Normal) == event.sensitivity
+            && self.allow_new_time_proposals.unwrap_or(true) == event.allow_new_time_proposals
+    }
+}
+
+/// Whether two times are the same span: the same instants in zones of one
+/// Windows name, or the same dates.
+fn same_time(wanted: &EventTime, held: &EventTime) -> bool {
+    match (wanted, held) {
+        (
+            EventTime::Timed { start, end, zone },
+            EventTime::Timed {
+                start: held_start,
+                end: held_end,
+                zone: held_zone,
+            },
+        ) => {
+            let windows = crate::windows_zones::iana_to_windows_zone;
+            start == held_start
+                && end == held_end
+                && (zone == held_zone
+                    || windows(zone).is_some_and(|name| windows(held_zone) == Some(name)))
+        }
+        (EventTime::AllDay { .. }, EventTime::AllDay { .. }) => wanted == held,
+        _ => false,
     }
 }
 
@@ -481,20 +560,128 @@ mod tests {
         );
     }
 
-    /// The patch an input stands for sets what the input sets and leaves
-    /// the rest, the defaults included.
+    /// The patch an input stands for sets what the input sets, clears what
+    /// it leaves out and puts the server's defaults back, so a replay that
+    /// removed a field removes it on the event; a mailbox-default reminder
+    /// and a meeting the input does not ask for stay off the patch.
     #[test]
-    fn an_input_as_a_patch_sets_only_its_fields() {
+    fn an_input_as_a_patch_makes_the_event_match_it() {
         let mut input = EventInput::new("Review", time());
         input.location = Some("Room 1".into());
         let patch = input.as_patch();
         assert_eq!(patch.summary.as_deref(), Some("Review"));
         assert_eq!(patch.time, Some(time()));
         assert_eq!(patch.location, Some(Some("Room 1".into())));
-        assert_eq!(patch.body, None);
+        assert_eq!(patch.body, Some(None));
+        assert_eq!(patch.attendees, Some(Vec::new()));
+        assert_eq!(patch.show_as, Some(ShowAs::Busy));
+        assert_eq!(patch.sensitivity, Some(Sensitivity::Normal));
+        assert_eq!(patch.allow_new_time_proposals, Some(true));
         assert_eq!(patch.reminder, None);
-        assert_eq!(patch.attendees, None);
         assert_eq!(patch.online_meeting, None);
+
+        input.reminder = Some(None);
+        input.online_meeting = true;
+        let patch = input.as_patch();
+        assert_eq!(patch.reminder, Some(None));
+        assert_eq!(patch.online_meeting, Some(true));
+    }
+
+    /// The event a create made, in the server's terms.
+    fn made(input: &EventInput) -> Event {
+        let mut event: Event = serde_json::from_value(json!({
+            "account": "evoqs",
+            "calendar": "cal",
+            "id": "ev-1",
+            "uid": "UID-1",
+            "summary": input.summary,
+            "time": input.time,
+            "own_response": "organizer",
+            "sensitivity": "normal",
+            "show_as": "busy",
+            "reminder": 15,
+        }))
+        .unwrap();
+        event.location = input.location.clone();
+        event.body = input.body.clone();
+        event.attendees = input
+            .attendees
+            .iter()
+            .map(|a| crate::calendar_model::Attendee {
+                name: None,
+                email: a.email.clone(),
+                role: a.role,
+                status: crate::calendar_model::ResponseStatus::NeedsAction,
+                proposed_time: None,
+            })
+            .collect();
+        event
+    }
+
+    /// The event a create made matches the create, its defaults (a reminder
+    /// left to the mailbox's matches the 15 minutes it got), a zone of the
+    /// same Windows name and a description whose lines the server
+    /// rewrapped included; each field a replay changed is a mismatch.
+    #[test]
+    fn an_input_matches_the_event_it_made_until_a_field_changes() {
+        let mut input = EventInput::new("Review", time());
+        input.location = Some("Room 1".into());
+        input.body = Some("Agenda:\nbudget".into());
+        input.attendees = vec![
+            AttendeeInput {
+                email: "ada@example.com".into(),
+                name: Some("Ada".into()),
+                role: AttendeeRole::Required,
+            },
+            AttendeeInput {
+                email: "room@example.com".into(),
+                name: None,
+                role: AttendeeRole::Resource,
+            },
+        ];
+        let mut event = made(&input);
+        assert!(input.matches(&event));
+        event.body = Some("Agenda:\r\n budget\n".into());
+        event.attendees.reverse();
+        event.attendees[0].email = "ROOM@example.com".into();
+        event.time = EventTime::timed(
+            Utc.with_ymd_and_hms(2026, 11, 3, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 11, 3, 10, 0, 0).unwrap(),
+            "Europe/Amsterdam",
+        )
+        .unwrap();
+        assert!(input.matches(&event), "the server's spellings match");
+
+        let changed: [&dyn Fn(&mut EventInput); 9] = [
+            &|i| i.summary = "Review, moved".into(),
+            &|i| {
+                i.time = EventTime::all_day(
+                    chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+                    chrono::NaiveDate::from_ymd_opt(2026, 11, 4).unwrap(),
+                )
+                .unwrap()
+            },
+            &|i| i.location = None,
+            &|i| i.body = None,
+            &|i| i.attendees[1].role = AttendeeRole::Optional,
+            &|i| i.attendees.truncate(1),
+            &|i| i.reminder = Some(Some(5)),
+            &|i| i.online_meeting = true,
+            &|i| i.show_as = Some(ShowAs::Free),
+        ];
+        for change in changed {
+            let mut replay = input.clone();
+            change(&mut replay);
+            assert!(!replay.matches(&event), "{replay:?} matched");
+        }
+        let mut other_zone = input.clone();
+        other_zone.time = EventTime::timed(
+            Utc.with_ymd_and_hms(2026, 11, 3, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 11, 3, 10, 0, 0).unwrap(),
+            "Europe/London",
+        )
+        .unwrap();
+        assert!(!other_zone.matches(&event));
     }
 
     fn value_with(input: &EventInput, key: &str, value: serde_json::Value) -> EventInput {

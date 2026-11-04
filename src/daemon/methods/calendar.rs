@@ -56,10 +56,12 @@
 //! the transaction id the create carries (the client's, or one it mints),
 //! so a client whose operation vanished retries with the same id and the
 //! server makes one event. The operation settles at once with an event the
-//! cache already holds under that transaction id; otherwise it creates the
-//! event, writes the server's answer into the cache under the account's
-//! calendar lock, syncs the account and announces `calendar.changed`. The
-//! cache is written only once the server answered.
+//! cache already holds under that transaction id when the event matches the
+//! input, and patches that event with the input's fields when the retry
+//! changed them; otherwise it creates the event. A written event goes into
+//! the cache under the account's calendar lock before the account syncs and
+//! `calendar.changed` is announced. The cache is written only once the server
+//! answered.
 //!
 //! Its refusals, all before an operation starts and `-32602` unless named:
 //! an account without a calendar backend, the sign-in without the calendar
@@ -1031,9 +1033,10 @@ async fn respond(work: RespondWork, handle: OperationHandle) {
     }
 }
 
-/// A new event: the one the cache already holds under the transaction id,
-/// else the server's answer to the create, written into the cache before the
-/// sync that confirms it.
+/// A new event: the one the cache already holds under the transaction id
+/// when it matches the input, that one patched with the input's fields when
+/// the retry changed them, else the server's answer to the create; a written
+/// event goes into the cache before the sync that confirms it.
 async fn create(work: CreateWork, handle: OperationHandle) {
     let CreateWork {
         account,
@@ -1046,8 +1049,9 @@ async fn create(work: CreateWork, handle: OperationHandle) {
     let tx = transaction_id.clone();
     let created = off_thread("the new event", move || async move {
         let store = Store::open(crate::config::store_path(&account.name))?;
-        if let Some(event) = cache::event_by_transaction(&store, &account.name, &tx)? {
-            return Ok::<_, CalendarBackendError>(Some(event));
+        let made = cache::event_by_transaction(&store, &account.name, &tx)?;
+        if let Some(event) = made.as_ref().filter(|event| input.matches(event)) {
+            return Ok::<_, CalendarBackendError>(Some(event.clone()));
         }
         let backend = backend_for(&account)
             .await?
@@ -1055,7 +1059,17 @@ async fn create(work: CreateWork, handle: OperationHandle) {
         if !commit_point("event.create", &token).await {
             return Ok(None);
         }
-        let event = match backend.create_event(&calendar, &input, &tx).await? {
+        // A retry that changed the event a first try made patches it, as the
+        // backend adopts it on Graph's ErrorDuplicateTransactionId.
+        let written = match &made {
+            Some(event) => {
+                backend
+                    .update_event(&event.calendar, &event.id, &input.as_patch())
+                    .await?
+            }
+            None => backend.create_event(&calendar, &input, &tx).await?,
+        };
+        let event = match written {
             Written::Event(event) => *event,
             Written::Series(series) => {
                 return Err(anyhow::anyhow!(
