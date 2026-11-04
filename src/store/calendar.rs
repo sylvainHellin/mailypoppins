@@ -711,6 +711,20 @@ pub fn upsert_event(store: &Store, account: &str, event: &Event) -> Result<()> {
     write_event(store.conn(), account, &event.calendar, event, &json, false)
 }
 
+/// Drop one event of `account` from the cache (the write-through of
+/// `event.cancel` and `event.delete`), before the delta sync reports it
+/// removed. `true` when the cache held it.
+pub fn remove_event(store: &Store, account: &str, id: &str) -> Result<bool> {
+    let removed = store
+        .conn()
+        .execute(
+            &format!("DELETE FROM {EVENTS_TABLE} WHERE account = ?1 AND event_id = ?2"),
+            [account, id],
+        )
+        .with_context(|| format!("removing calendar event {id}"))?;
+    Ok(removed > 0)
+}
+
 /// The cached event of `account` a create with `transaction_id` made, if the
 /// cache holds it: what a retried create settles with instead of posting.
 pub fn event_by_transaction(
@@ -1084,6 +1098,20 @@ mod tests {
         );
         assert_eq!(event_by_transaction(&store, "evoqs", "tx-2").unwrap(), None);
         assert_eq!(event_by_transaction(&store, "perso", "tx-1").unwrap(), None);
+    }
+
+    /// A cancelled or deleted event leaves the cache of its own account
+    /// only, and a second removal finds nothing.
+    #[test]
+    fn a_removed_event_leaves_its_accounts_cache() {
+        let (_dir, store) = open();
+        upsert_calendars(&store, "evoqs", &[calendar("cal-main", true)]).unwrap();
+        let event = timed("ev-gone", "cal-main", 4, 9);
+        upsert_event(&store, "evoqs", &event).unwrap();
+        assert!(!remove_event(&store, "perso", "ev-gone").unwrap());
+        assert!(remove_event(&store, "evoqs", "ev-gone").unwrap());
+        assert_eq!(get_event(&store, "evoqs", "ev-gone").unwrap(), None);
+        assert!(!remove_event(&store, "evoqs", "ev-gone").unwrap());
     }
 
     fn baseline(upserts: Vec<Event>) -> SyncResult {
