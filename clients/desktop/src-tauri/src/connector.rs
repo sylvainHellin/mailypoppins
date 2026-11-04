@@ -146,6 +146,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "calendar.list",
     "calendar.view",
     "calendar.set_visibility",
+    "calendar.freebusy",
     "event.create",
     "event.respond",
     "send.invite",
@@ -1301,6 +1302,7 @@ mod tests {
             "calendar.list",
             "calendar.view",
             "calendar.set_visibility",
+            "calendar.freebusy",
             "event.create",
             "event.respond",
         ] {

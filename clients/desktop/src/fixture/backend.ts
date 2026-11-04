@@ -22,8 +22,11 @@ import type {
   AgendaEvent,
   Bootstrap,
   CalendarEvent,
+  CalendarFreeBusyParams,
+  CalendarFreeBusyResult,
   CalendarInfo,
   CalendarReminder,
+  CalendarScheduleItem,
   DraftCreated,
   DraftEntry,
   DraftInvalid,
@@ -731,6 +734,86 @@ function calendarViewOf(start: string, end: string, zone: string | null) {
     zone: zone ?? "Europe/Berlin",
     window: { start: "2099-09-14T00:00:00Z", end: "2100-10-14T00:00:00Z" },
     events,
+  };
+}
+
+/** The fixture accounts' own address, fixture.rs's `FIXTURE_OWN_ADDRESS`. */
+export const FIXTURE_OWN_ADDRESS = "me@example.com";
+/** A colleague with free/busy, fixture.rs's `FIXTURE_COLLEAGUE`: busy 10:00 to 11:00 and tentative 15:00 to 16:00 after the range's start. */
+export const FIXTURE_COLLEAGUE = "robin@example.com";
+/** fixture.rs's `FIXTURE_NO_FREE_BUSY`. */
+export const FIXTURE_NO_FREE_BUSY = "Proxy web request failed (5016)";
+
+const DIGIT: Record<string, string> = { free: "0", tentative: "1", busy: "2", oof: "3", "working-elsewhere": "4" };
+const WEIGHT: Record<string, number> = { "0": 0, "?": 1, "4": 2, "1": 3, "2": 4, "3": 5 };
+
+/**
+ * fixture.rs's `calendar.freebusy`: the account's own timed events, the
+ * colleague's two blocks, a room free, any other address without free/busy;
+ * an account whose calendars lack `free-busy` is refused.
+ */
+function freeBusyOf(cmd: string, params: CalendarFreeBusyParams): CalendarFreeBusyResult {
+  const account = params.account;
+  knownAccount(cmd, account);
+  if (!mock.calendars.some((c) => c.account === account && c.features.includes("free-busy"))) {
+    throw {
+      kind: "protocol",
+      code: -32602,
+      message: `${account} has no calendar backend, so there is no server to ask for free/busy; free/busy needs an account whose calendar mp reads from the server`,
+    };
+  }
+  const day = /^\d{4}-\d{2}-\d{2}$/;
+  const bound = (raw: string, end: boolean) => {
+    if (!day.test(raw)) return new Date(raw).getTime();
+    const midnight = new Date(`${raw}T00:00`);
+    if (end) midnight.setDate(midnight.getDate() + 1);
+    return midnight.getTime();
+  };
+  const start = bound(params.start, false);
+  const end = bound(params.end, true);
+  const interval = params.interval_minutes ?? 30;
+  const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
+  const slots = Math.ceil((end - start) / (interval * 60000));
+  const own = FIXTURE_OWN_ADDRESS;
+  const addresses = [own, ...params.addresses.map((a) => a.trim()).filter(Boolean)].filter(
+    (a, i, all) => all.findIndex((b) => b.toLowerCase() === a.toLowerCase()) === i,
+  );
+  const items = (address: string): CalendarScheduleItem[] | null => {
+    const lower = address.toLowerCase();
+    if (lower === own) {
+      return mock.events
+        .filter((e) => e.account === account && e.time.kind === "timed" && !e.cancelled && e.show_as !== "free")
+        .map((e) => ({ start: e.time.start, end: e.time.end, status: e.show_as, subject: e.summary }))
+        .filter((i) => Date.parse(i.end) > start && Date.parse(i.start) < end);
+    }
+    if (lower === FIXTURE_COLLEAGUE) {
+      const hours = (n: number) => iso(start + n * 3600000);
+      return [
+        { start: hours(10), end: hours(11), status: "busy" },
+        { start: hours(15), end: hours(16), status: "tentative" },
+      ];
+    }
+    return lower.startsWith("room") ? [] : null;
+  };
+  const view = (blocks: CalendarScheduleItem[]) =>
+    Array.from({ length: slots }, (_, n) => {
+      const from = start + n * interval * 60000;
+      const to = Math.min(from + interval * 60000, end);
+      return blocks
+        .filter((b) => Date.parse(b.start) < to && Date.parse(b.end) > from)
+        .map((b) => DIGIT[b.status] ?? "?")
+        .reduce((heaviest, d) => (WEIGHT[d] > WEIGHT[heaviest] ? d : heaviest), "0");
+    }).join("");
+  return {
+    account,
+    start: iso(start),
+    end: iso(end),
+    interval_minutes: interval,
+    schedules: addresses.map((address) => {
+      const blocks = items(address);
+      if (blocks === null) return { address, view: "", items: [], error: FIXTURE_NO_FREE_BUSY };
+      return { address, view: view(blocks), items: blocks };
+    }),
   };
 }
 
@@ -2081,6 +2164,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (only !== null) knownAccount(cmd, only);
       return clone(mock.calendars.filter((c) => only === null || c.account === only));
     }
+    case "calendar_freebusy":
+      return freeBusyOf(cmd, args.params as CalendarFreeBusyParams);
     case "calendar_reminders":
       return clone(mock.reminders);
     case "reminder_dismiss":

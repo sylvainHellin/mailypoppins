@@ -6,6 +6,8 @@ import { invoke, type Channel } from "@/lib/tauri";
 import type {
   AccountCredentials,
   Bootstrap,
+  CalendarFreeBusyParams,
+  CalendarFreeBusyResult,
   CalendarInfo,
   CalendarReminder,
   CalendarViewResult,
@@ -440,6 +442,15 @@ export const inviteGet = (account: string, row_id: number): Promise<InviteCard |
  */
 export const eventCreate = (params: EventCreateParams): Promise<EventCreateStarted> =>
   invoke<EventCreateStarted>("event_create", { params });
+
+/**
+ * The free/busy of the people and rooms `params` names and of the account
+ * (`calendar.freebusy`, CAL-14), once it settled: the account's schedule
+ * first, an address the server cannot read carrying its `error`. A
+ * refusal's message is the daemon's sentence.
+ */
+export const calendarFreeBusy = (params: CalendarFreeBusyParams): Promise<CalendarFreeBusyResult> =>
+  invoke<CalendarFreeBusyResult>("calendar_freebusy", { params });
 
 /**
  * Answer an event; the end arrives as `rsvp`, its result an

@@ -1,6 +1,7 @@
 // The event form (CAL-11, PERSO-255; the TUI's `n` overlay, the CLI's
-// `mp event create`): Calendar, Title, All day, Start, End, Location,
-// Attendees, Optional, Rooms, Teams, Reminder, Description. It creates
+// `mp event create`): Calendar, Title, All day, Start, End, the attendees'
+// availability (CAL-14), Location, Attendees, Optional, Rooms, Teams,
+// Reminder, Description. It creates
 // through `event.create`, and a failed or vanished create opens it again
 // with what was typed and a Retry that sends the same transaction id.
 
@@ -11,6 +12,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { eventProblem, localZone, submitEvent } from "@/app/eventForm";
+import { AvailabilityGrid } from "@/components/calendar/AvailabilityGrid";
 import { useDispatch } from "@/app/store";
 import type { EventDialog, EventFields } from "@/app/state";
 
@@ -160,6 +162,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
           </div>
           {field("start", allDay ? "First day" : "Start", { type: allDay ? "date" : "datetime-local" })}
           {field("end", allDay ? "Last day" : "End", { type: allDay ? "date" : "datetime-local" })}
+          <AvailabilityGrid fields={fields} calendar={chosen} />
           {field("location", "Location")}
           {field("to", "Attendees", { placeholder: "ada@example.com, bob@example.com" })}
           {field("optional", "Optional")}

@@ -35,6 +35,7 @@ export function writableCalendars(calendars: CalendarInfo[] | null | undefined):
       id: c.id,
       label: `${c.account}/${c.name}`,
       teams: c.features.includes("online-meeting"),
+      freeBusy: c.features.includes("free-busy"),
     }));
 }
 

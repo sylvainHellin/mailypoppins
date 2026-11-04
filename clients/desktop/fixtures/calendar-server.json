@@ -12,7 +12,8 @@
       "backend": "graph",
       "features": [
         "write",
-        "online-meeting"
+        "online-meeting",
+        "free-busy"
       ]
     },
     {
@@ -26,7 +27,8 @@
       "backend": "graph",
       "features": [
         "write",
-        "online-meeting"
+        "online-meeting",
+        "free-busy"
       ]
     },
     {
