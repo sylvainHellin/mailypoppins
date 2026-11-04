@@ -799,6 +799,47 @@ Examples:
         #[arg(long)]
         json: bool,
     },
+    /// Show when people and rooms are busy: the server's free/busy, your own
+    /// first
+    #[command(after_help = "\
+Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
+today; --on (default today) is one day, --from through --to a range of up to
+62 days. Each row is one slot of --interval minutes: \u{b7} free, \u{2592} tentative,
+\u{2588} busy, \u{2593} away, \u{2591} working elsewhere, ? unknown. An address outside your
+organisation reads \"no free/busy\". Needs a Microsoft 365 account.
+
+Examples:
+  mp calendar freebusy -A evoqs ada@example.com room-1@example.com
+  mp calendar freebusy -A evoqs --on tomorrow --interval 15 ada@example.com
+  mp calendar freebusy -A evoqs --from +1 --to +5 ada@example.com --json")]
+    Freebusy {
+        /// The people and room mailboxes to ask about (your own is always asked)
+        #[arg(value_name = "ADDRESS")]
+        addresses: Vec<String>,
+        /// The day (default today)
+        #[arg(long, value_name = "DATE", allow_hyphen_values = true, conflicts_with_all = ["from", "to"])]
+        on: Option<String>,
+        /// The range's first day
+        #[arg(long, value_name = "DATE", allow_hyphen_values = true, requires = "to")]
+        from: Option<String>,
+        /// The range's last day, included
+        #[arg(
+            long,
+            value_name = "DATE",
+            allow_hyphen_values = true,
+            requires = "from"
+        )]
+        to: Option<String>,
+        /// Minutes per slot, 5 to 1440
+        #[arg(long, value_name = "MIN", default_value_t = 30)]
+        interval: u32,
+        /// The IANA zone the days run in (default the local zone)
+        #[arg(long, value_name = "ZONE")]
+        zone: Option<String>,
+        /// Print the settled `calendar.freebusy` result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Make a calendar's events visible in the views again
     Show {
         /// The calendar id, as `mp calendar list` prints it
@@ -4013,6 +4054,70 @@ async fn routed_calendar_view(request: ViewRequest, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `mp calendar freebusy` was asked, before the dates are read.
+struct FreeBusyRequest {
+    addresses: Vec<String>,
+    on: Option<String>,
+    range: Option<(String, String)>,
+    interval: u32,
+    zone: Option<String>,
+}
+
+/// `mp calendar freebusy`: the days are read here, in the viewer's zone,
+/// and the schedules are `calendar.freebusy`'s, the account's own first.
+async fn routed_calendar_freebusy(
+    account: &str,
+    request: FreeBusyRequest,
+    json: bool,
+) -> Result<()> {
+    use mailypoppins::calendar_cmd as cal;
+    let zone = viewer_zone(request.zone.as_deref())?;
+    let today = chrono::Utc::now().with_timezone(&zone).date_naive();
+    let date = |raw: &str| cal::parse_date(raw, today).map_err(|e| anyhow!(e));
+    let days = match &request.range {
+        Some((from, to)) => {
+            let (from, to) = (date(from)?, date(to)?);
+            if to < from {
+                return Err(anyhow!("--to {to} is before --from {from}"));
+            }
+            (from, to)
+        }
+        None => {
+            let day = request
+                .on
+                .as_deref()
+                .map(date)
+                .transpose()?
+                .unwrap_or(today);
+            (day, day)
+        }
+    };
+    let params = cal::freebusy_params(account, &request.addresses, days, zone, request.interval);
+    let mut connection = operation_session().await;
+    let started = daemon_try_call(
+        &mut connection,
+        "calendar.freebusy",
+        serde_json::to_value(&params)?,
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    let result = match connection.settle(&started).await {
+        Ok(Settled::Done(result)) => result,
+        Ok(Settled::Failed(message)) => return Err(anyhow!("{message}")),
+        Err(_) => daemon_unavailable(
+            "the daemon closed the connection before the free/busy query answered",
+        ),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let answer: mp_protocol::calendar::CalendarFreeBusyResult =
+        serde_json::from_value(result).context("reading the settled calendar.freebusy result")?;
+    print!("{}", cal::render_freebusy(&answer, zone));
+    Ok(())
+}
+
 /// `mp calendar reminders`: the waiting reminders, one per line with the
 /// account and the event id a dismissal names under it.
 async fn routed_calendar_reminders(account: Option<&str>, json: bool) -> Result<()> {
@@ -5978,6 +6083,27 @@ async fn main() -> Result<()> {
             CalendarAction::Show { calendar } => {
                 let account = pick_account_named(&global_config, cli.account.as_deref())?;
                 routed_calendar_visibility(&account.name, &calendar, true).await?;
+            }
+            CalendarAction::Freebusy {
+                addresses,
+                on,
+                from,
+                to,
+                interval,
+                zone,
+                json,
+            } => {
+                let account = pick_account_named(&global_config, cli.account.as_deref())?
+                    .name
+                    .clone();
+                let request = FreeBusyRequest {
+                    addresses,
+                    on,
+                    range: from.zip(to),
+                    interval,
+                    zone,
+                };
+                routed_calendar_freebusy(&account, request, json).await?;
             }
             CalendarAction::Reminders { json } => {
                 let account = match cli.account.as_deref() {

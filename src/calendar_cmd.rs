@@ -514,6 +514,144 @@ pub fn render_event(event: &CalendarEvent, zone: Tz, names: &CalendarNames) -> S
     out
 }
 
+// ---------------------------------------------------------------------------
+// Free/busy
+// ---------------------------------------------------------------------------
+
+/// The `calendar.freebusy` parameters of the days `first` to `last` (both
+/// included) in `zone`, for `addresses`, at slots of `interval` minutes.
+pub fn freebusy_params(
+    account: &str,
+    addresses: &[String],
+    (first, last): (NaiveDate, NaiveDate),
+    zone: Tz,
+    interval: u32,
+) -> mp_protocol::calendar::CalendarFreeBusyParams {
+    mp_protocol::calendar::CalendarFreeBusyParams {
+        account: account.to_string(),
+        addresses: addresses.to_vec(),
+        start: first.to_string(),
+        end: last.to_string(),
+        zone: Some(zone.name().to_string()),
+        interval_minutes: Some(interval),
+    }
+}
+
+/// The hour ruler over a day's row of `interval`-minute slots: an hour
+/// label every few hours, as wide as the labels need; `None` when the slots
+/// do not divide an hour.
+fn hour_ruler(interval: u32) -> Option<String> {
+    if interval == 0 || interval > 60 || 60 % interval != 0 {
+        return None;
+    }
+    let per_hour = (60 / interval) as usize;
+    let every = [1usize, 2, 3, 4, 6, 12]
+        .into_iter()
+        .find(|hours| hours * per_hour >= 4)
+        .unwrap_or(24);
+    let mut ruler = String::new();
+    for hour in (0..24).step_by(every) {
+        ruler.push_str(&format!("{hour:02}"));
+        let width = every * per_hour;
+        ruler.push_str(&" ".repeat(width.saturating_sub(2)));
+    }
+    Some(ruler.trim_end().to_string())
+}
+
+/// `mp calendar freebusy`: per address a row of glyphs for each day of the
+/// range in `zone`, an hour ruler over the first, and the blocks that are
+/// not free with their times; an address the server has no free/busy for
+/// says so.
+pub fn render_freebusy(result: &mp_protocol::calendar::CalendarFreeBusyResult, zone: Tz) -> String {
+    use mp_client::format::{availability_row, availability_word, slot_of, AVAILABILITY_LEGEND};
+    let (Some(start), Some(end)) = (instant(&result.start), instant(&result.end)) else {
+        return format!(
+            "The free/busy answer names no range ({} to {})\n",
+            result.start, result.end
+        );
+    };
+    let first = start.with_timezone(&zone).date_naive();
+    let last = (end - chrono::Duration::seconds(1))
+        .with_timezone(&zone)
+        .date_naive();
+    let interval = result.interval_minutes;
+    let mut out = String::new();
+    let range = if first == last {
+        first.format("%a %Y-%m-%d").to_string()
+    } else {
+        format!(
+            "{} to {}",
+            first.format("%a %Y-%m-%d"),
+            last.format("%a %Y-%m-%d")
+        )
+    };
+    out.push_str(&format!(
+        "Free/busy, {range} ({}), {interval} min slots\n",
+        zone.name()
+    ));
+    out.push_str(&format!("{}\n", AVAILABILITY_LEGEND.dimmed()));
+    let days: Vec<NaiveDate> = first.iter_days().take_while(|day| *day <= last).collect();
+    let row_of = |view: &str, day: NaiveDate| {
+        let open = day_start(zone, day).max(start);
+        let close = day_start(zone, day + Days::new(1)).min(end);
+        let from = slot_of(&result.start, interval, open).unwrap_or(0);
+        let to = slot_of(
+            &result.start,
+            interval,
+            close - chrono::Duration::seconds(1),
+        )
+        .unwrap_or(from);
+        availability_row(view, from, (to - from + 1).max(0) as usize)
+    };
+    for schedule in &result.schedules {
+        out.push('\n');
+        out.push_str(&format!("{}\n", schedule.address.bold()));
+        if let Some(error) = &schedule.error {
+            out.push_str(&format!(
+                "  {}\n",
+                format!("no free/busy: {error}").dimmed()
+            ));
+            continue;
+        }
+        if let Some(ruler) = hour_ruler(interval) {
+            out.push_str(&format!("  {:<10}  {}\n", "", ruler.dimmed()));
+        }
+        for day in &days {
+            out.push_str(&format!(
+                "  {:<10}  {}\n",
+                day.format("%a %d %b").to_string(),
+                row_of(&schedule.view, *day)
+            ));
+        }
+        for item in &schedule.items {
+            let (Some(from), Some(to)) = (instant(&item.start), instant(&item.end)) else {
+                continue;
+            };
+            let (from, to) = (from.with_timezone(&zone), to.with_timezone(&zone));
+            let until = if to.date_naive() == from.date_naive() {
+                to.format("%H:%M").to_string()
+            } else {
+                to.format("%a %d %b %H:%M").to_string()
+            };
+            let mut line = format!(
+                "  {:<10}  {} {}-{until}",
+                availability_word(&item.status),
+                from.format("%a %d %b"),
+                from.format("%H:%M")
+            );
+            if let Some(subject) = &item.subject {
+                line.push_str(&format!("  {subject}"));
+            }
+            if let Some(location) = &item.location {
+                line.push_str(&format!("  @ {location}"));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,5 +1063,84 @@ mod tests {
             lines,
             ["✗ server calendar not synced: calendar needs a re-login"]
         );
+    }
+
+    /// The text of `s` without its colour codes.
+    fn uncoloured(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                chars.by_ref().find(|c| *c == 'm');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// A day's free/busy is one glyph row per address under an hour ruler,
+    /// the blocks with their times in the viewer's zone, and an outside
+    /// address its reason; the params ask for the days as dates.
+    #[test]
+    fn the_free_busy_rows_read_in_the_viewers_zone() {
+        use mp_protocol::calendar::{
+            CalendarFreeBusyResult, CalendarSchedule, CalendarScheduleItem,
+        };
+        let berlin: Tz = "Europe/Berlin".parse().unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let params = freebusy_params("evoqs", &["ada@evoqs.com".into()], (day, day), berlin, 30);
+        assert_eq!(
+            (params.start.as_str(), params.end.as_str()),
+            ("2026-11-04", "2026-11-04")
+        );
+        assert_eq!(params.zone.as_deref(), Some("Europe/Berlin"));
+        let own = format!("{}2222{}", "0".repeat(18), "0".repeat(26));
+        let result = CalendarFreeBusyResult {
+            account: "evoqs".into(),
+            start: "2026-11-03T23:00:00Z".into(),
+            end: "2026-11-04T23:00:00Z".into(),
+            interval_minutes: 30,
+            schedules: vec![
+                CalendarSchedule {
+                    address: "s.hellin@evoqs.com".into(),
+                    view: own,
+                    items: vec![CalendarScheduleItem {
+                        start: "2026-11-04T08:00:00Z".into(),
+                        end: "2026-11-04T10:00:00Z".into(),
+                        status: "busy".into(),
+                        subject: Some("Team meeting".into()),
+                        location: Some("Room 2".into()),
+                    }],
+                    error: None,
+                },
+                CalendarSchedule {
+                    address: "someone@gmail.com".into(),
+                    view: String::new(),
+                    items: Vec::new(),
+                    error: Some("Proxy web request failed (5016)".into()),
+                },
+            ],
+        };
+        let text = uncoloured(&render_freebusy(&result, berlin));
+        let dots = |n: usize| "\u{b7}".repeat(n);
+        let expected = format!(
+            "Free/busy, Wed 2026-11-04 (Europe/Berlin), 30 min slots\n\
+             {}\n\
+             \n\
+             s.hellin@evoqs.com\n\
+             \x20 {:<10}  00  02  04  06  08  10  12  14  16  18  20  22\n\
+             \x20 Wed 04 Nov  {}{}{}\n\
+             \x20 busy        Wed 04 Nov 09:00-11:00  Team meeting  @ Room 2\n\
+             \n\
+             someone@gmail.com\n\
+             \x20 no free/busy: Proxy web request failed (5016)\n",
+            mp_client::format::AVAILABILITY_LEGEND,
+            "",
+            dots(18),
+            "\u{2588}".repeat(4),
+            dots(26),
+        );
+        assert_eq!(text, expected);
     }
 }
