@@ -14,6 +14,7 @@ import {
   calendarRows,
   cursorEntry,
   daysBetween,
+  isOrganizer,
   layoutDays,
   loadIsFor,
   openEventMail,
@@ -23,7 +24,7 @@ import {
   wantedDays,
 } from "@/app/calendar";
 import { rsvpDialogFor } from "@/app/rsvp";
-import { editDialogFor, removeDialogFor } from "@/app/eventChange";
+import { editDialogFor, proposalRefusal, removeDialogFor, takeProposal } from "@/app/eventChange";
 import { useAppState, useDispatch } from "@/app/store";
 import type { CalendarLayout } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
@@ -228,6 +229,8 @@ export function CalendarView() {
               onJoin={(url) =>
                 void cmd.openExternal(url).catch((e: unknown) => dispatch({ type: "notice", text: `Could not open the meeting link: ${asGuiError(e).message}` }))
               }
+              onUseProposal={isOrganizer(current.event) ? (slot) => takeProposal(s, dispatch, current.event, slot) : undefined}
+              proposalRefusal={isOrganizer(current.event) ? proposalRefusal(current.event, calendars) : null}
             >
               <div className="flex flex-col items-start gap-1 pt-1">
                 <Button size="sm" variant="outline" disabled={refusal !== null} onClick={() => run("calendar_rsvp")} title="Respond (V)">

@@ -203,6 +203,10 @@ export type CalendarEventCardProps = {
   onOpenMail?: () => void;
   /** The online meeting in the browser. */
   onJoin?: (url: string) => void;
+  /** The organizer's "Use this time" on an attendee's proposal: the edit form at that time (PERSO-255). */
+  onUseProposal?: (slot: CalendarTimeSlot) => void;
+  /** Why a proposal cannot be taken here (an occurrence, a read-only calendar); the button says so, disabled. */
+  proposalRefusal?: string | null;
   /** What follows the details, such as the respond button. */
   children?: ReactNode;
 };
@@ -212,10 +216,11 @@ export type CalendarEventCardProps = {
  * the TUI's event card: the summary, a cancellation first, when with its
  * zone, the series, where, the calendar, the organizer, the user's own
  * answer, whether new times may be proposed, the online meeting and its join
- * link, the description and every attendee's status and proposed time; an
- * event that came from an invitation mail offers that mail.
+ * link, the description and every attendee's status and proposed time, with
+ * "Use this time" beside each proposal for the organizer; an event that came
+ * from an invitation mail offers that mail.
  */
-export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, children }: CalendarEventCardProps) {
+export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, onUseProposal, proposalRefusal = null, children }: CalendarEventCardProps) {
   const attendeesId = useId();
   const rows: [string, ReactNode][] = [["When", neutralWhen(event)]];
   const series = seriesLine(event);
@@ -287,8 +292,20 @@ export function CalendarEventCard({ event, calendars, id, onOpenMail, onJoin, ch
                     {a.role === "optional" ? <span className="text-muted-foreground"> (optional)</span> : null}
                   </span>
                   {a.proposed_time ? (
-                    <span data-slot="event-proposal" className="text-warning">
+                    <span data-slot="event-proposal" className="flex flex-wrap items-center gap-1.5 text-warning">
                       Proposes {slotWhen(a.proposed_time)}
+                      {onUseProposal ? (
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={proposalRefusal !== null}
+                          onClick={() => a.proposed_time && onUseProposal(a.proposed_time)}
+                          title={proposalRefusal ?? "Open the event form at this time; Save tells every attendee"}
+                          aria-label={`Use this time, proposed by ${a.name ?? a.email}`}
+                        >
+                          Use this time
+                        </Button>
+                      ) : null}
                     </span>
                   ) : null}
                 </span>

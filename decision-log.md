@@ -376,9 +376,10 @@ Status: accepted
 
 Why: `event.respond` routes on the event id: a server event goes to the backend (Graph's accept, tentatively accept or decline with the comment and `sendResponse`), an invitation mail's event (`imip:<row_id>`) to the iMIP reply `calendar.rsvp` already sends through the durable outbox.
 `send_response: false` is refused on the iMIP path, because the reply mail is the answer and the only record of it; a Graph account's invitation mail answers through the server event `message.invite` names, and its iMIP path keeps the `ANO-4` refusal.
+A non-blank comment with `send_response: false` is `-32602` on every backend before any server call, since Graph answers the pair with HTTP 400 and an answer nobody is told of has no reader for a comment; the CLI lets the daemon refuse it, and the TUI and the desktop hold it back on their error line with Send blocked, as they hold back a proposal with the response off.
 `calendar.rsvp` stays as the iMIP path's own address; every client answers through `event.respond`.
-Rejected: a second iMIP implementation inside `event.respond`; answering a Graph account's invitation by iMIP reply (the server calendar would not see the answer).
-Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, confirmed by Sylvain in chat 2026-11-03.
+Rejected: a second iMIP implementation inside `event.respond`; answering a Graph account's invitation by iMIP reply (the server calendar would not see the answer); dropping the comment of an unsent answer without a word.
+Source: implementation of PERSO-200 on branch `calendar-phase-1`, 2026-10-29, confirmed by Sylvain in chat 2026-11-03; the comment refusal settled in the PERSO-255 slice 6 review, 2026-11-04.
 Status: accepted
 
 ## 2026-10-29 - The calendar re-login prompt goes through account.credentials and a health check, with no new method

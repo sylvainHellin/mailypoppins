@@ -273,7 +273,10 @@ async fn calendar_list_shows_the_fake_calendars_and_the_invitation_calendars() {
     // The backend's features on its calendars, less the online meeting on
     // one that offers no Teams, and none on an invitation one.
     assert_eq!(listed["calendars"][0]["features"], json!(FAKE_FEATURES));
-    assert_eq!(listed["calendars"][1]["features"], json!(["write"]));
+    assert_eq!(
+        listed["calendars"][1]["features"],
+        json!(["write", "propose-time"])
+    );
     assert_eq!(listed["calendars"][2]["features"], json!([]));
     assert_eq!(listed["calendars"][3]["features"], json!([]));
 
@@ -460,7 +463,8 @@ async fn a_none_accounts_view_is_its_imip_agenda() {
 
 /// Every answer reaches the fake with its comment and its send choice, the
 /// operation settles with what it did, and the immediate sync leaves the
-/// event readable.
+/// event readable; a comment on an answer not sent is refused before the
+/// server is called, since Graph refuses it, and a blank one is none.
 #[tokio::test]
 async fn event_respond_records_every_answer_on_the_fake() {
     let slice = Slice::start();
@@ -482,6 +486,16 @@ async fn event_respond_records_every_answer_on_the_fake() {
                 if let Some(comment) = comment {
                     params["comment"] = json!(comment);
                 }
+                if comment.is_some() && !send_response {
+                    let refused = call_err(&mut conn, "event.respond", params.clone()).await;
+                    assert_eq!(refused.code, -32602, "{params}");
+                    assert_eq!(
+                        refused.message,
+                        "A comment goes to the organizer, so it needs send_response; drop the \
+                         comment to answer without telling them"
+                    );
+                    continue;
+                }
                 let status = run_operation(&mut conn, "event.respond", params).await;
                 let result = succeeded(&status);
                 assert_eq!(result["via"], "server", "{result}");
@@ -493,6 +507,7 @@ async fn event_respond_records_every_answer_on_the_fake() {
                     response,
                     comment: comment.map(str::to_string),
                     send_response,
+                    proposed_time: None,
                 });
             }
         }
@@ -510,6 +525,24 @@ async fn event_respond_records_every_answer_on_the_fake() {
         response: Response::Accept,
         comment: None,
         send_response: true,
+        proposed_time: None,
+    });
+    let status = run_operation(
+        &mut conn,
+        "event.respond",
+        json!({
+            "account": SERVER, "event": "ev-meeting", "response": "decline",
+            "comment": " ", "send_response": false,
+        }),
+    )
+    .await;
+    succeeded(&status);
+    expected.push(RecordedResponse {
+        event: "ev-meeting".into(),
+        response: Response::Decline,
+        comment: None,
+        send_response: false,
+        proposed_time: None,
     });
     assert_eq!(slice.answers(), expected);
 
@@ -1605,4 +1638,178 @@ async fn event_changes_without_the_scope_are_the_relogin_prompt() {
         );
     }
     assert!(writes(&slice).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Proposing a new time (PERSO-255)
+// ---------------------------------------------------------------------------
+
+/// The fixture's meeting, the change rows' events, and a meeting whose
+/// organizer accepts no new times.
+fn proposal_slice() -> Slice {
+    use mailypoppins::calendar_model::{EventTime, OwnResponse, Person};
+    let mut fixed = support::calendar_fixture::event(
+        "ev-fixed",
+        "cal-main",
+        "fixed@example.com",
+        "Board meeting",
+        EventTime::timed(at(4, 9), at(4, 10), "Europe/Berlin").unwrap(),
+    );
+    fixed.organizer = Some(Person {
+        name: None,
+        email: "chair@tum.de".into(),
+    });
+    fixed.own_response = OwnResponse::NeedsAction;
+    fixed.allow_new_time_proposals = false;
+    let mut events = change_events();
+    events.push(fixed);
+    Slice::start_seeded(false, &[], |_| (), events)
+}
+
+/// A tentative or a decline proposes a new time read in the zone it names,
+/// keeping the meeting's length unless it names an end; the fake receives
+/// the slot with the zone, the operation settles with the slot as UTC
+/// instants, and a retry of the same answer sends the same proposal again,
+/// since an answer sets the attendee's state to a value.
+#[tokio::test]
+async fn event_respond_proposes_a_new_time_with_a_tentative_or_a_decline() {
+    let slice = proposal_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let wall = |hour| format!("{}T{hour}:00", day(3).date_naive());
+    let berlin = |hour: u32| {
+        let wall = day(3).date_naive().and_hms_opt(hour, 0, 0).unwrap();
+        chrono::TimeZone::from_local_datetime(&chrono_tz::Europe::Berlin, &wall)
+            .unwrap()
+            .to_utc()
+    };
+    let tentative = json!({
+        "account": SERVER, "event": "ev-meeting", "response": "tentative",
+        "comment": "Could we move it?",
+        "proposed_time": {"start": wall(14), "zone": "Europe/Berlin"},
+    });
+    let first =
+        succeeded(&run_operation(&mut conn, "event.respond", tentative.clone()).await).clone();
+    assert_eq!(first["response"], "tentative");
+    assert_eq!(first["delivered"], true);
+    let rfc =
+        |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert_eq!(
+        first["proposed_time"],
+        json!({"start": rfc(berlin(14)), "end": rfc(berlin(15))})
+    );
+    let again = succeeded(&run_operation(&mut conn, "event.respond", tentative).await).clone();
+    assert_eq!(again, first, "a retry settles as the first answer did");
+
+    let declined = run_operation(
+        &mut conn,
+        "event.respond",
+        json!({
+            "account": SERVER, "event": "ev-meeting", "response": "decline",
+            "proposed_time": {"start": wall(16), "end": wall(18), "zone": "Europe/Berlin"},
+        }),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&declined)["proposed_time"]["end"],
+        json!(rfc(berlin(18)))
+    );
+
+    let answers = slice.answers();
+    assert_eq!(answers.len(), 3);
+    let proposed = answers[0].proposed_time.as_ref().expect("a proposal");
+    assert_eq!(proposed.zone, "Europe/Berlin");
+    assert_eq!(proposed.slot.start, berlin(14));
+    assert_eq!(proposed.slot.end, berlin(15));
+    assert_eq!(answers[1], answers[0]);
+    assert_eq!(answers[2].response, Response::Decline);
+    assert_eq!(
+        answers[2].proposed_time.as_ref().map(|p| p.slot.end),
+        Some(berlin(18))
+    );
+}
+
+/// A proposal is refused before an operation starts, and the server is
+/// never called: with an accept, with the response not sent, on an
+/// invitation mail's event, on a meeting the user organizes, on one whose
+/// organizer accepts no new times, on a cancelled one, on an event the cache
+/// does not hold, at the meeting's own time and at a time that does not
+/// read.
+#[tokio::test]
+async fn a_proposed_time_is_refused_before_any_server_call() {
+    let slice = proposal_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let imip = format!("imip:{}", row_of(slice.root(), IMIP));
+    let later = json!({"start": format!("{}T15:00", day(3).date_naive()), "zone": "UTC"});
+    let refusal = |account: &str, event: &str, response: &str, extra: Value| {
+        let mut params = json!({
+            "account": account, "event": event, "response": response,
+            "proposed_time": later,
+        });
+        if let (Some(params), Some(extra)) = (params.as_object_mut(), extra.as_object()) {
+            params.extend(extra.clone());
+        }
+        params
+    };
+    let own_time = json!({"proposed_time": {
+        "start": at(3, 9).to_rfc3339(), "end": at(3, 10).to_rfc3339(),
+    }});
+    for (params, sentence) in [
+        (
+            refusal(SERVER, "ev-meeting", "accept", json!({})),
+            "with tentative or decline, not with accept",
+        ),
+        (
+            refusal(
+                SERVER,
+                "ev-meeting",
+                "tentative",
+                json!({"send_response": false}),
+            ),
+            "needs send_response",
+        ),
+        (
+            refusal(IMIP, &imip, "tentative", json!({})),
+            "no iCalendar COUNTER",
+        ),
+        (
+            refusal(SERVER, "ev-own", "decline", json!({})),
+            "You organize Budget; change its time with event.update",
+        ),
+        (
+            refusal(SERVER, "ev-fixed", "tentative", json!({})),
+            "The organizer of Board meeting does not accept new time proposals",
+        ),
+        (
+            refusal(SERVER, "ev-called-off", "decline", json!({})),
+            "was cancelled by its organizer",
+        ),
+        (
+            refusal(SERVER, "ev-nope", "tentative", json!({})),
+            "has no event ev-nope to propose a new time for",
+        ),
+        (
+            refusal(SERVER, "ev-meeting", "tentative", own_time),
+            "Project review already takes place then",
+        ),
+        (
+            refusal(
+                SERVER,
+                "ev-meeting",
+                "tentative",
+                json!({"proposed_time": {"start": "next week"}}),
+            ),
+            "next week",
+        ),
+    ] {
+        let refused = call_err(&mut conn, "event.respond", params.clone()).await;
+        assert_eq!(refused.code, -32602, "{params}");
+        assert!(
+            refused.message.contains(sentence),
+            "{params}: {}",
+            refused.message
+        );
+    }
+    assert!(slice.answers().is_empty(), "no answer reached the server");
 }

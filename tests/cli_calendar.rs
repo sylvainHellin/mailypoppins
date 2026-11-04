@@ -106,6 +106,34 @@ fn weekly() -> Vec<Event> {
         .collect()
 }
 
+/// A meeting the server account organizes, twenty days out, past the
+/// agenda's fourteen, for which Ada proposed the next morning.
+fn proposed() -> Event {
+    use mailypoppins::calendar_model::{
+        Attendee, AttendeeRole, OwnResponse, ResponseStatus, TimeSlot,
+    };
+    let mut budget = event(
+        "ev-budget",
+        "cal-main",
+        "budget@example.com",
+        "Budget",
+        EventTime::timed(at(20, 14), at(20, 15), "Europe/Berlin").unwrap(),
+    );
+    budget.is_organizer = true;
+    budget.own_response = OwnResponse::Organizer;
+    budget.attendees = vec![Attendee {
+        name: Some("Ada Lovelace".into()),
+        email: "ada@example.com".into(),
+        role: AttendeeRole::Required,
+        status: ResponseStatus::Tentative,
+        proposed_time: Some(TimeSlot {
+            start: at(21, 8),
+            end: at(21, 9),
+        }),
+    }];
+    budget
+}
+
 /// A seeded root, its daemon, and the logs of the two fakes.
 struct Slice {
     tmp: TempDir,
@@ -123,7 +151,8 @@ impl Slice {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tempfile::tempdir().unwrap();
         seed_outlook(tmp.path());
-        let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, weekly());
+        let events = [weekly(), vec![proposed()]].concat();
+        let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, events);
         let transport =
             send_fixture::fake_transport_rejecting(&ledger.path().join("transport.log"), rejected);
         let env = [
@@ -279,7 +308,7 @@ fn calendar_list_view_hide_and_show_through_the_cli() {
     let rebuilt = slice.ok(&["calendar", "rebuild", "-A", SERVER]);
     assert!(
         rebuilt.contains(
-            "server calendar: 2 calendar(s), 4 event(s) synced, 0 removed, 2 baseline(s)"
+            "server calendar: 2 calendar(s), 5 event(s) synced, 0 removed, 2 baseline(s)"
         ),
         "{rebuilt}"
     );
@@ -503,6 +532,22 @@ fn event_show_and_respond_through_the_cli() {
     assert_eq!(tentative["send_response"], false);
     assert_eq!(tentative["delivered"], false);
     assert_eq!(tentative["comment"], Value::Null);
+    // A comment nobody is told of is the daemon's refusal, not a Graph 400.
+    let unsent = slice.err(&[
+        "event",
+        "respond",
+        "ev-meeting",
+        "decline",
+        "--comment",
+        "away",
+        "--no-send-response",
+        "-A",
+        SERVER,
+    ]);
+    assert!(
+        unsent.contains("A comment goes to the organizer, so it needs send_response"),
+        "{unsent}"
+    );
     slice.ok(&["event", "respond", "ev-meeting", "decline", "-A", SERVER]);
 
     // `mp invite` on the meeting's invitation mail answers the server event.
@@ -517,6 +562,7 @@ fn event_show_and_respond_through_the_cli() {
         response,
         comment: comment.map(str::to_string),
         send_response,
+        proposed_time: None,
     };
     assert_eq!(
         slice.answers(),
@@ -530,6 +576,117 @@ fn event_show_and_respond_through_the_cli() {
 
     let unknown = slice.err(&["event", "show", "nope", "-A", SERVER]);
     assert!(unknown.contains("nope"), "{unknown}");
+}
+
+/// `mp event respond --propose` proposes a new time with a tentative or a
+/// decline, keeping the meeting's length, and prints it; the daemon's
+/// refusals reach stderr with exit 1. The organizer's `mp event show` lists
+/// the attendee's proposal, and `mp event update --use-proposal` moves the
+/// meeting to it.
+#[test]
+fn a_new_time_is_proposed_and_taken_through_the_cli() {
+    let slice = Slice::start();
+    slice.ok(&["calendar", "rebuild", "-A", SERVER]);
+    let start = format!("{}T15:00", day(3).date_naive());
+    let proposed = slice.ok(&[
+        "event",
+        "respond",
+        "ev-meeting",
+        "tentative",
+        "--propose",
+        &start,
+        "--zone",
+        "UTC",
+        "-A",
+        SERVER,
+    ]);
+    assert!(
+        proposed.contains("Tentative ev-meeting: through the server, organizer told"),
+        "{proposed}"
+    );
+    assert!(proposed.contains("proposed: "), "{proposed}");
+    let answers = slice.answers();
+    let slot = &answers.last().unwrap().proposed_time.as_ref().unwrap().slot;
+    assert_eq!((slot.start, slot.end), (at(3, 15), at(3, 16)));
+
+    let json = slice.json(&[
+        "event",
+        "respond",
+        "ev-meeting",
+        "decline",
+        "--propose",
+        &start,
+        "--propose-duration",
+        "30m",
+        "--zone",
+        "UTC",
+        "-A",
+        SERVER,
+        "--json",
+    ]);
+    assert_eq!(
+        json["proposed_time"]["end"],
+        (at(3, 15) + chrono::Duration::minutes(30))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    );
+    let accept = slice.err(&[
+        "event",
+        "respond",
+        "ev-meeting",
+        "accept",
+        "--propose",
+        &start,
+        "-A",
+        SERVER,
+    ]);
+    assert!(accept.contains("not with accept"), "{accept}");
+    let silent = slice.err(&[
+        "event",
+        "respond",
+        "ev-meeting",
+        "tentative",
+        "--propose",
+        &start,
+        "--no-send-response",
+        "-A",
+        SERVER,
+    ]);
+    assert!(silent.contains("needs send_response"), "{silent}");
+    assert_eq!(slice.answers().len(), 2, "a refusal reaches no server");
+
+    let shown = slice.ok(&["event", "show", "ev-budget", "-A", SERVER]);
+    assert!(shown.contains("proposes "), "{shown}");
+    let nobody = slice.err(&[
+        "event",
+        "update",
+        "ev-budget",
+        "--use-proposal",
+        "bob@example.com",
+        "-A",
+        SERVER,
+    ]);
+    assert!(
+        nobody.contains("bob@example.com is not an attendee of Budget"),
+        "{nobody}"
+    );
+    let taken = slice.json(&[
+        "event",
+        "update",
+        "ev-budget",
+        "--use-proposal",
+        "ADA@example.com",
+        "-A",
+        SERVER,
+        "--json",
+    ]);
+    let instant = |key: &str| {
+        chrono::DateTime::parse_from_rfc3339(taken["event"]["time"][key].as_str().unwrap())
+            .unwrap()
+            .to_utc()
+    };
+    assert_eq!((instant("start"), instant("end")), (at(21, 8), at(21, 9)));
+    assert_eq!(taken["event"]["time"]["zone"], "Europe/Berlin");
 }
 
 /// `mp invite` on an account without a backend still sends the iMIP reply,

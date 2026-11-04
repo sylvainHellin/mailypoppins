@@ -674,7 +674,13 @@ export const RSVP_RESPONSES: readonly RsvpResponse[] = ["accept", "tentative", "
  * dialog calls it, the event's summary or the email's subject, and whether
  * it is a server event, which alone may answer without telling the organizer.
  */
-export type RsvpDialog = { account: string; event: string; summary: string; server: boolean };
+/**
+ * The respond choice's target: `server` for a server event, which offers the
+ * send-response choice, and `propose` when a tentative or a decline may
+ * propose a new time (a server event whose organizer accepts proposals, as
+ * far as this window knows; PERSO-255).
+ */
+export type RsvpDialog = { account: string; event: string; summary: string; server: boolean; propose: boolean };
 
 /**
  * An answer this window started, from the choice until it settles or is

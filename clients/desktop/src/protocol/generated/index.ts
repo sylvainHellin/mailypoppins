@@ -72,6 +72,7 @@ export type { EventFrontmatter } from "./EventFrontmatter";
 export type { EventGetResult } from "./EventGetResult";
 export type { EventInputParams } from "./EventInputParams";
 export type { EventPatchParams } from "./EventPatchParams";
+export type { EventProposedTime } from "./EventProposedTime";
 export type { EventRespondParams } from "./EventRespondParams";
 export type { EventRespondResult } from "./EventRespondResult";
 export type { EventUpdateParams } from "./EventUpdateParams";

@@ -14,7 +14,7 @@
 // the bottom the commands.
 
 import type { Dispatch } from "react";
-import type { CalendarEvent, CalendarInfo, EventCancelResult, EventPatchParams } from "@/protocol/types";
+import type { CalendarEvent, CalendarInfo, CalendarTimeSlot, EventCancelResult, EventPatchParams } from "@/protocol/types";
 import { asGuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
@@ -105,6 +105,27 @@ export function editDialogFor(event: CalendarEvent, calendars: readonly Calendar
     error: null,
     edit: { account: event.account, event: event.id, organizer: isOrganizer(event), online: event.is_online_meeting, original: fields },
   };
+}
+
+/** Why the organizer cannot take a proposal on `event` from here (the edit form's refusals); null when they can. */
+export function proposalRefusal(event: CalendarEvent, calendars: readonly CalendarInfo[] | null): string | null {
+  if (!isOrganizer(event)) return "Only the organizer takes a proposed time";
+  const dialog = editDialogFor(event, calendars);
+  return typeof dialog === "string" ? dialog : null;
+}
+
+/**
+ * The organizer's "Use this time" (PERSO-255): the edit form on `event` at
+ * the time an attendee proposed, in this window's zone, so Save sends the
+ * new time through `event_update` and the server tells every attendee; or
+ * why the proposal cannot be taken here.
+ */
+export function proposalDialogFor(event: CalendarEvent, calendars: readonly CalendarInfo[] | null, slot: CalendarTimeSlot): EventDialog | string {
+  const refusal = proposalRefusal(event, calendars);
+  if (refusal) return refusal;
+  const dialog = editDialogFor(event, calendars);
+  if (typeof dialog === "string") return dialog;
+  return { ...dialog, fields: { ...dialog.fields, allDay: false, start: wallTime(new Date(slot.start)), end: wallTime(new Date(slot.end)) } };
 }
 
 /**
@@ -305,6 +326,13 @@ export function editEvent(s: AppState, dispatch: Dispatch<Action>): void {
     return dispatch({ type: "open_event_form", dialog: kept });
   }
   const dialog = editDialogFor(event, s.calendars.data);
+  if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+  dispatch({ type: "open_event_form", dialog });
+}
+
+/** The card's "Use this time": the edit form at the proposed time, or why not. */
+export function takeProposal(s: AppState, dispatch: Dispatch<Action>, event: CalendarEvent, slot: CalendarTimeSlot): void {
+  const dialog = proposalDialogFor(event, s.calendars.data, slot);
   if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
   dispatch({ type: "open_event_form", dialog });
 }

@@ -34,6 +34,7 @@ import type {
   DraftMessage,
   DraftPreview,
   EventCreateParams,
+  EventProposedTime,
   EventUpdateParams,
   EventFrontmatter,
   HoldStatus,
@@ -247,7 +248,17 @@ export const mock = {
   /** How many test notifications `reminder_notify_test` raised. */
   testNotifications: 0,
   /** The answers `event_respond` started and no test settled yet, oldest first. */
-  rsvps: [] as { operation_id: string; account: string; event: string; response: string; comment: string | null; send_response: boolean }[],
+  rsvps: [] as {
+    operation_id: string;
+    account: string;
+    event: string;
+    response: string;
+    comment: string | null;
+    send_response: boolean;
+    proposed_time: EventProposedTime | null;
+    /** The proposal as UTC instants, read in this window's zone, the event's length kept when it names no end. */
+    proposed_slot: { start: string; end: string } | null;
+  }[],
   /** The next RSVP's operation id counter. */
   nextRsvp: 1,
   /** The invitations `send_invite` started and no test settled yet, oldest first. */
@@ -766,10 +777,26 @@ export function settleRsvp(opts: { fail?: boolean; delivered?: boolean; operatio
       send_response: run.send_response,
       via: rowId === null ? "server" : "imip",
       delivered: run.send_response && (opts.delivered ?? true),
+      ...(run.proposed_slot ? { proposed_time: run.proposed_slot } : {}),
     },
   });
   return run.operation_id;
 }
+
+/** fixture.rs's `PROPOSAL_WITH_ACCEPT_REFUSAL`: a proposed time with an accept. */
+export const PROPOSAL_WITH_ACCEPT_REFUSAL = "A new time is proposed with tentative or decline, not with accept";
+
+/** fixture.rs's `SILENT_PROPOSAL_REFUSAL`: a proposed time the organizer would not be told of. */
+export const SILENT_PROPOSAL_REFUSAL =
+  "A proposed time goes to the organizer, so it needs send_response; drop the proposal to answer without telling them";
+
+/** fixture.rs's `SILENT_COMMENT_REFUSAL`: a comment on an answer the organizer would not be told of. */
+export const SILENT_COMMENT_REFUSAL =
+  "A comment goes to the organizer, so it needs send_response; drop the comment to answer without telling them";
+
+/** fixture.rs's `IMIP_PROPOSAL_REFUSAL`: a proposed time on an invitation mail's event. */
+export const IMIP_PROPOSAL_REFUSAL =
+  "mp cannot propose a new time by mail yet (no iCalendar COUNTER); answer tentative or decline with a comment naming the time you suggest";
 
 /** fixture.rs's `IMIP_SILENT_REFUSAL`: `send_response: false` on an invitation mail's event. */
 export const IMIP_SILENT_REFUSAL =
@@ -2264,12 +2291,32 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (!["accept", "tentative", "decline"].includes(response)) {
         throw { kind: "protocol", code: null, message: `An answer is accept, tentative or decline, not "${response}"` };
       }
-      if (!mock.events.some((x) => x.account === account && x.id === event)) throw refuse(`${account} has no event ${event}`);
+      const proposed = (args.proposed_time ?? null) as EventProposedTime | null;
+      if (proposed && response === "accept") throw refuse(PROPOSAL_WITH_ACCEPT_REFUSAL);
+      const held = mock.events.find((x) => x.account === account && x.id === event);
+      if (!held) throw refuse(`${account} has no event ${event}`);
+      if (proposed && event.startsWith("imip:")) throw refuse(IMIP_PROPOSAL_REFUSAL);
       const sendResponse = args.send_response == null ? true : Boolean(args.send_response);
       if (!sendResponse && event.startsWith("imip:")) throw refuse(IMIP_SILENT_REFUSAL);
       const comment = typeof args.comment === "string" && args.comment.trim() ? args.comment.trim() : null;
+      if (!sendResponse && proposed) throw refuse(SILENT_PROPOSAL_REFUSAL);
+      if (!sendResponse && comment) throw refuse(SILENT_COMMENT_REFUSAL);
+      if (proposed) {
+        // The daemon's refusals of a proposal, word for word.
+        const title = held.summary;
+        if (held.cancelled) throw refuse(`${title} was cancelled by its organizer; there is no time to move`);
+        if (held.is_organizer) throw refuse(`You organize ${title}; change its time with event.update instead of proposing one`);
+        if (!held.allow_new_time_proposals) throw refuse(`The organizer of ${title} does not accept new time proposals`);
+      }
       const operation_id = `fixture-respond-${mock.nextRsvp++}`;
-      mock.rsvps.push({ operation_id, account, event, response, comment, send_response: sendResponse });
+      let proposedSlot: { start: string; end: string } | null = null;
+      if (proposed) {
+        const from = new Date(proposed.start);
+        const length = held.time.kind === "timed" ? Date.parse(held.time.end) - Date.parse(held.time.start) : 86_400_000;
+        const to = proposed.end ? new Date(proposed.end) : new Date(from.getTime() + length);
+        proposedSlot = { start: from.toISOString().replace(".000Z", "Z"), end: to.toISOString().replace(".000Z", "Z") };
+      }
+      mock.rsvps.push({ operation_id, account, event, response, comment, send_response: sendResponse, proposed_time: proposed, proposed_slot: proposedSlot });
       return { operation_id };
     }
     case "event_create": {

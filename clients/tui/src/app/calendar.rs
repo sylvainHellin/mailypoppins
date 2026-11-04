@@ -15,8 +15,8 @@ use mp_protocol::calendar::{CalendarViewParams, IMIP_EVENT_PREFIX};
 
 use super::{
     App, CalendarEntry, CalendarEvent, CalendarEventTime, CalendarLayout, CalendarsOverlay,
-    EventCalendarChoice, EventCardOverlay, EventForm, EventRemoveOverlay, MessageRef, Overlay,
-    RsvpOverlay, StatusLevel, Tz, View,
+    EventCalendarChoice, EventCardOverlay, EventForm, EventFormRow, EventRemoveOverlay, MessageRef,
+    Overlay, RsvpOverlay, StatusLevel, Tz, View,
 };
 
 /// The part of one day an event covers.
@@ -419,7 +419,7 @@ impl App {
     /// `Enter`: the event card of the event under the cursor.
     pub fn open_event_card(&mut self) {
         if let Some(event) = self.selected_event().cloned() {
-            self.overlay = Overlay::EventCard(Box::new(EventCardOverlay { event, scroll: 0 }));
+            self.overlay = Overlay::EventCard(Box::new(EventCardOverlay::new(event)));
         }
     }
 
@@ -469,7 +469,9 @@ impl App {
 
     /// `V` on an event: the respond overlay, unless there is nothing to
     /// answer. Which answers the daemon takes is its own business; what is
-    /// refused here is what no answer could mean.
+    /// refused here is what no answer could mean. The overlay may propose a
+    /// new time on a server event whose organizer accepts proposals, on a
+    /// calendar whose backend offers `propose-time` (PERSO-255).
     pub fn open_rsvp_overlay_for(&mut self, event: &CalendarEvent) {
         if event.cancelled {
             self.set_status(
@@ -494,11 +496,17 @@ impl App {
         } else {
             event.summary.clone()
         };
-        self.overlay = Overlay::Rsvp(RsvpOverlay::new(
-            event.account.clone(),
-            event.id.clone(),
-            summary,
-        ));
+        let mut overlay = RsvpOverlay::new(event.account.clone(), event.id.clone(), summary);
+        // A calendar list not read yet lets the daemon decide.
+        let offered = self
+            .calendar_view
+            .calendars
+            .iter()
+            .find(|c| c.account == event.account && c.id == event.calendar)
+            .is_none_or(|c| c.features.iter().any(|f| f == "propose-time"));
+        overlay.propose = overlay.server && event.allow_new_time_proposals && offered;
+        overlay.zone = self.calendar_view.zone.name().to_string();
+        self.overlay = Overlay::Rsvp(overlay);
     }
 
     /// `n`: the event form on the cursor's day, or the form a failed create
@@ -640,6 +648,68 @@ impl App {
         };
         let form = EventForm::edit(event, choice, self.calendar_view.zone);
         self.overlay = Overlay::EventForm(Box::new(form));
+    }
+
+    /// `p` on the event card (PERSO-255): the event form on `event` at the
+    /// time of its `chosen`th proposal, so `Enter` moves the meeting there
+    /// through `event.update` and the server tells every attendee. Only the
+    /// organizer takes a proposal, and an event mp cannot change says why.
+    pub fn open_event_edit_at_proposal(&mut self, event: &CalendarEvent, chosen: usize) {
+        let proposals: Vec<_> = event
+            .attendees
+            .iter()
+            .filter_map(|a| a.proposed_time.as_ref().map(|slot| (a, slot)))
+            .collect();
+        let Some((attendee, slot)) = proposals.get(chosen).or(proposals.first()).copied() else {
+            self.set_status(format!("Nobody proposed a new time for {}", event.summary));
+            return;
+        };
+        if !event.is_organizer {
+            self.set_status(format!(
+                "Only the organizer takes a proposed time; {} organizes {}",
+                event
+                    .organizer
+                    .as_ref()
+                    .map(|o| o.email.as_str())
+                    .unwrap_or("someone else"),
+                event.summary
+            ));
+            return;
+        }
+        if event.cancelled {
+            self.set_status(format!("{} was cancelled", event.summary));
+            return;
+        }
+        if let Some(why) = self.unchangeable(event) {
+            self.set_status(why);
+            return;
+        }
+        let Some(calendar) = self
+            .calendar_view
+            .calendars
+            .iter()
+            .find(|c| c.account == event.account && c.id == event.calendar)
+        else {
+            return;
+        };
+        let choice = EventCalendarChoice {
+            account: calendar.account.clone(),
+            id: calendar.id.clone(),
+            name: calendar.name.clone(),
+            teams: calendar.features.iter().any(|f| f == "online-meeting"),
+        };
+        let zone = self.calendar_view.zone;
+        let mut form = EventForm::edit(event, choice, zone);
+        form.move_to(&slot.start, &slot.end, zone);
+        form.row = EventFormRow::Start;
+        let who = attendee
+            .name
+            .clone()
+            .unwrap_or_else(|| attendee.email.clone());
+        self.overlay = Overlay::EventForm(Box::new(form));
+        self.set_status(format!(
+            "The form holds {who}'s proposed time; Enter moves the meeting and tells every attendee"
+        ));
     }
 
     /// `D`: cancel or delete the event under the cursor.

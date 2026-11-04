@@ -236,7 +236,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -251,7 +251,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -266,7 +266,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
+      --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
@@ -1050,27 +1050,28 @@ Arguments:
   <EVENT>  The event id, as `mp calendar view --json` prints it
 
 Options:
-      --summary <TEXT>     The new title
-      --start <WHEN>       The new start
-      --end <WHEN>         The new end; on an all-day event the last day, included
-      --duration <D>       The new length (1h30m, PT1H30M; whole days on an all-day event)
-      --all-day            Make it an all-day event: --start and --end are bare dates
-      --zone <ZONE>        The IANA zone the new times are read in (default the event's own)
-      --location <TEXT>    Where it takes place
-      --clear-location     Remove the location
-      --body <TEXT>        The new description
-      --body-file <PATH>   The new description, read from a file (- for stdin)
-      --clear-body         Remove the description
-      --to <ADDR>          A required attendee of the new list (repeatable)
-      --optional <ADDR>    An optional attendee of the new list (repeatable)
-      --room <ADDR>        A room mailbox of the new list (repeatable)
-      --teams              Add a Teams meeting link (when the calendar offers Teams); a link once added stays
-      --reminder <MIN>     Minutes before the start the reminder fires
-      --no-reminder        No reminder
-      --show-as <WORD>     How the time shows to others: free, tentative, busy, oof, working-elsewhere
-      --json               Print the settled `event.update` result as JSON on stdout
-  -A, --account <ACCOUNT>  Account to use
-  -h, --help               Print help
+      --summary <TEXT>       The new title
+      --start <WHEN>         The new start
+      --end <WHEN>           The new end; on an all-day event the last day, included
+      --duration <D>         The new length (1h30m, PT1H30M; whole days on an all-day event)
+      --all-day              Make it an all-day event: --start and --end are bare dates
+      --zone <ZONE>          The IANA zone the new times are read in (default the event's own)
+      --location <TEXT>      Where it takes place
+      --clear-location       Remove the location
+      --body <TEXT>          The new description
+      --body-file <PATH>     The new description, read from a file (- for stdin)
+      --clear-body           Remove the description
+      --to <ADDR>            A required attendee of the new list (repeatable)
+      --optional <ADDR>      An optional attendee of the new list (repeatable)
+      --room <ADDR>          A room mailbox of the new list (repeatable)
+      --teams                Add a Teams meeting link (when the calendar offers Teams); a link once added stays
+      --reminder <MIN>       Minutes before the start the reminder fires
+      --no-reminder          No reminder
+      --show-as <WORD>       How the time shows to others: free, tentative, busy, oof, working-elsewhere
+      --use-proposal <ADDR>  Move the meeting to the time the attendee ADDR proposed, as `mp event show` lists it
+      --json                 Print the settled `event.update` result as JSON on stdout
+  -A, --account <ACCOUNT>    Account to use
+  -h, --help                 Print help
 
 WHEN takes the forms of mp event create. A new --start keeps the event's
 length unless --end or --duration names a new one, and an --end or a
@@ -1078,10 +1079,13 @@ length unless --end or --duration names a new one, and an --end or a
 unless --zone names another. --to, --optional and --room name the whole new
 attendee list. An attendee may change only --reminder, --no-reminder and
 --show-as on their own copy of a meeting; the rest is the organizer's.
+--use-proposal moves the meeting to the time an attendee proposed, which
+mp event show lists under the attendee.
 
 Examples:
   mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
   mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs
+  mp event update AAMkADev1 --use-proposal ada@example.com -A evoqs
 
 $ mp event cancel --help
 Cancel a meeting you organize: every attendee gets the cancellation
@@ -1140,11 +1144,29 @@ Arguments:
   <RESPONSE>  The answer [possible values: accept, tentative, decline]
 
 Options:
-      --comment <TEXT>     A comment for the organizer
-      --no-send-response   Record the answer without telling the organizer (server events only: an iMIP reply is the answer itself)
-      --json               Print the settled `event.respond` result as JSON on stdout
-  -A, --account <ACCOUNT>  Account to use
-  -h, --help               Print help
+      --comment <TEXT>        A comment for the organizer
+      --no-send-response      Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
+      --propose <WHEN>        Propose a new start to the organizer (tentative or decline)
+      --propose-end <WHEN>    The proposed end (default: the event's length)
+      --propose-duration <D>  The proposed length (1h30m, PT1H30M)
+      --zone <ZONE>           The IANA zone the proposed times are read in (default the event's own, the local zone for an all-day event)
+      --json                  Print the settled `event.respond` result as JSON on stdout
+  -A, --account <ACCOUNT>     Account to use
+  -h, --help                  Print help
+
+A tentative or a decline of a server event may propose a new time to the
+organizer: --propose takes the forms of mp event create's WHEN, read in the
+event's own zone (the local zone for an all-day event) unless --zone names
+another, and the proposal keeps the event's length unless --propose-end or
+--propose-duration names another; a bare date alone on a timed meeting
+proposes that whole day. The organizer sees it on the event and takes it
+with mp event update EVENT --use-proposal ADDR. A proposal must reach the
+organizer, so it is refused with --no-send-response, as a --comment is, and
+an invitation mail's event (imip:<row_id>) takes none: mp builds no
+iCalendar COUNTER.
+
+Example:
+  mp event respond AAMkADev1 tentative --propose 2026-11-18T15:00 -A evoqs
 
 $ mp hooks --help
 Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`

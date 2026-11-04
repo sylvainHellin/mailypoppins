@@ -131,6 +131,26 @@ pub const SHOW_AS: [(&str, &str); 5] = [
 /// The show-as a new event gets when the form leaves it alone.
 pub const DEFAULT_SHOW_AS: &str = "busy";
 
+/// The date, start and end rows of a timed span from `start` to `end`,
+/// RFC 3339 instants, read in `zone`: the end as a clock time on the same
+/// day, else with its date.
+fn timed_rows(start: &str, end: &str, zone: Tz) -> (String, String, String) {
+    let local = |raw: &str| {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|at| at.with_timezone(&zone).naive_local())
+    };
+    let (start, end) = (local(start), local(end));
+    let date = start.map(|s| s.date().to_string()).unwrap_or_default();
+    let start_clock = start.map(|s| s.format("%H:%M").to_string());
+    let end = match (start, end) {
+        (Some(s), Some(e)) if s.date() == e.date() => e.format("%H:%M").to_string(),
+        (_, Some(e)) => e.format("%Y-%m-%dT%H:%M").to_string(),
+        _ => String::new(),
+    };
+    (date, start_clock.unwrap_or_default(), end)
+}
+
 /// The event form's state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventForm {
@@ -214,11 +234,6 @@ impl EventForm {
     /// `zone`, the Calendar view's: `Enter` sends what changed.
     pub fn edit(event: &CalendarEvent, calendar: EventCalendarChoice, zone: Tz) -> Self {
         let day = |raw: &str| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
-        let local = |raw: &str| {
-            chrono::DateTime::parse_from_rfc3339(raw)
-                .ok()
-                .map(|at| at.with_timezone(&zone).naive_local())
-        };
         let (all_day, date, start, end) = match &event.time {
             CalendarEventTime::AllDay { start, end } => {
                 let first = day(start);
@@ -230,15 +245,8 @@ impl EventForm {
                 (true, start.clone(), String::new(), end)
             }
             CalendarEventTime::Timed { start, end, .. } => {
-                let (start, end) = (local(start), local(end));
-                let date = start.map(|s| s.date().to_string()).unwrap_or_default();
-                let start_clock = start.map(|s| s.format("%H:%M").to_string());
-                let end = match (start, end) {
-                    (Some(s), Some(e)) if s.date() == e.date() => e.format("%H:%M").to_string(),
-                    (_, Some(e)) => e.format("%Y-%m-%dT%H:%M").to_string(),
-                    _ => String::new(),
-                };
-                (false, date, start_clock.unwrap_or_default(), end)
+                let (date, start, end) = timed_rows(start, end, zone);
+                (false, date, start, end)
             }
         };
         let people = |role: &str| {
@@ -286,6 +294,19 @@ impl EventForm {
             original: Box::new(form.clone()),
         });
         form
+    }
+
+    /// Move the form's time to the span from `start` to `end`, RFC 3339
+    /// instants, read in `zone`: what `p` on the event card does with an
+    /// attendee's proposed time (PERSO-255), which `Enter` then sends as a
+    /// change of the event's time.
+    pub fn move_to(&mut self, start: &str, end: &str, zone: Tz) {
+        let (date, start, end) = timed_rows(start, end, zone);
+        self.all_day = false;
+        self.date = date;
+        self.start = start;
+        self.end = end;
+        self.error = None;
     }
 
     /// Flip the Teams switch, which a Teams meeting being edited keeps on.

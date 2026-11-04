@@ -15,10 +15,15 @@ use super::util::truncate;
 use super::widgets::{modal_stack_areas, render_action_button, render_modal_shell};
 
 /// Render the respond overlay (#0029, PERSO-200): Accept / Tentative /
-/// Decline, a comment line, and on a server event whether the organizer is
-/// told. Opened with `V`; Enter answers, Esc cancels.
+/// Decline, a comment line, on a tentative or a decline that may propose
+/// one the proposed start and end (PERSO-255), on a server event whether the
+/// organizer is told, and why the last `Enter` did not answer. Opened with
+/// `V`; Enter answers, Esc cancels.
 pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area: Rect) {
-    let height = if overlay.server { 11 } else { 10 };
+    let height = 10
+        + u16::from(overlay.server)
+        + 2 * u16::from(overlay.proposing())
+        + u16::from(overlay.error.is_some());
     let Some((_, inner)) = render_modal_shell(
         frame,
         area,
@@ -62,22 +67,43 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
         lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
     }
 
-    // While typing, the row shows the comment's tail so the caret stays in
-    // view; otherwise its start, cut with an ellipsis.
-    let typing = overlay.row == RsvpRow::Comment;
-    let prefix = "  Comment: ";
-    let avail = inner_width.saturating_sub(prefix.len());
-    let comment = if typing {
-        super::util::scrolled_input_value(&format!("{}\u{258f}", overlay.comment), avail)
-    } else if overlay.comment.is_empty() {
-        "(none)".to_string()
-    } else {
-        truncate(&overlay.comment, avail)
+    // While typing, a text row shows its tail so the caret stays in view;
+    // otherwise its start, cut with an ellipsis, or what an empty one means.
+    let text_row = |row: RsvpRow, prefix: &str, text: &str, empty: &str| {
+        let typing = overlay.row == row;
+        let avail = inner_width.saturating_sub(prefix.chars().count());
+        let shown = if typing {
+            super::util::scrolled_input_value(&format!("{text}\u{258f}"), avail)
+        } else if text.is_empty() {
+            empty.to_string()
+        } else {
+            truncate(text, avail)
+        };
+        Line::from(vec![
+            Span::styled(prefix.to_string(), if typing { focused } else { muted }),
+            Span::styled(shown, if typing { focused } else { normal }),
+        ])
     };
-    lines.push(Line::from(vec![
-        Span::styled(prefix, if typing { focused } else { muted }),
-        Span::styled(comment, if typing { focused } else { normal }),
-    ]));
+    lines.push(text_row(
+        RsvpRow::Comment,
+        "  Comment: ",
+        &overlay.comment,
+        "(none)",
+    ));
+    if overlay.proposing() {
+        lines.push(text_row(
+            RsvpRow::ProposeStart,
+            "  Propose: ",
+            &overlay.proposed_start,
+            "(none: YYYY-MM-DDTHH:MM)",
+        ));
+        lines.push(text_row(
+            RsvpRow::ProposeEnd,
+            "  Until:   ",
+            &overlay.proposed_end,
+            "(the event's length)",
+        ));
+    }
     if overlay.server {
         let toggle = if overlay.send_response {
             "[x] yes"
@@ -89,6 +115,12 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
             Span::styled("  Send response: ", if on { focused } else { muted }),
             Span::styled(toggle, if on { focused } else { normal }),
         ]));
+    }
+    if let Some(error) = &overlay.error {
+        lines.push(Line::from(Span::styled(
+            truncate(&format!("  {error}"), inner_width),
+            Style::default().fg(theme::active().error),
+        )));
     }
 
     frame.render_widget(Paragraph::new(lines), stack.content);

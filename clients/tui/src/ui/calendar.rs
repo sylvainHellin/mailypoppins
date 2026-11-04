@@ -950,7 +950,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     };
     let names = calendar_names(&app.calendar_view.calendars);
     frame.render_widget(
-        Paragraph::new(event_lines(event, app.calendar_view.zone, &names))
+        Paragraph::new(event_lines(event, app.calendar_view.zone, &names, None))
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(theme::active().bg)),
         inner,
@@ -960,7 +960,9 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 /// The `Enter` overlay: the same card, scrollable, with its keys.
 pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut Frame, area: Rect) {
     let names = calendar_names(&app.calendar_view.calendars);
-    let lines = event_lines(&card.event, app.calendar_view.zone, &names);
+    // The proposal `p` takes is marked when there is more than one to pick.
+    let chosen = (card.proposals().len() > 1).then_some(card.proposal);
+    let lines = event_lines(&card.event, app.calendar_view.zone, &names, chosen);
     let width = area.width.saturating_sub(8).clamp(40, 96);
     // The card's lines, the border and the footer, up to the frame.
     let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(4));
@@ -982,8 +984,13 @@ pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut 
         stack.content,
     );
     if let Some(footer) = stack.footer {
+        let proposals = card.proposals().len();
         let keys = if card.event.source.is_some() {
             "  V respond \u{b7} m open the mail \u{b7} e open the .ics \u{b7} j/k scroll \u{b7} Esc close"
+        } else if card.event.is_organizer && proposals > 1 {
+            "  p use this time \u{b7} Tab next proposal \u{b7} E edit \u{b7} D cancel \u{b7} j/k scroll \u{b7} Esc close"
+        } else if card.event.is_organizer && proposals == 1 {
+            "  p use the proposed time \u{b7} E edit \u{b7} D cancel or delete \u{b7} j/k scroll \u{b7} Esc close"
         } else {
             "  V respond \u{b7} E edit \u{b7} D cancel or delete \u{b7} j/k scroll \u{b7} Esc close"
         };
@@ -1041,11 +1048,13 @@ fn status_style(status: &str) -> Style {
 /// The card's lines: the title, then when, where, the calendar, the
 /// organizer, the attendees with their answers and proposed times, the
 /// user's own answer, whether new times may be proposed, the series, the
-/// online meeting, the links, the invitation mail, and the body.
+/// online meeting, the links, the invitation mail, and the body. `chosen`
+/// marks the proposal `p` takes, counted among the proposals.
 pub(super) fn event_lines(
     event: &CalendarEvent,
     zone: Tz,
     names: &CalendarNames,
+    chosen: Option<usize>,
 ) -> Vec<Line<'static>> {
     let theme = theme::active();
     let label = Style::default().fg(theme.text_muted);
@@ -1082,6 +1091,7 @@ pub(super) fn event_lines(
             value,
         );
     }
+    let mut proposal = 0;
     for (n, attendee) in event.attendees.iter().enumerate() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -1095,10 +1105,19 @@ pub(super) fn event_lines(
             Span::styled(attendee.status.clone(), status_style(&attendee.status)),
         ]));
         if let Some(slot) = &attendee.proposed_time {
+            let marker = if chosen == Some(proposal) {
+                "\u{25b6}"
+            } else {
+                " "
+            };
+            proposal += 1;
             field(
                 &mut lines,
                 "",
-                format!("  proposes {}", time_span(&slot.start, &slot.end, &zone)),
+                format!(
+                    "{marker} proposes {}",
+                    time_span(&slot.start, &slot.end, &zone)
+                ),
                 Style::default().fg(theme.warning),
             );
         }
