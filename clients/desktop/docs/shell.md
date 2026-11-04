@@ -763,7 +763,8 @@ Its alert names the first problem with the fields as typed and Create event stay
 A create is `event_create` with the form's fields as `EventCreateParams`, the times read in this window's IANA zone, which the dialog's description names; a refusal (an event typed wrong, a read-only calendar, a sign-in without the calendar scope) shows verbatim in the alert and keeps the form open.
 Once started the form closes, and `state.eventCreates` keeps each create (`{token, account, summary, dialog, operation_id}`) with the transaction id its start answered, `eventCreateEarly` an end that overtook the answer.
 The settle says "Created <summary>", then "; invited <address>" or "; invited N people".
-A failure ("The event was not created: <why>") or a create a daemon restart dropped ("The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once") opens the form again as "New event (retry)", with what was typed and Retry, which sends the same transaction id, so the server makes the event at most once; with another dialog open the form is kept instead, and New event opens it.
+A failure ("The event was not created: <why>") or a create a daemon restart dropped ("The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once") opens the form again as "New event (retry)", with what was typed and Retry.
+With another dialog open the form is kept, and New event opens it.
 
 ### New invitation
 

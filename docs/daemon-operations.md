@@ -125,7 +125,7 @@ The table is what routes and through what:
 | `mp calendar show\|hide <calendar> [--account]` | `calendar.set_visibility` | PERSO-200 |
 | `mp event show <event> [--account] [--json]` | `event.get`, then `calendar.list` for the calendar name | PERSO-200 |
 | `mp event respond <event> <accept\|tentative\|decline> [--comment] [--no-send-response] [--json]` | `event.respond` | PERSO-200 |
-| `mp event create --summary --start (--end\|--duration) [--calendar] [--all-day] [--zone] [--location] [--body\|--body-file] [--to]... [--optional]... [--room]... [--teams] [--reminder\|--no-reminder] [--transaction-id] [--json]` | `event.create` | PERSO-255 |
+| `mp event create [--account] --summary --start [--end\|--duration] [--calendar] [--all-day] [--zone] [--location] [--body\|--body-file] [--to]... [--optional]... [--room]... [--teams] [--reminder\|--no-reminder] [--transaction-id] [--json]` | `event.create` | PERSO-255 |
 | `mp invite accept\|tentative\|decline <selector> [--mailbox] [--comment] [--no-send-response]` | `message.invite`, then `event.get` and `event.respond` on its `event_id`, else on `imip:<row_id>` | P4-U14, PERSO-200 |
 | `mp store gc [--dry-run] [--force] [--all-accounts]` | one `diagnostic.store_gc` per account | P4-U14 |
 | `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
@@ -472,7 +472,7 @@ Every answer that went through publishes `calendar.changed`.
 
 `event.create` (PERSO-255) is an operation in the same journal, which a daemon restart forgets: nothing is replayed, since a new event sends mail to people.
 It answers its `transaction_id` with the operation id before any server call, and a client whose operation vanished retries with the same id, which Graph keeps on the event and dedups: an unchanged repeat answers the event the first create made, and a changed one patches it.
-Before it posts, the operation looks for a cached event carrying that transaction id and settles with it, so a retry after the event has synced calls the server not at all.
+Before it posts, the operation looks for a cached event carrying that transaction id: one that matches the create's fields settles the operation without a server call, and one the retry changed is patched to match them, the way Graph's changed repeat is.
 Otherwise it connects the backend, looks at its cancel token, posts the event, writes the server's answer into the cache under the account's calendar lock and syncs the account at once; a failure of that sync is logged and leaves the event standing, and `calendar.changed` follows.
 Nothing is written to the cache before the server answers, so a refusal the daemon could not predict (a calendar whose access changed) shows no event Graph does not hold.
 

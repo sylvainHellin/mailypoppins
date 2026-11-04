@@ -1152,9 +1152,11 @@ An attendee is `{email, name?, role?}` (`EventAttendeeInput`), `role` one of `re
 `reminder` is minutes before the start, `null` for none, and absent for the mailbox default; `show_as` is `free`, `tentative`, `busy`, `oof` or `working-elsewhere`, `sensitivity` `normal`, `personal`, `private` or `confidential`, and `online_meeting: true` provisions a Teams meeting.
 An all-day event's midnights go to Graph in the Windows name of `zone`, so the event covers that zone's days exactly.
 `transaction_id` is the client's id for the create, minted by the daemon when absent (`mp-` and 32 hex digits) and sent to Graph as `transactionId`: a client whose operation vanished retries with the same id, and the server holds one event however often the create arrives.
-The operation settles at once with an event the cache already holds under that transaction id, without calling the server; otherwise it posts the event, and a Graph `ErrorDuplicateTransactionId` (a repeat whose fields changed) adopts the event the first create made and patches it with this create's fields.
+The operation settles at once with an event the cache already holds under that transaction id when the event matches this create's fields, without calling the server, and patches that event with them when the retry changed them.
+Otherwise it posts the event, and a Graph `ErrorDuplicateTransactionId` (a repeat whose fields changed) adopts the event the first create made and patches it the same way.
+The patch makes the event match the create: a location, description or attendee list the retry left out is cleared, show-as, sensitivity and new-time proposals go back to the server's defaults, and a reminder left to the mailbox default and an online meeting stay as they are.
 The server's answer enters the cache under the account's calendar lock before the immediate sync, which publishes `calendar.changed`; nothing is written to the cache before the server answers.
-The refusals come before the operation starts: `-32602` for an account without a backend, for an event typed wrong (the sentence names what), and for a calendar `calendar.list` does not name or one whose `can_edit` is `false`, and `-32603` with the re-login prompt for a sign-in without the calendar scope.
+The refusals come before the operation starts: `-32602` for an account without a backend, for an event typed wrong (the sentence names what), and for a calendar `calendar.list` does not name or one whose `can_edit` is `false`, or, with none named, an account whose calendars have not synced and so has no default, and `-32603` with the re-login prompt for a sign-in without the calendar scope.
 It settles `EventWriteResult` `{account, event, transaction_id, invited}`, `event` the created `CalendarEvent` and `invited` the addresses the server sent the invitation to.
 
 `calendar.rebuild` `{account}` keeps its iMIP meaning, the fold of the stored replies, on every account, since every account's invitation mails feed its view.
@@ -1209,7 +1211,7 @@ Where a worker looks is part of its method's contract, and a method whose work e
 `contact.rebuild` looks every 256 rows of its walk and once more before the contacts cache write; `calendar.rsvp` and `send.invite` look once the reply or the invitation is built, before the durable submission; `event.respond` looks once the account's calendar backend is connected, before it sends the answer to the server, and on an invitation mail's event where `calendar.rsvp` does; `event.create` looks once the backend is connected, before it posts the event.
 A cancel that lands before the commit point drops what was prepared: the cache stays as it was, nothing is submitted and no outbox row is minted.
 A cancel that lands after it cannot recall the write or the submission, which then completes under an operation that already reads `cancelled`.
-A client therefore words a cancelled end of these three as having stopped waiting rather than undone.
+A client therefore words a cancelled end of these methods as having stopped waiting rather than undone.
 
 `sync.quick` and `sync.full` look before the fetch, before every body chunk of every mailbox's download, and before each mailbox's ingest.
 A cancel stops the download at its next chunk and the ingest at its next mailbox: the mailboxes already ingested stay written, since a pass is idempotent and the next one resumes from their cursors, and the mailbox the cancel landed before is dropped unwritten, its download included.
@@ -1725,4 +1727,4 @@ It also removed `calendar.events`, the one-account iMIP agenda, once neither the
 The capability list lost the name and the desktop no longer requires it, so a client that still calls it is answered `-32601`.
 The fixtures of the `event.*` family are named `event.<method>.request.json` and `.response.json`, which the fixture suite reads as a call and its answer before it reads the `event.` prefix as a bare envelope.
 
-PERSO-255 (the server calendar, phase 2) added `event.create`, an operation, with the types `EventCreateParams`, `EventInputParams`, `EventAttendeeInput`, `EventCreateStarted` and `EventWriteResult`, additively; `calendar.list` rows now list `write` and `online-meeting` in `features` on a Graph calendar, and the capability list grew by the name.
+PERSO-255 (the server calendar, phase 2) added `event.create`, an operation, with the types `EventCreateParams`, `EventInputParams`, `EventAttendeeInput`, `EventCreateStarted` and `EventWriteResult`, additively; `calendar.list` rows list `write` and `online-meeting` in `features` on a Graph calendar, and the capability list carries the name.

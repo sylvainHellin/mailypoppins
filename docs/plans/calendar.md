@@ -57,11 +57,11 @@ The other entries are design choices of this plan; phase 1 built D6, D7, D8 and 
 
 ## Current state
 
-After phase 1:
+After phase 1 and the first slices of phase 2:
 
 - A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
 - Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
-- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get`, `event.respond` and, from phase 2, `event.create` for single events, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
+- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get`, `event.respond` and `event.create` for single events, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
 - The CLI has `mp calendar list|view|show|hide|rebuild` and `mp event create|show|respond`, and `mp invite` answers through `event.respond`.
 - The TUI's `n` and the desktop app's New event open an event form that creates a single event on a Graph account through `event.create`.
 - The TUI and the desktop app show agenda, day and week layouts with an event card, a calendars panel and a respond dialog with a comment and the send-response choice.
