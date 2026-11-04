@@ -1,6 +1,6 @@
 # Design: server-side calendar
 
-> Status: phase 1 merged (2026-11-03); phase 2 designed (2026-11-03), phases 3 and 4 are design. Implementer-facing.
+> Status: phase 1 merged (2026-11-03); phase 2 merged (2026-11-04), its eye checks on the Mac open; phases 3 and 4 are design. Implementer-facing.
 > Built: [architecture.md](../architecture.md), "Server calendar", and [daemon-protocol.md](../daemon-protocol.md), "The server calendar", describe what phase 1 shipped.
 > Scoping: `.sync/calendar-scoping/index.html` and Sylvain's comment export of 2026-10-28.
 > Phase 2 design: `.sync/reports/calendar-phase-2-design/2026-11-03_calendar-phase-2-design.html`.
@@ -57,7 +57,7 @@ The other entries are design choices of this plan; phase 1 built D6, D7, D8 and 
 
 ## Current state
 
-After phase 1 and the first slices of phase 2:
+After phases 1 and 2:
 
 - A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
 - Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
@@ -237,6 +237,9 @@ Each slice is one branch merged to `main` with its docs, parity rows, website pa
 8. Reminders: the daemon's reminder task, the `calendar_reminders` table, its events and commands, and the presentation in the three clients; needs slice 2 for dismissing and snoozing on the server.
 
 Slices 1 and 2 can run side by side; once slice 4 has merged, slices 5, 6 and 7 can run in parallel, and slice 8 can run any time after slice 2.
+
+- Done: all eight slices merged on 2026-11-04; on EVOQS through the installed daemon, a single event and a weekly series are created, changed, cancelled and deleted from the CLI and come back from Graph's sync as written, an occurrence moved alone stays an exception when the series is renamed, and a shorter rule and a deleted occurrence leave the views.
+- Open: Sylvain's eye checks of the desktop and TUI forms, the macOS reminder notification and the dismissal carried to Outlook; "Use this time" on a real proposal, which needs a second Microsoft 365 account; free/busy compared with Outlook's Scheduling Assistant on an account with colleagues.
 
 ### Phase 3, EWS for on-prem Exchange, TUM (PERSO-256, after phase 1)
 
