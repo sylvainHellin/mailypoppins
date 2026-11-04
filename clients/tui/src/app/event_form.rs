@@ -498,6 +498,11 @@ impl EventForm {
         if self.all_day != was.all_day || self.span() != was.span() {
             let (start, end) = self.span();
             fields.start = Some(start);
+            // An all-day event with no last day is one day long, which the
+            // daemon would otherwise read as "keep its length".
+            if end.is_none() && self.all_day {
+                fields.duration = Some("P1D".into());
+            }
             fields.end = end;
             fields.all_day = Some(self.all_day);
             fields.zone = Some(self.zone.clone());
@@ -776,6 +781,15 @@ mod tests {
         let mut teams = edit_form(true);
         teams.toggle_teams();
         assert!(teams.teams, "a Teams meeting stays one");
+
+        let mut day = edit_form(true);
+        day.toggle_all_day();
+        let fields = day.update_params().unwrap().fields;
+        assert_eq!(fields.start.as_deref(), Some("2026-11-18"));
+        assert_eq!(
+            (fields.end, fields.duration.as_deref()),
+            (None, Some("P1D"))
+        );
     }
 
     /// An attendee's form changes the reminder and nothing else, and an
