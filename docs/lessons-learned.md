@@ -3412,3 +3412,9 @@ It keeps one fake per spec and account for the life of the process (`FakeCalenda
 
 `cargo insta accept` run at the root accepts only the root crate's snapshots; the TUI golden frames live in `clients/tui` and need `--workspace`.
 ts-rs also warns "failed to parse serde attribute" on `#[serde(deserialize_with = ...)]`; `#[serde(with = "module")]` plus `#[ts(as = "...")]` keeps the generated type right.
+
+## Graph drops isOnlineMeeting on a calendar that allows no online-meeting provider (2026-11-04, PERSO-255)
+
+Graph silently ignores `isOnlineMeeting: true` on a calendar whose `allowedOnlineMeetingProviders` is empty (a mailbox with no Teams licence, as EVOQS): the create succeeds with `isOnlineMeeting: false` and `onlineMeetingProvider: "unknown"`.
+The online-meeting capability is therefore read per calendar from that list, and `calendar.list` reports `online-meeting` only on a calendar that names `teamsForBusiness`.
+The calendar list is read in full at every sync, so a new `Calendar` field needs a store column but no `MODEL_VERSION` bump.

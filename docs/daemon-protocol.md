@@ -1114,7 +1114,8 @@ The wire types are `mp_protocol::calendar`; an event is `CalendarEvent`, the neu
 `calendar.list` `{account?}` -> `{calendars: [CalendarInfo]}` is a query.
 A row is `{account, id, name, color, is_default, can_edit, visible, backend, features}`, `color` `null` when the server names none and `backend` the account's `calendar_backend` as the configuration spells it.
 `features` lists what the backend lets a client do beyond reading and answering, so a client greys out what an account lacks: `write`, `online-meeting`, `propose-time`, `free-busy` and `server-reminders` (PERSO-255), each listed once the daemon serves it there.
-This build serves `write` (`event.create`) and `online-meeting` (a Teams link on a new event) on a Graph calendar, and none on the invitation calendar, which answers `[]`.
+This build serves `write` (`event.create`) on a Graph calendar and `online-meeting` (a Teams link on a new event) on one whose `allowedOnlineMeetingProviders` names `teamsForBusiness`, and none on the invitation calendar, which answers `[]`.
+A mailbox without a Teams licence answers that list empty and Graph drops a request for a meeting link there without a word, so its calendars list no `online-meeting` and a client hides or disables its Teams toggle on them.
 An account with a backend lists its server calendars in the server's order, as the last sync stored them, so an account that never synced lists none.
 Every account holding an invitation mail lists one more, the virtual invitation calendar `{id: "imip", name: "Invitations", backend: "none"}`, so its events can be hidden like a server calendar's.
 Without `account` it answers every account with a store, in configuration order; a named account is refused as `message.list` refuses one.
@@ -1156,7 +1157,7 @@ The operation settles at once with an event the cache already holds under that t
 Otherwise it posts the event, and a Graph `ErrorDuplicateTransactionId` (a repeat whose fields changed) adopts the event the first create made and patches it the same way.
 The patch makes the event match the create: a location, description or attendee list the retry left out is cleared, show-as, sensitivity and new-time proposals go back to the server's defaults, and a reminder left to the mailbox default and an online meeting stay as they are.
 The server's answer enters the cache under the account's calendar lock before the immediate sync, which publishes `calendar.changed`; nothing is written to the cache before the server answers.
-The refusals come before the operation starts: `-32602` for an account without a backend, for an event typed wrong (the sentence names what), and for a calendar `calendar.list` does not name or one whose `can_edit` is `false`, or, with none named, an account whose calendars have not synced and so has no default, and `-32603` with the re-login prompt for a sign-in without the calendar scope.
+The refusals come before the operation starts: `-32602` for an account without a backend, for an event typed wrong (the sentence names what), for a calendar `calendar.list` does not name or one whose `can_edit` is `false`, or, with none named, an account whose calendars have not synced and so has no default, and for `online_meeting: true` on a calendar without `online-meeting` (`The calendar <name> of <account> offers no Teams meetings (the mailbox has no Teams licence)`), and `-32603` with the re-login prompt for a sign-in without the calendar scope.
 It settles `EventWriteResult` `{account, event, transaction_id, invited}`, `event` the created `CalendarEvent` and `invited` the addresses the server sent the invitation to.
 
 `calendar.rebuild` `{account}` keeps its iMIP meaning, the fold of the stored replies, on every account, since every account's invitation mails feed its view.
@@ -1727,4 +1728,4 @@ It also removed `calendar.events`, the one-account iMIP agenda, once neither the
 The capability list lost the name and the desktop no longer requires it, so a client that still calls it is answered `-32601`.
 The fixtures of the `event.*` family are named `event.<method>.request.json` and `.response.json`, which the fixture suite reads as a call and its answer before it reads the `event.` prefix as a bare envelope.
 
-PERSO-255 (the server calendar, phase 2) added `event.create`, an operation, with the types `EventCreateParams`, `EventInputParams`, `EventAttendeeInput`, `EventCreateStarted` and `EventWriteResult`, additively; `calendar.list` rows list `write` and `online-meeting` in `features` on a Graph calendar, and the capability list carries the name.
+PERSO-255 (the server calendar, phase 2) added `event.create`, an operation, with the types `EventCreateParams`, `EventInputParams`, `EventAttendeeInput`, `EventCreateStarted` and `EventWriteResult`, additively; `calendar.list` rows list `write` in `features` on a Graph calendar and `online-meeting` on one that offers Teams, and the capability list carries the name.
