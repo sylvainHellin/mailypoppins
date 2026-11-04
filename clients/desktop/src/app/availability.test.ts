@@ -16,6 +16,7 @@ const fields = (over: Partial<EventFields> = {}): EventFields => ({
   teams: false,
   reminder: "",
   noReminder: false,
+  showAs: "busy",
   body: "",
   ...over,
 });
