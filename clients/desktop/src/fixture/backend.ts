@@ -256,9 +256,11 @@ export const mock = {
   /** The next create's operation id counter. */
   nextEventCreate: 1,
   /** The updates, cancels and deletes `event_update`, `event_cancel` and `event_delete` started and no test settled yet, oldest first, each with what it does. */
-  eventChanges: [] as { operation_id: string; account: string; id: string; kind: "update" | "cancel" | "delete"; event: CalendarEvent | null }[],
+  eventChanges: [] as { operation_id: string; account: string; id: string; kind: "update" | "cancel" | "delete"; event: CalendarEvent | null; retried?: unknown }[],
   /** The next change's operation id counter. */
   nextEventChange: 1,
+  /** The cancels and deletes that took an event off the server and the cache, with what each settled with, as the daemon's `calendar_removed_events`: a repeat of the same call counts as done with that result. */
+  removedEvents: [] as { account: string; id: string; kind: "cancel" | "delete"; result: unknown }[],
   /** Each account's contact index, ranked, as `contact.search` rows. */
   contacts: clone(fixtures.contacts),
   /** The rebuilds `contact_rebuild` started and no test settled yet, oldest first. */
@@ -529,6 +531,7 @@ export function resetMock(): void {
   mock.nextEventCreate = 1;
   mock.eventChanges = [];
   mock.nextEventChange = 1;
+  mock.removedEvents = [];
   mock.contacts = clone(fixtures.contacts);
   mock.rebuilds = [];
   mock.nextRebuild = 1;
@@ -655,9 +658,13 @@ export function settleEventCreate(opts: { fail?: boolean } = {}): string {
  * fixture.rs's `event.update`, `event.cancel` and `event.delete` end: the
  * oldest change not settled yet lands on the server calendar with
  * `calendar.changed` and settles the daemon's result, or with `fail` fails
- * with the server's refusal.
+ * with the server's refusal. With `dropped` the change lands as it would and
+ * the client hears `operation_dropped` instead, as when the daemon restarted
+ * after the server answered. A cancel or delete that landed is remembered,
+ * so a retry of the same call counts as done; a retry settles with the first
+ * call's result and reaches the server no more.
  */
-export function settleEventChange(opts: { fail?: boolean } = {}): string {
+export function settleEventChange(opts: { fail?: boolean; dropped?: boolean } = {}): string {
   const run = mock.eventChanges.shift();
   if (!run) throw new Error("no event change is waiting to settle");
   if (opts.fail) {
@@ -666,6 +673,10 @@ export function settleEventChange(opts: { fail?: boolean } = {}): string {
       state: "failed",
       error: { code: -32603, message: `Graph refused the ${run.kind}: HTTP 503` },
     });
+    return run.operation_id;
+  }
+  if (run.retried !== undefined) {
+    emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "succeeded", result: run.retried });
     return run.operation_id;
   }
   const at = mock.events.findIndex((e) => e.account === run.account && e.id === run.id);
@@ -679,6 +690,14 @@ export function settleEventChange(opts: { fail?: boolean } = {}): string {
       : run.kind === "cancel"
         ? { account: run.account, event: run.id, notified: (before?.attendees ?? []).map((a) => a.email) }
         : { account: run.account, event: run.id };
+  if (run.kind !== "update") {
+    mock.removedEvents = mock.removedEvents.filter((r) => !(r.account === run.account && r.id === run.id));
+    mock.removedEvents.push({ account: run.account, id: run.id, kind: run.kind, result });
+  }
+  if (opts.dropped) {
+    emit({ type: "operation_dropped", operation_id: run.operation_id, kind: "event_change", reason: "the daemon restarted" });
+    return run.operation_id;
+  }
   emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "succeeded", result });
   return run.operation_id;
 }
@@ -2222,6 +2241,15 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const method = cmd.replace("_", ".");
       if (id.startsWith("imip:")) throw refuse(`${id} is an invitation mail's event, which can only be answered (event.respond); ${method} changes a server event`);
       const event = mock.events.find((e) => e.account === account && e.id === id);
+      const removed = mock.removedEvents.find((r) => r.account === account && r.id === id && `event_${r.kind}` === cmd);
+      if (!event && removed) {
+        // The daemon's counted-as-done retry: the same call took the event
+        // off the server and the cache already, so it settles with that
+        // call's result and reaches the server no more.
+        const operation_id = `fixture-change-${mock.nextEventChange++}`;
+        mock.eventChanges.push({ operation_id, account, id, kind: removed.kind, event: null, retried: removed.result });
+        return { operation_id };
+      }
       if (!event) throw refuse(`${account} has no event ${id} (cancelled or deleted already, or not synced yet)`);
       if (event.kind !== "single" || event.series_master_id) {
         throw refuse(`${event.summary} is part of a recurring series, which mp cannot change yet; change it in Outlook`);

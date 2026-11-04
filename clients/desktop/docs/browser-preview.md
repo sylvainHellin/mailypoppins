@@ -42,7 +42,7 @@ mpFixture.settleRebuild()                        // the oldest contact rebuild; 
 mpFixture.settleRsvp()                           // the oldest event_respond answer; { fail: true } or { delivered: false }
 mpFixture.settleInvite()                         // the oldest invitation sent
 mpFixture.settleEventCreate()                    // the oldest event_create; { fail: true }
-mpFixture.settleEventChange()                    // the oldest event_update, event_cancel or event_delete; { fail: true }
+mpFixture.settleEventChange()                    // the oldest event_update, event_cancel or event_delete; { fail: true }, or { dropped: true } for one that landed before the daemon restarted, whose retry counts as done
 mpFixture.reportDeviceCode(); mpFixture.settleSignIn()
 mpFixture.simulateInvite(false)                  // invite_update; true for invite_cancel
 mpFixture.simulateSignatureChanged()

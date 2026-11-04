@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { mock, settleEventChange } from "@/test/tauri-mock";
-import { changedFields, editDialogFor, editProblem, NOTHING_CHANGED, ORGANIZER_ONLY, removeDialogFor } from "@/app/eventChange";
+import { changedFields, editDialogFor, editProblem, NOTHING_CHANGED, ORGANIZER_ONLY, removeDialogFor, RESTARTED_REMOVE } from "@/app/eventChange";
 import { NO_TITLE } from "@/app/eventForm";
 import type { CalendarEvent, CalendarInfo } from "@/protocol/types";
 import type { EventDialog } from "@/app/state";
@@ -204,6 +204,24 @@ describe("changing an event in the Calendar view", () => {
     await r.user.click(within(again).getByRole("button", { name: /Cancel meeting/ }));
     await waitFor(() => expect(callsOf("event_cancel")).toHaveLength(2));
     expect(callsOf("event_cancel")[1]).toEqual({ account: "home", event: "AAMkAD-robin", comment: "Postponed" });
+  });
+
+  it("a cancel whose daemon restarted after the server took it asks again, and confirming counts as done", async () => {
+    const r = await calendarOn("AAMkAD-robin");
+    await r.user.keyboard("D");
+    const dialog = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    await r.user.type(within(dialog).getByLabelText("Comment"), "Postponed{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Cancel the meeting?" })).toBeNull());
+    act(() => void settleEventChange({ dropped: true }));
+    expect(mock.events.some((e) => e.id === "AAMkAD-robin")).toBe(false);
+    const again = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    expect(within(again).getByLabelText("Comment")).toHaveValue("Postponed");
+    expect(again.querySelector('[data-slot="event-remove-error"]')).toHaveTextContent(RESTARTED_REMOVE);
+    await r.user.click(within(again).getByRole("button", { name: /Cancel meeting/ }));
+    await waitFor(() => expect(callsOf("event_cancel")).toHaveLength(2));
+    expect(mock.eventChanges[0]?.retried).toBeDefined();
+    act(() => void settleEventChange());
+    await noticed(/Cancelled 1:1 with Robin; told /);
   });
 
   it("a cancel that fails while another overlay is open keeps its confirmation for D", async () => {
