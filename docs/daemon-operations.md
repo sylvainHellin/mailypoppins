@@ -126,6 +126,9 @@ The table is what routes and through what:
 | `mp event show <event> [--account] [--json]` | `event.get`, then `calendar.list` for the calendar name | PERSO-200 |
 | `mp event respond <event> <accept\|tentative\|decline> [--comment] [--no-send-response] [--json]` | `event.respond` | PERSO-200 |
 | `mp event create [--account] --summary --start [--end\|--duration] [--calendar] [--all-day] [--zone] [--location] [--body\|--body-file] [--to]... [--optional]... [--room]... [--teams] [--reminder\|--no-reminder] [--transaction-id] [--json]` | `event.create` | PERSO-255 |
+| `mp event update <event> [--account] [--summary] [--start] [--end\|--duration] [--all-day] [--zone] [--location\|--clear-location] [--body\|--body-file\|--clear-body] [--to]... [--optional]... [--room]... [--teams] [--reminder\|--no-reminder] [--show-as] [--json]` | `event.update` | PERSO-255 |
+| `mp event cancel <event> [--account] [--comment] [--json]` | `event.cancel` | PERSO-255 |
+| `mp event delete <event> [--account] [--json]` | `event.delete` | PERSO-255 |
 | `mp invite accept\|tentative\|decline <selector> [--mailbox] [--comment] [--no-send-response]` | `message.invite`, then `event.get` and `event.respond` on its `event_id`, else on `imip:<row_id>` | P4-U14, PERSO-200 |
 | `mp store gc [--dry-run] [--force] [--all-accounts]` | one `diagnostic.store_gc` per account | P4-U14 |
 | `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
@@ -454,7 +457,7 @@ The queues do not wait for a tick any more: the drainer above empties them after
 ### The calendar sync
 
 After the tail drain, whatever the mail pass did, and once it has released the runtime's turn so a drain does not wait behind it, a tick syncs the account's server calendar (PERSO-200, `calendar_sync::poll_account`) when its `calendar_backend` is one this build runs, Graph in phase 1: the calendar list, then each calendar's window by its delta token, re-baselined once a day.
-It runs off the reactor, as the mail body does, and under one lock per account that `calendar.rebuild`, `event.create` and `event.respond` take too, so two syncs of one account never read the same token side by side.
+It runs off the reactor, as the mail body does, and under one lock per account that `calendar.rebuild`, `event.create`, `event.update`, `event.cancel`, `event.delete` and `event.respond` take too, so two syncs of one account never read the same token side by side.
 A sync that moved the cache publishes `calendar.changed` `{account}` beside the tick's `sync.completed`; a joiner carries none, as it carries no `sync.completed`.
 A token without the calendar scope is skipped with a debug line, because the `calendar:<name>` health check already prompts for the re-login, and any other failure is a warning in the log: the tick reports the mail pass, never the calendar.
 An `ews` or `caldav` account is refused as not supported yet and syncs nothing; an account without a server ticks never, so its calendar is polled by nothing either.
@@ -475,6 +478,13 @@ It answers its `transaction_id` with the operation id before any server call, an
 Before it posts, the operation looks for a cached event carrying that transaction id: one that matches the create's fields settles the operation without a server call, and one the retry changed is patched to match them, the way Graph's changed repeat is.
 Otherwise it connects the backend, looks at its cancel token, posts the event, writes the server's answer into the cache under the account's calendar lock and syncs the account at once; a failure of that sync is logged and leaves the event standing, and `calendar.changed` follows.
 Nothing is written to the cache before the server answers, so a refusal the daemon could not predict (a calendar whose access changed) shows no event Graph does not hold.
+
+### Changing, cancelling and deleting an event
+
+`event.update`, `event.cancel` and `event.delete` (PERSO-255) are operations in the same journal, and nothing replays them after a restart either.
+An update sets fields to values, so a client whose operation vanished sends it again safely; a cancel or a delete of an event the server no longer holds (404) counts as done, the rule a delete of a mail already gone from its folder follows.
+Each reads the cached event before the operation starts, refuses there what the user may not do, then connects the backend, looks at its cancel token and sends the change.
+The server's answer goes into the cache under the account's calendar lock, the updated event upserted and a cancelled or deleted one removed, then the account syncs at once; a failure of that sync is logged and leaves the change standing, and `calendar.changed` follows, which also moves the reminders.
 
 ### The reminders
 
@@ -710,7 +720,7 @@ It is read by whichever process submits, which after P4-U12 is the daemon and on
 Unset, empty or unparseable it does nothing.
 It is what pins the successful sends in `tests/daemon_send_slice.rs`, and its name is `mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV`.
 
-`MAILYPOPPINS_DAEMON_FAKE_CALENDAR=<json>` serves every account whose `calendar_backend` is not `none` from an in-memory calendar server (PERSO-200), so the calendar sync, the views, `event.respond` and `event.create` run without a tenant; one server per account lives as long as the daemon, so a write survives into the next sync.
+`MAILYPOPPINS_DAEMON_FAKE_CALENDAR=<json>` serves every account whose `calendar_backend` is not `none` from an in-memory calendar server (PERSO-200), so the calendar sync, the views, `event.respond`, `event.create`, `event.update`, `event.cancel` and `event.delete` run without a tenant; one server per account lives as long as the daemon, so a write survives into the next sync.
 Its value is a JSON object, every key optional: `calendars` and `events` are the server's contents in the model's serialisation, each rewritten to the account it serves, `log` a file the fake appends one JSON line `{event, response, comment, send_response}` to per answer, `write_log` a file it appends one JSON line per write to (a `RecordedWrite`, tagged by `call`: `create`, `update`, `cancel`, `delete`, `dismiss_reminder`, `snooze_reminder`), `missing_scope` makes every call fail as a token without `Calendars.ReadWrite` does, `features` the `CalendarFeature` words `calendar.list` reports for the account (none when absent), `series` the series masters (`SeriesInfo`) every baseline reports resolved, and `message_events` maps a mail's Graph id to the event `message.invite` names.
 A daemon reads it at every calendar call, so each sync starts from the spec's contents and the cache does the remembering.
 Unset, empty or unparseable it does nothing.

@@ -25,6 +25,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/rsvp.ts` | The reader's invitation cards, the New invitation form's Graph refusal, the answer refusals in the TUI's words, the respond choice and the answers this window awaits |
 | `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
 | `src/app/eventForm.ts` | The event form's calendars, checks and params, and the creates this window awaits |
+| `src/app/eventChange.ts` | The edit form on an event and the fields it changed, the cancel or delete confirmation, and the changes this window awaits |
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
 | `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
@@ -704,6 +705,7 @@ Every event is an `option` with the agenda row's name, so the cursor, a click an
 The event card (`CalendarEventCard` in `EventCard.tsx`, a region named "Event") is the TUI's event card for the cursor event, beside the days, or under them in the narrow layout: the summary; "Cancelled by the organizer."; When in the viewer's zone, with the event's own zone when it differs ("Wed 14 Oct 2099, 09:00 to 10:30"; an all-day event's dates, the exclusive end made inclusive); Repeats, the rule of a series or "An occurrence of a series"; Where; Calendar; Organizer; "Your response" unless the user organizes it or it invites nobody; the description; and every attendee with their status, an optional one marked.
 "Join the meeting" opens the online meeting link through `open_external`, and an event that came from an invitation mail has "Open mail", which shows that mail in Mail, its mailbox opened and the mail selected (the TUI card's `m`).
 The card's "Respond" button runs `V`, disabled with the refusal under it.
+On a server event the card also has "Edit" (`E`) and "Cancel meeting" or "Delete" (`D`), each disabled with the reason as its title where mp cannot make the change (see Edit, cancel and delete).
 
 ### Keys and actions
 
@@ -718,10 +720,11 @@ The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
 - `m` shows the invitation mail of the cursor event in Mail, as the card's "Open mail" does.
 - `V` opens the respond choice for the cursor event (see Respond).
 - `n` opens the event form on the cursor's day (see New event).
+- `E` opens the event form on the cursor event, and `D` cancels or deletes it (see Edit, cancel and delete).
 - `c` shows or hides the calendars panel (see Calendars).
 - `r` reads the events and the calendars again and says "Calendar refreshed (N events)" once they land; a read that fails says "Calendar refresh failed: <why>" and keeps the events it had.
 
-The palette runs the same actions from the CALENDAR rows ("Previous / next day or week (also [ and ])", "Go to today", "Jump to date (e.g. 2026-07-06)", "Agenda / day / week layout", "Open the event card", "Open the invitation's .ics in $EDITOR", "Respond (accept / tentative / decline, comment)", "New event (the event form, on the cursor's day)", "Show or hide calendars", "Read the events again"), plus its own "Next day or week", "Day layout", "Week layout" and "Open the invitation mail"; outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the calendar".
+The palette runs the same actions from the CALENDAR rows ("Previous / next day or week (also [ and ])", "Go to today", "Jump to date (e.g. 2026-07-06)", "Agenda / day / week layout", "Open the event card", "Open the invitation's .ics in $EDITOR", "Respond (accept / tentative / decline, comment)", "New event (the event form, on the cursor's day)", "Edit the event (the event form with its values)", "Cancel the meeting (tells the attendees) or delete the event", "Show or hide calendars", "Read the events again"), plus its own "Next day or week", "Day layout", "Week layout" and "Open the invitation mail"; outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the calendar".
 The header's buttons run the same: Previous, Today, Next, the "Jump to date" field, the Agenda, Day and Week layout buttons (`aria-pressed`), Calendars, New event (see New event), New invitation (see New invitation), Refresh and Mail.
 When no event is under the cursor the view's body takes the focus, so the keys reach the view and not a header button.
 
@@ -765,6 +768,23 @@ Once started the form closes, and `state.eventCreates` keeps each create (`{toke
 The settle says "Created <summary>", then "; invited <address>" or "; invited N people".
 A failure ("The event was not created: <why>") or a create a daemon restart dropped ("The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once") opens the form again as "New event (retry)", with what was typed and Retry.
 With another dialog open the form is kept, and New event opens it.
+
+### Edit, cancel and delete
+
+`E`, the palette's "Edit the event (the event form with its values)" and the card's "Edit" open the event form on the cursor event (CAL-12, PERSO-255; `editDialogFor` in `src/app/eventChange.ts`), a dialog named "Edit event", filled with the event's values, its times in this window's zone.
+The calendar stays the event's (its select is disabled), a Teams meeting stays one ("A Teams meeting stays one"), and a Teams meeting's description is disabled, since the server would drop its join details.
+On a meeting someone else organizes the dialog is "Edit event (your reminder)" and every field but the reminder is disabled, since an attendee changes only their own copy's reminder.
+An invitation mail's event, an event of a series, a cancelled one and one on a calendar mp does not write to are not opened: the notice says why.
+The alert says "Nothing changed yet" until a field differs from what the form opened with; Save changes sends `event_update` with only those fields (`changedFields`), so a change made in Outlook to another field survives, and the daemon's refusal shows verbatim in the alert.
+
+`D`, the palette's "Cancel the meeting (tells the attendees) or delete the event" and the card's "Cancel meeting" or "Delete" act on the cursor event (CAL-13; `removeDialogFor`): a meeting the user organizes opens "Cancel the meeting?", which says how many attendees the server tells and takes a Comment sent with the cancellation, Enter cancelling; an event that tells nobody (no attendees, or the user's copy of a cancelled meeting) opens "Delete the event?", `y` or Enter deleting and `n` keeping it; someone else's live meeting says "<summary> is someone else's meeting: decline it (Respond) to tell the organizer".
+The overlay is `event_remove` (`EventRemoveDialog.tsx`), and a refusal shows in its alert.
+The desktop takes `D` rather than the design's `X`, which dismisses the newest notice in every view; the TUI takes `D` too.
+
+Each change is `event_update`, `event_cancel` or `event_delete`, awaited as `event_change`: `state.eventChanges` keeps each one (`{token, account, summary, kind, dialog, operation_id}`), `eventChangeEarly` an end that overtook the start's answer.
+The settle says "Updated <summary>", "Cancelled <summary>" with "; told <address>" or "; told N people", or "Deleted <summary>", and makes the Calendar view stale.
+A failed update ("The change did not go through: <why>") or one a daemon restart dropped ("The daemon restarted before the change was confirmed; Save sends it again") opens the form again with what was typed; an update sets fields to values, so sending it again is safe.
+A failed cancel or delete says "<Cancelling|Deleting> <summary> failed: <why>", and one a restart dropped says to Refresh to see whether it went through.
 
 ### New invitation
 

@@ -41,6 +41,8 @@ mpFixture.emitMenu("settings")                   // a native menu item, by its i
 mpFixture.settleRebuild()                        // the oldest contact rebuild; { saved: "refused_shrunk" } or { fail: "..." }
 mpFixture.settleRsvp()                           // the oldest event_respond answer; { fail: true } or { delivered: false }
 mpFixture.settleInvite()                         // the oldest invitation sent
+mpFixture.settleEventCreate()                    // the oldest event_create; { fail: true }
+mpFixture.settleEventChange()                    // the oldest event_update, event_cancel or event_delete; { fail: true }
 mpFixture.reportDeviceCode(); mpFixture.settleSignIn()
 mpFixture.simulateInvite(false)                  // invite_update; true for invite_cancel
 mpFixture.simulateSignatureChanged()
