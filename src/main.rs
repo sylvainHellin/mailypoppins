@@ -507,7 +507,7 @@ Examples:
         #[command(subcommand)]
         action: SignatureAction,
     },
-    /// The calendar: list, view, show and hide calendars, rebuild
+    /// The calendar: list, view, show and hide calendars, reminders, rebuild
     Calendar {
         #[command(subcommand)]
         action: CalendarAction,
@@ -809,6 +809,31 @@ Examples:
         #[arg(value_name = "CALENDAR")]
         calendar: String,
     },
+    /// List the reminders that fired and wait for you: summary, when, where,
+    /// account and event id
+    ///
+    /// Every account unless -A names one. The daemon fires a reminder at its
+    /// due minute (the event's start minus its reminder setting), and the
+    /// desktop app or the TUI raises the notification; this lists what is
+    /// still waiting.
+    Reminders {
+        /// Print the `calendar.reminders` answer as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dismiss or snooze one event's reminder, in every client and in Outlook
+    #[command(after_help = "\
+A dismissal or a snooze reaches every open client, and on a Microsoft 365
+account Outlook too. A reminder may be dismissed before it fires, which keeps
+it from firing.
+
+Examples:
+  mp calendar reminder dismiss AAMkADev2 -A evoqs
+  mp calendar reminder snooze AAMkADev2 --minutes 10 -A evoqs")]
+    Reminder {
+        #[command(subcommand)]
+        action: ReminderAction,
+    },
     /// Report what the stored attendee REPLY emails resolve on the stored
     /// invitations, and resync the server calendar of an account that has
     /// one. The fold writes nothing: attendee statuses are derived from the
@@ -816,6 +841,27 @@ Examples:
     /// cached copy to rebuild. Covers every configured account unless `-A`
     /// names one.
     Rebuild,
+}
+
+/// `mp calendar reminder <action>` (PERSO-255), on the event id
+/// `mp calendar reminders` prints.
+#[derive(Subcommand)]
+enum ReminderAction {
+    /// Dismiss the reminder: it does not fire again for this meeting
+    Dismiss {
+        /// The event id, as `mp calendar reminders` prints it
+        #[arg(value_name = "EVENT")]
+        event: String,
+    },
+    /// Snooze the reminder: it fires again in --minutes
+    Snooze {
+        /// The event id, as `mp calendar reminders` prints it
+        #[arg(value_name = "EVENT")]
+        event: String,
+        /// How long until it fires again
+        #[arg(long, value_name = "N", default_value_t = 5)]
+        minutes: u32,
+    },
 }
 
 /// The layouts of `mp calendar view`.
@@ -3834,6 +3880,74 @@ async fn routed_calendar_view(request: ViewRequest, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `mp calendar reminders`: the waiting reminders, one per line with the
+/// account and the event id a dismissal names under it.
+async fn routed_calendar_reminders(account: Option<&str>, json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let params = match account {
+        Some(account) => serde_json::json!({"accounts": [account]}),
+        None => serde_json::json!({}),
+    };
+    let answer = daemon_try_call(&mut connection, "calendar.reminders", params)
+        .await
+        .map_err(|e| refusal(account.unwrap_or_default(), e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let listed: mp_protocol::reminder::CalendarRemindersResult =
+        serde_json::from_value(answer).context("reading the daemon's calendar.reminders answer")?;
+    if listed.reminders.is_empty() {
+        println!("No reminders waiting");
+        return Ok(());
+    }
+    let zone = mailypoppins::calendar_view::local_zone();
+    let now = chrono::Utc::now();
+    for reminder in &listed.reminders {
+        println!(
+            "{} {}",
+            "\u{25f7}".yellow(),
+            mp_client::format::reminder_line(reminder, now, &zone)
+        );
+        println!(
+            "  {}",
+            format!("{}  {}", reminder.account, reminder.event).dimmed()
+        );
+    }
+    Ok(())
+}
+
+/// `mp calendar reminder dismiss|snooze`.
+async fn routed_calendar_reminder(account: &str, action: ReminderAction) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    match action {
+        ReminderAction::Dismiss { event } => {
+            daemon_try_call(
+                &mut connection,
+                "calendar.dismiss_reminder",
+                serde_json::json!({"account": account, "event": event}),
+            )
+            .await
+            .map_err(|e| refusal(account, e))?;
+            println!("{} Dismissed the reminder of {event}", "\u{2713}".green());
+        }
+        ReminderAction::Snooze { event, minutes } => {
+            daemon_try_call(
+                &mut connection,
+                "calendar.snooze_reminder",
+                serde_json::json!({"account": account, "event": event, "minutes": minutes}),
+            )
+            .await
+            .map_err(|e| refusal(account, e))?;
+            println!(
+                "{} Snoozed the reminder of {event} for {minutes} min",
+                "\u{2713}".green()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `mp calendar show|hide`.
 async fn routed_calendar_visibility(account: &str, calendar: &str, visible: bool) -> Result<()> {
     let mut connection = daemon_connection().await;
@@ -5681,6 +5795,21 @@ async fn main() -> Result<()> {
             CalendarAction::Show { calendar } => {
                 let account = pick_account_named(&global_config, cli.account.as_deref())?;
                 routed_calendar_visibility(&account.name, &calendar, true).await?;
+            }
+            CalendarAction::Reminders { json } => {
+                let account = match cli.account.as_deref() {
+                    Some(named) => Some(
+                        pick_account_named(&global_config, Some(named))?
+                            .name
+                            .clone(),
+                    ),
+                    None => None,
+                };
+                routed_calendar_reminders(account.as_deref(), json).await?;
+            }
+            CalendarAction::Reminder { action } => {
+                let account = pick_account_named(&global_config, cli.account.as_deref())?;
+                routed_calendar_reminder(&account.name, action).await?;
             }
             CalendarAction::Hide { calendar } => {
                 let account = pick_account_named(&global_config, cli.account.as_deref())?;
