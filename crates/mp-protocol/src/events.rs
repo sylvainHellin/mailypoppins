@@ -218,6 +218,16 @@ pub const KIND_CONTACT_CHANGED: &str = "contact.changed";
 /// or hidden. The payload is [`crate::calendar::CalendarChanged`].
 pub const KIND_CALENDAR_CHANGED: &str = "calendar.changed";
 
+/// The `kind` a reminder that fell due travels as (PERSO-255), once per
+/// firing and to every client. The payload is
+/// [`crate::reminder::CalendarReminder`].
+pub const KIND_CALENDAR_REMINDER: &str = "calendar.reminder";
+
+/// The `kind` an account's reminders moved travels as (PERSO-255): a dismiss,
+/// a snooze, or a fired reminder cleared because its event no longer reminds.
+/// The payload is [`crate::reminder::CalendarRemindersChanged`].
+pub const KIND_CALENDAR_REMINDERS_CHANGED: &str = "calendar.reminders_changed";
+
 /// The `kind` one progress report of an operation travels as, with a payload
 /// carrying its `operation_id`.
 pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";

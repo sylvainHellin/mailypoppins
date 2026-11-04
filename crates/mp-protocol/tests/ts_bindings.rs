@@ -17,8 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mp_protocol::{
-    account, calendar, contact, diagnostic, draft, events, listing, operation, rendition, send,
-    signature, state,
+    account, calendar, contact, diagnostic, draft, events, listing, operation, reminder, rendition,
+    send, signature, state,
 };
 use ts_rs::{Config, TS};
 
@@ -156,6 +156,12 @@ fn export_into(dir: &Path) -> usize {
         state::OutboxCounts,
         state::Snapshot,
         state::Bootstrap,
+        reminder::CalendarReminder,
+        reminder::CalendarRemindersParams,
+        reminder::CalendarRemindersResult,
+        reminder::ReminderDismissed,
+        reminder::ReminderSnoozed,
+        reminder::CalendarRemindersChanged,
     )
 }
 

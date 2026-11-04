@@ -87,9 +87,9 @@ const MAX_PAGES: usize = 500;
 const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
 
 /// What this build serves on a Graph calendar beyond reading and answering
-/// ([`super::features`]): nothing yet, since every write of phase 2 adds its
-/// feature here as its daemon method ships.
-pub const FEATURES: &[CalendarFeature] = &[];
+/// ([`super::features`]): every write of phase 2 adds its feature here as its
+/// daemon method ships.
+pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::ServerReminders];
 
 // ---------------------------------------------------------------------------
 // The HTTP seam

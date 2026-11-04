@@ -128,6 +128,22 @@ const CALENDAR_FIXTURES: &[&str] = &[
     "notification.calendar_changed.json",
 ];
 
+/// The fixtures PERSO-255 adds for the calendar reminders: a pair per
+/// method, one `calendar.reminder` and one `calendar.reminders_changed`.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const REMINDER_FIXTURES: &[&str] = &[
+    "calendar.dismiss_reminder.request.json",
+    "calendar.dismiss_reminder.response.json",
+    "calendar.reminders.request.json",
+    "calendar.reminders.response.json",
+    "calendar.snooze_reminder.request.json",
+    "calendar.snooze_reminder.response.json",
+    "notification.calendar_reminder.json",
+    "notification.calendar_reminders_changed.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -196,6 +212,7 @@ fn every_required_fixture_is_committed() {
         .chain(LIST_STREAM_FIXTURES)
         .chain(CONVERSATION_FIXTURES)
         .chain(CALENDAR_FIXTURES)
+        .chain(REMINDER_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();

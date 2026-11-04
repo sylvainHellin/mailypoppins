@@ -53,6 +53,7 @@ pub mod draft_sync;
 pub mod drafts;
 pub mod read;
 pub mod rebuild;
+pub mod reminders;
 pub mod schema;
 pub mod search;
 pub mod sweep;

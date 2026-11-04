@@ -360,6 +360,10 @@ pub struct DaemonState {
     /// family, the canonical state, which projects the non-`ok` checks into
     /// every bootstrap snapshot, and the periodic sweep that re-evaluates them.
     pub diagnostics: Arc<super::diagnostics::Diagnostics>,
+    /// The calendar reminders (PERSO-255): the task that fires them, woken
+    /// by the canonical state's `calendar.changed`, and the clock the
+    /// `calendar.*_reminder` commands read.
+    pub reminders: Arc<super::reminders::Reminders>,
 }
 
 impl DaemonState {
@@ -426,6 +430,10 @@ impl DaemonState {
         // that joins mid-window has no other way to learn about a countdown it
         // may cancel.
         canonical.attach_holds(Arc::clone(&holds));
+        let reminders = Arc::new(super::reminders::Reminders::new(
+            super::reminders::ReminderClock::from_env(),
+        ));
+        canonical.attach_reminders(Arc::clone(&reminders));
         let mut dispatcher = Dispatcher::new();
         super::methods::register(
             &mut dispatcher,
@@ -439,6 +447,7 @@ impl DaemonState {
                 holds: Arc::clone(&holds),
                 diagnostics: Arc::clone(&diagnostics),
                 copies,
+                reminders: Arc::clone(&reminders),
             },
         );
         DaemonState {
@@ -453,6 +462,7 @@ impl DaemonState {
             holds,
             shutdown: Arc::new(super::shutdown::Shutdown::new()),
             diagnostics,
+            reminders,
         }
     }
 
@@ -1072,7 +1082,15 @@ async fn dispatch_request(
     let method = request.method.clone();
     match method.as_str() {
         "initialize" => match session.initialize(&request.params, state) {
-            Ok(result) => (result_value(id, result), false),
+            Ok(result) => {
+                // The kind the reminders' presenter is elected from.
+                if let Some(ctx) = session.client_ctx() {
+                    state
+                        .canonical
+                        .set_client_kind(ConnectionId(ctx.connection_id), ctx.kind);
+                }
+                (result_value(id, result), false)
+            }
             Err(refusal) => (
                 Some(error_value(id, refusal.code, refusal.message, refusal.data)),
                 false,
