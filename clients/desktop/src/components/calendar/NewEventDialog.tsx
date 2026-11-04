@@ -1,12 +1,12 @@
 // The event form (CAL-11, CAL-12, PERSO-255; the TUI's `n` and `E` overlay,
 // the CLI's `mp event create` and `mp event update`): Calendar, Title, All
 // day, Start, End, Location, Attendees, Optional, Rooms, Teams, Reminder,
-// Description. It creates through `event.create`, and a failed or vanished
+// Show as, Description. It creates through `event.create`, and a failed or vanished
 // create opens it again with what was typed and a Retry that sends the same
 // transaction id. Opened on an event (`dialog.edit`), it holds the event's
 // values and Save sends `event.update` with what changed; the calendar
 // stays the event's, a Teams meeting stays one, and an attendee changes the
-// reminder only.
+// reminder and the show-as only.
 
 import { useEffect, useId, useRef, useState, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { eventProblem, localZone, submitEvent } from "@/app/eventForm";
+import { eventProblem, localZone, SHOW_AS, submitEvent } from "@/app/eventForm";
 import { editProblem, submitEdit } from "@/app/eventChange";
 import { useDispatch } from "@/app/store";
 import type { EventDialog, EventFields } from "@/app/state";
@@ -50,9 +50,12 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
   const edit = dialog?.edit ?? null;
   const problem = fields && dialog ? (edit ? editProblem({ ...dialog, fields }) : eventProblem(fields, calendars)) : null;
   const retry = dialog?.transactionId != null;
-  // An attendee changes their copy's reminder and nothing else.
+  // An attendee changes their copy's reminder and show-as and nothing else.
   const locked = edit !== null && !edit.organizer;
-  const title = edit ? (locked ? "Edit event (your reminder)" : "Edit event") : retry ? "New event (retry)" : "New event";
+  const title = edit ? (locked ? "Edit event (your reminder and show-as)" : "Edit event") : retry ? "New event (retry)" : "New event";
+  // A word the server gave that the list does not name (`unknown`) shows until another is picked.
+  const showAs = fields?.showAs ?? "busy";
+  const showAsOptions = SHOW_AS.some((o) => o.word === showAs) ? SHOW_AS : [...SHOW_AS, { word: showAs, label: showAs }];
 
   const submit = async () => {
     if (!dialog || !fields || busy) return;
@@ -211,6 +214,23 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
               {check("noReminder", "None", (on) => change({ noReminder: on }))}
             </span>
           </div>
+          {row(
+            "show-as",
+            "Show as",
+            <select
+              id={`${id}-show-as`}
+              data-field="showAs"
+              value={showAs}
+              onChange={(e) => change({ showAs: e.currentTarget.value })}
+              className="h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {showAsOptions.map((o) => (
+                <option key={o.word} value={o.word}>
+                  {o.label}
+                </option>
+              ))}
+            </select>,
+          )}
           {row(
             "body",
             "Description",

@@ -7,7 +7,10 @@
 // an `event_change` operation; the daemon refuses what the user may not do
 // in its own sentence. A failed or vanished update opens the form again with
 // what was typed; an update sets fields to values, so Save sends it again
-// safely. Pure functions over the model, which the reducer routes to, and at
+// safely. A failed or vanished cancel or delete opens its confirmation again
+// with the comment; the daemon counts a repeat of one that went through as
+// done. Either comes back over the view when nothing else is open, else it
+// is kept for Edit or `D` on the event and a notice says so. Pure functions over the model, which the reducer routes to, and at
 // the bottom the commands.
 
 import type { Dispatch } from "react";
@@ -23,8 +26,13 @@ import type { AppState, EventCalendar, EventChangeRun, EventDialog, EventFields,
 const CHANGE_EARLY_CAP = 16;
 
 export const NOTHING_CHANGED = "Nothing changed yet";
-export const ORGANIZER_ONLY = "Only the organizer can change this event; the reminder is yours";
+export const ORGANIZER_ONLY = "Only the organizer can change this event; the reminder and show-as are yours";
 export const RESTARTED_CHANGE = "The daemon restarted before the change was confirmed; Save sends it again";
+/** Why a vanished cancel or delete asks again: a repeat of one that went through counts as done. */
+export const RESTARTED_REMOVE = "The daemon restarted before it was confirmed; confirming again is safe, and counts as done if it went through";
+
+/** The fields an attendee may change on their own copy. */
+const ATTENDEE_FIELDS = new Set(["reminder", "show_as"]);
 
 const pad = (n: number) => String(n).padStart(2, "0");
 /** A `datetime-local` value of `at` in this window's zone. */
@@ -59,6 +67,7 @@ export function editFields(event: CalendarEvent, calendar: EventCalendar): Event
     teams: event.is_online_meeting,
     reminder: event.reminder == null ? "" : String(event.reminder),
     noReminder: event.reminder == null,
+    showAs: event.show_as,
     body: event.body ?? "",
   };
 }
@@ -155,17 +164,19 @@ export function changedFields(dialog: EventDialog, zone: string): EventPatchPara
   if (key(people(f)) !== key(people(was))) fields.attendees = people(f);
   if (f.teams && !was.teams) fields.online_meeting = true;
   if (reminderOf(f) !== reminderOf(was)) fields.reminder = reminderOf(f);
+  if (f.showAs !== was.showAs) fields.show_as = f.showAs;
   return fields;
 }
 
-/** What an edit form lacks: the fields' own problem, no change, or an attendee's change beyond the reminder. */
+/** What an edit form lacks: the fields' own problem (a title only when the event had one), no change, or an attendee's change beyond the reminder and the show-as. */
 export function editProblem(dialog: EventDialog): string | null {
-  const problem = eventProblem(dialog.fields, dialog.calendars);
+  const hadTitle = dialog.edit ? dialog.edit.original.title.trim() !== "" : true;
+  const problem = eventProblem(dialog.fields, dialog.calendars, hadTitle);
   if (problem) return problem;
   const fields = changedFields(dialog, localZone());
   const keys = Object.keys(fields);
   if (keys.length === 0) return NOTHING_CHANGED;
-  if (!dialog.edit?.organizer && keys.some((k) => k !== "reminder")) return ORGANIZER_ONLY;
+  if (!dialog.edit?.organizer && keys.some((k) => !ATTENDEE_FIELDS.has(k))) return ORGANIZER_ONLY;
   return null;
 }
 
@@ -173,11 +184,15 @@ export function editProblem(dialog: EventDialog): string | null {
 // The model
 // ---------------------------------------------------------------------------
 
+/** The confirmation over the view; opening the one a failure kept, or a fresh one for its event, forgets the kept one. */
 export function openEventRemove(s: AppState, dialog: EventRemoveDialog): AppState {
+  const kept = s.keptEventRemove;
+  const same = kept !== null && kept.account === dialog.account && kept.event === dialog.event;
   return {
     ...s,
     overlay: "event_remove",
     eventRemoveDialog: dialog,
+    keptEventRemove: same ? null : kept,
     eventDialog: null,
     dialog: null,
     composeDialog: null,
@@ -211,18 +226,28 @@ export function changedText(run: EventChangeRun, result: unknown): string {
   return told.length === 1 ? `${done}; told ${told[0]}` : `${done}; told ${told.length} people`;
 }
 
-/** An update's form back with `error`, over the view when nothing else is open; else the notice says it. */
-function reopen(s: AppState, dialog: EventDialog, error: string, account: string): AppState {
-  if (s.overlay === null) return openEventDialog(s, { ...dialog, error });
-  return pushNotice(s, { kind: "failed", account, text: `${error}; Edit opens the form again` });
+/** An update's form back with `error`, over the view when nothing else is open; else kept for Edit on the event, which the notice says. */
+function reopen(s: AppState, dialog: EventDialog, error: string, account: string, summary: string): AppState {
+  const again: EventDialog = { ...dialog, error };
+  if (s.overlay === null) return openEventDialog(s, again);
+  return pushNotice({ ...s, keptEventDialog: again }, { kind: "failed", account, text: `${error}; Edit on ${summary} opens the form again with what you typed` });
 }
 
-/** A change of this window ended: say how; a failed or vanished update opens its form again. */
+/** A cancel's or a delete's confirmation back with `error` and its comment, over the view when nothing else is open; else kept for `D` on the event. */
+function reopenRemove(s: AppState, dialog: EventRemoveDialog, error: string, kind: EventChangeRun["kind"]): AppState {
+  const again: EventRemoveDialog = { ...dialog, error };
+  if (s.overlay === null) return openEventRemove(s, again);
+  const what = kind === "cancel" ? "Cancel meeting" : "Delete";
+  return pushNotice({ ...s, keptEventRemove: again }, { kind: "failed", account: dialog.account, text: `${error}; ${what} on ${dialog.summary} asks again` });
+}
+
+/** A change of this window ended: say how; a failed or vanished one opens its form or confirmation again. */
 function eventChangeEnded(s: AppState, run: EventChangeRun, end: OperationEnd): AppState {
   const next = staleCalendar({ ...s, eventChanges: s.eventChanges.filter((r) => r !== run) });
   const what = `${VERB[run.kind][0].toLowerCase()} ${run.summary}`;
   if ("dropped" in end) {
-    if (run.dialog) return reopen(next, run.dialog, RESTARTED_CHANGE, run.account);
+    if (run.dialog) return reopen(next, run.dialog, RESTARTED_CHANGE, run.account, run.summary);
+    if (run.removal) return reopenRemove(next, run.removal, RESTARTED_REMOVE, run.kind);
     return pushNotice(next, { kind: "failed", account: run.account, text: `The daemon restarted while ${what}; Refresh shows whether it went through` });
   }
   if (end.state === "cancelled") {
@@ -230,7 +255,8 @@ function eventChangeEnded(s: AppState, run: EventChangeRun, end: OperationEnd): 
   }
   if (end.state !== "succeeded") {
     const error = end.error ?? end.state;
-    if (run.dialog) return reopen(next, run.dialog, `The change did not go through: ${error}`, run.account);
+    if (run.dialog) return reopen(next, run.dialog, `The change did not go through: ${error}`, run.account, run.summary);
+    if (run.removal) return reopenRemove(next, run.removal, `${VERB[run.kind][0]} ${run.summary} failed: ${error}`, run.kind);
     return pushNotice(next, { kind: "failed", account: run.account, text: `${VERB[run.kind][0]} ${run.summary} failed: ${error}` });
   }
   return pushNotice(next, { kind: "applied", account: run.account, text: changedText(run, end.result ?? null) });
@@ -251,7 +277,7 @@ export function eventChangeStarted(s: AppState, token: number, operationId: stri
   const started: EventChangeRun = { ...run, operation_id: operationId, dialog: run.dialog ? { ...run.dialog, error: null } : null };
   let next: AppState = { ...s, eventChanges: s.eventChanges.map((r) => (r === run ? started : r)) };
   if (next.overlay === "event" && run.dialog) next = { ...next, overlay: null, eventDialog: null };
-  if (next.overlay === "event_remove" && !run.dialog) next = { ...next, overlay: null, eventRemoveDialog: null };
+  if (next.overlay === "event_remove" && run.removal) next = { ...next, overlay: null, eventRemoveDialog: null };
   const early = next.eventChangeEarly.find((e) => e.operation_id === operationId);
   next = { ...next, eventChangeEarly: eventChanging(next) ? next.eventChangeEarly.filter((e) => e !== early) : [] };
   return early ? eventChangeEnded(next, started, early) : next;
@@ -269,19 +295,25 @@ export function eventChangeFailed(s: AppState, token: number): AppState {
 
 let nextChange = 1;
 
-/** `E` in the Calendar view and the card's Edit: the event form on the cursor event, or why it cannot be changed. */
+/** `E` in the Calendar view and the card's Edit: the form a failed update of the cursor event kept, else the event form on it, or why it cannot be changed. */
 export function editEvent(s: AppState, dispatch: Dispatch<Action>): void {
   const event = cursorEntry(s)?.event;
   if (!event) return dispatch({ type: "notice", text: "No event under the cursor" });
+  const kept = s.keptEventDialog;
+  if (kept?.edit && kept.edit.account === event.account && kept.edit.event === event.id) {
+    return dispatch({ type: "open_event_form", dialog: kept });
+  }
   const dialog = editDialogFor(event, s.calendars.data);
   if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
   dispatch({ type: "open_event_form", dialog });
 }
 
-/** `D` in the Calendar view and the card's Cancel meeting or Delete: the confirmation, or why not. */
+/** `D` in the Calendar view and the card's Cancel meeting or Delete: the confirmation a failed cancel or delete of the cursor event kept, else a fresh one, or why not. */
 export function removeEvent(s: AppState, dispatch: Dispatch<Action>): void {
   const event = cursorEntry(s)?.event;
   if (!event) return dispatch({ type: "notice", text: "No event under the cursor" });
+  const kept = s.keptEventRemove;
+  if (kept && kept.account === event.account && kept.event === event.id) return dispatch({ type: "open_event_remove", dialog: kept });
   const dialog = removeDialogFor(event, s.calendars.data);
   if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
   dispatch({ type: "open_event_remove", dialog });
@@ -294,8 +326,8 @@ export async function submitEdit(dispatch: Dispatch<Action>, dialog: EventDialog
   const edit = dialog.edit;
   if (!edit) return "This form makes a new event";
   const token = nextChange++;
-  const summary = dialog.fields.title.trim();
-  dispatch({ type: "event_change_requested", token, account: edit.account, summary, kind: "update", dialog });
+  const summary = dialog.fields.title.trim() || "(no title)";
+  dispatch({ type: "event_change_requested", token, account: edit.account, summary, kind: "update", dialog, removal: null });
   try {
     const started = await cmd.eventUpdate({ account: edit.account, event: edit.event, fields: changedFields(dialog, localZone()) });
     dispatch({ type: "event_change_started", token, operation_id: started.operation_id });
@@ -306,11 +338,12 @@ export async function submitEdit(dispatch: Dispatch<Action>, dialog: EventDialog
   }
 }
 
-/** Cancel or delete as the confirmation says; a refusal of the daemon comes back as its sentence. Null once it started. */
+/** Cancel or delete as the confirmation says; a refusal of the daemon comes back as its sentence. Null once it started; a failure later opens the confirmation again with `comment`. */
 export async function submitRemove(dispatch: Dispatch<Action>, dialog: EventRemoveDialog, comment: string): Promise<string | null> {
   const token = nextChange++;
   const kind = dialog.cancel ? "cancel" : "delete";
-  dispatch({ type: "event_change_requested", token, account: dialog.account, summary: dialog.summary, kind, dialog: null });
+  const removal: EventRemoveDialog = { ...dialog, comment, error: null };
+  dispatch({ type: "event_change_requested", token, account: dialog.account, summary: dialog.summary, kind, dialog: null, removal });
   try {
     const started = dialog.cancel
       ? await cmd.eventCancel(dialog.account, dialog.event, comment.trim() || null)

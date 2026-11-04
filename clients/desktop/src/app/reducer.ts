@@ -474,7 +474,7 @@ export type Action =
   | { type: "event_create_failed"; token: number }
   // Changing, cancelling and deleting an event (app/eventChange.ts).
   | { type: "open_event_remove"; dialog: EventRemoveDialog }
-  | { type: "event_change_requested"; token: number; account: string; summary: string; kind: EventChangeRun["kind"]; dialog: EventDialog | null }
+  | { type: "event_change_requested"; token: number; account: string; summary: string; kind: EventChangeRun["kind"]; dialog: EventDialog | null; removal: EventRemoveDialog | null }
   | { type: "event_change_started"; token: number; operation_id: string }
   | { type: "event_change_failed"; token: number }
   // The Contacts view (app/contacts.ts).
@@ -2293,7 +2293,7 @@ function reduce(s: AppState, a: Action): AppState {
     case "open_event_remove":
       return openEventRemove(s, a.dialog);
     case "event_change_requested":
-      return eventChangeRequested(s, { token: a.token, account: a.account, summary: a.summary, kind: a.kind, dialog: a.dialog });
+      return eventChangeRequested(s, { token: a.token, account: a.account, summary: a.summary, kind: a.kind, dialog: a.dialog, removal: a.removal });
     case "event_change_started":
       return eventChangeStarted(s, a.token, a.operation_id);
     case "event_change_failed":

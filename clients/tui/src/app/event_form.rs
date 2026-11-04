@@ -28,7 +28,8 @@ use super::Tz;
 pub struct EventEdit {
     pub account: String,
     pub event: String,
-    /// The event is the user's own: an attendee changes only the reminder.
+    /// The event is the user's own: an attendee changes only the reminder
+    /// and the show-as.
     pub is_organizer: bool,
     /// The event is a Teams meeting, which stays one.
     pub online: bool,
@@ -98,6 +99,7 @@ pub enum EventFormRow {
     Rooms,
     Teams,
     Reminder,
+    ShowAs,
     Description,
 }
 
@@ -109,10 +111,25 @@ impl EventFormRow {
             EventFormRow::Calendar
                 | EventFormRow::AllDay
                 | EventFormRow::Teams
+                | EventFormRow::ShowAs
                 | EventFormRow::Description
         )
     }
 }
+
+/// The show-as words `event.create` and `event.update` take, with the label
+/// the form shows, in the order `Left` and `Right` walk them. `busy` is
+/// the server's default for a new event.
+pub const SHOW_AS: [(&str, &str); 5] = [
+    ("free", "Free"),
+    ("tentative", "Tentative"),
+    ("busy", "Busy"),
+    ("oof", "Out of office"),
+    ("working-elsewhere", "Working elsewhere"),
+];
+
+/// The show-as a new event gets when the form leaves it alone.
+pub const DEFAULT_SHOW_AS: &str = "busy";
 
 /// The event form's state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +157,10 @@ pub struct EventForm {
     /// Minutes before the start; empty for the mailbox default, `none` for
     /// no reminder.
     pub reminder: String,
+    /// How the time shows to others: a word of [`SHOW_AS`], or the word the
+    /// server gave an event being edited (`unknown`) until the user picks
+    /// one.
+    pub show_as: String,
     /// The description, edited in `$EDITOR`.
     pub body: String,
     /// The IANA zone the times are read in: the Calendar view's.
@@ -180,6 +201,7 @@ impl EventForm {
             rooms: String::new(),
             teams: false,
             reminder: String::new(),
+            show_as: DEFAULT_SHOW_AS.into(),
             body: String::new(),
             zone: zone.to_string(),
             transaction_id: None,
@@ -246,6 +268,7 @@ impl EventForm {
                 Some(minutes) => minutes.to_string(),
                 None => "none".into(),
             },
+            show_as: event.show_as.clone(),
             body: event.body.clone().unwrap_or_default(),
             zone: zone.name().to_string(),
             transaction_id: None,
@@ -295,6 +318,7 @@ impl EventForm {
             Rooms,
             Teams,
             Reminder,
+            ShowAs,
             Description,
         ]
         .into_iter()
@@ -358,10 +382,32 @@ impl EventForm {
         }
     }
 
+    /// Move to the next or the previous show-as; a word the server gave that
+    /// [`SHOW_AS`] does not name moves to its first or last.
+    pub fn cycle_show_as(&mut self, forward: bool) {
+        let len = SHOW_AS.len();
+        let at = SHOW_AS.iter().position(|(word, _)| *word == self.show_as);
+        let to = match (at, forward) {
+            (Some(at), true) => (at + 1) % len,
+            (Some(at), false) => (at + len - 1) % len,
+            (None, true) => 0,
+            (None, false) => len - 1,
+        };
+        self.show_as = SHOW_AS[to].0.to_string();
+    }
+
+    /// The show-as as the form shows it.
+    pub fn show_as_label(&self) -> &str {
+        SHOW_AS
+            .iter()
+            .find(|(word, _)| *word == self.show_as)
+            .map_or(self.show_as.as_str(), |(_, label)| label)
+    }
+
     /// What is wrong with the fields as typed, the first thing only; `None`
     /// when the form can be sent. The daemon checks everything again. An
     /// edit form that changes nothing, or an attendee's that changes more
-    /// than the reminder, says so.
+    /// than the reminder and the show-as, says so.
     pub fn problem(&self) -> Option<String> {
         if let Some(problem) = self.fields_problem() {
             return Some(problem);
@@ -373,17 +419,24 @@ impl EventForm {
         }
         let own = EventPatchParams {
             reminder: fields.reminder,
+            show_as: fields.show_as.clone(),
             ..Default::default()
         };
         if !edit.is_organizer && fields != own {
-            return Some("Only the organizer can change this event; the reminder is yours".into());
+            return Some(ORGANIZER_ONLY.into());
         }
         None
     }
 
-    /// [`Self::problem`] of the fields alone.
+    /// [`Self::problem`] of the fields alone. A title is needed on a new
+    /// event, and on an edit only when the user clears one the event had:
+    /// an event the server holds with none keeps saving its other fields.
     fn fields_problem(&self) -> Option<String> {
-        if self.title.trim().is_empty() {
+        let had_title = self
+            .editing
+            .as_ref()
+            .is_none_or(|edit| !edit.original.title.trim().is_empty());
+        if self.title.trim().is_empty() && had_title {
             return Some("The event needs a title".into());
         }
         let Ok(date) = NaiveDate::parse_from_str(self.date.trim(), "%Y-%m-%d") else {
@@ -532,6 +585,9 @@ impl EventForm {
         if reminder != was.reminder_minutes().unwrap_or(None) {
             fields.reminder = reminder;
         }
+        if self.show_as != was.show_as {
+            fields.show_as = Some(self.show_as.clone());
+        }
         fields
     }
 
@@ -575,11 +631,16 @@ impl EventForm {
                 attendees,
                 online_meeting: (self.teams && chosen.teams).then_some(true),
                 reminder: self.reminder_minutes().unwrap_or(None),
+                show_as: (self.show_as != DEFAULT_SHOW_AS).then(|| self.show_as.clone()),
                 ..Default::default()
             },
         })
     }
 }
+
+/// What the form says when an attendee changes the organizer's fields.
+pub const ORGANIZER_ONLY: &str =
+    "Only the organizer can change this event; the reminder and show-as are yours";
 
 /// `HH:MM`.
 fn time(raw: &str) -> Option<NaiveTime> {
@@ -805,6 +866,77 @@ mod tests {
         );
         form.title = "Mine now".into();
         assert!(form.problem().unwrap().starts_with("Only the organizer"));
+    }
+
+    /// A new event shows as busy, the server's default, which it does not
+    /// send; `Left` and `Right` walk the five words, wrapping, and a word
+    /// other than busy is sent.
+    #[test]
+    fn a_new_event_shows_as_busy_unless_changed() {
+        let mut form = form();
+        form.title = "Planning".into();
+        assert_eq!(form.show_as_label(), "Busy");
+        assert_eq!(form.params().unwrap().event.show_as, None);
+        form.cycle_show_as(true);
+        assert_eq!(form.show_as_label(), "Out of office");
+        assert_eq!(form.params().unwrap().event.show_as.as_deref(), Some("oof"));
+        form.cycle_show_as(true);
+        form.cycle_show_as(true);
+        assert_eq!(form.show_as, "free");
+        form.cycle_show_as(false);
+        assert_eq!(form.show_as, "working-elsewhere");
+    }
+
+    /// An edit sends the show-as only when it changed, and an attendee may
+    /// change it on their copy, alone or with the reminder.
+    #[test]
+    fn an_edit_sends_the_show_as_it_changed() {
+        let mut organizer = edit_form(true);
+        assert_eq!(organizer.show_as, "busy");
+        organizer.cycle_show_as(false);
+        assert_eq!(
+            serde_json::to_value(organizer.update_params().unwrap().fields).unwrap(),
+            serde_json::json!({"show_as": "tentative"})
+        );
+        let mut attendee = edit_form(false);
+        assert!(attendee.rows().contains(&EventFormRow::ShowAs));
+        attendee.cycle_show_as(true);
+        attendee.reminder = "5".into();
+        assert_eq!(
+            serde_json::to_value(attendee.update_params().unwrap().fields).unwrap(),
+            serde_json::json!({"reminder": 5, "show_as": "oof"})
+        );
+        let mut unknown = meeting(true);
+        unknown.show_as = "unknown".into();
+        let main = form().calendars[0].clone();
+        let mut form = EventForm::edit(&unknown, main, "Europe/Berlin".parse().unwrap());
+        assert_eq!(form.show_as_label(), "unknown");
+        assert_eq!(form.problem().as_deref(), Some("Nothing changed yet"));
+        form.cycle_show_as(true);
+        assert_eq!(form.show_as, "free");
+    }
+
+    /// An event the server holds without a title still saves its other
+    /// fields, an attendee's reminder among them; a title the event had
+    /// cannot be cleared.
+    #[test]
+    fn an_untitled_event_saves_without_a_title() {
+        let main = form().calendars[0].clone();
+        let mut untitled = meeting(false);
+        untitled.summary = String::new();
+        let mut form = EventForm::edit(&untitled, main.clone(), "Europe/Berlin".parse().unwrap());
+        form.reminder = "5".into();
+        assert_eq!(
+            serde_json::to_value(form.update_params().unwrap().fields).unwrap(),
+            serde_json::json!({"reminder": 5})
+        );
+        let mut cleared = edit_form(true);
+        cleared.title = " ".into();
+        cleared.reminder = "5".into();
+        assert_eq!(
+            cleared.problem().as_deref(),
+            Some("The event needs a title")
+        );
     }
 
     /// Moving to a calendar without online meetings drops the Teams switch

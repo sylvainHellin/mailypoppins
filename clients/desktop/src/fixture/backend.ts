@@ -664,7 +664,7 @@ export function settleEventChange(opts: { fail?: boolean } = {}): string {
     emitEnvelope("operation.finished", {
       operation_id: run.operation_id,
       state: "failed",
-      error: { code: -32603, message: "Graph refused the update: HTTP 503" },
+      error: { code: -32603, message: `Graph refused the ${run.kind}: HTTP 503` },
     });
     return run.operation_id;
   }
@@ -2201,7 +2201,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         reminder: e.reminder === null ? undefined : (e.reminder ?? 15),
         is_online_meeting: e.online_meeting ?? false,
         sensitivity: "normal",
-        show_as: "busy",
+        show_as: e.show_as ?? "busy",
         cancelled: false,
         is_organizer: true,
         allow_new_time_proposals: true,

@@ -764,9 +764,9 @@ impl Queries for Writes {
 }
 
 /// `E` on a meeting the user was invited to opens the form on the
-/// reminder, which is all an attendee changes; a changed title is named as
-/// the organizer's, and the reminder alone is one `event.update` with that
-/// field. A failed change reopens the form, and a settled one says so.
+/// reminder, which with the show-as below it is all an attendee changes; a
+/// changed title is named as the organizer's, and the reminder and the
+/// show-as `Right` moved to are one `event.update` with those fields. A failed change reopens the form, and a settled one says so.
 #[test]
 fn an_attendee_edits_the_reminder_through_event_update() {
     let _data = seeded();
@@ -796,6 +796,13 @@ fn an_attendee_edits_the_reminder_through_event_update() {
     form.title = "Mine now".into();
     assert!(form.problem().unwrap().starts_with("Only the organizer"));
     form.title = "Project review".into();
+    app.handle_key(KeyEvent::from(KeyCode::Down));
+    app.handle_key(KeyEvent::from(KeyCode::Right));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("the form is open");
+    };
+    assert_eq!(form.row, EventFormRow::ShowAs);
+    assert_eq!(form.show_as_label(), "Out of office");
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     let Some(Action::UpdateEvent(form)) = app.pending_actions.pop_front() else {
         panic!("Enter queues the change");
@@ -807,7 +814,8 @@ fn an_attendee_edits_the_reminder_through_event_update() {
         door.0.lock().unwrap().clone(),
         [(
             "event.update".to_string(),
-            json!({"account": ACCOUNT, "event": "ev-meeting", "fields": {"reminder": 10}})
+            json!({"account": ACCOUNT, "event": "ev-meeting",
+                   "fields": {"reminder": 10, "show_as": "oof"}})
         )]
     );
     assert_eq!(app.bg_count, 1);

@@ -759,7 +759,7 @@ Every end makes the Calendar view and the account's invitation cards stale, and 
 
 `n`, the header's "New event" and the palette's "New event (the event form, on the cursor's day)" open the event form (CAL-11, PERSO-255), the overlay `event` (`NewEventDialog.tsx`, a dialog named "New event"), the TUI's event form; outside the Calendar view the palette's row opens it on today.
 It offers the calendars `calendar_list` names that take a new event (`writableCalendars` in `src/app/eventForm.ts`): those the user may edit on a backend whose `features` hold `write`, each account's default first, the selection's account's default selected; with none it says "No calendar takes new events: no account has a server calendar mp writes to".
-Its fields are Calendar, Title, the "All day" checkbox, Start and End (`datetime-local`, or First day and Last day as dates on an all-day event, the last day optional), Location, Attendees, Optional and Rooms (comma separated), the "Teams meeting" checkbox (disabled with "This calendar has no online meetings" where the backend lacks `online-meeting`), Reminder in minutes with "None", and Description.
+Its fields are Calendar, Title, the "All day" checkbox, Start and End (`datetime-local`, or First day and Last day as dates on an all-day event, the last day optional), Location, Attendees, Optional and Rooms (comma separated), the "Teams meeting" checkbox (disabled with "This calendar has no online meetings" where the backend lacks `online-meeting`), Reminder in minutes with "None", "Show as" (Free, Tentative, Busy, Out of office, Working elsewhere; Busy, the server's default, unless changed, and sent only when changed), and Description.
 The form starts on 09:00 to 10:00 of the cursor's day with the focus in Title; Enter in a one-line field moves on, Cmd+Enter or Ctrl+Enter creates, Escape cancels and drops what was typed.
 Its alert names the first problem with the fields as typed and Create event stays disabled until there is none; the daemon checks every field again.
 
@@ -767,13 +767,15 @@ A create is `event_create` with the form's fields as `EventCreateParams`, the ti
 Once started the form closes, and `state.eventCreates` keeps each create (`{token, account, summary, dialog, operation_id}`) with the transaction id its start answered, `eventCreateEarly` an end that overtook the answer.
 The settle says "Created <summary>", then "; invited <address>" or "; invited N people".
 A failure ("The event was not created: <why>") or a create a daemon restart dropped ("The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once") opens the form again as "New event (retry)", with what was typed and Retry.
-With another dialog open the form is kept, and New event opens it.
+With another dialog open the form is kept, and New event opens it (`keptEventDialog`).
 
 ### Edit, cancel and delete
 
 `E`, the palette's "Edit the event (the event form with its values)" and the card's "Edit" open the event form on the cursor event (CAL-12, PERSO-255; `editDialogFor` in `src/app/eventChange.ts`), a dialog named "Edit event", filled with the event's values, its times in this window's zone.
 The calendar stays the event's (its select is disabled), a Teams meeting stays one ("A Teams meeting stays one"), and a Teams meeting's description is disabled, since the server would drop its join details.
-On a meeting someone else organizes the dialog is "Edit event (your reminder)" and every field but the reminder is disabled, since an attendee changes only their own copy's reminder.
+On a meeting someone else organizes the dialog is "Edit event (your reminder and show-as)" and every field but the reminder and "Show as" is disabled, since an attendee changes only their own copy's reminder and show-as.
+"Show as" opens on the event's own value (one the list does not name, such as `unknown`, shows as itself until another is picked) and is sent only when changed.
+An event the server holds without a title saves its other fields with the title left empty; only clearing a title the event had is refused ("The event needs a title").
 An invitation mail's event, an event of a series, a cancelled one and one on a calendar mp does not write to are not opened: the notice says why.
 The alert says "Nothing changed yet" until a field differs from what the form opened with; Save changes sends `event_update` with only those fields (`changedFields`), so a change made in Outlook to another field survives, and the daemon's refusal shows verbatim in the alert.
 
@@ -781,10 +783,11 @@ The alert says "Nothing changed yet" until a field differs from what the form op
 The overlay is `event_remove` (`EventRemoveDialog.tsx`), and a refusal shows in its alert.
 The desktop takes `D` rather than the design's `X`, which dismisses the newest notice in every view; the TUI takes `D` too.
 
-Each change is `event_update`, `event_cancel` or `event_delete`, awaited as `event_change`: `state.eventChanges` keeps each one (`{token, account, summary, kind, dialog, operation_id}`), `eventChangeEarly` an end that overtook the start's answer.
+Each change is `event_update`, `event_cancel` or `event_delete`, awaited as `event_change`: `state.eventChanges` keeps each one (`{token, account, summary, kind, dialog, removal, operation_id}`, `dialog` the update's form and `removal` the cancel's or delete's confirmation with its comment), `eventChangeEarly` an end that overtook the start's answer.
 The settle says "Updated <summary>", "Cancelled <summary>" with "; told <address>" or "; told N people", or "Deleted <summary>", and makes the Calendar view stale.
 A failed update ("The change did not go through: <why>") or one a daemon restart dropped ("The daemon restarted before the change was confirmed; Save sends it again") opens the form again with what was typed; an update sets fields to values, so sending it again is safe.
-A failed cancel or delete says "<Cancelling|Deleting> <summary> failed: <why>", and one a restart dropped says to Refresh to see whether it went through.
+A failed cancel or delete ("<Cancelling|Deleting> <summary> failed: <why>") or one a restart dropped ("The daemon restarted before it was confirmed; confirming again is safe, and counts as done if it went through") opens its confirmation again with the comment and the reason in its alert; the daemon counts a repeat of a cancel or delete that went through as done.
+With another dialog open either is kept instead (`keptEventDialog`, `keptEventRemove`) and a notice says "<why>; Edit on <summary> opens the form again with what you typed" or "<why>; <Cancel meeting|Delete> on <summary> asks again"; Edit or `D` on that event opens the kept one.
 
 ### New invitation
 

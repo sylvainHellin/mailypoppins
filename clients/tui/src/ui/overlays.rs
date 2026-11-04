@@ -127,7 +127,7 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
     let muted = Style::default().fg(theme::active().text_muted);
 
     let title = match (&form.editing, &form.transaction_id) {
-        (Some(edit), _) if !edit.is_organizer => "Edit event (your reminder)",
+        (Some(edit), _) if !edit.is_organizer => "Edit event (your reminder and show-as)",
         (Some(_), _) => "Edit event",
         (None, Some(_)) => "New event (retry)",
         (None, None) => "New event",
@@ -166,6 +166,10 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
             }
             EventFormRow::Teams => ("Teams", switch(form.teams).to_string()),
             EventFormRow::Reminder => ("Reminder", form.reminder.clone()),
+            EventFormRow::ShowAs => (
+                "Show as",
+                format!("\u{2039} {} \u{203a}", form.show_as_label()),
+            ),
             EventFormRow::Description => {
                 let first = form.body.lines().next().unwrap_or_default();
                 let more = form.body.lines().count().saturating_sub(1);
@@ -216,9 +220,9 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
     frame.render_widget(Paragraph::new(lines), stack.content);
     if let Some(footer) = stack.footer {
         let keys = if form.editing.is_some() {
-            "  Enter save the changes \u{b7} Tab next \u{b7} Space toggle \u{b7} Esc cancel"
+            "  Enter save \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} choose \u{b7} Esc cancel"
         } else {
-            "  Enter create \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} calendar \u{b7} Esc cancel"
+            "  Enter create \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} choose \u{b7} Esc cancel"
         };
         frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
     }

@@ -55,6 +55,7 @@ describe("the event form's model", () => {
         teams: true,
         reminder: "",
         noReminder: true,
+        showAs: "busy",
         body: "",
       },
     };
@@ -87,6 +88,8 @@ describe("the event form's model", () => {
     expect(params.event.end).toBeUndefined();
     expect(params.event.reminder).toBeUndefined();
     expect(params.transaction_id).toBeUndefined();
+    expect(params.event.show_as).toBeUndefined();
+    expect(eventParams({ ...allDay, fields: { ...allDay.fields, showAs: "oof" } }, "Europe/Berlin").event.show_as).toBe("oof");
   });
 });
 

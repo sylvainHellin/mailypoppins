@@ -1970,10 +1970,10 @@ impl App {
     /// The event form's keys (PERSO-255). `Tab`, `Shift+Tab` and the arrows
     /// walk the rows; a text row takes every character typed; `Space` flips
     /// the all-day and Teams switches; `Left` and `Right` change the
-    /// calendar; `Enter` on the description opens `$EDITOR` and anywhere else
-    /// creates the event (or, on an edit form, sends what changed), unless a
-    /// field is wrong, which the form names; `Esc` closes the form and drops
-    /// what was typed.
+    /// calendar and the show-as; `Enter` on the description opens `$EDITOR`
+    /// and anywhere else creates the event (or, on an edit form, sends what
+    /// changed), unless a field is wrong, which the form names; `Esc` closes
+    /// the form and drops what was typed.
     fn handle_event_form_key(&mut self, key: KeyEvent) -> Option<Message> {
         let Overlay::EventForm(form) = &mut self.overlay else {
             return None;
@@ -1984,6 +1984,8 @@ impl App {
             KeyCode::BackTab | KeyCode::Up => form.step(-1),
             KeyCode::Left if form.row == EventFormRow::Calendar => form.cycle_calendar(false),
             KeyCode::Right if form.row == EventFormRow::Calendar => form.cycle_calendar(true),
+            KeyCode::Left if form.row == EventFormRow::ShowAs => form.cycle_show_as(false),
+            KeyCode::Right if form.row == EventFormRow::ShowAs => form.cycle_show_as(true),
             KeyCode::Char(' ') if form.row == EventFormRow::AllDay => form.toggle_all_day(),
             KeyCode::Char(' ') if form.row == EventFormRow::Teams => form.toggle_teams(),
             KeyCode::Char(c) if typing => {

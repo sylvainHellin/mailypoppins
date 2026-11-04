@@ -20,6 +20,16 @@ import type { AppState, EventCalendar, EventCreateRun, EventDialog, EventFields,
 const EVENT_EARLY_CAP = 16;
 
 export const NO_TITLE = "The event needs a title";
+
+/** The show-as words `event.create` and `event.update` take, with the form's label; `busy` is the server's default for a new event. */
+export const SHOW_AS: readonly { word: string; label: string }[] = [
+  { word: "free", label: "Free" },
+  { word: "tentative", label: "Tentative" },
+  { word: "busy", label: "Busy" },
+  { word: "oof", label: "Out of office" },
+  { word: "working-elsewhere", label: "Working elsewhere" },
+];
+export const DEFAULT_SHOW_AS = "busy";
 export const NO_CALENDAR = "No calendar takes new events: no account has a server calendar mp writes to";
 export const RESTARTED = "The daemon restarted before the event was confirmed; Retry sends the same transaction id, which creates it at most once";
 
@@ -59,6 +69,7 @@ export function freshFields(calendars: EventCalendar[], account: string | null, 
     teams: false,
     reminder: "",
     noReminder: false,
+    showAs: DEFAULT_SHOW_AS,
     body: "",
   };
 }
@@ -74,10 +85,15 @@ export function addresses(list: string): string[] {
     .filter(Boolean);
 }
 
-/** What the fields lack or get wrong, the first thing only; null when the form can be sent. The daemon checks it all again. */
-export function eventProblem(fields: EventFields, calendars: EventCalendar[]): string | null {
+/**
+ * What the fields lack or get wrong, the first thing only; null when the
+ * form can be sent. The daemon checks it all again. A title is needed unless
+ * the event being edited had none (`hadTitle` false), so an untitled event
+ * still saves its other fields.
+ */
+export function eventProblem(fields: EventFields, calendars: EventCalendar[], hadTitle = true): string | null {
   if (!calendars.some((c) => c.key === fields.calendar)) return NO_CALENDAR;
-  if (fields.title.trim() === "") return NO_TITLE;
+  if (fields.title.trim() === "" && hadTitle) return NO_TITLE;
   if (fields.allDay) {
     if (!DAY.test(fields.start)) return "The first day is YYYY-MM-DD";
     if (fields.end && !DAY.test(fields.end)) return "The last day is YYYY-MM-DD, or empty for one day";
@@ -126,6 +142,7 @@ export function eventParams(dialog: EventDialog, zone: string): EventCreateParam
   if (f.body.trim()) event.body = f.body;
   if (f.teams && calendar?.teams) event.online_meeting = true;
   if (reminder !== undefined) event.reminder = reminder;
+  if (f.showAs !== DEFAULT_SHOW_AS) event.show_as = f.showAs;
   const params: EventCreateParams = { account: calendar?.account ?? "", calendar: calendar?.id, event };
   if (dialog.transactionId) params.transaction_id = dialog.transactionId;
   return params;
@@ -135,13 +152,21 @@ export function eventParams(dialog: EventDialog, zone: string): EventCreateParam
 // The model
 // ---------------------------------------------------------------------------
 
+/** Whether `kept` is the form `dialog` stands for: both new events, or both edits of the same event. */
+function sameForm(dialog: EventDialog, kept: EventDialog | null): boolean {
+  if (!kept) return false;
+  if (!dialog.edit) return !kept.edit;
+  return kept.edit?.account === dialog.edit.account && kept.edit.event === dialog.edit.event;
+}
+
+/** The form over the view; opening the form a failure kept, or a fresh one in its place, forgets the kept one. */
 export function openEventDialog(s: AppState, dialog: EventDialog): AppState {
   return {
     ...s,
     overlay: "event",
     eventDialog: dialog,
     eventRemoveDialog: null,
-    keptEventDialog: dialog.edit ? s.keptEventDialog : null,
+    keptEventDialog: sameForm(dialog, s.keptEventDialog) ? null : s.keptEventDialog,
     dialog: null,
     composeDialog: null,
     attachDialog: null,
@@ -229,11 +254,11 @@ let nextCreate = 1;
 
 /**
  * "New event", `n` in the Calendar view and the palette: the form a failed
- * create kept, else a fresh one on the cursor's day (today outside the
+ * create kept (not a kept edit, which Edit on its event opens), else a fresh one on the cursor's day (today outside the
  * Calendar view), in the selected account's default calendar.
  */
 export async function newEvent(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
-  if (s.keptEventDialog) {
+  if (s.keptEventDialog && !s.keptEventDialog.edit) {
     dispatch({ type: "open_event_form", dialog: s.keptEventDialog });
     return;
   }

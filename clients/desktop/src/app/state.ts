@@ -681,7 +681,9 @@ export type InviteSendRun = { token: number; account: string; subject: string; o
  * `account/id` of the calendar the event goes to, `start` and `end` are
  * `YYYY-MM-DDTHH:MM` on a timed event and `YYYY-MM-DD` on an all-day one
  * (the end its last day, empty for one day), the attendee lists are comma
- * separated, and `reminder` is minutes, empty for the mailbox default.
+ * separated, `reminder` is minutes, empty for the mailbox default, and
+ * `showAs` is a show-as word (`busy` on a new event, the server's default;
+ * an edited event's own, `unknown` included).
  */
 export type EventFields = {
   calendar: string;
@@ -696,6 +698,7 @@ export type EventFields = {
   teams: boolean;
   reminder: string;
   noReminder: boolean;
+  showAs: string;
   body: string;
 };
 
@@ -708,23 +711,25 @@ export type EventDialog = { fields: EventFields; calendars: EventCalendar[]; tra
 
 /**
  * What an edit of the event form changes (PERSO-255): the event, whether
- * the user organizes it (an attendee changes the reminder only), whether it
- * is a Teams meeting (which stays one), and the fields as the form opened,
- * which the change is read against.
+ * the user organizes it (an attendee changes the reminder and the show-as
+ * only), whether it is a Teams meeting (which stays one), and the fields as
+ * the form opened, which the change is read against.
  */
 export type EventEdit = { account: string; event: string; organizer: boolean; online: boolean; original: EventFields };
 
 /**
  * The `D` confirmation (PERSO-255): cancel a meeting the user organizes,
  * which tells its `attendees`, with a comment, or delete an event that
- * tells nobody.
+ * tells nobody. A confirmation a failed cancel or delete opens again
+ * carries the `comment` it was sent with and why it failed.
  */
-export type EventRemoveDialog = { account: string; event: string; summary: string; cancel: boolean; attendees: number };
+export type EventRemoveDialog = { account: string; event: string; summary: string; cancel: boolean; attendees: number; comment?: string; error?: string | null };
 
 /**
  * A change this window started, until it settles or is dropped:
  * `operation_id` is null until its start answers. An update keeps the form
- * as it was sent, which a failure opens again.
+ * as it was sent, and a cancel or a delete its confirmation with the
+ * comment, which a failure opens again.
  */
 export type EventChangeRun = {
   token: number;
@@ -732,6 +737,7 @@ export type EventChangeRun = {
   summary: string;
   kind: "update" | "cancel" | "delete";
   dialog: EventDialog | null;
+  removal: EventRemoveDialog | null;
   operation_id: string | null;
 };
 
@@ -986,7 +992,7 @@ export type AppState = {
   inviteSendEarly: OperationEnd[];
   /** What the `event` overlay shows; null whenever another overlay or none is open. */
   eventDialog: EventDialog | null;
-  /** A form whose create failed while another overlay was open: New event opens it again. */
+  /** A form whose create or update failed while another overlay was open: New event, or Edit on that event, opens it again. */
   keptEventDialog: EventDialog | null;
   /** New events this window started, in start order. */
   eventCreates: EventCreateRun[];
@@ -994,6 +1000,8 @@ export type AppState = {
   eventCreateEarly: OperationEnd[];
   /** What the `event_remove` overlay shows; null whenever another overlay or none is open. */
   eventRemoveDialog: EventRemoveDialog | null;
+  /** A confirmation whose cancel or delete failed while another overlay was open: `D` on that event opens it again. */
+  keptEventRemove: EventRemoveDialog | null;
   /** Updates, cancels and deletes this window started, in start order. */
   eventChanges: EventChangeRun[];
   /** Operation ends that arrived while a change's start was unanswered, for its id. */
@@ -1147,6 +1155,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     inviteSendEarly: [],
     eventDialog: null,
     keptEventDialog: null,
+    keptEventRemove: null,
     eventCreates: [],
     eventCreateEarly: [],
     eventRemoveDialog: null,

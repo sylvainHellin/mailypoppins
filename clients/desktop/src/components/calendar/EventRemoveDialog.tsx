@@ -16,7 +16,8 @@ export type EventRemoveDialogProps = { dialog: EventRemoveState | null; onOpenCh
  * A cancel names how many people it tells and takes a comment for them,
  * which has the focus; Enter cancels the meeting. A delete says it tells
  * nobody; `y` or Enter deletes and `n` keeps the event. Escape keeps it
- * either way, and a daemon refusal shows in the dialog's alert.
+ * either way, and a daemon refusal shows in the dialog's alert. Opened again
+ * after a failed cancel or delete, it holds the comment and says why.
  */
 export function EventRemoveDialog({ dialog, onOpenChange }: EventRemoveDialogProps) {
   const dispatch = useDispatch();
@@ -29,8 +30,8 @@ export function EventRemoveDialog({ dialog, onOpenChange }: EventRemoveDialogPro
   const cancel = dialog?.cancel ?? false;
 
   useEffect(() => {
-    setComment("");
-    setError(null);
+    setComment(dialog?.comment ?? "");
+    setError(dialog?.error ?? null);
     setBusy(false);
   }, [dialog]);
 

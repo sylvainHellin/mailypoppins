@@ -28,12 +28,12 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 22 |││Fri 2026-08-07        │  Rooms                                                               │                      ││
 23 |││  14:00-15:00 ✓ Abgesa│  Teams        [ ]                                                    │                      ││
 24 |││                [evoqs│  Reminder     none                                                   │                      ││
-25 |││                      │  Description  Bitte Helm mitbringen.                                 │                      ││
-26 |││                      │                                                                      │                      ││
-27 |││                      │  Times in Europe/Berlin                                              │                      ││
-28 |││                      │  Enter save the changes · Tab next · Space toggle · Esc cancel       │                      ││
-29 |││                      ╰──────────────────────────────────────────────────────────────────────╯                      ││
-30 |││                                       ││                                                                           ││
+25 |││                      │  Show as      ‹ Busy ›                                               │                      ││
+26 |││                      │  Description  Bitte Helm mitbringen.                                 │                      ││
+27 |││                      │                                                                      │                      ││
+28 |││                      │  Times in Europe/Berlin                                              │                      ││
+29 |││                      │  Enter save · Tab next · Space toggle · ←/→ choose · Esc cancel      │                      ││
+30 |││                      ╰──────────────────────────────────────────────────────────────────────╯                      ││
 31 |││                                       ││                                                                           ││
 32 |│╰───────────────────────────────────────╯│                                                                           ││
 33 |│╭ View ─────────────────────────────────╮│                                                                           ││

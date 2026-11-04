@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { mock, settleEventChange } from "@/test/tauri-mock";
 import { changedFields, editDialogFor, editProblem, NOTHING_CHANGED, ORGANIZER_ONLY, removeDialogFor } from "@/app/eventChange";
+import { NO_TITLE } from "@/app/eventForm";
 import type { CalendarEvent, CalendarInfo } from "@/protocol/types";
 import type { EventDialog } from "@/app/state";
 
@@ -84,11 +85,30 @@ describe("the event change model", () => {
     expect(changedFields(quiet, "Europe/Berlin")).toEqual({ reminder: null });
   });
 
-  it("lets an attendee change the reminder only", () => {
+  it("lets an attendee change the reminder and the show-as only", () => {
     const dialog = editDialogFor(event({ is_organizer: false, own_response: "accepted", organizer: { email: "kim@example.com" } }), calendars) as EventDialog;
     expect(dialog.edit?.organizer).toBe(false);
     expect(editProblem({ ...dialog, fields: { ...dialog.fields, reminder: "5" } })).toBeNull();
+    const away: EventDialog = { ...dialog, fields: { ...dialog.fields, showAs: "oof" } };
+    expect(editProblem(away)).toBeNull();
+    expect(changedFields(away, "Europe/Berlin")).toEqual({ show_as: "oof" });
     expect(editProblem({ ...dialog, fields: { ...dialog.fields, title: "Mine now" } })).toBe(ORGANIZER_ONLY);
+  });
+
+  it("sends the show-as only when it changed", () => {
+    const dialog = editDialogFor(event({ show_as: "tentative" }), calendars) as EventDialog;
+    expect(dialog.fields.showAs).toBe("tentative");
+    expect(changedFields({ ...dialog, fields: { ...dialog.fields, location: "Room 2" } }, "Europe/Berlin")).toEqual({ location: "Room 2" });
+    expect(changedFields({ ...dialog, fields: { ...dialog.fields, showAs: "free" } }, "Europe/Berlin")).toEqual({ show_as: "free" });
+  });
+
+  it("saves an event without a title, and refuses clearing a title it had", () => {
+    const untitled = editDialogFor(event({ summary: "", is_organizer: false, own_response: "accepted", organizer: { email: "kim@example.com" } }), calendars) as EventDialog;
+    const reminded: EventDialog = { ...untitled, fields: { ...untitled.fields, reminder: "5" } };
+    expect(editProblem(reminded)).toBeNull();
+    expect(changedFields(reminded, "Europe/Berlin")).toEqual({ reminder: 5 });
+    const own = editDialogFor(event(), calendars) as EventDialog;
+    expect(editProblem({ ...own, fields: { ...own.fields, title: " ", location: "Room 2" } })).toBe(NO_TITLE);
   });
 
   it("cancels the organizer's meeting, deletes what tells nobody, and refuses the rest", () => {
@@ -135,17 +155,72 @@ describe("changing an event in the Calendar view", () => {
     expect(within(again).getByLabelText("Location")).toHaveValue("Room 2");
   });
 
-  it("an attendee's form changes the reminder only", async () => {
+  it("a failed update while another overlay is open keeps what was typed for Edit", async () => {
+    const r = await calendarOn("AAMkAD-robin");
+    await r.user.keyboard("E");
+    const dialog = await screen.findByRole("dialog", { name: "Edit event" });
+    await r.user.type(within(dialog).getByLabelText("Location"), "Room 2");
+    await r.user.click(within(dialog).getByRole("button", { name: /Save changes/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit event" })).toBeNull());
+    await r.user.keyboard("?");
+    await screen.findByRole("dialog", { name: "Keys" });
+    act(() => void settleEventChange({ fail: true }));
+    expect(await screen.findByText(/HTTP 503; Edit on 1:1 with Robin opens the form again with what you typed/)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Edit event" })).toBeNull();
+    await r.user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Keys" })).toBeNull());
+    await r.user.keyboard("E");
+    const again = await screen.findByRole("dialog", { name: "Edit event" });
+    expect(within(again).getByLabelText("Location")).toHaveValue("Room 2");
+    expect(again.querySelector('[data-slot="event-error"]')).toHaveTextContent("The change did not go through");
+  });
+
+  it("an attendee's form changes the reminder and the show-as only", async () => {
     const r = await calendarOn("AAMkAD-design");
     await r.user.keyboard("E");
-    const dialog = await screen.findByRole("dialog", { name: "Edit event (your reminder)" });
+    const dialog = await screen.findByRole("dialog", { name: "Edit event (your reminder and show-as)" });
     expect(within(dialog).getByLabelText("Title")).toBeDisabled();
     const reminder = within(dialog).getByLabelText("Reminder");
     await r.user.clear(reminder);
     await r.user.type(reminder, "5");
+    const showAs = within(dialog).getByLabelText("Show as");
+    expect(showAs).toBeEnabled();
+    await r.user.selectOptions(showAs, "Out of office");
     await r.user.click(within(dialog).getByRole("button", { name: /Save changes/ }));
     await waitFor(() => expect(callsOf("event_update")).toHaveLength(1));
-    expect(callsOf("event_update")[0]).toEqual({ params: { account: "home", event: "AAMkAD-design", fields: { reminder: 5 } } });
+    expect(callsOf("event_update")[0]).toEqual({ params: { account: "home", event: "AAMkAD-design", fields: { reminder: 5, show_as: "oof" } } });
+  });
+
+  it("a failed cancel opens the confirmation again with the comment, and confirming sends it again", async () => {
+    const r = await calendarOn("AAMkAD-robin");
+    await r.user.keyboard("D");
+    const dialog = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    await r.user.type(within(dialog).getByLabelText("Comment"), "Postponed{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Cancel the meeting?" })).toBeNull());
+    act(() => void settleEventChange({ fail: true }));
+    const again = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    expect(within(again).getByLabelText("Comment")).toHaveValue("Postponed");
+    expect(again.querySelector('[data-slot="event-remove-error"]')).toHaveTextContent("Cancelling 1:1 with Robin failed: Graph refused the cancel: HTTP 503");
+    await r.user.click(within(again).getByRole("button", { name: /Cancel meeting/ }));
+    await waitFor(() => expect(callsOf("event_cancel")).toHaveLength(2));
+    expect(callsOf("event_cancel")[1]).toEqual({ account: "home", event: "AAMkAD-robin", comment: "Postponed" });
+  });
+
+  it("a cancel that fails while another overlay is open keeps its confirmation for D", async () => {
+    const r = await calendarOn("AAMkAD-robin");
+    await r.user.keyboard("D");
+    const dialog = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    await r.user.type(within(dialog).getByLabelText("Comment"), "Postponed{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Cancel the meeting?" })).toBeNull());
+    await r.user.keyboard("?");
+    await screen.findByRole("dialog", { name: "Keys" });
+    act(() => void settleEventChange({ fail: true }));
+    expect(await screen.findByText(/HTTP 503; Cancel meeting on 1:1 with Robin asks again/)).toBeInTheDocument();
+    await r.user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Keys" })).toBeNull());
+    await r.user.keyboard("D");
+    const again = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    expect(within(again).getByLabelText("Comment")).toHaveValue("Postponed");
   });
 
   it("D asks to cancel the organizer's meeting with a comment and sends event_cancel; on someone else's meeting it says to decline", async () => {
