@@ -84,8 +84,9 @@ export const VIEW_KEYS: Readonly<Record<Exclude<View, "mail">, ViewKeyTable>> = 
   // previous and next day or week, `t` today and never the `t` family, `gt`
   // a date, `a`, `d`, `w` the layouts, Enter the event card, `e` the
   // invitation's invite.ics, `V` the respond choice, `n` the event form,
-  // `c` the calendars, `r` a fresh read, and `m` the invitation mail (the
-  // TUI card's key);
+  // `E` the form on the cursor event, `D` its cancel or delete, `c` the
+  // calendars, `r` a fresh read, and `m` the invitation mail (the TUI card's
+  // key);
   // `j`/`k`, `gg`, `G` move its cursor.
   calendar: listView(
     {
@@ -101,6 +102,8 @@ export const VIEW_KEYS: Readonly<Record<Exclude<View, "mail">, ViewKeyTable>> = 
       e: "calendar_open_source",
       V: "calendar_rsvp",
       n: "new_event",
+      E: "edit_event",
+      D: "remove_event",
       c: "calendar_calendars",
       r: "calendar_refresh",
       m: "calendar_open_mail",

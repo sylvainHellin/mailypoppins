@@ -908,6 +908,58 @@ most once.")]
         #[arg(long)]
         json: bool,
     },
+    /// Change an event: only the fields you name change, and the server
+    /// sends the attendees an update
+    #[command(after_help = "\
+WHEN takes the forms of mp event create. A new --start keeps the event's
+length unless --end or --duration names a new one, and an --end or a
+--duration alone keeps its start; the times are read in the event's own zone
+unless --zone names another. --to, --optional and --room name the whole new
+attendee list. An attendee may change only --reminder, --no-reminder and
+--show-as on their own copy of a meeting; the rest is the organizer's.
+
+Examples:
+  mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
+  mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs")]
+    Update {
+        /// The event id, as `mp calendar view --json` prints it
+        #[arg(value_name = "EVENT")]
+        event: String,
+        #[command(flatten)]
+        fields: Box<UpdateFlags>,
+        /// Print the settled `event.update` result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a meeting you organize: every attendee gets the cancellation
+    #[command(after_help = "\
+A meeting that invites nobody is deleted with mp event delete, and a meeting
+someone else organizes is declined with mp event respond EVENT decline.")]
+    Cancel {
+        /// The event id, as `mp calendar view --json` prints it
+        #[arg(value_name = "EVENT")]
+        event: String,
+        /// A message for the attendees, sent with the cancellation
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+        /// Print the settled `event.cancel` result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete an event that tells nobody: one without attendees, or your
+    /// copy of a meeting its organizer cancelled
+    #[command(after_help = "\
+A live meeting is not deleted: its organizer cancels it (mp event cancel), so
+the attendees are told, and an attendee declines it (mp event respond EVENT
+decline), so the organizer is.")]
+    Delete {
+        /// The event id, as `mp calendar view --json` prints it
+        #[arg(value_name = "EVENT")]
+        event: String,
+        /// Print the settled `event.delete` result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one event: when, where, organizer, attendees, your answer
     Show {
         /// The event id: a server id, or imip:<row_id> for an invitation mail's event
@@ -1035,34 +1087,12 @@ struct CreateFlags {
 impl CreateFlags {
     /// `event.create`'s params for `account`.
     fn params(&self, account: &str) -> Result<mp_protocol::calendar::EventCreateParams> {
-        use mp_protocol::calendar::{EventAttendeeInput, EventCreateParams, EventInputParams};
+        use mp_protocol::calendar::{EventCreateParams, EventInputParams};
         let body = match &self.body_file {
-            Some(path) if path.as_os_str() == "-" => {
-                let mut text = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
-                    .context("reading the description from stdin")?;
-                Some(text)
-            }
-            Some(path) => Some(
-                std::fs::read_to_string(path)
-                    .with_context(|| format!("reading the description from {}", path.display()))?,
-            ),
+            Some(path) => Some(read_description(path)?),
             None => self.body.clone(),
         };
-        let attendees = [
-            (&self.to, "required"),
-            (&self.optional, "optional"),
-            (&self.room, "resource"),
-        ]
-        .into_iter()
-        .flat_map(|(emails, role)| {
-            emails.iter().map(move |email| EventAttendeeInput {
-                email: email.clone(),
-                name: None,
-                role: Some(role.to_string()),
-            })
-        })
-        .collect();
+        let attendees = attendee_inputs(&self.to, &self.optional, &self.room);
         Ok(EventCreateParams {
             account: account.to_string(),
             calendar: self.calendar.clone(),
@@ -1087,6 +1117,145 @@ impl CreateFlags {
             },
         })
     }
+}
+
+/// What `mp event update` sends as `event.update`'s fields: each flag given
+/// is a field changed, and nothing else is sent.
+#[derive(clap::Args)]
+struct UpdateFlags {
+    /// The new title
+    #[arg(long, value_name = "TEXT")]
+    summary: Option<String>,
+    /// The new start
+    #[arg(long, value_name = "WHEN")]
+    start: Option<String>,
+    /// The new end; on an all-day event the last day, included
+    #[arg(long, value_name = "WHEN", conflicts_with = "duration")]
+    end: Option<String>,
+    /// The new length (1h30m, PT1H30M; whole days on an all-day event)
+    #[arg(long, value_name = "D")]
+    duration: Option<String>,
+    /// Make it an all-day event: --start and --end are bare dates
+    #[arg(long)]
+    all_day: bool,
+    /// The IANA zone the new times are read in (default the event's own)
+    #[arg(long, value_name = "ZONE")]
+    zone: Option<String>,
+    /// Where it takes place
+    #[arg(long, value_name = "TEXT", conflicts_with = "clear_location")]
+    location: Option<String>,
+    /// Remove the location
+    #[arg(long)]
+    clear_location: bool,
+    /// The new description
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["body_file", "clear_body"])]
+    body: Option<String>,
+    /// The new description, read from a file (- for stdin)
+    #[arg(long, value_name = "PATH", conflicts_with = "clear_body")]
+    body_file: Option<std::path::PathBuf>,
+    /// Remove the description
+    #[arg(long)]
+    clear_body: bool,
+    /// A required attendee of the new list (repeatable)
+    #[arg(long = "to", value_name = "ADDR")]
+    to: Vec<String>,
+    /// An optional attendee of the new list (repeatable)
+    #[arg(long = "optional", value_name = "ADDR")]
+    optional: Vec<String>,
+    /// A room mailbox of the new list (repeatable)
+    #[arg(long = "room", value_name = "ADDR")]
+    room: Vec<String>,
+    /// Add a Teams meeting link (when the calendar offers Teams); a link
+    /// once added stays
+    #[arg(long)]
+    teams: bool,
+    /// Minutes before the start the reminder fires
+    #[arg(long, value_name = "MIN", conflicts_with = "no_reminder")]
+    reminder: Option<u32>,
+    /// No reminder
+    #[arg(long)]
+    no_reminder: bool,
+    /// How the time shows to others: free, tentative, busy, oof,
+    /// working-elsewhere
+    #[arg(long, value_name = "WORD")]
+    show_as: Option<String>,
+}
+
+impl UpdateFlags {
+    /// `event.update`'s params for `event` of `account`.
+    fn params(
+        &self,
+        account: &str,
+        event: &str,
+    ) -> Result<mp_protocol::calendar::EventUpdateParams> {
+        use mp_protocol::calendar::{EventPatchParams, EventUpdateParams};
+        let body = match (&self.body_file, self.clear_body) {
+            (_, true) => Some(None),
+            (Some(path), false) => Some(Some(read_description(path)?)),
+            (None, false) => self.body.clone().map(Some),
+        };
+        let attendees = (!self.to.is_empty() || !self.optional.is_empty() || !self.room.is_empty())
+            .then(|| attendee_inputs(&self.to, &self.optional, &self.room));
+        Ok(EventUpdateParams {
+            account: account.to_string(),
+            event: event.to_string(),
+            fields: EventPatchParams {
+                summary: self.summary.clone(),
+                start: self.start.clone(),
+                end: self.end.clone(),
+                duration: self.duration.clone(),
+                zone: self.zone.clone(),
+                all_day: self.all_day.then_some(true),
+                location: if self.clear_location {
+                    Some(None)
+                } else {
+                    self.location.clone().map(Some)
+                },
+                body,
+                attendees,
+                online_meeting: self.teams.then_some(true),
+                reminder: match (self.reminder, self.no_reminder) {
+                    (_, true) => Some(None),
+                    (Some(minutes), false) => Some(Some(minutes)),
+                    (None, false) => None,
+                },
+                show_as: self.show_as.clone(),
+                ..Default::default()
+            },
+        })
+    }
+}
+
+/// A description read from `path`, `-` for stdin.
+fn read_description(path: &std::path::Path) -> Result<String> {
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .context("reading the description from stdin")?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(path)
+        .with_context(|| format!("reading the description from {}", path.display()))
+}
+
+/// The attendees `--to`, `--optional` and `--room` name, in that order.
+fn attendee_inputs(
+    to: &[String],
+    optional: &[String],
+    room: &[String],
+) -> Vec<mp_protocol::calendar::EventAttendeeInput> {
+    [(to, "required"), (optional, "optional"), (room, "resource")]
+        .into_iter()
+        .flat_map(|(emails, role)| {
+            emails
+                .iter()
+                .map(move |email| mp_protocol::calendar::EventAttendeeInput {
+                    email: email.clone(),
+                    name: None,
+                    role: Some(role.to_string()),
+                })
+        })
+        .collect()
 }
 
 /// RSVP actions for `mp invite <accept|tentative|decline> <selector>`.
@@ -4177,6 +4346,87 @@ async fn routed_event_create(account: &str, flags: &CreateFlags, json: bool) -> 
     Ok(())
 }
 
+/// `mp event update`: the settled event, printed as `mp event show` prints
+/// it.
+async fn routed_event_update(
+    account: &str,
+    event: &str,
+    flags: &UpdateFlags,
+    json: bool,
+) -> Result<()> {
+    let params = serde_json::to_value(flags.params(account, event)?)?;
+    let mut connection = operation_session().await;
+    let result = run_admin_operation(&mut connection, "event.update", params, account).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let updated: mp_protocol::calendar::EventUpdateResult =
+        serde_json::from_value(result).context("reading the settled event.update result")?;
+    println!(
+        "{} Updated {} ({})",
+        "\u{2713}".green(),
+        updated.event.summary,
+        updated.event.id
+    );
+    let names = calendar_list(&mut connection, Some(account)).await?;
+    let names = mailypoppins::calendar_cmd::calendar_names(&calendar_infos(&names)?);
+    print!(
+        "{}",
+        mailypoppins::calendar_cmd::render_event(
+            &updated.event,
+            mailypoppins::calendar_view::local_zone(),
+            &names
+        )
+    );
+    Ok(())
+}
+
+/// `mp event cancel`: the meeting cancelled, and who was told.
+async fn routed_event_cancel(
+    account: &str,
+    event: &str,
+    comment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let params = serde_json::to_value(mp_protocol::calendar::EventCancelParams {
+        account: account.to_string(),
+        event: event.to_string(),
+        comment,
+    })?;
+    let mut connection = operation_session().await;
+    let result = run_admin_operation(&mut connection, "event.cancel", params, account).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let cancelled: mp_protocol::calendar::EventCancelResult =
+        serde_json::from_value(result).context("reading the settled event.cancel result")?;
+    println!("{} Cancelled {}", "\u{2713}".green(), cancelled.event);
+    if !cancelled.notified.is_empty() {
+        println!("  told: {}", cancelled.notified.join(", "));
+    }
+    Ok(())
+}
+
+/// `mp event delete`.
+async fn routed_event_delete(account: &str, event: &str, json: bool) -> Result<()> {
+    let params = serde_json::to_value(mp_protocol::calendar::EventDeleteParams {
+        account: account.to_string(),
+        event: event.to_string(),
+    })?;
+    let mut connection = operation_session().await;
+    let result = run_admin_operation(&mut connection, "event.delete", params, account).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let deleted: mp_protocol::calendar::EventDeleteResult =
+        serde_json::from_value(result).context("reading the settled event.delete result")?;
+    println!("{} Deleted {}", "\u{2713}".green(), deleted.event);
+    Ok(())
+}
+
 /// `mp event respond`: the settled answer, and how it reached the organizer.
 async fn routed_event_respond(
     account: &str,
@@ -6007,6 +6257,23 @@ async fn main() -> Result<()> {
             match action {
                 EventAction::Create { event, json } => {
                     routed_event_create(&account, &event, json).await?;
+                }
+                EventAction::Update {
+                    event,
+                    fields,
+                    json,
+                } => {
+                    routed_event_update(&account, &event, &fields, json).await?;
+                }
+                EventAction::Cancel {
+                    event,
+                    comment,
+                    json,
+                } => {
+                    routed_event_cancel(&account, &event, comment, json).await?;
+                }
+                EventAction::Delete { event, json } => {
+                    routed_event_delete(&account, &event, json).await?;
                 }
                 EventAction::Show { event, json } => {
                     routed_event_show(&account, &event, json).await?;

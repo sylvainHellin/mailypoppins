@@ -157,6 +157,10 @@ The type blocks in this document are for reading, and the generated files are th
 | `calendar_set_visibility` | `account`, `calendar`, `visible` | nothing; the daemon publishes `calendar.changed` |
 | `calendar_view` | `start`, `end` (RFC 3339 with an offset, `end` exclusive), `zone?` | `CalendarViewResult`, every account's visible calendars |
 | `event_respond` | `account`, `event`, `response: "accept" \| "tentative" \| "decline"`, `comment?`, `send_response?` | `{ operation_id }` |
+| `event_create` | `params: EventCreateParams` | `EventCreateStarted` (`{ operation_id, transaction_id }`) |
+| `event_update` | `params: EventUpdateParams` (`{account, event, fields}`, the fields that changed) | `{ operation_id }` |
+| `event_cancel` | `account`, `event`, `comment?` | `{ operation_id }` |
+| `event_delete` | `account`, `event` | `{ operation_id }` |
 | `invite_source_open` | `account`, `row_id` (an invitation mail's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
 | `invite_get` | `account`, `row_id` | `InviteCard` (the event and its server `event_id`), or `null` for a message with no invitation |
 | `invite_refusal` | `account` | `InviteRefusal` |
@@ -327,6 +331,8 @@ A cancelled hold cancels the operation too, which then ends `cancelled`.
 | `outbox_retry` | `outbox_retry` | `send.outbox_retry` | `OutboxRetryOutcome` |
 | `rsvp` | `event_respond` | `event.respond` | `EventRespondResult` |
 | `send_invite` | `send_invite` | `send.invite` | `SendOutcome` |
+| `event_create` | `event_create` | `event.create` | `EventWriteResult` |
+| `event_change` | `event_update`, `event_cancel`, `event_delete` | `event.update`, `event.cancel`, `event.delete` | `EventUpdateResult`, `EventCancelResult`, `EventDeleteResult` |
 | `contact_rebuild` | `contact_rebuild` | `contact.rebuild` | `ContactRebuilt` |
 
 Each ends one of three ways, as the event stream below says: `operation.finished` with `{operation_id, state, result?, error?}`, `operation_settled` with the whole `OperationStatus` after a re-query, or `operation_dropped` when the daemon restarted.
@@ -388,6 +394,9 @@ A response other than `accept`, `tentative` or `decline` is a `protocol` refusal
 A daemon refusal of the start comes back as the daemon's own sentence with its code, as `send_invite`'s does: `send_response: false` on an invitation mail's event, a Graph account on the iMIP path, a sign-in without the calendar scope.
 `EventRespondResult` is the settle: the `response` and `comment` taken, `send_response`, `via` (`server` or `imip`), and `delivered`, whether the organizer heard of it; an iMIP reply the organizer's server did not take has its outbox row, retried after a transient refusal and parked otherwise.
 The daemon refuses nothing about the event itself: an answer to the user's own or to a cancelled event is the frontend's to prevent, as it is the TUI's; no probe runs ahead of the call.
+
+`event_update`, `event_cancel` and `event_delete` (PERSO-255) start `event.update`, `event.cancel` and `event.delete` and await each as `kind: "event_change"`.
+A blank cancel comment is none; every refusal (an attendee's change beyond the reminder, a cancel of someone else's meeting, a delete of a live meeting, an event of a series) is the daemon's own sentence with its code, and nothing is checked ahead of the call.
 
 `invite_refusal` answers whether an account can send invitations at all, for the New invitation form.
 The daemon refuses `send.invite` on a Graph account (`ANO-4`) before it looks at anything else, and `calendar.rsvp` too, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.

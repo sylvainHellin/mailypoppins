@@ -3,4 +3,4 @@
 /**
  * What kind of operation the GUI awaits.
  */
-export type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry" | "rsvp" | "send_invite" | "event_create" | "contact_rebuild" | "oauth2_login";
+export type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry" | "rsvp" | "send_invite" | "event_create" | "event_change" | "contact_rebuild" | "oauth2_login";

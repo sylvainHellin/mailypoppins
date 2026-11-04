@@ -6,9 +6,9 @@ use ratatui::Frame;
 
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
-    ConfirmDialog, DirPicker, DirPickerMode, EventForm, EventFormRow, MailboxPicker,
-    PersistentError, PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay,
-    ThreadEntry, ThreadOverlay,
+    ConfirmDialog, DirPicker, DirPickerMode, EventForm, EventFormRow, EventRemoveOverlay,
+    MailboxPicker, PersistentError, PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode,
+    SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -126,9 +126,11 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
         .add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(theme::active().text_muted);
 
-    let title = match &form.transaction_id {
-        Some(_) => "New event (retry)",
-        None => "New event",
+    let title = match (&form.editing, &form.transaction_id) {
+        (Some(edit), _) if !edit.is_organizer => "Edit event (your reminder and show-as)",
+        (Some(_), _) => "Edit event",
+        (None, Some(_)) => "New event (retry)",
+        (None, None) => "New event",
     };
     let mut lines = vec![
         Line::from(Span::styled(
@@ -143,6 +145,8 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
     for row in rows {
         let on = form.row == row;
         let (label, value) = match row {
+            // An edit keeps the event in its calendar.
+            EventFormRow::Calendar if form.editing.is_some() => ("Calendar", form.chosen().label()),
             EventFormRow::Calendar => (
                 "Calendar",
                 format!("\u{2039} {} \u{203a}", form.chosen().label()),
@@ -157,8 +161,15 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
             EventFormRow::To => ("Attendees", form.to.clone()),
             EventFormRow::Optional => ("Optional", form.optional.clone()),
             EventFormRow::Rooms => ("Rooms", form.rooms.clone()),
+            EventFormRow::Teams if form.editing.as_ref().is_some_and(|e| e.online) => {
+                ("Teams", "[x] (stays on)".to_string())
+            }
             EventFormRow::Teams => ("Teams", switch(form.teams).to_string()),
             EventFormRow::Reminder => ("Reminder", form.reminder.clone()),
+            EventFormRow::ShowAs => (
+                "Show as",
+                format!("\u{2039} {} \u{203a}", form.show_as_label()),
+            ),
             EventFormRow::Description => {
                 let first = form.body.lines().next().unwrap_or_default();
                 let more = form.body.lines().count().saturating_sub(1);
@@ -176,6 +187,7 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
             super::util::scrolled_input_value(&format!("{value}\u{258f}"), avail)
         } else if value.is_empty() {
             match row {
+                EventFormRow::Reminder if form.editing.is_some() => "(none)".to_string(),
                 EventFormRow::Reminder => "(the mailbox default; minutes or none)".to_string(),
                 EventFormRow::End if form.all_day => "(one day)".to_string(),
                 _ => String::new(),
@@ -207,9 +219,130 @@ pub(super) fn render_event_form(form: &EventForm, frame: &mut Frame, area: Rect)
     )));
     frame.render_widget(Paragraph::new(lines), stack.content);
     if let Some(footer) = stack.footer {
-        let keys = "  Enter create \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} calendar \u{b7} Esc cancel";
+        let keys = if form.editing.is_some() {
+            "  Enter save \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} choose \u{b7} Esc cancel"
+        } else {
+            "  Enter create \u{b7} Tab next \u{b7} Space toggle \u{b7} \u{2190}/\u{2192} choose \u{b7} Esc cancel"
+        };
         frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
     }
+}
+
+/// Render the `D` confirmation (PERSO-255): a cancel names how many people
+/// it tells and takes a comment for them; a delete says it tells nobody.
+/// One opened again after a failure says why under it, wrapped.
+pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Frame, area: Rect) {
+    // The modal's inner width, as `render_modal_shell` will size it: 60 or
+    // the area less its margin, less the border.
+    let inner_width = 60.min(area.width.saturating_sub(4)).saturating_sub(2) as usize;
+    let error = overlay
+        .error
+        .as_deref()
+        .map(|why| wrap_words(why, inner_width, 3))
+        .unwrap_or_default();
+    let extra = if error.is_empty() {
+        0
+    } else {
+        error.len() as u16 + 1
+    };
+    let height = if overlay.cancel { 9 } else { 8 } + extra;
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        60,
+        height,
+        theme::active().warning,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 0, 1);
+    let width = inner.width as usize;
+    let normal = Style::default().fg(theme::active().text);
+    let focused = Style::default()
+        .fg(theme::active().selection)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(theme::active().text_muted);
+    let title = if overlay.cancel {
+        "Cancel the meeting?"
+    } else {
+        "Delete the event?"
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::active().warning)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(truncate(&overlay.summary, width), normal)),
+    ];
+    if overlay.cancel {
+        let people = match overlay.attendees {
+            1 => "its attendee".to_string(),
+            n => format!("its {n} attendees"),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("The server sends {people} the cancellation."),
+            muted,
+        )));
+        let prefix = "Comment: ";
+        let avail = width.saturating_sub(prefix.len());
+        lines.push(Line::from(vec![
+            Span::styled(prefix, focused),
+            Span::styled(
+                super::util::scrolled_input_value(&format!("{}\u{258f}", overlay.comment), avail),
+                focused,
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled("The server tells nobody.", muted)));
+    }
+    if !error.is_empty() {
+        lines.push(Line::from(""));
+        let style = Style::default().fg(theme::active().error);
+        lines.extend(
+            error
+                .into_iter()
+                .map(|row| Line::from(Span::styled(row, style))),
+        );
+    }
+    frame.render_widget(Paragraph::new(lines), stack.content);
+    if let Some(footer) = stack.footer {
+        let keys = if overlay.cancel {
+            "  Enter cancel the meeting \u{b7} Esc keep it"
+        } else {
+            "  y/Enter delete \u{b7} n/Esc keep it"
+        };
+        frame.render_widget(Paragraph::new(Span::styled(keys, muted)), footer);
+    }
+}
+
+/// `text` wrapped at word boundaries to `width` columns, at most `rows` of
+/// them, the last one truncated when the text runs on.
+fn wrap_words(text: &str, width: usize, rows: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let fits = row.is_empty()
+            || super::util::display_width(&row) + 1 + super::util::display_width(word) <= width;
+        if !fits {
+            out.push(std::mem::take(&mut row));
+        }
+        if !row.is_empty() {
+            row.push(' ');
+        }
+        row.push_str(word);
+    }
+    if !row.is_empty() {
+        out.push(row);
+    }
+    if out.len() > rows {
+        let rest = out.split_off(rows - 1).join(" ");
+        out.push(truncate(&rest, width));
+    }
+    out.into_iter().map(|row| truncate(&row, width)).collect()
 }
 
 pub(super) fn render_confirm_dialog(dialog: &ConfirmDialog, frame: &mut Frame, area: Rect) {

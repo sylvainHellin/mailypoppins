@@ -1,0 +1,10 @@
+{
+  "id": 85,
+  "jsonrpc": "2.0",
+  "method": "event.cancel",
+  "params": {
+    "account": "evoqs",
+    "comment": "Postponed to next month",
+    "event": "AAMkADev1"
+  }
+}

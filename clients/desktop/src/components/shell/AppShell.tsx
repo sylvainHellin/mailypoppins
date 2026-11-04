@@ -18,6 +18,7 @@ import { AccountPicker } from "@/components/sidebar/AccountPicker";
 import { FolderPicker } from "@/components/sidebar/FolderPicker";
 import { RsvpDialog } from "@/components/calendar/RsvpDialog";
 import { NewEventDialog } from "@/components/calendar/NewEventDialog";
+import { EventRemoveDialog } from "@/components/calendar/EventRemoveDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
 import { ServerSearchDialog } from "@/components/search/ServerSearchDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
@@ -140,6 +141,7 @@ export function AppShell() {
       <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
       <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
       <NewEventDialog dialog={s.overlay === "event" ? s.eventDialog : null} onOpenChange={close} />
+      <EventRemoveDialog dialog={s.overlay === "event_remove" ? s.eventRemoveDialog : null} onOpenChange={close} />
       <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />
       <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
       <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />

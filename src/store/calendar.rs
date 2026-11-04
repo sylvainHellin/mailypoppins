@@ -2,7 +2,7 @@
 //! "Event store").
 //!
 //! A disposable cache of the rolling window (D6): the server is the source of
-//! truth, so [`drop_calendar_cache`] and a resync lose nothing. Six tables,
+//! truth, so [`drop_calendar_cache`] and a resync lose nothing. Seven tables,
 //! all created by [`super::schema::ensure_additive_tables`]:
 //!
 //! - [`CALENDARS_TABLE`]: the account's calendars as the server last listed
@@ -30,6 +30,13 @@
 //!   its `messages.id` and the server id it was looked up under, so
 //!   `message.invite` asks the server once per invitation mail (a mail that
 //!   stands for no event is remembered too, with a `NULL` event).
+//! - [`REMOVED_TABLE`]: each event an `event.cancel` or `event.delete` of mp
+//!   took off the server and out of the cache in the last
+//!   [`REMOVAL_KEPT_DAYS`] days, with who the cancel told, so a retry of the
+//!   same call counts as done rather than as an event the cache never held
+//!   ([`removal`]). A record of mp's own writes rather than of the server, so
+//!   [`drop_calendar_cache`] keeps it; a schema-version rebuild of the store
+//!   does not carry it, and a retry after one is refused as an unknown event.
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,10 +58,15 @@ pub const EVENTS_TABLE: &str = "calendar_events";
 pub const SYNC_TABLE: &str = "calendar_sync";
 pub const SERIES_TABLE: &str = "calendar_series";
 pub const INVITES_TABLE: &str = "calendar_invite_events";
+pub const REMOVED_TABLE: &str = "calendar_removed_events";
 
-/// The `CREATE` statements of the six tables and their indexes, as
+/// How long [`REMOVED_TABLE`] remembers a cancel or a delete: longer than any
+/// client waits to retry an operation that vanished.
+pub const REMOVAL_KEPT_DAYS: i64 = 7;
+
+/// The `CREATE` statements of the seven tables and their indexes, as
 /// `(table, statements)` for [`super::schema::ensure_additive_tables`].
-pub fn create_sql() -> [(&'static str, String); 6] {
+pub fn create_sql() -> [(&'static str, String); 7] {
     [
         (
             CALENDARS_TABLE,
@@ -154,6 +166,22 @@ pub fn create_sql() -> [(&'static str, String); 6] {
                     server_id   TEXT NOT NULL,
                     event_id    TEXT,
                     PRIMARY KEY (account, message_row)
+                )"
+            ),
+        ),
+        (
+            REMOVED_TABLE,
+            // `method` is `event.cancel` or `event.delete`, `notified` the
+            // JSON list of the addresses a cancel told, `removed_at` unix
+            // seconds.
+            format!(
+                "CREATE TABLE IF NOT EXISTS {REMOVED_TABLE} (
+                    account    TEXT NOT NULL,
+                    event_id   TEXT NOT NULL,
+                    method     TEXT NOT NULL,
+                    notified   TEXT NOT NULL,
+                    removed_at INTEGER NOT NULL,
+                    PRIMARY KEY (account, event_id)
                 )"
             ),
         ),
@@ -711,6 +739,89 @@ pub fn upsert_event(store: &Store, account: &str, event: &Event) -> Result<()> {
     write_event(store.conn(), account, &event.calendar, event, &json, false)
 }
 
+/// A cancel or a delete mp made, as [`REMOVED_TABLE`] remembers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    /// `event.cancel` or `event.delete`.
+    pub method: String,
+    /// The addresses a cancel told; empty for a delete.
+    pub notified: Vec<String>,
+}
+
+/// Drop one event of `account` from the cache (the write-through of
+/// `event.cancel` and `event.delete`), before the delta sync reports it
+/// removed, and remember `removal` in the same transaction, forgetting the
+/// removals older than [`REMOVAL_KEPT_DAYS`]. `true` when the cache held the
+/// event.
+pub fn remove_event(
+    store: &Store,
+    account: &str,
+    id: &str,
+    removal: &Removal,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let notified =
+        serde_json::to_string(&removal.notified).context("serialising who a cancel told")?;
+    let tx = store.immediate_transaction()?;
+    let removed = tx
+        .execute(
+            &format!("DELETE FROM {EVENTS_TABLE} WHERE account = ?1 AND event_id = ?2"),
+            [account, id],
+        )
+        .with_context(|| format!("removing calendar event {id}"))?;
+    tx.execute(
+        &format!("DELETE FROM {REMOVED_TABLE} WHERE removed_at < ?1"),
+        [(now - Duration::days(REMOVAL_KEPT_DAYS)).timestamp()],
+    )
+    .context("forgetting old calendar removals")?;
+    tx.execute(
+        &format!(
+            "INSERT OR REPLACE INTO {REMOVED_TABLE}
+                 (account, event_id, method, notified, removed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        ),
+        params![account, id, removal.method, notified, now.timestamp()],
+    )
+    .with_context(|| format!("remembering the removal of calendar event {id}"))?;
+    tx.commit()
+        .with_context(|| format!("committing the removal of calendar event {id}"))?;
+    Ok(removed > 0)
+}
+
+/// The cancel or delete of `account`'s event `id` mp made in the last
+/// [`REMOVAL_KEPT_DAYS`] days, if any: what a retried call settles with
+/// instead of reaching the server.
+pub fn removal(
+    store: &Store,
+    account: &str,
+    id: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<Removal>> {
+    let row: Option<(String, String)> = store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT method, notified FROM {REMOVED_TABLE}
+                 WHERE account = ?1 AND event_id = ?2 AND removed_at >= ?3"
+            ),
+            params![
+                account,
+                id,
+                (now - Duration::days(REMOVAL_KEPT_DAYS)).timestamp()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .with_context(|| format!("looking up the removal of calendar event {id}"))?;
+    row.map(|(method, notified)| {
+        Ok(Removal {
+            method,
+            notified: serde_json::from_str(&notified).context("reading who a cancel told")?,
+        })
+    })
+    .transpose()
+}
+
 /// The cached event of `account` a create with `transaction_id` made, if the
 /// cache holds it: what a retried create settles with instead of posting.
 pub fn event_by_transaction(
@@ -942,7 +1053,8 @@ fn write_series(conn: &rusqlite::Connection, account: &str, series: &SeriesInfo)
 
 /// Drop everything the calendar cache of `account` holds (calendars, events,
 /// sync tokens, series, invitation lookups), keeping the visibility
-/// preferences: the next sync rebuilds the rest from the server
+/// preferences and the removals mp made ([`REMOVED_TABLE`]): the next sync
+/// rebuilds the rest from the server
 /// (`calendar.rebuild`).
 pub fn drop_calendar_cache(store: &Store, account: &str) -> Result<()> {
     let tx = store.immediate_transaction()?;
@@ -1084,6 +1196,49 @@ mod tests {
         );
         assert_eq!(event_by_transaction(&store, "evoqs", "tx-2").unwrap(), None);
         assert_eq!(event_by_transaction(&store, "perso", "tx-1").unwrap(), None);
+    }
+
+    /// A cancelled or deleted event leaves the cache of its own account
+    /// only, and a second removal finds nothing; the removal is remembered
+    /// for its account and forgotten after [`REMOVAL_KEPT_DAYS`], and a
+    /// calendar rebuild keeps it.
+    #[test]
+    fn a_removed_event_leaves_its_accounts_cache_and_is_remembered() {
+        let (_dir, store) = open();
+        upsert_calendars(&store, "evoqs", &[calendar("cal-main", true)]).unwrap();
+        let event = timed("ev-gone", "cal-main", 4, 9);
+        upsert_event(&store, "evoqs", &event).unwrap();
+        let cancel = Removal {
+            method: "event.cancel".into(),
+            notified: vec!["ada@example.com".into()],
+        };
+        let now = Utc::now();
+        assert!(!remove_event(&store, "perso", "ev-gone", &cancel, now).unwrap());
+        assert!(remove_event(&store, "evoqs", "ev-gone", &cancel, now).unwrap());
+        assert_eq!(get_event(&store, "evoqs", "ev-gone").unwrap(), None);
+        assert!(!remove_event(&store, "evoqs", "ev-gone", &cancel, now).unwrap());
+        assert_eq!(
+            removal(&store, "evoqs", "ev-gone", now).unwrap(),
+            Some(cancel.clone())
+        );
+        assert_eq!(removal(&store, "evoqs", "ev-other", now).unwrap(), None);
+        drop_calendar_cache(&store, "evoqs").unwrap();
+        assert_eq!(
+            removal(&store, "evoqs", "ev-gone", now).unwrap(),
+            Some(cancel.clone())
+        );
+        let later = now + Duration::days(REMOVAL_KEPT_DAYS + 1);
+        assert_eq!(removal(&store, "evoqs", "ev-gone", later).unwrap(), None);
+        let delete = Removal {
+            method: "event.delete".into(),
+            notified: Vec::new(),
+        };
+        remove_event(&store, "evoqs", "ev-next", &delete, later).unwrap();
+        assert_eq!(removal(&store, "evoqs", "ev-gone", now).unwrap(), None);
+        assert_eq!(
+            removal(&store, "evoqs", "ev-next", later).unwrap(),
+            Some(delete)
+        );
     }
 
     fn baseline(upserts: Vec<Event>) -> SyncResult {

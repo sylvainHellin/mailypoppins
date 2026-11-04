@@ -721,3 +721,131 @@ fn event_create_through_the_cli() {
         "{no_teams}"
     );
 }
+
+/// `mp event update` sends only the fields its flags name and prints the
+/// changed event; an attendee may change their copy's show-as and reminder
+/// and nothing else; `mp event cancel` tells the attendees and names them,
+/// `mp event delete` removes an event that tells nobody, and a live meeting
+/// is refused a delete with the daemon's sentence and exit 1.
+#[test]
+fn event_update_cancel_and_delete_through_the_cli() {
+    let slice = Slice::start();
+    slice.ok(&["calendar", "rebuild", "-A", SERVER]);
+    let start = format!("{}T14:00", day(10).date_naive());
+    let meeting = slice.json(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Planning",
+        "--start",
+        &start,
+        "--duration",
+        "1h",
+        "--zone",
+        "Europe/Berlin",
+        "--location",
+        "Room 1",
+        "--to",
+        "ada@example.com",
+        "--json",
+    ]);
+    let id = meeting["event"]["id"].as_str().unwrap().to_string();
+
+    let moved = format!("{}T16:00", day(10).date_naive());
+    let printed = slice.ok(&[
+        "event",
+        "update",
+        &id,
+        "-A",
+        SERVER,
+        "--start",
+        &moved,
+        "--clear-location",
+        "--summary",
+        "Planning, moved",
+    ]);
+    assert!(
+        printed.contains(&format!("Updated Planning, moved ({id})")),
+        "{printed}"
+    );
+    let shown = slice.json(&["event", "show", &id, "-A", SERVER, "--json"]);
+    assert_eq!(shown["event"]["summary"], "Planning, moved");
+    assert!(shown["event"].get("location").is_none(), "{shown}");
+    let reminder = slice.json(&[
+        "event",
+        "update",
+        &id,
+        "-A",
+        SERVER,
+        "--reminder",
+        "5",
+        "--json",
+    ]);
+    assert_eq!(reminder["event"]["reminder"], 5);
+    assert_eq!(reminder["event"]["summary"], "Planning, moved");
+
+    let attendee = slice.err(&[
+        "event",
+        "update",
+        "ev-meeting",
+        "-A",
+        SERVER,
+        "--summary",
+        "Mine now",
+    ]);
+    assert!(
+        attendee.contains("Only the organizer can change this event"),
+        "{attendee}"
+    );
+    let own_copy = slice.json(&[
+        "event",
+        "update",
+        "ev-meeting",
+        "-A",
+        SERVER,
+        "--show-as",
+        "free",
+        "--json",
+    ]);
+    assert_eq!(own_copy["event"]["show_as"], "free");
+
+    let live = slice.err(&["event", "delete", &id, "-A", SERVER]);
+    assert!(live.contains("cancel it to tell them"), "{live}");
+    let cancelled = slice.ok(&[
+        "event",
+        "cancel",
+        &id,
+        "-A",
+        SERVER,
+        "--comment",
+        "Postponed",
+    ]);
+    assert!(
+        cancelled.contains(&format!("Cancelled {id}")),
+        "{cancelled}"
+    );
+    assert!(cancelled.contains("told: ada@example.com"), "{cancelled}");
+
+    let solo = slice.json(&[
+        "event",
+        "create",
+        "-A",
+        SERVER,
+        "--summary",
+        "Focus",
+        "--start",
+        &start,
+        "--duration",
+        "2h",
+        "--json",
+    ]);
+    let solo = solo["event"]["id"].as_str().unwrap().to_string();
+    let nobody = slice.err(&["event", "cancel", &solo, "-A", SERVER]);
+    assert!(nobody.contains("invites nobody"), "{nobody}");
+    let deleted = slice.json(&["event", "delete", &solo, "-A", SERVER, "--json"]);
+    assert_eq!(deleted["event"], solo.as_str());
+    let gone = slice.err(&["event", "show", &solo, "-A", SERVER]);
+    assert!(gone.contains(&format!("has no event {solo}")), "{gone}");
+}

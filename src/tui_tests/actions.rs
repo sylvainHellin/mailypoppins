@@ -407,6 +407,12 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ),
     ("Rsvp", ActionRoute::Daemon(&["event.respond"]), false),
     ("CreateEvent", ActionRoute::Daemon(&["event.create"]), false),
+    ("UpdateEvent", ActionRoute::Daemon(&["event.update"]), false),
+    (
+        "RemoveEvent",
+        ActionRoute::Daemon(&["event.cancel", "event.delete"]),
+        false,
+    ),
     (
         "EditEventDescription",
         ActionRoute::ClientOnly("$EDITOR, over the event form's description"),
@@ -536,6 +542,26 @@ fn one_of_each_action() -> Vec<Action> {
             chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(),
             "Europe/Berlin",
         ))),
+        Action::UpdateEvent(Box::new(crate::tui::app::EventForm::new(
+            vec![crate::tui::app::EventCalendarChoice {
+                account: ACCOUNT.to_string(),
+                id: "cal-main".to_string(),
+                name: "Calendar".to_string(),
+                teams: true,
+            }],
+            ACCOUNT,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(),
+            "Europe/Berlin",
+        ))),
+        Action::RemoveEvent(Box::new(crate::tui::app::EventRemoveOverlay {
+            account: ACCOUNT.to_string(),
+            event: "ev-1".to_string(),
+            summary: "Budget".to_string(),
+            cancel: true,
+            attendees: 1,
+            comment: String::new(),
+            error: None,
+        })),
         Action::EditEventDescription,
         Action::ComposeToContact {
             to: "a@example.com".to_string(),
@@ -620,6 +646,8 @@ fn variant_name(action: &Action) -> &'static str {
         Action::ComposeEditSignature => "ComposeEditSignature",
         Action::Rsvp { .. } => "Rsvp",
         Action::CreateEvent(_) => "CreateEvent",
+        Action::UpdateEvent(_) => "UpdateEvent",
+        Action::RemoveEvent(_) => "RemoveEvent",
         Action::EditEventDescription => "EditEventDescription",
         Action::ComposeToContact { .. } => "ComposeToContact",
         Action::SendContactVcard { .. } => "SendContactVcard",

@@ -10,6 +10,7 @@ import * as attachments from "@/app/attachments";
 import { CALENDAR_CARD_ID, CALENDAR_JUMP_ID, openCursorEventMail, openEventSource, today } from "@/app/calendar";
 import { openEventRsvp, openRsvp } from "@/app/rsvp";
 import { newEvent } from "@/app/eventForm";
+import { editEvent, removeEvent } from "@/app/eventChange";
 import { newInvitation } from "@/app/invite";
 import { manageSignatures } from "@/app/signatures";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
@@ -426,6 +427,10 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return newInvitation(s, dispatch);
     case "new_event":
       return void newEvent(s, dispatch);
+    case "edit_event":
+      return editEvent(s, dispatch);
+    case "remove_event":
+      return removeEvent(s, dispatch);
     case "contacts_search":
       document.getElementById(CONTACTS_SEARCH_ID)?.focus();
       return;

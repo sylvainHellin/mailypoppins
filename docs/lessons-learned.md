@@ -3429,3 +3429,23 @@ After merging a long-lived branch, run `cargo test --workspace` before calling t
 
 In jsdom, `user.keyboard("{Meta>}p{/Meta}")` on a focused input appends `p` to its value, as no browser does for Cmd+P; `{Control>}p{/Control}` types nothing.
 A test that a chord stays the field's while a text field has focus therefore checks the focus and that no dialog opened, not the field's value (`keymap.test.tsx`, "ignores keys while a text field has focus").
+
+## A desktop view's own key shadows a shared key, so check VIEW_SHARED_KEYS first (2026-11-04, PERSO-255)
+
+The desktop app's `X` dismisses the newest notice in every view, and a full-pane view's own binding wins over the keys every view shares (`VIEW_SHARED_KEYS`), so a view that takes one of those keys silently loses the shared action there.
+Check that list before giving a view a key; the calendar's cancel or delete took `D` instead of the planned `X` for this reason, in the TUI too, so both clients keep one key.
+
+## A worktree has none of the local-only .gitignore files (2026-11-04, PERSO-255)
+
+The `.gitignore` files are kept out of git, so a fresh worktree ignores nothing, and `git add -A` after a website build stages `website/dist` and `website/.astro`.
+Stage paths explicitly in a worktree.
+
+## An event patch's time is read against the cached event (2026-11-04, PERSO-255)
+
+`event.update` reads a patch's time against the event the cache holds: a new start alone keeps the event's length, and an `all_day` with no last day keeps it too.
+A client that switches a timed event to all-day without a last day must therefore send `duration: P1D`, or the daemon makes the event as long as it was.
+
+## A retried cancel or delete needs a record of the removal to settle from (2026-11-04, PERSO-255)
+
+A cancel or delete takes the event out of the cache once the server answers, so a client whose operation vanished and retries finds nothing to recognise, and the retry was refused as an unknown event.
+The removal is recorded in `calendar_removed_events` in the same transaction as the cache delete, and a retry of the same method settles from that record with the first call's result without reaching the server; an id the cache never held is still refused.

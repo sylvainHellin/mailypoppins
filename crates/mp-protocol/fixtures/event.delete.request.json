@@ -1,0 +1,9 @@
+{
+  "id": 86,
+  "jsonrpc": "2.0",
+  "method": "event.delete",
+  "params": {
+    "account": "evoqs",
+    "event": "AAMkADev3"
+  }
+}
