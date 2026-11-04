@@ -2,10 +2,20 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { mock, settleEventChange, settleEventCreate } from "@/test/tauri-mock";
-import { changedFields, editDialogFor, editProblem, NOTHING_CHANGED, ORGANIZER_ONLY, removeDialogFor, RESTARTED_REMOVE } from "@/app/eventChange";
-import { NO_TITLE } from "@/app/eventForm";
+import {
+  changedFields,
+  editDialogFor,
+  editProblem,
+  NOTHING_CHANGED,
+  openEventScope,
+  openEventSeriesForm,
+  ORGANIZER_ONLY,
+  removeDialogFor,
+  RESTARTED_REMOVE,
+} from "@/app/eventChange";
+import { NO_TITLE, openEventDialog } from "@/app/eventForm";
 import type { CalendarEvent, CalendarInfo, CalendarRecurrence } from "@/protocol/types";
-import type { EventDialog } from "@/app/state";
+import { initialState, type EventDialog } from "@/app/state";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const cursorEvent = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-event-id");
@@ -285,6 +295,20 @@ describe("an occurrence of a series", () => {
     const kept = editDialogFor(master, calendars, "series", odd) as EventDialog;
     expect(kept.fields.repeat).toMatchObject({ pattern: null, kept: odd });
     expect(changedFields({ ...kept, fields: { ...kept.fields, title: "Thanksgiving" } }, "Europe/Berlin")).toEqual({ summary: "Thanksgiving" });
+  });
+
+  it("opens the series form event_get answered only while its chooser is still open", () => {
+    const occurrence = event({ kind: "occurrence", series_master_id: "ev-series" });
+    const chosen = { event: occurrence, remove: false };
+    const asking = openEventScope(initialState(), chosen);
+    const series = editDialogFor(event({ id: "ev-series", kind: "series-master" }), calendars, "series", weekly) as EventDialog;
+    expect(openEventSeriesForm(asking, chosen, series)).toMatchObject({ overlay: "event", eventDialog: series, eventScopeDialog: null });
+    // Escape closed the chooser before the reply came.
+    const kept = { ...asking, overlay: null, eventScopeDialog: null };
+    expect(openEventSeriesForm(kept, chosen, series)).toBe(kept);
+    // `o` opened the occurrence's form before the reply came.
+    const alone = openEventDialog(asking, editDialogFor(occurrence, calendars, "occurrence") as EventDialog);
+    expect(openEventSeriesForm(alone, chosen, series)).toBe(alone);
   });
 
   it("E on an occurrence asks its scope; the whole series reads the master through event_get and saves it in the series scope", async () => {

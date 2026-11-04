@@ -211,6 +211,7 @@ import {
   isEventChangeOperation,
   openEventRemove,
   openEventScope,
+  openEventSeriesForm,
 } from "@/app/eventChange";
 import {
   contactsFailed,
@@ -480,6 +481,7 @@ export type Action =
   // Changing, cancelling and deleting an event (app/eventChange.ts).
   | { type: "open_event_remove"; dialog: EventRemoveDialog }
   | { type: "open_event_scope"; dialog: EventScopeDialog }
+  | { type: "open_event_series_form"; chosen: EventScopeDialog; dialog: EventDialog }
   | { type: "event_change_requested"; token: number; account: string; summary: string; kind: EventChangeRun["kind"]; dialog: EventDialog | null; removal: EventRemoveDialog | null }
   | { type: "event_change_started"; token: number; operation_id: string }
   | { type: "event_change_failed"; token: number }
@@ -2307,6 +2309,8 @@ function reduce(s: AppState, a: Action): AppState {
       return openEventRemove(s, a.dialog);
     case "open_event_scope":
       return openEventScope(s, a.dialog);
+    case "open_event_series_form":
+      return openEventSeriesForm(s, a.chosen, a.dialog);
     case "event_change_requested":
       return eventChangeRequested(s, { token: a.token, account: a.account, summary: a.summary, kind: a.kind, dialog: a.dialog, removal: a.removal });
     case "event_change_started":

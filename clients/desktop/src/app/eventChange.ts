@@ -252,6 +252,16 @@ export function openEventRemove(s: AppState, dialog: EventRemoveDialog): AppStat
   };
 }
 
+/**
+ * The series form `event_get` answered for the chooser `chosen`: opened only
+ * while that chooser is still over the view, so a reply that comes after
+ * Escape or after `o` opened the occurrence's form changes nothing.
+ */
+export function openEventSeriesForm(s: AppState, chosen: EventScopeDialog, dialog: EventDialog): AppState {
+  if (s.overlay !== "event_scope" || s.eventScopeDialog !== chosen) return s;
+  return openEventDialog(s, dialog);
+}
+
 /** The choice between an occurrence and its whole series over the view. */
 export function openEventScope(s: AppState, dialog: EventScopeDialog): AppState {
   return {
@@ -398,7 +408,8 @@ export function removeEvent(s: AppState, dispatch: Dispatch<Action>): void {
 /**
  * The scope chooser's answer: the cancel or delete confirmation in that
  * scope; the form on the occurrence alone; or the form on the whole series,
- * its master and rule read through `event_get`, whose failure is a notice.
+ * its master and rule read through `event_get`, whose failure is a notice
+ * and whose answer opens the form only while this chooser is still open.
  */
 export async function chooseEventScope(s: AppState, dispatch: Dispatch<Action>, scope: EventScope): Promise<void> {
   const chosen = s.eventScopeDialog;
@@ -409,21 +420,22 @@ export async function chooseEventScope(s: AppState, dispatch: Dispatch<Action>, 
     if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
     return dispatch({ type: "open_event_remove", dialog });
   }
-  let dialog: EventDialog | string;
   if (scope === "occurrence") {
-    dialog = editDialogFor(event, s.calendars.data, "occurrence");
-  } else {
-    const master = event.series_master_id;
-    if (!master) return dispatch({ type: "notice", text: `${eventTitle(event)} names no series` });
-    try {
-      const got = await cmd.eventGet(event.account, master);
-      dialog = editDialogFor(got.event, s.calendars.data, "series", got.series?.recurrence ?? null);
-    } catch (e: unknown) {
-      return dispatch({ type: "notice", text: `The series of ${eventTitle(event)} could not be read: ${asGuiError(e).message}` });
-    }
+    const dialog = editDialogFor(event, s.calendars.data, "occurrence");
+    if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+    return dispatch({ type: "open_event_form", dialog });
+  }
+  const master = event.series_master_id;
+  if (!master) return dispatch({ type: "notice", text: `${eventTitle(event)} names no series` });
+  let dialog: EventDialog | string;
+  try {
+    const got = await cmd.eventGet(event.account, master);
+    dialog = editDialogFor(got.event, s.calendars.data, "series", got.series?.recurrence ?? null);
+  } catch (e: unknown) {
+    return dispatch({ type: "notice", text: `The series of ${eventTitle(event)} could not be read: ${asGuiError(e).message}` });
   }
   if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
-  dispatch({ type: "open_event_form", dialog });
+  dispatch({ type: "open_event_series_form", chosen, dialog });
 }
 
 /** Save an edit form: what it lacks is refused here; a refusal of the daemon comes back as its sentence. Null once the update started. */
