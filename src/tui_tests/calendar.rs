@@ -32,7 +32,8 @@ use crate::calendar_sync::sync_account;
 use crate::config::{AccountConfig, CalendarBackendKind};
 use crate::tui::app::{
     AccountState, Action, App, BgResult, CalendarLayout, Credentials, EventCalendarChoice,
-    EventForm, EventFormRow, EventRemoveOverlay, Overlay, RsvpChoice, RsvpOverlay, RsvpRow, View,
+    EventForm, EventFormRow, EventRemoveOverlay, EventScopeChooser, Overlay, RsvpChoice,
+    RsvpOverlay, RsvpRow, View,
 };
 use crate::tui::commands::{dispatch, settled};
 use crate::tui::events::{Applied, Awaited};
@@ -739,6 +740,7 @@ fn golden_calendar_event_edit_and_remove() {
         attendees: 2,
         comment: "Verschoben".into(),
         error: None,
+        scope: None,
     }));
     assert_snapshot!("event_cancel", frame_snapshot(&mut app, WIDTH, HEIGHT));
 
@@ -762,6 +764,7 @@ fn golden_calendar_event_edit_and_remove() {
         attendees: 0,
         comment: String::new(),
         error: None,
+        scope: None,
     }));
     assert_snapshot!("event_delete", frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
@@ -933,6 +936,7 @@ fn a_cancel_sends_its_comment_through_event_cancel() {
         attendees: 1,
         comment: String::new(),
         error: None,
+        scope: None,
     }));
     for c in "Postponed".chars() {
         app.handle_key(key(c));
@@ -984,6 +988,7 @@ fn a_failed_cancel_asks_again_with_its_comment() {
         attendees: 2,
         comment: "Postponed".into(),
         error: None,
+        scope: None,
     };
     let door = Writes::default();
     assert!(dispatch(
@@ -1065,4 +1070,206 @@ fn a_failed_cancel_asks_again_with_its_comment() {
     };
     assert!(again.error.as_deref().unwrap().contains("read-only"));
     assert!(app.calendar_view.pending_removals.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Recurrence and scopes (PERSO-255)
+// ---------------------------------------------------------------------------
+
+/// The event form making a weekly series, its Repeat row naming the rule in
+/// words over the rows that shape it; the chooser `E` asks on an occurrence
+/// of the jour fixe; and the form on that occurrence alone, whose Repeat row
+/// names its series.
+#[test]
+fn golden_calendar_series_forms() {
+    let mut app = calendar_fixture();
+    let choice = EventCalendarChoice {
+        account: "evoqs".into(),
+        id: "cal-main".into(),
+        name: "Kalender".into(),
+        teams: true,
+    };
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+    let mut form = EventForm::new(vec![choice.clone()], "evoqs", day, "Europe/Berlin");
+    form.title = "Standup".into();
+    form.start = "09:00".into();
+    form.end = "09:15".into();
+    form.cycle_repeat(true);
+    form.cycle_repeat(true);
+    form.repeat_on = "Tu, Th".into();
+    form.ends = "2026-09-30".into();
+    form.row = EventFormRow::Repeat;
+    assert_eq!(
+        form.repeat_label(),
+        "Weekly on Tuesday, Thursday until 2026-09-30"
+    );
+    app.overlay = Overlay::EventForm(Box::new(form));
+    assert_snapshot!("event_form_repeat", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    let mut jour = app
+        .calendar_view
+        .events
+        .iter()
+        .find(|e| e.id == "ev-jour-1")
+        .cloned()
+        .unwrap();
+    jour.is_organizer = true;
+    jour.own_response = "organizer".into();
+    app.overlay = Overlay::EventScope(Box::new(EventScopeChooser {
+        event: jour.clone(),
+        remove: false,
+        series: false,
+    }));
+    assert_snapshot!("event_scope", frame_snapshot(&mut app, WIDTH, HEIGHT));
+
+    let form = EventForm::edit_occurrence(&jour, choice, app.calendar_view.zone);
+    assert!(!form.rows().contains(&EventFormRow::Every));
+    app.overlay = Overlay::EventForm(Box::new(form));
+    assert_snapshot!(
+        "event_form_occurrence",
+        frame_snapshot(&mut app, WIDTH, HEIGHT)
+    );
+}
+
+/// [`server`] plus a weekly series the user organizes, its master in the
+/// series cache and two occurrences, five and twelve days out.
+fn server_with_series() -> FakeCalendarBackend {
+    use crate::calendar_backend::SeriesInfo;
+    use crate::calendar_model::{Frequency, Recurrence, Weekday};
+    let time = |days| EventTime::timed(at(days, 8), at(days, 9), "Europe/Berlin").unwrap();
+    let mut master = server_event("ev-weekly", "cal-main", "Weekly sync", time(5));
+    master.kind = EventKind::SeriesMaster;
+    master.is_organizer = true;
+    master.own_response = OwnResponse::Organizer;
+    let rule = Recurrence {
+        frequency: Frequency::Weekly,
+        interval: 1,
+        weekdays: vec![Weekday::of_date(at(5, 0).date_naive())],
+        day_of_month: None,
+        week_index: None,
+        month: None,
+        first_day_of_week: Some(Weekday::Monday),
+        start: Some(at(5, 0).date_naive()),
+        until: None,
+        count: Some(2),
+    };
+    master.recurrence = Some(rule.describe());
+    let fake = server();
+    for (id, days) in [("ev-weekly-a", 5), ("ev-weekly-b", 12)] {
+        let mut occurrence = master.clone();
+        occurrence.id = id.into();
+        occurrence.kind = EventKind::Occurrence;
+        occurrence.series_master_id = Some("ev-weekly".into());
+        occurrence.time = time(days);
+        occurrence.recurrence_id = Some(at(days, 8).to_rfc3339());
+        fake.put_event(occurrence);
+    }
+    fake.with_series(vec![SeriesInfo {
+        master_id: "ev-weekly".into(),
+        uid: "ev-weekly@example.com".into(),
+        recurrence: Some(rule),
+        master: Some(Box::new(master)),
+        zone: Some("Europe/Berlin".into()),
+    }])
+}
+
+/// `E` on an occurrence asks its scope first; `s` reads the series' master
+/// through `event.get` and opens the form on it, its rule in the Repeat
+/// rows, and `Enter` is one `event.update` of the master in the series
+/// scope. `D` on an occurrence asks too, and `o` then `y` delete that
+/// occurrence alone.
+#[test]
+fn an_occurrence_asks_its_scope_before_a_change() {
+    let data = crate::config::test_env::TestDataDir::new();
+    std::fs::create_dir_all(crate::config::account_dir(ACCOUNT)).expect("an account dir");
+    let store = crate::store::Store::open(crate::config::store_path(ACCOUNT)).expect("a store");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+        .block_on(sync_account(
+            &store,
+            &server_with_series().serving(ACCOUNT),
+            ACCOUNT,
+            Utc::now(),
+        ))
+        .expect("the fake server syncs");
+    let log = CallLog::default();
+    let mut app = app_over(log.clone());
+    app.switch_view(View::Calendar);
+    let at_weekly = summaries(&app)
+        .iter()
+        .position(|s| s == "Weekly sync")
+        .expect("the series shows");
+    for _ in 0..at_weekly {
+        app.handle_key(key('j'));
+    }
+
+    app.handle_key(key('E'));
+    let Overlay::EventScope(chooser) = &app.overlay else {
+        panic!(
+            "E on an occurrence asks its scope: {:?}",
+            app.status_message
+        );
+    };
+    assert!(!chooser.remove && !chooser.series);
+    app.handle_key(key('s'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("s opens the series form: {:?}", app.status_message);
+    };
+    assert_eq!(form.scope(), Some("series"));
+    assert_eq!(form.editing.as_ref().unwrap().event, "ev-weekly");
+    assert_eq!(form.repeat, Some(crate::tui::app::RepeatPattern::Weekly));
+    assert_eq!(form.ends, "2");
+    assert!(
+        form.repeat_label().ends_with("(2 times)"),
+        "{}",
+        form.repeat_label()
+    );
+    assert_eq!(
+        calls(&log, "event.get"),
+        [json!({"account": ACCOUNT, "event": "ev-weekly"})]
+    );
+    let Overlay::EventForm(form) = &mut app.overlay else {
+        unreachable!()
+    };
+    form.title = "Weekly sync, new room".into();
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Some(Action::UpdateEvent(form)) = app.pending_actions.pop_front() else {
+        panic!("Enter queues the change");
+    };
+    let door = Writes::default();
+    assert!(dispatch(&mut app, &door, &Action::UpdateEvent(form)));
+
+    app.handle_key(key('D'));
+    let Overlay::EventScope(chooser) = &app.overlay else {
+        panic!("D on an occurrence asks its scope");
+    };
+    assert!(chooser.remove);
+    app.handle_key(key('o'));
+    let Overlay::EventRemove(removal) = &app.overlay else {
+        panic!("o asks to delete the occurrence");
+    };
+    assert_eq!(removal.scope.as_deref(), Some("occurrence"));
+    assert!(!removal.cancel);
+    app.handle_key(key('y'));
+    let Some(Action::RemoveEvent(removal)) = app.pending_actions.pop_front() else {
+        panic!("y queues the delete");
+    };
+    assert!(dispatch(&mut app, &door, &Action::RemoveEvent(removal)));
+    assert_eq!(
+        door.0.lock().unwrap().clone(),
+        [
+            (
+                "event.update".to_string(),
+                json!({"account": ACCOUNT, "event": "ev-weekly", "scope": "series",
+                       "fields": {"summary": "Weekly sync, new room"}})
+            ),
+            (
+                "event.delete".to_string(),
+                json!({"account": ACCOUNT, "event": "ev-weekly-a", "scope": "occurrence"})
+            ),
+        ]
+    );
+    drop(data);
 }

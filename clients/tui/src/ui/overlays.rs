@@ -7,8 +7,8 @@ use ratatui::Frame;
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
     ConfirmDialog, DirPicker, DirPickerMode, EventForm, EventFormRow, EventRemoveOverlay,
-    MailboxPicker, PersistentError, PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode,
-    SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    EventScopeChooser, MailboxPicker, PersistentError, PickerPurpose, RsvpOverlay, RsvpRow,
+    SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -145,6 +145,8 @@ pub(super) fn render_event_form(
 
     let title = match (&form.editing, &form.transaction_id) {
         (Some(edit), _) if !edit.is_organizer => "Edit event (your reminder and show-as)",
+        (Some(_), _) if form.scope() == Some("series") => "Edit the whole series",
+        (Some(_), _) if form.scope() == Some("occurrence") => "Edit this occurrence",
         (Some(_), _) => "Edit event",
         (None, Some(_)) => "New event (retry)",
         (None, None) => "New event",
@@ -187,6 +189,16 @@ pub(super) fn render_event_form(
                 "Show as",
                 format!("\u{2039} {} \u{203a}", form.show_as_label()),
             ),
+            EventFormRow::Repeat if form.scope() == Some("occurrence") => {
+                ("Repeats", form.repeat_label())
+            }
+            EventFormRow::Repeat => (
+                "Repeats",
+                format!("\u{2039} {} \u{203a}", form.repeat_label()),
+            ),
+            EventFormRow::Every => ("Every", form.every.clone()),
+            EventFormRow::RepeatOn => ("On", form.repeat_on.clone()),
+            EventFormRow::Ends => ("Ends", form.ends.clone()),
             EventFormRow::Description => {
                 let first = form.body.lines().next().unwrap_or_default();
                 let more = form.body.lines().count().saturating_sub(1);
@@ -207,6 +219,8 @@ pub(super) fn render_event_form(
                 EventFormRow::Reminder if form.editing.is_some() => "(none)".to_string(),
                 EventFormRow::Reminder => "(the mailbox default; minutes or none)".to_string(),
                 EventFormRow::End if form.all_day => "(one day)".to_string(),
+                EventFormRow::RepeatOn => "(its own weekday; Mo, We, ...)".to_string(),
+                EventFormRow::Ends => "(never; a last day or a number of times)".to_string(),
                 _ => String::new(),
             }
         } else {
@@ -260,6 +274,72 @@ pub(super) fn render_event_form(
     }
 }
 
+/// Render the scope chooser `E` and `D` open on an occurrence of a series
+/// (PERSO-255): this occurrence, selected by default, or the whole series,
+/// each with its key.
+pub(super) fn render_event_scope(chooser: &EventScopeChooser, frame: &mut Frame, area: Rect) {
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        52,
+        9,
+        theme::active().accent,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 0, 1);
+    let width = inner.width as usize;
+    let focused = Style::default()
+        .fg(theme::active().selection)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(theme::active().text);
+    let muted = Style::default().fg(theme::active().text_muted);
+    let title = if chooser.remove {
+        "Cancel or delete a recurring event"
+    } else {
+        "Edit a recurring event"
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            truncate(&chooser.event.summary, width),
+            normal,
+        )),
+        Line::from(""),
+    ];
+    for (series, label, key) in [
+        (false, "This occurrence", "o"),
+        (true, "The whole series", "s"),
+    ] {
+        let on = chooser.series == series;
+        let mark = if on { "(\u{2022})" } else { "( )" };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {mark} {label:<20}"),
+                if on { focused } else { normal },
+            ),
+            Span::styled(key, muted),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), stack.content);
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "  o/s choose \u{b7} Enter take \u{b7} Esc keep",
+                muted,
+            )),
+            footer,
+        );
+    }
+}
+
 /// Render the `D` confirmation (PERSO-255): a cancel names how many people
 /// it tells and takes a comment for them; a delete says it tells nobody.
 /// One opened again after a failure says why under it, wrapped.
@@ -295,10 +375,13 @@ pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Fram
         .fg(theme::active().selection)
         .add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(theme::active().text_muted);
-    let title = if overlay.cancel {
-        "Cancel the meeting?"
-    } else {
-        "Delete the event?"
+    let title = match (overlay.cancel, overlay.scope.as_deref()) {
+        (true, Some("series")) => "Cancel the whole series?",
+        (true, Some("occurrence")) => "Cancel this occurrence?",
+        (true, _) => "Cancel the meeting?",
+        (false, Some("series")) => "Delete the whole series?",
+        (false, Some("occurrence")) => "Delete this occurrence?",
+        (false, _) => "Delete the event?",
     };
     let mut lines = vec![
         Line::from(Span::styled(

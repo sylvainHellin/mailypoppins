@@ -20,8 +20,8 @@ expression: frame
 14 |││  │  Teams        [ ]                                                    │do││
 15 |││  │  Reminder     (the mailbox default; minutes or none)                 │  ││
 16 |│╰──│  Show as      ‹ Busy ›                                               │  ││
-17 |│╭ V│  Description  (none; Enter edits in $EDITOR)                         │  ││
-18 |││ m│  Availability           +4 more                                      │  ││
+17 |│╭ V│  Repeats      ‹ Does not repeat ›                                    │  ││
+18 |││ m│  Description  (none; Enter edits in $EDITOR)                         │  ││
 19 |│╰──│  The end comes before the start                                      │──╯│
 20 |│╭──│  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │──╮│
 21 |││  ╰──────────────────────────────────────────────────────────────────────╯  ││

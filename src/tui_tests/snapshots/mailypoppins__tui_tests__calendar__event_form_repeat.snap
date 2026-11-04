@@ -1,0 +1,57 @@
+---
+source: src/tui_tests/calendar.rs
+expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
+---
+== text 120x40 (trailing spaces trimmed) ==
+00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Agenda: Mon 03 Aug to Mon 17 Aug ─────╮╭ Event ────────────────────────────────────────────────────────────────────╮│
+02 |││Mon 2026-08-03                         ││Baustellenübergabe                                                         ││
+03 |││  09:00-10:00 ✓ Baustellenübergabe     ││                                                                           ││
+04 |││                [evoqs/Calendar]  @ Ra…││When        Mon 2026-08-03 09:00-10:00                                     ││
+05 |││                                       ││Where       Raum 2.14                                                      ││
+06 |││Tue 2026-08-04  (today)                ││Calendar    evoqs/Calendar                                                 ││
+07 |││  10:00-11:00 ? Jour fixe              ││Organizer   planung@example.org                                            ││
+08 |││                [evoqs╭──────────────────────────────────────────────────────────────────────╮                      ││
+09 |││  10:30-12:00 ? PhD Ko│New event                                                             │                      ││
+10 |││                [perso│                                                                      │                      ││
+11 |││                      │  Calendar     ‹ evoqs/Kalender ›                                     │                      ││
+12 |││Wed 2026-08-05        │  Title        Standup                                                │ev-handover           ││
+13 |││  all day       Sommer│  All day      [ ]                                                    │                      ││
+14 |││                [evoqs│  Date         2026-08-04                                             │                      ││
+15 |││                      │  Start        09:00                                                  │                      ││
+16 |││Thu 2026-08-06        │  End          09:15                                                  │                      ││
+17 |││  all day       Sommer│  Location                                                            │                      ││
+18 |││                [evoqs│  Attendees                                                           │                      ││
+19 |││  10:00-11:00 ? Jour f│  Optional                                                            │                      ││
+20 |││                [evoqs│  Rooms                                                               │                      ││
+21 |││                      │  Teams        [ ]                                                    │                      ││
+22 |││Fri 2026-08-07        │  Reminder     (the mailbox default; minutes or none)                 │                      ││
+23 |││  14:00-15:00 ✓ Abgesa│  Show as      ‹ Busy ›                                               │                      ││
+24 |││                [evoqs│  Repeats      ‹ Weekly on Tuesday, Thursday until 2026-09-30 ›       │                      ││
+25 |││                      │  Every        1                                                      │                      ││
+26 |││                      │  On           Tu, Th                                                 │                      ││
+27 |││                      │  Ends         2026-09-30                                             │                      ││
+28 |││                      │  Description  (none; Enter edits in $EDITOR)                         │                      ││
+29 |││                      │                                                                      │                      ││
+30 |││                      │  Times in Europe/Berlin                                              │                      ││
+31 |││                      │  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │                      ││
+32 |│╰──────────────────────╰──────────────────────────────────────────────────────────────────────╯                      ││
+33 |│╭ View ─────────────────────────────────╮│                                                                           ││
+34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
+35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
+37 |││                                                                                                                    ││
+38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
+39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+== style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
+02 |bold@2..16 bold@43..61
+03 |bg:surface+fg:selection+bold@2..41
+04 |bg:surface+fg:selection+bold@2..41
+06 |bold@2..25
+09 |bold@25..34
+12 |bold@2..16
+16 |bold@2..16
+22 |bold@2..16
+23 |strike@2..24
+24 |strike@2..18 fg:selection+bold@25..88
+34 |bold@27..37

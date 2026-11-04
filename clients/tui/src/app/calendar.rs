@@ -15,8 +15,8 @@ use mp_protocol::calendar::{CalendarViewParams, IMIP_EVENT_PREFIX};
 
 use super::{
     App, CalendarEntry, CalendarEvent, CalendarEventTime, CalendarLayout, CalendarsOverlay,
-    EventCalendarChoice, EventCardOverlay, EventForm, EventRemoveOverlay, MessageRef, Overlay,
-    RsvpOverlay, StatusLevel, Tz, View,
+    EventCalendarChoice, EventCardOverlay, EventForm, EventRemoveOverlay, EventScopeChooser,
+    MessageRef, Overlay, RsvpOverlay, StatusLevel, Tz, View,
 };
 
 /// The part of one day an event covers.
@@ -562,17 +562,11 @@ impl App {
     }
 
     /// Why `event` cannot be changed from here, before the daemon is asked:
-    /// an invitation mail's event, an occurrence or a series, or a calendar
-    /// that takes no writes. The daemon checks again.
+    /// an invitation mail's event, or a calendar that takes no writes. The
+    /// daemon checks again.
     fn unchangeable(&mut self, event: &CalendarEvent) -> Option<String> {
         if event.id.starts_with(IMIP_EVENT_PREFIX) {
             return Some("An invitation mail's event can only be answered (V)".into());
-        }
-        if event.kind != "single" || event.series_master_id.is_some() {
-            return Some(format!(
-                "{} is part of a recurring series, which mp cannot change yet",
-                event.summary
-            ));
         }
         if let Some(queries) = self.queries() {
             self.calendar_view.calendars = super::super::queries::calendar_list(queries);
@@ -600,12 +594,16 @@ impl App {
     }
 
     /// The event form on `event`, filled with its values, or the edit form a
-    /// failed change of it kept; an event mp cannot change says why.
+    /// failed change of it (or of its series) kept; an event mp cannot
+    /// change says why, and an occurrence of a series asks first whether the
+    /// change is to it or to the whole series.
     pub fn open_event_edit_for(&mut self, event: &CalendarEvent) {
         let kept = self.calendar_view.kept_form.as_ref().is_some_and(|form| {
-            form.editing
-                .as_ref()
-                .is_some_and(|edit| edit.account == event.account && edit.event == event.id)
+            form.editing.as_ref().is_some_and(|edit| {
+                edit.account == event.account
+                    && (edit.event == event.id
+                        || event.series_master_id.as_deref() == Some(edit.event.as_str()))
+            })
         });
         if kept {
             if let Some(form) = self.calendar_view.kept_form.take() {
@@ -624,22 +622,75 @@ impl App {
             self.set_status(why);
             return;
         }
-        let Some(calendar) = self
+        if is_occurrence(event) {
+            self.overlay = Overlay::EventScope(Box::new(EventScopeChooser {
+                event: event.clone(),
+                remove: false,
+                series: false,
+            }));
+            return;
+        }
+        let Some(choice) = self.calendar_choice(event) else {
+            return;
+        };
+        let form = EventForm::edit(event, choice, self.calendar_view.zone);
+        self.overlay = Overlay::EventForm(Box::new(form));
+    }
+
+    /// The calendar `event` is in, as the event form shows it.
+    fn calendar_choice(&self, event: &CalendarEvent) -> Option<EventCalendarChoice> {
+        let calendar = self
             .calendar_view
             .calendars
             .iter()
-            .find(|c| c.account == event.account && c.id == event.calendar)
-        else {
-            return;
-        };
-        let choice = EventCalendarChoice {
+            .find(|c| c.account == event.account && c.id == event.calendar)?;
+        Some(EventCalendarChoice {
             account: calendar.account.clone(),
             id: calendar.id.clone(),
             name: calendar.name.clone(),
             teams: calendar.features.iter().any(|f| f == "online-meeting"),
+        })
+    }
+
+    /// The scope chooser's answer: `E`'s form on the occurrence alone or on
+    /// the whole series, its master read through `event.get`; `D`'s
+    /// confirmation in the scope chosen.
+    pub fn choose_event_scope(&mut self, chooser: EventScopeChooser) {
+        let event = chooser.event;
+        let scope = if chooser.series {
+            "series"
+        } else {
+            "occurrence"
         };
-        let form = EventForm::edit(event, choice, self.calendar_view.zone);
-        self.overlay = Overlay::EventForm(Box::new(form));
+        if chooser.remove {
+            return self.confirm_event_remove(&event, Some(scope));
+        }
+        let Some(choice) = self.calendar_choice(&event) else {
+            return;
+        };
+        let zone = self.calendar_view.zone;
+        if !chooser.series {
+            let form = EventForm::edit_occurrence(&event, choice, zone);
+            self.overlay = Overlay::EventForm(Box::new(form));
+            return;
+        }
+        let Some(master) = event.series_master_id.clone() else {
+            return self.set_status(format!("{} names no series", event.summary));
+        };
+        let Some(queries) = self.queries() else {
+            return self.set_status("No daemon to read the series from".into());
+        };
+        match super::super::queries::event_get(queries, &event.account, &master) {
+            Ok(series) => {
+                let rule = series.series.as_ref().and_then(|s| s.recurrence.as_ref());
+                let form = EventForm::edit_series(&series.event, rule, choice, zone);
+                self.overlay = Overlay::EventForm(Box::new(form));
+            }
+            Err(e) => self.set_status_level(
+                format!("The series of {} could not be read: {e:#}", event.summary),
+                StatusLevel::Error,
+            ),
+        }
     }
 
     /// `D`: cancel or delete the event under the cursor.
@@ -653,7 +704,8 @@ impl App {
     /// organizes, which tells its attendees, with a comment; delete an event
     /// that tells nobody (one without attendees, or the user's copy of a
     /// cancelled meeting); and for someone else's live meeting, the answer
-    /// that tells its organizer instead.
+    /// that tells its organizer instead. An occurrence of a series asks
+    /// first whether it goes alone or with the whole series.
     pub fn open_event_remove_for(&mut self, event: &CalendarEvent) {
         let kept = self
             .calendar_view
@@ -670,6 +722,19 @@ impl App {
             self.set_status(why);
             return;
         }
+        if is_occurrence(event) {
+            self.overlay = Overlay::EventScope(Box::new(EventScopeChooser {
+                event: event.clone(),
+                remove: true,
+                series: false,
+            }));
+            return;
+        }
+        self.confirm_event_remove(event, None);
+    }
+
+    /// The cancel or delete confirmation of `event` in `scope`.
+    fn confirm_event_remove(&mut self, event: &CalendarEvent, scope: Option<&str>) {
         let meeting = !event.attendees.is_empty();
         let cancel = if event.cancelled {
             false
@@ -692,6 +757,7 @@ impl App {
             attendees: event.attendees.len(),
             comment: String::new(),
             error: None,
+            scope: scope.map(str::to_string),
         }));
     }
 
@@ -716,6 +782,12 @@ impl App {
             self.open_rsvp_overlay_for(&event);
         }
     }
+}
+
+/// Whether `event` is one occurrence of a series, which a change names the
+/// scope of.
+fn is_occurrence(event: &CalendarEvent) -> bool {
+    matches!(event.kind.as_str(), "occurrence" | "exception") || event.series_master_id.is_some()
 }
 
 #[cfg(test)]

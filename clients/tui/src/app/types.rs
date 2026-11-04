@@ -1987,6 +1987,22 @@ pub struct EventRemoveOverlay {
     /// Why the last cancel or delete of this confirmation did not go
     /// through, shown under it when it opens again.
     pub error: Option<String>,
+    /// `occurrence` or `series` for an occurrence of a series, `None` for a
+    /// single event.
+    pub scope: Option<String>,
+}
+
+/// The chooser `E` and `D` open on an occurrence of a series: the change
+/// reaches this occurrence, or the whole series, as Outlook asks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventScopeChooser {
+    /// The occurrence the key acted on.
+    pub event: CalendarEvent,
+    /// `D`'s cancel or delete rather than `E`'s change.
+    pub remove: bool,
+    /// The whole series is chosen; this occurrence when false, the
+    /// default.
+    pub series: bool,
 }
 
 /// Messages that drive state transitions (TEA pattern).
@@ -2628,6 +2644,9 @@ pub enum Overlay {
     EventForm(Box<super::EventForm>),
     /// The cancel or delete confirmation (`D` on an event, PERSO-255).
     EventRemove(Box<EventRemoveOverlay>),
+    /// "This occurrence" or "The whole series", asked before `E` or `D`
+    /// acts on an occurrence of a series (PERSO-255).
+    EventScope(Box<EventScopeChooser>),
     /// The calendars shown or hidden in the Calendar view (`c`, PERSO-200).
     Calendars(CalendarsOverlay),
     /// One event of the Calendar view in full (`Enter`, PERSO-200).

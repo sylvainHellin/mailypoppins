@@ -566,6 +566,7 @@ fn one_of_each_action() -> Vec<Action> {
             attendees: 1,
             comment: String::new(),
             error: None,
+            scope: None,
         })),
         Action::EditEventDescription,
         Action::QueryFreeBusy(Box::default()),
