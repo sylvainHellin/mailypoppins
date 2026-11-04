@@ -3424,3 +3424,8 @@ The calendar list is read in full at every sync, so a new `Calendar` field needs
 Git merges a new struct field on main and a new struct literal on a branch without a conflict, because the two edits touch different lines.
 The merged tree then fails to compile in a test that builds the struct by hand (main's `Calendar::online_meeting_providers` against a reminders test on the slice 8 branch).
 After merging a long-lived branch, run `cargo test --workspace` before calling the merge clean: the compiler, not git, is the conflict check for new required fields.
+
+## user-event types the letter of a Meta chord into a focused field (2026-11-04, PERSO-255)
+
+In jsdom, `user.keyboard("{Meta>}p{/Meta}")` on a focused input appends `p` to its value, as no browser does for Cmd+P; `{Control>}p{/Control}` types nothing.
+A test that a chord stays the field's while a text field has focus therefore checks the focus and that no dialog opened, not the field's value (`keymap.test.tsx`, "ignores keys while a text field has focus").

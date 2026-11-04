@@ -1,9 +1,11 @@
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { GUI_ENTRIES, SECTIONS } from "@/keymap/catalog";
+import { DESKTOP_KEYS, GUI_ENTRIES, SECTIONS } from "@/keymap/catalog";
 
-const TOTAL = SECTIONS.reduce((n, s) => n + s.bindings.length, 0) + GUI_ENTRIES.filter((e) => e.keys.length > 0).length;
+/** The DESKTOP section: the desktop's own keys for KEYMAP rows, then the GUI rows with a key. */
+const DESKTOP_ROWS = Object.keys(DESKTOP_KEYS).length + GUI_ENTRIES.filter((e) => e.keys.length > 0).length;
+const TOTAL = SECTIONS.reduce((n, s) => n + s.bindings.length, 0) + DESKTOP_ROWS;
 
 async function openHelp() {
   const { user } = renderApp();
@@ -70,12 +72,26 @@ describe("the key help filter", () => {
     const { user, help, rows } = await openHelp();
     await user.keyboard("desktop");
     expect([...help.querySelectorAll("[cmdk-group-heading]")].map((h) => h.textContent)).toEqual(["DESKTOP"]);
-    expect(rows()).toHaveLength(GUI_ENTRIES.filter((e) => e.keys.length > 0).length);
+    expect(rows()).toHaveLength(DESKTOP_ROWS);
     await user.keyboard("{Escape}");
     await user.keyboard("?");
     const again = await screen.findByRole("dialog", { name: "Keys" });
     expect(within(again).getByRole("combobox", { name: "Filter keys" })).toHaveValue("");
     expect(within(again).getAllByTestId("help-item")).toHaveLength(TOTAL);
+  });
+
+  it("lists both of Back's keys in the DESKTOP section", async () => {
+    const { help } = await openHelp();
+    const desktop = within(help).getByRole("group", { name: "DESKTOP" });
+    const back = within(desktop).getAllByTestId("help-item").find((r) => r.getAttribute("data-label") === "Back");
+    expect(back).toHaveTextContent("Cmd+[ / Alt+Left");
+  });
+
+  it("lists the TUI's R reminders row", async () => {
+    const { user, help } = await openHelp();
+    await user.keyboard("reminders");
+    const row = within(help).getAllByTestId("help-item").find((r) => r.getAttribute("data-label")?.startsWith("Calendar reminders"));
+    expect(row).toHaveTextContent("R");
   });
 
   it("Enter on a row runs nothing and Escape closes the help", async () => {

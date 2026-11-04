@@ -36,6 +36,7 @@ import { hiddenPaletteRows, useStoredReaderMode } from "@/app/readerMode";
 import { updatePaletteEntries, useUpdateEvents } from "@/app/updates";
 import { screenFor } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
+import type { ActionId } from "@/keymap/catalog";
 import { useKeymap } from "@/keymap/useKeymap";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
@@ -66,6 +67,11 @@ export function AppShell() {
   useUpdateEvents(dispatch, checkUpdates);
   const updateRows = useMemo(() => updatePaletteEntries(s.update), [s.update]);
   const hiddenRows = hiddenPaletteRows(s);
+  // A palette run leads its search's equal matches from then on.
+  const runFromPalette = (id: ActionId) => {
+    dispatch({ type: "palette_ran", id });
+    run(id);
+  };
 
   const layout = useLayout();
   useEffect(() => dispatch({ type: "set_layout", layout }), [layout, dispatch]);
@@ -106,7 +112,14 @@ export function AppShell() {
       {body}
       <TerminalHost />
       <PrefixPopup state={s} />
-      <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} extra={updateRows} hidden={hiddenRows} />
+      <CommandPalette
+        open={s.overlay === "palette"}
+        onOpenChange={close}
+        onRun={runFromPalette}
+        extra={updateRows}
+        hidden={hiddenRows}
+        recent={s.prefs.paletteRecent}
+      />
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
       <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />

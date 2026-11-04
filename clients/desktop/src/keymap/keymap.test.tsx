@@ -3,7 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
 import { VIEW_KEYS } from "@/keymap/viewKeys";
-import { bindingFor, GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
+import {
+  BY_ACTION,
+  bindingFor,
+  DESKTOP_KEYS,
+  GUI_ENTRIES,
+  paletteEntries,
+  SECTION_OVERRIDES,
+  SECTIONS,
+  type ActionId,
+} from "@/keymap/catalog";
 import { LINE_PX } from "@/keymap/useKeymap";
 import { HALF_PAGE } from "@/app/actions";
 
@@ -16,6 +25,23 @@ function selectedSubject(): string | null {
   const row = document.querySelector('[role="option"][aria-selected="true"]');
   return row?.getAttribute("aria-label") ?? null;
 }
+
+describe("the catalog against the generated KEYMAP", () => {
+  // A label with no row binds nothing, silently: the row a stale keymap.json
+  // lacks, or a TUI description reworded without the catalog.
+  it("names only descriptions that keymap.json has, in the section an override names", () => {
+    const all = new Set(SECTIONS.flatMap((s) => s.bindings.map((b) => b.action)));
+    expect(Object.keys(BY_ACTION).filter((label) => !all.has(label))).toEqual([]);
+    expect(Object.keys(DESKTOP_KEYS).filter((label) => !all.has(label))).toEqual([]);
+    const missing = Object.entries(SECTION_OVERRIDES).flatMap(([title, rows]) => {
+      const section = SECTIONS.find((s) => s.title === title);
+      return Object.keys(rows)
+        .filter((label) => !section?.bindings.some((b) => b.action === label))
+        .map((label) => `${title}: ${label}`);
+    });
+    expect(missing).toEqual([]);
+  });
+});
 
 describe("keyboard routing", () => {
   it("ff opens the Server Search form, the TUI's Search all mail, and the help and palette name it", async () => {
@@ -130,7 +156,7 @@ describe("keyboard routing", () => {
     expect(await screen.findByRole("listbox", { name: "Archive messages" })).toBeInTheDocument();
   });
 
-  it(": and Ctrl+p open the palette, ? the key help", async () => {
+  it(":, Ctrl+p and Cmd+p open the palette, ? the key help", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.keyboard(":");
@@ -139,6 +165,12 @@ describe("keyboard routing", () => {
     await user.keyboard("{Control>}p{/Control}");
     expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
+    await user.keyboard("{Meta>}p{/Meta}");
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    // Cmd+Shift+P is not the palette's.
+    await user.keyboard("{Meta>}{Shift>}P{/Shift}{/Meta}");
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
     await user.keyboard("?");
     expect(await screen.findByRole("dialog", { name: "Keys" })).toBeInTheDocument();
   });
@@ -153,6 +185,10 @@ describe("keyboard routing", () => {
     expect(selectedSubject()).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(input).toHaveValue("j:");
+    // The palette's Ctrl+p and Cmd+p stay the field's, as `:` does.
+    await user.keyboard("{Control>}p{/Control}{Meta>}p{/Meta}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(input).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(input).not.toHaveFocus();
   });

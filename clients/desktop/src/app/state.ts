@@ -156,9 +156,22 @@ export type Prefs = {
    * `tc`, its palette entry and the Settings switch add and remove an account.
    */
   flatListAccounts: string[];
+  /**
+   * The actions last run from the palette, most recent first, at most
+   * {@link PALETTE_RECENT_MAX}: a search's equal matches list in this order.
+   */
+  paletteRecent: string[];
 };
 
-export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420, activityHidden: false, flatListAccounts: [] };
+export const PALETTE_RECENT_MAX = 30;
+
+export const DEFAULT_PREFS: Prefs = {
+  sidebarCollapsed: false,
+  listWidth: 420,
+  activityHidden: false,
+  flatListAccounts: [],
+  paletteRecent: [],
+};
 export const LIST_WIDTH_MIN = 260;
 export const LIST_WIDTH_MAX = 720;
 /** The reader keeps at least this much of the pane row, whatever the list width. */

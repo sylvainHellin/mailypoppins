@@ -155,7 +155,7 @@ export type Badge = "M3" | "M4" | "soon" | "key" | "menu" | "later";
 type Binding = { id: ActionId; keys?: string[] } | { badge: Badge; keys?: string[] };
 
 /** By the KEYMAP description, whatever the section. */
-const BY_ACTION: Record<string, Binding> = {
+export const BY_ACTION: Record<string, Binding> = {
   Quit: { badge: "menu" },
   "Jump to mailbox": { badge: "key" },
   "Cycle focus forward": { id: "focus_next" },
@@ -237,7 +237,7 @@ const BY_ACTION: Record<string, Binding> = {
 const BY_SECTION: Record<string, Badge> = {};
 
 /** A section's own reading of a shared description. */
-const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
+export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   BODY: { "Half-page down / up": { badge: "key" } },
   // The activity log dialog's own keys (ActivityLogDialog.tsx), which act
   // inside the open dialog only.
@@ -316,6 +316,15 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   },
 };
 
+/**
+ * The desktop's own keys for a KEYMAP row, by its description, after the
+ * TUI's: the palette row shows them, and the key help's DESKTOP section.
+ */
+export const DESKTOP_KEYS: Record<string, string[]> = {
+  // The macOS habit (useKeymap.ts); no menu item claims it.
+  "Command palette (run an action by name)": ["Cmd+p"],
+};
+
 export function bindingFor(section: string, action: string): Binding {
   return (
     SECTION_OVERRIDES[section]?.[action] ??
@@ -334,7 +343,8 @@ export type PaletteEntry = {
 
 /**
  * Every KEYMAP row, one entry per description within a section (`:` and
- * `Ctrl+p` are one entry with two keys), in KEYMAP order.
+ * `Ctrl+p` are one entry with two keys), in KEYMAP order, with the
+ * desktop's own keys (`DESKTOP_KEYS`) last.
  */
 export function paletteEntries(sections: KeymapSection[] = SECTIONS): PaletteEntry[] {
   const out: PaletteEntry[] = [];
@@ -358,6 +368,7 @@ export function paletteEntries(sections: KeymapSection[] = SECTIONS): PaletteEnt
       seen.set(b.action, entry);
       out.push(entry);
     }
+    for (const [action, keys] of Object.entries(DESKTOP_KEYS)) seen.get(action)?.keys.push(...keys);
   }
   return out;
 }
@@ -368,7 +379,7 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Widen list", keys: [], id: "widen_list", badge: null },
   { section: "APP", label: "Narrow list", keys: [], id: "narrow_list", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
-  { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
+  { section: "APP", label: "Back", keys: ["Cmd+[", "Alt+Left"], id: "back", badge: null },
   // The TUI has no settings view, and no key for one (D11): the palette, the
   // sidebar and the app menu's "Settings…", whose Cmd+, is the macOS convention.
   { section: "APP", label: "Open settings", keys: ["Cmd+,"], id: "open_settings", badge: null },

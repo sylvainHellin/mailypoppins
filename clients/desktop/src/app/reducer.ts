@@ -103,6 +103,7 @@ import {
   mailboxSlugs,
   markStale,
   NO_MARKS,
+  PALETTE_RECENT_MAX,
   readerKey,
   targetKey,
   type AccountWizard,
@@ -372,6 +373,8 @@ export type Action =
   | { type: "notice"; text: string | null; level?: ActivityLevel }
   /** `!`: hide or show the activity area's notices. */
   | { type: "toggle_activity_hidden" }
+  /** An action ran from the palette: it leads `prefs.paletteRecent`. */
+  | { type: "palette_ran"; id: string }
   | { type: "error"; error: GuiError | null }
   | { type: "search_local"; query: string }
   | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[] }
@@ -2081,6 +2084,11 @@ function reduce(s: AppState, a: Action): AppState {
       return withNotice(s, a.text, a.level);
     case "toggle_activity_hidden":
       return { ...s, prefs: { ...s.prefs, activityHidden: !s.prefs.activityHidden } };
+    case "palette_ran": {
+      if (s.prefs.paletteRecent[0] === a.id) return s;
+      const paletteRecent = [a.id, ...s.prefs.paletteRecent.filter((id) => id !== a.id)].slice(0, PALETTE_RECENT_MAX);
+      return { ...s, prefs: { ...s.prefs, paletteRecent } };
+    }
     case "error":
       return { ...s, lastError: a.error };
 
