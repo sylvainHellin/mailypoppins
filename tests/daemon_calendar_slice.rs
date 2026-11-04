@@ -1468,6 +1468,115 @@ async fn event_delete_removes_an_event_that_tells_nobody() {
     );
 }
 
+/// An update, a cancel or a delete of an event on a calendar that takes no
+/// writes is refused before an operation starts, and nothing reaches the
+/// server.
+#[tokio::test]
+async fn event_changes_on_a_read_only_calendar_are_refused() {
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    let store = read_fixture::store(slice.root(), SERVER);
+    let calendars: Vec<_> = mailypoppins::store::calendar::list_calendars(&store, SERVER)
+        .unwrap()
+        .into_iter()
+        .map(|mut calendar| {
+            calendar.can_edit = false;
+            calendar
+        })
+        .collect();
+    mailypoppins::store::calendar::upsert_calendars(&store, SERVER, &calendars).unwrap();
+
+    for (method, params, name) in [
+        (
+            "event.update",
+            json!({"account": SERVER, "event": "ev-own", "fields": {"reminder": 5}}),
+            "Calendar",
+        ),
+        (
+            "event.cancel",
+            json!({"account": SERVER, "event": "ev-own", "comment": "Postponed"}),
+            "Calendar",
+        ),
+        (
+            "event.delete",
+            json!({"account": SERVER, "event": "ev-solo"}),
+            "Holidays",
+        ),
+    ] {
+        let refused = call_err(&mut conn, method, params).await;
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (
+                -32602,
+                format!("The calendar {name} of {SERVER} is read-only").as_str()
+            ),
+            "{method}"
+        );
+    }
+    assert!(writes(&slice).is_empty());
+    for id in ["ev-own", "ev-solo"] {
+        assert!(
+            mailypoppins::store::calendar::get_event(&store, SERVER, id)
+                .unwrap()
+                .is_some(),
+            "{id} stays in the cache"
+        );
+    }
+}
+
+/// An update the server refuses fails the operation with the server's
+/// error, and the cache keeps the event as it was.
+#[tokio::test]
+async fn an_update_the_server_refuses_leaves_the_cache_as_it_was() {
+    use mailypoppins::calendar_model::{EventTime, OwnResponse};
+    let slice = change_slice();
+    let mut conn = slice.connect().await;
+    rebuild(&mut conn, SERVER).await;
+    // An event the cache holds and the server does not, which the fake
+    // refuses to update as Graph answers 404.
+    let mut lost = support::calendar_fixture::event(
+        "ev-lost",
+        "cal-main",
+        "lost@example.com",
+        "Lost review",
+        EventTime::timed(at(12, 9), at(12, 10), "Europe/Berlin").unwrap(),
+    );
+    lost.is_organizer = true;
+    lost.own_response = OwnResponse::Organizer;
+    lost.reminder = Some(15);
+    let store = read_fixture::store(slice.root(), SERVER);
+    mailypoppins::store::calendar::upsert_event(&store, SERVER, &lost).unwrap();
+    let before = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-lost"}),
+    )
+    .await;
+
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": SERVER, "event": "ev-lost",
+               "fields": {"summary": "Found review", "reminder": 5}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(error.contains("no event with id ev-lost"), "{status}");
+    assert!(writes(&slice).is_empty());
+
+    let after = call(
+        &mut conn,
+        "event.get",
+        json!({"account": SERVER, "event": "ev-lost"}),
+    )
+    .await;
+    assert_eq!(after, before);
+    assert_eq!(after["event"]["summary"], "Lost review");
+    assert_eq!(after["event"]["reminder"], 15);
+}
+
 /// A sign-in without the calendar scope is the re-login prompt for every
 /// change, before an operation starts.
 #[tokio::test]
