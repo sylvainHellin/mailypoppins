@@ -30,10 +30,10 @@ expression: "frame_snapshot(&mut app, 70, 30)"
 24 |││                  mail  |  contacts  |  calendar                  ││
 25 |│╰──────────────────────────────────────────────────────────────────╯│
 26 |│╭──────────────────────────────────────────────────────────────────╮│
-27 |││ CALENDAR   j/k Events  h/l Day/week  t Today  a/d/w Layout …     ││
+27 |││ CALENDAR   j/k Events  h/l Day/week  a/d/w Layout  Enter Card …  ││
 28 |│╰──────────────────────────────────────────────────────────────────╯│
 29 |╰────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 08 |bg:surface+fg:selection+bold@10..68
 24 |bold@41..51
-27 |bold@2..12 bold@14..17 bold@26..29 bold@40..41 bold@49..54
+27 |bold@2..12 bold@14..17 bold@26..29 bold@40..45 bold@54..59

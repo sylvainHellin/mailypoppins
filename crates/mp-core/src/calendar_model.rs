@@ -443,7 +443,7 @@ pub enum OnlineMeetingProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CalendarFeature {
-    /// Create, update, cancel and delete events.
+    /// Write events: create them through `event.create`.
     Write,
     /// Give an event an online meeting (a Teams link).
     OnlineMeeting,

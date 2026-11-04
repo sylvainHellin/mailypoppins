@@ -14,6 +14,8 @@ import type {
   DraftMessage,
   DraftPreview,
   DraftValidation,
+  EventCreateParams,
+  EventCreateStarted,
   HoldListing,
   OutboxListing,
   ThreadListing,
@@ -412,6 +414,15 @@ export const inviteSourceOpen = (account: string, row_id: number): Promise<Edito
 /** The event a message carries and its server event, or null for one with no invitation. */
 export const inviteGet = (account: string, row_id: number): Promise<InviteCard | null> =>
   invoke<InviteCard | null>("invite_get", { account, row_id });
+
+/**
+ * Create an event (`event.create`, PERSO-255); the end arrives as
+ * `event_create`, its result an `EventWriteResult`. The start answers the
+ * transaction id a retry of the same form sends again. A refusal's message
+ * is the daemon's sentence.
+ */
+export const eventCreate = (params: EventCreateParams): Promise<EventCreateStarted> =>
+  invoke<EventCreateStarted>("event_create", { params });
 
 /**
  * Answer an event; the end arrives as `rsvp`, its result an

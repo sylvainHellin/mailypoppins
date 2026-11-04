@@ -47,7 +47,8 @@
 //! Writes (`write.rs`, PERSO-255) create, patch, cancel and delete events
 //! and dismiss or snooze their reminders, sending each time as the event's
 //! wall time in its Windows zone ([`crate::windows_zones::iana_to_windows_zone`]),
-//! or in UTC for a zone the table lacks.
+//! or in UTC for a zone the table lacks; an all-day event's midnights go out
+//! in the Windows zone of the write's `zone`, the host's when absent.
 //!
 //! The HTTP layer is the [`GraphFetch`] seam: [`GraphHttp`] over the mail
 //! client's [`GraphClient`] in production, a scripted fake in the tests, so
@@ -87,9 +88,9 @@ const MAX_PAGES: usize = 500;
 const CALENDAR_SCOPE_NAME: &str = "Calendars.ReadWrite";
 
 /// What this build serves on a Graph calendar beyond reading and answering
-/// ([`super::features`]): nothing yet, since every write of phase 2 adds its
-/// feature here as its daemon method ships.
-pub const FEATURES: &[CalendarFeature] = &[];
+/// ([`super::features`]), each feature listed once its daemon method ships:
+/// `event.create` writes events, with a Teams link on request.
+pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::Write, CalendarFeature::OnlineMeeting];
 
 // ---------------------------------------------------------------------------
 // The HTTP seam

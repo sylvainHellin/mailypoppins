@@ -57,15 +57,16 @@ The other entries are design choices of this plan; phase 1 built D6, D7, D8 and 
 
 ## Current state
 
-After phase 1:
+After phase 1 and the first slices of phase 2:
 
 - A Graph account reads its server calendar: the daemon caches the window of every calendar and syncs it after the mail pass of each tick, with expanded occurrences of recurring events.
 - Every account still has the iMIP path of [calendar-invites.md](calendar-invites.md); its invitation mails show as the virtual `imip` calendar, and an invitation the server calendar also holds shows once, as the server's event.
-- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get` and `event.respond`, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
-- The CLI has `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, and `mp invite` answers through `event.respond`.
+- The daemon serves `calendar.list`, `calendar.set_visibility`, `calendar.view`, `event.get`, `event.respond` and `event.create` for single events, publishes `calendar.changed`, and `calendar.rebuild` also resyncs the server cache; `calendar.events` is removed, since `calendar.view` answers the invitations too, and `calendar.rsvp` and `send.invite` stay as they were.
+- The CLI has `mp calendar list|view|show|hide|rebuild` and `mp event create|show|respond`, and `mp invite` answers through `event.respond`.
+- The TUI's `n` and the desktop app's New event open an event form that creates a single event on a Graph account through `event.create`.
 - The TUI and the desktop app show agenda, day and week layouts with an event card, a calendars panel and a respond dialog with a comment and the send-response choice.
 - `GRAPH_SCOPES` holds `Calendars.ReadWrite`; a token without it gets a re-login prompt in every client, and mail keeps working.
-- Graph accounts are still refused for iMIP answers and for sending invitations; creating events waits for phase 2.
+- Graph accounts are still refused for iMIP answers and for sending invitations by mail; they create events on the server instead.
 - cal-cli (`~/code/side-projects/cal-cli`, Python) reads and writes the TUM calendar through EWS (exchangelib, password) and Gmail through the Google Calendar API, with free/busy and configured rooms.
 
 ## Accounts and backends
@@ -189,9 +190,9 @@ Every write is an `operation.*` in the daemon's in-memory operation registry, an
 
 ## Client surfaces
 
-- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; `mp event create|update|cancel` and `mp calendar freebusy` are provisional names for phase 2, and `mp send --invite` keeps working on iMIP accounts.
-- TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; the proposed time and an event form for create and update come in phase 2.
-- Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; the "New invitation" form becomes the event form in phase 2.
+- CLI: phase 1 ships `mp calendar list|view|show|hide|rebuild` and `mp event show|respond`, with `--json` for agents, and `mp invite` answers through `event.respond`; phase 2 adds `mp event create`, and `mp event update|cancel|delete` and `mp calendar freebusy` are the names its later slices take, and `mp send --invite` keeps working on iMIP accounts.
+- TUI: phase 1 ships the agenda, day and week layouts (the week falling back to the day grid on a narrow terminal), the event card, the calendars overlay, the re-login banner and a respond overlay with the comment and the send-response choice; phase 2 adds the event form on `n` for a new event, which update, the repeat settings and the proposed time extend.
+- Desktop: phase 1 ships the same layouts, the calendars panel, the event card with its join link and invitation mail, and answers with a comment and the send-response choice from the card and the reader; phase 2 adds the New event form beside "New invitation", which stays for an account without a calendar backend until the event form sends its invitation by mail too.
 - Every new capability gets its row in [parity-matrix.md](../parity-matrix.md) with its CLI, TUI and desktop location, and the website pages follow the CLI.
 
 ## Phases

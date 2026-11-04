@@ -146,6 +146,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "calendar.list",
     "calendar.view",
     "calendar.set_visibility",
+    "event.create",
     "event.respond",
     "send.invite",
     "contact.search",
@@ -1297,6 +1298,7 @@ mod tests {
             "calendar.list",
             "calendar.view",
             "calendar.set_visibility",
+            "event.create",
             "event.respond",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");

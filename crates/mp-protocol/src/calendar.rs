@@ -499,6 +499,150 @@ pub struct EventRespondResult {
     pub delivered: bool,
 }
 
+/// One person or room a new event invites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventAttendeeInput {
+    pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub name: Option<String>,
+    /// `required`, `optional`, or `resource` for a room mailbox; `required`
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub role: Option<String>,
+}
+
+/// A new event as a client types it; the daemon resolves the times and
+/// checks every field before an operation starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventInputParams {
+    pub summary: String,
+    /// A time (`2026-11-18T14:00`, read in `zone`, or RFC 3339 with an
+    /// offset), or a bare date (`2026-11-18`) for an all-day event.
+    pub start: String,
+    /// The same form as `start`; on an all-day event the last day,
+    /// included. Exclusive with `duration`; neither on an all-day event is
+    /// the one day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub end: Option<String>,
+    /// `1h30m` or ISO 8601 `PT1H30M`; whole days on an all-day event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub duration: Option<String>,
+    /// The IANA zone the event is held in, which reads a time without an
+    /// offset and places an all-day event's midnights; the daemon's own zone
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub zone: Option<String>,
+    /// Asks for an all-day event, which then needs bare dates; absent, a
+    /// bare-date `start` makes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub all_day: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub location: Option<String>,
+    /// The description as plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub body: Option<String>,
+    /// Who the server invites; none for an event that tells nobody.
+    #[serde(default)]
+    pub attendees: Vec<EventAttendeeInput>,
+    /// Give the event an online meeting (a Teams link on Microsoft 365).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub online_meeting: Option<bool>,
+    /// Minutes before the start the reminder fires: absent for the mailbox
+    /// default, `null` for none.
+    #[serde(default, with = "present", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<Option<u32>>"))]
+    pub reminder: Option<Option<u32>>,
+    /// `free`, `tentative`, `busy`, `oof` or `working-elsewhere`; busy when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub show_as: Option<String>,
+    /// `normal`, `personal`, `private` or `confidential`; normal when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub sensitivity: Option<String>,
+    /// Whether attendees may propose a new time; yes when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub allow_new_time_proposals: Option<bool>,
+}
+
+/// A key that is present, `null` included, as `Some`, so the three states of
+/// a clearable field survive the wire: absent, `null`, and a value.
+mod present {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(
+        value: &Option<Option<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(inner) => inner.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
+}
+
+/// The `params` of `event.create`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventCreateParams {
+    pub account: String,
+    /// A [`CalendarInfo::id`] of the account; its default calendar when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub calendar: Option<String>,
+    /// The id a retry of the same create sends again, so the server makes
+    /// one event however often it arrives; the daemon mints one when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub transaction_id: Option<String>,
+    pub event: EventInputParams,
+}
+
+/// What `event.create` answers at once, before any server call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventCreateStarted {
+    pub operation_id: String,
+    /// The transaction id the create carries, which a retry sends again.
+    pub transaction_id: String,
+}
+
+/// What a settled `event.create` reports.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EventWriteResult {
+    pub account: String,
+    /// The event as the server holds it, now in the cache.
+    pub event: CalendarEvent,
+    pub transaction_id: String,
+    /// The addresses the server sent the invitation to, rooms included;
+    /// empty for an event that tells nobody.
+    pub invited: Vec<String>,
+}
+
 /// The payload of a `calendar.changed` event: an account's calendars or
 /// events moved (a sync, a respond, a visibility change), and a client that
 /// shows them reads `calendar.list` or `calendar.view` again.
@@ -586,6 +730,18 @@ mod tests {
         let started = result(include_str!("../fixtures/event.respond.response.json"));
         assert!(started["operation_id"].is_string());
 
+        let raw = params(include_str!("../fixtures/event.create.request.json"));
+        let create: EventCreateParams =
+            serde_json::from_value(raw.clone()).expect("event.create params");
+        assert_eq!(create.event.reminder, Some(Some(10)));
+        assert_eq!(create.event.attendees[1].role.as_deref(), Some("resource"));
+        assert_eq!(serde_json::to_value(&create).unwrap(), raw);
+        let started: EventCreateStarted = serde_json::from_value(result(include_str!(
+            "../fixtures/event.create.response.json"
+        )))
+        .expect("event.create's answer");
+        assert_eq!(started.transaction_id, create.transaction_id.unwrap());
+
         let visibility = params(include_str!(
             "../fixtures/calendar.set_visibility.request.json"
         ));
@@ -603,6 +759,29 @@ mod tests {
         let changed: CalendarChanged =
             serde_json::from_value(note["params"]["payload"].clone()).expect("the payload");
         assert_eq!(changed.account, "evoqs");
+    }
+
+    /// A new event's reminder is the mailbox default when absent, none when
+    /// `null` and minutes otherwise, and each reads back as it was sent.
+    #[test]
+    fn an_event_input_tells_an_absent_reminder_from_a_null_one() {
+        let read = |value: serde_json::Value| -> EventInputParams {
+            serde_json::from_value(value).expect("an event input")
+        };
+        let base = serde_json::json!({"summary": "Review", "start": "2026-11-18"});
+        let absent = read(base.clone());
+        assert_eq!(absent.reminder, None);
+        assert!(absent.attendees.is_empty());
+        let mut none = base.clone();
+        none["reminder"] = serde_json::Value::Null;
+        assert_eq!(read(none.clone()).reminder, Some(None));
+        assert_eq!(
+            serde_json::to_value(read(none)).unwrap()["reminder"],
+            serde_json::Value::Null
+        );
+        let mut minutes = base;
+        minutes["reminder"] = 5.into();
+        assert_eq!(read(minutes).reminder, Some(Some(5)));
     }
 
     /// The frontmatter block round-trips through JSON with its skip rules

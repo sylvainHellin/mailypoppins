@@ -441,6 +441,10 @@
         "action": "Show or hide calendars"
       },
       {
+        "key": "n",
+        "action": "New event (the event form, on the cursor's day)"
+      },
+      {
         "key": "r",
         "action": "Read the events again"
       }

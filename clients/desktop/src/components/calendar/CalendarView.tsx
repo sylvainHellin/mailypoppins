@@ -42,7 +42,8 @@ const LAYOUTS: { layout: CalendarLayout; label: string; key: string; action: Act
  * or the week grid, beside the card of the event under the cursor. `h`/`l`
  * move by a day or a week, `t` comes back to today, `gt` jumps to a date,
  * `a`/`d`/`w` switch the layout, `c` shows the calendars to show or hide,
- * `V` answers the cursor event, `e` opens an invitation's invite.ics, `m`
+ * `V` answers the cursor event, `n` opens the event form on the cursor's
+ * day, `e` opens an invitation's invite.ics, `m`
  * its mail, `r` reads the events again, Escape brings Mail back.
  */
 export function CalendarView() {
@@ -177,6 +178,10 @@ export function CalendarView() {
             <Button size="xs" variant="ghost" aria-pressed={view.calendarsOpen} onClick={() => run("calendar_calendars")} title="Show or hide calendars (c)">
               <Layers aria-hidden="true" />
               Calendars
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => run("new_event")} title="New event (n)">
+              <CalendarPlus aria-hidden="true" />
+              New event
             </Button>
             <Button size="xs" variant="ghost" onClick={() => run("new_invitation")} title="New invitation">
               <CalendarPlus aria-hidden="true" />

@@ -1,7 +1,11 @@
 //! The Graph calendar writes (PERSO-255, `docs/plans/calendar.md`, phase 2).
 //!
 //! - Create: `POST /me/calendars/{id}/events` with the event and its
-//!   `transactionId`; the server sends the invitations.
+//!   `transactionId`; the server sends the invitations. Graph answers a
+//!   repeat of the same body with the event the first one made, and a repeat
+//!   whose body changed with HTTP 400 `ErrorDuplicateTransactionId` naming
+//!   that event in `@event.existingEventId`, which the create adopts and
+//!   patches to match its own fields.
 //! - Update: `PATCH /me/events/{id}` with the fields the patch names, on an
 //!   occurrence or a series master alike.
 //! - Cancel: `POST /me/events/{id}/cancel`, with the comment for the
@@ -13,8 +17,11 @@
 //! Each time goes out as the event's wall time plus the Windows name of its
 //! zone, the form Graph takes, through CLDR's IANA-to-Windows table (every
 //! territory's zones and their aliases); a zone the table lacks goes out as
-//! UTC, with the instants exact. An all-day event
-//! goes out as its midnights in UTC, which Graph keeps as the dates.
+//! UTC, with the instants exact. An all-day event goes out as its midnights
+//! under the Windows name of the write's `zone` (the host zone when absent):
+//! Graph keeps the dates either way, but stores the midnights as instants,
+//! and midnights sent as UTC cover 01:00 to 01:00 for a Berlin user in every
+//! range query and free/busy read.
 //!
 //! A cancel, a delete, a dismiss or a snooze of an event Graph no longer has
 //! (404) counts as done, the rule mp applies to deleting a mail already gone
@@ -58,8 +65,24 @@ fn instant_in(at: DateTime<Utc>, zone: &str) -> Value {
     }
 }
 
-/// The `start`, `end` and `isAllDay` of `time`.
-fn put_time(body: &mut Map<String, Value>, time: &EventTime) {
+/// The Windows name an all-day event's midnights go out under: that of
+/// `zone`, an IANA name, else of the host zone, else UTC for a zone the
+/// table has no Windows name for.
+fn all_day_zone(zone: Option<&str>) -> &'static str {
+    let host;
+    let zone = match zone.map(str::trim).filter(|z| !z.is_empty()) {
+        Some(zone) => zone,
+        None => {
+            host = crate::calendar_model::local_zone();
+            host.name()
+        }
+    };
+    crate::windows_zones::iana_to_windows_zone(zone).unwrap_or("UTC")
+}
+
+/// The `start`, `end` and `isAllDay` of `time`; `zone` places an all-day
+/// time's midnights.
+fn put_time(body: &mut Map<String, Value>, time: &EventTime, zone: Option<&str>) {
     let (start, end, all_day) = match time {
         EventTime::Timed { start, end, zone } => {
             (instant_in(*start, zone), instant_in(*end, zone), false)
@@ -68,9 +91,10 @@ fn put_time(body: &mut Map<String, Value>, time: &EventTime) {
             let (start, end) = time
                 .all_day_midnights()
                 .expect("an all-day time has its midnights");
+            let windows = all_day_zone(zone);
             (
-                date_time_zone(start, "UTC"),
-                date_time_zone(end, "UTC"),
+                date_time_zone(start, windows),
+                date_time_zone(end, windows),
                 true,
             )
         }
@@ -155,7 +179,7 @@ fn put_online_meeting(body: &mut Map<String, Value>) {
 pub(super) fn create_body(input: &EventInput, transaction_id: &str) -> Value {
     let mut body = Map::new();
     body.insert("subject".into(), input.summary.clone().into());
-    put_time(&mut body, &input.time);
+    put_time(&mut body, &input.time, input.zone.as_deref());
     body.insert("transactionId".into(), transaction_id.into());
     if let Some(location) = input.location.as_deref() {
         body.insert("location".into(), location_json(Some(location)));
@@ -193,7 +217,7 @@ pub(super) fn patch_body(patch: &EventPatch) -> Value {
         body.insert("subject".into(), summary.clone().into());
     }
     if let Some(time) = &patch.time {
-        put_time(&mut body, time);
+        put_time(&mut body, time, patch.zone.as_deref());
     }
     if let Some(location) = &patch.location {
         body.insert("location".into(), location_json(location.as_deref()));
@@ -234,6 +258,26 @@ fn event_url(event: &str, action: Option<&str>) -> String {
 
 fn success(answer: &HttpAnswer) -> bool {
     (200..300).contains(&answer.status)
+}
+
+/// The event an earlier create with the same `transactionId` made, when
+/// Graph refused this one as its changed repeat: HTTP 400
+/// `ErrorDuplicateTransactionId`, the event's id in the error's
+/// `@event.existingEventId`.
+fn duplicate_transaction(answer: &HttpAnswer) -> Option<String> {
+    if answer.status != 400 {
+        return None;
+    }
+    let value: Value = serde_json::from_str(&answer.body).ok()?;
+    let error = &value["error"];
+    if error["code"].as_str() != Some("ErrorDuplicateTransactionId") {
+        return None;
+    }
+    error["@event.existingEventId"]
+        .as_str()
+        .or_else(|| value["@event.existingEventId"].as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn refused(what: &str, answer: &HttpAnswer) -> CalendarBackendError {
@@ -302,6 +346,16 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
             .fetch
             .post(&url, create_body(input, transaction_id))
             .await?;
+        if let Some(existing) = duplicate_transaction(&answer) {
+            debug!(
+                "[calendar] {}: transaction {transaction_id} made event {existing} already; \
+                 patching it with this create's fields",
+                self.account
+            );
+            return self
+                .patch_event(&calendar.id, &existing, &input.as_patch())
+                .await;
+        }
         if !success(&answer) {
             return Err(refused("new event", &answer));
         }
