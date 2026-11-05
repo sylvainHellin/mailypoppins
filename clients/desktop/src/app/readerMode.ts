@@ -10,6 +10,7 @@ import { readerDraftKey, type AppState } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
+import { forgetReads, joinRead } from "@/lib/inflight";
 
 export type ReaderMode = "html" | "text";
 
@@ -95,37 +96,27 @@ export function cachedText(key: string): CachedText | undefined {
   return textCache.get(key);
 }
 
-/**
- * The reads still on their way, by the cache's key: a second reader of the
- * same key, as StrictMode's remount of the pane is, joins the first read
- * instead of asking the daemon again. A refused read is not kept.
- */
-const textReads = new Map<string, Promise<CachedText>>();
+/** The prefix of the text reads' keys in `joinRead`. */
+const TEXT_READ = "message_text:";
 
-/** The text under `key`: cached, joined to the read on its way, or read with `read` and remembered. */
+/** Moved on by `forgetTexts`: a read started before it does not cache its answer. */
+let textEra = 0;
+
+/**
+ * The text under `key`: cached, joined to the read on its way (StrictMode's
+ * remount of the pane joins the first read, `joinRead`), or read with `read`
+ * and remembered. A refused read is not kept.
+ */
 export function readText(key: string, read: () => Promise<CachedText>): Promise<CachedText> {
   const hit = textCache.get(key);
   if (hit) return Promise.resolve(hit);
-  const pending = textReads.get(key);
-  if (pending) return pending;
-  // A read that `forgetTexts` dropped on its way neither caches its answer nor clears a newer read under its key.
-  const settle = (): boolean => {
-    if (textReads.get(key) !== next) return false;
-    textReads.delete(key);
-    return true;
-  };
-  const next = read().then(
-    (text) => {
-      if (settle()) rememberText(key, text);
+  const era = textEra;
+  return joinRead(TEXT_READ + key, () =>
+    read().then((text) => {
+      if (era === textEra) rememberText(key, text);
       return text;
-    },
-    (e: unknown) => {
-      settle();
-      throw e;
-    },
+    }),
   );
-  textReads.set(key, next);
-  return next;
 }
 
 function rememberText(key: string, text: CachedText): void {
@@ -141,7 +132,8 @@ function rememberText(key: string, text: CachedText): void {
 /** Forget every body read and every read on its way; a test starts with none. */
 export function forgetTexts(): void {
   textCache.clear();
-  textReads.clear();
+  textEra += 1;
+  forgetReads(TEXT_READ);
 }
 
 /** A line the sender quoted: `>` after optional leading blanks, as the TUI's preview marks it. */

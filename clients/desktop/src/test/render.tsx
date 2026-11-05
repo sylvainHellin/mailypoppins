@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import App from "@/App";
 import { resetMock } from "@/test/tauri-mock";
 import { forgetTexts } from "@/app/readerMode";
+import { forgetReads } from "@/lib/inflight";
 import { setWidth } from "@/test/setup";
 
 /**
@@ -14,6 +15,7 @@ import { setWidth } from "@/test/setup";
 export function renderApp(width = 1400, before?: () => void) {
   resetMock();
   forgetTexts();
+  forgetReads();
   before?.();
   setWidth(width);
   const user = userEvent.setup();
