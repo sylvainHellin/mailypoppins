@@ -341,6 +341,37 @@ fn the_rows_stay_while_the_next_query_runs() {
     assert!(!landed.contains("checking"), "{landed}");
 }
 
+/// Two rows whose local parts would read the same in the name column are
+/// named by their whole address instead, so they stay apart; a row whose
+/// local part is its own keeps the short name.
+#[test]
+fn rows_that_would_read_the_same_are_named_by_their_address() {
+    let mut app = calendar_fixture();
+    let mut form = form();
+    form.to = "info@a.com, info@b.com, ada@example.org".into();
+    form.rooms = "room@a.org, room@b.org".into();
+    let key = form.free_busy_key().unwrap();
+    app.overlay = Overlay::EventForm(Box::new(form));
+    app.calendar_view.availability = Availability {
+        seen: Some((key.clone(), Instant::now())),
+        asked: Some(key),
+        operation: Some("op-1".into()),
+        answer: None,
+    };
+    let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
+    let waiting = "\u{2508}".repeat(52);
+    for who in [
+        "info@a.com",
+        "info@b.com",
+        "ada",
+        "\u{2302} room@a.org",
+        "\u{2302} room@b.org",
+    ] {
+        assert_eq!(track(&frame, who), waiting, "{who}");
+    }
+    assert!(!frame.contains(&name("info")), "{frame}");
+}
+
 /// Answers `calendar.freebusy` with a fresh operation id each call, or
 /// refuses once `refuse` is set.
 #[derive(Default)]

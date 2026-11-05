@@ -123,6 +123,32 @@ fn name_column(text: &str) -> String {
     format!("{:INDENT$}{cut}{:pad$}", "", "")
 }
 
+/// Each row's name column: "You" for the user, the address's local part
+/// for the others, after the glyph for a room. Rows whose names would read
+/// the same once cut (info@a.com and info@b.com) show as much of their
+/// whole address as fits instead, so they stay apart.
+fn row_names(rows: &[Row]) -> Vec<String> {
+    let column = |row: &Row, text: &str| match row.kind {
+        Kind::You => name_column("You"),
+        Kind::Room => name_column(&format!("{ROOM}{text}")),
+        Kind::Required | Kind::Optional => name_column(text),
+    };
+    let short: Vec<String> = rows
+        .iter()
+        .map(|row| column(row, row.address.split('@').next().unwrap_or_default()))
+        .collect();
+    rows.iter()
+        .zip(&short)
+        .map(|(row, cut)| {
+            if row.kind != Kind::You && short.iter().filter(|other| *other == cut).count() > 1 {
+                column(row, &row.address)
+            } else {
+                cut.clone()
+            }
+        })
+        .collect()
+}
+
 /// Push `glyph` in `style`, extending the last span when it has the same
 /// style, so a row is a handful of spans rather than one per cell.
 fn push(spans: &mut Vec<Span<'static>>, glyph: char, style: Style) {
@@ -414,14 +440,11 @@ pub(super) fn availability_lines(
     lines.push(Line::from(spans));
 
     let normal = Style::default().fg(theme.text);
-    for row in rows.iter().take(shown) {
+    let names = row_names(&rows);
+    for (row, full) in rows.iter().zip(names).take(shown) {
         let mut spans = match row.kind {
-            Kind::You => vec![Span::styled(
-                name_column("You"),
-                normal.add_modifier(Modifier::BOLD),
-            )],
+            Kind::You => vec![Span::styled(full, normal.add_modifier(Modifier::BOLD))],
             kind => {
-                let local = row.address.split('@').next().unwrap_or_default();
                 let style = if kind == Kind::Optional {
                     muted
                 } else {
@@ -429,7 +452,6 @@ pub(super) fn availability_lines(
                 };
                 if kind == Kind::Room {
                     // The room's glyph muted, its name cut after it.
-                    let full = name_column(&format!("{ROOM}{local}"));
                     let split = full
                         .char_indices()
                         .nth(INDENT + ROOM.chars().count())
@@ -439,7 +461,7 @@ pub(super) fn availability_lines(
                         Span::styled(full[split..].to_string(), style),
                     ]
                 } else {
-                    vec![Span::styled(name_column(local), style)]
+                    vec![Span::styled(full, style)]
                 }
             }
         };
