@@ -1248,6 +1248,28 @@ fn trimmed_ref() -> serde_json::Value {
     )
 }
 
+/// `occ-cms` as `GET .../events/master-cms/instances` answers it: in full,
+/// with the details of its master `subject`, and no rule of its own.
+fn instance_cms(subject: &str) -> serde_json::Value {
+    let mut occurrence = delta_master(false, subject);
+    let trimmed = trimmed_cms();
+    for key in ["id", "seriesMasterId", "type", "start", "end"] {
+        occurrence[key] = trimmed[key].clone();
+    }
+    occurrence["recurrence"] = serde_json::Value::Null;
+    occurrence
+}
+
+/// A last page of a plain read (`instances`, `calendarView`): no link at all.
+fn view_page(value: Vec<serde_json::Value>) -> String {
+    serde_json::json!({ "value": value }).to_string()
+}
+
+/// The instances of `master-cms` over the window, as a route prefix.
+fn cms_instances() -> String {
+    format!("{BASE}/me/calendars/AAMkCal-default/events/master-cms/instances?")
+}
+
 /// The delta link of the default calendar, short of its token.
 const DELTA: &str = "me/calendars/AAMkCal-default/calendarView/delta?$deltatoken=";
 
@@ -1372,12 +1394,18 @@ async fn a_master_change_reaches_the_cached_occurrences_it_trimmed() {
     const ONE_CALENDAR: &str =
         r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
     let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    // A master the delta brings alone is read with its instances, which
+    // answer `occ-cms` under the series' current name.
+    let mut weekly = instance_cms("CMS Weekly");
+    weekly["showAs"] = "tentative".into();
+    let instances = view_page(vec![weekly]);
     let backend = |page: String| {
         GraphCalendarBackend::with_fetch(
             "evoqs",
             ScriptedFetch::default()
                 .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
-                .route(&delta, ok(&page)),
+                .route(&delta, ok(&page))
+                .route(&cms_instances(), ok(&instances)),
         )
     };
     let dir = tempfile::tempdir().unwrap();
@@ -1401,20 +1429,49 @@ async fn a_master_change_reaches_the_cached_occurrences_it_trimmed() {
         .unwrap();
     assert!(holiday.is_all_day());
 
-    // The incremental delta brings the renamed master alone.
+    // The incremental delta brings the renamed master with its occurrence
+    // trimmed, as Graph re-sends a series whole when its subject changes
+    // (probes of 2026-11-04), and the occurrence takes the new details
+    // without a read of the series' instances.
     let mut renamed = delta_master(false, "CMS Weekly");
     renamed["showAs"] = "tentative".into();
-    let page = delta_page(&format!("{DELTA}round2"), vec![renamed]);
-    let second = sync_account(&store, &backend(page), "evoqs", hour(1))
+    let page = delta_page(&format!("{DELTA}round2"), vec![renamed, trimmed_cms()]);
+    let round2 = backend(page);
+    let second = sync_account(&store, &round2, "evoqs", hour(1))
         .await
         .unwrap();
     assert!(second.changed());
-    assert_eq!(second.upserts, 0);
+    assert_eq!(second.upserts, 1);
+    assert!(
+        !round2
+            .fetch
+            .sent()
+            .iter()
+            .any(|sent| sent.url.starts_with(&cms_instances())),
+        "a master that came with its occurrences reads no instances"
+    );
     let cms = cache::get_event(&store, "evoqs", "occ-cms")
         .unwrap()
         .unwrap();
     assert_eq!(cms.summary, "CMS Weekly");
     assert_eq!(cms.show_as, ShowAs::Tentative);
+    assert_eq!(summary("occ-ref"), "Reformation Day");
+
+    // A master the delta brings alone (a change out of the window) keeps
+    // the occurrence its instances still answer.
+    let mut alone = delta_master(false, "CMS Weekly");
+    alone["showAs"] = "tentative".into();
+    let page = delta_page(&format!("{DELTA}round2b"), vec![alone]);
+    let lone = backend(page);
+    sync_account(&store, &lone, "evoqs", hour(1)).await.unwrap();
+    assert!(
+        lone.fetch
+            .sent()
+            .iter()
+            .any(|sent| sent.url == format!("{}{RANGE}", cms_instances())),
+        "a master that came alone reads its instances over the window"
+    );
+    assert_eq!(summary("occ-cms"), "CMS Weekly");
     assert_eq!(summary("occ-ref"), "Reformation Day");
 
     // A trimmed occurrence that comes without its master takes the details
@@ -1563,6 +1620,79 @@ async fn a_master_resent_alone_after_its_only_occurrence_was_deleted_leaves_no_g
     );
 }
 
+/// PERSO-268: a master the delta brings alone whose instances Graph does not
+/// answer prunes nothing, as before the instances read: its cached
+/// occurrences stay, re-derived from the new master, the token is kept, and
+/// the next baseline reaches whatever the delta left out.
+#[tokio::test]
+async fn a_lone_master_whose_instances_cannot_be_read_keeps_its_occurrences() {
+    use crate::calendar_sync::sync_account;
+    use crate::store::{calendar as cache, Store};
+
+    const ONE_CALENDAR: &str =
+        r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
+    let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    for failure in [
+        status(503, r#"{"error":{"code":"ServiceUnavailable"}}"#),
+        status(404, r#"{"error":{"code":"ErrorItemNotFound"}}"#),
+    ] {
+        let backend = |page: String| {
+            GraphCalendarBackend::with_fetch(
+                "evoqs",
+                ScriptedFetch::default()
+                    .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
+                    .route(&delta, ok(&page))
+                    .route(&cms_instances(), failure.clone()),
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+
+        sync_account(&store, &backend(trimmed_page()), "evoqs", now)
+            .await
+            .unwrap();
+
+        let mut renamed = delta_master(false, "CMS Weekly");
+        renamed["showAs"] = "tentative".into();
+        let page = delta_page(&format!("{DELTA}round2"), vec![renamed]);
+        let round2 = backend(page);
+        let second = sync_account(&store, &round2, "evoqs", now + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(
+            round2
+                .fetch
+                .sent()
+                .iter()
+                .any(|sent| sent.url.starts_with(&cms_instances())),
+            "the lone master's instances were asked for"
+        );
+        assert_eq!(second.baselines, 0, "an incremental sync: {second:?}");
+        assert!(second.changed());
+        assert_eq!(second.upserts, 0);
+        let cms = cache::get_event(&store, "evoqs", "occ-cms")
+            .unwrap()
+            .expect("occ-cms kept when its series' instances cannot be read");
+        assert_eq!(cms.summary, "CMS Weekly");
+        assert_eq!(cms.show_as, ShowAs::Tentative);
+        assert!(cache::get_event(&store, "evoqs", "occ-ref")
+            .unwrap()
+            .is_some());
+        let state = cache::load_sync_state(&store, "evoqs", "AAMkCal-default")
+            .unwrap()
+            .expect("a sync state");
+        assert!(
+            state
+                .token
+                .as_deref()
+                .is_some_and(|token| token.contains("round2")),
+            "the token moves on: {:?}",
+            state.token
+        );
+    }
+}
+
 /// A backend that knows `master-cms` by its `UID` alone, as an older build
 /// cached it, and syncs the default calendar on from `round1`.
 fn detailless_sync(master_answer: HttpAnswer) -> (GraphCalendarBackend<ScriptedFetch>, String) {
@@ -1656,12 +1786,27 @@ async fn an_occurrence_sent_in_full_after_a_trimmed_one_keeps_its_own_details() 
     const ONE_CALENDAR: &str =
         r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
     let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    // The exception in full, as the delta re-sends it and as the series'
+    // instances answer it.
+    let mut full = trimmed_cms();
+    for (key, value) in [
+        ("iCalUId", "OCC-UID".into()),
+        ("subject", "CMS kickoff".into()),
+        ("isAllDay", false.into()),
+        ("showAs", "oof".into()),
+        ("type", "exception".into()),
+        ("originalStartTimeZone", "W. Europe Standard Time".into()),
+    ] {
+        full[key] = value;
+    }
+    let instances = view_page(vec![full.clone()]);
     let backend = |page: String| {
         GraphCalendarBackend::with_fetch(
             "evoqs",
             ScriptedFetch::default()
                 .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
-                .route(&delta, ok(&page)),
+                .route(&delta, ok(&page))
+                .route(&cms_instances(), ok(&instances)),
         )
     };
     let dir = tempfile::tempdir().unwrap();
@@ -1680,24 +1825,14 @@ async fn an_occurrence_sent_in_full_after_a_trimmed_one_keeps_its_own_details() 
     assert_eq!(cms().summary, "CMS Team Meeting");
 
     // The occurrence is edited on its own and comes back in full.
-    let mut full = trimmed_cms();
-    for (key, value) in [
-        ("iCalUId", "OCC-UID".into()),
-        ("subject", "CMS kickoff".into()),
-        ("isAllDay", false.into()),
-        ("showAs", "oof".into()),
-        ("type", "exception".into()),
-        ("originalStartTimeZone", "W. Europe Standard Time".into()),
-    ] {
-        full[key] = value;
-    }
     let page = delta_page(&format!("{DELTA}round2"), vec![full]);
     sync_account(&store, &backend(page), "evoqs", hour(1))
         .await
         .unwrap();
     assert_eq!(cms().summary, "CMS kickoff");
 
-    // A later rename of the series leaves the exception alone.
+    // A later rename of the series leaves the exception alone, here with the
+    // master alone in the delta and the exception read from its instances.
     let page = delta_page(
         &format!("{DELTA}round3"),
         vec![delta_master(false, "CMS Weekly")],

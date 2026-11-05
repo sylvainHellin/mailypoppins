@@ -105,7 +105,8 @@ pub struct SyncResult {
     pub inheriting: Vec<EventId>,
     /// The series masters whose occurrences in the window an incremental
     /// sync brought in full, as Graph's delta re-sends a whole series when
-    /// anything in it changed: the store drops each one's cached occurrences
+    /// anything in it changed (or read whole, for a master it re-sent
+    /// alone): the store drops each one's cached occurrences
     /// the sync did not bring, the ones deleted or ended by a new rule on
     /// the server, which the delta never names.
     pub resent_series: Vec<EventId>,
