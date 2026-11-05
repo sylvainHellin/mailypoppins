@@ -23,7 +23,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { FileText } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { cachedText, isQuoted, rememberText } from "@/app/readerMode";
+import { cachedText, isQuoted, readText } from "@/app/readerMode";
 import { readerKey } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiError } from "@/lib/gui-types";
@@ -186,10 +186,8 @@ export function ReaderText({ instance, account, rowId, messageId, version, subje
       return;
     }
     let live = true;
-    cmd
-      .messageText(account, rowId)
+    readText(key, () => cmd.messageText(account, rowId).then((text) => ({ body: text.body })))
       .then((text) => {
-        rememberText(key, { body: text.body });
         if (live) setShown({ message, result: { kind: "text", body: text.body } });
       })
       .catch((e: unknown) => {

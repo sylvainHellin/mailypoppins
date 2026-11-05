@@ -95,7 +95,35 @@ export function cachedText(key: string): CachedText | undefined {
   return textCache.get(key);
 }
 
-export function rememberText(key: string, text: CachedText): void {
+/**
+ * The reads still on their way, by the cache's key: a second reader of the
+ * same key, as StrictMode's remount of the pane is, joins the first read
+ * instead of asking the daemon again. A refused read is not kept.
+ */
+const textReads = new Map<string, Promise<CachedText>>();
+
+/** The text under `key`: cached, joined to the read on its way, or read with `read` and remembered. */
+export function readText(key: string, read: () => Promise<CachedText>): Promise<CachedText> {
+  const hit = textCache.get(key);
+  if (hit) return Promise.resolve(hit);
+  const pending = textReads.get(key);
+  if (pending) return pending;
+  const next = read().then(
+    (text) => {
+      textReads.delete(key);
+      rememberText(key, text);
+      return text;
+    },
+    (e: unknown) => {
+      textReads.delete(key);
+      throw e;
+    },
+  );
+  textReads.set(key, next);
+  return next;
+}
+
+function rememberText(key: string, text: CachedText): void {
   textCache.delete(key);
   textCache.set(key, text);
   while (textCache.size > TEXT_CACHE_SIZE) {
@@ -105,9 +133,10 @@ export function rememberText(key: string, text: CachedText): void {
   }
 }
 
-/** Forget every body read; a test starts with none. */
+/** Forget every body read and every read on its way; a test starts with none. */
 export function forgetTexts(): void {
   textCache.clear();
+  textReads.clear();
 }
 
 /** A line the sender quoted: `>` after optional leading blanks, as the TUI's preview marks it. */
