@@ -124,6 +124,7 @@ All notable changes to this project are documented in this file.
 ### Fixed
 - Desktop: the reader's text view asks the daemon once per message in dev builds too, and the test harness renders under StrictMode as the app does.
 - An occurrence deleted in Outlook as the only one of its series inside the sync window leaves mp's views at the next sync instead of lingering until the daily full re-read: a series master that Graph's delta re-sends alone is read with its instances over the window (PERSO-268).
+- The TUI help's EVENT CARD section lists every key the card takes (V, E, D, p, Tab, m, e, j/k, Esc / q / Enter), worded for the card, and the website's and the desktop's key lists follow (PERSO-270).
 - The TUI hint bar names the event card (EVENT) and lists the keys it takes for the event in view, the same set as the card's own footer (PERSO-270).
 - Desktop: the RSVP dialog takes the focus as it opens, so keys typed straight after `tv`, `V` or Respond follow its order and Tab from Decline reaches the comment; closing still returns the focus to the email or event it came from (PERSO-269).
 - An occurrence or a series deleted in Outlook leaves mp's views at the next sync, and the TUI event form keeps the availability count at 80x24 by scrolling its fields with the cursor (PERSO-255).

@@ -3492,6 +3492,7 @@ A hint bar or footer whose keys depend on an overlay's state cannot come from KE
 ## A help row's words join the palette's search text (2026-11-04, PERSO-255)
 
 A new KEYMAP row's description joins the desktop palette's search text with its section title, so a word in either can pull the row into another row's ranking test: "edit form" in the event card's `p` row made "edit event" match two rows in `rank.test.ts`.
+A match can also come from inside a word: the card's `e` row ("...in $EDITOR") matches "edit event" through "EDITOR" and the section "EVENT CARD" (PERSO-270).
 
 ## insta stops at a test's first failing snapshot (2026-11-04, PERSO-255)
 
