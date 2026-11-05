@@ -530,7 +530,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-02 Delete a received message or a local draft
 
 - Classification: GUI parity
-- Source anchor: `mp delete <selector> [--mailbox] [--force]`, `mp delete --sent` (`src/main.rs`), TUI `d`
+- Source anchor: `mp delete <selector>... [--mailbox] [--force]`, `mp delete --sent` (`src/main.rs`), TUI `d`
 - Daemon surface: `message.delete` for received mail, `draft.discard` for a draft and for the `--sent` sweep, which is a parameter of the same method rather than one of its own
 - GUI location: clients/desktop: `d`, the palette's "Delete" and the reader toolbar's Delete, after "Delete this email?"; a draft row is discarded through `draft_discard`, and a batch holding messages and drafts calls both (M2, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`v marks and steps, and d with Enter deletes the marked rows in list order`, `d on a draft discards it after the confirmation`), `clients/desktop/src/app/events.test.tsx` (`discards a draft, and the state.remove that follows reloads the list without it`), `clients/desktop/src-tauri/src/fixture.rs` (`a_discarded_draft_is_removed_and_an_approved_one_refused`)

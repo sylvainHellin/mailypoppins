@@ -341,13 +341,13 @@ Options:
 $ mp delete --help
 Delete a received email (server + local) or a local draft
 
-Usage: mp delete [OPTIONS] [SELECTOR]
+Usage: mp delete [OPTIONS] [SELECTOR]...
 
 Arguments:
-  [SELECTOR]  Received (mp://<acct>/<mbox>/<id>[/<uid>]) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
+  [SELECTOR]...  Received (mp://<acct>/<mbox>/<id>[/<uid>]) or drafts (mp://<acct>/drafts/<id>) selectors, one or more; omit with --sent
 
 Options:
-      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --mailbox <MAILBOX>  Mailbox to resolve the selectors in
       --force              Delete an approved draft (a queued send) anyway
       --sent               Clear every sent draft of the account (takes no selector)
   -A, --account <ACCOUNT>  Account to use

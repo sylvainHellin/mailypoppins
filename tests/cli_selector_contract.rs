@@ -919,6 +919,31 @@ fn a_selector_naming_an_unconfigured_account_fails_with_that_account_named() {
     assert!(stderr.contains("not configured"), "{stderr}");
 }
 
+/// `mp delete` takes several selectors, each resolved in its own account: a
+/// refusal is reported against its selector, the others are still deleted, and
+/// the run ends in an error naming how many failed.
+#[test]
+fn delete_takes_several_selectors_and_reports_each_refusal() {
+    let fx = XAcctFixture::new();
+    fx.draft(XAcctFixture::DEFAULT, "aaaa000000000001", "First draft");
+    fx.draft(XAcctFixture::OTHER, "bbbb000000000002", "Second draft");
+
+    let stderr = fx.err(&[
+        "delete",
+        "mp://perso/drafts/aaaa000000000001",
+        "mp://ghost/drafts/whatever",
+        "mp://tum/drafts/bbbb000000000002",
+    ]);
+    assert!(stderr.contains("mp://ghost/drafts/whatever: "), "{stderr}");
+    assert!(stderr.contains("not configured"), "{stderr}");
+    assert!(stderr.contains("1 of 3 deletes failed"), "{stderr}");
+
+    let perso_list = fx.ok(&["list"]);
+    assert!(!perso_list.contains("aaaa000000000001"), "{perso_list}");
+    let tum_list = fx.ok(&["list", "-A", "tum"]);
+    assert!(!tum_list.contains("bbbb000000000002"), "{tum_list}");
+}
+
 /// `mp invite` answers from the invitation's own account, as every other
 /// received selector does, rather than from the default account's store.
 #[test]

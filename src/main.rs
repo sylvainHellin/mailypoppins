@@ -331,17 +331,17 @@ enum Commands {
     // footgun `Sync` guards against. The drafts vs received split and the
     // --force/--sent rules are carried by the argument help below.
     Delete {
-        /// Received (mp://<acct>/<mbox>/<id>[/<uid>]) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
+        /// Received (mp://<acct>/<mbox>/<id>[/<uid>]) or drafts (mp://<acct>/drafts/<id>) selectors, one or more; omit with --sent
         #[arg(value_name = "SELECTOR", required_unless_present = "sent")]
-        selector: Option<String>,
-        /// Mailbox to resolve the selector in
+        selectors: Vec<String>,
+        /// Mailbox to resolve the selectors in
         #[arg(long)]
         mailbox: Option<String>,
         /// Delete an approved draft (a queued send) anyway
         #[arg(long)]
         force: bool,
         /// Clear every sent draft of the account (takes no selector)
-        #[arg(long, conflicts_with_all = ["selector", "mailbox", "force"])]
+        #[arg(long, conflicts_with_all = ["selectors", "mailbox", "force"])]
         sent: bool,
     },
     /// Open a received email's attachment in the default application
@@ -3151,6 +3151,48 @@ async fn routed_received_mutation(
     daemon_try_call_within(&mut connection, method, params, DAEMON_MUTATION_TIMEOUT)
         .await
         .map_err(|e| refusal(account, e))
+}
+
+/// `mp delete` of one selector: a drafts selector discards the draft, a
+/// received one deletes the message on its server and in the store.
+async fn delete_one(
+    selector: &str,
+    mailbox: Option<&str>,
+    force: bool,
+    default: &AccountConfig,
+    global: &GlobalConfig,
+) -> Result<serde_json::Value> {
+    // A cross-account selector deletes from its own account, so the store and
+    // (for received mail) the server credentials must be the selector's, not
+    // `-A`'s (the #0073 follow-up bug).
+    let account_config = account_for_selector(selector, default, global)?;
+    if is_drafts_selector(selector, mailbox)? {
+        // Drafts are local-only: no server op, just the file and the index row
+        // the rescan drops (#0073).
+        return routed_discard(&account_config.name, selector, force).await;
+    }
+    // The durable queue again (#0039): the daemon commits the row delete and
+    // the owed server delete together, then drains it. A delete has nothing to
+    // roll back (the row is gone and the server still holds the message), so a
+    // refusal propagates verbatim and the next sync refetches the UID; the
+    // not-found message stays byte-identical.
+    fetch_on_miss(
+        &account_config,
+        selector,
+        mailbox,
+        StandIn::Refused { verb: "delete" },
+        async |selector: &str, mailbox: Option<&str>| {
+            routed_received_mutation(
+                &account_config.name,
+                "message.delete",
+                selector,
+                mailbox,
+                &[],
+            )
+            .await
+        },
+    )
+    .await
 }
 
 /// `mp delete <drafts selector>`: local-only, so one call and no backend.
@@ -6275,7 +6317,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Delete {
-            selector,
+            selectors,
             mailbox,
             force,
             sent,
@@ -6286,48 +6328,51 @@ async fn main() -> Result<()> {
                 // files with nothing left to do to them. Clear them in one
                 // call, file and row alike.
                 routed_sweep(&account_config.name).await?;
-            } else {
-                // `required_unless_present = "sent"` guarantees the selector.
-                let selector = selector.expect("clap requires a selector without --sent");
-                // A cross-account selector deletes from its own account, so the
-                // store and (for received mail) the server credentials must be
-                // the selector's, not `-A`'s (the #0073 follow-up bug).
-                let account_config =
-                    account_for_selector(&selector, &account_config, &global_config)?;
-                let deleted = if is_drafts_selector(&selector, mailbox.as_deref())? {
-                    // Drafts are local-only: no server op, just the file and
-                    // the index row the rescan drops (#0073).
-                    routed_discard(&account_config.name, &selector, force).await?
-                } else {
-                    // The durable queue again (#0039): the daemon commits the
-                    // row delete and the owed server delete together, then
-                    // drains it. A delete has nothing to roll back (the row is
-                    // gone and the server still holds the message), so a
-                    // refusal propagates verbatim and the next sync refetches
-                    // the UID; the not-found message stays byte-identical.
-                    fetch_on_miss(
-                        &account_config,
-                        &selector,
-                        mailbox.as_deref(),
-                        StandIn::Refused { verb: "delete" },
-                        async |selector: &str, mailbox: Option<&str>| {
-                            routed_received_mutation(
-                                &account_config.name,
-                                "message.delete",
-                                selector,
-                                mailbox,
-                                &[],
-                            )
-                            .await
-                        },
-                    )
-                    .await?
-                };
+            } else if let [selector] = selectors.as_slice() {
+                // One selector keeps its error verbatim, as before several were
+                // accepted: the parity gates compare it byte for byte.
+                let deleted = delete_one(
+                    selector,
+                    mailbox.as_deref(),
+                    force,
+                    &account_config,
+                    &global_config,
+                )
+                .await?;
                 println!(
                     "{} deleted {}",
                     "\u{2713}".green(),
                     wire_str(&deleted["selector"])
                 );
+            } else {
+                // Several selectors: each is deleted on its own, a refusal is
+                // reported against its selector and the rest still run, as `rm`
+                // does, and the exit is an error when any of them failed.
+                let mut failed = 0;
+                for selector in &selectors {
+                    match delete_one(
+                        selector,
+                        mailbox.as_deref(),
+                        force,
+                        &account_config,
+                        &global_config,
+                    )
+                    .await
+                    {
+                        Ok(deleted) => println!(
+                            "{} deleted {}",
+                            "\u{2713}".green(),
+                            wire_str(&deleted["selector"])
+                        ),
+                        Err(error) => {
+                            failed += 1;
+                            eprintln!("{} {selector}: {error:#}", "\u{2717}".red());
+                        }
+                    }
+                }
+                if failed > 0 {
+                    anyhow::bail!("{failed} of {} deletes failed", selectors.len());
+                }
             }
         }
 
