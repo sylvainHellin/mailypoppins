@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { parseReaderMode } from "@/app/readerMode";
+import { cachedText, forgetTexts, parseReaderMode, readText } from "@/app/readerMode";
 import { GUI_ENTRIES, paletteEntries } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { renderApp, shellReady } from "@/test/render";
@@ -378,5 +378,34 @@ describe("the text cache across a daemon restart", () => {
     expect((await textPane()).textContent).not.toContain("the quarterly ledger");
     // Read again under the new instance, not served from the cache.
     expect(calls("message_text").filter((c) => c.args?.row_id === 1001).length).toBeGreaterThan(1);
+  });
+});
+
+describe("readText", () => {
+  it("a read forgotten on its way neither caches its answer nor clears the newer read under its key", async () => {
+    forgetTexts();
+    let answerOld: (t: { body: string | null }) => void = () => {};
+    const old = readText("k", () => new Promise((resolve) => (answerOld = resolve)));
+    forgetTexts();
+    let reads = 0;
+    let answerNew: (t: { body: string | null }) => void = () => {};
+    const newer = readText("k", () => {
+      reads += 1;
+      return new Promise((resolve) => (answerNew = resolve));
+    });
+    answerOld({ body: "old" });
+    await old;
+    expect(cachedText("k")).toBeUndefined();
+    // A third caller still joins the newer read instead of asking again.
+    const joined = readText("k", () => {
+      reads += 1;
+      return Promise.resolve({ body: "third" });
+    });
+    answerNew({ body: "new" });
+    expect(await joined).toEqual({ body: "new" });
+    expect(await newer).toEqual({ body: "new" });
+    expect(reads).toBe(1);
+    expect(cachedText("k")).toEqual({ body: "new" });
+    forgetTexts();
   });
 });

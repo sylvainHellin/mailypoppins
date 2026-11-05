@@ -108,14 +108,19 @@ export function readText(key: string, read: () => Promise<CachedText>): Promise<
   if (hit) return Promise.resolve(hit);
   const pending = textReads.get(key);
   if (pending) return pending;
+  // A read that `forgetTexts` dropped on its way neither caches its answer nor clears a newer read under its key.
+  const settle = (): boolean => {
+    if (textReads.get(key) !== next) return false;
+    textReads.delete(key);
+    return true;
+  };
   const next = read().then(
     (text) => {
-      textReads.delete(key);
-      rememberText(key, text);
+      if (settle()) rememberText(key, text);
       return text;
     },
     (e: unknown) => {
-      textReads.delete(key);
+      settle();
       throw e;
     },
   );

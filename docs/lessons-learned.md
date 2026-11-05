@@ -3478,7 +3478,12 @@ A vitest test that types into a base-ui dialog right after `findByRole("dialog")
 
 base-ui's Dialog `initialFocus` focuses one animation frame after the popup mounts, so keys typed at once still reach what was behind it; a child focused synchronously through a callback ref closes that gap, but the popup then records that child as what had the focus before opening and drops the focus on `<body>` at close.
 An explicit `finalFocus` handing back the element captured in the ref fixes the return, and the capture must skip a focus already inside the child and never clear what it holds, because StrictMode attaches a callback ref twice and the second attach sees the child focused (`RsvpDialog.tsx`).
-`renderApp`'s default render has no StrictMode, so such a test passes `{ strict: true }`.
+`renderApp` renders under StrictMode as main.tsx does, so such a test needs nothing extra.
+
+## A Tauri listen mock must unlisten per registration (2026-11-05)
+
+Tauri's unlisten removes one registration by event id, and an effect can call it only once `listen` has answered, which is after a StrictMode remount has registered again; a mock that keeps one handler per event and clears it on unlisten drops the remount's listener, so menu events reach nothing in tests while the dev build works (`fixture/backend.ts`).
+An effect that reads from the daemon under StrictMode reads twice unless the remount joins the first read in flight (`readText` in `readerMode.ts`); a cache filled on answer is not enough, and a read that a reset dropped on its way must neither cache its answer nor clear the newer read under its key.
 
 ## State-gated key hints live on the overlay, not in KEYMAP (2026-11-05, PERSO-270)
 
