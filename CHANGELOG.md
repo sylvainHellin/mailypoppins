@@ -119,6 +119,7 @@ All notable changes to this project are documented in this file.
 - A mailbox name matches a store key first, then a sidebar label, then a server name, in every client, so a folder called Trash is reached by its name rather than the folder the server marks as trash (#0141).
 - Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
 - Desktop: a palette search ranks a match in an action's name above the same match in its section or keys, hides actions whose letters only turn up scattered (`test` no longer lists Toggle flag/star), and lists the action you ran from the palette most recently first among equal matches, also after a restart.
+- Desktop: the event form groups its fields into When, People and Details, shows a field's problem only once you leave it or try to create, and its availability grid is a timeline with a row per person, hour gridlines, a legend, the chosen time as a band across every row and a tooltip per slot (PERSO-255).
 
 ### Fixed
 - An occurrence deleted in Outlook as the only one of its series inside the sync window leaves mp's views at the next sync instead of lingering until the daily full re-read: a series master that Graph's delta re-sends alone is read with its instances over the window (PERSO-268).
