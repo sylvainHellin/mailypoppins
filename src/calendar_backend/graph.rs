@@ -67,7 +67,7 @@
 //! client's [`GraphClient`] in production, a scripted fake in the tests, so
 //! the paging, the fallbacks and the 410 handling run without a tenant.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -1378,6 +1378,12 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         // holds the series to, at the cost of one request per lone master.
         // An `instances` read that fails prunes nothing, and the next
         // baseline reaches what the delta left out.
+        //
+        // `instances` answers a plain occurrence in full, which still takes
+        // every detail from its master: it is flagged inheriting as a trimmed
+        // one is, so a later master whose `instances` cannot be read still
+        // reaches it through the store's re-derivation.
+        let mut plain_instances: HashSet<String> = HashSet::new();
         if !full_resync {
             let mut alone: Vec<String> = Vec::new();
             for id in &order {
@@ -1405,6 +1411,9 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                             let id = occurrence.id.clone();
                             if last.contains_key(&id) {
                                 continue;
+                            }
+                            if event_kind(occurrence.kind.as_deref()) == EventKind::Occurrence {
+                                plain_instances.insert(id.clone());
                             }
                             last.insert(id.clone(), Item::Upsert(occurrence));
                             order.push(id);
@@ -1451,6 +1460,10 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                                 {
                                     orphaned = true;
                                 }
+                            } else if plain_instances.contains(&id)
+                                && series.as_ref().is_some_and(|s| s.master.is_some())
+                            {
+                                result.inheriting.push(converted.id.clone());
                             }
                             result.upserts.push(converted);
                         }

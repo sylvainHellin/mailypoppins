@@ -1693,6 +1693,78 @@ async fn a_lone_master_whose_instances_cannot_be_read_keeps_its_occurrences() {
     }
 }
 
+/// PERSO-268: a plain occurrence the series' instances answer in full still
+/// takes its details from its master, as a trimmed one does, so a later
+/// rename that comes with a lone master whose instances cannot be read
+/// reaches it through the store's re-derivation.
+#[tokio::test]
+async fn an_occurrence_read_from_instances_still_inherits_a_later_rename() {
+    use crate::calendar_sync::sync_account;
+    use crate::store::{calendar as cache, Store};
+
+    const ONE_CALENDAR: &str =
+        r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
+    let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    let backend = |page: String, instances: HttpAnswer| {
+        GraphCalendarBackend::with_fetch(
+            "evoqs",
+            ScriptedFetch::default()
+                .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
+                .route(&delta, ok(&page))
+                .route(&cms_instances(), instances),
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let hour = |h| now + chrono::Duration::hours(h);
+    let cms = || {
+        cache::get_event(&store, "evoqs", "occ-cms")
+            .unwrap()
+            .expect("occ-cms cached")
+    };
+    let unreadable = || status(503, r#"{"error":{"code":"ServiceUnavailable"}}"#);
+
+    sync_account(&store, &backend(trimmed_page(), unreadable()), "evoqs", now)
+        .await
+        .unwrap();
+    assert_eq!(cms().summary, "CMS Team Meeting");
+
+    // Round A: the master comes alone and its instances answer `occ-cms` in
+    // full.
+    let page = delta_page(
+        &format!("{DELTA}round2"),
+        vec![delta_master(false, "CMS Team Meeting")],
+    );
+    let instances = view_page(vec![instance_cms("CMS Team Meeting")]);
+    let round_a = backend(page, ok(&instances));
+    sync_account(&store, &round_a, "evoqs", hour(1))
+        .await
+        .unwrap();
+    assert!(
+        round_a
+            .fetch
+            .sent()
+            .iter()
+            .any(|sent| sent.url.starts_with(&cms_instances())),
+        "the lone master's instances were asked for"
+    );
+    assert_eq!(cms().summary, "CMS Team Meeting");
+
+    // Round B: the series is renamed and its master comes alone again, but
+    // its instances cannot be read.
+    let mut renamed = delta_master(false, "CMS Weekly");
+    renamed["showAs"] = "tentative".into();
+    let page = delta_page(&format!("{DELTA}round3"), vec![renamed]);
+    let second = sync_account(&store, &backend(page, unreadable()), "evoqs", hour(2))
+        .await
+        .unwrap();
+    assert_eq!(second.baselines, 0, "an incremental sync: {second:?}");
+    let cms = cms();
+    assert_eq!(cms.summary, "CMS Weekly");
+    assert_eq!(cms.show_as, ShowAs::Tentative);
+}
+
 /// A backend that knows `master-cms` by its `UID` alone, as an older build
 /// cached it, and syncs the default calendar on from `round1`.
 fn detailless_sync(master_answer: HttpAnswer) -> (GraphCalendarBackend<ScriptedFetch>, String) {
