@@ -346,10 +346,59 @@ fn the_rows_stay_while_the_next_query_runs() {
 /// local part is its own keeps the short name.
 #[test]
 fn rows_that_would_read_the_same_are_named_by_their_address() {
+    let frame = waiting_rows(
+        "info@a.com, info@b.com, ada@example.org",
+        "room@a.org, room@b.org",
+        &[
+            "info@a.com",
+            "info@b.com",
+            "ada",
+            "\u{2302} room@a.org",
+            "\u{2302} room@b.org",
+        ],
+    );
+    assert!(!frame.contains(&name("info")), "{frame}");
+}
+
+/// A clashing name too long for the column is cut in the middle: the start,
+/// then the end of the address where the local parts are the same, else
+/// the end of the local part, which is where the rows differ.
+#[test]
+fn long_rows_that_would_read_the_same_keep_the_end_that_differs() {
+    waiting_rows(
+        "info@example.com, info@example.org, info@company-a.de, info@company-b.de, \
+         sylvain.hellin@x.de, sylvain.hellinger@y.de",
+        "",
+        &[
+            "info\u{2026}ple.com",
+            "info\u{2026}ple.org",
+            "info\u{2026}ny-a.de",
+            "info\u{2026}ny-b.de",
+            "sylv\u{2026}.hellin",
+            "sylv\u{2026}llinger",
+        ],
+    );
+    waiting_rows(
+        "",
+        "conference-room@site-a.org, conference-room@site-b.org, \
+         boardroom-north-1@example.org, boardroom-north-2@example.org",
+        &[
+            "\u{2302} con\u{2026}-a.org",
+            "\u{2302} con\u{2026}-b.org",
+            "\u{2302} boa\u{2026}orth-1",
+            "\u{2302} boa\u{2026}orth-2",
+        ],
+    );
+}
+
+/// The frame of a form inviting `to` and booking `rooms` while their
+/// availability is on its way, after checking that each of `names` names a
+/// waiting row.
+fn waiting_rows(to: &str, rooms: &str, names: &[&str]) -> String {
     let mut app = calendar_fixture();
     let mut form = form();
-    form.to = "info@a.com, info@b.com, ada@example.org".into();
-    form.rooms = "room@a.org, room@b.org".into();
+    form.to = to.into();
+    form.rooms = rooms.into();
     let key = form.free_busy_key().unwrap();
     app.overlay = Overlay::EventForm(Box::new(form));
     app.calendar_view.availability = Availability {
@@ -360,16 +409,10 @@ fn rows_that_would_read_the_same_are_named_by_their_address() {
     };
     let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
     let waiting = "\u{2508}".repeat(52);
-    for who in [
-        "info@a.com",
-        "info@b.com",
-        "ada",
-        "\u{2302} room@a.org",
-        "\u{2302} room@b.org",
-    ] {
+    for who in names {
         assert_eq!(track(&frame, who), waiting, "{who}");
     }
-    assert!(!frame.contains(&name("info")), "{frame}");
+    frame
 }
 
 /// Answers `calendar.freebusy` with a fresh operation id each call, or

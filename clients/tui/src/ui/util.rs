@@ -44,6 +44,21 @@ pub(super) fn take_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// The longest suffix of `s` that fits in `max_width` display cells.
+pub(super) fn take_width_end(s: &str, max_width: usize) -> String {
+    let mut out: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for c in s.chars().rev() {
+        let w = char_display_width(c);
+        if used + w > max_width {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.into_iter().rev().collect()
+}
+
 /// Display width of a single char, treating control chars as zero-width so a
 /// stray control byte can never make the window math overshoot.
 fn char_display_width(c: char) -> usize {

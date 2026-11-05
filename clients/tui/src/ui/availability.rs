@@ -26,7 +26,7 @@ use mp_client::format::{availability_row, slot_of};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::util::{display_width, truncate};
+use super::util::{display_width, take_width, take_width_end, truncate};
 use crate::app::{Availability, EventForm, AVAILABILITY_INTERVAL};
 use crate::theme;
 
@@ -123,28 +123,52 @@ fn name_column(text: &str) -> String {
     format!("{:INDENT$}{cut}{:pad$}", "", "")
 }
 
+/// `text` in `width` cells: whole when it fits, else its first third, an
+/// ellipsis and as much of its end as fits.
+fn cut_middle(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_string();
+    }
+    let head = take_width(text, width / 3);
+    let tail = take_width_end(text, width - display_width(&head) - 1);
+    format!("{head}\u{2026}{tail}")
+}
+
 /// Each row's name column: "You" for the user, the address's local part
 /// for the others, after the glyph for a room. Rows whose names would read
-/// the same once cut (info@a.com and info@b.com) show as much of their
-/// whole address as fits instead, so they stay apart.
+/// the same once cut name themselves by the end that tells them apart
+/// instead: the whole address when another row has the same local part
+/// (info@a.com and info@b.com), else the local part, either cut in the
+/// middle to its start and as much of its end as fits when too long. Two
+/// rows that differ only in a middle part that does not fit still read
+/// the same.
 fn row_names(rows: &[Row]) -> Vec<String> {
+    fn local(row: &Row) -> &str {
+        row.address.split('@').next().unwrap_or_default()
+    }
+    let glyph = |row: &Row| if row.kind == Kind::Room { ROOM } else { "" };
     let column = |row: &Row, text: &str| match row.kind {
         Kind::You => name_column("You"),
-        Kind::Room => name_column(&format!("{ROOM}{text}")),
-        Kind::Required | Kind::Optional => name_column(text),
+        _ => name_column(&format!("{}{text}", glyph(row))),
     };
-    let short: Vec<String> = rows
-        .iter()
-        .map(|row| column(row, row.address.split('@').next().unwrap_or_default()))
-        .collect();
+    let short: Vec<String> = rows.iter().map(|row| column(row, local(row))).collect();
     rows.iter()
         .zip(&short)
         .map(|(row, cut)| {
-            if row.kind != Kind::You && short.iter().filter(|other| *other == cut).count() > 1 {
-                column(row, &row.address)
-            } else {
-                cut.clone()
+            if row.kind == Kind::You || short.iter().filter(|other| *other == cut).count() < 2 {
+                return cut.clone();
             }
+            let shared = rows
+                .iter()
+                .filter(|other| local(other) == local(row))
+                .count()
+                > 1;
+            let text = if shared {
+                row.address.as_str()
+            } else {
+                local(row)
+            };
+            column(row, &cut_middle(text, NAME - 1 - display_width(glyph(row))))
         })
         .collect()
 }
