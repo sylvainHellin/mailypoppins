@@ -40,8 +40,12 @@
 //! A delta never names an occurrence that left its series (deleted, or ended
 //! by a new rule) but re-sends the series whole: a master that comes with
 //! some of its occurrences is listed in [`SyncResult::resent_series`], and
-//! the store drops its cached occurrences that did not come; a removed
-//! master takes its occurrences along in the store.
+//! the store drops its cached occurrences that did not come. A master that
+//! comes alone, as when its only occurrence in the window was deleted, has
+//! its occurrences read through
+//! `GET /me/calendars/{id}/events/{master}/instances` over the window and is
+//! listed the same way; a removed master takes its occurrences along in the
+//! store.
 //!
 //! Every request sends `Prefer: IdType="ImmutableId"`. No
 //! `Prefer: outlook.timezone` is sent, so times come back in UTC and the
@@ -63,7 +67,7 @@
 //! client's [`GraphClient`] in production, a scripted fake in the tests, so
 //! the paging, the fallbacks and the 410 handling run without a tenant.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -1234,6 +1238,38 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
             .ok_or_else(|| MasterError::Other(anyhow!("series master without iCalUId")))
     }
 
+    /// The occurrences of the series `master_id` of `calendar` over `window`,
+    /// read whole through `instances`, page after page. The answer names
+    /// every occurrence and exception the series holds there and none of the
+    /// ones deleted, which a delta never reports.
+    async fn series_instances(
+        &self,
+        calendar: &str,
+        master_id: &str,
+        window: CalendarWindow,
+    ) -> Result<Vec<Box<wire::Event>>, WalkError> {
+        let url = format!(
+            "{GRAPH_BASE}/me/calendars/{}/events/{}/instances?{}",
+            encode_id(calendar),
+            encode_id(master_id),
+            window_query(window)
+        );
+        let walked = self.walk(&url, false).await?;
+        Ok(walked
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Upsert(mut event) if is_instance(event.kind.as_deref()) => {
+                    event
+                        .series_master_id
+                        .get_or_insert_with(|| master_id.to_string());
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Fold a walked chain into a [`SyncResult`]: the last word on each id
     /// wins, series masters are resolved (afresh on a baseline, else only
     /// the ones not known yet), and each event converted.
@@ -1249,6 +1285,7 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
     async fn collect(
         &self,
         calendar: &Calendar,
+        window: CalendarWindow,
         walked: Walked,
         full_resync: bool,
     ) -> (SyncResult, bool) {
@@ -1333,9 +1370,22 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         // master and every occurrence of the window, never naming one that
         // left (probes of 2026-11-04, `.agents/research/`). A master that came
         // with at least one of its occurrences is such a series, whose cached
-        // occurrences the store holds to what came; a master alone prunes
-        // nothing, so a delta that re-sent no occurrence drops none.
+        // occurrences the store holds to what came.
+        //
+        // A master that came alone may have lost its last occurrence in the
+        // window (PERSO-268), or changed only out of it: its `instances` over
+        // the window are the series' occurrences there, which the store
+        // holds the series to, at the cost of one request per lone master.
+        // An `instances` read that fails prunes nothing, and the next
+        // baseline reaches what the delta left out.
+        //
+        // `instances` answers a plain occurrence in full, which still takes
+        // every detail from its master: it is flagged inheriting as a trimmed
+        // one is, so a later master whose `instances` cannot be read still
+        // reaches it through the store's re-derivation.
+        let mut plain_instances: HashSet<String> = HashSet::new();
         if !full_resync {
+            let mut alone: Vec<String> = Vec::new();
             for id in &order {
                 let Some(Item::Upsert(event)) = last.get(id) else {
                     continue;
@@ -1350,6 +1400,38 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                 });
                 if brought {
                     result.resent_series.push(id.clone());
+                } else {
+                    alone.push(id.clone());
+                }
+            }
+            for master in alone {
+                match self.series_instances(&calendar.id, &master, window).await {
+                    Ok(occurrences) => {
+                        for occurrence in occurrences {
+                            let id = occurrence.id.clone();
+                            if last.contains_key(&id) {
+                                continue;
+                            }
+                            if event_kind(occurrence.kind.as_deref()) == EventKind::Occurrence {
+                                plain_instances.insert(id.clone());
+                            }
+                            last.insert(id.clone(), Item::Upsert(occurrence));
+                            order.push(id);
+                        }
+                        result.resent_series.push(master);
+                    }
+                    Err(err) => {
+                        let why = match err {
+                            WalkError::Reset(why) | WalkError::Unsupported(why) => why,
+                            WalkError::Forbidden => "HTTP 403".to_string(),
+                            WalkError::Failed(err) => format!("{err:#}"),
+                        };
+                        warn!(
+                            "[calendar] {}: could not read the occurrences of series {master} \
+                             in {}: {why}; its cached occurrences stay until the next baseline",
+                            self.account, calendar.name
+                        );
+                    }
                 }
             }
         }
@@ -1378,6 +1460,10 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
                                 {
                                     orphaned = true;
                                 }
+                            } else if plain_instances.contains(&id)
+                                && series.as_ref().is_some_and(|s| s.master.is_some())
+                            {
+                                result.inheriting.push(converted.id.clone());
                             }
                             result.upserts.push(converted);
                         }
@@ -1504,7 +1590,7 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
             path.as_str()
         );
         let link = walked.delta_link.clone();
-        let (mut result, orphaned) = self.collect(calendar, walked, full_resync).await;
+        let (mut result, orphaned) = self.collect(calendar, window, walked, full_resync).await;
         result.path = Some(path.as_str().to_string());
         if orphaned {
             warn!(
