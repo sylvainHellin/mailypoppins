@@ -3478,6 +3478,10 @@ base-ui's Dialog `initialFocus` focuses one animation frame after the popup moun
 An explicit `finalFocus` handing back the element captured in the ref fixes the return, and the capture must skip a focus already inside the child and never clear what it holds, because StrictMode attaches a callback ref twice and the second attach sees the child focused (`RsvpDialog.tsx`).
 `renderApp`'s default render has no StrictMode, so such a test passes `{ strict: true }`.
 
+## State-gated key hints live on the overlay, not in KEYMAP (2026-11-05, PERSO-270)
+
+A hint bar or footer whose keys depend on an overlay's state cannot come from KEYMAP, which is static: the state-gated list stays on the overlay (`EventCardOverlay::key_hints`) and every surface reads it, so the card's footer and the hint bar cannot drift.
+
 ## A help row's words join the palette's search text (2026-11-04, PERSO-255)
 
 A new KEYMAP row's description joins the desktop palette's search text with its section title, so a word in either can pull the row into another row's ranking test: "edit form" in the event card's `p` row made "edit event" match two rows in `rank.test.ts`.

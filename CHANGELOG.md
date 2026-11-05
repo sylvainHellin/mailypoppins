@@ -121,6 +121,7 @@ All notable changes to this project are documented in this file.
 - Desktop: a palette search ranks a match in an action's name above the same match in its section or keys, hides actions whose letters only turn up scattered (`test` no longer lists Toggle flag/star), and lists the action you ran from the palette most recently first among equal matches, also after a restart.
 
 ### Fixed
+- The TUI hint bar names the event card (EVENT) and lists the keys it takes for the event in view, the same set as the card's own footer (PERSO-270).
 - Desktop: the RSVP dialog takes the focus as it opens, so keys typed straight after `tv`, `V` or Respond follow its order and Tab from Decline reaches the comment; closing still returns the focus to the email or event it came from (PERSO-269).
 - An occurrence or a series deleted in Outlook leaves mp's views at the next sync, and the TUI event form keeps the availability count at 80x24 by scrolling its fields with the cursor (PERSO-255).
 - An answer to a meeting with a comment and Send response off is refused before the server call, in the daemon on every backend and on the TUI respond overlay's and the desktop RSVP dialog's error line, instead of failing at Graph with HTTP 400 (PERSO-255).
