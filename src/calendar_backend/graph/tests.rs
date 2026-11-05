@@ -1484,6 +1484,85 @@ async fn a_master_change_reaches_the_cached_occurrences_it_trimmed() {
     assert_eq!(summary("occ-ref"), "Reformation Day");
 }
 
+/// PERSO-268: Outlook deletes the only occurrence of a series inside the
+/// window, and the incremental delta re-sends the series master alone, with
+/// no occurrence to prune the series to and no `@removed` for the deleted one
+/// (probes of 2026-11-04, `.agents/research/`). The series' instances over
+/// the window, which Graph answers empty, are the truth the cache must reach
+/// with that sync, not with the next day's baseline.
+#[tokio::test]
+async fn a_master_resent_alone_after_its_only_occurrence_was_deleted_leaves_no_ghost() {
+    use crate::calendar_sync::sync_account;
+    use crate::store::{calendar as cache, Store};
+
+    const ONE_CALENDAR: &str =
+        r#"{"value":[{"id":"AAMkCal-default","name":"Kalender","isDefaultCalendar":true}]}"#;
+    // What `GET .../events/master-cms/instances` over the window answers once
+    // the occurrence is deleted: nothing, through either route to the series.
+    const NO_INSTANCES: &str = r#"{"value":[]}"#;
+    let delta = format!("{BASE}/me/calendars/AAMkCal-default/calendarView/delta?");
+    let backend = |page: String| {
+        GraphCalendarBackend::with_fetch(
+            "evoqs",
+            ScriptedFetch::default()
+                .route(&format!("{BASE}/me/calendars"), ok(ONE_CALENDAR))
+                .route(&delta, ok(&page))
+                .route(
+                    &format!("{BASE}/me/calendars/AAMkCal-default/events/master-cms/instances"),
+                    ok(NO_INSTANCES),
+                )
+                .route(
+                    &format!("{BASE}/me/events/master-cms/instances"),
+                    ok(NO_INSTANCES),
+                ),
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let viewed = || -> Vec<String> {
+        cache::events_in_range(&store, &["evoqs"], window(), chrono_tz::UTC, false)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect()
+    };
+
+    sync_account(&store, &backend(trimmed_page()), "evoqs", now)
+        .await
+        .unwrap();
+    assert_eq!(viewed(), ["occ-cms", "occ-ref"]);
+
+    // `occ-cms`, the only occurrence of the CMS series in the window, is
+    // deleted in Outlook: the delta re-sends its master alone.
+    let page = delta_page(
+        &format!("{DELTA}round2"),
+        vec![delta_master(false, "CMS Team Meeting")],
+    );
+    let second = sync_account(
+        &store,
+        &backend(page),
+        "evoqs",
+        now + chrono::Duration::hours(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.baselines, 0, "an incremental sync: {second:?}");
+    assert_eq!(
+        cache::get_event(&store, "evoqs", "occ-cms").unwrap(),
+        None,
+        "the deleted occurrence stays in the cache as a ghost"
+    );
+    assert_eq!(viewed(), ["occ-ref"]);
+    assert!(second.changed(), "{second:?}");
+    assert!(
+        cache::get_series(&store, "evoqs", "master-cms")
+            .unwrap()
+            .is_some(),
+        "the series itself is still on the server"
+    );
+}
+
 /// A backend that knows `master-cms` by its `UID` alone, as an older build
 /// cached it, and syncs the default calendar on from `round1`.
 fn detailless_sync(master_answer: HttpAnswer) -> (GraphCalendarBackend<ScriptedFetch>, String) {
