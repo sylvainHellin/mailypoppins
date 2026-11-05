@@ -536,7 +536,10 @@ fn e_on_the_card_opens_the_invitations_ics_only_for_a_mail() {
 }
 
 /// `j`/`Down` and `k`/`Up` scroll a card taller than its area by a line:
-/// the last lines come into view and go again, and `k` stops at the top.
+/// the last lines come into view and go again, and `k` stops at the top;
+/// `j` stops with the last line on the area's bottom row, so the first `k`
+/// after pressing past it moves the view at once; a card that fits does
+/// not scroll.
 #[test]
 fn j_and_k_scroll_the_card() {
     let mut app = calendar_fixture();
@@ -559,6 +562,37 @@ fn j_and_k_scroll_the_card() {
     app.handle_key(KeyEvent::from(KeyCode::Up));
     assert_eq!(scroll(&app), 0);
     assert!(!shows_the_body(&mut app));
+
+    // The frame's rows holding `text`, by index.
+    let row_of = |frame: &str, text: &str| {
+        frame
+            .lines()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("no row holds {text:?}:\n{frame}"))
+    };
+    for _ in 0..30 {
+        app.handle_key(key('j'));
+    }
+    let frame = frame_snapshot(&mut app, WIDTH, 20);
+    let last = row_of(&frame, "Bitte Helm mitbringen.");
+    let footer = row_of(&frame, "j/k scroll");
+    assert_eq!(
+        last + 1,
+        footer,
+        "the last line sits on the bottom row:\n{frame}"
+    );
+    let link = row_of(&frame, "Link ");
+    let bottom = scroll(&app);
+    app.handle_key(key('k'));
+    assert_eq!(scroll(&app), bottom - 1, "one k moves the view up by one");
+    let frame = frame_snapshot(&mut app, WIDTH, 20);
+    assert!(!frame.contains("Bitte Helm mitbringen."), "{frame}");
+    assert_eq!(row_of(&frame, "Link "), link + 1, "{frame}");
+
+    // A frame the whole card fits in does not scroll at all.
+    app.handle_key(key('j'));
+    frame_snapshot(&mut app, WIDTH, HEIGHT);
+    assert_eq!(scroll(&app), 0, "a card that fits does not scroll");
 }
 
 /// `q` and `Enter` close the card, as `Esc` does, and leave the view

@@ -299,16 +299,18 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
     if app.overlay.is_active() {
         widgets::dim_background(frame, area);
     }
-    // The `Help`/`Activity`/`Search`/`Compose` renderers take `&mut App`
-    // (they clamp scroll offsets against the computed viewport), so they can't
-    // run while holding an immutable borrow of `app.overlay`. Dispatch those
-    // via a discriminant check; the payload-carrying overlays render by ref.
+    // The `Help`/`Activity`/`Search`/`Compose`/`EventCard` renderers take
+    // `&mut App` (they clamp scroll offsets against the computed viewport), so
+    // they can't run while holding an immutable borrow of `app.overlay`.
+    // Dispatch those via a discriminant check; the payload-carrying overlays
+    // render by ref.
     match &app.overlay {
         Overlay::None
         | Overlay::Help
         | Overlay::Activity
         | Overlay::Search
-        | Overlay::Compose(_) => {}
+        | Overlay::Compose(_)
+        | Overlay::EventCard(_) => {}
         Overlay::Confirm(dialog) => overlays::render_confirm_dialog(dialog, frame, area),
         Overlay::Attachment(picker) => overlays::render_attachment_picker(picker, frame, area),
         Overlay::Account(picker) => {
@@ -324,7 +326,6 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::EventRemove(overlay) => overlays::render_event_remove(overlay, frame, area),
         Overlay::EventScope(chooser) => overlays::render_event_scope(chooser, frame, area),
         Overlay::Calendars(overlay) => calendar::render_calendars_overlay(overlay, frame, area),
-        Overlay::EventCard(card) => calendar::render_event_card(app, card, frame, area),
         Overlay::Reminders(overlay) => {
             reminders::render_reminders_overlay(app, overlay, frame, area)
         }
@@ -340,6 +341,8 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         search::render_search_overlay(app, frame, area);
     } else if matches!(app.overlay, Overlay::Compose(_)) {
         compose::render_compose_wizard(app, frame, area);
+    } else if matches!(app.overlay, Overlay::EventCard(_)) {
+        calendar::render_event_card(app, frame, area);
     }
 
     // which-key popup (#0092): when a mnemonic family leader is pending and no

@@ -29,7 +29,7 @@ use mp_client::format::{
 
 use super::super::app::{
     day_part, App, CalendarEvent, CalendarEventTime, CalendarLayout, CalendarsOverlay, DayPart,
-    EventCardOverlay, Tz,
+    Overlay, Tz,
 };
 use super::super::theme;
 use super::util::{display_width, truncate};
@@ -957,12 +957,25 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// The `Enter` overlay: the same card, scrollable, with its keys.
-pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut Frame, area: Rect) {
+/// The `Enter` overlay: the same card, scrollable, with its keys. The scroll
+/// is clamped here, where the rows the wrapped lines take are known, so the
+/// last line stops on the area's bottom row and `k` moves the view at once
+/// however often `j` was pressed past it (PERSO-270), the help overlay's
+/// pattern.
+pub(super) fn render_event_card(app: &mut App, frame: &mut Frame, area: Rect) {
+    let Overlay::EventCard(card) = &app.overlay else {
+        return;
+    };
     let names = calendar_names(&app.calendar_view.calendars);
     // The proposal `p` takes is marked when there is more than one to pick.
     let chosen = (card.proposals().len() > 1).then_some(card.proposal);
     let lines = event_lines(&card.event, app.calendar_view.zone, &names, chosen);
+    let keys = card
+        .key_hints()
+        .iter()
+        .map(|(keys, label)| format!("{keys} {label}"))
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
     let width = area.width.saturating_sub(8).clamp(40, 96);
     // The card's lines, the border and the footer, up to the frame.
     let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(4));
@@ -977,19 +990,15 @@ pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut 
         return;
     };
     let stack = modal_stack_areas(inner, 0, 1);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((card.scroll, 0)),
-        stack.content,
-    );
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let rows = u16::try_from(paragraph.line_count(stack.content.width)).unwrap_or(u16::MAX);
+    let max_scroll = rows.saturating_sub(stack.content.height);
+    let Overlay::EventCard(card) = &mut app.overlay else {
+        return;
+    };
+    card.scroll = card.scroll.min(max_scroll);
+    frame.render_widget(paragraph.scroll((card.scroll, 0)), stack.content);
     if let Some(footer) = stack.footer {
-        let keys = card
-            .key_hints()
-            .iter()
-            .map(|(keys, label)| format!("{keys} {label}"))
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ");
         let keys = format!("  {keys}");
         frame.render_widget(
             Paragraph::new(Span::styled(

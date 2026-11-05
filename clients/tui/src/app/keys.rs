@@ -2183,7 +2183,9 @@ impl App {
     /// The event card's keys (PERSO-200): `j`/`k` scroll, `V` answers,
     /// `m` opens the invitation mail and `e` its `.ics`, `p` opens the event
     /// form at the attendee's proposed time and `Tab` picks the next
-    /// proposal (PERSO-255), `Esc`, `q` and `Enter` close it.
+    /// proposal (PERSO-255), `Esc`, `q` and `Enter` close it. `j` has no
+    /// bound here: the render clamps the scroll to the card's wrapped rows
+    /// (PERSO-270), the only place that knows them.
     fn handle_event_card_key(&mut self, key: KeyEvent) -> Option<Message> {
         let Overlay::EventCard(card) = &mut self.overlay else {
             return None;
