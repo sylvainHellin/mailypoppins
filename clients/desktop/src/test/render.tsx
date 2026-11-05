@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "@/App";
@@ -5,14 +6,26 @@ import { resetMock } from "@/test/tauri-mock";
 import { forgetTexts } from "@/app/readerMode";
 import { setWidth } from "@/test/setup";
 
-/** Render the whole app against the fixture mock, at a window width. */
-export function renderApp(width = 1400, before?: () => void) {
+/**
+ * Render the whole app against the fixture mock, at a window width. `strict`
+ * wraps it in StrictMode as main.tsx does, so effects and callback refs run
+ * attach, detach, attach as in every dev build.
+ */
+export function renderApp(width = 1400, before?: () => void, { strict = false }: { strict?: boolean } = {}) {
   resetMock();
   forgetTexts();
   before?.();
   setWidth(width);
   const user = userEvent.setup();
-  const utils = render(<App />);
+  const utils = render(
+    strict ? (
+      <StrictMode>
+        <App />
+      </StrictMode>
+    ) : (
+      <App />
+    ),
+  );
   return { user, ...utils };
 }
 

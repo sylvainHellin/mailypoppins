@@ -43,13 +43,15 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   // and Tab would land on the list instead of the comment (PERSO-269), so the
   // list takes the focus as it mounts. The popup then sees the list as what
   // had the focus before it opened, so closing hands the focus back to what
-  // really had it.
+  // really had it. StrictMode attaches the ref twice, the second time with
+  // the focus already in the list, so only a focus from outside the list is
+  // recorded and it is never cleared.
   const returnTo = useRef<HTMLElement | null>(null);
   const attachList = useCallback((node: HTMLDivElement | null) => {
     listRef.current = node;
     if (!node) return;
     const before = document.activeElement;
-    returnTo.current = before instanceof HTMLElement && !node.contains(before) ? before : null;
+    if (before instanceof HTMLElement && !node.contains(before)) returnTo.current = before;
     node.focus();
   }, []);
   const finalFocus = useCallback(() => (returnTo.current?.isConnected ? returnTo.current : true), []);

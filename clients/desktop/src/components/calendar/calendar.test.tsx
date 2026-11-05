@@ -36,8 +36,8 @@ async function jumpTo(user: User, day: string) {
 }
 
 /** The Calendar view on the fixture's week, the agenda from Wednesday 2099-10-14. */
-async function openCalendar(before?: () => void) {
-  const r = renderApp(1400, before);
+async function openCalendar(before?: () => void, { strict = false } = {}) {
+  const r = renderApp(1400, before, { strict });
   await shellReady();
   await r.user.keyboard(" a");
   await screen.findByRole("region", { name: "Calendar" });
@@ -309,7 +309,8 @@ describe("V and the respond choice in the Calendar view", () => {
   });
 
   it("V and the card's Respond put the focus in the choice as it opens, so keys typed at once follow its order (PERSO-269)", async () => {
-    const { user, list } = await openCalendar();
+    // StrictMode attaches the list's ref twice, as every dev build does.
+    const { user, list } = await openCalendar(undefined, { strict: true });
     const respond = () => within(card()).getByRole("button", { name: "Respond" });
     // Each way in, and where the focus goes back to: the event the cursor is on, or the button pressed.
     const ways: [() => Promise<void>, () => HTMLElement][] = [
