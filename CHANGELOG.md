@@ -120,8 +120,11 @@ All notable changes to this project are documented in this file.
 - Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
 - Desktop: a palette search ranks a match in an action's name above the same match in its section or keys, hides actions whose letters only turn up scattered (`test` no longer lists Toggle flag/star), and lists the action you ran from the palette most recently first among equal matches, also after a restart.
 - Desktop: the event form groups its fields into When, People and Details, shows a field's problem only once you leave it or try to create, and its availability grid is a timeline with a row per person, hour gridlines, a legend, the chosen time as a band across every row and a tooltip per slot (PERSO-255).
+- TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the end of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- TUI: the focused row of a modal form or chooser (event form, RSVP, scope chooser, cancel or delete, calendars, reminders) stays legible on a light terminal in the terminal theme.
+- TUI event card: `j`/Down stops when the last line reaches the bottom of the card, a card that fits does not scroll, and `k` responds at once after pressing past the end (PERSO-270).
 - Desktop: the reader's text view and the draft preview ask the daemon once per message or draft in dev builds too, through one in-flight join (`joinRead`), and the test harness renders under StrictMode as the app does.
 - An occurrence deleted in Outlook as the only one of its series inside the sync window leaves mp's views at the next sync instead of lingering until the daily full re-read: a series master that Graph's delta re-sends alone is read with its instances over the window (PERSO-268).
 - The TUI help's EVENT CARD section lists every key the card takes (V, E, D, p, Tab, m, e, j/k, Esc / q / Enter), worded for the card, and the website's and the desktop's key lists follow (PERSO-270).

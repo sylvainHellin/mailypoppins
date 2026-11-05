@@ -3486,6 +3486,16 @@ Tauri's unlisten removes one registration by event id, and an effect can call it
 An effect that reads from the daemon under StrictMode reads twice unless the remount joins the first read in flight (`joinRead` in `src/lib/inflight.ts`, which `readText` and the draft preview use); a cache filled on answer is not enough, and a read that a reset dropped on its way must neither cache its answer nor clear the newer read under its key.
 A read joined only while in flight costs nothing in release, since nothing is cached; key it on every argument and generation the answer depends on, or a re-read joins a stale request.
 
+## TUI colours that hold on a light terminal (2026-11-05, PERSO-255)
+
+`theme.selection` is a foreground for the `surface` cursor row only: on a modal's Reset ground in the terminal theme it is White and vanishes on a light terminal, so a modal's focused row uses `widgets::focus_style` (`heading`, bold, Magenta in the terminal theme).
+A full-block fill on two adjacent TUI rows merges into one tall block; the seven-eighths block (U+2587) keeps each row's busy cells apart.
+In the default theme `theme.code` equals `theme.selection`, so the golden frames' style runs tag a `code`-coloured cell as `fg:selection`, and the goldens do not tag `heading` at all, so a focus cue in that colour shows there only as `bold`.
+
+## A wrapped Paragraph clamps its scroll by its rendered rows (2026-11-05, PERSO-270)
+
+A wrapped `Paragraph` cannot clamp its scroll by `lines.len()`: the event card counts its rendered rows with `Paragraph::line_count(width)` (ratatui feature `unstable-rendered-line-info`, which a ratatui upgrade may rename) and clamps the stored offset in the `&mut App` renderer, so `k` moves the view at once however often `j` was pressed past the end.
+
 ## State-gated key hints live on the overlay, not in KEYMAP (2026-11-05, PERSO-270)
 
 A hint bar or footer whose keys depend on an overlay's state cannot come from KEYMAP, which is static: the state-gated list stays on the overlay (`EventCardOverlay::key_hints`) and every surface reads it, so the card's footer and the hint bar cannot drift.
