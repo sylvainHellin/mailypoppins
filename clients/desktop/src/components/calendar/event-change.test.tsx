@@ -31,8 +31,8 @@ const noticed = (text: string | RegExp) =>
 type User = ReturnType<typeof renderApp>["user"];
 
 /** The Calendar view anchored on Wednesday 2099-10-14, the cursor on `event`. */
-async function calendarOn(event: string) {
-  const r = renderApp(1400);
+async function calendarOn(event: string, before?: () => void) {
+  const r = renderApp(1400, before);
   await shellReady();
   await r.user.keyboard(" a");
   await screen.findByRole("region", { name: "Calendar" });
@@ -405,6 +405,30 @@ describe("an occurrence of a series", () => {
     await r.user.click(within(alone).getByRole("button", { name: /Save changes/ }));
     await waitFor(() => expect(callsOf("event_update")).toHaveLength(2));
     expect(callsOf("event_update")[1]).toEqual({ params: { account: "home", event: "AAMkAD-weekly-20991020", scope: "occurrence", fields: { reminder: 5 } } });
+  });
+
+  it("a Start moved past the series' last day shows the rule's problem once Start is left", async () => {
+    const r = await calendarOn("AAMkAD-weekly-20991020", () => {
+      const ours = { is_organizer: true, own_response: "organizer" as const };
+      mock.events = mock.events.map((e) => (e.series_master_id === "AAMkAD-weekly" ? { ...e, ...ours } : e));
+      mock.series = mock.series.map((s) =>
+        s.master.id === "AAMkAD-weekly" ? { master: { ...s.master, ...ours }, recurrence: { frequency: "weekly", interval: 1, weekdays: ["tuesday"], until: "2099-10-27" } } : s,
+      );
+    });
+    await r.user.keyboard("E");
+    const ask = await screen.findByRole("dialog", { name: "Edit a recurring event" });
+    await r.user.click(within(ask).getByRole("button", { name: /The whole series/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit the whole series" });
+    expect(within(dialog).getByLabelText("Ends")).toHaveValue("until");
+    const end = within(dialog).getByLabelText("End");
+    await r.user.clear(end);
+    await r.user.type(end, "2099-11-03T09:00");
+    const start = within(dialog).getByLabelText("Start");
+    await r.user.clear(start);
+    await r.user.type(start, "2099-11-03T08:30");
+    await r.user.tab();
+    expect(dialog.querySelector('[data-slot="event-error"]')).toHaveTextContent("The series ends before its first day, 2099-11-03");
+    expect(within(dialog).getByRole("button", { name: /Save changes/ })).toBeDisabled();
   });
 
   it("D on someone else's occurrence says to decline it before asking any scope", async () => {

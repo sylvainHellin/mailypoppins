@@ -11,8 +11,8 @@ const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c)
 const form = () => screen.findByRole("dialog", { name: /New event/ });
 const alertOf = (dialog: HTMLElement) => dialog.querySelector('[data-slot="event-error"]');
 
-async function openForm() {
-  const r = renderApp();
+async function openForm(before?: () => void) {
+  const r = renderApp(1400, before);
   await shellReady();
   await r.user.keyboard(" a");
   await screen.findByRole("region", { name: "Calendar" });
@@ -132,6 +132,16 @@ describe("the event form", () => {
     await user.keyboard("{Meta>}{Enter}{/Meta}");
     await waitFor(() => expect(alertOf(dialog)).toHaveTextContent("The event needs a title"));
     expect(callsOf("event_create")).toHaveLength(0);
+  });
+
+  it("Enter in a field skips a disabled one: Location goes to Reminder past a Teams the calendar cannot make", async () => {
+    const { user, dialog } = await openForm(() => {
+      mock.calendars = mock.calendars.map((c) => ({ ...c, features: c.features.filter((f) => f !== "online-meeting") }));
+    });
+    expect(within(dialog).getByLabelText("Teams meeting")).toBeDisabled();
+    await user.click(within(dialog).getByLabelText("Location"));
+    await user.keyboard("{Enter}");
+    expect(within(dialog).getByLabelText("Reminder")).toHaveFocus();
   });
 
   it("shows a daemon refusal verbatim and stays open with what was typed", async () => {

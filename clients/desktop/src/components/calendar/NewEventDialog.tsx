@@ -34,15 +34,16 @@ export type NewEventDialogProps = { dialog: EventDialog | null; onOpenChange: (o
 
 /**
  * The problems a field the user has left reveals: the start and the end
- * reveal each other's, since moving one can put the other wrong, and every
- * control of the Repeats section reveals the rule's.
+ * reveal each other's, since moving one can put the other wrong, and the
+ * rule's, which reads its first day from the start (a series' last day can
+ * fall before it); every control of the Repeats section reveals the rule's.
  */
 const REVEALS: Record<string, ProblemField[]> = {
   calendar: ["calendar"],
   title: ["title"],
-  allDay: ["start", "end"],
-  start: ["start", "end"],
-  end: ["start", "end"],
+  allDay: ["start", "end", "repeat"],
+  start: ["start", "end", "repeat"],
+  end: ["start", "end", "repeat"],
   to: ["to"],
   optional: ["optional"],
   rooms: ["rooms"],
@@ -60,7 +61,7 @@ const SELECT =
   "h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50";
 
 /**
- * Enter in a one-line field moves to the next one, Cmd+Enter or Ctrl+Enter
+ * Enter in a one-line field moves to the next enabled one, Cmd+Enter or Ctrl+Enter
  * creates, Escape cancels. The first problem with the fields as typed shows
  * in its alert once the field it is about was left or a create was tried,
  * the daemon's refusal at once, and the form stays open with what was typed.
@@ -130,7 +131,8 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
     }
     if (!(e.target instanceof HTMLInputElement) || e.target.type === "checkbox") return;
     e.preventDefault();
-    const order = [...(formRef.current?.querySelectorAll<HTMLElement>("[data-field], [data-submit]") ?? [])];
+    // A disabled control takes no focus, so Enter would stop on it.
+    const order = [...(formRef.current?.querySelectorAll<HTMLElement>("[data-field]:not(:disabled), [data-submit]:not(:disabled)") ?? [])];
     order[order.indexOf(e.target) + 1]?.focus();
   };
 
