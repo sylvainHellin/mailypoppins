@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
@@ -38,6 +38,21 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const dispatch = useDispatch();
   const id = useId();
   const listRef = useRef<HTMLDivElement>(null);
+  // The popup moves the focus to the list a frame after it opens; keys typed
+  // before that would start from the email or the event behind the dialog
+  // and Tab would land on the list instead of the comment (PERSO-269), so the
+  // list takes the focus as it mounts. The popup then sees the list as what
+  // had the focus before it opened, so closing hands the focus back to what
+  // really had it.
+  const returnTo = useRef<HTMLElement | null>(null);
+  const attachList = useCallback((node: HTMLDivElement | null) => {
+    listRef.current = node;
+    if (!node) return;
+    const before = document.activeElement;
+    returnTo.current = before instanceof HTMLElement && !node.contains(before) ? before : null;
+    node.focus();
+  }, []);
+  const finalFocus = useCallback(() => (returnTo.current?.isConnected ? returnTo.current : true), []);
   const [selected, setSelected] = useState(0);
   const [comment, setComment] = useState("");
   const [sendResponse, setSendResponse] = useState(true);
@@ -121,13 +136,13 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const optionId = (i: number) => `${id}-option-${i}`;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent initialFocus={listRef} data-slot="rsvp-dialog" className="sm:max-w-sm">
+      <DialogContent initialFocus={listRef} finalFocus={finalFocus} data-slot="rsvp-dialog" className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>RSVP</DialogTitle>
           <DialogDescription className="break-words">{dialog?.summary ?? ""}</DialogDescription>
         </DialogHeader>
         <div
-          ref={listRef}
+          ref={attachList}
           role="listbox"
           aria-label="Response"
           tabIndex={0}

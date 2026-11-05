@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { COMMENT_NEEDS_RESPONSE } from "@/app/rsvp";
 import { renderApp, shellReady } from "@/test/render";
 import { INVITE_ROW, mock, SEND_FAIL_REASON, settleRsvp, simulateInvite } from "@/test/tauri-mock";
@@ -131,6 +131,29 @@ describe("tv and the RSVP choice", () => {
     expect(selected()).toBe("decline");
     await user.keyboard("{ArrowUp}");
     expect(selected()).toBe("tentative");
+  });
+
+  it("keys typed as the choice opens follow its order: Tab from Decline goes on to the comment (PERSO-269)", async () => {
+    const { user } = await openInvitation();
+    const before = document.activeElement;
+    // The keys come before the next frame, the one the popup would move the focus in.
+    vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame"] });
+    try {
+      await user.keyboard("tvjj{Tab}");
+      const dialog = screen.getByRole("dialog", { name: "RSVP" });
+      const comment = within(dialog).getByRole("textbox", { name: "Comment" });
+      expect(within(dialog).getByRole("option", { selected: true })).toHaveAttribute("data-response", "decline");
+      expect(document.activeElement).toBe(comment);
+      // The frame, when it comes, leaves the focus on the comment.
+      vi.advanceTimersToNextFrame();
+      expect(document.activeElement).toBe(comment);
+    } finally {
+      vi.useRealTimers();
+    }
+    // Closing gives the focus back to the row it came from.
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(before));
   });
 
   it("tv opens the choice: a, t, d pick, j, k and Tab move, Enter sends the choice", async () => {
