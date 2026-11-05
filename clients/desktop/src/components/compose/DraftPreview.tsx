@@ -23,6 +23,7 @@ import { useAppState, useDispatch } from "@/app/store";
 import { draftsShown, filteredDrafts, targetKey, type DraftItem } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type DraftAttachments } from "@/lib/gui-types";
+import { joinRead } from "@/lib/inflight";
 import type { DraftPreview as Preview, DraftReport } from "@/protocol/types";
 
 type Loaded = {
@@ -85,11 +86,14 @@ export function DraftPreview({
   useEffect(() => {
     if (invalid) return;
     let live = true;
-    Promise.allSettled([
-      cmd.draftPreview(account, draft.id),
-      cmd.draftValidate(account, draft.id),
-      cmd.draftAttachments(account, draft.id),
-    ]).then(([p, v, a]) => {
+    // StrictMode's remount joins the reads on their way.
+    joinRead(`draft_preview:${key}`, () =>
+      Promise.allSettled([
+        cmd.draftPreview(account, draft.id),
+        cmd.draftValidate(account, draft.id),
+        cmd.draftAttachments(account, draft.id),
+      ]),
+    ).then(([p, v, a]) => {
       if (!live) return;
       setLoaded({
         key,
@@ -285,7 +289,8 @@ export function ComposeSummary({ account, draftId, member = false }: { account: 
   useEffect(() => {
     if (known) return;
     let live = true;
-    cmd.draftPreview(account, draftId).then(
+    // StrictMode's remount joins the read on its way; a re-read list (`landed`) asks again.
+    joinRead(`draft_summary:${account}/${draftId}@${landed}`, () => cmd.draftPreview(account, draftId)).then(
       (p) => {
         if (!live) return;
         setRead({
