@@ -795,9 +795,19 @@ export type EventChangeRun = {
 /**
  * A calendar a new event can go to (`account/id` as its key), whether it can
  * have a Teams link, and whether its backend serves the attendees'
- * free/busy (CAL-14), absent for no.
+ * free/busy (CAL-14), absent for no; its name and the server's colour, null
+ * for none, for the form's picker.
  */
-export type EventCalendar = { key: string; account: string; id: string; label: string; teams: boolean; freeBusy?: boolean };
+export type EventCalendar = {
+  key: string;
+  account: string;
+  id: string;
+  label: string;
+  teams: boolean;
+  freeBusy?: boolean;
+  name: string;
+  color: string | null;
+};
 
 /**
  * A new event this window started, until it settles or is dropped;

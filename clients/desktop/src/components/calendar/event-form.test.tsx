@@ -11,8 +11,8 @@ const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c)
 const form = () => screen.findByRole("dialog", { name: /New event/ });
 const alertOf = (dialog: HTMLElement) => dialog.querySelector('[data-slot="event-error"]');
 
-async function openForm() {
-  const r = renderApp();
+async function openForm(before?: () => void) {
+  const r = renderApp(1400, before);
   await shellReady();
   await r.user.keyboard(" a");
   await screen.findByRole("region", { name: "Calendar" });
@@ -104,8 +104,14 @@ describe("the event form", () => {
     await r.user.keyboard("n");
     const dialog = await form();
     expect(within(dialog).getByLabelText("Calendar")).toHaveValue("home/AAMk-cal-home");
+    // A fresh form is not wrong yet: the title's problem shows once the field is left.
+    expect(alertOf(dialog)).toBeEmptyDOMElement();
+    expect(within(dialog).getByRole("button", { name: /Create event/ })).toBeDisabled();
+    await r.user.click(within(dialog).getByLabelText("Title"));
+    await r.user.tab();
     expect(alertOf(dialog)).toHaveTextContent("The event needs a title");
     await r.user.type(within(dialog).getByLabelText("Title"), "Kick-off");
+    expect(alertOf(dialog)).toBeEmptyDOMElement();
     await r.user.type(within(dialog).getByLabelText("Attendees"), "robin@example.com");
     await r.user.click(within(dialog).getByLabelText("Teams meeting"));
     await r.user.keyboard("{Meta>}{Enter}{/Meta}");
@@ -118,6 +124,24 @@ describe("the event form", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: /New event/ })).toBeNull());
     act(() => void settleEventCreate());
     expect(await screen.findByText("Created Kick-off; invited robin@example.com")).toBeInTheDocument();
+  });
+
+  it("shows an untouched field's problem once a create is tried, and sends nothing", async () => {
+    const { user, dialog } = await openForm();
+    expect(alertOf(dialog)).toBeEmptyDOMElement();
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    await waitFor(() => expect(alertOf(dialog)).toHaveTextContent("The event needs a title"));
+    expect(callsOf("event_create")).toHaveLength(0);
+  });
+
+  it("Enter in a field skips a disabled one: Location goes to Reminder past a Teams the calendar cannot make", async () => {
+    const { user, dialog } = await openForm(() => {
+      mock.calendars = mock.calendars.map((c) => ({ ...c, features: c.features.filter((f) => f !== "online-meeting") }));
+    });
+    expect(within(dialog).getByLabelText("Teams meeting")).toBeDisabled();
+    await user.click(within(dialog).getByLabelText("Location"));
+    await user.keyboard("{Enter}");
+    expect(within(dialog).getByLabelText("Reminder")).toHaveFocus();
   });
 
   it("shows a daemon refusal verbatim and stays open with what was typed", async () => {

@@ -24,7 +24,7 @@ import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
 import { pushNotice } from "@/app/pending";
 import { cursorEntry, eventTitle, isOrganizer, staleCalendar } from "@/app/calendar";
-import { addresses, eventProblem, localZone, openEventDialog } from "@/app/eventForm";
+import { addresses, eventIssue, localZone, openEventDialog, type EventIssue } from "@/app/eventForm";
 import { NO_REPEAT, repeatFromRule, ruleOf, sameRule } from "@/app/recurrence";
 import type {
   AppState,
@@ -126,6 +126,8 @@ export function editDialogFor(
     account: info.account,
     id: info.id,
     label: `${info.account}/${info.name}`,
+    name: info.name,
+    color: info.color ?? null,
     teams: info.features.includes("online-meeting"),
     freeBusy: info.features.includes("free-busy"),
   };
@@ -248,15 +250,20 @@ export function changedFields(dialog: EventDialog, zone: string): EventPatchPara
 }
 
 /** What an edit form lacks: the fields' own problem (a title only when the event had one), no change, or an attendee's change beyond the reminder and the show-as. */
-export function editProblem(dialog: EventDialog): string | null {
+export function editIssue(dialog: EventDialog): EventIssue | null {
   const hadTitle = dialog.edit ? dialog.edit.original.title.trim() !== "" : true;
-  const problem = eventProblem(dialog.fields, dialog.calendars, hadTitle);
-  if (problem) return problem;
+  const issue = eventIssue(dialog.fields, dialog.calendars, hadTitle);
+  if (issue) return issue;
   const fields = changedFields(dialog, localZone());
   const keys = Object.keys(fields);
-  if (keys.length === 0) return NOTHING_CHANGED;
-  if (!dialog.edit?.organizer && keys.some((k) => !ATTENDEE_FIELDS.has(k))) return ORGANIZER_ONLY;
+  if (keys.length === 0) return { field: null, message: NOTHING_CHANGED };
+  if (!dialog.edit?.organizer && keys.some((k) => !ATTENDEE_FIELDS.has(k))) return { field: null, message: ORGANIZER_ONLY };
   return null;
+}
+
+/** editIssue's message alone. */
+export function editProblem(dialog: EventDialog): string | null {
+  return editIssue(dialog)?.message ?? null;
 }
 
 // ---------------------------------------------------------------------------

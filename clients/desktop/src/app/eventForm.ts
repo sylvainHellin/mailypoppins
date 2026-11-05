@@ -46,6 +46,8 @@ export function writableCalendars(calendars: CalendarInfo[] | null | undefined):
       account: c.account,
       id: c.id,
       label: `${c.account}/${c.name}`,
+      name: c.name,
+      color: c.color ?? null,
       teams: c.features.includes("online-meeting"),
       freeBusy: c.features.includes("free-busy"),
     }));
@@ -89,38 +91,50 @@ export function addresses(list: string): string[] {
     .filter(Boolean);
 }
 
+/** The field a problem is about, so the form shows it once that field was touched; null for one about the form as a whole. */
+export type ProblemField = "calendar" | "title" | "start" | "end" | "to" | "optional" | "rooms" | "reminder" | "repeat";
+
+/** A problem with the fields and the field it is about. */
+export type EventIssue = { field: ProblemField | null; message: string };
+
 /**
- * What the fields lack or get wrong, the first thing only; null when the
- * form can be sent. The daemon checks it all again. A title is needed unless
- * the event being edited had none (`hadTitle` false), so an untitled event
- * still saves its other fields.
+ * What the fields lack or get wrong, the first thing only, and the field it
+ * is about; null when the form can be sent. The daemon checks it all again.
+ * A title is needed unless the event being edited had none (`hadTitle`
+ * false), so an untitled event still saves its other fields.
  */
-export function eventProblem(fields: EventFields, calendars: EventCalendar[], hadTitle = true): string | null {
-  if (!calendars.some((c) => c.key === fields.calendar)) return NO_CALENDAR;
-  if (fields.title.trim() === "" && hadTitle) return NO_TITLE;
+export function eventIssue(fields: EventFields, calendars: EventCalendar[], hadTitle = true): EventIssue | null {
+  const issue = (field: ProblemField | null, message: string): EventIssue => ({ field, message });
+  if (!calendars.some((c) => c.key === fields.calendar)) return issue(null, NO_CALENDAR);
+  if (fields.title.trim() === "" && hadTitle) return issue("title", NO_TITLE);
   if (fields.allDay) {
-    if (!DAY.test(fields.start)) return "The first day is YYYY-MM-DD";
-    if (fields.end && !DAY.test(fields.end)) return "The last day is YYYY-MM-DD, or empty for one day";
-    if (fields.end && fields.end < fields.start) return "The last day comes before the first";
+    if (!DAY.test(fields.start)) return issue("start", "The first day is YYYY-MM-DD");
+    if (fields.end && !DAY.test(fields.end)) return issue("end", "The last day is YYYY-MM-DD, or empty for one day");
+    if (fields.end && fields.end < fields.start) return issue("end", "The last day comes before the first");
   } else {
-    if (!TIME.test(fields.start)) return "The start is a date and a time";
-    if (!TIME.test(fields.end)) return "The end is a date and a time";
-    if (fields.end <= fields.start) return "The end comes before the start";
+    if (!TIME.test(fields.start)) return issue("start", "The start is a date and a time");
+    if (!TIME.test(fields.end)) return issue("end", "The end is a date and a time");
+    if (fields.end <= fields.start) return issue("end", "The end comes before the start");
   }
-  for (const [what, list] of [
-    ["attendee", fields.to],
-    ["optional attendee", fields.optional],
-    ["room", fields.rooms],
+  for (const [field, what, list] of [
+    ["to", "attendee", fields.to],
+    ["optional", "optional attendee", fields.optional],
+    ["rooms", "room", fields.rooms],
   ] as const) {
     const bad = addresses(list).find((a) => !a.includes("@"));
-    if (bad) return `The ${what} "${bad}" is not an email address`;
+    if (bad) return issue(field, `The ${what} "${bad}" is not an email address`);
   }
   if (!fields.noReminder && fields.reminder.trim() && !/^\d+$/.test(fields.reminder.trim())) {
-    return "The reminder is a number of minutes, or empty for the mailbox default";
+    return issue("reminder", "The reminder is a number of minutes, or empty for the mailbox default");
   }
   const rule = ruleOf(fields.repeat, fields.start);
-  if ("problem" in rule) return rule.problem;
+  if ("problem" in rule) return issue("repeat", rule.problem);
   return null;
+}
+
+/** eventIssue's message alone. */
+export function eventProblem(fields: EventFields, calendars: EventCalendar[], hadTitle = true): string | null {
+  return eventIssue(fields, calendars, hadTitle)?.message ?? null;
 }
 
 /** `event_create`'s params for the form, its times in `zone`. */
