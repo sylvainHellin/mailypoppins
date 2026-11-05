@@ -404,13 +404,20 @@ describe("a removed draft", () => {
     await shellReady();
     await editDraftEmbedded(user, "j");
     const draft = selectedRow()!;
+    // StrictMode's first mount of the pane already disposed its xterm, before it spawned
+    // (terminal.test.tsx, "spawns once under StrictMode"): the removal must dispose nothing more.
+    const [editor, ...others] = terms.filter((t) => !t.disposed);
+    expect(others).toEqual([]);
+    const disposedBefore = terms.filter((t) => t.disposed);
     act(() => emitEnvelope("state.remove", { resource: `draft:work/${draft}` }));
     await act(() => new Promise((r) => setTimeout(r, 20)));
     expect(kills()).toEqual([]);
+    expect(mock.terminal.of("spawn")).toHaveLength(1);
     expect(panes()).toHaveLength(1);
     expect(shownPane()).not.toBeNull();
     expect(line()).toHaveAttribute("data-status", "editing");
-    expect(terms.filter((t) => t.disposed)).toEqual([]);
+    expect(editor.disposed).toBe(false);
+    expect(terms.filter((t) => t.disposed)).toEqual(disposedBefore);
   });
 });
 

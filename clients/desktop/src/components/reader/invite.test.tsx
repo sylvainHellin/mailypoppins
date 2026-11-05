@@ -14,8 +14,8 @@ const noticed = (text: string) =>
   waitFor(() => expect([...document.querySelectorAll('[role="status"]')].some((e) => e.textContent?.includes(text))).toBe(true));
 
 /** The inbox's last row, the steering committee's invitation, in the reader. */
-async function openInvitation({ strict = false } = {}) {
-  const r = renderApp(1400, undefined, { strict });
+async function openInvitation() {
+  const r = renderApp(1400);
   await shellReady();
   await r.user.keyboard("G");
   await card();
@@ -134,8 +134,8 @@ describe("tv and the RSVP choice", () => {
   });
 
   it("keys typed as the choice opens follow its order: Tab from Decline goes on to the comment (PERSO-269)", async () => {
-    // StrictMode attaches the list's ref twice, as every dev build does.
-    const { user } = await openInvitation({ strict: true });
+    // renderApp's StrictMode attaches the list's ref twice, as every dev build does.
+    const { user } = await openInvitation();
     const before = document.activeElement;
     // The keys come before the next frame, the one the popup would move the focus in.
     vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame"] });
