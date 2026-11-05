@@ -193,9 +193,12 @@ export const UPDATE_STATUS_FIXTURE: UpdateStatus = { current: "0.1.0", enabled: 
 export const mock = {
   connection: { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true } as ConnectionStatus,
   channel: null as Channel<GuiEvent> | null,
-  menu: null as ((e: { payload: string }) => void) | null,
-  /** Every app event handler `listen` registered, by event name. */
-  listeners: new Map<string, (e: { payload: unknown }) => void>(),
+  /**
+   * Every app event handler `listen` registered and its unlisten has not
+   * removed, by event name. Tauri keeps each registration apart, so a
+   * StrictMode remount's handler outlives the late unlisten of the first.
+   */
+  listeners: new Map<string, Set<(e: { payload: unknown }) => void>>(),
   /** Every `invoke`, oldest first; a password `config_probe` or `config_set_password` carried is recorded as `REDACTED`. */
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   /** Fail a command with a GuiError-shaped rejection. */
@@ -394,7 +397,7 @@ export function settleUpdateInstall(opts: { fail?: string } = {}): void {
 
 /** Emit an app event as `@tauri-apps/api/event`'s `emit` would reach `listen`. */
 export function emitAppEvent(event: string, payload: unknown): void {
-  mock.listeners.get(event)?.({ payload });
+  for (const h of [...(mock.listeners.get(event) ?? [])]) h({ payload });
 }
 
 /** fixture.rs's `DEVICE_CODE_MESSAGE`, the device-code progress's message. */
@@ -550,7 +553,6 @@ export const MOCK_FILES = [`${MOCK_HOME}/Documents/report.pdf`, `${MOCK_HOME}/Do
 export function resetMock(): void {
   mock.connection = { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true };
   mock.channel = null;
-  mock.menu = null;
   mock.listeners.clear();
   mock.calls = [];
   mock.failing.clear();
@@ -1171,7 +1173,7 @@ export function emit(event: GuiEvent): void {
 }
 
 export function emitMenu(id: string): void {
-  mock.menu?.({ payload: id });
+  emitAppEvent("menu", id);
 }
 
 
@@ -2827,12 +2829,14 @@ export async function openPicker(options: Record<string, unknown> = {}): Promise
 }
 
 export async function listen<T>(event: string, handler: (e: { payload: T }) => void): Promise<UnlistenFn> {
-  if (event === "menu") mock.menu = handler as unknown as (e: { payload: string }) => void;
-  const h = handler as unknown as (e: { payload: unknown }) => void;
-  mock.listeners.set(event, h);
+  // A wrapper per registration, as Tauri's event id: the same handler listened twice is two registrations.
+  const h = (e: { payload: unknown }) => handler(e as { payload: T });
+  const set = mock.listeners.get(event) ?? new Set();
+  set.add(h);
+  mock.listeners.set(event, set);
   return () => {
-    if (event === "menu") mock.menu = null;
-    if (mock.listeners.get(event) === h) mock.listeners.delete(event);
+    set.delete(h);
+    if (set.size === 0 && mock.listeners.get(event) === set) mock.listeners.delete(event);
   };
 }
 
