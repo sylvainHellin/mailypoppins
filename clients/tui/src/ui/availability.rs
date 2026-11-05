@@ -1,60 +1,148 @@
-//! The event form's availability rows (PERSO-255): one row of glyphs per
-//! person and room over the form's day from 07:00 to 20:00, one character
-//! per 30-minute slot (`·` free, `▒` tentative, `█` busy, `▓` away, `░`
-//! working elsewhere, `?` unknown), the chosen time's slots underlined, and
-//! "no free/busy" for an address the server cannot read. An edit form's
-//! rows also colour the slots the event holds now, so the organizer's busy
-//! block there reads as the event itself, with a legend beside the ruler.
+//! The event form's availability rows (PERSO-255): a timeline of the form's
+//! day from 07:00 to 20:00 under its fields, one row per person, the user
+//! (`You`) first, then the attendees and the rooms (`⌂`), each named by the
+//! local part of its address in the form's label column, so the timeline
+//! lines up with the field values above it.
+//!
+//! Each 30-minute slot is two cells (one on a form too narrow for two),
+//! filled by its status with a glyph and a colour, so a monochrome terminal
+//! still tells them apart: free is blank, `▇` busy, `▒` tentative, `▓` away,
+//! `░` working elsewhere, `╱` unknown, and a row the server cannot read is
+//! hatched and says "no free/busy". The hour labels sit on the hour
+//! gridlines (`▏`), a legend over them names the fills, and the chosen time
+//! is a band of raised background across the ruler and every row, marked
+//! `━` on the line under them. An edit form draws the slots the event holds
+//! now in the event's own colour, marked `┄` (`╍` where the chosen time
+//! covers them too), so the organizer's busy block reads as the event
+//! itself rather than a clash.
+//!
+//! While a query is on its way the last answer's rows stay, dimmed, and an
+//! address it lacks waits as a placeholder row (`┈`); a refused query keeps
+//! the rows, hatched, under its reason. The rows neither collapse nor jump
+//! under the field being typed in.
 
-use chrono::{NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use mp_client::format::{availability_row, slot_of};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::util::truncate;
-use crate::app::{Availability, EventForm};
+use super::util::{display_width, truncate};
+use crate::app::{Availability, EventForm, AVAILABILITY_INTERVAL};
 use crate::theme;
 
 /// The first hour a row shows.
 const FIRST_HOUR: u32 = 7;
 /// The hour a row ends at.
 const LAST_HOUR: u32 = 20;
-/// The label column's width.
-const LABEL: usize = 22;
+/// The indent of every line, the form's own.
+const INDENT: usize = 2;
+/// The name column, the width of the form's label column.
+const NAME: usize = 13;
 /// The most rows shown however tall the terminal; the rest are counted.
 const MAX_ROWS: usize = 8;
 
-/// The hour ruler over the rows: a label every two hours.
-fn ruler(per_hour: usize) -> String {
-    let mut out = String::new();
-    for hour in (FIRST_HOUR..LAST_HOUR).step_by(2) {
-        out.push_str(&format!("{hour:02}"));
-        out.push_str(&" ".repeat((2 * per_hour).saturating_sub(2)));
+/// The glyph of a busy slot: seven eighths of the cell, so the busy
+/// blocks of two rows read as two rather than one tall block.
+const BUSY: char = '\u{2587}';
+/// The glyph of a free cell on an hour gridline.
+const GRIDLINE: char = '\u{258f}';
+/// The glyph of a slot nobody knows: off the answer's view, a row the
+/// server cannot read, or a refused query.
+const UNKNOWN: char = '\u{2571}';
+/// The glyph of a row still on its way.
+const PENDING: char = '\u{2508}';
+/// The glyph of a room's name.
+const ROOM: &str = "\u{2302} ";
+
+/// Who a row is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    You,
+    Required,
+    Optional,
+    Room,
+}
+
+/// What a row's timeline shows.
+enum Track {
+    /// The slots from 07:00, as `availability_row` glyphs.
+    Slots(Vec<char>),
+    /// The server cannot read this address.
+    NoFreeBusy,
+    /// The answer has not reached this address yet.
+    Pending,
+    /// The query was refused.
+    Refused,
+}
+
+/// One person's row.
+struct Row {
+    address: String,
+    kind: Kind,
+    track: Track,
+}
+
+/// The timeline's geometry: `slots` slots of `cell` cells, `per_hour` an
+/// hour.
+struct Grid {
+    slots: usize,
+    per_hour: usize,
+    cell: usize,
+}
+
+impl Grid {
+    fn cells(&self) -> usize {
+        self.slots * self.cell
     }
-    out.trim_end().to_string()
+
+    /// The cells from one labelled hour gridline to the next: every hour,
+    /// or every other one where an hour is too narrow for its label.
+    fn step(&self) -> usize {
+        let hour = self.per_hour * self.cell;
+        if hour >= 3 {
+            hour
+        } else {
+            2 * hour
+        }
+    }
+
+    fn gridline(&self, cell: usize) -> bool {
+        cell.is_multiple_of(self.step())
+    }
+
+    fn slot(&self, cell: usize) -> i64 {
+        (cell / self.cell) as i64
+    }
 }
 
-/// `address` in the label column, cut with an ellipsis.
-fn label(address: &str) -> String {
-    let count = address.chars().count();
-    let shown = if count > LABEL {
-        let mut cut: String = address.chars().take(LABEL - 1).collect();
-        cut.push('\u{2026}');
-        cut
-    } else {
-        address.to_string()
-    };
-    format!("  {shown:<LABEL$} ")
+/// `text` in the name column: the indent, then the text cut to leave a
+/// space before the timeline.
+fn name_column(text: &str) -> String {
+    let cut = truncate(text, NAME - 1);
+    let pad = NAME.saturating_sub(display_width(&cut));
+    format!("{:INDENT$}{cut}{:pad$}", "", "")
 }
 
-/// The slots of the form's chosen time, as offsets from the row's first
-/// slot, on a timed event of the shown day.
-fn chosen(form: &EventForm, first: i64, start: &str, interval: u32) -> Option<(i64, i64)> {
+/// Push `glyph` in `style`, extending the last span when it has the same
+/// style, so a row is a handful of spans rather than one per cell.
+fn push(spans: &mut Vec<Span<'static>>, glyph: char, style: Style) {
+    if let Some(last) = spans.last_mut() {
+        if last.style == style {
+            last.content.to_mut().push(glyph);
+            return;
+        }
+    }
+    spans.push(Span::styled(glyph.to_string(), style));
+}
+
+/// The slots of `form`'s time, as offsets from the slot that starts at
+/// `origin`, on a timed event.
+fn chosen(form: &EventForm, origin: DateTime<Utc>, interval: u32) -> Option<(i64, i64)> {
     if form.all_day {
         return None;
     }
     let zone = mp_core::calendar_model::parse_zone(&form.zone)?;
-    let date = chrono::NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d").ok()?;
+    let date = NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d").ok()?;
     let from = NaiveTime::parse_from_str(form.start.trim(), "%H:%M").ok()?;
     let end = form.end.trim();
     let to = match NaiveTime::parse_from_str(end, "%H:%M") {
@@ -70,137 +158,354 @@ fn chosen(form: &EventForm, first: i64, start: &str, interval: u32) -> Option<(i
     if to <= from {
         return None;
     }
-    let first_slot = slot_of(start, interval, from)? - first;
-    let last_slot = slot_of(start, interval, to - chrono::Duration::seconds(1))? - first;
-    Some((first_slot, last_slot))
+    let seconds = i64::from(interval.max(1)) * 60;
+    let first = (from - origin).num_seconds().div_euclid(seconds);
+    let last = ((to - origin).num_seconds() - 1).div_euclid(seconds);
+    Some((first, last))
+}
+
+/// Whether slot `slot` lies in `range`.
+fn within(range: Option<(i64, i64)>, slot: i64) -> bool {
+    range.is_some_and(|(from, to)| (from..=to).contains(&slot))
 }
 
 /// The lines the form shows under its fields, at most `max` of them in
 /// `width` columns: none while the form's account has no free/busy, else
-/// the header and a row per schedule. Rows that do not fit are counted on
-/// a "+N more" line, so a short terminal keeps the form's problem line.
+/// the legend (or the refusal), the hour ruler, a row per person and the
+/// line marking the chosen time. A short terminal gives up the legend, then
+/// the marks, then rows, counting the rows that do not fit, so the form
+/// keeps its problem line; one line alone is the count, or the refusal.
 pub(super) fn availability_lines(
     form: &EventForm,
     state: &Availability,
     width: usize,
     max: usize,
 ) -> Vec<Line<'static>> {
-    if state.seen.is_none() || max == 0 {
+    let Some((seen, _)) = &state.seen else {
+        return Vec::new();
+    };
+    if max == 0 {
         return Vec::new();
     }
-    let muted = Style::default().fg(theme::active().text_muted);
-    let checking = if state.checking() {
-        "  checking\u{2026}"
+    let Some(zone) = mp_core::calendar_model::parse_zone(&form.zone) else {
+        return Vec::new();
+    };
+    let theme = theme::active();
+    let muted = Style::default().fg(theme.text_muted);
+    let faint = Style::default().fg(theme.text_faint);
+    // Busy and tentative take the desktop's Pumpkin, which the `code` slot
+    // carries in the app's palettes and holds on every ground; `selection`
+    // is White in the terminal theme, made for the DarkGray cursor row, and
+    // would vanish on a light terminal.
+    let busy = theme.code;
+    let (answer, refusal) = match &state.answer {
+        Some(Ok(answer)) => (Some(answer), None),
+        Some(Err(why)) => (None, Some(why.as_str())),
+        None => (None, None),
+    };
+    // The answer on screen is for another query than the form's while one
+    // is on its way or the form changed since: its rows stay, dimmed.
+    let stale = state.answer.is_some() && (state.checking() || state.asked.as_ref() != Some(seen));
+    let checking = stale || state.answer.is_none();
+    let dim = if stale {
+        Modifier::DIM
     } else {
-        ""
+        Modifier::empty()
     };
-    let answer = match &state.answer {
-        None => {
-            return vec![Line::from(Span::styled(
-                format!("{}{}", label("Availability"), checking.trim_start()),
-                muted,
-            ))];
-        }
-        Some(Err(why)) => {
-            let room = width.saturating_sub(label("Availability").chars().count());
-            return vec![Line::from(vec![
-                Span::styled(label("Availability"), muted),
-                Span::styled(
-                    truncate(&format!("unavailable: {why}"), room),
-                    Style::default().fg(theme::active().warning),
-                ),
-            ])];
-        }
-        Some(Ok(answer)) => answer,
-    };
-    let interval = answer.interval_minutes.max(1);
+
+    let interval = answer.map_or(AVAILABILITY_INTERVAL, |a| a.interval_minutes.max(1));
     let per_hour = (60 / interval).max(1) as usize;
     let slots = (LAST_HOUR - FIRST_HOUR) as usize * per_hour;
-    let zone = mp_core::calendar_model::parse_zone(&form.zone);
-    let date = chrono::NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d").ok();
-    let first = zone
-        .zip(date)
-        .and_then(|(zone, date)| {
-            zone.from_local_datetime(&date.and_hms_opt(FIRST_HOUR, 0, 0)?)
+    let cell = if width >= INDENT + NAME + 2 * slots {
+        2
+    } else {
+        1
+    };
+    let grid = Grid {
+        slots,
+        per_hour,
+        cell,
+    };
+    // The day the rows read: the answer's, which the form may have moved
+    // off while the next query runs, else the form's own.
+    let day = answer
+        .and_then(|a| DateTime::parse_from_rfc3339(&a.start).ok())
+        .map(|start| start.with_timezone(&zone).date_naive())
+        .or_else(|| NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d").ok());
+    let Some(origin) = day
+        .and_then(|day| {
+            zone.from_local_datetime(&day.and_hms_opt(FIRST_HOUR, 0, 0)?)
                 .earliest()
         })
-        .and_then(|at| slot_of(&answer.start, interval, at.with_timezone(&Utc)));
-    let Some(first) = first else {
+        .map(|at| at.with_timezone(&Utc))
+    else {
         return Vec::new();
     };
-    let total = answer.schedules.len();
-    // The header, then as many rows as fit with room for the count of the
-    // rest; one line alone is the header's label and that count.
-    let fits = |rows: usize| 1 + rows + usize::from(rows < total) <= max;
-    let shown = (0..=total.min(MAX_ROWS))
-        .rev()
-        .find(|rows| fits(*rows))
-        .unwrap_or(0);
-    let more = |hidden: usize| format!("+{hidden} more");
-    if max == 1 && total > 0 {
-        return vec![Line::from(vec![
-            Span::styled(label("Availability"), muted),
-            Span::styled(more(total), muted),
-        ])];
+    let first = match answer {
+        Some(answer) => match slot_of(&answer.start, interval, origin) {
+            Some(first) => first,
+            None => return Vec::new(),
+        },
+        None => 0,
+    };
+
+    // The rows: the answer's (the user's own first), then the form's
+    // addresses it has not reached; before an answer the user's row waits
+    // too.
+    let listed = |list: &str, address: &str| {
+        list.split([',', ';'])
+            .map(str::trim)
+            .any(|a| a.eq_ignore_ascii_case(address))
+    };
+    let kind_of = |address: &str| {
+        if listed(&form.rooms, address) {
+            Kind::Room
+        } else if listed(&form.optional, address) {
+            Kind::Optional
+        } else {
+            Kind::Required
+        }
+    };
+    let waiting = || {
+        if refusal.is_some() {
+            Track::Refused
+        } else {
+            Track::Pending
+        }
+    };
+    let mut rows: Vec<Row> = match answer {
+        Some(answer) => answer
+            .schedules
+            .iter()
+            .enumerate()
+            .map(|(n, schedule)| Row {
+                address: schedule.address.clone(),
+                kind: if n == 0 {
+                    Kind::You
+                } else {
+                    kind_of(&schedule.address)
+                },
+                track: if schedule.error.is_some() {
+                    Track::NoFreeBusy
+                } else {
+                    Track::Slots(
+                        availability_row(&schedule.view, first, slots)
+                            .chars()
+                            .collect(),
+                    )
+                },
+            })
+            .collect(),
+        None => vec![Row {
+            address: String::new(),
+            kind: Kind::You,
+            track: waiting(),
+        }],
+    };
+    for address in &seen.addresses {
+        if !rows.iter().any(|r| r.address.eq_ignore_ascii_case(address)) {
+            rows.push(Row {
+                address: address.clone(),
+                kind: kind_of(address),
+                track: waiting(),
+            });
+        }
     }
-    let mut lines = vec![Line::from(vec![
-        Span::styled(label("Availability"), muted),
-        Span::styled(ruler(per_hour), muted),
-        Span::styled(checking.to_string(), muted),
-    ])];
-    let picked = chosen(form, first, &answer.start, interval);
+
+    // The budget: the ruler (and a refusal's line), as many rows as fit
+    // with the marks line counting the rest, then the marks line and the
+    // legend while room is left.
+    let total = rows.len();
+    let base = 1 + usize::from(refusal.is_some());
+    let fits = |shown: usize| base + shown + usize::from(shown < total) <= max;
+    // The "Availability" line beside `text`, the refusal cut to the width.
+    let titled = |text: String, style: Style| {
+        Line::from(vec![
+            Span::styled(name_column("Availability"), muted),
+            Span::styled(truncate(&text, width.saturating_sub(INDENT + NAME)), style),
+        ])
+    };
+    let refused = |why: &str| {
+        titled(
+            format!("unavailable: {why}"),
+            Style::default().fg(theme.warning).add_modifier(dim),
+        )
+    };
+    let Some(shown) = (0..=total.min(MAX_ROWS)).rev().find(|rows| fits(*rows)) else {
+        return vec![match refusal {
+            Some(why) => refused(why),
+            None if answer.is_none() => titled("checking\u{2026}".into(), muted),
+            None => titled(format!("+{total} more"), muted),
+        }];
+    };
+    let mut left = max - (base + shown + usize::from(shown < total));
+    let marks = shown < total || left > 0;
+    if shown == total && marks {
+        left -= 1;
+    }
+    let legend = refusal.is_none() && left > 0;
+
+    let picked = chosen(form, origin, interval);
     // The time the event being edited holds now, on the shown day.
     let current = form
         .editing
         .as_ref()
-        .and_then(|edit| chosen(&edit.original, first, &answer.start, interval))
+        .and_then(|edit| chosen(&edit.original, origin, interval))
         .filter(|(from, to)| *to >= 0 && *from < slots as i64);
-    let own = Style::default().fg(theme::active().accent_alt);
-    if current.is_some() {
-        let legend = ["  \u{2588}", " this event"];
-        let used: usize = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum();
-        if used + legend.iter().map(|s| s.chars().count()).sum::<usize>() <= width {
-            lines[0].spans.push(Span::styled(legend[0], own));
-            lines[0].spans.push(Span::styled(legend[1], muted));
+    let band = |style: Style, slot: i64| {
+        if within(picked, slot) {
+            style.bg(theme.surface)
+        } else {
+            style
         }
-    }
-    let normal = Style::default().fg(theme::active().text);
-    let marked = Style::default()
-        .fg(theme::active().accent)
-        .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
-    for schedule in answer.schedules.iter().take(shown) {
-        let mut spans = vec![Span::styled(label(&schedule.address), normal)];
-        if schedule.error.is_some() {
-            spans.push(Span::styled("no free/busy".to_string(), muted));
-            lines.push(Line::from(spans));
-            continue;
+    };
+
+    let mut lines = Vec::with_capacity(shown + 3);
+    if let Some(why) = refusal {
+        lines.push(refused(why));
+    } else if legend {
+        let mut spans = vec![Span::styled(name_column("Availability"), muted)];
+        let mut used = INDENT + NAME;
+        let mut items = vec![
+            (BUSY, "busy", busy),
+            ('\u{2592}', "tentative", busy),
+            ('\u{2593}', "away", theme.error),
+            ('\u{2591}', "elsewhere", theme.accent),
+        ];
+        if current.is_some() {
+            items.push(('\u{2504}', "this event", theme.accent_alt));
         }
-        let row: Vec<char> = availability_row(&schedule.view, first, slots)
-            .chars()
-            .collect();
-        for (at, glyph) in row.into_iter().enumerate() {
-            let within = |range: Option<(i64, i64)>| {
-                range.is_some_and(|(from, to)| (from..=to).contains(&(at as i64)))
-            };
-            let style = match (within(picked), within(current)) {
-                (true, true) => marked.patch(own),
-                (true, false) => marked,
-                (false, true) => own,
-                (false, false) => normal,
-            };
-            spans.push(Span::styled(glyph.to_string(), style));
+        for (n, (glyph, word, colour)) in items.into_iter().enumerate() {
+            let gap = if n == 0 { "" } else { "  " };
+            let wide = gap.len() + 2 + word.len();
+            if used + wide > width {
+                break;
+            }
+            used += wide;
+            spans.push(Span::raw(gap));
+            spans.push(Span::styled(glyph.to_string(), Style::default().fg(colour)));
+            spans.push(Span::styled(format!(" {word}"), muted));
         }
         lines.push(Line::from(spans));
     }
-    if shown < total {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", more(total - shown)),
-            muted,
-        )));
+
+    // The ruler: an hour's label on each gridline, under the legend's
+    // "Availability" or, without the legend, beside its own.
+    let ruler_label = if checking {
+        "checking\u{2026}"
+    } else if legend || refusal.is_some() {
+        ""
+    } else {
+        "Availability"
+    };
+    let mut spans = vec![Span::styled(name_column(ruler_label), muted)];
+    let mut labels: Vec<char> = vec![' '; grid.cells()];
+    for at in (0..grid.cells()).filter(|at| grid.gridline(*at)) {
+        let hour = FIRST_HOUR as usize + at / (grid.per_hour * grid.cell);
+        for (n, digit) in format!("{hour:02}").chars().enumerate() {
+            if let Some(cell) = labels.get_mut(at + n) {
+                *cell = digit;
+            }
+        }
+    }
+    for (at, glyph) in labels.into_iter().enumerate() {
+        push(&mut spans, glyph, band(muted, grid.slot(at)));
+    }
+    lines.push(Line::from(spans));
+
+    let normal = Style::default().fg(theme.text);
+    for row in rows.iter().take(shown) {
+        let mut spans = match row.kind {
+            Kind::You => vec![Span::styled(
+                name_column("You"),
+                normal.add_modifier(Modifier::BOLD),
+            )],
+            kind => {
+                let local = row.address.split('@').next().unwrap_or_default();
+                let style = if kind == Kind::Optional {
+                    muted
+                } else {
+                    normal
+                };
+                if kind == Kind::Room {
+                    // The room's glyph muted, its name cut after it.
+                    let full = name_column(&format!("{ROOM}{local}"));
+                    let split = full
+                        .char_indices()
+                        .nth(INDENT + ROOM.chars().count())
+                        .map_or(full.len(), |(at, _)| at);
+                    vec![
+                        Span::styled(full[..split].to_string(), muted),
+                        Span::styled(full[split..].to_string(), style),
+                    ]
+                } else {
+                    vec![Span::styled(name_column(local), style)]
+                }
+            }
+        };
+        let cells: Vec<(char, Style)> = match &row.track {
+            Track::Slots(glyphs) => (0..grid.cells())
+                .map(|at| {
+                    let slot = grid.slot(at);
+                    let (glyph, colour) = match glyphs.get(slot as usize) {
+                        Some('\u{b7}') if grid.gridline(at) => (GRIDLINE, theme.text_faint),
+                        Some('\u{b7}') => (' ', theme.text_faint),
+                        Some('\u{2588}') => (BUSY, busy),
+                        Some('\u{2592}') => ('\u{2592}', busy),
+                        Some('\u{2593}') => ('\u{2593}', theme.error),
+                        Some('\u{2591}') => ('\u{2591}', theme.accent),
+                        _ => (UNKNOWN, theme.text_faint),
+                    };
+                    let colour = if within(current, slot) {
+                        theme.accent_alt
+                    } else {
+                        colour
+                    };
+                    (glyph, Style::default().fg(colour))
+                })
+                .collect(),
+            Track::NoFreeBusy => {
+                let words = " no free/busy";
+                let hatch = grid.cells().saturating_sub(words.len());
+                (0..hatch)
+                    .map(|_| (UNKNOWN, faint))
+                    .chain(words.chars().map(|c| (c, muted)))
+                    .take(grid.cells())
+                    .collect()
+            }
+            Track::Refused => (0..grid.cells()).map(|_| (UNKNOWN, faint)).collect(),
+            Track::Pending => (0..grid.cells()).map(|_| (PENDING, faint)).collect(),
+        };
+        for (at, (glyph, style)) in cells.into_iter().enumerate() {
+            push(
+                &mut spans,
+                glyph,
+                band(style, grid.slot(at)).add_modifier(dim),
+            );
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if marks {
+        let more = if shown < total {
+            format!("+{} more", total - shown)
+        } else {
+            String::new()
+        };
+        let mut spans = vec![Span::styled(name_column(&more), muted)];
+        let accent = Style::default().fg(theme.accent);
+        let own = Style::default().fg(theme.accent_alt);
+        for at in 0..grid.cells() {
+            let slot = grid.slot(at);
+            let (glyph, style) = match (within(picked, slot), within(current, slot)) {
+                (true, true) => ('\u{254d}', accent),
+                (true, false) => ('\u{2501}', accent),
+                (false, true) => ('\u{2504}', own),
+                (false, false) => (' ', Style::default()),
+            };
+            push(&mut spans, glyph, style);
+        }
+        lines.push(Line::from(spans));
     }
     lines
 }

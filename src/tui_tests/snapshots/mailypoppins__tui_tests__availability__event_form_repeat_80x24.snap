@@ -21,7 +21,7 @@ expression: frame
 15 |││  │  Repeats      ‹ Weekly on Tuesday, Thursday ›                        │  ││
 16 |│╰──│  Every        1                                                      │  ││
 17 |│╭ V│  On           Tu, Th▏                                                │  ││
-18 |││ m│  Availability           +4 more                                      │  ││
+18 |││ m│  Availability +4 more                                                │  ││
 19 |│╰──│  The end comes before the start                                      │──╯│
 20 |│╭──│  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │──╮│
 21 |││  ╰──────────────────────────────────────────────────────────────────────╯  ││

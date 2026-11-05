@@ -112,9 +112,12 @@ fn answer() -> CalendarFreeBusyResult {
     }
 }
 
-/// The form with its availability rows: a row per schedule from 07:00 to
-/// 20:00 under the hour ruler, the outside address reading "no free/busy";
-/// and the rows while the first query is still on its way.
+/// The form with its availability rows: the legend, the hour ruler, a row
+/// per schedule from 07:00 to 20:00 named in the form's label column (the
+/// user's "You", the room's marked), the outside address hatched and
+/// reading "no free/busy", the chosen time a band of `bg:surface` across
+/// the ruler and the rows, marked under them; and the same rows, waiting,
+/// while the first query is still on its way.
 #[test]
 fn golden_calendar_event_form_availability() {
     let mut app = calendar_fixture();
@@ -144,7 +147,54 @@ fn golden_calendar_event_form_availability() {
     );
 }
 
-/// The rows' glyphs, row by row, the chosen time's slots among them.
+/// The name column of a row as the frame shows it after the form's left
+/// border: the indent and the 13-wide label column.
+fn name(name: &str) -> String {
+    format!("\u{2502}  {name:<13}")
+}
+
+/// The 52 cells of the row `who` names (two per half hour from 07:00).
+fn track(frame: &str, who: &str) -> String {
+    let prefix = name(who);
+    let line = frame
+        .lines()
+        .find(|line| line.contains(&prefix))
+        .unwrap_or_else(|| panic!("no row for {who:?} in\n{frame}"));
+    let at = line.find(&prefix).unwrap() + prefix.len();
+    line[at..].chars().take(52).collect()
+}
+
+/// The 52 cells of the line marking the chosen time and the event's own
+/// under the rows, at the columns of the user's row.
+fn marks(frame: &str) -> String {
+    let you = name("You");
+    let row = frame.lines().find(|line| line.contains(&you)).unwrap();
+    let column = row[..row.find(&you).unwrap()].chars().count() + you.chars().count();
+    let line = frame
+        .lines()
+        .skip_while(|line| !line.contains(&you))
+        .take_while(|line| !line.starts_with("== style runs"))
+        .find(|line| line.contains(['\u{2501}', '\u{2504}', '\u{254d}']))
+        .unwrap_or_else(|| panic!("no marks in\n{frame}"));
+    line.chars().skip(column).take(52).collect()
+}
+
+/// A row's expected cells: free (a gridline on each hour, blank between)
+/// but for `marks` (half-hour slot from 07:00, glyph).
+fn cells(marks: &[(usize, char)]) -> String {
+    (0..52)
+        .map(
+            |cell| match marks.iter().find(|(slot, _)| *slot == cell / 2) {
+                Some((_, glyph)) => *glyph,
+                None if cell % 4 == 0 => '\u{258f}',
+                None => ' ',
+            },
+        )
+        .collect()
+}
+
+/// The rows' cells, row by row, a glyph per status; the hour labels on
+/// the gridlines; the legend; the chosen time marked under the rows.
 #[test]
 fn the_rows_read_the_days_slots_from_seven_to_eight() {
     let mut app = calendar_fixture();
@@ -158,33 +208,137 @@ fn the_rows_read_the_days_slots_from_seven_to_eight() {
         answer: Some(Ok(answer())),
     };
     let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
-    let row = |address: &str| -> String {
-        let line = frame
-            .lines()
-            .find(|line| {
-                line.contains(address) && !line.contains("Attendees") && !line.contains("Rooms")
-            })
-            .unwrap_or_else(|| panic!("no row for {address} in\n{frame}"));
-        let at = line.find(address).unwrap() + 23;
-        line.chars()
-            .skip(line[..at].chars().count())
-            .take(26)
-            .collect()
+    let busy = '\u{2587}';
+    assert_eq!(track(&frame, "You"), cells(&[(4, busy), (5, busy)]));
+    assert_eq!(
+        track(&frame, "ada"),
+        cells(&[(12, '\u{2593}'), (13, '\u{2593}'), (16, '\u{2592}')])
+    );
+    assert_eq!(track(&frame, "\u{2302} room-1"), cells(&[]));
+    assert_eq!(
+        track(&frame, "someone"),
+        format!("{} no free/busy", "\u{2571}".repeat(39))
+    );
+    // 14:00 to 15:30 is slots 14 to 16, cells 28 to 33.
+    assert_eq!(
+        marks(&frame),
+        format!(
+            "{}{}{}",
+            " ".repeat(28),
+            "\u{2501}".repeat(6),
+            " ".repeat(18)
+        )
+    );
+    assert!(
+        frame.contains(&format!(
+            "{}07  08  09  10  11  12  13  14  15  16  17  18  19",
+            name("")
+        )),
+        "{frame}"
+    );
+    assert!(
+        frame.contains(&format!(
+            "{}\u{2587} busy  \u{2592} tentative  \u{2593} away  \u{2591} elsewhere",
+            name("Availability")
+        )),
+        "{frame}"
+    );
+    assert!(!frame.contains("this event"), "a new event has no own time");
+
+    // A form too narrow for two cells a slot gives each one cell, a label
+    // every other hour.
+    let narrow = frame_snapshot(&mut app, 66, HEIGHT);
+    assert!(
+        narrow.contains(&format!("{}07  09  11  13  15  17  19", name(""))),
+        "{narrow}"
+    );
+    let you: String = track(&narrow, "You").chars().take(26).collect();
+    assert_eq!(
+        you,
+        "\u{258f}   \u{2587}\u{2587}  \u{258f}   \u{258f}   \u{258f}   \u{258f}   \u{258f} "
+    );
+}
+
+/// While the next query runs (an attendee typed), the last answer's rows
+/// stay, dimmed, the new address waits as a placeholder row and the ruler
+/// says it is checking, so the rows do not collapse; the answer's day is
+/// the one they read. Working elsewhere and an unknown slot have their own
+/// glyphs.
+#[test]
+fn the_rows_stay_while_the_next_query_runs() {
+    let mut app = calendar_fixture();
+    let mut form = form();
+    let mut last = answer();
+    last.schedules[0].view = view(&[(22, '4'), (23, '4')])[..38].to_string();
+    form.to.push_str(", kim@example.org");
+    let next = form.free_busy_key().unwrap();
+    app.overlay = Overlay::EventForm(Box::new(form));
+    app.calendar_view.availability = Availability {
+        seen: Some((next.clone(), Instant::now())),
+        asked: Some(next),
+        operation: Some("op-2".into()),
+        answer: Some(Ok(last)),
     };
-    let dots = |n: usize| "\u{b7}".repeat(n);
+    let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
+    // The view ends at 19:00, slot 24 from 07:00.
     assert_eq!(
-        row("sylvain@example.org"),
-        format!("{}\u{2588}\u{2588}{}", dots(4), dots(20))
+        track(&frame, "You"),
+        cells(&[
+            (8, '\u{2591}'),
+            (9, '\u{2591}'),
+            (24, '\u{2571}'),
+            (25, '\u{2571}')
+        ])
     );
-    assert_eq!(
-        row("ada@example.org"),
-        format!("{}\u{2593}\u{2593}{}\u{2592}{}", dots(12), dots(2), dots(9))
+    assert_eq!(track(&frame, "kim"), "\u{2508}".repeat(52));
+    assert!(
+        frame.contains(&format!("{}07  08", name("checking\u{2026}"))),
+        "{frame}"
     );
-    assert_eq!(row("room-1@example.org"), dots(26));
-    assert!(frame
+    let buffer = crate::tui::ui::golden_frames::render_buffer(&mut app, WIDTH, HEIGHT);
+    let text = crate::tui::ui::golden_frames::text_rows(&buffer);
+    let y = text
         .lines()
-        .any(|line| line.contains("someone@gmail.com") && line.contains("no free/busy")));
-    assert!(frame.contains("07  09  11  13  15  17  19"), "{frame}");
+        .position(|line| line.contains(&name("ada")))
+        .unwrap() as u16;
+    let x = (0..WIDTH)
+        .find(|x| buffer[(*x, y)].symbol() == "\u{2593}")
+        .unwrap();
+    assert!(
+        buffer[(x, y)]
+            .modifier
+            .contains(ratatui::style::Modifier::DIM),
+        "the last answer's rows are dimmed"
+    );
+    let rows = text_rows(&frame)
+        .iter()
+        .filter(|line| {
+            ["You", "ada", "someone", "\u{2302} room-1", "kim"]
+                .iter()
+                .any(|who| line.contains(&name(who)))
+        })
+        .count();
+    assert_eq!(rows, 5, "{frame}");
+
+    // The answer lands: the same five rows, undimmed.
+    let mut answer = answer();
+    answer.schedules.push(CalendarSchedule {
+        address: "kim@example.org".into(),
+        view: view(&[]),
+        items: Vec::new(),
+        error: None,
+    });
+    let state = &mut app.calendar_view.availability;
+    state.operation = None;
+    state.answer = Some(Ok(answer));
+    let landed = frame_snapshot(&mut app, WIDTH, HEIGHT);
+    assert_eq!(
+        text_rows(&landed).len(),
+        text_rows(&frame).len(),
+        "{landed}"
+    );
+    assert_eq!(track(&landed, "kim"), cells(&[]));
+    assert!(!landed.contains("checking"), "{landed}");
 }
 
 /// Answers `calendar.freebusy` with a fresh operation id each call, or
@@ -412,8 +566,11 @@ fn a_short_terminal_keeps_the_problem_line_under_the_rows() {
         );
         let shown = text
             .iter()
-            .filter(|line| line.contains("@example.org ") && !line.contains("Attendees"))
-            .filter(|line| !line.contains("Rooms"))
+            .filter(|line| {
+                ["You", "ada", "someone", "\u{2302} room-1"]
+                    .iter()
+                    .any(|who| line.contains(&name(who)))
+            })
             .count();
         assert_eq!(shown, rows, "rows at 80x{height}:\n{frame}");
         assert_eq!(more.is_empty(), !frame.contains("more"), "{frame}");
@@ -569,10 +726,11 @@ fn the_edit_form_asks_free_busy_once_its_query_stands_still() {
 }
 
 /// The edit form's rows: the slots the meeting holds now (15:00 to 16:00)
-/// in the event's own colour on every row, with the legend beside the
-/// ruler, and the chosen time (17:00 to 18:00) underlined as in the create
-/// form; at 80x24 the problem line and the keys keep their rows and the
-/// availability is the count of its rows.
+/// in the event's own colour on every row and marked `┄` under the rows,
+/// with its legend item, and the chosen time (17:00 to 18:00) a band of
+/// raised background across the ruler and the rows, marked `━`, as in the
+/// create form; at 80x24 the problem line and the keys keep their rows and
+/// the availability is the count of its rows.
 #[test]
 fn golden_calendar_event_edit_form_availability() {
     let mut app = calendar_fixture();
@@ -587,43 +745,56 @@ fn golden_calendar_event_edit_form_availability() {
     };
     let frame = frame_snapshot(&mut app, WIDTH, HEIGHT);
     assert_snapshot!("event_edit_form_availability", frame);
-    assert!(frame.contains("\u{2588} this event"), "{frame}");
+    assert!(frame.contains("\u{2504} this event"), "{frame}");
+    let busy = '\u{2587}';
+    assert_eq!(track(&frame, "You"), cells(&[(16, busy), (17, busy)]));
+    // 15:00 to 16:00 is cells 32 to 35, 17:00 to 18:00 cells 40 to 43.
+    assert_eq!(
+        marks(&frame),
+        format!(
+            "{}{}{}{}{}",
+            " ".repeat(32),
+            "\u{2504}".repeat(4),
+            " ".repeat(4),
+            "\u{2501}".repeat(4),
+            " ".repeat(8)
+        )
+    );
 
     // The colour the style runs do not record: the meeting's two slots on
-    // each row with a view, the chosen slots underlined in the accent.
+    // each row, the chosen slots' band on the ruler and on every row.
     let buffer = crate::tui::ui::golden_frames::render_buffer(&mut app, WIDTH, HEIGHT);
     let theme = crate::tui::theme::active();
     let text = crate::tui::ui::golden_frames::text_rows(&buffer);
-    for address in [
-        "sylvain@example.org",
-        "ada@example.org",
-        "room-1@example.org",
-    ] {
+    let you = text
+        .lines()
+        .find(|line| line.contains(&name("You")))
+        .unwrap_or_else(|| panic!("no row for You in\n{text}"));
+    // The row number's four columns, then the track after the name column.
+    let x0 = (you[..you.find(&name("You")).unwrap()].chars().count() + name("You").chars().count()
+        - 4) as u16;
+    for who in ["You", "ada", "\u{2302} room-1"] {
         let y = text
             .lines()
-            .position(|line| {
-                line.contains(&format!("{address}  "))
-                    && !line.contains("Attendees")
-                    && !line.contains("Rooms")
-            })
-            .unwrap_or_else(|| panic!("no row for {address} in\n{text}")) as u16;
-        let row: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
-        // The label column is 22 wide and a space follows it.
-        let x0 = row[..row.find(address).unwrap()].chars().count() as u16 + 23;
-        let coloured: Vec<u16> = (0..26)
+            .position(|line| line.contains(&name(who)))
+            .unwrap_or_else(|| panic!("no row for {who} in\n{text}")) as u16;
+        let coloured: Vec<u16> = (0..52)
             .filter(|n| buffer[(x0 + n, y)].fg == theme.accent_alt)
             .collect();
-        assert_eq!(coloured, [16, 17], "{address}");
-        let underlined: Vec<u16> = (0..26)
-            .filter(|n| {
-                buffer[(x0 + n, y)]
-                    .modifier
-                    .contains(ratatui::style::Modifier::UNDERLINED)
-            })
+        assert_eq!(coloured, [32, 33, 34, 35], "{who}");
+        let band: Vec<u16> = (0..52)
+            .filter(|n| buffer[(x0 + n, y)].bg == theme.surface)
             .collect();
-        assert_eq!(underlined, [20, 21], "{address}");
-        assert_eq!(buffer[(x0 + 20, y)].fg, theme.accent, "{address}");
+        assert_eq!(band, [40, 41, 42, 43], "{who}");
     }
+    let ruler = text
+        .lines()
+        .position(|line| line.contains("07  08  09"))
+        .unwrap() as u16;
+    let band: Vec<u16> = (0..52)
+        .filter(|n| buffer[(x0 + n, ruler)].bg == theme.surface)
+        .collect();
+    assert_eq!(band, [40, 41, 42, 43], "the ruler");
 
     let frame = frame_snapshot(&mut app, 80, 24);
     assert_snapshot!("event_edit_form_availability_80x24", frame);
@@ -660,7 +831,7 @@ fn a_long_refusal_is_cut_with_an_ellipsis() {
         .find(|line| line.contains("unavailable: "))
         .unwrap_or_else(|| panic!("no refusal in\n{frame}"));
     assert!(
-        line.contains("unavailable: The free/busy query failed: the\u{2026}"),
+        line.contains("unavailable: The free/busy query failed: the server an\u{2026}\u{2502}"),
         "{line}"
     );
 }

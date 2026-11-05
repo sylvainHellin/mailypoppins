@@ -8,36 +8,36 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 02 |││Mon 2026-08-03                         ││Baustellenübergabe                                                         ││
 03 |││  09:00-10:00 ✓ Baustellenübergabe     ││                                                                           ││
 04 |││                [evoqs/Calendar]  @ Ra…││When        Mon 2026-08-03 09:00-10:00                                     ││
-05 |││                                       ││Where       Raum 2.14                                                      ││
-06 |││Tue 2026-08-04  (today╭──────────────────────────────────────────────────────────────────────╮                      ││
-07 |││  10:00-11:00 ? Jour f│New event                                                             │                      ││
-08 |││                [evoqs│                                                                      │                      ││
-09 |││  10:30-12:00 ? PhD Ko│  Calendar     ‹ evoqs/Kalender ›                                     │                      ││
-10 |││                [perso│  Title        Budget review▏                                         │                      ││
-11 |││                      │  All day      [ ]                                                    │                      ││
-12 |││Wed 2026-08-05        │  Date         2026-08-04                                             │ev-handover           ││
-13 |││  all day       Sommer│  Start        14:00                                                  │                      ││
-14 |││                [evoqs│  End          15:30                                                  │                      ││
-15 |││                      │  Location                                                            │                      ││
-16 |││Thu 2026-08-06        │  Attendees    ada@example.org, someone@gmail.com                     │                      ││
-17 |││  all day       Sommer│  Optional                                                            │                      ││
-18 |││                [evoqs│  Rooms        room-1@example.org                                     │                      ││
-19 |││  10:00-11:00 ? Jour f│  Teams        [ ]                                                    │                      ││
-20 |││                [evoqs│  Reminder     (the mailbox default; minutes or none)                 │                      ││
-21 |││                      │  Show as      ‹ Busy ›                                               │                      ││
-22 |││Fri 2026-08-07        │  Repeats      ‹ Does not repeat ›                                    │                      ││
-23 |││  14:00-15:00 ✓ Abgesa│  Description  (none; Enter edits in $EDITOR)                         │                      ││
-24 |││                [evoqs│                                                                      │                      ││
-25 |││                      │  Availability           07  09  11  13  15  17  19                   │                      ││
-26 |││                      │  sylvain@example.org    ····██····················                   │                      ││
-27 |││                      │  ada@example.org        ············▓▓··▒·········                   │                      ││
-28 |││                      │  someone@gmail.com      no free/busy                                 │                      ││
-29 |││                      │  room-1@example.org     ··························                   │                      ││
-30 |││                      │                                                                      │                      ││
-31 |││                      │  Times in Europe/Berlin                                              │                      ││
-32 |│╰──────────────────────│  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │                      ││
-33 |│╭ View ────────────────╰──────────────────────────────────────────────────────────────────────╯                      ││
-34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
+05 |││                      ╭──────────────────────────────────────────────────────────────────────╮                      ││
+06 |││Tue 2026-08-04  (today│New event                                                             │                      ││
+07 |││  10:00-11:00 ? Jour f│                                                                      │                      ││
+08 |││                [evoqs│  Calendar     ‹ evoqs/Kalender ›                                     │                      ││
+09 |││  10:30-12:00 ? PhD Ko│  Title        Budget review▏                                         │                      ││
+10 |││                [perso│  All day      [ ]                                                    │                      ││
+11 |││                      │  Date         2026-08-04                                             │                      ││
+12 |││Wed 2026-08-05        │  Start        14:00                                                  │ev-handover           ││
+13 |││  all day       Sommer│  End          15:30                                                  │                      ││
+14 |││                [evoqs│  Location                                                            │                      ││
+15 |││                      │  Attendees    ada@example.org, someone@gmail.com                     │                      ││
+16 |││Thu 2026-08-06        │  Optional                                                            │                      ││
+17 |││  all day       Sommer│  Rooms        room-1@example.org                                     │                      ││
+18 |││                [evoqs│  Teams        [ ]                                                    │                      ││
+19 |││  10:00-11:00 ? Jour f│  Reminder     (the mailbox default; minutes or none)                 │                      ││
+20 |││                [evoqs│  Show as      ‹ Busy ›                                               │                      ││
+21 |││                      │  Repeats      ‹ Does not repeat ›                                    │                      ││
+22 |││Fri 2026-08-07        │  Description  (none; Enter edits in $EDITOR)                         │                      ││
+23 |││  14:00-15:00 ✓ Abgesa│                                                                      │                      ││
+24 |││                [evoqs│  Availability ▇ busy  ▒ tentative  ▓ away  ░ elsewhere               │                      ││
+25 |││                      │               07  08  09  10  11  12  13  14  15  16  17  18  19     │                      ││
+26 |││                      │  You          ▏   ▏   ▇▇▇▇▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏      │                      ││
+27 |││                      │  ada          ▏   ▏   ▏   ▏   ▏   ▏   ▓▓▓▓▏   ▒▒  ▏   ▏   ▏   ▏      │                      ││
+28 |││                      │  someone      ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱ no free/busy   │                      ││
+29 |││                      │  ⌂ room-1     ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏   ▏      │                      ││
+30 |││                      │                                           ━━━━━━                     │                      ││
+31 |││                      │                                                                      │                      ││
+32 |│╰──────────────────────│  Times in Europe/Berlin                                              │                      ││
+33 |│╭ View ────────────────│  Enter create · Tab next · Space toggle · ←/→ choose · Esc cancel    │                      ││
+34 |││    mail  |  contacts ╰──────────────────────────────────────────────────────────────────────╯                      ││
 35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
 36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
 37 |││                                                                                                                    ││
@@ -47,15 +47,15 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 02 |bold@2..16 bold@43..61
 03 |bg:surface+fg:selection+bold@2..41
 04 |bg:surface+fg:selection+bold@2..41
-06 |bold@2..24
-07 |bold@25..34
-10 |fg:selection+bold@25..54
+06 |bold@2..24 bold@25..34
+09 |fg:selection+bold@25..54
 12 |bold@2..16
 16 |bold@2..16
 22 |bold@2..16
 23 |strike@2..24
-24 |strike@2..18
-26 |bold@64..67
-27 |bold@64..67
-29 |bold@64..67
-34 |bold@27..37
+24 |strike@2..18 fg:selection@40..41 fg:selection@48..49 fg:error@61..62
+25 |bg:surface@68..74
+26 |bold@25..40 fg:selection@48..52 bg:surface@68..74
+27 |fg:error@64..68 bg:surface@68..72 bg:surface+fg:selection@72..74
+28 |bg:surface@68..74
+29 |bg:surface@68..74

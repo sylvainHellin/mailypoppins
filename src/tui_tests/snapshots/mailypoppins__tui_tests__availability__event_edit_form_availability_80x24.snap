@@ -21,7 +21,7 @@ expression: frame
 15 |││  │  Reminder     15                                                     │  ││
 16 |│╰──│  Show as      ‹ Busy ›                                               │  ││
 17 |│╭ V│  Description  (none; Enter edits in $EDITOR)                         │  ││
-18 |││ m│  Availability           +3 more                                      │  ││
+18 |││ m│  Availability +3 more                                                │  ││
 19 |│╰──│  Times in Europe/Berlin                                              │──╯│
 20 |│╭──│  Enter save · Tab next · Space toggle · ←/→ choose · Esc cancel      │──╮│
 21 |││  ╰──────────────────────────────────────────────────────────────────────╯  ││

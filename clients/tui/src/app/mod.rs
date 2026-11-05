@@ -8,7 +8,7 @@ mod keys;
 mod reminders;
 mod types;
 
-pub use availability::{Availability, FreeBusyKey, AVAILABILITY_DEBOUNCE};
+pub use availability::{Availability, FreeBusyKey, AVAILABILITY_DEBOUNCE, AVAILABILITY_INTERVAL};
 pub use calendar::{day_part, DayPart};
 pub use event_form::{EventCalendarChoice, EventEdit, EventForm, EventFormRow, RepeatPattern};
 pub use keymap::{
