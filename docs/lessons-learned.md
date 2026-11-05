@@ -3483,7 +3483,8 @@ An explicit `finalFocus` handing back the element captured in the ref fixes the 
 ## A Tauri listen mock must unlisten per registration (2026-11-05)
 
 Tauri's unlisten removes one registration by event id, and an effect can call it only once `listen` has answered, which is after a StrictMode remount has registered again; a mock that keeps one handler per event and clears it on unlisten drops the remount's listener, so menu events reach nothing in tests while the dev build works (`fixture/backend.ts`).
-An effect that reads from the daemon under StrictMode reads twice unless the remount joins the first read in flight (`readText` in `readerMode.ts`); a cache filled on answer is not enough, and a read that a reset dropped on its way must neither cache its answer nor clear the newer read under its key.
+An effect that reads from the daemon under StrictMode reads twice unless the remount joins the first read in flight (`joinRead` in `src/lib/inflight.ts`, which `readText` and the draft preview use); a cache filled on answer is not enough, and a read that a reset dropped on its way must neither cache its answer nor clear the newer read under its key.
+A read joined only while in flight costs nothing in release, since nothing is cached; key it on every argument and generation the answer depends on, or a re-read joins a stale request.
 
 ## State-gated key hints live on the overlay, not in KEYMAP (2026-11-05, PERSO-270)
 

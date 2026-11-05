@@ -122,7 +122,7 @@ All notable changes to this project are documented in this file.
 - Desktop: the event form groups its fields into When, People and Details, shows a field's problem only once you leave it or try to create, and its availability grid is a timeline with a row per person, hour gridlines, a legend, the chosen time as a band across every row and a tooltip per slot (PERSO-255).
 
 ### Fixed
-- Desktop: the reader's text view asks the daemon once per message in dev builds too, and the test harness renders under StrictMode as the app does.
+- Desktop: the reader's text view and the draft preview ask the daemon once per message or draft in dev builds too, through one in-flight join (`joinRead`), and the test harness renders under StrictMode as the app does.
 - An occurrence deleted in Outlook as the only one of its series inside the sync window leaves mp's views at the next sync instead of lingering until the daily full re-read: a series master that Graph's delta re-sends alone is read with its instances over the window (PERSO-268).
 - The TUI help's EVENT CARD section lists every key the card takes (V, E, D, p, Tab, m, e, j/k, Esc / q / Enter), worded for the card, and the website's and the desktop's key lists follow (PERSO-270).
 - The TUI hint bar names the event card (EVENT) and lists the keys it takes for the event in view, the same set as the card's own footer (PERSO-270).
