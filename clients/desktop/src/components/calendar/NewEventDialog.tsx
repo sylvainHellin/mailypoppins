@@ -434,8 +434,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
                   "reminder",
                   "Reminder",
                   <span className="flex items-center gap-4">
-                    {/* As wide as Start and End, so None lines up under All day. */}
-                    <span className="flex w-60 items-center gap-2">
+                    <span className="flex items-center gap-2">
                       <Input
                         id={`${id}-reminder`}
                         data-field="reminder"
