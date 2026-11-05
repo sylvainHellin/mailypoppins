@@ -22,7 +22,7 @@ The matrix is a list rather than a table because eight columns over 140 rows is 
 
 ### Classification vocabulary
 
-- GUI parity: a user-facing capability the GUI must deliver, in milestones M1 to M4 of the [native GUI plan](plans/native-gui.md), and M6 for desktop notifications.
+- GUI parity: a user-facing capability the GUI must deliver, in milestones M1 to M4 of the [native GUI plan](../.agents/plans/native-gui.md), and M6 for desktop notifications.
 - CLI automation: a machine-facing surface whose consumers are scripts, agents, and other tools.
 - Diagnostics and maintenance: an operator surface for inspecting or repairing local state.
 - Daemon administration: lifecycle, locking, watching, and queue operation of the daemon itself.
@@ -37,7 +37,7 @@ A "client-side" entry needs no method at all and stays in the client process.
 
 ### GUI location
 
-Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129, which shipped the shell together with the read slices first planned for #0131, M2 to M4 are #0131, and M6 is #0132.
+Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](../.agents/plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129, which shipped the shell together with the read slices first planned for #0131, M2 to M4 are #0131, and M6 is #0132.
 An entry with another classification reads `not required`, since the plan puts no GUI-parity obligation on it.
 The ticket that ships an entry replaces the milestone with the surface and interaction it built.
 

@@ -2391,7 +2391,7 @@ mod tests {
 /// Build the `multipart/alternative` for an iMIP invite: `text/plain`,
 /// `text/html`, and the inline `text/calendar; method=REQUEST; charset=UTF-8`
 /// part carrying the `VEVENT`. This inline calendar part is the contract
-/// (`docs/plans/calendar-invites.md`, §2) — Outlook and Gmail render it as an
+/// (`.agents/plans/calendar-invites.md`, §2) — Outlook and Gmail render it as an
 /// actionable Accept / Tentative / Decline invite.
 fn build_invite_alternative(plain: &str, html: String, ics: &str) -> MultiPart {
     let calendar_ct: ContentType = "text/calendar; method=REQUEST; charset=UTF-8"

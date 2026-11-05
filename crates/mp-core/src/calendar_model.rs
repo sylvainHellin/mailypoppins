@@ -1,4 +1,4 @@
-//! The neutral calendar event model (PERSO-200, `docs/plans/calendar.md`,
+//! The neutral calendar event model (PERSO-200, `.agents/plans/calendar.md`,
 //! "Neutral event model").
 //!
 //! Every calendar backend (Graph, then EWS, then CalDAV) converts its events
@@ -1078,7 +1078,7 @@ impl Event {
 }
 
 /// `UID` plus `RECURRENCE-ID`, the identity "Events are deduplicated across
-/// sources on" (`docs/plans/calendar.md`, "Invitations on an account with a
+/// sources on" (`.agents/plans/calendar.md`, "Invitations on an account with a
 /// backend").
 ///
 /// The `RECURRENCE-ID` is normalised to one canonical form per kind of value:

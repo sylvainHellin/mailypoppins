@@ -2,7 +2,7 @@
 //!
 //! Builds a `METHOD:REQUEST` `VCALENDAR`/`VEVENT` from resolved input and
 //! renders it to the `.ics` bytes that go into the outgoing iMIP MIME message
-//! (see `docs/plans/calendar-invites.md`, D1/D7, §2). This is the counterpart
+//! (see `.agents/plans/calendar-invites.md`, D1/D7, §2). This is the counterpart
 //! to the receive-side parser in [`crate::calendar`]; both use the `icalendar`
 //! crate so escaping (RFC 5545 TEXT) and folding are handled by one dependency.
 //!
@@ -477,7 +477,7 @@ impl Rsvp {
 
 /// What we extracted from a received invite's sidecar `.ics` in order to build
 /// a REPLY. The sidecar is the source of truth for `UID`/`SEQUENCE`
-/// (`docs/plans/calendar-invites.md`, D2) — never the frontmatter cache.
+/// (`.agents/plans/calendar-invites.md`, D2) — never the frontmatter cache.
 #[derive(Debug, Clone)]
 pub struct ReplyContext {
     pub uid: String,

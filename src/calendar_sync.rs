@@ -1,4 +1,4 @@
-//! The calendar sync of one account (PERSO-200, `docs/plans/calendar.md`,
+//! The calendar sync of one account (PERSO-200, `.agents/plans/calendar.md`,
 //! "Sync"): the backend's calendars and the events of the rolling window into
 //! the store's calendar cache ([`crate::store::calendar`]).
 //!

@@ -76,7 +76,7 @@ the honest before-and-after still needs Sylvain's machine, a real account and th
 
 ## The cache-and-prefetch contingency stays closed
 
-[../../plans/preview-latency.md](../../plans/preview-latency.md) holds a cache and a background
+[preview-latency.md](../../../.agents/plans/preview-latency.md) holds a cache and a background
 prefetch in reserve, closed as unnecessary on 2026-09-08, to be reopened only if a measurement
 demands them.
 This measurement does not.

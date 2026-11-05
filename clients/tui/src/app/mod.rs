@@ -1788,7 +1788,7 @@ impl App {
     /// Read one message body for the preview memo (P5-U4).
     ///
     /// One `message.get` on the session the `App` holds, which is the
-    /// per-cursor-move read `docs/plans/preview-latency.md` measures: the memo
+    /// per-cursor-move read `.agents/plans/preview-latency.md` measures: the memo
     /// above it means a frame on an unchanged selection issues nothing at all,
     /// and a move issues exactly one call.
     ///

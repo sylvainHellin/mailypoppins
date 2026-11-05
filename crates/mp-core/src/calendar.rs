@@ -2,7 +2,7 @@
 //!
 //! Turns a raw `text/calendar` payload (the sidecar `.ics` bytes) into an
 //! [`ParsedEvent`] that the email writer serializes into the `event:`
-//! frontmatter block (see `docs/plans/calendar-invites.md`, D2/D5/D6).
+//! frontmatter block (see `.agents/plans/calendar-invites.md`, D2/D5/D6).
 //!
 //! Parsing is strictly best-effort: any failure returns `None` and the caller
 //! still persists the sidecar `.ics` and the email itself. A malformed invite

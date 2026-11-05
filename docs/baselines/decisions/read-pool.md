@@ -12,14 +12,14 @@ running, and four buys almost nothing over two.
 | --- | --- |
 | `pool_size` | 2 read connections per account, plus the writer connection, which is not in the pool |
 | `preview_p95_us` | 219.69 at size 1, 84.19 at size 2, 79.70 at size 4, all under contention |
-| `constraint` | `rusqlite::Connection` is `Send` but not `Sync` (`docs/plans/preview-latency.md`), so a pool is N connections each owned by one thread, never one connection shared behind a lock |
+| `constraint` | `rusqlite::Connection` is `Send` but not `Sync` (`.agents/plans/preview-latency.md`), so a pool is N connections each owned by one thread, never one connection shared behind a lock |
 | `host` | Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS (16 threads), 28 GiB RAM, fixture on tmpfs |
 | `commit` | the `spikes/ipc-bench` extension committed with this file, parent `ca3c61c895df945454a5472c66d30a9ff82b2044` (branch `daemon`) |
 
 ## The constraint the shape has to honour
 
 `rusqlite::Connection` is `Send` but not `Sync`.
-`docs/plans/preview-latency.md` records it twice: every read opens a fresh connection with its
+`.agents/plans/preview-latency.md` records it twice: every read opens a fresh connection with its
 pragmas (`src/store/mod.rs:210`) precisely because a connection cannot be parked on a shared
 `AccountState`, and the idea of caching one there is filed as blocked on the same fact.
 

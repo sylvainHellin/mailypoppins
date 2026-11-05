@@ -4,7 +4,7 @@
 //! `src/daemon/state/` and `mp_client::StateTracker` exist, against the
 //! contract fixed in `.agents/workflow/native-gui-daemon/plan.md` section 3.3
 //! (unit P3a-U3), the two bootstrap rules recorded in
-//! `docs/plans/daemon-bootstrap.md`, and the event prose in
+//! `.agents/plans/daemon-bootstrap.md`, and the event prose in
 //! `docs/daemon-protocol.md`. It does not compile under `--features daemon`
 //! today, and that failure *is* the proof the contract has no stub behind it.
 //! An implementer (P3a-U4) does not edit this file; they make it pass.
@@ -135,7 +135,7 @@
 //!   by mutating after `bootstrap()` returns and before the queue is drained.
 //!   All five boundaries are covered; four of them need the hook.
 //! - **The bootstrap gate is reentrant on its own thread**, the lesson
-//!   `docs/plans/daemon-bootstrap.md` records: the hook calls `apply` on the
+//!   `.agents/plans/daemon-bootstrap.md` records: the hook calls `apply` on the
 //!   bootstrapping thread, and a plain `Mutex` held across it deadlocks on
 //!   itself. [`the_bootstrap_gate_survives_a_reentrant_mutation`] is that
 //!   lesson as an executable, bounded assertion.
@@ -476,7 +476,7 @@ impl Forced {
     }
 
     /// How many events the client accepts, from the table in
-    /// `docs/plans/daemon-bootstrap.md`.
+    /// `.agents/plans/daemon-bootstrap.md`.
     fn expected_deliveries(self) -> usize {
         match self {
             Forced::BeforeRegister | Forced::AfterRegister => 0,
@@ -820,7 +820,7 @@ fn the_five_boundaries_reproduce_the_recorded_observation_table() {
         assert_eq!(
             run.accepted.len(),
             boundary.expected_deliveries(),
-            "{boundary:?}: docs/plans/daemon-bootstrap.md records {} delivered event(s); \
+            "{boundary:?}: .agents/plans/daemon-bootstrap.md records {} delivered event(s); \
              accepted {:?}, dropped {:?}",
             boundary.expected_deliveries(),
             run.accepted,

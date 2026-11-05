@@ -160,7 +160,7 @@ Its handshake requires `message.list_stream` (`TUI_REQUIRED_CAPABILITIES` in `sr
 
 Since P5-U4 the three reads a frame needs go the same way, through `crate::tui::queries` and the session the `App` holds.
 The two that can wait keep the thread they always had and block on a call rather than on a store open: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup, both through a `Session::handle()` a worker thread can own, so nothing about the load moved onto the draw thread.
-The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `docs/plans/preview-latency.md` budgets.
+The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `.agents/plans/preview-latency.md` budgets.
 The listing is transferred whole, once per mailbox open, as `docs/baselines/decisions/list-transfer.md` decided; the row deltas that keep it current decode here already and are applied by nothing until P5-U8 drains the event stream.
 Since #0138 the transfer is `message.list_stream`: the daemon reads the mailbox on its blocking pool, answers with its `total`, and streams the rows in `message.rows` chunks of about 1 MiB, which the session thread collects into one list before the loader thread sees it.
 A mailbox past the 16 MiB response cap therefore opens; only `message.list` with `limit: null` still answers `frame_too_large` there, about 34 000 rows, for a client that still sends it (`docs/baselines/message-list-unbounded.md`).
@@ -462,7 +462,7 @@ It runs off the reactor, as the mail body does, and under one lock per account t
 A sync that moved the cache publishes `calendar.changed` `{account}` beside the tick's `sync.completed`; a joiner carries none, as it carries no `sync.completed`.
 A token without the calendar scope is skipped with a debug line, because the `calendar:<name>` health check already prompts for the re-login, and any other failure is a warning in the log: the tick reports the mail pass, never the calendar.
 An `ews` or `caldav` account is refused as not supported yet and syncs nothing; an account without a server ticks never, so its calendar is polled by nothing either.
-The calendar is polled at the tick's own pace, the scheduler's `sync_interval_secs`, the watcher's arrivals and the clients' syncs; Graph webhooks would need a public endpoint (`docs/plans/calendar.md`, D11).
+The calendar is polled at the tick's own pace, the scheduler's `sync_interval_secs`, the watcher's arrivals and the clients' syncs; Graph webhooks would need a public endpoint (`.agents/plans/calendar.md`, D11).
 
 ### Answering an invitation
 

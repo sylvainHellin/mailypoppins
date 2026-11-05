@@ -4,7 +4,7 @@
 //! send of the draft would build (PERSO-136), under the same policy and with
 //! the same bridge.
 //!
-//! The plan's reader rule (docs/plans/native-gui.md, "Reading HTML bodies"):
+//! The plan's reader rule (.agents/plans/native-gui.md, "Reading HTML bodies"):
 //! the document carries the reader policy as its `Content-Security-Policy`
 //! response header, and the app CSP stays strict. The header is built from
 //! constants and never from a value read out of the message: a sender can hide a

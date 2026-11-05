@@ -85,7 +85,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
 /// without a bump.
 pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[];
 
-/// The complete schema. Follows the sketch in `docs/plans/data-access-layer.md`.
+/// The complete schema. Follows the sketch in `.agents/plans/data-access-layer.md`.
 ///
 /// Identity notes that are load-bearing rather than cosmetic:
 ///

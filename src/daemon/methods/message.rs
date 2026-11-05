@@ -360,7 +360,7 @@ fn wire_date_sort_of(date_display: Option<&str>, stamped: Option<i64>) -> String
 /// `id` is `messages.id`, the synthetic row key. It is here because it is the
 /// identity a TUI client holds for a listed row (`MessageRef`, #0050) and the
 /// address it hands back to [`get`]; it is per-store and per-session, it
-/// survives no rebuild (`docs/plans/preview-latency.md`, "hole 1"), and a
+/// survives no rebuild (`.agents/plans/preview-latency.md`, "hole 1"), and a
 /// client that persisted one would be naming a row that may since have become
 /// another message.
 ///

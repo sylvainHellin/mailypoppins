@@ -1,4 +1,4 @@
-//! The Graph calendar writes (PERSO-255, `docs/plans/calendar.md`, phase 2).
+//! The Graph calendar writes (PERSO-255, `.agents/plans/calendar.md`, phase 2).
 //!
 //! - Create: `POST /me/calendars/{id}/events` with the event and its
 //!   `transactionId`; the server sends the invitations. Graph answers a

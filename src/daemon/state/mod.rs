@@ -7,7 +7,7 @@
 //! [`CanonicalState::bootstrap`] attaches that queue to the fan-out and
 //! captures a [`Snapshot`] in one serialized operation.
 //!
-//! # The two rules, from `docs/plans/daemon-bootstrap.md`
+//! # The two rules, from `.agents/plans/daemon-bootstrap.md`
 //!
 //! **Register the subscriber before capturing the snapshot.** Every change
 //! committed from the attachment onwards is then already queued, which is

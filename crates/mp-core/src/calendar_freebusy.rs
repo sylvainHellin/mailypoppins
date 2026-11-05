@@ -1,4 +1,4 @@
-//! Free/busy (PERSO-255, `docs/plans/calendar.md`, phase 2, slice 7): when
+//! Free/busy (PERSO-255, `.agents/plans/calendar.md`, phase 2, slice 7): when
 //! the people and the rooms of a meeting are busy, which the event form
 //! shows while the user picks a time and `mp calendar freebusy` prints.
 //!

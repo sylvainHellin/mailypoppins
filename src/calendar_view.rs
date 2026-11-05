@@ -1,4 +1,4 @@
-//! The merged calendar view (PERSO-200, `docs/plans/calendar.md`, D7 and
+//! The merged calendar view (PERSO-200, `.agents/plans/calendar.md`, D7 and
 //! "Invitations on an account with a backend"): the events `calendar.view`
 //! and `event.get` serve.
 //!

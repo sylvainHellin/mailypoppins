@@ -1,4 +1,4 @@
-//! The calendar reminders (PERSO-255, `docs/plans/calendar.md`, phase 2).
+//! The calendar reminders (PERSO-255, `.agents/plans/calendar.md`, phase 2).
 //!
 //! The daemon computes each event's reminder from the calendar cache, which
 //! holds the reminder setting of every occurrence (an occurrence the delta

@@ -46,7 +46,7 @@ The one place the old spelling survives is the keyring service fallback below.
 
 ## Daemon and crate boundaries
 
-mp is built around a local daemon that owns every store read, every network call and every durable operation, and the CLI, the TUI and the desktop app (`clients/desktop`) are its clients ([native-gui.md](plans/native-gui.md)).
+mp is built around a local daemon that owns every store read, every network call and every durable operation, and the CLI, the TUI and the desktop app (`clients/desktop`) are its clients ([native-gui.md](../.agents/plans/native-gui.md)).
 The wire contract is [daemon-protocol.md](daemon-protocol.md) and the operator's half is [daemon-operations.md](daemon-operations.md).
 What follows is the shape that design gives the tree.
 
@@ -464,7 +464,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 
 ## Server calendar
 
-PERSO-200 gives every account a calendar view over two sources: the server calendar of an account with a calendar backend, and the iMIP invitation mails every account holds ([plans/calendar.md](plans/calendar.md) carries the design, [daemon-protocol.md](daemon-protocol.md#the-server-calendar) the wire shapes).
+PERSO-200 gives every account a calendar view over two sources: the server calendar of an account with a calendar backend, and the iMIP invitation mails every account holds ([calendar.md](../.agents/plans/calendar.md) carries the design, [daemon-protocol.md](daemon-protocol.md#the-server-calendar) the wire shapes).
 Phase 1 builds the engine against Microsoft Graph; EWS and CalDAV are later phases.
 
 ### Event model and backends

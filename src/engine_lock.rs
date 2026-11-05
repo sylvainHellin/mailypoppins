@@ -2,7 +2,7 @@
 //!
 //! The data-access-layer plan specifies a single-writer engine guarded by a
 //! non-blocking advisory lock on `<account_dir>/store.lock`
-//! (`docs/plans/data-access-layer.md`). SQLite's own WAL locking serialises
+//! (`.agents/plans/data-access-layer.md`). SQLite's own WAL locking serialises
 //! individual writes but cannot express "one engine for the lifetime of the
 //! process": its locks are scoped to a transaction. This is the missing piece.
 //!

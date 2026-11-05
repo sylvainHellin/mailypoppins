@@ -102,7 +102,7 @@ It is skipped on any host without root, this one included, so the wrong-owner br
 
 The macOS half of the gate line cannot be proved here at all.
 This is a Linux host, and the plan already carries the macOS run as an escalation to Sylvain rather than as a line a Linux agent may sign off.
-Everything the suite touches is POSIX (`flock`, `stat`, `connect`, `unlink`, `umask`), and `docs/plans/daemon-dependencies.md` verified in the vendored tokio source that peer credentials resolve on both platforms, but neither observation is a test run.
+Everything the suite touches is POSIX (`flock`, `stat`, `connect`, `unlink`, `umask`), and `.agents/plans/daemon-dependencies.md` verified in the vendored tokio source that peer credentials resolve on both platforms, but neither observation is a test run.
 
 Passes on Linux, escalated on macOS.
 

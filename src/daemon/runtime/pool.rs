@@ -9,7 +9,7 @@
 //! ## Why a pool of whole connections and not one shared connection
 //!
 //! `rusqlite::Connection` is `Send` but not `Sync`, which
-//! `docs/plans/preview-latency.md` records twice. A connection cannot be parked
+//! `.agents/plans/preview-latency.md` records twice. A connection cannot be parked
 //! behind a shared reference and used from several tasks; it can only be
 //! *moved* to whoever is reading right now and moved back afterwards, which is
 //! why a checkout is a guard ([`PooledRead`]) rather than a borrow.

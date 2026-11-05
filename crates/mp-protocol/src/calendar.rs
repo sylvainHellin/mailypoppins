@@ -5,7 +5,7 @@
 //! both ends of the socket now need them, so they live here and the root crate
 //! re-exports them under their old paths. Nothing about the YAML frontmatter
 //! they also serialise changed: the field names, the `#[serde]` attributes and
-//! the skip rules are the ones `docs/plans/calendar-invites.md` D2 fixed.
+//! the skip rules are the ones `.agents/plans/calendar-invites.md` D2 fixed.
 //!
 //! [`AgendaEvent`] is one invitation row of the local agenda: one
 //! `messages.id`, the frontmatter block the shared event card renders, and the
@@ -34,7 +34,7 @@ pub struct EventAttendee {
 
 /// The nested `event:` frontmatter block populated when an email carries an
 /// iMIP calendar invitation. The sidecar `.ics` is the source of truth; this
-/// block is a render/query cache (see `docs/plans/calendar-invites.md`, D2).
+/// block is a render/query cache (see `.agents/plans/calendar-invites.md`, D2).
 ///
 /// Every field is optional or defaulted so that emails without an `event:`
 /// block (the vast majority) round-trip unchanged.

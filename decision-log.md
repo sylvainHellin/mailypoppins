@@ -47,14 +47,14 @@ Status: accepted
 
 ## 2026-10-22 - The desktop prefix chord waits 5 s by default for its second key, configurable in Settings
 
-Why: the 1.2 s wait was too short, so a late second key fired its flat action (`a` after `c` archived instead of replying to all); 5 s leaves room for a slow second key while an accidental prefix still lapses on its own. Ticket #0148, plan `docs/plans/chord-timeout.md`.
+Why: the 1.2 s wait was too short, so a late second key fired its flat action (`a` after `c` archived instead of replying to all); 5 s leaves room for a slow second key while an accidental prefix still lapses on its own. Ticket #0148, plan `.agents/plans/chord-timeout.md`.
 Rejected: no timeout by default (an accidental prefix keeps the which-key overlay up until Escape; it stays a choice in Settings); 3 s (less room for the second key).
 Source: chat with Sylvain, 2026-10-22.
 Status: superseded by the 2026-10-22 entry "The desktop prefix chord never times out"
 
 ## 2026-10-22 - The TUI sidebar keeps showing only the active account; collapsing the other accounts is desktop only
 
-Why: the TUI sidebar never lists the other accounts, so the request is already met there, and the `ga` picker covers switching. Ticket #0147, plan `docs/plans/account-picker.md` (Decision 6).
+Why: the TUI sidebar never lists the other accounts, so the request is already met there, and the `ga` picker covers switching. Ticket #0147, plan `.agents/plans/account-picker.md` (Decision 6).
 Rejected: collapsed header rows for the other accounts in the TUI sidebar (extra work for the same result).
 Source: chat with Sylvain, 2026-10-22.
 Status: accepted
@@ -89,14 +89,14 @@ Status: accepted
 
 ## 2026-10-22 - The account picker follows its plan's five recommendations
 
-Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account, and picking the current account there expands it again after a hand collapse, since its header takes no key; a row of an account that is not serving says so in both pickers (the runtime state in the desktop, `not ready` in the TUI, which has one flag for opening and blocked); the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket #0147, plan `docs/plans/account-picker.md`.
+Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account, and picking the current account there expands it again after a hand collapse, since its header takes no key; a row of an account that is not serving says so in both pickers (the runtime state in the desktop, `not ready` in the TUI, which has one flag for opening and blocked); the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket #0147, plan `.agents/plans/account-picker.md`.
 Rejected: a type-to-filter field (it would swallow `j` and `k`); a TUI unread count per account (new state for a cosmetic gain); remembering the expand state across restarts; a cursor stop on every account header with Enter to toggle it (a second keyboard model for the picker's job).
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
 Status: accepted, amended by the 2026-10-22 entry "Both account pickers say opening, blocked or sync failed"
 
 ## 2026-10-22 - The desktop prefix chord never times out, as in the TUI
 
-Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, a click drops it so an abandoned chord never resolves with a much later key, and the which-key popup appears at once. Ticket #0148, plan `docs/plans/chord-timeout.md`.
+Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, a click drops it so an abandoned chord never resolves with a much later key, and the which-key popup appears at once. Ticket #0148, plan `.agents/plans/chord-timeout.md`.
 Rejected: a 5 s default with four presets in Settings (the earlier entry of the same day; two behaviours between the clients and a setting changed once); a show delay before the popup.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
 Status: accepted
@@ -222,7 +222,7 @@ Status: accepted
 
 ## 2026-10-22 - A renamed Graph folder keeps its rows, and IMAP rename detection waits for a check of the live servers
 
-Why: Graph's folder id survives a rename, so the listing stores it and a new name with a known id moves the folder's rows, cursor and delta token to the new key; a pinned old name is left alone and logged. IMAP has no folder id; its detection by UIDVALIDITY and Message-ID overlap is planned in `docs/plans/mailbox-discovery.md` and needs a rename on TUM and Proton first to learn whether each keeps UIDVALIDITY.
+Why: Graph's folder id survives a rename, so the listing stores it and a new name with a known id moves the folder's rows, cursor and delta token to the new key; a pinned old name is left alone and logged. IMAP has no folder id; its detection by UIDVALIDITY and Message-ID overlap is planned in `.agents/plans/mailbox-discovery.md` and needs a rename on TUM and Proton first to learn whether each keeps UIDVALIDITY.
 Rejected: building the IMAP half on an assumption about the servers.
 Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
 Status: accepted
@@ -291,7 +291,7 @@ Status: accepted
 
 ## 2026-10-26 - Open work lives in Plane, project PERSO, module Mailypoppins; BACKLOG.md and docs/tickets/ are retired
 
-Why: Plane is the single issue tracker for every code repo Sylvain maintains, so the repo stops keeping a second, plain-text one; each open ticket became a PERSO issue whose title keeps its number (PERSO-139 is "Two-way server drafts (#0143)"), the daemon follow-up lists of the backlog became one issue per phase, and the settled daemon-migration deferrals moved to the "Settled deferrals" section of `docs/plans/native-gui.md`.
+Why: Plane is the single issue tracker for every code repo Sylvain maintains, so the repo stops keeping a second, plain-text one; each open ticket became a PERSO issue whose title keeps its number (PERSO-139 is "Two-way server drafts (#0143)"), the daemon follow-up lists of the backlog became one issue per phase, and the settled daemon-migration deferrals moved to the "Settled deferrals" section of `.agents/plans/native-gui.md`.
 Docs and comments cite an issue by its identifier (`PERSO-139`); a four-digit number (`#0143`) names a retired ticket, which git keeps (last in the tree at `ed93905f`).
 Rejected: keeping BACKLOG.md as an index beside Plane (two trackers drift); moving the done tickets into Plane too (git history holds them).
 Source: Sylvain, decision of 2026-10-26; migration tracked in PERSO-194.
@@ -309,7 +309,7 @@ Status: accepted
 ## 2026-10-28 - The server-side calendar is built against Graph first, then EWS for TUM, then CalDAV
 
 Why: Graph is the cheapest API to build the shared engine, event store and views against, on the EVOQS account whose tenant Sylvain administers; TUM carries most meetings and room bookings and follows next; the personal calendar waits on its move to a CalDAV provider.
-The plan is `docs/plans/calendar.md`, with one Plane issue per phase (PERSO-200, PERSO-255, PERSO-256, PERSO-257).
+The plan is `.agents/plans/calendar.md`, with one Plane issue per phase (PERSO-200, PERSO-255, PERSO-256, PERSO-257).
 Rejected: Graph, then CalDAV, then EWS (TUM waits longest); EWS first (TUM sooner, but the engine is built against the hardest API).
 Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
 Status: accepted

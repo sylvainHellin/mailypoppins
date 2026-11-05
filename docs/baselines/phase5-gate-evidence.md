@@ -136,7 +136,7 @@ The method is therefore defined here, in the terms that file uses, and both colu
 
 One run is one `mp` launched inside a 120x40 pty and quit with `q` once it has painted.
 The launch instant is taken **inside** the pty immediately before the exec (`date +%s.%N`, then `exec mp`), so the pty setup and the shell are outside the measurement.
-The first frame is the process's own `[TIMING] tui_draw` line in `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`, the instrument #0108 added and the one `docs/plans/preview-latency.md` already measures against; its `done` line reports 0 or 1 ms on every run, so which of the pair is read moves nothing.
+The first frame is the process's own `[TIMING] tui_draw` line in `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`, the instrument #0108 added and the one `.agents/plans/preview-latency.md` already measures against; its `done` line reports 0 or 1 ms on every run, so which of the pair is read moves nothing.
 First paint is the difference between the two, in milliseconds, and the harness reads it out of the log by byte offset so no earlier run can be mistaken for this one.
 
 - Fixture: `cargo run --release --example mkfixture -- --out /var/tmp/mp-p5u11-fixture --rows 5000`, the Phase 0 fixture with the Phase 0 flags, 5501 messages, 25.1 MiB.

@@ -1,5 +1,5 @@
 //! The seam between the calendar engine and a server calendar (PERSO-200,
-//! `docs/plans/calendar.md`, D7).
+//! `.agents/plans/calendar.md`, D7).
 //!
 //! Each backend (Graph in phase 1, EWS in phase 3, CalDAV in phase 4)
 //! implements [`CalendarBackend`] over the neutral model of

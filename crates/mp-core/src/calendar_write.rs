@@ -1,5 +1,5 @@
 //! What a calendar write sends to a backend (PERSO-255,
-//! `docs/plans/calendar.md`, phase 2).
+//! `.agents/plans/calendar.md`, phase 2).
 //!
 //! [`EventInput`] is a new event and [`EventPatch`] a change to one, both in
 //! the neutral model's terms: times as an [`EventTime`] (UTC instants plus

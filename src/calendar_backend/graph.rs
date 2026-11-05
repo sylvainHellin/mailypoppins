@@ -1,4 +1,4 @@
-//! The Microsoft Graph calendar backend (PERSO-200, `docs/plans/calendar.md`,
+//! The Microsoft Graph calendar backend (PERSO-200, `.agents/plans/calendar.md`,
 //! "Backend notes", Graph).
 //!
 //! Reads go through `calendarView/delta` over the cache window, one calendar

@@ -1,7 +1,7 @@
 # The reader frame and its navigation guard
 
 The reader shows a message body as its own document: an `<iframe>` on `MessageMeta.html_url` (`mpmsg://localhost/<account>/<row_id>`), which the Rust layer's scheme handler answers ([rust-layer.md](rust-layer.md), "The reader").
-The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, "Reading HTML bodies".
+The rendering rule and its reasons are in the plan, `.agents/plans/native-gui.md`, "Reading HTML bodies".
 
 ## The frame
 

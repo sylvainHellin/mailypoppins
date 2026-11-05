@@ -3016,11 +3016,6 @@ Build the desktop crate after changing a shared crate's dependencies and commit 
 The connector caches `mp --version` by the binary's path, size and modification time, so a connect that restarts the daemon probes again afterwards instead of trusting the cached answer (#0139, PERSO-107).
 A test stands in for a second version with a wrapper script that switches the version it reports on `daemon restart` and touches itself, which changes the cache key.
 
-## A new file under docs/plans/ needs git add -f, in a conflict resolution too (2026-10-22)
-
-The local `.gitignore` excludes `/docs/plans`, so a plan file that is new to the tree stays out of a commit unless it is added with `git add -f`; files already tracked there commit as usual.
-The same holds when a cherry-pick or rebase conflict brings in a new plan file: `git add` on the resolution skips it without a word, and the commit lands without it.
-
 ## A host side effect in a shared crate is fenced by the test-support feature, not by cfg(test) (2026-10-22)
 
 `#[cfg(test)]` holds only while a crate's own tests build it, so when the TUI's or the root crate's tests build `mp-core` as a dependency, `mp_core::notify` ran osascript or notify-send for real.

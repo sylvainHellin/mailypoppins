@@ -2,7 +2,7 @@
 
 The macOS GUI of mailypoppins, a third client of the daemon beside the CLI and the TUI.
 It is built with Tauri 2, React 19, Vite, Tailwind 4 and shadcn on Base UI.
-The plan is [docs/plans/native-gui.md](../../docs/plans/native-gui.md), and the tickets are PERSO-206 for M1 and PERSO-207 for M2 to M4.
+The plan is [.agents/plans/native-gui.md](../../.agents/plans/native-gui.md), and the tickets are PERSO-206 for M1 and PERSO-207 for M2 to M4.
 
 ## What works
 

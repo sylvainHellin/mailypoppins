@@ -29,7 +29,7 @@ Passes.
 
 ## Every GUI-parity feature has a target interaction, or a recorded settled deferral
 
-Artifacts: `docs/parity-matrix.md` and the "Settled deferrals" section of `docs/plans/native-gui.md`.
+Artifacts: `docs/parity-matrix.md` and the "Settled deferrals" section of `.agents/plans/native-gui.md`.
 
 ```sh
 grep -c '^- Classification: GUI parity' docs/parity-matrix.md   # 97
@@ -41,7 +41,7 @@ Partially satisfied, and it cannot be more than that in Phase 0.
 The plan puts the GUI design in Phase 9 and instructs P0-U3 in the same document to leave the GUI column at `TBD (Phase 9)`.
 So no GUI-parity entry carries a target interaction, and the gate line's first half is unsatisfiable by the phase that is supposed to satisfy it.
 The one exception is `RD-05`, inline image rendering, whose GUI location reads `none` because #0109 retired the capability and the identifier stays reserved rather than carrying an obligation.
-The second half is met for what is actually settled today: the deferral list is the "Settled deferrals" section of `docs/plans/native-gui.md`, and it holds the decisions taken rather than a placeholder per row.
+The second half is met for what is actually settled today: the deferral list is the "Settled deferrals" section of `.agents/plans/native-gui.md`, and it holds the decisions taken rather than a placeholder per row.
 
 Of the 97 GUI-parity entries, one is retired (`RD-05`), one is deferred with the deferral recorded (`OBS-07`), and 95 carry neither a target interaction nor a deferral because the interaction does not exist to record yet.
 

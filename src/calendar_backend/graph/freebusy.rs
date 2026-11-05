@@ -1,4 +1,4 @@
-//! Free/busy through Graph (PERSO-255, `docs/plans/calendar.md`, phase 2,
+//! Free/busy through Graph (PERSO-255, `.agents/plans/calendar.md`, phase 2,
 //! slice 7): `POST /me/calendar/getSchedule`, which `Calendars.ReadWrite`
 //! covers (the call needs `Calendars.ReadBasic` or more).
 //!

@@ -674,7 +674,7 @@ Only the shown list is read: one that went stale behind another view is read whe
 ## Calendar
 
 The Calendar view shows the events of every account, the server calendars and the invitation mails merged by the daemon, the TUI's Calendar view (CAL-02, CAL-03, PERSO-200).
-It has three layouts, as the TUI does: the agenda, the day grid and the week grid (D10 of docs/plans/calendar.md).
+It has three layouts, as the TUI does: the agenda, the day grid and the week grid (D10 of .agents/plans/calendar.md).
 
 ### The days and the events
 

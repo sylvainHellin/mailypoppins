@@ -4,7 +4,7 @@ import type { EventAttendee } from "./EventAttendee";
 /**
  * The nested `event:` frontmatter block populated when an email carries an
  * iMIP calendar invitation. The sidecar `.ics` is the source of truth; this
- * block is a render/query cache (see `docs/plans/calendar-invites.md`, D2).
+ * block is a render/query cache (see `.agents/plans/calendar-invites.md`, D2).
  *
  * Every field is optional or defaulted so that emails without an `event:`
  * block (the vast majority) round-trip unchanged.

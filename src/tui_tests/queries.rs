@@ -696,7 +696,7 @@ fn a_preview_walk_leaves_no_handle_behind() {
 
     let rows = list_emails(&fixture, ACCOUNT, "inbox").expect("the daemon lists inbox");
     // Down the list and back up, which is the walk that evicts a one-slot memo
-    // on every move (`docs/plans/preview-latency.md`).
+    // on every move (`.agents/plans/preview-latency.md`).
     for entry in rows.iter().chain(rows.iter().rev()) {
         let msg = entry.msg.expect("an ingested row has a MessageRef");
         message_body(&fixture, ACCOUNT, msg).expect("the daemon reads a body");

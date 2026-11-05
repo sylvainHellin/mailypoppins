@@ -137,12 +137,12 @@ pub struct AccountConfig {
 }
 
 /// Which server calendar an account reaches (PERSO-200,
-/// `docs/plans/calendar.md`, "Account setting").
+/// `.agents/plans/calendar.md`, "Account setting").
 ///
 /// The calendar backend is chosen per account and independently of the mail
 /// transport: TUM keeps IMAP and SMTP for mail and reaches its calendar through
 /// EWS. An account with no calendar backend keeps the iMIP path of
-/// `docs/plans/calendar-invites.md`.
+/// `.agents/plans/calendar-invites.md`.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CalendarBackendKind {
@@ -702,7 +702,7 @@ pub struct SignatureEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Retention and disk budget (see docs/plans/data-access-layer.md)
+// Retention and disk budget (see .agents/plans/data-access-layer.md)
 // ---------------------------------------------------------------------------
 //
 // The local store is a cache in front of the server, so evicting a body or an

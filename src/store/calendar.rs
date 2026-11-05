@@ -1,4 +1,4 @@
-//! The calendar cache of an account (PERSO-200, `docs/plans/calendar.md`,
+//! The calendar cache of an account (PERSO-200, `.agents/plans/calendar.md`,
 //! "Event store").
 //!
 //! A disposable cache of the rolling window (D6): the server is the source of
