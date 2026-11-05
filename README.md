@@ -33,7 +33,7 @@ A change made in one client shows up in the others at once.
 - An approval step before sending, an undo-send window and a durable outbox.
 - Conversations that gather a thread from Inbox, Sent, Archive and Drafts.
 - One search syntax for the server and the local store.
-- A calendar with agenda, day and week views over the Outlook calendar of a Microsoft 365 account and the invitation mails of every account; invitations are sent and answered from the same views.
+- A calendar with agenda, day and week views over the Outlook calendar of a Microsoft 365 account and the invitation mails of every account; events are created, edited, repeated, cancelled and answered from the same views, with colleagues' free/busy in the event form and Outlook's reminders as notifications.
 - A contacts index built from your mail, signatures as Markdown files, and hooks that run a command on matching incoming mail.
 - Vim keys, a which-key popup and a command palette in the terminal UI and the desktop app.
 
