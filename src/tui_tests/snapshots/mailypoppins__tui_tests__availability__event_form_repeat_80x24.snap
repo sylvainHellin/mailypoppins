@@ -33,4 +33,4 @@ expression: frame
 04 |bg:surface+fg:selection+bold@2..4
 06 |bold@2..4
 12 |bold@2..4
-17 |fg:selection+bold@5..27
+17 |bold@5..27

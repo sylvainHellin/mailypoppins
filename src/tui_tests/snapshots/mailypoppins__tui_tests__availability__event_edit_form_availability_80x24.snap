@@ -31,6 +31,6 @@ expression: frame
 02 |bold@2..4
 03 |bg:surface+fg:selection+bold@2..4 bold@5..15
 04 |bg:surface+fg:selection+bold@2..4
-05 |fg:selection+bold@5..34
+05 |bold@5..34
 06 |bold@2..4
 12 |bold@2..4

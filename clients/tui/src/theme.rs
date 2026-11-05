@@ -75,7 +75,8 @@ pub struct Theme {
     pub accent_alt: Color,
 
     // Content
-    /// Header field labels, H1 headings, help section titles, picker cursor.
+    /// Header field labels, H1 headings, help section titles, picker cursor,
+    /// the focused row of a form or chooser in a modal.
     pub heading: Color,
     /// Attention highlight that is not a warning: focused compose field
     /// label, selection count in the status bar, emphasized command names.
@@ -527,7 +528,12 @@ mod tests {
                     TEXT,
                     "input cursors, H3, progress",
                 ),
-                ("heading", t.heading, TEXT, "header labels, H1, help titles"),
+                (
+                    "heading",
+                    t.heading,
+                    TEXT,
+                    "header labels, H1, help titles, focused form row",
+                ),
                 ("emphasis", t.emphasis, TEXT, "focused compose label"),
                 ("success", t.success, TEXT, "success status, save-here row"),
                 (

@@ -33,7 +33,7 @@ use super::super::app::{
 };
 use super::super::theme;
 use super::util::{display_width, truncate};
-use super::widgets::{modal_stack_areas, render_modal_shell};
+use super::widgets::{focus_style, modal_stack_areas, render_modal_shell};
 
 /// Below this content width the agenda drops its event card.
 const DETAIL_MIN_WIDTH: u16 = 56;
@@ -1206,9 +1206,7 @@ pub(super) fn render_calendars_overlay(overlay: &CalendarsOverlay, frame: &mut F
                 text.push_str("  (default)");
             }
             let style = if selected {
-                Style::default()
-                    .fg(theme::active().selection)
-                    .add_modifier(Modifier::BOLD)
+                focus_style(theme::active())
             } else if calendar.visible {
                 Style::default().fg(theme::active().text)
             } else {

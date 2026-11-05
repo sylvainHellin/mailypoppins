@@ -4,7 +4,7 @@
 //! Before this module every overlay re-implemented the same `Flex::Center`
 //! horizontal+vertical layout dance plus its own `Clear` + bordered `Block`,
 //! which drifted into subtly inconsistent margins and border styles. These
-//! five primitives centralize that so overlays share one shell:
+//! primitives centralize that so overlays share one shell:
 //!
 //! - [`render_panel_shell`] \u2014 `Clear` + rounded bordered block, returns inner
 //!   `Rect`;
@@ -13,12 +13,15 @@
 //! - [`modal_stack_areas`] \u2014 split a modal's inner area into
 //!   header / content / footer rows;
 //! - [`render_action_button`] \u2014 the ` esc close ` accent chip;
+//! - [`focus_style`] \u2014 the focused row of a form or chooser;
 //! - `panel_contrast_fg` lives on [`super::super::theme::Theme`].
 
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
+
+use super::super::theme::Theme;
 
 /// Dim every cell of `area` by OR-ing in `Modifier::DIM`, so a modal drawn on
 /// top of it visually floats above the (now recessed) main view. Call once,
@@ -161,4 +164,34 @@ pub(super) fn render_action_button(
             .alignment(Alignment::Center),
         rect,
     );
+}
+
+/// The focused row of a form or chooser drawn on a modal's `panel_bg`
+/// (the event form's field label, the RSVP choice, a scope or calendar
+/// row): `heading`, bold. Not `selection`, the cursor row's foreground over
+/// `surface`: the terminal theme makes it White for its DarkGray cursor
+/// row, and on a modal's Reset ground it vanishes on a light terminal.
+/// `heading` is Magenta there, which reads on light and dark terminals
+/// alike, holds 4.5:1 on `panel_bg` in the light themes, and is the
+/// pickers' cursor colour already.
+pub(super) fn focus_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.heading)
+        .add_modifier(Modifier::BOLD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A focused row stays legible on a light terminal: its colour is not
+    /// the terminal theme's White `selection`, which the Reset ground of a
+    /// modal would swallow.
+    #[test]
+    fn the_focused_row_reads_on_any_terminal_ground() {
+        let terminal = Theme::terminal();
+        assert_eq!(focus_style(&terminal).fg, Some(Color::Magenta));
+        assert_ne!(focus_style(&terminal).fg, Some(terminal.selection));
+        assert!(focus_style(&terminal).add_modifier.contains(Modifier::BOLD));
+    }
 }

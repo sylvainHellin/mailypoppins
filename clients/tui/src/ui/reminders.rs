@@ -11,7 +11,7 @@ use ratatui::Frame;
 use super::super::app::{App, RemindersOverlay, SNOOZE_MINUTES};
 use super::super::theme;
 use super::util::truncate;
-use super::widgets::{modal_stack_areas, render_modal_shell};
+use super::widgets::{focus_style, modal_stack_areas, render_modal_shell};
 
 pub(super) fn render_reminders_overlay(
     app: &App,
@@ -52,9 +52,7 @@ pub(super) fn render_reminders_overlay(
             mp_client::format::reminder_line(reminder, now, &zone)
         );
         let style = if selected {
-            Style::default()
-                .fg(theme::active().selection)
-                .add_modifier(Modifier::BOLD)
+            focus_style(theme::active())
         } else {
             Style::default().fg(theme::active().text)
         };

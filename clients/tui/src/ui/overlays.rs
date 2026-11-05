@@ -12,7 +12,7 @@ use super::super::app::{
 };
 use super::super::theme;
 use super::util::truncate;
-use super::widgets::{modal_stack_areas, render_action_button, render_modal_shell};
+use super::widgets::{focus_style, modal_stack_areas, render_action_button, render_modal_shell};
 
 /// Render the respond overlay (#0029, PERSO-200): Accept / Tentative /
 /// Decline, a comment line, on a tentative or a decline that may propose
@@ -38,9 +38,7 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
     let stack = modal_stack_areas(inner, 0, 1);
     let inner_width = inner.width as usize;
     let normal = Style::default().fg(theme::active().text);
-    let focused = Style::default()
-        .fg(theme::active().selection)
-        .add_modifier(Modifier::BOLD);
+    let focused = focus_style(theme::active());
     let muted = Style::default().fg(theme::active().text_muted);
 
     let mut lines = vec![
@@ -174,9 +172,7 @@ pub(super) fn render_event_form(
         .areas(stack.content);
     let width = inner.width as usize;
     let normal = Style::default().fg(theme::active().text);
-    let focused = Style::default()
-        .fg(theme::active().selection)
-        .add_modifier(Modifier::BOLD);
+    let focused = focus_style(theme::active());
     let muted = Style::default().fg(theme::active().text_muted);
 
     let title = match (&form.editing, &form.transaction_id) {
@@ -348,9 +344,7 @@ pub(super) fn render_event_scope(chooser: &EventScopeChooser, frame: &mut Frame,
     };
     let stack = modal_stack_areas(inner, 0, 1);
     let width = inner.width as usize;
-    let focused = Style::default()
-        .fg(theme::active().selection)
-        .add_modifier(Modifier::BOLD);
+    let focused = focus_style(theme::active());
     let normal = Style::default().fg(theme::active().text);
     let muted = Style::default().fg(theme::active().text_muted);
     let title = if chooser.remove {
@@ -429,9 +423,7 @@ pub(super) fn render_event_remove(overlay: &EventRemoveOverlay, frame: &mut Fram
     let stack = modal_stack_areas(inner, 0, 1);
     let width = inner.width as usize;
     let normal = Style::default().fg(theme::active().text);
-    let focused = Style::default()
-        .fg(theme::active().selection)
-        .add_modifier(Modifier::BOLD);
+    let focused = focus_style(theme::active());
     let muted = Style::default().fg(theme::active().text_muted);
     let title = match (overlay.cancel, overlay.scope.as_deref()) {
         (true, Some("series")) => "Cancel the whole series?",
