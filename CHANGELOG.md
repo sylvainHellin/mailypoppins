@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
-- `mp delete` takes several selectors, across accounts and between drafts and received mail; a refusal is reported against its selector, the others are still deleted, and the run exits with an error naming how many failed.
+- `mp archive`, `mp move` and `mp delete` take several selectors, across accounts (and for `mp delete` across drafts and received mail); a refusal is reported against its selector, the others are still deleted, and the run exits with an error naming how many failed.
 - Create a recurring event (daily, weekly on chosen days, monthly on a day or a weekday, yearly; ending on a date, after N times or never) from `mp event create --repeat`, the TUI form's Repeats row and the desktop form's Repeats section, and change, cancel or delete one occurrence or the whole series with `--scope occurrence|series`, the TUI's `o`/`s` chooser and the desktop's This occurrence or The whole series; taking an attendee's proposed time on an occurrence moves that occurrence alone (PERSO-255).
 - The TUI help (`?`) lists the event card's own keys in an EVENT CARD section: `p` uses the marked proposed time, `Tab` marks the next, `m` opens the invitation mail (PERSO-255).
 - Propose a new time when answering a meeting tentatively or declining it (`mp event respond --propose`, the TUI respond overlay, the desktop RSVP dialog), and as organizer take an attendee's proposal with `mp event update --use-proposal`, `p` on the TUI event card or Use this time on the desktop card, which open the edit form at the proposed time (PERSO-255).

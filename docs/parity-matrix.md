@@ -519,7 +519,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-01 Archive a received message on the server and locally
 
 - Classification: GUI parity
-- Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:935`)
+- Source anchor: `mp archive <selector>... [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:935`)
 - Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false`, the TUI's contract (P5-U6), it queues the pair and answers, and the account's drainer drains it once mutations have been quiet for 1.5 s (#0133)
 - GUI location: clients/desktop: `a` in the list or the reader, the palette's "Archive" and the reader toolbar's Archive, each asking "Archive this email?" first; the row leaves the list at once and comes back on a refusal or a rollback (M2, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`), `clients/desktop/src/app/events.test.tsx` (`archives a row, and the drain's invalidation keeps it gone`), `clients/desktop/src-tauri/src/commands.rs` (`an_archive_moves_every_row_in_order_and_queues`)
@@ -563,7 +563,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-05 Move a message to another mailbox through a fuzzy picker
 
 - Classification: GUI parity
-- Source anchor: `mp move <selector> <mailbox> [--mailbox]` (`src/main.rs`, PERSO-235), TUI `M`, `Action::MoveToMailbox` (`clients/tui/src/app/types.rs:1571`)
+- Source anchor: `mp move <selector>... <mailbox> [--mailbox]` (`src/main.rs`, PERSO-235), TUI `M`, `Action::MoveToMailbox` (`clients/tui/src/app/types.rs:1571`)
 - Daemon surface: `message.move` `{account, row_id, destination, settle}` (the CLI addresses by selector and settles), plus the mailbox list from `state.bootstrap`
 - GUI location: clients/desktop: `M`, the reader toolbar's Move and the palette open a picker of the account's mailboxes less Drafts and the rows' own mailbox, filtered as the name is typed; from Drafts it says "Quick-move is not available in this mailbox", the TUI's words (M2, #0131)
 - Validation: `tests/cli_move.rs`, `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`M opens the mailbox picker, typing filters it and Enter moves`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`filters as the name is typed, and Escape cancels`, `says why a Drafts row cannot move`), `clients/desktop/src-tauri/src/commands.rs` (`a_move_lands_in_the_destination_by_slug_or_label`)

@@ -303,28 +303,28 @@ enum Commands {
         #[arg(long)]
         timeout: Option<u64>,
     },
-    /// Archive a received email (server + local)
+    /// Archive received emails (server + local)
     Archive {
-        /// Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
-        #[arg(value_name = "SELECTOR")]
-        selector: String,
-        /// Mailbox to resolve the selector in
+        /// Received selectors, one or more: mp://<account>/<mailbox>/<message-id>[/<uid>]
+        #[arg(value_name = "SELECTOR", required = true)]
+        selectors: Vec<String>,
+        /// Mailbox to resolve the selectors in
         #[arg(long)]
         mailbox: Option<String>,
     },
-    /// Move a received email to another mailbox (server + local)
+    /// Move received emails to another mailbox (server + local)
     Move {
-        /// Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
-        #[arg(value_name = "SELECTOR")]
-        selector: String,
+        /// Received selectors, one or more: mp://<account>/<mailbox>/<message-id>[/<uid>]
+        #[arg(value_name = "SELECTOR", required = true)]
+        selectors: Vec<String>,
         /// Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
         #[arg(value_name = "MAILBOX")]
         destination: String,
-        /// Mailbox to resolve the selector in
+        /// Mailbox to resolve the selectors in
         #[arg(long)]
         mailbox: Option<String>,
     },
-    /// Delete a received email (server + local) or a local draft
+    /// Delete received emails (server + local) or local drafts
     //
     // Kept to one doc line on purpose: a second paragraph flips clap into its
     // long-help layout and reformats the whole subcommand's `--help`, the same
@@ -3153,46 +3153,136 @@ async fn routed_received_mutation(
         .map_err(|e| refusal(account, e))
 }
 
-/// `mp delete` of one selector: a drafts selector discards the draft, a
-/// received one deletes the message on its server and in the store.
-async fn delete_one(
+/// What `mp archive`, `mp move` and `mp delete` do to each of their selectors.
+enum MessageAction<'a> {
+    Archive,
+    Move { destination: &'a str },
+    Delete { force: bool },
+}
+
+impl MessageAction<'_> {
+    /// The verb in a refusal, the stand-in's wording and the failure count.
+    fn verb(&self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Move { .. } => "move",
+            Self::Delete { .. } => "delete",
+        }
+    }
+}
+
+/// Runs `action` on every selector, each resolved in its own account. One
+/// selector keeps its error verbatim, as before several were accepted, since
+/// the parity gates compare it byte for byte; with several, a refusal is
+/// reported against its selector, the rest still run, as `rm` does, and the
+/// exit is an error naming how many failed.
+async fn act_on_selectors(
+    action: &MessageAction<'_>,
+    selectors: &[String],
+    mailbox: Option<&str>,
+    default: &AccountConfig,
+    global: &GlobalConfig,
+) -> Result<()> {
+    if let [selector] = selectors {
+        let done = act_on_one(action, selector, mailbox, default, global).await?;
+        report_acted(action, &done);
+        return Ok(());
+    }
+    let mut failed = 0;
+    for selector in selectors {
+        match act_on_one(action, selector, mailbox, default, global).await {
+            Ok(done) => report_acted(action, &done),
+            Err(error) => {
+                failed += 1;
+                eprintln!("{} {selector}: {error:#}", "\u{2717}".red());
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} {}s failed", selectors.len(), action.verb());
+    }
+    Ok(())
+}
+
+/// One selector of [`act_on_selectors`]: an archive or a move rewrites the
+/// row and moves the message on its server, a delete of a drafts selector
+/// discards the draft and of a received one deletes the message.
+async fn act_on_one(
+    action: &MessageAction<'_>,
     selector: &str,
     mailbox: Option<&str>,
-    force: bool,
     default: &AccountConfig,
     global: &GlobalConfig,
 ) -> Result<serde_json::Value> {
-    // A cross-account selector deletes from its own account, so the store and
-    // (for received mail) the server credentials must be the selector's, not
-    // `-A`'s (the #0073 follow-up bug).
+    // The server op and the row rewrite both belong to the selector's
+    // account, so the store and the server credentials must be the
+    // selector's, not `-A`'s (the #0073 follow-up bug).
     let account_config = account_for_selector(selector, default, global)?;
-    if is_drafts_selector(selector, mailbox)? {
-        // Drafts are local-only: no server op, just the file and the index row
-        // the rescan drops (#0073).
-        return routed_discard(&account_config.name, selector, force).await;
-    }
-    // The durable queue again (#0039): the daemon commits the row delete and
-    // the owed server delete together, then drains it. A delete has nothing to
-    // roll back (the row is gone and the server still holds the message), so a
-    // refusal propagates verbatim and the next sync refetches the UID; the
-    // not-found message stays byte-identical.
+    let (method, extra): (&str, Vec<(&str, &str)>) = match action {
+        MessageAction::Archive => ("message.archive", vec![]),
+        // `mp archive` with a destination of the user's choosing (PERSO-235):
+        // the same daemon call the TUI's `M` makes. The daemon resolves the
+        // destination as a role, slug or label, so an unknown name is refused
+        // there with the account's mailboxes listed.
+        MessageAction::Move { destination } => {
+            ("message.move", vec![("destination", *destination)])
+        }
+        MessageAction::Delete { force } => {
+            if is_drafts_selector(selector, mailbox)? {
+                // Drafts are local-only: no server op, just the file and the
+                // index row the rescan drops (#0073).
+                return routed_discard(&account_config.name, selector, *force).await;
+            }
+            // The durable queue again (#0039): the daemon commits the row
+            // delete and the owed server delete together, then drains it. A
+            // delete has nothing to roll back (the row is gone and the server
+            // still holds the message), so a refusal propagates verbatim and
+            // the next sync refetches the UID; the not-found message stays
+            // byte-identical.
+            ("message.delete", vec![])
+        }
+    };
     fetch_on_miss(
         &account_config,
         selector,
         mailbox,
-        StandIn::Refused { verb: "delete" },
+        StandIn::Refused {
+            verb: action.verb(),
+        },
         async |selector: &str, mailbox: Option<&str>| {
-            routed_received_mutation(
-                &account_config.name,
-                "message.delete",
-                selector,
-                mailbox,
-                &[],
-            )
-            .await
+            routed_received_mutation(&account_config.name, method, selector, mailbox, &extra).await
         },
     )
     .await
+}
+
+/// The line [`act_on_selectors`] prints for a selector it acted on: an
+/// archive or a move hands back the message's new selector, which is all a
+/// pipe receives.
+fn report_acted(action: &MessageAction<'_>, done: &serde_json::Value) {
+    let (verb, moved) = match action {
+        MessageAction::Archive => ("archived", true),
+        MessageAction::Move { .. } => ("moved", true),
+        MessageAction::Delete { .. } => ("deleted", false),
+    };
+    if moved {
+        hand_back(
+            &format!(
+                "{} {verb} {}\n  {} {}",
+                "\u{2713}".green(),
+                wire_str(&done["selector"]),
+                "now".dimmed(),
+                wire_str(&done["moved_to"]["selector"])
+            ),
+            wire_str(&done["moved_to"]["selector"]),
+        );
+    } else {
+        println!(
+            "{} {verb} {}",
+            "\u{2713}".green(),
+            wire_str(&done["selector"])
+        );
+    }
 }
 
 /// `mp delete <drafts selector>`: local-only, so one call and no backend.
@@ -6241,79 +6331,32 @@ async fn main() -> Result<()> {
             routed_watch(&account_config, &mailbox, timeout).await?;
         }
 
-        Some(Commands::Archive { selector, mailbox }) => {
-            // The server move and the row rewrite both belong to the selector's
-            // account: resolve it before asking the daemon, so a cross-account
-            // selector is answered by its own account's store and credentials.
-            let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let moved = fetch_on_miss(
-                &account_config,
-                &selector,
+        Some(Commands::Archive { selectors, mailbox }) => {
+            act_on_selectors(
+                &MessageAction::Archive,
+                &selectors,
                 mailbox.as_deref(),
-                StandIn::Refused { verb: "archive" },
-                async |selector: &str, mailbox: Option<&str>| {
-                    routed_received_mutation(
-                        &account_config.name,
-                        "message.archive",
-                        selector,
-                        mailbox,
-                        &[],
-                    )
-                    .await
-                },
+                &account_config,
+                &global_config,
             )
             .await?;
-            hand_back(
-                &format!(
-                    "{} archived {}\n  {} {}",
-                    "\u{2713}".green(),
-                    wire_str(&moved["selector"]),
-                    "now".dimmed(),
-                    wire_str(&moved["moved_to"]["selector"])
-                ),
-                wire_str(&moved["moved_to"]["selector"]),
-            );
         }
 
         Some(Commands::Move {
-            selector,
+            selectors,
             destination,
             mailbox,
         }) => {
-            // `mp archive` with a destination of the user's choosing
-            // (PERSO-235): the same daemon call the TUI's `M` makes, resolved
-            // against the selector's own account, and settled before it
-            // answers. The destination is resolved by the daemon, as a role,
-            // slug or label, so an unknown name is refused there with the
-            // account's mailboxes listed.
-            let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let moved = fetch_on_miss(
-                &account_config,
-                &selector,
-                mailbox.as_deref(),
-                StandIn::Refused { verb: "move" },
-                async |selector: &str, mailbox: Option<&str>| {
-                    routed_received_mutation(
-                        &account_config.name,
-                        "message.move",
-                        selector,
-                        mailbox,
-                        &[("destination", destination.as_str())],
-                    )
-                    .await
+            act_on_selectors(
+                &MessageAction::Move {
+                    destination: &destination,
                 },
+                &selectors,
+                mailbox.as_deref(),
+                &account_config,
+                &global_config,
             )
             .await?;
-            hand_back(
-                &format!(
-                    "{} moved {}\n  {} {}",
-                    "\u{2713}".green(),
-                    wire_str(&moved["selector"]),
-                    "now".dimmed(),
-                    wire_str(&moved["moved_to"]["selector"])
-                ),
-                wire_str(&moved["moved_to"]["selector"]),
-            );
         }
 
         Some(Commands::Delete {
@@ -6328,51 +6371,15 @@ async fn main() -> Result<()> {
                 // files with nothing left to do to them. Clear them in one
                 // call, file and row alike.
                 routed_sweep(&account_config.name).await?;
-            } else if let [selector] = selectors.as_slice() {
-                // One selector keeps its error verbatim, as before several were
-                // accepted: the parity gates compare it byte for byte.
-                let deleted = delete_one(
-                    selector,
+            } else {
+                act_on_selectors(
+                    &MessageAction::Delete { force },
+                    &selectors,
                     mailbox.as_deref(),
-                    force,
                     &account_config,
                     &global_config,
                 )
                 .await?;
-                println!(
-                    "{} deleted {}",
-                    "\u{2713}".green(),
-                    wire_str(&deleted["selector"])
-                );
-            } else {
-                // Several selectors: each is deleted on its own, a refusal is
-                // reported against its selector and the rest still run, as `rm`
-                // does, and the exit is an error when any of them failed.
-                let mut failed = 0;
-                for selector in &selectors {
-                    match delete_one(
-                        selector,
-                        mailbox.as_deref(),
-                        force,
-                        &account_config,
-                        &global_config,
-                    )
-                    .await
-                    {
-                        Ok(deleted) => println!(
-                            "{} deleted {}",
-                            "\u{2713}".green(),
-                            wire_str(&deleted["selector"])
-                        ),
-                        Err(error) => {
-                            failed += 1;
-                            eprintln!("{} {selector}: {error:#}", "\u{2717}".red());
-                        }
-                    }
-                }
-                if failed > 0 {
-                    anyhow::bail!("{failed} of {} deletes failed", selectors.len());
-                }
             }
         }
 

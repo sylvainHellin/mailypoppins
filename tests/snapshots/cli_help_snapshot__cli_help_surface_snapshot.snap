@@ -23,9 +23,9 @@ Commands:
   list-mailboxes  List every folder on the server with its sync policy and role
   sync            Sync mailboxes from the server into the local store
   watch           Watch a mailbox for changes using IMAP IDLE
-  archive         Archive a received email (server + local)
-  move            Move a received email to another mailbox (server + local)
-  delete          Delete a received email (server + local) or a local draft
+  archive         Archive received emails (server + local)
+  move            Move received emails to another mailbox (server + local)
+  delete          Delete received emails (server + local) or local drafts
   open            Open a received email's attachment in the default application
   save            Save a received email's attachment(s) to a directory
   export          Write a received email's raw RFC 822 message to <date>_<subject>.eml
@@ -312,34 +312,34 @@ Options:
   -h, --help               Print help
 
 $ mp archive --help
-Archive a received email (server + local)
+Archive received emails (server + local)
 
-Usage: mp archive [OPTIONS] <SELECTOR>
+Usage: mp archive [OPTIONS] <SELECTOR>...
 
 Arguments:
-  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
+  <SELECTOR>...  Received selectors, one or more: mp://<account>/<mailbox>/<message-id>[/<uid>]
 
 Options:
-      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --mailbox <MAILBOX>  Mailbox to resolve the selectors in
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
 $ mp move --help
-Move a received email to another mailbox (server + local)
+Move received emails to another mailbox (server + local)
 
-Usage: mp move [OPTIONS] <SELECTOR> <MAILBOX>
+Usage: mp move [OPTIONS] <SELECTOR>... <MAILBOX>
 
 Arguments:
-  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
-  <MAILBOX>   Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
+  <SELECTOR>...  Received selectors, one or more: mp://<account>/<mailbox>/<message-id>[/<uid>]
+  <MAILBOX>      Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
 
 Options:
-      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --mailbox <MAILBOX>  Mailbox to resolve the selectors in
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
 $ mp delete --help
-Delete a received email (server + local) or a local draft
+Delete received emails (server + local) or local drafts
 
 Usage: mp delete [OPTIONS] [SELECTOR]...
 

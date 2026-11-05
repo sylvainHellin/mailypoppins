@@ -224,6 +224,39 @@ fn mailbox_narrows_an_ambiguous_selector() {
     assert_refused(&out, fixture::CREDENTIALS_REFUSAL);
 }
 
+/// `mp move` and `mp archive` take several selectors before the destination:
+/// each refusal is reported against its own selector, every selector is tried,
+/// and the run fails naming how many did.
+#[test]
+fn several_selectors_are_each_tried_and_each_refusal_is_reported() {
+    let slice = Slice::start();
+    let before = slice.rows();
+    let shared_in_inbox = fixture::message_selector(fixture::ACCOUNT, "inbox", fixture::SHARED);
+    let selectors = [kickoff_in_inbox(), shared_in_inbox];
+    for (args, summary) in [
+        (
+            vec!["move", &selectors[0], &selectors[1], "archive"],
+            "2 of 2 moves failed",
+        ),
+        (
+            vec!["archive", &selectors[0], &selectors[1]],
+            "2 of 2 archives failed",
+        ),
+    ] {
+        let out = slice.routed(&args);
+        assert!(!out.status.success(), "{}", stderr(&out));
+        let err = stderr(&out);
+        for selector in &selectors {
+            assert!(
+                err.contains(&format!("{selector}: {}", fixture::CREDENTIALS_REFUSAL)),
+                "{err}"
+            );
+        }
+        assert!(err.contains(summary), "{err}");
+    }
+    assert_eq!(slice.rows(), before, "a refused move moves nothing");
+}
+
 /// A second server copy of [`fixture::SHARED`] in archive, on UID 9 beside the
 /// seeded one on UID 1: two rows under one Message-ID in one mailbox, as a
 /// move that ran twice leaves them (PERSO-236).
