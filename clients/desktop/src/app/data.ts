@@ -28,7 +28,11 @@ export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => 
       .connectionStatus()
       .then((status) => live && dispatch({ type: "connection_status", status }))
       .catch(() => {});
-    const unlisten = onMenu((id) => menuRef.current(id)).catch(() => undefined);
+    // Tauri unlistens only once `listen` answered, so a remount's listener and the
+    // first mount's overlap for a moment; `live` keeps a menu item from running twice.
+    const unlisten = onMenu((id) => {
+      if (live) menuRef.current(id);
+    }).catch(() => undefined);
     const unlistenReminder = onReminderOpen((target) => {
       if (live) dispatch({ type: "reminder_open", ...target });
     }).catch(() => undefined);
