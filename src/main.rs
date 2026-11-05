@@ -507,12 +507,12 @@ Examples:
         #[command(subcommand)]
         action: SignatureAction,
     },
-    /// The calendar: list, view, show and hide calendars, reminders, rebuild
+    /// The calendar: list, view, show and hide calendars, free/busy, reminders, rebuild
     Calendar {
         #[command(subcommand)]
         action: CalendarAction,
     },
-    /// One calendar event: create it, show it, answer it
+    /// One calendar event: create, change, cancel, delete, show or answer it
     #[command(after_help = "\
 Examples:
   mp event create -A evoqs --summary \"Project review\" --start 2026-11-18T14:00 --duration 1h --to ada@example.com --teams

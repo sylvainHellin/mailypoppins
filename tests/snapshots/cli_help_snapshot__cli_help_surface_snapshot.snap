@@ -35,8 +35,8 @@ Commands:
   config          Manage configuration
   contacts        Contact index operations
   signature       Manage the signatures drafts carry, and each account's default
-  calendar        The calendar: list, view, show and hide calendars, reminders, rebuild
-  event           One calendar event: create it, show it, answer it
+  calendar        The calendar: list, view, show and hide calendars, free/busy, reminders, rebuild
+  event           One calendar event: create, change, cancel, delete, show or answer it
   hooks           Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
   outbox          Inspect and unblock the durable send queue
   store           Local store maintenance (retention garbage collection)
@@ -763,7 +763,7 @@ Options:
   -h, --help               Print help
 
 $ mp calendar --help
-The calendar: list, view, show and hide calendars, reminders, rebuild
+The calendar: list, view, show and hide calendars, free/busy, reminders, rebuild
 
 Usage: mp calendar [OPTIONS] <COMMAND>
 
@@ -982,7 +982,7 @@ Options:
   -h, --help               Print help
 
 $ mp event --help
-One calendar event: create it, show it, answer it
+One calendar event: create, change, cancel, delete, show or answer it
 
 Usage: mp event [OPTIONS] <COMMAND>
 
