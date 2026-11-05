@@ -3472,6 +3472,12 @@ A master's time change drops every exception of the series, as Outlook does, whi
 
 A vitest test that types into a base-ui dialog right after `findByRole("dialog")` races the dialog's initial focus, and passes in the full suite only by timing; wait for `dialog.contains(document.activeElement)` first.
 
+## Focusing a base-ui dialog's child on mount takes over its return focus (2026-11-05, PERSO-269)
+
+base-ui's Dialog `initialFocus` focuses one animation frame after the popup mounts, so keys typed at once still reach what was behind it; a child focused synchronously through a callback ref closes that gap, but the popup then records that child as what had the focus before opening and drops the focus on `<body>` at close.
+An explicit `finalFocus` handing back the element captured in the ref fixes the return, and the capture must skip a focus already inside the child and never clear what it holds, because StrictMode attaches a callback ref twice and the second attach sees the child focused (`RsvpDialog.tsx`).
+`renderApp`'s default render has no StrictMode, so such a test passes `{ strict: true }`.
+
 ## A help row's words join the palette's search text (2026-11-04, PERSO-255)
 
 A new KEYMAP row's description joins the desktop palette's search text with its section title, so a word in either can pull the row into another row's ranking test: "edit form" in the event card's `p` row made "edit event" match two rows in `rank.test.ts`.
