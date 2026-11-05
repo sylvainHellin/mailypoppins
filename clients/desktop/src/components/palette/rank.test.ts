@@ -50,15 +50,22 @@ describe("the palette's ranking", () => {
     expect(labels("dismiss not").slice(0, 2)).toEqual(["Dismiss the newest notice", "Dismiss all notices"]);
   });
 
-  it("finds the Calendar view's edit and its cancel or delete by their verbs", () => {
+  it("finds the Calendar view's edit and its cancel or delete by their verbs, then the event card's", () => {
     const edit = "Edit the event (the event form with its values)";
     const remove = "Cancel the meeting (tells the attendees) or delete the event";
+    const cardEdit = "EVENT CARD Edit this event (the event form with its values)";
+    const cardRemove = "EVENT CARD Cancel this meeting (tells the attendees) or delete this event";
     expect(labels("edit").slice(0, 2)).toEqual(["Edit recipients (in Drafts or a conversation)", edit]);
     expect(labels("cancel")[0]).toBe(remove);
     expect(labels("delete").slice(0, 2)).toEqual(["Delete", remove]);
-    expect(labels("edit event")).toEqual([edit]);
-    expect(labels("cancel meeting")).toEqual([remove]);
-    expect(labels("delete event")).toEqual([remove]);
+    // The card's `e` row matches "edit" inside $EDITOR and "event" by its section, below both edits.
+    expect(rows("edit event")).toEqual([
+      `CALENDAR ${edit}`,
+      cardEdit,
+      "EVENT CARD Open the invitation's .ics in $EDITOR",
+    ]);
+    expect(rows("cancel meeting")).toEqual([`CALENDAR ${remove}`, cardRemove]);
+    expect(rows("delete event")).toEqual([`CALENDAR ${remove}`, cardRemove]);
   });
 
   it("matches a row by its key, below a label match", () => {

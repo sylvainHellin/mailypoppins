@@ -466,6 +466,18 @@
     "title": "EVENT CARD",
     "bindings": [
       {
+        "key": "V",
+        "action": "Respond to this event (accept / tentative / decline, comment)"
+      },
+      {
+        "key": "E",
+        "action": "Edit this event (the event form with its values)"
+      },
+      {
+        "key": "D",
+        "action": "Cancel this meeting (tells the attendees) or delete this event"
+      },
+      {
         "key": "p",
         "action": "Use the marked proposed time (organizer only)"
       },
@@ -476,6 +488,18 @@
       {
         "key": "m",
         "action": "Open the invitation mail"
+      },
+      {
+        "key": "e",
+        "action": "Open the invitation's .ics in $EDITOR"
+      },
+      {
+        "key": "j/k",
+        "action": "Scroll the card"
+      },
+      {
+        "key": "Esc / q / Enter",
+        "action": "Close the card"
       }
     ]
   },

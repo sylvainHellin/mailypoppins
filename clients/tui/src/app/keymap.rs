@@ -80,9 +80,9 @@ pub enum KeyCtx {
     Contacts,
     /// Calendar view agenda (#0034): local-first event list + detail card.
     Calendar,
-    /// The event card overlay's own keys (PERSO-255), hand-dispatched by
-    /// `handle_event_card_key`; the card also takes the CALENDAR `V`, `e`,
-    /// `E` and `D`.
+    /// The event card overlay (PERSO-255), hand-dispatched by
+    /// `handle_event_card_key`: every key the card takes, worded for the
+    /// card, the `V`, `E`, `D` and `e` it shares with CALENDAR included.
     EventCard,
     /// Activity-log overlay.
     Activity,
@@ -1800,10 +1800,28 @@ pub static KEYMAP: &[KeyBinding] = &[
         false,
     ),
     // -- EVENT CARD (PERSO-255) -------------------------------------------
-    // The card overlay's own keys, beside the CALENDAR keys it also takes;
-    // hand-dispatched by `handle_event_card_key`, and named in its footer
-    // and the hint bar by `EventCardOverlay::key_hints`, which gates them on
-    // the event.
+    // Every key the card overlay takes, the CALENDAR keys it shares
+    // included; hand-dispatched by `handle_event_card_key`, and named in its
+    // footer and the hint bar by `EventCardOverlay::key_hints`, which gates
+    // them on the event.
+    manual(
+        "V",
+        KeyCtx::EventCard,
+        "Respond to this event (accept / tentative / decline, comment)",
+        false,
+    ),
+    manual(
+        "E",
+        KeyCtx::EventCard,
+        "Edit this event (the event form with its values)",
+        false,
+    ),
+    manual(
+        "D",
+        KeyCtx::EventCard,
+        "Cancel this meeting (tells the attendees) or delete this event",
+        false,
+    ),
     manual(
         "p",
         KeyCtx::EventCard,
@@ -1817,6 +1835,19 @@ pub static KEYMAP: &[KeyBinding] = &[
         false,
     ),
     manual("m", KeyCtx::EventCard, "Open the invitation mail", false),
+    manual(
+        "e",
+        KeyCtx::EventCard,
+        "Open the invitation's .ics in $EDITOR",
+        false,
+    ),
+    manual("j/k", KeyCtx::EventCard, "Scroll the card", false),
+    manual(
+        "Esc / q / Enter",
+        KeyCtx::EventCard,
+        "Close the card",
+        false,
+    ),
     // -- HEADERS ----------------------------------------------------------
     // The headers pane scrolls; every message action (open attachment, browser,
     // reply, triage, next/prev, Esc) comes from the shared MESSAGE context, so
@@ -2185,8 +2216,8 @@ mod tests {
         }
     }
 
-    /// The help lists the event card's own keys right after the CALENDAR
-    /// keys the card also takes, and none of them reaches the resolver.
+    /// The help lists every key the event card takes right after the
+    /// CALENDAR section, and none of them reaches the resolver.
     #[test]
     fn the_help_lists_the_event_cards_own_keys_after_the_calendar() {
         let sections = help_sections();
@@ -2194,7 +2225,20 @@ mod tests {
         let calendar = titles.iter().position(|t| *t == "CALENDAR").unwrap();
         assert_eq!(titles.get(calendar + 1), Some(&"EVENT CARD"));
         let keys: Vec<&str> = sections[calendar + 1].1.iter().map(|(k, _)| *k).collect();
-        assert_eq!(keys, ["p", "Tab", "m"]);
+        assert_eq!(
+            keys,
+            [
+                "V",
+                "E",
+                "D",
+                "p",
+                "Tab",
+                "m",
+                "e",
+                "j/k",
+                "Esc / q / Enter"
+            ]
+        );
         assert!(KEYMAP
             .iter()
             .filter(|kb| kb.ctx == KeyCtx::EventCard)

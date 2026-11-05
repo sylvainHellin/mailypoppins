@@ -19,7 +19,7 @@ A failing key is not a status this document may carry: it is a bug to fix before
 Seventeen of the twenty pass.
 The three that do not are the three whose effect leaves the process: the clipboard, a server-only search hit, and a browser over a message with an HTML part.
 Each says in its own row what a host with a display, a browser and a real account would have to press to close it.
-The result list's `cF` and `te` (PERSO-174) and the event card's `p`, `Tab` and `m` (PERSO-255) came after this walk; their rows say so and are not taken until the next walk presses them.
+The result list's `cF` and `te` (PERSO-174), the event card's `p`, `Tab` and `m` (PERSO-255) and its `V`, `E`, `D`, `e`, `j/k` and `Esc / q / Enter` (PERSO-270) came after this walk; their rows say so and are not taken until the next walk presses them.
 
 ## The table
 
@@ -42,9 +42,15 @@ The result list's `cF` and `te` (PERSO-174) and the event card's `p`, `Tab` and 
 | SERVER SEARCH | `O` | pass | The dir picker opened on `/var/tmp/mp-p5u11-walk/Downloads` and `Enter` on `[ Save here ]` wrote `attachment-153.txt`, 23 bytes, the attachment's own payload. |
 | SERVER SEARCH | `Tab` | pass | Focus left the result list for the Advanced field: the footer changed from `Enter: open / e: read / y: path / …` to `Tab/Shift+Tab: fields / Space: toggle / Enter: search / Esc: close` and the cursor block landed on the Advanced line. |
 | SERVER SEARCH | `Esc` | pass | The overlay closed from the result list and the mail view was painted underneath it, cursor and counts intact. |
+| EVENT CARD | `V` | NOT TAKEN (owner-only) | Catalogued under the card by PERSO-270 after this walk, so never pressed here, and no test presses it on the card; the CALENDAR `V` tests in `clients/tui/src/app/keys.rs` press it in the view, which opens the same respond overlay. |
+| EVENT CARD | `E` | NOT TAKEN (owner-only) | Catalogued under the card by PERSO-270 after this walk, so never pressed here, and no test presses it on the card; it opens the event form the CALENDAR `E` opens. |
+| EVENT CARD | `D` | NOT TAKEN (owner-only) | Catalogued under the card by PERSO-270 after this walk, so never pressed here, and no test presses it on the card; it opens the confirmation the CALENDAR `D` opens. |
 | EVENT CARD | `p` | NOT TAKEN (owner-only) | Added by PERSO-255 after this walk, so never pressed here. `src/tui_tests/calendar.rs::p_on_the_card_opens_the_edit_form_at_the_proposed_time` presses it on the organizer's card and sees the edit form at the marked proposal, an occurrence's in the occurrence scope; taking one against a server needs an account whose attendee proposed a time. |
 | EVENT CARD | `Tab` | NOT TAKEN (owner-only) | Added by PERSO-255 after this walk, so never pressed here. The same test presses it twice on a card with two proposals and sees the mark come back to the first. |
 | EVENT CARD | `m` | NOT TAKEN (owner-only) | Added to the catalogue by PERSO-255 after this walk, so never pressed here, and no test presses it on the card; it opens the invitation mail an `imip:` event came from, which the walk's fixture has none of. |
+| EVENT CARD | `e` | NOT TAKEN (owner-only) | Catalogued under the card by PERSO-270 after this walk, so never pressed here, and no test presses it on the card; `clients/tui/src/app/keys.rs::calendar_e_opens_the_invitations_ics_only_for_a_mail` presses the CALENDAR `e`, which queues the same `.ics`. |
+| EVENT CARD | `j/k` | NOT TAKEN (owner-only) | Catalogued under the card by PERSO-270 after this walk, so never pressed here, and no test presses it on the card; it moves the card's scroll offset by a line. |
+| EVENT CARD | `Esc / q / Enter` | NOT TAKEN (owner-only) | Catalogued under the card by PERSO-270 after this walk, so never pressed here. `clients/tui/src/app/keys.rs::calendar_enter_opens_the_event_card` presses `Esc` on the card and sees it close; no test presses `q` or `Enter` on it. |
 | ACTIVITY LOG | `j/k` | pass | With 100 entries in the log, `j` moved the top visible line on by one and `k` moved it back. |
 | ACTIVITY LOG | `d/u` | pass | `d` moved the top visible line on by half a window (from the first entry to the middle of the second), `u` moved it back to where `gg` had left it. |
 | ACTIVITY LOG | `gg / G` | pass | `G` put the tail of the log on screen (entry `n46` of the ladder at the top of the window), `gg` put the oldest entry back. |

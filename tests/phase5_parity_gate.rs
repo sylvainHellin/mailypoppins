@@ -865,10 +865,11 @@ fn the_manual_rows_are_exactly_what_this_runs_binary_dumps() {
     );
     assert_eq!(
         derived.len(),
-        25,
+        31,
         "Phase 0 counted 20 documented-only Manual rows (15 server search, 5 activity log), \
-         PERSO-174 added the server search's `cF` and `te`, and PERSO-255 the event card's `p`, \
-         `Tab` and `m`; a new one needs a `docs/baselines/pre-daemon/manual-keys.md` row and a \
+         PERSO-174 added the server search's `cF` and `te`, PERSO-255 the event card's `p`, \
+         `Tab` and `m`, and PERSO-270 the card's `V`, `E`, `D`, `e`, `j/k` and \
+         `Esc / q / Enter`; a new one needs a `docs/baselines/pre-daemon/manual-keys.md` row and a \
          checklist row"
     );
 }
