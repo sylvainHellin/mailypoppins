@@ -1989,6 +1989,39 @@ impl EventCardOverlay {
             .filter(|attendee| attendee.proposed_time.is_some())
             .collect()
     }
+
+    /// The keys the card takes for this event, as `(keys, label)` pairs
+    /// (PERSO-270): an invitation mail's event is answered or opened, the
+    /// organizer of a proposed time uses it (`Tab` only with several to
+    /// pick from), any other event is answered, edited or removed. The card's
+    /// footer and the hint bar both read it, so they cannot disagree.
+    pub fn key_hints(&self) -> Vec<(&'static str, &'static str)> {
+        let proposals = self.proposals().len();
+        let mut hints = if self.event.source.is_some() {
+            vec![
+                ("V", "respond"),
+                ("m", "open the mail"),
+                ("e", "open the .ics"),
+            ]
+        } else if self.event.is_organizer && proposals > 1 {
+            vec![
+                ("p", "use this time"),
+                ("Tab", "next proposal"),
+                ("E", "edit"),
+                ("D", "cancel"),
+            ]
+        } else if self.event.is_organizer && proposals == 1 {
+            vec![
+                ("p", "use the proposed time"),
+                ("E", "edit"),
+                ("D", "cancel or delete"),
+            ]
+        } else {
+            vec![("V", "respond"), ("E", "edit"), ("D", "cancel or delete")]
+        };
+        hints.extend([("j/k", "scroll"), ("Esc", "close")]);
+        hints
+    }
 }
 
 /// The `D` confirmation of the Calendar view (PERSO-255): cancel a meeting

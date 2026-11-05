@@ -1801,7 +1801,9 @@ pub static KEYMAP: &[KeyBinding] = &[
     ),
     // -- EVENT CARD (PERSO-255) -------------------------------------------
     // The card overlay's own keys, beside the CALENDAR keys it also takes;
-    // hand-dispatched by `handle_event_card_key`, and named in its footer.
+    // hand-dispatched by `handle_event_card_key`, and named in its footer
+    // and the hint bar by `EventCardOverlay::key_hints`, which gates them on
+    // the event.
     manual(
         "p",
         KeyCtx::EventCard,

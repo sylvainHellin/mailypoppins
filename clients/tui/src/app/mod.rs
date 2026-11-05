@@ -769,6 +769,9 @@ impl App {
             Overlay::Search => Some(KeyCtx::ServerSearch),
             Overlay::Activity => Some(KeyCtx::Activity),
             Overlay::Help => Some(KeyCtx::Help),
+            // The event card's keys depend on the event, so the hint bar
+            // reads them from the card itself (PERSO-270).
+            Overlay::EventCard(_) => Some(KeyCtx::EventCard),
             // Modal overlays (confirm / pickers / rsvp / error / compose) have
             // their own inline chips; the hint bar defers to them.
             Overlay::Confirm(_)
@@ -783,7 +786,6 @@ impl App {
             | Overlay::EventRemove(_)
             | Overlay::EventScope(_)
             | Overlay::Calendars(_)
-            | Overlay::EventCard(_)
             | Overlay::Reminders(_)
             | Overlay::Thread(_)
             | Overlay::Palette(_)
