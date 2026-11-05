@@ -1,5 +1,5 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import {
   emitEnvelope,
@@ -36,8 +36,8 @@ async function jumpTo(user: User, day: string) {
 }
 
 /** The Calendar view on the fixture's week, the agenda from Wednesday 2099-10-14. */
-async function openCalendar(before?: () => void) {
-  const r = renderApp(1400, before);
+async function openCalendar(before?: () => void, { strict = false } = {}) {
+  const r = renderApp(1400, before, { strict });
   await shellReady();
   await r.user.keyboard(" a");
   await screen.findByRole("region", { name: "Calendar" });
@@ -306,6 +306,39 @@ describe("V and the respond choice in the Calendar view", () => {
     await expect(cmd.eventRespond("home", "AAMkAD-design", "decline", "On leave that week", false, null)).rejects.toMatchObject({
       message: SILENT_COMMENT_REFUSAL,
     });
+  });
+
+  it("V and the card's Respond put the focus in the choice as it opens, so keys typed at once follow its order (PERSO-269)", async () => {
+    // StrictMode attaches the list's ref twice, as every dev build does.
+    const { user, list } = await openCalendar(undefined, { strict: true });
+    const respond = () => within(card()).getByRole("button", { name: "Respond" });
+    // Each way in, and where the focus goes back to: the event the cursor is on, or the button pressed.
+    const ways: [() => Promise<void>, () => HTMLElement][] = [
+      [() => user.keyboard("Vjj{Tab}"), () => within(list).getByRole("option", { selected: true })],
+      [() => user.click(respond()).then(() => user.keyboard("jj{Tab}")), respond],
+    ];
+    for (const [open, origin] of ways) {
+      const before = origin();
+      // The keys come before the next frame, the one the popup would move the focus in.
+      vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame"] });
+      try {
+        await open();
+        const dialog = screen.getByRole("dialog", { name: "RSVP" });
+        const comment = within(dialog).getByRole("textbox", { name: "Comment" });
+        expect(within(dialog).getByRole("option", { selected: true })).toHaveAttribute("data-response", "decline");
+        expect(document.activeElement).toBe(comment);
+        // The frame, when it comes, leaves the focus on the comment.
+        vi.advanceTimersToNextFrame();
+        expect(document.activeElement).toBe(comment);
+      } finally {
+        vi.useRealTimers();
+      }
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull());
+      // Closing gives the focus back to where it was before the choice opened.
+      await waitFor(() => expect(document.activeElement).toBe(before));
+    }
+    expect(callsOf("event_respond")).toEqual([]);
   });
 
   it("an invitation mail's event offers no send-response choice and sends the daemon's default", async () => {
