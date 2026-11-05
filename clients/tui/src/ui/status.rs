@@ -1,10 +1,14 @@
+use std::borrow::Cow;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::super::app::{hint_bindings, prefix_continuations, App, KeyAction, KeyCtx, View};
+use super::super::app::{
+    hint_bindings, prefix_continuations, App, KeyAction, KeyCtx, Overlay, View,
+};
 use super::super::theme;
 use super::util::display_width;
 
@@ -12,13 +16,19 @@ use super::util::display_width;
 /// border, so it reads as a pane like every other one.
 pub(super) const HINT_BAR_HEIGHT: u16 = 3;
 
+/// A `keys` + label pair of the hint bar; a label is owned when it is not a
+/// `KEYMAP` row's own (the event card's, PERSO-270).
+type Hint = (&'static str, Cow<'static, str>);
+
 /// herdr-style mode/hint bar (#0032): a single line showing an accent-bg mode
 /// badge plus the next valid keystrokes for the current context, all derived
 /// from `KEYMAP`. When a leader prefix (today `g`) is pending it shows that
 /// prefix's continuations instead, making the previously-invisible leader
-/// discoverable (Space -> the `m/c/a` view switch; `g` -> `gg`/`G`). Overlay
-/// contexts with their own inline chips (confirm,
-/// pickers, compose, ...) render no hint bar (`key_context()` returns `None`).
+/// discoverable (Space -> the `m/c/a` view switch; `g` -> `gg`/`G`). The event
+/// card's keys depend on its event, so they come from the card rather than
+/// `KEYMAP` (PERSO-270). Overlay contexts with their own inline chips
+/// (confirm, pickers, compose, ...) render no hint bar (`key_context()`
+/// returns `None`).
 pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
     let bg = theme::active().bg;
     // The pane shell: same rounded border and background as the sidebar, list
@@ -46,24 +56,24 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
     // message set; otherwise the bar would advertise only `j/k` and `v`.
     let msg_pane = matches!(ctx, KeyCtx::List | KeyCtx::Headers | KeyCtx::Preview);
     let pending = app.pending_prefix();
-    let (badge, hints): (String, Vec<(&'static str, &'static str)>) = if let Some(p) = pending {
+    let (badge, hints): (String, Vec<Hint>) = if let Some(p) = pending {
         // Leader pending: show its continuations (Space -> `m/c/a`; `g` ->
         // `gg`, `G`). Global leader continuations (the Space `m/c/a` view
         // switch, #0033) resolve before the pane context, so surface them
         // alongside the pane's own continuations whenever we are not already
         // in Global.
-        let mut conts: Vec<(&str, &str)> = prefix_continuations(ctx, p)
-            .map(|kb| (kb.keys, kb.hint_label()))
+        let mut conts: Vec<(&str, Cow<str>)> = prefix_continuations(ctx, p)
+            .map(|kb| (kb.keys, kb.hint_label().into()))
             .collect();
         if ctx != KeyCtx::Global {
             for kb in prefix_continuations(KeyCtx::Global, p) {
-                conts.push((kb.keys, kb.hint_label()));
+                conts.push((kb.keys, kb.hint_label().into()));
             }
         }
         if msg_pane {
             for kb in prefix_continuations(KeyCtx::Message, p) {
                 if !conts.iter().any(|(k, _)| *k == kb.keys) {
-                    conts.push((kb.keys, kb.hint_label()));
+                    conts.push((kb.keys, kb.hint_label().into()));
                 }
             }
         }
@@ -75,6 +85,14 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
             p.to_uppercase().to_string()
         };
         (badge, conts)
+    } else if let Overlay::EventCard(card) = &app.overlay {
+        // The card's footer keys, capitalised like the `KEYMAP` hints.
+        let hs = card
+            .key_hints()
+            .into_iter()
+            .map(|(keys, label)| (keys, Cow::Owned(capitalised(label))))
+            .collect();
+        (mode_label(app, ctx), hs)
     } else {
         // Off-Mail, only the view-agnostic Global bindings actually fire
         // (mail-specific Global keys are swallowed by the dispatcher, #0033).
@@ -86,19 +104,19 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         // Layout` pair, so `c Calendars` and `n New` still fit a 100-column
         // terminal; the help overlay keeps the layout keys.
         let crowded = ctx == KeyCtx::Calendar && !app.reminders.is_empty();
-        let mut hs: Vec<(&str, &str)> = hint_bindings(ctx)
+        let mut hs: Vec<(&str, Cow<str>)> = hint_bindings(ctx)
             .filter(|kb| !(off_mail && ctx == KeyCtx::Global && !kb.action.is_view_agnostic()))
             .filter(|kb| !(crowded && kb.action == KeyAction::CalendarAgenda))
-            .map(|kb| (kb.keys, kb.hint_label()))
+            .map(|kb| (kb.keys, kb.hint_label().into()))
             .collect();
         if msg_pane {
             for kb in hint_bindings(KeyCtx::Message) {
                 if !hs.iter().any(|(k, _)| *k == kb.keys) {
-                    hs.push((kb.keys, kb.hint_label()));
+                    hs.push((kb.keys, kb.hint_label().into()));
                 }
             }
         }
-        (mode_label(app, ctx).to_string(), hs)
+        (mode_label(app, ctx), hs)
     };
 
     let badge_text = format!(" {} ", badge);
@@ -157,7 +175,7 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         ));
         spans.push(Span::styled(" ", Style::default().bg(bg)));
         spans.push(Span::styled(
-            *label,
+            label.clone(),
             Style::default().fg(theme::active().text_muted).bg(bg),
         ));
     }
@@ -170,6 +188,15 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
 
     let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(bg));
     frame.render_widget(bar, inner);
+}
+
+/// `label` with its first letter in upper case.
+fn capitalised(label: &str) -> String {
+    let mut chars = label.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// The badge label for a non-prefixed context. A live selection takes over the
@@ -198,11 +225,94 @@ fn mode_label(app: &App, ctx: KeyCtx) -> String {
         KeyCtx::ServerSearch => "SEARCH",
         KeyCtx::Contacts => "CONTACTS",
         KeyCtx::Calendar => "CALENDAR",
-        // Like Message, never what `key_context()` returns: the card's keys
-        // are catalogued for the help overlay only.
-        KeyCtx::EventCard => "CALENDAR",
+        KeyCtx::EventCard => "EVENT",
         KeyCtx::Activity => "ACTIVITY",
         KeyCtx::Help => "HELP",
     };
     format!("{base}{zoom}")
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    use super::super::golden_frames::{self as gf, render_buffer};
+    use crate::app::{App, KeyCtx, Overlay};
+
+    /// The hint bar's content row: one above its bottom border, which sits
+    /// one above the outer frame.
+    fn hint_row(app: &mut App) -> String {
+        let buffer = render_buffer(app, gf::WIDTH, gf::HEIGHT);
+        let y = gf::HEIGHT - 3;
+        (0..gf::WIDTH).map(|x| buffer[(x, y)].symbol()).collect()
+    }
+
+    /// The Calendar view with the event card open on the cursor's event.
+    fn card_app(cursor: usize, edit: impl FnOnce(&mut App)) -> App {
+        let mut app = gf::calendar_fixture();
+        app.calendar_view.list_index = cursor;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.overlay, Overlay::EventCard(_)));
+        edit(&mut app);
+        app
+    }
+
+    fn card(app: &mut App) -> &mut crate::app::EventCardOverlay {
+        let Overlay::EventCard(card) = &mut app.overlay else {
+            panic!("the event card is open");
+        };
+        card
+    }
+
+    /// The event card reports its own context (PERSO-270), so the hint bar
+    /// names it and lists the keys the card takes in the event's state.
+    #[test]
+    fn the_event_card_reports_its_context_and_keys() {
+        // A server event the user attends: answer, edit, remove.
+        let mut app = card_app(0, |_| {});
+        assert_eq!(app.key_context(), Some(KeyCtx::EventCard));
+        let row = hint_row(&mut app);
+        assert!(row.contains(" EVENT "), "badge: {row}");
+        for hint in ["V Respond", "E Edit", "D Cancel or delete", "Esc Close"] {
+            assert!(row.contains(hint), "{hint:?} missing: {row}");
+        }
+        assert!(!row.contains("p Use"), "no proposal to use: {row}");
+        assert!(!row.contains("Tab "), "no proposal to pick: {row}");
+
+        // The organizer with two proposed times: use one, pick the next.
+        let mut app = card_app(0, |app| {
+            let card = card(app);
+            card.event.is_organizer = true;
+            let mut second = card.event.attendees[1].clone();
+            second.email = "bob@example.org".into();
+            card.event.attendees.push(second);
+        });
+        let row = hint_row(&mut app);
+        for hint in ["p Use this time", "Tab Next proposal", "E Edit", "D Cancel"] {
+            assert!(row.contains(hint), "{hint:?} missing: {row}");
+        }
+        assert!(
+            !row.contains("V Respond"),
+            "the organizer answers nobody: {row}"
+        );
+
+        // An invitation mail's event: answer, open the mail or its `.ics`.
+        let mut app = card_app(0, |app| {
+            let source = gf::calendar_fixture()
+                .calendar_view
+                .events
+                .iter()
+                .find_map(|event| event.source.clone())
+                .unwrap();
+            card(app).event.source = Some(source);
+        });
+        let row = hint_row(&mut app);
+        for hint in ["V Respond", "m Open the mail", "e Open the .ics"] {
+            assert!(row.contains(hint), "{hint:?} missing: {row}");
+        }
+        assert!(
+            !row.contains("E Edit"),
+            "a mail's event is not edited: {row}"
+        );
+    }
 }

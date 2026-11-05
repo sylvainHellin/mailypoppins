@@ -984,16 +984,13 @@ pub(super) fn render_event_card(app: &App, card: &EventCardOverlay, frame: &mut 
         stack.content,
     );
     if let Some(footer) = stack.footer {
-        let proposals = card.proposals().len();
-        let keys = if card.event.source.is_some() {
-            "  V respond \u{b7} m open the mail \u{b7} e open the .ics \u{b7} j/k scroll \u{b7} Esc close"
-        } else if card.event.is_organizer && proposals > 1 {
-            "  p use this time \u{b7} Tab next proposal \u{b7} E edit \u{b7} D cancel \u{b7} j/k scroll \u{b7} Esc close"
-        } else if card.event.is_organizer && proposals == 1 {
-            "  p use the proposed time \u{b7} E edit \u{b7} D cancel or delete \u{b7} j/k scroll \u{b7} Esc close"
-        } else {
-            "  V respond \u{b7} E edit \u{b7} D cancel or delete \u{b7} j/k scroll \u{b7} Esc close"
-        };
+        let keys = card
+            .key_hints()
+            .iter()
+            .map(|(keys, label)| format!("{keys} {label}"))
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+        let keys = format!("  {keys}");
         frame.render_widget(
             Paragraph::new(Span::styled(
                 keys,
