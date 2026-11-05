@@ -305,6 +305,18 @@ describe("the draft preview", () => {
     expect(within(other).getByRole("list", { name: "Warnings" })).toHaveTextContent("the subject is empty");
   });
 
+  it("reads a draft once under StrictMode, whose remount joins the reads on their way", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    const preview = await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+    await within(preview).findByText("Valid");
+    const shown = { account: "work", id: "angebot-antwort" };
+    for (const cmd of ["draft_preview", "draft_validate", "draft_attachments"]) {
+      expect(callsOf(cmd).filter((c) => c?.id === shown.id), cmd).toEqual([shown]);
+    }
+  });
+
   it("Enter opens a draft's preview in the reader", async () => {
     const { user } = renderApp();
     await shellReady();

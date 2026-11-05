@@ -168,7 +168,9 @@ describe("the exit", () => {
     await waitFor(() => expect(banner()).toBeEmptyDOMElement());
     const summary = await within(reader()).findByRole("article", { name: /^Draft: / });
     expect(summary).toHaveTextContent(DRAFT);
-    expect(mock.calls.some((c) => c.cmd === "draft_preview" && c.args?.id === "fixture-draft-1")).toBe(true);
+    // The summary's read of the row and its preview's, each once under StrictMode.
+    await within(summary).findByText("Valid");
+    expect(mock.calls.filter((c) => c.cmd === "draft_preview" && c.args?.id === "fixture-draft-1")).toHaveLength(2);
     expect(panes()).toEqual([]);
     await user.click(within(summary).getByRole("button", { name: "Close" }));
     expect(await within(reader()).findByRole("article", { name: message! })).toBeInTheDocument();
