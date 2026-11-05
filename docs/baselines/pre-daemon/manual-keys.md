@@ -112,11 +112,16 @@ Same function, the `else` branch.
 ## Event card overlay
 
 `handle_event_card_key`, added by PERSO-200 and PERSO-255 after the freeze.
-Catalogued as `EVENT CARD` for its own keys; the CALENDAR `V`, `e`, `E` and `D` act on the card too, and its footer names what applies.
+Catalogued as `EVENT CARD`, every key below (PERSO-270), and its footer names what applies.
+
+- `V` closes the card and opens the respond overlay on its event.
+- `E` closes the card and opens the event form with the event's values.
+- `D` closes the card and opens the cancel or delete confirmation.
 
 - `p` opens the edit form at the marked attendee's proposed time, on the organizer's card; on an occurrence of a series the form is the occurrence's alone.
 - `Tab` marks the next proposed time when several attendees proposed one.
 - `m` opens the invitation mail an `imip:` event came from.
+- `e` closes the card and opens the invitation's `.ics` in `$EDITOR`.
 - `j` / `Down` and `k` / `Up` scroll the card.
 - `Esc` / `q` / `Enter` close it.
 

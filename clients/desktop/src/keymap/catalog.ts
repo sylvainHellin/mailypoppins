@@ -268,14 +268,21 @@ export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Show or hide calendars": { id: "calendar_calendars" },
     "Read the events again": { id: "calendar_refresh" },
   },
-  // The TUI's event card overlay keys (PERSO-255). The desktop's card is
-  // always shown beside the Calendar view, so `m` works in the view; each
-  // proposal on the organizer's card has its own "Use this time" button,
-  // which Tab reaches, rather than a mark that `p` takes.
+  // The TUI's event card overlay keys (PERSO-255, PERSO-270). The desktop's
+  // card is always shown beside the Calendar view, so `V`, `E`, `D`, `m` and
+  // `e` work in the view on the event it shows, and it neither scrolls by
+  // key nor closes; each proposal on the organizer's card has its own "Use
+  // this time" button, which Tab reaches, rather than a mark that `p` takes.
   "EVENT CARD": {
+    "Respond to this event (accept / tentative / decline, comment)": { id: "calendar_rsvp" },
+    "Edit this event (the event form with its values)": { id: "edit_event" },
+    "Cancel this meeting (tells the attendees) or delete this event": { id: "remove_event" },
     "Use the marked proposed time (organizer only)": { badge: "key", keys: [] },
     "Mark the next proposed time": { badge: "key" },
     "Open the invitation mail": { id: "calendar_open_mail" },
+    "Open the invitation's .ics in $EDITOR": { id: "calendar_open_source" },
+    "Scroll the card": { badge: "key", keys: [] },
+    "Close the card": { badge: "key", keys: [] },
   },
   // The Contacts view's own keys (src/keymap/viewKeys.ts); its moves are
   // the list's, which reach the view's cursor.
