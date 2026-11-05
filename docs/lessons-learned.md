@@ -3462,6 +3462,8 @@ A decline that carries a proposal still removes the meeting from the attendee's 
 
 Graph's calendarView delta re-sends a series whole (the master and every occurrence in the window) when anything in it changes, and never names an occurrence that left it, whether deleted, cancelled or dropped by a shorter rule; only a removed master is reported.
 A master's `cancelledOccurrences` appears only on an explicit `$select`, not in the delta, so mp prunes a re-sent series to the occurrences that came (`SyncResult::resent_series`) and re-baselines the calendar after its own series writes.
+A master re-sent with none of its occurrences (its only one in the window deleted, or a change outside the window) says nothing about which cached occurrences remain, so mp reads `GET /me/calendars/{id}/events/{master}/instances` over the window, one request per lone master, and prunes to that answer; a failed read prunes nothing and leaves the repair to the next baseline (PERSO-268).
+`instances` answers a plain occurrence in full, yet it still takes every detail from its master, so mp flags it inheriting as it does a trimmed delta occurrence; otherwise a later rename whose `instances` read fails would never reach it.
 
 ## A recurrence patch must name its zone, and a master's time change drops the exceptions (2026-11-04, PERSO-255)
 

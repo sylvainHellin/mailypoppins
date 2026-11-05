@@ -121,6 +121,7 @@ All notable changes to this project are documented in this file.
 - Desktop: a palette search ranks a match in an action's name above the same match in its section or keys, hides actions whose letters only turn up scattered (`test` no longer lists Toggle flag/star), and lists the action you ran from the palette most recently first among equal matches, also after a restart.
 
 ### Fixed
+- An occurrence deleted in Outlook as the only one of its series inside the sync window leaves mp's views at the next sync instead of lingering until the daily full re-read: a series master that Graph's delta re-sends alone is read with its instances over the window (PERSO-268).
 - The TUI hint bar names the event card (EVENT) and lists the keys it takes for the event in view, the same set as the card's own footer (PERSO-270).
 - Desktop: the RSVP dialog takes the focus as it opens, so keys typed straight after `tv`, `V` or Respond follow its order and Tab from Decline reaches the comment; closing still returns the focus to the email or event it came from (PERSO-269).
 - An occurrence or a series deleted in Outlook leaves mp's views at the next sync, and the TUI event form keeps the availability count at 80x24 by scrolling its fields with the cursor (PERSO-255).
