@@ -383,6 +383,235 @@ fn p_on_the_card_opens_the_edit_form_at_the_proposed_time() {
     assert!(line.starts_with("Nobody proposed a new time"), "{line}");
 }
 
+/// The card of the fixture's `index`th row, opened the way a user opens it:
+/// the cursor on the row and `Enter` in the view.
+fn card_on(app: &mut App, index: usize, summary: &str) {
+    app.calendar_view.list_index = index;
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Overlay::EventCard(card) = &app.overlay else {
+        panic!("Enter opens the card of {summary}");
+    };
+    assert_eq!(card.event.summary, summary);
+}
+
+/// `V` on the card closes it and opens the respond overlay against the
+/// card's own event; on an event there is nothing to answer, the card closes
+/// and the status line says why.
+#[test]
+fn v_on_the_card_opens_the_respond_overlay_for_its_event() {
+    let mut app = calendar_fixture();
+    card_on(&mut app, 1, "Jour fixe");
+    app.handle_key(key('V'));
+    let Overlay::Rsvp(overlay) = &app.overlay else {
+        panic!(
+            "V on the card opens the respond overlay: {:?}",
+            app.status_message
+        );
+    };
+    assert_eq!(overlay.account, "evoqs");
+    assert_eq!(overlay.event, "ev-jour-1");
+    assert_eq!(overlay.summary, "Jour fixe");
+
+    let mut app = calendar_fixture();
+    card_on(&mut app, 6, "Abgesagter Termin");
+    app.handle_key(key('V'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert!(app
+        .status_message
+        .as_deref()
+        .is_some_and(|m| m.contains("cancelled")));
+}
+
+/// `E` on the card closes it and opens the event form filled with the
+/// card's event; on an invitation mail's event and on a calendar mp does not
+/// write to, the card closes and the status line says why.
+#[test]
+fn shift_e_on_the_card_opens_the_event_form_with_its_values() {
+    let mut app = calendar_fixture();
+    for calendar in &mut app.calendar_view.calendars {
+        calendar.features = vec!["write".into()];
+    }
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    app.handle_key(key('E'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("E on the card opens the form: {:?}", app.status_message);
+    };
+    let editing = form.editing.as_ref().expect("the form edits the event");
+    assert_eq!(
+        (editing.account.as_str(), editing.event.as_str()),
+        ("evoqs", "ev-handover")
+    );
+    assert_eq!(form.title, "Baustellen\u{fc}bergabe");
+    assert_eq!(
+        (form.date.as_str(), form.start.as_str(), form.end.as_str()),
+        ("2026-08-03", "09:00", "10:00"),
+        "the event's times in the view's zone"
+    );
+    assert_eq!(form.location, "Raum 2.14");
+
+    app.overlay = Overlay::None;
+    card_on(&mut app, 2, "PhD Kolloquium");
+    app.handle_key(key('E'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("An invitation mail's event can only be answered (V)")
+    );
+
+    let mut app = calendar_fixture();
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    app.handle_key(key('E'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("The calendar Calendar takes no changes from mp")
+    );
+}
+
+/// `D` on the card closes it and opens the cancel confirmation of a meeting
+/// the user organizes, naming its attendees; on someone else's meeting the
+/// card closes and the status line points at the answer instead.
+#[test]
+fn d_on_the_card_opens_the_cancel_confirmation_or_refuses_a_foreign_meeting() {
+    let mut app = calendar_fixture();
+    for calendar in &mut app.calendar_view.calendars {
+        calendar.features = vec!["write".into()];
+    }
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    app.handle_key(key('D'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some(
+            "Baustellen\u{fc}bergabe is someone else's meeting: decline it with V to tell the \
+             organizer"
+        )
+    );
+
+    app.calendar_view.events[0].is_organizer = true;
+    app.calendar_view.events[0].own_response = "organizer".into();
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    app.handle_key(key('D'));
+    let Overlay::EventRemove(removal) = &app.overlay else {
+        panic!("D on the card asks to cancel: {:?}", app.status_message);
+    };
+    assert_eq!(
+        (removal.account.as_str(), removal.event.as_str()),
+        ("evoqs", "ev-handover")
+    );
+    assert!(removal.cancel, "the organizer's meeting is cancelled");
+    assert_eq!(removal.attendees, 2);
+    assert_eq!(removal.scope, None);
+}
+
+/// `e` on the card of an invitation mail's event closes it and queues the
+/// invitation's `.ics` for `$EDITOR`, the CALENDAR view's `e`; on a server
+/// event there is no mail behind it, so the card closes, nothing is queued
+/// and the status line says so.
+#[test]
+fn e_on_the_card_opens_the_invitations_ics_only_for_a_mail() {
+    let mut app = calendar_fixture();
+    app.account_config.name = "perso".to_string();
+    card_on(&mut app, 2, "PhD Kolloquium");
+    app.handle_key(key('e'));
+    assert!(matches!(app.overlay, Overlay::None));
+    match app.pending_actions.pop_front() {
+        Some(Action::OpenEventSource { msg }) => {
+            assert_eq!(msg, crate::tui::app::MessageRef::new(3));
+        }
+        other => panic!("expected OpenEventSource, got {other:?}"),
+    }
+    assert!(app.pending_actions.is_empty());
+
+    let mut app = calendar_fixture();
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    app.handle_key(key('e'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert!(app.pending_actions.is_empty(), "a server event has no mail");
+    assert_eq!(app.view, View::Calendar);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("This event is the server's; no invitation mail stands behind it")
+    );
+}
+
+/// `j`/`Down` and `k`/`Up` scroll a card taller than its area by a line:
+/// the last lines come into view and go again, and `k` stops at the top;
+/// `j` stops with the last line on the area's bottom row, so the first `k`
+/// after pressing past it moves the view at once; a card that fits does
+/// not scroll.
+#[test]
+fn j_and_k_scroll_the_card() {
+    let mut app = calendar_fixture();
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    let scroll = |app: &App| match &app.overlay {
+        Overlay::EventCard(card) => card.scroll,
+        _ => panic!("the card stays open"),
+    };
+    // Fourteen lines in a frame of twenty rows: the body is off the card.
+    let shows_the_body =
+        |app: &mut App| frame_snapshot(app, WIDTH, 20).contains("Bitte Helm mitbringen.");
+    assert!(!shows_the_body(&mut app));
+    app.handle_key(key('k'));
+    assert_eq!(scroll(&app), 0, "k stops at the top");
+    app.handle_key(key('j'));
+    app.handle_key(KeyEvent::from(KeyCode::Down));
+    assert_eq!(scroll(&app), 2);
+    assert!(shows_the_body(&mut app));
+    app.handle_key(key('k'));
+    app.handle_key(KeyEvent::from(KeyCode::Up));
+    assert_eq!(scroll(&app), 0);
+    assert!(!shows_the_body(&mut app));
+
+    // The frame's rows holding `text`, by index.
+    let row_of = |frame: &str, text: &str| {
+        frame
+            .lines()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("no row holds {text:?}:\n{frame}"))
+    };
+    for _ in 0..30 {
+        app.handle_key(key('j'));
+    }
+    let frame = frame_snapshot(&mut app, WIDTH, 20);
+    let last = row_of(&frame, "Bitte Helm mitbringen.");
+    let footer = row_of(&frame, "j/k scroll");
+    assert_eq!(
+        last + 1,
+        footer,
+        "the last line sits on the bottom row:\n{frame}"
+    );
+    let link = row_of(&frame, "Link ");
+    let bottom = scroll(&app);
+    app.handle_key(key('k'));
+    assert_eq!(scroll(&app), bottom - 1, "one k moves the view up by one");
+    let frame = frame_snapshot(&mut app, WIDTH, 20);
+    assert!(!frame.contains("Bitte Helm mitbringen."), "{frame}");
+    assert_eq!(row_of(&frame, "Link "), link + 1, "{frame}");
+
+    // A frame the whole card fits in does not scroll at all.
+    app.handle_key(key('j'));
+    frame_snapshot(&mut app, WIDTH, HEIGHT);
+    assert_eq!(scroll(&app), 0, "a card that fits does not scroll");
+}
+
+/// `q` and `Enter` close the card, as `Esc` does, and leave the view
+/// standing: `q` here is the card's, not the quit key.
+#[test]
+fn q_and_enter_close_the_card() {
+    let mut app = calendar_fixture();
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    assert!(app.handle_key(key('q')).is_none(), "q does not quit");
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(app.view, View::Calendar);
+
+    card_on(&mut app, 0, "Baustellen\u{fc}bergabe");
+    assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(app.view, View::Calendar);
+    assert!(app.pending_actions.is_empty());
+}
+
 /// `V` offers a proposed time on a server event whose organizer accepts
 /// proposals on a calendar that offers them, and on no other; the overlay
 /// reads its times in the view's zone.
