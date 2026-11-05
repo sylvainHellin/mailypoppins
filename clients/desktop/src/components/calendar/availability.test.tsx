@@ -96,7 +96,9 @@ describe("the event form's availability grid", () => {
       [...rowOf(grid, address)!.querySelectorAll("[data-status]")].map((c, n) => (c.hasAttribute(attr) ? n : null)).filter((n) => n !== null);
     const own = [...rowOf(grid, "me@example.com")!.querySelectorAll("[data-status]")];
     expect(own[6].getAttribute("data-status")).toBe("busy");
-    expect(own[6].getAttribute("title")).toBe("10:00 busy, this event");
+    expect(own[6].getAttribute("data-tip")).toBe("10:00 busy, this event");
+    fireEvent.mouseEnter(own[6]);
+    expect(within(grid).getByRole("tooltip")).toHaveTextContent("You (me@example.com)10:00 to 10:30: busy, this event");
     expect(marks("me@example.com", "data-current")).toEqual([6]);
     expect(marks("robin@example.com", "data-current")).toEqual([6]);
     expect(marks("me@example.com", "data-chosen")).toEqual([6]);
