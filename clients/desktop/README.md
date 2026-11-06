@@ -70,7 +70,8 @@ The browser preview needs no Rust build and serves the same fixtures through the
 ```sh
 pnpm test                               # vitest under jsdom, the Tauri API mocked from the fixtures
 pnpm exec tsc -b                        # type-check the frontend and the Node side (vite.config.ts, scripts/), writing only under node_modules/.tmp
-pnpm build                              # the same type-check, bundle the frontend, then check that no fixture code is in it
+pnpm build                              # the same type-check, bundle the frontend, then check that no fixture or WebDriver code is in it
+pnpm test:e2e                           # the end-to-end specs in the app's own window, on the fixtures (below)
 pnpm gen:keymap                         # regenerate src/keymap/keymap.json from `mp dump-keys --json` (MP_BIN or `mp` on PATH)
 pnpm gen:types                          # regenerate src/protocol/generated/ from the Rust types with ts-rs (runs cargo)
 pnpm contrast                           # rewrite the contrast table in docs/design-tokens.md
@@ -79,7 +80,36 @@ cd src-tauri
 export CARGO_TARGET_DIR=/var/tmp/mp-desktop-target
 cargo test                              # the Rust layer; add `-- --ignored live_daemon` with MP_DESKTOP_MP_BIN set for the live test
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features e2e -- -D warnings   # the end-to-end tests' build
 ```
+
+## End-to-end tests
+
+```sh
+cd clients/desktop
+export CARGO_TARGET_DIR=/var/tmp/mp-e2e-target
+pnpm test:e2e                                               # build, then run every spec
+pnpm test:e2e --no-build                                    # run against the last build
+pnpm test:e2e -- --spec e2e/specs/02-reader.e2e.ts          # anything after `--` goes to `wdio run`
+```
+
+[scripts/e2e.ts](scripts/e2e.ts) builds a debug app with the `e2e` cargo feature (`tauri build --debug --no-bundle --features e2e`, the frontend through `pnpm build`) into `<target dir>/debug/mp-desktop`, then runs the WebdriverIO specs in [e2e/specs/](e2e/specs/) against it with `@wdio/tauri-service`.
+The feature embeds `tauri-plugin-wdio-webdriver`, a WebDriver server on 127.0.0.1:4445 that drives the real WKWebView, and is only in effect on the fixtures, so even a test build never opens a real mailbox to it.
+The specs take about 15 s; the build before them adds under a minute after a change and several minutes from cold.
+Each run gets a scratch directory `/var/tmp/mp-e2e-run-*`, which the app sees as its home, temp, data and config directories (the fixture's draft files included), and WebdriverIO's logs go to its `logs/`.
+
+The app stays out of the way of whoever works on the Mac ([src-tauri/src/e2e.rs](src-tauri/src/e2e.rs)): it runs as an accessory with no Dock icon or menu bar and is never activated, so it never takes the focus or comes to the front.
+Its window is on screen, since WebKit pauses the page of a hidden or off-screen window, but fully transparent, click-through, behind every other window and left out of Mission Control.
+
+The specs cover the start on the fixtures, the reader, the draft flows `fixture_simulate` drives (editor save, invalid frontmatter, held, failed, partly delivered and copy-owed sends), and the PERSO-83 compose checks a webview reaches (`cf` with the Signature select, `cn` with an inline Body, `ta` with a typed path).
+What they cannot see:
+
+- The reader's HTML frame: it is sandboxed without `allow-same-origin` ([docs/reader.md](docs/reader.md)), so WebDriver, whose scripts run in the app's page, sees only that it loaded; the body is read in Text mode.
+- Anything native: the App menu, the file and folder pickers behind Browse and Save, notifications, the terminal window an editor opens, the title bar, and keys that macOS handles before the page (WebDriver's keys are synthesized in the page).
+- The installed app: the DMG, its allowance under Privacy & Security, the bundled `mp` and a real daemon, which needs a whole desktop rather than a webview; those checks are for Cua with a Lume macOS VM (PERSO-271, part B).
+
+The feature never ships: [src-tauri/src/lib.rs](src-tauri/src/lib.rs) refuses it in a release build with `compile_error!`, and `pnpm bundle` fails when the app it built carries the WebDriver server (`node scripts/check-bundle.ts --app <app>`).
+The plugin has no commands and no permissions, so [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json) grants it nothing.
 
 ## Install from a local build
 
@@ -92,6 +122,7 @@ pnpm bundle                               # builds mp in release, bundles it as 
 [scripts/install-local.sh](../../scripts/install-local.sh) at the repository root does the pull, `cargo install`, this bundle, the copy into `/Applications` and the daemon restart in one run (`--no-gui`, `--dry-run`, `-h`).
 
 `pnpm bundle` ([scripts/bundle.ts](scripts/bundle.ts)) copies `mp` to `src-tauri/binaries/mp-<target>` and builds with [src-tauri/tauri.bundle.conf.json](src-tauri/tauri.bundle.conf.json), which names it in `bundle.externalBin`; plain `pnpm tauri build` makes an app without its own `mp`.
+It then fails if the app carries the end-to-end tests' WebDriver server, which only the `e2e` feature compiles in.
 The app lands in `<target dir>/<target>/release/bundle/macos/mailypoppins.app` and the DMG beside it in `dmg/`, the target dir being `$CARGO_TARGET_DIR` or `src-tauri/target`.
 The bundle is unsigned until #0012, so a downloaded copy needs an allowance in System Settings > Privacy & Security ("Open Anyway" after the first blocked launch), or `xattr -dr com.apple.quarantine` on the app; a local build is not quarantined.
 
