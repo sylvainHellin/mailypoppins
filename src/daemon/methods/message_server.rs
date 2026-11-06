@@ -41,12 +41,23 @@
 //! # What the limit means
 //!
 //! `limit` is the number of hits the whole search answers with (PERSO-175):
-//! every mailbox is asked for its newest `limit` matches as stubs, the stubs
-//! are merged newest first and cut to `limit`, and only the survivors are
-//! downloaded whole, mailbox by mailbox ([`crate::server_search`]). The settle
-//! says when the answer is cut, `truncated`, and when Microsoft Graph's
-//! `$search` cap cut it, `capped`. `mp search`, the TUI overlay and the
-//! desktop search bar all read the answer from this one call.
+//! every mailbox is asked for its newest `limit` matches as stubs (its oldest
+//! under `order: "oldest"`), the stubs are merged in that order and cut to
+//! `limit`, and only the survivors are downloaded whole, mailbox by mailbox
+//! ([`crate::server_search`]). The settle says when the answer is cut,
+//! `truncated`, and when Microsoft Graph's `$search` cap cut it, `capped`.
+//! `mp search`, the TUI overlay and the desktop search bar all read the
+//! answer from this one call.
+//!
+//! # What order the hits are in
+//!
+//! The hits stream as each mailbox's survivors land, so the stream is in no
+//! useful order. Each event numbers its hit (`seq`), and the settle's
+//! `hit_order` lists those numbers in the `order` asked for (PERSO-273):
+//! newest first when none is named, oldest first, or for `relevance` newest
+//! first, since a mail server gives no score, and the settle's `order` says
+//! which one it applied. Every client lays the hits out by it rather than
+//! sorting them itself.
 //!
 //! # What the settle says about coverage
 //!
@@ -64,7 +75,8 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::listing::{
-    MessageFlags, SearchCoverage, ServerSearchHit, ServerSearchSettled, UnreachableMailbox,
+    MessageFlags, SearchCoverage, SearchOrder, ServerSearchHit, ServerSearchHitEvent,
+    ServerSearchSettled, UnreachableMailbox,
 };
 use mp_protocol::RpcError;
 
@@ -561,6 +573,8 @@ struct SearchRequest {
     configured: Vec<(String, String)>,
     /// The number of hits the whole search answers with (PERSO-175).
     limit: usize,
+    /// The order the hits are cut in and listed in (PERSO-273).
+    order: SearchOrder,
     /// The normalised Message-IDs the local pass is already showing.
     excluded: HashSet<String>,
     secrets: crate::secrets::SecretsBackendKind,
@@ -582,6 +596,7 @@ fn search_request(
         "query",
         "mailboxes",
         "limit",
+        "order",
         "exclude_message_ids",
     ];
     known.extend(super::message::SEARCH_FLAG_PARAMS);
@@ -632,6 +647,7 @@ fn search_request(
             .and_then(|limit| usize::try_from(limit).ok())
             .ok_or_else(|| invalid_params("limit is a non-negative integer"))?,
     };
+    let order = super::message::search_order(params)?;
     let excluded = match params.get("exclude_message_ids") {
         None | Some(Value::Null) => HashSet::new(),
         Some(Value::Array(ids)) => ids
@@ -658,6 +674,7 @@ fn search_request(
         targets,
         configured: hit_labels(&catalogue, &configured),
         limit,
+        order,
         excluded,
         secrets: snapshot.config.secrets_backend,
     })
@@ -847,7 +864,14 @@ async fn search_imap(
         search: imap_search,
         message_id: request.parsed.message_id.clone(),
     };
-    let cut = two_phase(&mut backend, &scopes(request), request.limit, &mut stream).await;
+    let cut = two_phase(
+        &mut backend,
+        &scopes(request),
+        request.limit,
+        request.order,
+        &mut stream,
+    )
+    .await;
     session.logout().await.ok();
     Ok(stream.settle(cut))
 }
@@ -892,7 +916,14 @@ async fn search_graph(
     let client = crate::graph::GraphClient::new_async(&config).await?;
     let mut stream = Stream::new(request, handle, canonical, false, Vec::new());
     let mut backend = GraphSearch::new(&client, &request.parsed, &request.configured);
-    let cut = two_phase(&mut backend, &scopes(request), request.limit, &mut stream).await;
+    let cut = two_phase(
+        &mut backend,
+        &scopes(request),
+        request.limit,
+        request.order,
+        &mut stream,
+    )
+    .await;
     Ok(stream.settle(cut))
 }
 
@@ -913,8 +944,9 @@ struct Stream<'a> {
     /// The terms the store answered rather than the server, which the settle
     /// reports so a client can say un-synced mail is not covered (PERSO-131).
     local_terms: Vec<String>,
-    /// Hits published.
-    published: usize,
+    /// The `date_sort` of each hit published, indexed by its `seq`, which
+    /// the settle's `hit_order` is sorted by.
+    published: Vec<String>,
     /// Hits the local pass was already showing.
     deduplicated: usize,
     /// One `{mailbox, error}` per mailbox that refused.
@@ -959,7 +991,7 @@ impl<'a> Stream<'a> {
             canonical,
             with_attachments,
             local_terms,
-            published: 0,
+            published: Vec::new(),
             deduplicated: 0,
             unreachable: Vec::new(),
             seen: HashSet::new(),
@@ -969,18 +1001,32 @@ impl<'a> Stream<'a> {
     /// What the operation settles with.
     fn settle(self, cut: Cut) -> ServerSearchSettled {
         let coverage = coverage_of(&self.local_terms);
+        let order = self.request.order.on_server();
         ServerSearchSettled {
             account: self.request.account.name.clone(),
             query: self.request.query.clone(),
-            hits: self.published as u64,
+            hits: self.published.len() as u64,
             deduplicated: self.deduplicated as u64,
             unreachable: self.unreachable,
             coverage,
             local_terms: self.local_terms,
             truncated: cut.truncated,
             capped: cut.capped,
+            order,
+            hit_order: hit_order(&self.published, order),
         }
     }
+}
+
+/// The `seq` of every published hit, `date_sort` keys indexed by `seq`, in
+/// `order` by date, an unknown date (an empty key) last, the stream's order
+/// among equals.
+fn hit_order(date_sorts: &[String], order: SearchOrder) -> Vec<u64> {
+    let mut seqs: Vec<usize> = (0..date_sorts.len()).collect();
+    let key = |seq: usize| Some(date_sorts[seq].as_str()).filter(|key| !key.is_empty());
+    // Stable, so equal dates keep the order they streamed in.
+    seqs.sort_by(|a, b| order.by_date(key(*a), key(*b)));
+    seqs.into_iter().map(|seq| seq as u64).collect()
 }
 
 impl SearchSink for Stream<'_> {
@@ -1016,14 +1062,17 @@ impl SearchSink for Stream<'_> {
         let store = crate::store::open_store(account);
         for email in emails {
             let hit = to_hit(store.as_ref(), account, label, &email);
+            let date_sort = hit.date_sort.clone();
+            let event = ServerSearchHitEvent {
+                operation_id: self.handle.id().as_str().to_string(),
+                seq: self.published.len() as u64,
+                hit,
+            };
             self.canonical.publish(Event::Lifecycle {
                 kind: KIND_SERVER_SEARCH_HIT,
-                payload: json!({
-                    "operation_id": self.handle.id().as_str(),
-                    "hit": hit,
-                }),
+                payload: json!(event),
             });
-            self.published += 1;
+            self.published.push(date_sort);
         }
     }
 
@@ -1539,5 +1588,49 @@ mod tests {
             counts,
             Some(Change::MailboxCounts { ref mailbox, total: 1, .. }) if mailbox == "Labels/AI"
         ));
+    }
+
+    /// The settle's `hit_order` lays the hits out by date in the order
+    /// asked, an unknown date last and equal dates in stream order, whatever
+    /// order the mailboxes streamed them in (PERSO-273).
+    #[test]
+    fn the_settle_orders_the_streamed_hits_by_date() {
+        // Streamed mailbox by mailbox: an archive's hits, then the inbox's.
+        let streamed: Vec<String> = [
+            "2026-02-01T10:00:00",
+            "",
+            "2026-03-01T10:00:00",
+            "2026-01-01T10:00:00",
+            "2026-03-01T10:00:00",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(hit_order(&streamed, SearchOrder::Newest), [2, 4, 0, 3, 1]);
+        assert_eq!(hit_order(&streamed, SearchOrder::Oldest), [3, 0, 2, 4, 1]);
+        assert!(hit_order(&[], SearchOrder::Newest).is_empty());
+    }
+
+    /// `order` is newest when absent or `null`, one of the three spellings
+    /// otherwise, and anything else is a wrong parameter (PERSO-273).
+    #[test]
+    fn the_order_param_defaults_to_newest_and_refuses_an_unknown_one() {
+        use super::super::message::search_order;
+        assert_eq!(search_order(&json!({})).unwrap(), SearchOrder::Newest);
+        assert_eq!(
+            search_order(&json!({"order": null})).unwrap(),
+            SearchOrder::Newest
+        );
+        assert_eq!(
+            search_order(&json!({"order": "oldest"})).unwrap(),
+            SearchOrder::Oldest
+        );
+        assert_eq!(
+            search_order(&json!({"order": "relevance"})).unwrap(),
+            SearchOrder::Relevance
+        );
+        for wrong in [json!("date"), json!(1)] {
+            let refused = search_order(&json!({ "order": wrong })).unwrap_err();
+            assert_eq!(refused.code, -32602, "invalid params");
+        }
     }
 }

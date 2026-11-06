@@ -5,6 +5,7 @@ use mailypoppins::selector::Namespace;
 use mailypoppins::types::*;
 
 use anyhow::{anyhow, bail, Context, Result};
+use clap::builder::TypedValueParser;
 use clap::{Parser, Subcommand};
 use colored::*;
 use log::{error, info, warn};
@@ -98,10 +99,15 @@ IMAP has:attachment has no server key, so it is answered from the local store
 the term in local_terms. filename: is Gmail/Exchange/--local only.
 
 The daemon runs a server search, the same one the TUI and the desktop app run:
-each mailbox is asked for its newest --limit matches, those are merged newest
-first and cut to --limit, and only the survivors are downloaded. A mailbox the
-server refuses does not stop the others; a \"Search in <mailbox> failed\" line
-on stderr follows the results.";
+each mailbox is asked for its newest --limit matches (its oldest under
+--sort oldest), those are merged in that order and cut to --limit, and only the
+survivors are downloaded. A mailbox the server refuses does not stop the
+others; a \"Search in <mailbox> failed\" line on stderr follows the results.
+
+Order: hits are listed newest first unless --sort says otherwise, in --local
+and server searches alike. --sort relevance ranks --local hits best match
+first (newest first among equals); a mail server gives no score, so a server
+search lists them newest first.";
 
 #[derive(Subcommand)]
 enum Commands {
@@ -450,17 +456,28 @@ enum Commands {
         /// Strictly before this date, YYYY-MM-DD (before:)
         #[arg(long)]
         before: Option<String>,
-        /// Max results across every searched mailbox, the newest winning
-        /// wherever they sit; a server search cut by it ends with a
-        /// "raise -n" line. Exchange stops a search at 1000 results per
-        /// mailbox, which a line says instead
+        /// Max results across every searched mailbox, the first in --sort
+        /// order winning wherever they sit; a server search cut by it ends
+        /// with a "raise -n" line. Exchange stops a search at 1000 results
+        /// per mailbox, which a line says instead
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
+        /// Order of the hits: newest or oldest by date, or relevance (best
+        /// match first under --local; a server search has no score and lists
+        /// newest first)
+        #[arg(
+            long,
+            value_name = "ORDER",
+            default_value = "newest",
+            value_parser = clap::builder::PossibleValuesParser::new(["newest", "oldest", "relevance"])
+                .map(|order| order.parse::<mp_protocol::listing::SearchOrder>().expect("a listed order")),
+        )]
+        sort: mp_protocol::listing::SearchOrder,
         /// Show full body instead of preview
         #[arg(long)]
         full: bool,
         /// Search the local store's full-text index instead of the server
-        /// (offline, ranked, covers every synced mailbox at once)
+        /// (offline, covers every synced mailbox at once)
         #[arg(long)]
         local: bool,
         /// Emit one JSON object {account, query, source: local|server,
@@ -2768,8 +2785,8 @@ async fn routed_dump(
     Ok(records)
 }
 
-/// `mp search --local`: the ranked hits of the daemon's index read, which the
-/// text listing maps onto store rows and `--json` prints as they came.
+/// `mp search --local`: the hits of the daemon's index read in `order`, which
+/// the text listing maps onto store rows and `--json` prints as they came.
 ///
 /// The flags travel as the user typed them and the daemon builds the query with
 /// `search::from_cli`, so one parser serves every backend. `body` is `--full`;
@@ -2780,9 +2797,10 @@ async fn routed_search(
     mailbox: Option<&str>,
     flags: &mailypoppins::search::Flags,
     limit: usize,
+    order: mp_protocol::listing::SearchOrder,
     full: bool,
 ) -> Result<Vec<mp_client::queries::SearchHit>> {
-    let mut params = search_params(account, query, flags, limit);
+    let mut params = search_params(account, query, flags, limit, order);
     params["body"] = serde_json::json!(full);
     if let Some(mailbox) = mailbox {
         params["mailbox"] = serde_json::json!(mailbox);
@@ -2796,23 +2814,29 @@ async fn routed_search(
 }
 
 /// The parameters `message.search` and `message.search_server` share: the
-/// query as typed, `mp search`'s flags under their wire names, and the limit.
+/// query as typed, `mp search`'s flags under their wire names, the limit and
+/// the order.
 ///
 /// A flag the user did not give is left out rather than sent empty or
 /// `false`: a daemon older than the field filters on `message.search_server`
 /// refuses a key it does not know, so an `mp search` with no filter keeps
-/// working against it until it restarts.
+/// working against it until it restarts. The default order, newest, is the
+/// daemon's own default and travels the same way.
 fn search_params(
     account: &str,
     query: &str,
     flags: &mailypoppins::search::Flags,
     limit: usize,
+    order: mp_protocol::listing::SearchOrder,
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "account": account,
         "query": query,
         "limit": limit,
     });
+    if order != mp_protocol::listing::SearchOrder::default() {
+        params["order"] = serde_json::json!(order);
+    }
     if flags.has_attachment {
         params["has_attachment"] = serde_json::json!(true);
     }
@@ -2844,8 +2868,9 @@ fn server_search_params(
     mailbox: Option<&str>,
     flags: &mailypoppins::search::Flags,
     limit: usize,
+    order: mp_protocol::listing::SearchOrder,
 ) -> serde_json::Value {
-    let mut params = search_params(account, query, flags, limit);
+    let mut params = search_params(account, query, flags, limit, order);
     if let Some(mailbox) = mailbox {
         params["mailboxes"] = serde_json::json!([mailbox]);
     }
@@ -2858,12 +2883,14 @@ const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
 /// `mp search` without `--local`: the daemon's `message.search_server`, which
 /// the TUI overlay and the desktop search bar call too (`LST-06`, PERSO-175).
 ///
-/// `--limit` is the number of hits the whole search answers with: the daemon
-/// asks every mailbox for its newest `limit`, merges them newest first, cuts
-/// them to `limit` and downloads only those. The hits stream as events and
-/// are listed newest first once the search settles; what the settle says
-/// (the store-coverage warning, the cut, the mailboxes the server refused)
-/// is printed around them by [`mailypoppins::read_cmd::server_search_lines`].
+/// `params` is [`server_search_params`]' answer. `--limit` is the number of
+/// hits the whole search answers with: the daemon asks every mailbox for its
+/// first `limit` in `--sort` order (newest, or oldest), merges them in that
+/// order, cuts them to `limit` and downloads only those.
+/// The hits stream as events and are listed in the settle's `hit_order`, the
+/// order every client lists them in (PERSO-273); what the settle says (the
+/// store-coverage warning, the cut, the mailboxes the server refused) is
+/// printed around them by [`mailypoppins::read_cmd::server_search_lines`].
 ///
 /// `--mailbox` names any folder the server lists; without it the daemon
 /// reads the query's own `in:`, and without that searches every folder the
@@ -2872,14 +2899,11 @@ const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
 async fn routed_server_search(
     account_config: &AccountConfig,
     query: &str,
-    mailbox: Option<&str>,
-    flags: &mailypoppins::search::Flags,
-    limit: usize,
+    params: serde_json::Value,
     full: bool,
     json: bool,
 ) -> Result<()> {
     let account = account_config.name.as_str();
-    let params = server_search_params(account, query, mailbox, flags, limit);
 
     let mut connection = daemon_connection().await;
     // What a hit's mailbox label resolves to for its selector; an account
@@ -2902,14 +2926,16 @@ async fn routed_server_search(
         .map_err(|e| anyhow!("{}", e.message))?;
 
     let id = wire_str(&started["operation_id"]).to_string();
-    let mut hits: Vec<mp_protocol::listing::ServerSearchHit> = Vec::new();
+    let mut hits: Vec<(u64, mp_protocol::listing::ServerSearchHit)> = Vec::new();
     let settled = connection
         .await_operation_events(&id, |kind, payload| {
             if kind != KIND_SERVER_SEARCH_HIT {
                 return;
             }
-            match serde_json::from_value(payload["hit"].clone()) {
-                Ok(hit) => hits.push(hit),
+            match serde_json::from_value::<mp_protocol::listing::ServerSearchHitEvent>(
+                payload.clone(),
+            ) {
+                Ok(event) => hits.push((event.seq, event.hit)),
                 Err(e) => warn!("[search] a message.server_hit did not decode: {e}"),
             }
         })
@@ -2923,7 +2949,7 @@ async fn routed_server_search(
         Settled::Failed(message) => bail!("{message}"),
     };
 
-    let hits = mailypoppins::read_cmd::server_hits_newest_first(hits);
+    let hits = settled.arrange(hits);
     let lines = mailypoppins::read_cmd::server_search_lines(&settled, &hits, json);
     for line in &lines.before {
         eprintln!("{} {line}", "\u{26a0}".yellow());
@@ -6551,6 +6577,7 @@ async fn main() -> Result<()> {
             after,
             before,
             limit,
+            sort,
             full,
             local,
             json,
@@ -6587,6 +6614,7 @@ async fn main() -> Result<()> {
                     mailbox_key.as_deref(),
                     &flags,
                     limit.saturating_add(1),
+                    sort,
                     full,
                 )
                 .await?;
@@ -6621,7 +6649,12 @@ async fn main() -> Result<()> {
                         .collect();
                     print!(
                         "{}",
-                        mailypoppins::read_cmd::render_search(&account_config.name, &query, &rows)
+                        mailypoppins::read_cmd::render_search(
+                            &account_config.name,
+                            &query,
+                            sort,
+                            &rows
+                        )
                     );
                 }
                 // An early return leaves the check at the bottom of `main`
@@ -6631,16 +6664,15 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            routed_server_search(
-                &account_config,
+            let params = server_search_params(
+                &account_config.name,
                 &query,
                 mailbox.as_deref(),
                 &flags,
                 limit,
-                full,
-                json,
-            )
-            .await?;
+                sort,
+            );
+            routed_server_search(&account_config, &query, params, full, json).await?;
         }
 
         // The index, the ranking and the cache are all the daemon's from
@@ -7010,12 +7042,26 @@ mod tests {
     /// names its one mailbox.
     #[test]
     fn a_server_search_over_every_mailbox_names_none() {
-        let every = server_search_params("tum", "invoice", None, &Default::default(), 50);
+        let every = server_search_params(
+            "tum",
+            "invoice",
+            None,
+            &Default::default(),
+            50,
+            Default::default(),
+        );
         assert_eq!(
             every,
             serde_json::json!({"account": "tum", "query": "invoice", "limit": 50})
         );
-        let one = server_search_params("tum", "invoice", Some("Sent"), &Default::default(), 50);
+        let one = server_search_params(
+            "tum",
+            "invoice",
+            Some("Sent"),
+            &Default::default(),
+            50,
+            Default::default(),
+        );
         assert_eq!(one["mailboxes"], serde_json::json!(["Sent"]));
     }
 
@@ -7024,18 +7070,34 @@ mod tests {
     /// a filter the user gave travels under its wire name (PERSO-175).
     #[test]
     fn a_search_sends_only_the_filters_the_user_gave() {
-        let plain = search_params("tum", "invoice", &Default::default(), 20);
+        let plain = search_params(
+            "tum",
+            "invoice",
+            &Default::default(),
+            20,
+            Default::default(),
+        );
         assert_eq!(
             plain,
             serde_json::json!({"account": "tum", "query": "invoice", "limit": 20})
         );
+        // Newest is the daemon's default and is not spelled out; another
+        // order travels by its wire name (PERSO-273).
+        let oldest = search_params(
+            "tum",
+            "invoice",
+            &Default::default(),
+            20,
+            mp_protocol::listing::SearchOrder::Oldest,
+        );
+        assert_eq!(oldest["order"], "oldest");
 
         let flags = mailypoppins::search::Flags {
             has_attachment: true,
             from: Some("borrmann".into()),
             ..Default::default()
         };
-        let filtered = search_params("tum", "", &flags, 20);
+        let filtered = search_params("tum", "", &flags, 20, Default::default());
         assert_eq!(filtered["has_attachment"], true);
         assert_eq!(filtered["from"], "borrmann");
     }

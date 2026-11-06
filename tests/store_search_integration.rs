@@ -10,7 +10,7 @@ use mailypoppins::ingest::{
     ingest_message, ingest_message_with_policy, prune_vanished, IngestInput, RebindPolicy,
 };
 use mailypoppins::parse::{AttachmentData, FetchedEmail};
-use mailypoppins::store::search::{fts_expression, index_drift, search};
+use mailypoppins::store::search::{fts_expression, index_drift, search, SearchOrder};
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
 
@@ -69,7 +69,7 @@ impl Fixture {
     }
 
     fn hits(&self, query: &str) -> Vec<i64> {
-        search(&self.store, "acct", query, None, 20)
+        search(&self.store, "acct", query, None, 20, SearchOrder::Relevance)
             .unwrap()
             .into_iter()
             .map(|h| h.row.id)
@@ -77,11 +77,18 @@ impl Fixture {
     }
 
     fn hits_in(&self, query: &str, mailbox: &str) -> Vec<i64> {
-        search(&self.store, "acct", query, Some(mailbox), 20)
-            .unwrap()
-            .into_iter()
-            .map(|h| h.row.id)
-            .collect()
+        search(
+            &self.store,
+            "acct",
+            query,
+            Some(mailbox),
+            20,
+            SearchOrder::Relevance,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|h| h.row.id)
+        .collect()
     }
 }
 
@@ -241,7 +248,15 @@ fn filename_does_not_match_the_invite_sidecar() {
 #[test]
 fn an_or_group_mixing_filename_and_text_is_refused() {
     let f = Fixture::new();
-    let err = search(&f.store, "acct", "(filename:pdf OR invoice)", None, 20).unwrap_err();
+    let err = search(
+        &f.store,
+        "acct",
+        "(filename:pdf OR invoice)",
+        None,
+        20,
+        SearchOrder::Relevance,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("filename:"), "{err}");
 }
 
@@ -395,13 +410,13 @@ fn punctuation_in_a_query_is_not_a_syntax_error() {
     );
     for query in ["c++", "(c++)", "rust -", "ship AND", "ship\" OR rust"] {
         assert!(
-            search(&f.store, "acct", query, None, 20).is_ok(),
+            search(&f.store, "acct", query, None, 20, SearchOrder::Relevance).is_ok(),
             "query {query:?} must not fail"
         );
     }
     // A query with nothing indexable in it is refused rather than run.
-    assert!(search(&f.store, "acct", "  ??  ", None, 20).is_err());
-    assert!(search(&f.store, "acct", "\"", None, 20).is_err());
+    assert!(search(&f.store, "acct", "  ??  ", None, 20, SearchOrder::Relevance).is_err());
+    assert!(search(&f.store, "acct", "\"", None, 20, SearchOrder::Relevance).is_err());
     assert!(fts_expression("??").is_err());
 }
 
@@ -426,6 +441,88 @@ fn a_subject_hit_outranks_a_body_hit() {
         &email("b", "b@example.com", "Invoice 42", "attached"),
     );
     assert_eq!(f.hits("invoice"), vec![titled, buried]);
+}
+
+/// [`email`] sent on this `Date:`.
+fn dated(mut message: FetchedEmail, date: &str) -> FetchedEmail {
+    message.date = date.into();
+    message
+}
+
+/// The three orders (PERSO-273): newest and oldest by `Date:` whatever the
+/// rank, a dateless row last in both, relevance by bm25 and then newest
+/// first; and the limit keeps the first rows of the order, not of the rank.
+#[test]
+fn hits_come_back_newest_oldest_or_best_first() {
+    let f = Fixture::new();
+    // A subject hit in the middle of the dates, and body hits around it.
+    let old = f.ingest(
+        "inbox",
+        1,
+        &dated(
+            email("old", "a@example.com", "Lunch", "the invoice"),
+            "Mon, 5 Jan 2026 09:00:00 +0000",
+        ),
+    );
+    let titled = f.ingest(
+        "archive",
+        2,
+        &dated(
+            email("mid", "b@example.com", "Invoice 42", "attached"),
+            "Tue, 3 Mar 2026 09:00:00 +0000",
+        ),
+    );
+    let new = f.ingest(
+        "inbox",
+        3,
+        &dated(
+            email("new", "c@example.com", "Lunch again", "one more invoice"),
+            "Wed, 6 May 2026 09:00:00 +0000",
+        ),
+    );
+    let dateless = f.ingest(
+        "inbox",
+        4,
+        &dated(
+            email("nodate", "d@example.com", "Lunch", "an invoice"),
+            "not a date",
+        ),
+    );
+    let ordered = |order: SearchOrder, limit: usize| -> Vec<i64> {
+        search(&f.store, "acct", "invoice", None, limit, order)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.row.id)
+            .collect()
+    };
+
+    assert_eq!(
+        ordered(SearchOrder::Newest, 20),
+        vec![new, titled, old, dateless]
+    );
+    assert_eq!(
+        ordered(SearchOrder::Oldest, 20),
+        vec![old, titled, new, dateless]
+    );
+    let best = ordered(SearchOrder::Relevance, 20);
+    assert_eq!(best[0], titled, "the subject hit ranks first: {best:?}");
+    assert_eq!(best.len(), 4);
+
+    // The limit cuts the order the SQL ran, so it keeps the right rows.
+    assert_eq!(ordered(SearchOrder::Newest, 1), vec![new]);
+    assert_eq!(ordered(SearchOrder::Oldest, 1), vec![old]);
+    assert_eq!(ordered(SearchOrder::Relevance, 1), vec![titled]);
+
+    // A query with no text term has no rank: relevance is newest first.
+    let undated = |order: SearchOrder| -> Vec<i64> {
+        search(&f.store, "acct", "after:2026-01-01", None, 20, order)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.row.id)
+            .collect()
+    };
+    assert_eq!(undated(SearchOrder::Relevance), vec![new, titled, old]);
+    assert_eq!(undated(SearchOrder::Oldest), vec![old, titled, new]);
 }
 
 /// The search covers every mailbox at once, and `--mailbox` narrows it.
@@ -620,7 +717,7 @@ fn the_limit_caps_the_ranked_hits() {
         6,
         &email("m6", "a@example.com", "Common", "subject hit"),
     );
-    let hits = search(&f.store, "acct", "common", None, 2).unwrap();
+    let hits = search(&f.store, "acct", "common", None, 2, SearchOrder::Relevance).unwrap();
     assert_eq!(hits.len(), 2);
     assert_eq!(hits[0].row.id, best);
 }

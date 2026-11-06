@@ -50,7 +50,7 @@ const imapCommands = [
 const storeCommands = [
   { command: 'mp list-messages [--mailbox <name>] [-n N] [--json]', description: 'List received messages from the local store (offline; --json prints them as JSON on stdout)' },
   { command: 'mp show <selector> [--mailbox <name>] [--json]', description: 'Print one received message (headers, attachments, inline images and body) from the local store, fetching it from the server first when the store lacks it and the selector names its mailbox' },
-  { command: 'mp search --local <query> [--mailbox <name>] [-n N] [--full] [--json]', description: 'Ranked full-text search over the local store (offline, every synced mailbox at once)' },
+  { command: 'mp search --local <query> [--mailbox <name>] [-n N] [--sort <order>] [--full] [--json]', description: 'Full-text search over the local store (offline, every synced mailbox at once), newest first or in --sort order' },
 ];
 
 const storeOptions = [
@@ -188,7 +188,8 @@ const searchFlags = [
   { command: '--has-attachment', description: 'Only mail carrying an attachment (has:attachment)' },
   { command: '--after / --before <YYYY-MM-DD>', description: 'The date range as flags' },
   { command: '--mailbox <name>', description: 'Scope to one mailbox by role, label or server name: any folder the server lists (--local: any mailbox of the sidebar)' },
-  { command: '-n, --limit <N>', description: 'Max results across every searched mailbox, newest first (default: 20): each mailbox is asked for its newest N, and only the N newest overall are downloaded; a server search cut by it ends with a "raise -n" line; Exchange stops a search at 1000 results per mailbox, so a larger limit there says to narrow the query instead' },
+  { command: '-n, --limit <N>', description: 'Max results across every searched mailbox, the first N in --sort order (default: 20): each mailbox is asked for its first N, and only the first N overall are downloaded; a server search cut by it ends with a "raise -n" line; Exchange stops a search at 1000 results per mailbox, so a larger limit there says to narrow the query instead' },
+  { command: '--sort <order>', description: 'Order of the hits: newest (the default) or oldest by date, or relevance, best match first under --local; a mail server gives no score, so a server search lists relevance newest first' },
   { command: '--full', description: 'Show full body instead of preview' },
   { command: '--local', description: 'Search the local FTS index offline instead of the server' },
   { command: '--json', description: 'Print the hits as one JSON object on stdout, with "truncated": true when more matched than --limit let through; warnings stay on stderr' },
@@ -682,8 +683,9 @@ mp calendar reminder dismiss AAMkADev2 -A evoqs`}
       <h3 id="local-search-syntax">Local full-text search (<code>--local</code>)</h3>
       <p>
         <code>mp search --local &lt;query&gt;</code> answers from the local store's
-        FTS5 index instead of the server: offline, ranked best match first, and
-        covering every synced mailbox of the account at once. A subject hit
+        FTS5 index instead of the server: offline, newest first, and covering
+        every synced mailbox of the account at once. With
+        <code>--sort relevance</code> it ranks best match first, and a subject hit
         outranks the same word buried in a quoted reply. The index is written in
         the same transaction as the message it describes, so it is never stale
         with respect to what <code>mp sync</code> has pulled, and it holds only

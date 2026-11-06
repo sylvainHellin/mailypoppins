@@ -441,12 +441,13 @@ An unknown uid, a malformed id, a mailbox the account does not have and a select
 `body` defaults to `true` and its absence is not its nullity: with `body: false` the key is gone from the result, and with the default it is present and `null` when the store holds no readable body for the row.
 `mp show` prints its "no stored body" sentence for exactly that `null`, so collapsing the two would make a bodyless answer indistinguishable from an evicted blob.
 
-`message.search` takes `{"account": str, "query": str}` plus `mailbox`, `limit`, `body`, and the field filters `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after`, `before`, and returns:
+`message.search` takes `{"account": str, "query": str}` plus `mailbox`, `limit`, `order`, `body`, and the field filters `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after`, `before`, and returns:
 
 ```json
 {
   "account": "work",
   "query": "ledger",
+  "order": "newest",
   "hits": [{
     "uid": 3,
     "mailbox": "inbox",
@@ -463,7 +464,8 @@ An unknown uid, a malformed id, a mailbox the account does not have and a select
 
 The params mirror `mp search --local`'s flags and the daemon builds the query with `search::from_cli`, so one parser serves every backend and the client sends what the user typed.
 `body_query` is the wire name of the `--body` flag, because `body` is already the "send me the bodies" switch (`--full`) and one key may not mean two things; `body` defaults to `false` here and to `true` in `message.get`, deliberately, since `mp show` always prints a body and `mp search` prints one only under `--full`.
-Hits come back in the store's ranking order, which is what `mp search --local` prints under "best match first", and each hit is a `message.list` row, `selector` included, plus the `mailbox` it was found in.
+Hits come back in `order` (PERSO-273), `mp_protocol::listing::SearchOrder`: `newest` (the default, absent or `null`) and `oldest` by `date_sort`, a row whose `Date:` did not parse last in both, or `relevance`, the bm25 rank and then newest first; the answer echoes the order it applied, and an unknown one is `-32602`.
+The order is the SQL's, so `limit` keeps the first rows of it, and each hit is a `message.list` row, `selector` included, plus the `mailbox` it was found in.
 `mailbox` is resolved as `message.list` resolves it and falls back to the query's own `in:` directive; an unknown one is `-32602`.
 An absent `limit` means every hit.
 A query the search layer cannot use, a lone quote or bare punctuation, is `-32602` and not `-32603`: the parameter is wrong, not the store.
@@ -945,13 +947,14 @@ A replay is `durable`: a CLI that stops waiting leaves the command running to it
 Two operations carry every client's server search: the merged search behind the TUI's `ff`, the desktop search bar's server leg and `mp search` without `--local` (`LST-08`, `LST-06`), and the `f` that ingests a server-only hit (`LST-09`).
 
 ```text
-message.search_server {account, query, mailboxes?: [str], limit?, exclude_message_ids?: [str],
+message.search_server {account, query, mailboxes?: [str], limit?, order?, exclude_message_ids?: [str],
                        from?, to?, cc?, subject?, body_query?, filename?, has_attachment?,
                        after?, before?}
         -> {operation_id}
-   streams  state.event kind `message.server_hit`, payload {operation_id, hit}
+   streams  state.event kind `message.server_hit`, payload {operation_id, seq, hit}
    settles  {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
-             coverage: "server"|"local", local_terms: [str], truncated, capped}
+             coverage: "server"|"local", local_terms: [str], truncated, capped,
+             order: "newest"|"oldest", hit_order: [seq]}
 
 message.fetch {account, mailbox, message_id} -> {operation_id}
    settles  {account, mailbox, uid, row_id, selector, already_present}
@@ -960,7 +963,7 @@ message.fetch {account, mailbox, message_id} -> {operation_id}
 **The search leg is `message.search_server` and not `message.list_server`**, which was taken when it was named: P4-U10 had registered that name for `mp fetch`'s one-mailbox query over `criteria`. Both were retired on 2026-10-22, since `mp search --mailbox` asks the same question here.
 
 **It is an operation with streamed hits**, because the overlay fills in as the mailboxes answer.
-One `state.event` of kind `message.server_hit` per hit, payload `{operation_id, hit}`, where the id is on the payload because a fast retype leaves two searches in flight and a client has to tell their hits apart.
+One `state.event` of kind `message.server_hit` per hit, payload `mp_protocol::listing::ServerSearchHitEvent` `{operation_id, seq, hit}`, where the id is on the payload because a fast retype leaves two searches in flight and a client has to tell their hits apart, and `seq` numbers the hit in its search's stream from 0.
 A hit is `mp_protocol::listing::ServerSearchHit`: the envelope the overlay renders, the sidebar `mailbox` label it was found under, the `body_text` the preview pane shows and the `html_body` the `b` key hands to a browser, plus `row_id` and `selector`, which are `null` for a message this account has never ingested.
 A server-only hit carries no row and says so with `null` rather than with an empty string, because "not in the store" is the fact every row-dependent key of the overlay branches on.
 
@@ -976,7 +979,11 @@ A query the grammar cannot parse is `-32602`, and so is an empty mailbox name.
 The search runs in two passes, so a five-folder search downloads no more than a one-folder search for the same number.
 The first pass asks every mailbox for its newest `limit` matches with nothing but the key the second pass downloads by and the two headers the merge reads: on IMAP the UID with `BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)]`, on Graph the message id with `$select=id,internetMessageId,receivedDateTime,parentFolderId`.
 The stubs of every mailbox are merged newest first by `Date` and cut to `limit`, and the second pass downloads the survivors whole, mailbox by mailbox: one `UID FETCH (BODY.PEEK[] FLAGS)` per mailbox on IMAP, `/$batch` chunks of twenty on Graph.
-The hits stream as each mailbox's survivors land, so a client that lists them sorts by `date_sort`; the daemon has already cut them.
+
+**`order` is the order the search cuts and lists in** (PERSO-273), `message.search`'s `SearchOrder`, newest when absent.
+Under `oldest` the first pass asks each mailbox for its oldest `limit` instead and the merge keeps the oldest: on IMAP the lowest UIDs, on a Graph listing with no term `$orderby=receivedDateTime asc`, and on a Graph `$search` or Message-ID `$filter`, which take no `$orderby`, every page up to the 1000-result cap, keeping the oldest `limit`; a search the cap stopped answers the oldest of the newest 1000 and settles `capped`.
+A mail server gives no relevance score, so `relevance` runs newest first, and the settle's `order` names the order it applied.
+The hits stream as each mailbox's survivors land, in no useful order; the settle's `hit_order` lists every streamed `seq` in `order` by `date_sort`, an unparsable date last and equal dates in stream order, and every client lays its hits out by it (`ServerSearchSettled::arrange`) rather than sorting them itself.
 `truncated` is true when a mailbox matched more than `limit` or the merge dropped stubs, and `capped` when Graph's 1000-result `$search` cap stopped a mailbox short of `limit`, which no larger limit gets past.
 A client says so under its hits: `mp search` prints "More results than the N shown: raise -n to see them." (or the cap sentence), and the TUI footer and the desktop status bar end with the same sentence and a narrower search as the remedy, since neither takes a limit.
 
@@ -1832,3 +1839,6 @@ PERSO-255 (free/busy, phase 2) added `calendar.freebusy`, one client-scoped oper
 A Graph calendar's `features` list `free-busy`, and the desktop app requires the method at the handshake.
 
 PERSO-272 added `version`, the hex SHA-256 of the draft file's bytes, to the `draft.changed` payload (`mp_protocol::events::DraftChanged`), optional and additively; a snapshot draft row and a `draft.list` row do not carry it, no field was renamed or dropped, and no method was added.
+
+PERSO-273 (search order) added an optional `order` parameter to `message.search` and `message.search_server`, `mp_protocol::listing::SearchOrder` (`newest`, `oldest`, `relevance`), a `seq` member to the `message.server_hit` payload (`ServerSearchHitEvent`), `order` to `message.search`'s answer and `order` and `hit_order` to `ServerSearchSettled`, all additively; no field was renamed or dropped.
+One behaviour moved: a `message.search` that names no order answers newest first, where it answered best match first, so `mp search --local`, the TUI's local pass and the desktop's local search list the newest hits first and the limit keeps the newest; `--sort relevance` is the old order.

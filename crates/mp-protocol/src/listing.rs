@@ -534,6 +534,22 @@ pub struct ServerSearchHit {
     pub html_body: Option<String>,
 }
 
+/// The payload of one `message.server_hit` event: the hit, the search it
+/// belongs to, and its number in that search's stream (PERSO-273), which
+/// [`ServerSearchSettled::hit_order`] orders the hits by.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ServerSearchHitEvent {
+    /// The `message.search_server` operation the hit belongs to: a fast
+    /// retype leaves two searches in flight.
+    pub operation_id: String,
+    /// The hit's place in its search's stream, from 0.
+    #[serde(default)]
+    pub seq: u64,
+    /// The hit.
+    pub hit: ServerSearchHit,
+}
+
 /// Whether un-synced mail can be missing from a server search's hits, the
 /// `coverage` of [`ServerSearchSettled`] and of `mp search --json` (PERSO-122,
 /// PERSO-131).
@@ -547,6 +563,99 @@ pub enum SearchCoverage {
     /// The local store answered at least one term, which `local_terms` names,
     /// so a message the account has not synced cannot be among the hits.
     Local,
+}
+
+/// The order a search's hits come back in: the `order` param of
+/// `message.search` and `message.search_server`, and `mp search --sort`
+/// (PERSO-273).
+///
+/// Absent means [`SearchOrder::Newest`], so a client that sends nothing lists
+/// the newest mail first, as every mailbox listing does. `relevance` is the
+/// local index's bm25 rank, newest first among equals; a mail server gives no
+/// score, so a server search asked for it answers newest first and its settle
+/// says so in [`ServerSearchSettled::order`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum SearchOrder {
+    /// The newest `Date` first.
+    #[default]
+    Newest,
+    /// The oldest `Date` first.
+    Oldest,
+    /// The best match first (bm25 on the local index), the newest first among
+    /// equal matches.
+    Relevance,
+}
+
+impl SearchOrder {
+    /// Every order, in the order a picker lists them.
+    pub const ALL: [SearchOrder; 3] = [
+        SearchOrder::Newest,
+        SearchOrder::Oldest,
+        SearchOrder::Relevance,
+    ];
+
+    /// The wire spelling, `newest`, `oldest` or `relevance`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchOrder::Newest => "newest",
+            SearchOrder::Oldest => "oldest",
+            SearchOrder::Relevance => "relevance",
+        }
+    }
+
+    /// What a listing says its hits are in: `newest first`, `oldest first`
+    /// or `best match first`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            SearchOrder::Newest => "newest first",
+            SearchOrder::Oldest => "oldest first",
+            SearchOrder::Relevance => "best match first",
+        }
+    }
+
+    /// The order a server search applies: a mail server gives no score, so
+    /// `relevance` is answered newest first.
+    pub fn on_server(self) -> SearchOrder {
+        match self {
+            SearchOrder::Relevance => SearchOrder::Newest,
+            order => order,
+        }
+    }
+
+    /// Two dates in this order, `None` (a date that did not parse) last
+    /// either way; `relevance` compares them newest first, the tie-break
+    /// under a rank.
+    pub fn by_date<T: Ord>(self, a: Option<T>, b: Option<T>) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (a, b) {
+            (Some(a), Some(b)) => match self {
+                SearchOrder::Oldest => a.cmp(&b),
+                SearchOrder::Newest | SearchOrder::Relevance => b.cmp(&a),
+            },
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+}
+
+impl std::fmt::Display for SearchOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SearchOrder {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<SearchOrder, String> {
+        SearchOrder::ALL
+            .into_iter()
+            .find(|order| order.as_str() == s)
+            .ok_or_else(|| format!("order is one of newest, oldest, relevance, not {s:?}"))
+    }
 }
 
 /// One mailbox a server search could not search, which does not fail it.
@@ -569,7 +678,10 @@ pub const GRAPH_SEARCH_CAP: usize = 1000;
 /// What a `message.search_server` settles with (P5-U10c, `LST-08`).
 ///
 /// The hits are not here: each streamed as a `message.server_hit` event while
-/// the search ran. What settles is the count, the hits dropped because the
+/// the search ran, numbered by its `seq`, and `hit_order` lists those numbers
+/// in the order the search was asked for (PERSO-273), which
+/// [`ServerSearchSettled::arrange`] applies. What settles beside it is the
+/// count, the hits dropped because the
 /// local pass was already showing them, the mailboxes that refused, the
 /// coverage (PERSO-131): on a plain IMAP server `has:attachment` has no search
 /// key, so the daemon keeps only the hits the local store marks as carrying an
@@ -611,9 +723,38 @@ pub struct ServerSearchSettled {
     /// reaches the rest.
     #[serde(default)]
     pub capped: bool,
+    /// The order `hit_order` lists the hits in: the one asked for, except
+    /// that `relevance` is answered `newest` (a mail server gives no score).
+    #[serde(default)]
+    pub order: SearchOrder,
+    /// The `seq` of every streamed hit, in `order` (PERSO-273): the hits
+    /// stream mailbox by mailbox as each one's survivors download, and this
+    /// is the one list every client shows. Empty from a daemon that
+    /// predates it.
+    #[serde(default)]
+    pub hit_order: Vec<u64>,
 }
 
 impl ServerSearchSettled {
+    /// The streamed hits, each with the `seq` its event carried, in
+    /// [`Self::hit_order`]; a hit the order does not name (an older daemon's)
+    /// follows in the order it was handed in.
+    pub fn arrange<T>(&self, hits: impl IntoIterator<Item = (u64, T)>) -> Vec<T> {
+        let rank: std::collections::HashMap<u64, usize> = self
+            .hit_order
+            .iter()
+            .enumerate()
+            .map(|(at, seq)| (*seq, at))
+            .collect();
+        let mut keyed: Vec<(usize, T)> = hits
+            .into_iter()
+            .map(|(seq, hit)| (rank.get(&seq).copied().unwrap_or(usize::MAX), hit))
+            .collect();
+        // Stable, so the unnamed keep their arrival order.
+        keyed.sort_by_key(|(at, _)| *at);
+        keyed.into_iter().map(|(_, hit)| hit).collect()
+    }
+
     /// The caveat a client appends to its hit count, `local store only:
     /// has:attachment`, or `None` when the server answered every term: the
     /// words `mp search` prints in its result header.
@@ -646,8 +787,12 @@ mod tests {
             local_terms: vec!["has:attachment".to_string()],
             truncated: true,
             capped: false,
+            order: SearchOrder::Oldest,
+            hit_order: vec![2, 0, 1],
         };
         let encoded = serde_json::to_value(&settled).expect("it serialises");
+        assert_eq!(encoded["order"], json!("oldest"));
+        assert_eq!(encoded["hit_order"], json!([2, 0, 1]));
         assert_eq!(encoded["truncated"], json!(true));
         assert_eq!(encoded["capped"], json!(false));
         assert_eq!(encoded["coverage"], json!("local"));
@@ -672,6 +817,57 @@ mod tests {
         assert!(older.local_terms.is_empty());
         assert!(!older.truncated && !older.capped);
         assert_eq!(older.local_store_note(), None);
+        assert_eq!(older.order, SearchOrder::Newest);
+        assert!(older.hit_order.is_empty());
+    }
+
+    /// The three orders travel lowercase, absent reads as newest, and an
+    /// unknown spelling is refused with the three it could have been
+    /// (PERSO-273).
+    #[test]
+    fn a_search_order_travels_lowercase_and_defaults_to_newest() {
+        for order in SearchOrder::ALL {
+            assert_eq!(serde_json::to_value(order).unwrap(), json!(order.as_str()));
+            assert_eq!(order.as_str().parse::<SearchOrder>(), Ok(order));
+        }
+        assert_eq!(SearchOrder::default(), SearchOrder::Newest);
+        let refused = "date".parse::<SearchOrder>().unwrap_err();
+        assert!(refused.contains("newest, oldest, relevance"), "{refused}");
+        assert_eq!(SearchOrder::Relevance.on_server(), SearchOrder::Newest);
+        assert_eq!(SearchOrder::Oldest.on_server(), SearchOrder::Oldest);
+    }
+
+    /// A date that did not parse sorts last whichever way the dates run.
+    #[test]
+    fn an_unknown_date_sorts_last_in_either_order() {
+        let dates = [Some(2), None, Some(1), Some(3)];
+        let sorted = |order: SearchOrder| {
+            let mut d = dates.to_vec();
+            d.sort_by(|a, b| order.by_date(*a, *b));
+            d
+        };
+        assert_eq!(
+            sorted(SearchOrder::Newest),
+            [Some(3), Some(2), Some(1), None]
+        );
+        assert_eq!(
+            sorted(SearchOrder::Oldest),
+            [Some(1), Some(2), Some(3), None]
+        );
+    }
+
+    /// `arrange` lays the streamed hits out in the settle's order, and a hit
+    /// it does not name keeps its arrival place after the named ones.
+    #[test]
+    fn a_settle_arranges_the_streamed_hits() {
+        let settled = ServerSearchSettled {
+            hit_order: vec![2, 0, 1],
+            ..Default::default()
+        };
+        let streamed = [(0, "a"), (7, "stray"), (1, "b"), (2, "c")];
+        assert_eq!(settled.arrange(streamed), ["c", "a", "b", "stray"]);
+        let older = ServerSearchSettled::default();
+        assert_eq!(older.arrange([(1, "x"), (0, "y")]), ["x", "y"]);
     }
 
     /// The committed fixture decodes into the typed row, `selector` included.

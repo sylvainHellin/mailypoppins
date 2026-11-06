@@ -167,7 +167,15 @@ fn suites() -> Vec<Suite> {
         ),
         parity(
             "store_search_integration",
-            &["search", "--local", "ledger", "-n", "10"],
+            &[
+                "search",
+                "--local",
+                "ledger",
+                "-n",
+                "10",
+                "--sort",
+                "relevance",
+            ],
         ),
         parity("outbox_integration", &["outbox", "list"]),
         parity(

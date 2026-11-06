@@ -373,15 +373,21 @@ pub fn render_list(account: &str, groups: &[(String, usize, Vec<SelectedRow>)]) 
     out
 }
 
-/// `mp search --local`: the ranked hits of the FTS5 index (#0043).
+/// `mp search --local`: the hits of the FTS5 index (#0043), in the `order`
+/// the daemon answered them in (PERSO-273), which the footer names.
 ///
-/// Flat and best-first rather than grouped by mailbox, because the ranking is
-/// the answer: a full-tree search that regrouped its hits would hide which of
-/// them the index thought was the closest. Each hit prints the two lines
-/// `mp list-messages` prints, with the mailbox in front of the sender so the
-/// scope of a hit is readable without parsing the selector, plus the body when
-/// `bodies` carries one (`--full`).
-pub fn render_search(account: &str, query: &str, hits: &[(SelectedRow, Option<String>)]) -> String {
+/// Flat rather than grouped by mailbox, because the order is the answer: a
+/// full-tree search that regrouped its hits would hide which of them is the
+/// newest, or which the index thought was the closest. Each hit prints the
+/// two lines `mp list-messages` prints, with the mailbox in front of the
+/// sender so the scope of a hit is readable without parsing the selector,
+/// plus the body when `bodies` carries one (`--full`).
+pub fn render_search(
+    account: &str,
+    query: &str,
+    order: mp_protocol::listing::SearchOrder,
+    hits: &[(SelectedRow, Option<String>)],
+) -> String {
     let mut out = String::new();
     let mut line = |text: String| {
         out.push_str(&text);
@@ -431,7 +437,7 @@ pub fn render_search(account: &str, query: &str, hits: &[(SelectedRow, Option<St
         }
     }
     line("\u{2500}".repeat(RULE));
-    line(format!("Shown: {} (best match first)", hits.len()));
+    line(format!("Shown: {} ({})", hits.len(), order.describe()));
     out
 }
 
@@ -626,8 +632,8 @@ pub struct MessageListingJson {
     pub messages: Vec<ListedMessage>,
 }
 
-/// `mp search --json`: one object, the hits best first (`--local`) or newest
-/// first (server). `source` is `"local"` or `"server"`.
+/// `mp search --json`: one object, the hits in `--sort` order, newest first
+/// by default. `source` is `"local"` or `"server"`.
 ///
 /// `coverage` says whether un-synced mail can be among the hits: `"server"`
 /// when the server answered every term, `"local"` when the store answered at
@@ -697,18 +703,6 @@ impl SearchResultsJson {
 /// `truncated`, naming the `shown` hits listed above it.
 pub fn more_results_line(shown: usize) -> String {
     mp_client::format::more_results_line(shown, "raise -n to see them")
-}
-
-/// A server search's hits in the order `mp search` lists them, newest first
-/// by the daemon's UTC sort key, an unparsable date last.
-///
-/// The daemon streams them mailbox by mailbox, as each mailbox's survivors
-/// download; it already cut them to the limit (PERSO-175).
-pub fn server_hits_newest_first(
-    mut hits: Vec<mp_protocol::listing::ServerSearchHit>,
-) -> Vec<mp_protocol::listing::ServerSearchHit> {
-    hits.sort_by(|a, b| b.date_sort.cmp(&a.date_sort));
-    hits
 }
 
 /// A server search hit as the record the text listing prints.
@@ -1098,8 +1092,9 @@ mod tests {
         assert!(text.contains("Shown: 2 | In the store: 3"));
     }
 
-    /// `mp search --local` prints its hits best-first, each addressable by the
-    /// selector the next command takes, and shows the body only with `--full`.
+    /// `mp search --local` prints its hits in the order they came, says which
+    /// order that is, each addressable by the selector the next command
+    /// takes, and shows the body only with `--full`.
     #[test]
     fn the_search_listing_is_ranked_selectors_and_optional_bodies() {
         colored::control::set_override(false);
@@ -1112,6 +1107,7 @@ mod tests {
         let text = render_search(
             "acct",
             "ledger",
+            mp_protocol::listing::SearchOrder::Relevance,
             &[(selected(&first), None), (selected(&second), None)],
         );
         assert!(text.contains("\"ledger\" in acct (2 hits):"));
@@ -1127,9 +1123,11 @@ mod tests {
         let full = render_search(
             "acct",
             "ledger",
+            mp_protocol::listing::SearchOrder::Newest,
             &[(selected(&first), Some("the quarterly ledger".into()))],
         );
         assert!(full.contains("the quarterly ledger"));
+        assert!(full.contains("Shown: 1 (newest first)"));
         assert!(full.contains("(1 hit):"));
     }
 
@@ -1137,7 +1135,12 @@ mod tests {
     #[test]
     fn an_empty_search_says_so() {
         colored::control::set_override(false);
-        let text = render_search("acct", "nothing", &[]);
+        let text = render_search(
+            "acct",
+            "nothing",
+            mp_protocol::listing::SearchOrder::Newest,
+            &[],
+        );
         assert_eq!(text, "No local matches for \"nothing\" in acct\n");
     }
 
@@ -1248,22 +1251,6 @@ mod tests {
         assert_eq!(printed.date, "Fri, 7 Aug 2026 10:00:00 +0000");
         assert_eq!(printed.body_text.len(), 400);
         assert!(printed.flags.seen);
-    }
-
-    /// The hits stream mailbox by mailbox; `mp search` lists them newest
-    /// first wherever they came from, an unparsable date last.
-    #[test]
-    fn server_hits_list_newest_first() {
-        let hits = vec![
-            server_hit("old", "1 Feb 2026 10:00:00 +0000", ""),
-            server_hit("undated", "not a date", ""),
-            server_hit("new", "3 Feb 2026 10:00:00 +0000", ""),
-        ];
-        let subjects: Vec<String> = server_hits_newest_first(hits)
-            .into_iter()
-            .map(|hit| hit.subject)
-            .collect();
-        assert_eq!(subjects, ["new", "old", "undated"]);
     }
 
     fn settle(

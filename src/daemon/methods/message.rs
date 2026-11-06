@@ -1364,6 +1364,16 @@ pub(super) fn search_flags(params: &Value) -> Result<crate::search::Flags, RpcEr
     })
 }
 
+/// The `order` `message.search` and `message.search_server` take (PERSO-273):
+/// `newest`, `oldest` or `relevance`, newest when absent or `null`.
+pub(super) fn search_order(params: &Value) -> Result<mp_protocol::listing::SearchOrder, RpcError> {
+    match params.get("order") {
+        None | Some(Value::Null) => Ok(mp_protocol::listing::SearchOrder::default()),
+        Some(Value::String(order)) => order.parse().map_err(invalid_params),
+        Some(_) => Err(invalid_params("order is one of newest, oldest, relevance")),
+    }
+}
+
 /// The wire names of [`search_flags`], for a method's own parameter list.
 pub(super) const SEARCH_FLAG_PARAMS: [&str; 9] = [
     "from",
@@ -1377,7 +1387,8 @@ pub(super) const SEARCH_FLAG_PARAMS: [&str; 9] = [
     "before",
 ];
 
-/// The `result` of `message.search`: the ranked hits of the local index.
+/// The `result` of `message.search`: the hits of the local index, in the
+/// `order` asked for, newest first when it names none (PERSO-273).
 ///
 /// The params mirror `mp search --local`'s flags and the query is built with
 /// [`crate::search::from_cli`], so one parser serves every backend and the
@@ -1399,11 +1410,13 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     // Absent means every hit, spelled as a number the store binds rather than
     // as a sentinel the SQL would have to know about.
     let limit = limit_param(params)?.unwrap_or(i64::MAX as usize);
+    let order = search_order(params)?;
 
     let store = Store::open(crate::config::store_path(&name))
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
-    let hits = crate::store::search::search_ast(&store, &name, &ast, mailbox.as_deref(), limit)
-        .map_err(|e| invalid_params(format!("{e:#}")))?;
+    let hits =
+        crate::store::search::search_ast(&store, &name, &ast, mailbox.as_deref(), limit, order)
+            .map_err(|e| invalid_params(format!("{e:#}")))?;
 
     let wants_body = flag_param(params, "body", false)?;
     let blobs = BlobStore::new(crate::config::blobs_dir(&name));
@@ -1423,7 +1436,7 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
             wire
         })
         .collect();
-    Ok(json!({"account": name, "query": query, "hits": hits}))
+    Ok(json!({"account": name, "query": query, "order": order, "hits": hits}))
 }
 
 // ---------------------------------------------------------------------------

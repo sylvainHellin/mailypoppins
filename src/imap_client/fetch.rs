@@ -40,7 +40,8 @@ fn flags_of(msg: &async_imap::types::Fetch) -> MessageFlags {
 }
 
 /// The first pass of a server search (PERSO-175): the newest `limit` UIDs
-/// `mailbox` matches for a rendered `SEARCH`, each with only its `Date` and
+/// `mailbox` matches for a rendered `SEARCH`, or the oldest under
+/// `SearchOrder::Oldest` (PERSO-273), each with only its `Date` and
 /// `Message-ID` headers, and whether the server matched more.
 ///
 /// This is the seam the unified search grammar (#0086a) lowers to: the caller
@@ -60,6 +61,7 @@ pub async fn search_stubs_on_session(
     message_id: Option<&str>,
     mailbox: &str,
     limit: usize,
+    order: crate::server_search::SearchOrder,
 ) -> Result<MailboxStubs<u32>> {
     session
         .select(mailbox)
@@ -74,7 +76,12 @@ pub async fn search_stubs_on_session(
     let matched = uids.len();
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort_unstable();
-    let selected_uids: Vec<u32> = uid_list.into_iter().rev().take(limit).collect();
+    // UIDs ascend with arrival, so the highest are the newest and the lowest
+    // the oldest; the merge then orders the stubs by their `Date`.
+    let selected_uids: Vec<u32> = match order {
+        crate::server_search::SearchOrder::Oldest => uid_list.into_iter().take(limit).collect(),
+        _ => uid_list.into_iter().rev().take(limit).collect(),
+    };
     let more = matched > limit;
     if selected_uids.is_empty() {
         return Ok(MailboxStubs {

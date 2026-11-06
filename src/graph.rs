@@ -17,7 +17,7 @@ use serde::Deserialize;
 use crate::config::GraphConfig;
 use crate::ingest::pass_may_prune;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
-use crate::server_search::{Fetched, MailboxStubs, SearchStub};
+use crate::server_search::{Fetched, MailboxStubs, SearchOrder, SearchStub};
 use crate::sync::{
     stops_at, FreshObservation, ObservationSink, Stop, StopPoint, SyncResult, SyncTarget,
 };
@@ -1006,14 +1006,20 @@ fn batch_request_body(ids: &[&str]) -> serde_json::Value {
 
 /// Convert an ISO 8601 datetime (e.g. "2024-01-15T10:30:00Z") to RFC 2822 format.
 fn iso_to_rfc2822(iso: &str) -> String {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) {
-        dt.to_rfc2822()
-    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ") {
-        let utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc);
-        utc.to_rfc2822()
-    } else {
-        iso.to_string()
+    match iso_instant(iso) {
+        Some(dt) => dt.to_rfc2822(),
+        None => iso.to_string(),
     }
+}
+
+/// A Graph ISO 8601 timestamp as the instant it names, `None` when it does
+/// not parse.
+fn iso_instant(iso: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(iso).ok().or_else(|| {
+        chrono::NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ")
+            .ok()
+            .map(|dt| dt.and_utc().fixed_offset())
+    })
 }
 
 /// The Graph well-known folder name a configured folder stands for, if any.
@@ -4352,9 +4358,10 @@ fn graph_query_param(query: &crate::search::GraphQuery) -> Option<(&'static str,
 /// answers `SearchWithFilter` to the pair and `SearchWithOrderBy` to
 /// `$orderby` beside `$search`, and a `$filter` beside
 /// `$orderby=receivedDateTime` that does not start with `receivedDateTime` is
-/// `InefficientFilter`. Only the term-less listing is sorted server-side; a
-/// `$search` comes back newest first on its own, and the Message-ID filter
-/// matches a handful of copies at most.
+/// `InefficientFilter`. Only the term-less listing is sorted server-side,
+/// newest first or, `oldest_first`, oldest first (PERSO-273); a `$search`
+/// comes back newest first on its own, and the Message-ID filter matches a
+/// handful of copies at most.
 ///
 /// A [`SearchShape::Whole`] search asks for the threading signals the sync
 /// download asks for, `conversationId` and [`MESSAGE_EXPAND`] (PERSO-147), so
@@ -4367,6 +4374,7 @@ fn search_url(
     limit: usize,
     query: &crate::search::GraphQuery,
     shape: SearchShape,
+    oldest_first: bool,
 ) -> Result<reqwest::Url> {
     let mut pairs: Vec<(&str, String)> = Vec::new();
     pairs.push(("$top", limit.clamp(1, GRAPH_MAX_TOP).to_string()));
@@ -4379,7 +4387,15 @@ fn search_url(
     ));
     match graph_query_param(query) {
         Some(param) => pairs.push(param),
-        None => pairs.push(("$orderby", "receivedDateTime desc".to_string())),
+        None => pairs.push((
+            "$orderby",
+            if oldest_first {
+                "receivedDateTime asc"
+            } else {
+                "receivedDateTime desc"
+            }
+            .to_string(),
+        )),
     }
     let query = pairs
         .iter()
@@ -4489,6 +4505,12 @@ impl GraphClient {
     /// exact Message-ID lookup, as [`STUB_SELECT`] stubs, paged through
     /// `@odata.nextLink` up to `limit`.
     ///
+    /// Under [`SearchOrder::Oldest`] (PERSO-273) a term-less listing asks
+    /// Graph for `receivedDateTime asc`; a `$search` or a `$filter` takes no
+    /// `$orderby` beside it, so every page is read, up to Graph's 1000-result
+    /// `$search` cap, and the oldest `limit` are kept. A search the cap
+    /// stopped answers the oldest of the newest 1000 and says `capped`.
+    ///
     /// The caller merges every folder's stubs and cuts them to `limit` before
     /// downloading anything, then downloads the survivors whole with
     /// [`Self::fetch_search_hits`] ([`crate::server_search`]). The stub date
@@ -4503,12 +4525,38 @@ impl GraphClient {
         query: &crate::search::Query,
         folder: Option<&str>,
         limit: usize,
+        order: SearchOrder,
     ) -> Result<MailboxStubs<String>> {
+        let oldest = order == SearchOrder::Oldest;
+        let listing = matches!(
+            crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?,
+            crate::search::GraphQuery::All
+        );
+        // Graph sorts only the listing; anything else is read whole, newest
+        // first as Graph answers it, and cut here.
+        let read_whole = oldest && !listing;
         let pages: SearchPages<GraphSearchStub> = self
-            .search_pages(query, folder, limit, SearchShape::Stub)
+            .search_pages(
+                query,
+                folder,
+                if read_whole { usize::MAX } else { limit },
+                SearchShape::Stub,
+                oldest,
+            )
             .await?;
-        let stubs = pages
-            .hits
+        let mut hits = pages.hits;
+        let mut truncated = pages.truncated;
+        if read_whole {
+            hits.sort_by(|a, b| {
+                order.by_date(
+                    a.received_date_time.as_deref().and_then(iso_instant),
+                    b.received_date_time.as_deref().and_then(iso_instant),
+                )
+            });
+            truncated |= hits.len() > limit;
+            hits.truncate(limit);
+        }
+        let stubs = hits
             .into_iter()
             .filter(|stub| {
                 is_exact_message_id(
@@ -4529,7 +4577,7 @@ impl GraphClient {
             .collect();
         Ok(MailboxStubs {
             stubs,
-            more: pages.truncated,
+            more: truncated,
             capped: pages.capped,
         })
     }
@@ -4695,7 +4743,7 @@ impl GraphClient {
         limit: usize,
     ) -> Result<Vec<GraphFetched>> {
         let pages: SearchPages<GraphMessage> = self
-            .search_pages(query, folder, limit, SearchShape::Whole)
+            .search_pages(query, folder, limit, SearchShape::Whole, false)
             .await?;
         let mut hits = Vec::with_capacity(pages.hits.len());
         for msg in &pages.hits {
@@ -4717,7 +4765,9 @@ impl GraphClient {
         Ok(hits)
     }
 
-    /// The pages one search reads, in `shape`, cut to `limit`.
+    /// The pages one search reads, in `shape`, cut to `limit`; a term-less
+    /// listing comes `oldest_first` when asked, a `$search` or `$filter`
+    /// always in Graph's own order.
     ///
     /// One page used to be all a search read, with `$top` clamped to 1000,
     /// so `--limit 2500` quietly answered 1000; it now follows
@@ -4728,6 +4778,7 @@ impl GraphClient {
         folder: Option<&str>,
         limit: usize,
         shape: SearchShape,
+        oldest_first: bool,
     ) -> Result<SearchPages<T>> {
         let graph_query = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
@@ -4739,7 +4790,7 @@ impl GraphClient {
         };
 
         let is_search = matches!(graph_query, crate::search::GraphQuery::Search(_));
-        let mut url = search_url(&base, limit, &graph_query, shape)?;
+        let mut url = search_url(&base, limit, &graph_query, shape, oldest_first)?;
         let mut hits: Vec<T> = Vec::new();
         let mut pages = 0usize;
         let (truncated, capped) = loop {
@@ -6706,6 +6757,7 @@ mod tests {
             10,
             &graph_query,
             SearchShape::Whole,
+            false,
         )
         .unwrap();
         let raw = url.as_str();
@@ -6731,7 +6783,7 @@ mod tests {
         let graph_query = crate::search::to_graph(&query).unwrap();
         let base = "https://graph.microsoft.com/v1.0/me/messages";
         let pairs = |shape| -> std::collections::HashMap<String, String> {
-            search_url(base, 50, &graph_query, shape)
+            search_url(base, 50, &graph_query, shape, false)
                 .unwrap()
                 .query_pairs()
                 .into_owned()
@@ -6929,12 +6981,21 @@ mod tests {
     }
 
     fn url_pairs(query: &str, limit: usize) -> std::collections::HashMap<String, String> {
+        url_pairs_ordered(query, limit, false)
+    }
+
+    fn url_pairs_ordered(
+        query: &str,
+        limit: usize,
+        oldest_first: bool,
+    ) -> std::collections::HashMap<String, String> {
         let graph_query = crate::search::to_graph(&crate::search::parse(query).unwrap()).unwrap();
         search_url(
             "https://graph.microsoft.com/v1.0/me/messages",
             limit,
             &graph_query,
             SearchShape::Whole,
+            oldest_first,
         )
         .unwrap()
         .query_pairs()
@@ -6969,10 +7030,16 @@ mod tests {
         assert!(!lookup.contains_key("$orderby"), "{lookup:?}");
         assert!(!lookup.contains_key("$search"), "{lookup:?}");
 
-        // Only the term-less listing is sorted server-side.
+        // Only the term-less listing is sorted server-side, either way
+        // (PERSO-273); a `$search` asked oldest first still travels alone.
         let all = url_pairs("", 20);
         assert_eq!(all["$orderby"], "receivedDateTime desc");
         assert!(!all.contains_key("$search") && !all.contains_key("$filter"));
+        assert_eq!(
+            url_pairs_ordered("", 20, true)["$orderby"],
+            "receivedDateTime asc"
+        );
+        assert!(!url_pairs_ordered("invoice", 20, true).contains_key("$orderby"));
     }
 
     #[test]

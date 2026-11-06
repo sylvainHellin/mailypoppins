@@ -36,6 +36,7 @@ use super::read::{row_columns, row_from_sql, MessageRow, CALENDAR_SIDECAR_NAME};
 use super::{fold_case, Store, FOLD_FUNCTION};
 
 pub use crate::search::fts_expression;
+pub use mp_protocol::listing::SearchOrder;
 
 /// One ranked hit: the message row and the bm25 score it matched with.
 #[derive(Debug, Clone)]
@@ -71,24 +72,42 @@ fn filename_like_pattern(needle: &str) -> String {
     out
 }
 
-/// Search one account's messages, best match first.
+/// Search one account's messages, in `order` (PERSO-273).
 ///
 /// `mailbox` scopes the search to one mailbox key (the `MailboxRole` spelling
 /// ingest recorded); `None` searches every mailbox of the account, which is
 /// the point of the command -- the file era could only ever grep one directory
 /// at a time.
 ///
-/// The bm25 weights are `subject`, `from_`, `body_text` in that order: a word
-/// in the subject outranks the same word buried in a quoted reply chain.
+/// The order is the SQL's, so `limit` keeps the first rows of it: the newest
+/// or the oldest matches, or the best ones. A row whose `Date:` did not parse
+/// (`date_sort` 0) is last in both date orders. The bm25 weights `relevance`
+/// ranks by are `subject`, `from_`, `body_text` in that order: a word in the
+/// subject outranks the same word buried in a quoted reply chain.
 pub fn search(
     store: &Store,
     account: &str,
     query: &str,
     mailbox: Option<&str>,
     limit: usize,
+    order: SearchOrder,
 ) -> Result<Vec<SearchHit>> {
     let parsed = crate::search::parse(query).map_err(|e| anyhow::anyhow!("{e}"))?;
-    search_ast(store, account, &parsed, mailbox, limit)
+    search_ast(store, account, &parsed, mailbox, limit, order)
+}
+
+/// The `ORDER BY` of one search `order`, over the `rank` column the query
+/// selects.
+fn order_by(order: SearchOrder) -> &'static str {
+    match order {
+        SearchOrder::Newest => "messages.date_sort DESC, messages.id DESC",
+        // A dateless row is stamped 0 (or carries none), which ascending
+        // would put first; it goes last, as it does newest first.
+        SearchOrder::Oldest => {
+            "COALESCE(messages.date_sort, 0) <= 0, messages.date_sort ASC, messages.id ASC"
+        }
+        SearchOrder::Relevance => "rank ASC, messages.date_sort DESC, messages.id DESC",
+    }
 }
 
 /// The same search over an already-parsed [`crate::search::Query`], so the
@@ -100,6 +119,7 @@ pub fn search_ast(
     parsed: &crate::search::Query,
     mailbox: Option<&str>,
     limit: usize,
+    order: SearchOrder,
 ) -> Result<Vec<SearchHit>> {
     let render = crate::search::to_fts(parsed).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -180,11 +200,12 @@ pub fn search_ast(
     let limit_placeholder = binds.len() + 1;
     binds.push(Box::new(limit as i64));
 
+    let order_by = order_by(order);
     let sql = format!(
         "SELECT {columns}, {rank_expr} AS rank
          FROM {from_clause}
          WHERE {base_where}{predicates}
-         ORDER BY rank ASC, messages.date_sort DESC, messages.id DESC
+         ORDER BY {order_by}
          LIMIT ?{limit_placeholder}"
     );
     let mut stmt = store

@@ -588,6 +588,8 @@ pub fn pin_theme(root: &Path) {
 /// Run the pre-daemon binary against `tmp` and collect its output.
 pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
+    let args = without_sort_relevance(args);
+    let args = args.as_slice();
     graph_without_smtp_warning(piped_since_0144(
         args,
         oracle_command(tmp)
@@ -595,6 +597,30 @@ pub fn oracle(args: &[&str], tmp: &Path) -> Output {
             .output()
             .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
     ))
+}
+
+/// `args` without a `--sort relevance`, as the oracle takes them.
+///
+/// The pre-daemon `mp search --local` listed its hits best match first and
+/// had no `--sort`; since PERSO-273 the default is newest first and
+/// `--sort relevance` is the old order, rank then newest. A parity row of
+/// the local search therefore asks today's binary for `--sort relevance` and
+/// the oracle for its one order, which takes that deliberate change out of
+/// the row the way [`pin_font_size`] does for #0127.
+pub fn without_sort_relevance<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut rest = args.iter().peekable();
+    while let Some(arg) = rest.next() {
+        if *arg == "--sort" && rest.peek() == Some(&&"relevance") {
+            rest.next();
+            continue;
+        }
+        if *arg == "--sort=relevance" {
+            continue;
+        }
+        kept.push(*arg);
+    }
+    kept
 }
 
 /// The oracle's stderr without the SMTP warning it printed for a Graph account.

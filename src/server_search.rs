@@ -7,11 +7,15 @@
 //! runs in two passes:
 //!
 //! 1. Each mailbox is asked for its newest `limit` matches as
-//!    [`SearchStub`]s: the key the second pass downloads by, the `Date` the
+//!    [`SearchStub`]s, or its oldest under [`SearchOrder::Oldest`]
+//!    (PERSO-273): the key the second pass downloads by, the `Date` the
 //!    merge orders by and the `Message-ID` the caller filters on.
-//! 2. Every mailbox's stubs are merged newest first and cut to `limit`
+//! 2. Every mailbox's stubs are merged in that order and cut to `limit`
 //!    ([`select`]), and only the survivors are downloaded whole, mailbox by
 //!    mailbox.
+//!
+//! A mail server gives no relevance score, so [`SearchOrder::Relevance`] runs
+//! as [`SearchOrder::Newest`] here ([`SearchOrder::on_server`]).
 //!
 //! So a search downloads at most `limit` messages however many mailboxes it
 //! spans, and it knows when the answer is cut: a mailbox matched more than it
@@ -41,6 +45,7 @@ use anyhow::Result;
 use crate::graph::GraphClient;
 use crate::imap_client::ImapSession;
 use crate::parse::FetchedEmail;
+pub use mp_protocol::listing::SearchOrder;
 
 /// One hit of a search's first pass: what the merge across mailboxes reads,
 /// and the key the second pass downloads the message by.
@@ -75,7 +80,8 @@ pub enum Scope {
 /// One mailbox's first-pass answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MailboxStubs<K> {
-    /// Its newest matches, at most the limit it was asked for.
+    /// Its newest matches, or its oldest, at most the limit it was asked
+    /// for.
     pub stubs: Vec<SearchStub<K>>,
     /// The server matched more than `stubs` holds.
     pub more: bool,
@@ -119,11 +125,13 @@ pub trait SearchBackend {
     /// What a stub names its message by.
     type Key: Clone + Eq + std::hash::Hash + Send + Sync;
 
-    /// The newest `limit` matches in `scope` as stubs.
+    /// The newest `limit` matches in `scope` as stubs, or the oldest when
+    /// `order` is [`SearchOrder::Oldest`]; any other order reads as newest.
     fn stubs(
         &mut self,
         scope: &Scope,
         limit: usize,
+        order: SearchOrder,
     ) -> impl Future<Output = Result<MailboxStubs<Self::Key>>> + Send;
 
     /// The whole messages behind `keys` in `scope`, and the keys that did
@@ -149,19 +157,22 @@ pub trait SearchSink {
     fn refused(&mut self, mailbox: usize, error: &anyhow::Error);
 }
 
-/// Search `scopes` for the newest `limit` hits across all of them, handing
-/// each scope's downloaded hits to `sink` in scope order, folder by folder
-/// within one that spans every folder.
+/// Search `scopes` for the first `limit` hits in `order` across all of them
+/// (newest, or oldest; relevance runs newest), handing each scope's
+/// downloaded hits to `sink` in scope order, folder by folder within one that
+/// spans every folder. Arranging the landed hits in `order` is the sink's.
 pub async fn two_phase<B: SearchBackend, S: SearchSink>(
     backend: &mut B,
     scopes: &[Scope],
     limit: usize,
+    order: SearchOrder,
     sink: &mut S,
 ) -> Cut {
+    let order = order.on_server();
     let mut cut = Cut::default();
     let mut groups: Vec<(usize, Vec<SearchStub<B::Key>>)> = Vec::new();
     for (index, scope) in scopes.iter().enumerate() {
-        match backend.stubs(scope, limit).await {
+        match backend.stubs(scope, limit, order).await {
             Ok(found) => {
                 log::info!(
                     "[server_search] {scope:?} matched {}{}",
@@ -181,7 +192,7 @@ pub async fn two_phase<B: SearchBackend, S: SearchSink>(
         }
     }
 
-    let (picked, dropped) = select(groups, limit);
+    let (picked, dropped) = select(groups, limit, order);
     cut.truncated |= dropped;
     for (index, stubs) in picked {
         let keys: Vec<B::Key> = stubs.iter().map(|stub| stub.key.clone()).collect();
@@ -246,17 +257,23 @@ fn shortfall<K>(missing: &[(K, String)], asked: usize) -> anyhow::Error {
 
 /// The stubs each mailbox downloads whole, and whether the cut dropped any.
 ///
-/// Every mailbox's stubs are merged newest first by `Date`, an unparsable
-/// date last, and cut to `limit`. The survivors are handed back grouped by
-/// the mailbox index they came with, in that order, newest first within each;
-/// a mailbox none of whose stubs survived is left out, so the second pass
-/// selects nothing it downloads nothing from.
-pub fn select<K>(groups: Vec<StubGroup<K>>, limit: usize) -> (Vec<StubGroup<K>>, bool) {
+/// Every mailbox's stubs are merged in `order` by `Date` (newest first, or
+/// oldest first; relevance reads as newest), an unparsable date last, and cut
+/// to `limit`. The survivors are handed back grouped by the mailbox index
+/// they came with, in that order, in `order` within each; a mailbox none of
+/// whose stubs survived is left out, so the second pass selects nothing it
+/// downloads nothing from.
+pub fn select<K>(
+    groups: Vec<StubGroup<K>>,
+    limit: usize,
+    order: SearchOrder,
+) -> (Vec<StubGroup<K>>, bool) {
+    let order = order.on_server();
     let mut all: Vec<(usize, SearchStub<K>)> = groups
         .into_iter()
         .flat_map(|(index, stubs)| stubs.into_iter().map(move |stub| (index, stub)))
         .collect();
-    all.sort_by(|(_, a), (_, b)| newest_first(&a.date, &b.date));
+    all.sort_by(|(_, a), (_, b)| order.by_date(header_date(&a.date), header_date(&b.date)));
     let dropped = all.len() > limit;
     all.truncate(limit);
 
@@ -271,11 +288,10 @@ pub fn select<K>(groups: Vec<StubGroup<K>>, limit: usize) -> (Vec<StubGroup<K>>,
     (picked, dropped)
 }
 
-/// Two `Date` header values, newest first, an unparsable one last.
-fn newest_first(a: &str, b: &str) -> std::cmp::Ordering {
-    let a = chrono::DateTime::parse_from_rfc2822(a).ok();
-    let b = chrono::DateTime::parse_from_rfc2822(b).ok();
-    b.cmp(&a)
+/// A `Date` header value as the instant the merge orders by, `None` when it
+/// does not parse.
+fn header_date(date: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc2822(date).ok()
 }
 
 /// One IMAP session, searching with one rendered `SEARCH`.
@@ -292,13 +308,19 @@ pub struct ImapSearch<'a> {
 impl SearchBackend for ImapSearch<'_> {
     type Key = u32;
 
-    async fn stubs(&mut self, scope: &Scope, limit: usize) -> Result<MailboxStubs<u32>> {
+    async fn stubs(
+        &mut self,
+        scope: &Scope,
+        limit: usize,
+        order: SearchOrder,
+    ) -> Result<MailboxStubs<u32>> {
         crate::imap_client::search_stubs_on_session(
             self.session,
             &self.search,
             self.message_id.as_deref(),
             imap_mailbox(scope)?,
             limit,
+            order,
         )
         .await
     }
@@ -373,12 +395,17 @@ impl<'a> GraphSearch<'a> {
 impl SearchBackend for GraphSearch<'_> {
     type Key = String;
 
-    async fn stubs(&mut self, scope: &Scope, limit: usize) -> Result<MailboxStubs<String>> {
+    async fn stubs(
+        &mut self,
+        scope: &Scope,
+        limit: usize,
+        order: SearchOrder,
+    ) -> Result<MailboxStubs<String>> {
         match scope {
             Scope::Mailbox(folder) => {
                 let mut found = self
                     .client
-                    .search_stubs(self.query, Some(folder), limit)
+                    .search_stubs(self.query, Some(folder), limit, order)
                     .await?;
                 // One folder's hits are listed under its own label.
                 for stub in &mut found.stubs {
@@ -387,7 +414,10 @@ impl SearchBackend for GraphSearch<'_> {
                 Ok(found)
             }
             Scope::EveryFolder => {
-                let mut found = self.client.search_stubs(self.query, None, limit).await?;
+                let mut found = self
+                    .client
+                    .search_stubs(self.query, None, limit, order)
+                    .await?;
                 self.label_folders(&mut found.stubs).await;
                 Ok(found)
             }
@@ -460,17 +490,104 @@ mod tests {
             (2, vec![]),
             (3, vec![stub(1, "not a date", "<f@x>")]),
         ];
-        let (picked, dropped) = select(groups.clone(), 3);
+        let (picked, dropped) = select(groups.clone(), 3, SearchOrder::Newest);
         assert_eq!(keys_of(picked), vec![(0, vec![80]), (1, vec![7, 6])]);
         assert!(dropped, "three of six were cut");
 
-        let (picked, dropped) = select(groups, 6);
+        let (picked, dropped) = select(groups, 6, SearchOrder::Newest);
         assert_eq!(
             keys_of(picked),
             vec![(0, vec![80, 90]), (1, vec![7, 6, 5]), (3, vec![1])],
             "an unparsable date sorts last"
         );
         assert!(!dropped, "every stub fits");
+    }
+
+    /// The oldest-first merge keeps the `limit` oldest by `Date` across every
+    /// mailbox, an unparsable date still last, and relevance merges newest
+    /// first, a server having no score (PERSO-273).
+    #[test]
+    fn the_oldest_stubs_survive_an_oldest_first_cut() {
+        let groups = vec![
+            (
+                0,
+                vec![
+                    stub(80, "20 Feb 2026 10:00:00 +0000", "<b@x>"),
+                    stub(90, "1 Feb 2026 10:00:00 +0000", "<a@x>"),
+                ],
+            ),
+            (
+                1,
+                vec![
+                    stub(5, "3 Feb 2026 10:00:00 +0000", "<e@x>"),
+                    stub(7, "25 Feb 2026 10:00:00 +0000", "<c@x>"),
+                ],
+            ),
+            (2, vec![stub(1, "not a date", "<f@x>")]),
+        ];
+        let (picked, dropped) = select(groups.clone(), 2, SearchOrder::Oldest);
+        assert_eq!(keys_of(picked), vec![(0, vec![90]), (1, vec![5])]);
+        assert!(dropped);
+
+        let (picked, _) = select(groups.clone(), 5, SearchOrder::Oldest);
+        assert_eq!(
+            keys_of(picked),
+            vec![(0, vec![90, 80]), (1, vec![5, 7]), (2, vec![1])],
+            "an unparsable date sorts last oldest first too"
+        );
+
+        let (picked, _) = select(groups, 2, SearchOrder::Relevance);
+        assert_eq!(keys_of(picked), vec![(0, vec![80]), (1, vec![7])]);
+    }
+
+    /// An oldest-first search asks every mailbox for its oldest matches and
+    /// downloads the oldest across them; relevance asks for the newest
+    /// (PERSO-273).
+    #[tokio::test]
+    async fn an_oldest_first_search_asks_each_mailbox_for_its_oldest() {
+        let mut script = Script::default();
+        script.matches.insert(
+            "INBOX".into(),
+            (0..6)
+                .map(|i| stub(100 - i, &day(30 - i), &format!("<in{i}@x>")))
+                .collect(),
+        );
+        script.matches.insert(
+            "Archive".into(),
+            (0..3)
+                .map(|i| stub(10 - i, &day(20 - i), &format!("<ar{i}@x>")))
+                .collect(),
+        );
+        let mut sink = Collect::default();
+
+        let cut = two_phase(
+            &mut script,
+            &scopes(&["INBOX", "Archive"]),
+            3,
+            SearchOrder::Oldest,
+            &mut sink,
+        )
+        .await;
+
+        assert_eq!(script.orders, [SearchOrder::Oldest, SearchOrder::Oldest]);
+        assert_eq!(
+            script.fetched,
+            vec![("Archive".to_string(), vec![8, 9, 10])],
+            "the archive holds the three oldest"
+        );
+        assert!(cut.truncated);
+
+        let mut script = Script::default();
+        let mut sink = Collect::default();
+        two_phase(
+            &mut script,
+            &scopes(&["INBOX"]),
+            3,
+            SearchOrder::Relevance,
+            &mut sink,
+        )
+        .await;
+        assert_eq!(script.orders, [SearchOrder::Newest]);
     }
 
     /// A scripted server: each mailbox's matches newest first, and a record
@@ -482,19 +599,30 @@ mod tests {
         /// UIDs the second pass does not bring back, and why.
         vanish: HashMap<u32, &'static str>,
         asked: Vec<(String, usize)>,
+        /// The order each first-pass query was asked in.
+        orders: Vec<SearchOrder>,
         fetched: Vec<(String, Vec<u32>)>,
     }
 
     impl SearchBackend for Script {
         type Key = u32;
 
-        async fn stubs(&mut self, scope: &Scope, limit: usize) -> Result<MailboxStubs<u32>> {
+        async fn stubs(
+            &mut self,
+            scope: &Scope,
+            limit: usize,
+            order: SearchOrder,
+        ) -> Result<MailboxStubs<u32>> {
             let mailbox = name(scope);
             self.asked.push((mailbox.clone(), limit));
+            self.orders.push(order);
             if self.refuse.contains(&mailbox) {
                 anyhow::bail!("NO no such mailbox");
             }
-            let all = self.matches.get(&mailbox).cloned().unwrap_or_default();
+            let mut all = self.matches.get(&mailbox).cloned().unwrap_or_default();
+            if order == SearchOrder::Oldest {
+                all.reverse();
+            }
             Ok(MailboxStubs {
                 more: all.len() > limit,
                 stubs: all.into_iter().take(limit).collect(),
@@ -584,7 +712,14 @@ mod tests {
         script.vanish.insert(7, "HTTP 404");
         let mut sink = Collect::default();
 
-        let cut = two_phase(&mut script, &scopes(&["INBOX"]), 4, &mut sink).await;
+        let cut = two_phase(
+            &mut script,
+            &scopes(&["INBOX"]),
+            4,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
 
         assert_eq!(sink.landed, vec![(0, vec!["<m0@x>".to_string()])]);
         assert_eq!(sink.refused, vec![0]);
@@ -622,7 +757,14 @@ mod tests {
         );
         let mut sink = Collect::default();
 
-        let cut = two_phase(&mut script, &[Scope::EveryFolder], 3, &mut sink).await;
+        let cut = two_phase(
+            &mut script,
+            &[Scope::EveryFolder],
+            3,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
 
         assert_eq!(
             script.asked,
@@ -664,7 +806,14 @@ mod tests {
         );
         let mut sink = Collect::default();
 
-        let cut = two_phase(&mut script, &scopes(&["INBOX", "Archive"]), 5, &mut sink).await;
+        let cut = two_phase(
+            &mut script,
+            &scopes(&["INBOX", "Archive"]),
+            5,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
 
         assert_eq!(
             script.asked,
@@ -703,7 +852,14 @@ mod tests {
             ..Collect::default()
         };
 
-        let cut = two_phase(&mut script, &scopes(&["Spesen", "INBOX"]), 50, &mut sink).await;
+        let cut = two_phase(
+            &mut script,
+            &scopes(&["Spesen", "INBOX"]),
+            50,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
 
         assert_eq!(sink.refused, vec![0]);
         assert_eq!(script.fetched, vec![("INBOX".to_string(), vec![2])]);
@@ -727,7 +883,14 @@ mod tests {
             drop: Some("<m0@x>".into()),
             ..Collect::default()
         };
-        let cut = two_phase(&mut script, &scopes(&["INBOX"]), 2, &mut sink).await;
+        let cut = two_phase(
+            &mut script,
+            &scopes(&["INBOX"]),
+            2,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
         assert_eq!(script.fetched, vec![("INBOX".to_string(), vec![9])]);
         assert!(cut.truncated);
     }

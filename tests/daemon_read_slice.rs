@@ -168,7 +168,7 @@ use mailypoppins::daemon::methods::message::MESSAGE_READ_METHOD_SPECS;
 use mailypoppins::dump::{to_ndjson, EnvelopeRecord};
 use mailypoppins::read_cmd::{to_json, ShownMessage};
 use mailypoppins::store::read;
-use mailypoppins::store::search::search;
+use mailypoppins::store::search::{search, SearchOrder};
 
 use support::parity::{
     assert_byte_identical, mp_no_daemon, oracle, socket_path, DaemonFixture, EXIT_UNAVAILABLE,
@@ -813,12 +813,66 @@ async fn message_list_refuses_an_unknown_and_a_storeless_account() {
 // 4. `message.search`
 // ---------------------------------------------------------------------------
 
-/// The order on the wire is the store's ranked order, asserted against the
-/// store rather than against a transcription of it.
+/// The order on the wire is the store's order for the `order` asked, newest
+/// first when none is (PERSO-273), asserted against the store rather than
+/// against a transcription of it.
 #[tokio::test]
-async fn message_search_answers_in_the_stores_ranking_order() {
+async fn message_search_answers_in_the_stores_order() {
     let slice = Slice::start();
     let mut conn = slice.connect().await;
+    let store = fixture::store(slice.root(), fixture::ACCOUNT);
+
+    let mut by_order = Vec::new();
+    for order in [None, Some("newest"), Some("oldest"), Some("relevance")] {
+        let mut params = json!({"account": fixture::ACCOUNT, "query": "ledger", "limit": 20});
+        if let Some(order) = order {
+            params["order"] = json!(order);
+        }
+        let result = call(&mut conn, "message.search", params).await;
+        let wire: Vec<String> = result["hits"]
+            .as_array()
+            .expect("hits")
+            .iter()
+            .map(message_id_of)
+            .collect();
+        let applied: SearchOrder = order.unwrap_or("newest").parse().unwrap();
+        assert_eq!(result["order"], applied.as_str());
+        let expected: Vec<String> = search(&store, fixture::ACCOUNT, "ledger", None, 20, applied)
+            .expect("the store answers the same query")
+            .into_iter()
+            .map(|hit| format!("{}/{}", hit.row.mailbox, hit.row.uid))
+            .collect();
+        assert_eq!(wire, expected, "{order:?}: the wire order is the store's");
+        by_order.push(wire);
+    }
+    // Bericht is dated 2 July, the markup 30 June and the reply 29 June.
+    assert_eq!(
+        by_order[0],
+        ["inbox/1", "inbox/3", "sent/1"],
+        "newest first by default"
+    );
+    assert_eq!(by_order[1], by_order[0]);
+    assert_eq!(
+        by_order[2],
+        ["sent/1", "inbox/3", "inbox/1"],
+        "oldest first"
+    );
+    assert_eq!(
+        by_order[3],
+        ["inbox/3", "sent/1", "inbox/1"],
+        "the subject hit outranks the two body hits"
+    );
+
+    let refused = call_err(
+        &mut conn,
+        "message.search",
+        json!({"account": fixture::ACCOUNT, "query": "ledger", "order": "date"}),
+    )
+    .await;
+    assert_eq!(
+        refused.code, -32602,
+        "an unknown order is a wrong parameter"
+    );
 
     let result = call(
         &mut conn,
@@ -829,22 +883,7 @@ async fn message_search_answers_in_the_stores_ranking_order() {
     assert_path_free("message.search", &result, slice.root());
     assert_eq!(result["account"], fixture::ACCOUNT);
     assert_eq!(result["query"], "ledger");
-
     let hits = result["hits"].as_array().expect("hits");
-    let wire: Vec<String> = hits.iter().map(message_id_of).collect();
-
-    let store = fixture::store(slice.root(), fixture::ACCOUNT);
-    let expected: Vec<String> = search(&store, fixture::ACCOUNT, "ledger", None, 20)
-        .expect("the store answers the same query")
-        .into_iter()
-        .map(|hit| format!("{}/{}", hit.row.mailbox, hit.row.uid))
-        .collect();
-    assert_eq!(wire, expected, "the wire order is the store's ranking");
-    assert_eq!(
-        wire,
-        ["inbox/3", "sent/1", "inbox/1"],
-        "the subject hit outranks the two body hits"
-    );
 
     // A hit is a listing row plus the mailbox it was found in, which is what
     // renders the selector; the bodies are `--full`'s business and absent.
@@ -907,8 +946,19 @@ async fn message_search_mirrors_the_local_search_flags() {
     .await;
     assert_eq!(
         hits(&capped),
+        vec!["inbox/1".to_string()],
+        "the limit takes the newest hit, not an arbitrary one"
+    );
+    let best = call(
+        &mut conn,
+        "message.search",
+        json!({"account": fixture::ACCOUNT, "query": "ledger", "limit": 1, "order": "relevance"}),
+    )
+    .await;
+    assert_eq!(
+        hits(&best),
         vec!["inbox/3".to_string()],
-        "the limit takes the best hit, not an arbitrary one"
+        "under relevance the limit takes the best hit"
     );
 
     let full = call(
@@ -1075,21 +1125,82 @@ const DUMP_PARITY: &[&[&str]] = &[
     &["dump-mailbox"],
 ];
 
-/// `mp search --local`, the grammar, the flags and the refusals.
+/// `mp search --local`, the grammar, the flags and the refusals, under
+/// `--sort relevance`: the pre-daemon order, which the oracle runs without the
+/// flag it never had (`support::parity::without_sort_relevance`, PERSO-273).
 const SEARCH_PARITY: &[&[&str]] = &[
-    &["search", "--local", "ledger"],
-    &["search", "--local", "ledger", "--full"],
-    &["search", "--local", "ledger", "-n", "1"],
-    &["search", "--local", "ledger", "--mailbox", "sent"],
-    &["search", "--local", "\"quarterly summary\""],
-    &["search", "--local", "quarter*"],
-    &["search", "--local", "Anträge"],
-    &["search", "--local", "aardvark"],
-    &["search", "--local", "--subject", "Ledger"],
-    &["search", "--local", "--has-attachment", "ledger"],
-    &["search", "--local", "  ??  "],
-    &["search", "--local", "ledger", "--mailbox", "nope"],
-    &["-A", "delta", "search", "--local", "ledger"],
+    &["search", "--local", "ledger", "--sort", "relevance"],
+    &[
+        "search",
+        "--local",
+        "ledger",
+        "--full",
+        "--sort",
+        "relevance",
+    ],
+    &[
+        "search",
+        "--local",
+        "ledger",
+        "-n",
+        "1",
+        "--sort",
+        "relevance",
+    ],
+    &[
+        "search",
+        "--local",
+        "ledger",
+        "--mailbox",
+        "sent",
+        "--sort",
+        "relevance",
+    ],
+    &[
+        "search",
+        "--local",
+        "\"quarterly summary\"",
+        "--sort",
+        "relevance",
+    ],
+    &["search", "--local", "quarter*", "--sort", "relevance"],
+    &["search", "--local", "Anträge", "--sort", "relevance"],
+    &["search", "--local", "aardvark", "--sort", "relevance"],
+    &[
+        "search",
+        "--local",
+        "--subject",
+        "Ledger",
+        "--sort",
+        "relevance",
+    ],
+    &[
+        "search",
+        "--local",
+        "--has-attachment",
+        "ledger",
+        "--sort",
+        "relevance",
+    ],
+    &["search", "--local", "  ??  ", "--sort", "relevance"],
+    &[
+        "search",
+        "--local",
+        "ledger",
+        "--mailbox",
+        "nope",
+        "--sort",
+        "relevance",
+    ],
+    &[
+        "-A",
+        "delta",
+        "search",
+        "--local",
+        "ledger",
+        "--sort",
+        "relevance",
+    ],
 ];
 
 /// The gate of the whole slice: stdout, stderr and exit code, against the
@@ -1523,43 +1634,108 @@ fn the_dump_contract_holds_on_both_routes() {
 fn the_local_search_contract_holds_on_both_routes() {
     let slice = Slice::start();
     let markup_id = format!("inbox/{}", fixture::MARKUP);
-
-    // a_subject_hit_outranks_a_body_hit, and the flat "best match first" order
-    slice.for_each_binary(&["search", "--local", "ledger"], |route, out| {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "{route}: {out:?}");
-        let selectors: Vec<&str> = stdout
+    let bericht_id = format!("inbox/{}", fixture::BERICHT);
+    let sent_id = format!("sent/{}", fixture::SENT);
+    let selectors = |stdout: &str| -> Vec<String> {
+        stdout
             .lines()
             .filter_map(|line| line.split("mp://alpha/").nth(1))
             .filter_map(|rest| rest.split(' ').next())
-            .collect();
-        assert_eq!(
-            selectors.first().copied(),
-            Some(markup_id.as_str()),
-            "{route}: the subject hit comes first: {stdout}"
-        );
-        assert!(
-            stdout.contains("Shown: 3 (best match first)"),
-            "{route}: {stdout}"
-        );
-    });
+            .map(str::to_string)
+            .collect()
+    };
+
+    // Newest first by default, oldest first under --sort oldest, the footer
+    // saying which (PERSO-273): Bericht is dated 2 July, the markup 30 June
+    // and the reply 29 June. The pre-daemon binary had neither, so these rows
+    // run routed alone.
+    let newest = [bericht_id.clone(), markup_id.clone(), sent_id.clone()];
+    for (args, order, footer) in [
+        (
+            &["search", "--local", "ledger"][..],
+            newest.to_vec(),
+            "newest first",
+        ),
+        (
+            &["search", "--local", "ledger", "--sort", "oldest"][..],
+            newest.iter().rev().cloned().collect(),
+            "oldest first",
+        ),
+    ] {
+        let out = slice.routed(args);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(selectors(&stdout), order, "{stdout}");
+        assert!(stdout.contains(&format!("Shown: 3 ({footer})")), "{stdout}");
+    }
+    // The limit keeps the first of the order: the newest by default.
+    let out = slice.routed(&["search", "--local", "ledger", "-n", "1"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        selectors(&stdout),
+        std::slice::from_ref(&bericht_id),
+        "{stdout}"
+    );
+    let out = slice.routed(&["search", "--local", "ledger", "--sort", "date"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("newest, oldest, relevance"), "{stderr}");
+
+    // The rows below are the pre-daemon contract, whose one order was best
+    // match first: `--sort relevance`, which the oracle runs without.
+    // a_subject_hit_outranks_a_body_hit, and the flat "best match first" order
+    slice.for_each_binary(
+        &["search", "--local", "ledger", "--sort", "relevance"],
+        |route, out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{route}: {out:?}");
+            assert_eq!(
+                selectors(&stdout).first(),
+                Some(&markup_id),
+                "{route}: the subject hit comes first: {stdout}"
+            );
+            assert!(
+                stdout.contains("Shown: 3 (best match first)"),
+                "{route}: {stdout}"
+            );
+        },
+    );
 
     // the_limit_caps_the_ranked_hits
-    slice.for_each_binary(&["search", "--local", "ledger", "-n", "1"], |route, out| {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains("Shown: 1 (best match first)"),
-            "{route}: {stdout}"
-        );
-        assert!(
-            stdout.contains(fixture::MARKUP),
-            "{route}: the best hit, not the first row"
-        );
-    });
+    slice.for_each_binary(
+        &[
+            "search",
+            "--local",
+            "ledger",
+            "-n",
+            "1",
+            "--sort",
+            "relevance",
+        ],
+        |route, out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("Shown: 1 (best match first)"),
+                "{route}: {stdout}"
+            );
+            assert!(
+                stdout.contains(fixture::MARKUP),
+                "{route}: the best hit, not the first row"
+            );
+        },
+    );
 
     // search_spans_mailboxes_and_can_be_scoped_to_one
     slice.for_each_binary(
-        &["search", "--local", "ledger", "--mailbox", "sent"],
+        &[
+            "search",
+            "--local",
+            "ledger",
+            "--mailbox",
+            "sent",
+            "--sort",
+            "relevance",
+        ],
         |route, out| {
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(stdout.contains(fixture::SENT), "{route}: {stdout}");
@@ -1571,47 +1747,65 @@ fn the_local_search_contract_holds_on_both_routes() {
     );
 
     // unicode_terms_round_trip
-    slice.for_each_binary(&["search", "--local", "anträge"], |route, out| {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains(fixture::BERICHT),
-            "{route}: case folding is the tokenizer's: {stdout}"
-        );
-    });
+    slice.for_each_binary(
+        &["search", "--local", "anträge", "--sort", "relevance"],
+        |route, out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains(fixture::BERICHT),
+                "{route}: case folding is the tokenizer's: {stdout}"
+            );
+        },
+    );
 
     // a_phrase_matches_adjacent_words_only, and a_trailing_star_matches_a_prefix
     slice.for_each_binary(
-        &["search", "--local", "\"quarterly summary\""],
+        &[
+            "search",
+            "--local",
+            "\"quarterly summary\"",
+            "--sort",
+            "relevance",
+        ],
         |route, out| {
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(stdout.contains(fixture::MARKUP), "{route}: {stdout}");
         },
     );
-    slice.for_each_binary(&["search", "--local", "quarter*"], |route, out| {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains(fixture::MARKUP),
-            "{route}: a prefix query matches: {stdout}"
-        );
-    });
+    slice.for_each_binary(
+        &["search", "--local", "quarter*", "--sort", "relevance"],
+        |route, out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains(fixture::MARKUP),
+                "{route}: a prefix query matches: {stdout}"
+            );
+        },
+    );
 
     // an empty result is a sentence, not an error
-    slice.for_each_binary(&["search", "--local", "aardvark"], |route, out| {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "{route}: {out:?}");
-        assert!(stdout.contains("No local matches for"), "{route}: {stdout}");
-    });
+    slice.for_each_binary(
+        &["search", "--local", "aardvark", "--sort", "relevance"],
+        |route, out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{route}: {out:?}");
+            assert!(stdout.contains("No local matches for"), "{route}: {stdout}");
+        },
+    );
 
     // punctuation_in_a_query_is_not_a_syntax_error: the refusal, which the
     // parity table also compares byte for byte.
-    slice.for_each_binary(&["search", "--local", "  ??  "], |route, out| {
-        assert!(
-            !out.status.success(),
-            "{route}: a query with nothing in it is refused"
-        );
-        assert!(
-            !String::from_utf8_lossy(&out.stderr).contains("panicked"),
-            "{route}: refused, not crashed"
-        );
-    });
+    slice.for_each_binary(
+        &["search", "--local", "  ??  ", "--sort", "relevance"],
+        |route, out| {
+            assert!(
+                !out.status.success(),
+                "{route}: a query with nothing in it is refused"
+            );
+            assert!(
+                !String::from_utf8_lossy(&out.stderr).contains("panicked"),
+                "{route}: refused, not crashed"
+            );
+        },
+    );
 }
