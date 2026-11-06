@@ -391,6 +391,38 @@ fn long_rows_that_would_read_the_same_keep_the_end_that_differs() {
     );
 }
 
+#[test]
+fn clashing_rows_show_where_they_differ() {
+    // Addresses that differ just after the @ keep the start cut, which
+    // shows it; those that differ at the end take the middle cut.
+    waiting_rows(
+        "office@ls1.tum.de, office@ls2.tum.de, info@eu.example.com, info@us.example.com, \
+         info@company-a.de, info@company-b.de",
+        "",
+        &[
+            "office@ls1.\u{2026}",
+            "office@ls2.\u{2026}",
+            "info@eu.exa\u{2026}",
+            "info@us.exa\u{2026}",
+            "info\u{2026}ny-a.de",
+            "info\u{2026}ny-b.de",
+        ],
+    );
+    // Addresses that differ past the start cut and before the middle cut's
+    // end are cut around the part that differs.
+    waiting_rows(
+        "contact@dept-1.example.org, contact@dept-2.example.org, contact@dept-3.example.org",
+        "boardroom-north-1@example.org, boardroom-north-2@example.org",
+        &[
+            "con\u{2026}pt-1.ex\u{2026}",
+            "con\u{2026}pt-2.ex\u{2026}",
+            "con\u{2026}pt-3.ex\u{2026}",
+            "\u{2302} boa\u{2026}orth-1",
+            "\u{2302} boa\u{2026}orth-2",
+        ],
+    );
+}
+
 /// The frame of a form inviting `to` and booking `rooms` while their
 /// availability is on its way, after checking that each of `names` names a
 /// waiting row.
