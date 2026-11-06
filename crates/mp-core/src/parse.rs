@@ -1813,16 +1813,14 @@ pub fn slugify_subject(subject: &str) -> String {
 }
 
 pub fn slugify_sender(from: &str) -> String {
-    // Extract display name if present (e.g. "John Doe <john@example.com>" -> "John Doe")
-    // Otherwise use the local part of the email address
-    let name = if let Some(start) = from.find('<') {
-        let display = from[..start].trim().trim_matches('"');
-        if display.is_empty() {
-            // No display name, use local part of email
-            let email = &from[start + 1..from.find('>').unwrap_or(from.len())];
-            email.split('@').next().unwrap_or("unknown").to_string()
+    // The mailbox a reply goes to, as the reader names it: its display name
+    // ("John Doe <john@example.com>" -> "John Doe"), else its local part.
+    let local_part = |address: &str| address.split('@').next().unwrap_or("unknown").to_string();
+    let name = if let Some((name, address)) = display_mailbox(from) {
+        if name.is_empty() {
+            local_part(&address)
         } else {
-            display.to_string()
+            name
         }
     } else if from.contains('@') {
         from.split('@').next().unwrap_or("unknown").to_string()
@@ -3966,6 +3964,17 @@ mod tests {
     // -----------------------------------------------------------------------
     // slugify_sender -- additional edge cases
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_draft_slug_names_the_mailbox_the_reply_goes_to() {
+        assert_eq!(slugify_sender("Alice <a@x.com>, Bob <b@y.com>"), "alice");
+        assert_eq!(slugify_sender("x@y.com, Alice <alice@z.com>"), "alice");
+        assert_eq!(
+            slugify_sender("\"Bob <bob@x.com>\" <alice@z.com>"),
+            "bob-bob-x-com"
+        );
+        assert_eq!(slugify_sender("\"Doe, Jane\" <jane@x.com>"), "doe-jane");
+    }
 
     #[test]
     fn test_slugify_sender_plain_name() {
