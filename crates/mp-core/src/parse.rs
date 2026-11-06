@@ -1839,17 +1839,34 @@ pub fn slugify_sender(from: &str) -> String {
     crate::types::collapse_hyphens(&slug)
 }
 
-/// The address [`mailbox_addresses`] answers first for `raw`, that of its
-/// first mailbox (`A <a@x>, B <b@y>` names `a@x`), or `raw` trimmed when it
-/// names none (`(unknown)`, an empty group, a broken `John <john@x`).
+/// The address a reply to `raw` goes to: when a mailbox of it holds a
+/// `<...>` outside a quoted string, that of the first such mailbox
+/// ([`reply_mailbox`]: `A <a@x>, B <b@y>` names `a@x`, and
+/// `x@y, Alice <alice@z>` names `alice@z`); otherwise the first address
+/// [`mailbox_addresses`] answers (`a@x, b@y` names `a@x`); otherwise `raw`
+/// trimmed (`(unknown)`, an empty group, a broken `John <john@x`).
 ///
-/// The address is read as [`mailbox_addresses`] reads it, so it is never one
-/// a display name or a comment carries.
+/// A bare mailbox before a bracketed one is passed over because an older row
+/// may hold an encoded-word display name decoded to an address and a comma
+/// (`x@y, <alice@z>`): its bracketed mailbox is the one the sender named.
+/// The address is one [`mailbox_addresses`] answers, so it is never one a
+/// display name or a comment carries, and a block tests it.
 pub fn extract_email_address(raw: &str) -> String {
-    mailbox_addresses(raw)
-        .into_iter()
-        .next()
+    reply_mailbox(raw)
+        .map(|(_, _, address)| address)
+        .or_else(|| mailbox_addresses(raw).into_iter().next())
         .unwrap_or_else(|| raw.trim().to_string())
+}
+
+/// The first mailbox of `raw` ([`mailbox_parts`]) whose last `<...>` outside
+/// a quoted string names an address, read as [`bracketed_in`] reads it: the
+/// byte offset in `raw` its text starts at, that of its `<`, and the address.
+/// `None` when no mailbox of it holds one.
+fn reply_mailbox(raw: &str) -> Option<(usize, usize, String)> {
+    let chars = uncommented_chars(raw);
+    mailbox_parts(&chars)
+        .into_iter()
+        .find_map(|(start, part)| bracketed_in(part).map(|(open, address)| (start, open, address)))
 }
 
 /// The address of every mailbox an address header names, in order; empty
@@ -1876,7 +1893,7 @@ pub fn extract_email_address(raw: &str) -> String {
 /// with no whitespace; otherwise (`a@x (c) b@y`) every bare token holding an
 /// `@`, the last first, as a display name comes before its address. A block
 /// so tests every mailbox of the header, and [`extract_email_address`]
-/// answers its first. No address inside a quoted string is read, which is a
+/// answers the first holding a `<...>`, else the first. No address inside a quoted string is read, which is a
 /// name's (`"Bob <bob@x>"` names no mailbox), except a local part: a quoted
 /// string an `@` follows (`"john.doe"@x`) is kept as written.
 /// `clients/desktop/src/lib/mailbox.ts` mirrors the whole rule.
@@ -1904,7 +1921,7 @@ fn raw_addresses(undecoded: &str) -> Vec<String> {
 fn addresses_read(raw: &str, every_bracket: bool) -> Vec<String> {
     let chars = uncommented_chars(raw);
     let mut addresses: Vec<String> = Vec::new();
-    for part in mailbox_parts(&chars) {
+    for (_, part) in mailbox_parts(&chars) {
         for address in part_addresses(part, every_bracket) {
             if !addresses.contains(&address) {
                 addresses.push(address);
@@ -1914,12 +1931,27 @@ fn addresses_read(raw: &str, every_bracket: bool) -> Vec<String> {
     addresses
 }
 
+/// One character of a header as [`uncommented_chars`] answers it: its byte
+/// offset, the character, and whether it lies in a quoted string.
+type MarkedChar = (usize, char, bool);
+
 /// The mailboxes of an address header given as [`uncommented_chars`] answers
 /// it: its characters cut at every `,` and `;` outside a quoted string, a
-/// group's name staying before its first member (`G: a@x`). A part may be
-/// empty (`a@x, , b@y`, a group's `;` before a `,`).
-fn mailbox_parts(chars: &[(usize, char, bool)]) -> impl Iterator<Item = &[(usize, char, bool)]> {
-    chars.split(|&(_, c, quoted)| !quoted && matches!(c, ',' | ';'))
+/// group's name staying before its first member (`G: a@x`), each with the
+/// byte offset in the header its text starts at, its comments included (`0`,
+/// else just after the `,` or `;` before it). A part may be empty
+/// (`a@x, , b@y`, a group's `;` before a `,`).
+fn mailbox_parts(chars: &[MarkedChar]) -> Vec<(usize, &[MarkedChar])> {
+    let mut parts = Vec::new();
+    let (mut first, mut start) = (0, 0);
+    for (at, &(offset, c, quoted)) in chars.iter().enumerate() {
+        if !quoted && matches!(c, ',' | ';') {
+            parts.push((start, &chars[first..at]));
+            (first, start) = (at + 1, offset + c.len_utf8());
+        }
+    }
+    parts.push((start, &chars[first..]));
+    parts
 }
 
 /// The addresses one mailbox of [`mailbox_parts`] names: the address in its
@@ -2053,7 +2085,7 @@ fn last_bracketed(raw: &str) -> Option<(usize, String)> {
 }
 
 /// [`last_bracketed`] over `chars`, what [`uncommented_chars`] answers for
-/// `raw`, for a caller that already holds them.
+/// some text or a mailbox of it ([`mailbox_parts`]).
 fn bracketed_in(chars: &[(usize, char, bool)]) -> Option<(usize, String)> {
     let open = chars
         .iter()
@@ -2070,54 +2102,66 @@ fn bracketed_in(chars: &[(usize, char, bool)]) -> Option<(usize, String)> {
     (!address.is_empty()).then(|| (chars[open].0, address.to_string()))
 }
 
-/// The display name and the address of the mailbox a `From` names, read as
-/// [`mailbox_addresses`] reads a header naming one mailbox: the address in
-/// the last `<...>` once comments are dropped, the name everything before
-/// that `<`, unquoted and
-/// unescaped (`"Doe, Jane" <jane@x>` names `Doe, Jane`). A comment stays in
-/// the name (`Alice (Team) <a@x>`), which is how senders use one. The name is
-/// empty when there is none or it only repeats the address, as Graph's often
-/// does (`"a@x" <a@x>`). `None` when the header holds no `<...>` to read.
+/// The display name and the address of the mailbox of a `From` a reply goes
+/// to ([`reply_mailbox`]): the address in its last `<...>` once comments are
+/// dropped, the name the mailbox's text before that `<`
+/// ([`named_mailbox`]). `A <a@x>, B <b@y>` is `A` and `a@x`. `None` when no
+/// mailbox of the header holds a `<...>` to read.
 fn display_mailbox(raw: &str) -> Option<(String, String)> {
-    let (open, address) = last_bracketed(raw)?;
-    let name = unquoted_display_name(&raw[..open]);
-    let name = if name.to_lowercase() == address.to_lowercase() {
-        String::new()
+    let (start, open, address) = reply_mailbox(raw)?;
+    Some(named_mailbox(&raw[start..open], address))
+}
+
+/// A display name, `name` unquoted and unescaped (`"Doe, Jane"` names
+/// `Doe, Jane`), with the `address` after it. A comment stays in the name
+/// (`Alice (Team) <a@x>`), which is how senders use one. The name is empty
+/// when there is none or it only repeats the address, as Graph's often does
+/// (`"a@x" <a@x>`).
+fn named_mailbox(name: &str, address: String) -> (String, String) {
+    let name = unquoted_display_name(name);
+    if name.to_lowercase() == address.to_lowercase() {
+        (String::new(), address)
     } else {
-        name
-    };
-    Some((name, address))
+        (name, address)
+    }
 }
 
 /// `name` with its quoted strings opened: the `"` dropped and a `\` escape
 /// inside one replaced by the character it escapes; trimmed. A `"` never
-/// closed opens nothing, the whole name then being taken as written, as
+/// closed opens nothing, the name being taken as written from it on, as
 /// [`uncommented_offsets`] takes it.
 fn unquoted_display_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let (mut quoted, mut escaped) = (false, false);
-    for c in name.chars() {
+    // Where the open quoted string starts, in `name` and in `out`.
+    let mut opened = (0, 0);
+    for (at, c) in name.char_indices() {
         if escaped {
             out.push(c);
             escaped = false;
         } else if quoted && c == '\\' {
             escaped = true;
         } else if c == '"' {
+            if !quoted {
+                opened = (at, out.len());
+            }
             quoted = !quoted;
         } else {
             out.push(c);
         }
     }
     if quoted {
-        return name.trim().to_string();
+        out.truncate(opened.1);
+        out.push_str(&name[opened.0..]);
     }
     out.trim().to_string()
 }
 
 /// The name a reader is shown for the sender of a `From`: its display name
 /// unquoted and unescaped, else its address, else `raw` trimmed (`(unknown)`,
-/// a bare `a@x`). The mailbox is the one [`display_mailbox`] reads, so the
-/// name shown is never that of a mailbox the header only carries as text.
+/// a bare `a@x`). The mailbox is the one [`display_mailbox`] reads, the one
+/// a reply goes to, so the name shown is never that of a mailbox the header
+/// only carries as text, nor a second mailbox's (`A <a@x>, B <b@y>` is `A`).
 pub fn sender_display_name(raw: &str) -> String {
     match display_mailbox(raw) {
         Some((name, address)) if name.is_empty() => address,
@@ -2126,12 +2170,14 @@ pub fn sender_display_name(raw: &str) -> String {
     }
 }
 
-/// A `From` as a reader is shown it: `Name <address>` with the name unquoted
-/// and unescaped, the bare address when there is no name or it only repeats
-/// the address, else `raw` trimmed. For display only: the name is no longer
-/// quoted, so the result is not a header to parse again.
+/// A `From` as a reader is shown it, whole: `Name <address>` with the
+/// address the header's last `<...>` holds and the name everything before
+/// it, unquoted and unescaped (`A <a@x>, B <b@y>` is shown as it is), the
+/// bare address when there is no name or it only repeats the address, else
+/// `raw` trimmed. For display only: the name is no longer quoted, so the
+/// result is not a header to parse again.
 pub fn readable_sender(raw: &str) -> String {
-    match display_mailbox(raw) {
+    match last_bracketed(raw).map(|(open, address)| named_mailbox(&raw[..open], address)) {
         Some((name, address)) if name.is_empty() => address,
         Some((name, address)) => format!("{name} <{address}>"),
         None => raw.trim().to_string(),
@@ -2155,63 +2201,74 @@ pub fn readable_recipients(raw: &str) -> String {
 /// A `(` never closed opens no comment and a `"` never closed opens no quoted
 /// string: either may be the decoded text of an encoded-word display name
 /// (`bob@x ( <alice@y>`), and taken for syntax it would hide the `<...>`
-/// after it or keep a comment's. The daemon's `Authentication-Results`
+/// after it or keep a comment's. Each is a literal and what follows it is
+/// read afresh, a `"` never closed opening no quoted string after it, so a
+/// quoted string closed before it still holds its `(`. The daemon's `Authentication-Results`
 /// reader keeps a `strip_comments` of its own (`daemon::hooks::auth`) on the
 /// opposite rule: that header is raw, never decoded text, and a comment there
 /// may quote what a sender chose (an SPF domain, a HELO name), so an unclosed
 /// `(` must hide everything after it rather than let it read as a `pass`.
 fn uncommented_offsets(raw: &str) -> Vec<usize> {
     uncommented(raw, true)
-        .or_else(|| uncommented(raw, false))
-        .unwrap_or_else(|| raw.char_indices().map(|(at, _)| at).collect())
 }
 
 /// Every character of `raw` outside its comments ([`uncommented_offsets`]),
 /// with its byte offset and whether it lies in a quoted string, its `"` and
-/// a `\` escape included. A `"` never closed quotes nothing, as
-/// [`uncommented_offsets`] reads it. A reader takes a `<`, `>`, `,`, `;` or
-/// `:` for syntax only outside a quoted string: the store quotes a display
-/// name holding one (`"Bob <bob@x>" <alice@y>`, `"< G":;`).
+/// a `\` escape included. A `"` never closed quotes nothing from it on, as
+/// [`uncommented_offsets`] reads it, and a quoted string closed before it
+/// still does. A reader takes a `<`, `>`, `,`, `;` or `:` for syntax only
+/// outside a quoted string: the store quotes a display name holding one
+/// (`"Bob <bob@x>" <alice@y>`, `"< G":;`).
 pub(crate) fn uncommented_chars(raw: &str) -> Vec<(usize, char, bool)> {
     let (mut quoted, mut escaped) = (false, false);
-    let mut chars: Vec<(usize, char, bool)> = uncommented_offsets(raw)
-        .into_iter()
-        .map(|at| {
-            let c = char_at(raw, at);
-            let inside = if escaped {
-                escaped = false;
-                true
-            } else if quoted && c == '\\' {
-                escaped = true;
-                true
-            } else if c == '"' {
-                quoted = !quoted;
-                true
-            } else {
-                quoted
-            };
-            (at, c, inside)
-        })
-        .collect();
+    // The index in `chars` of the `"` opening the quoted string still open.
+    let mut opened = 0;
+    let mut chars: Vec<(usize, char, bool)> = Vec::new();
+    for at in uncommented_offsets(raw) {
+        let c = char_at(raw, at);
+        let inside = if escaped {
+            escaped = false;
+            true
+        } else if quoted && c == '\\' {
+            escaped = true;
+            true
+        } else if c == '"' {
+            if !quoted {
+                opened = chars.len();
+            }
+            quoted = !quoted;
+            true
+        } else {
+            quoted
+        };
+        chars.push((at, c, inside));
+    }
     if quoted {
-        for (_, _, inside) in &mut chars {
+        for (_, _, inside) in &mut chars[opened..] {
             *inside = false;
         }
     }
     chars
 }
 
-/// [`uncommented_offsets`] honouring quoted strings when `quotes`: `None`
-/// when one is never closed.
-fn uncommented(raw: &str, quotes: bool) -> Option<Vec<usize>> {
+/// [`uncommented_offsets`], honouring quoted strings when `quotes`. A `"`
+/// never closed is a literal, and what follows it is read with no quoted
+/// string, as an unclosed `(` is a literal and what follows it read afresh.
+fn uncommented(raw: &str, quotes: bool) -> Vec<usize> {
     let mut kept = Vec::with_capacity(raw.len());
     let (mut depth, mut opened, mut quoted, mut escaped) = (0usize, 0usize, false, false);
+    // Where the quoted string still open starts, and how many offsets were
+    // kept before it.
+    let mut quote = (0usize, 0usize);
     for (at, c) in raw.char_indices() {
         if escaped {
             escaped = false;
         } else if c == '\\' && (quoted || depth > 0) {
             escaped = true;
         } else if quotes && c == '"' && depth == 0 {
+            if !quoted {
+                quote = (at, kept.len());
+            }
             quoted = !quoted;
         } else if c == '(' && !quoted {
             if depth == 0 {
@@ -2228,20 +2285,29 @@ fn uncommented(raw: &str, quotes: bool) -> Option<Vec<usize>> {
         }
     }
     if quoted {
-        return None;
-    }
-    if depth > 0 {
+        // The `"` never closed: a literal, and what follows it is read with
+        // no quoted string, since none of its `"` closes one.
+        let (open, before) = quote;
+        kept.truncate(before);
+        kept.push(open);
+        let rest = open + 1;
+        kept.extend(
+            uncommented(&raw[rest..], false)
+                .into_iter()
+                .map(|at| rest + at),
+        );
+    } else if depth > 0 {
         // The outermost `(` never closed: a literal, and what follows it is
         // read afresh.
         kept.push(opened);
         let rest = opened + 1;
         kept.extend(
-            uncommented(&raw[rest..], quotes)?
+            uncommented(&raw[rest..], quotes)
                 .into_iter()
                 .map(|at| rest + at),
         );
     }
-    Some(kept)
+    kept
 }
 
 /// The character starting at byte `at` of `raw`, a char boundary.
@@ -2629,15 +2695,16 @@ mod tests {
             // A decoded encoded-word name that reads as an address, a comma
             // after it making it a mailbox of its own to RFC 5322.
             ("bob@x.com <alice@y.com>", "alice@y.com"),
-            // Decoded with its comma, an older row's name reads as the first
-            // mailbox; the backfill writes such a row again from its raw.
+            // Decoded with its comma, an older row's name reads as a mailbox
+            // of its own, and a reply passes over it to the bracketed one;
+            // the backfill writes such a row again from its raw.
             (
                 "bob@blocked.example, <alice@ok.example>",
-                "bob@blocked.example",
+                "alice@ok.example",
             ),
             (
                 "bob@blocked.example, Sales <alice@ok.example>",
-                "bob@blocked.example",
+                "alice@ok.example",
             ),
             // One opening a comment or a quoted string it never closes: a
             // literal, which hides neither the `<...>` after it nor a comment.
@@ -2653,26 +2720,30 @@ mod tests {
                 r#"bob@blocked.example" <alice@ok.example> (Bob <bob@x.com>)"#,
                 "alice@ok.example",
             ),
-            // So is a comment never closed: its `,` ends the first mailbox.
-            ("alice@y.com (Bob, <bob@x.com>", "alice@y.com"),
-            // Several mailboxes: the first, each read by its last `<...>`.
+            // So is a comment never closed: its `,` ends a mailbox, and the
+            // one after it holds the first `<...>`.
+            ("alice@y.com (Bob, <bob@x.com>", "bob@x.com"),
+            // Several mailboxes: the first holding a `<...>`, read by its
+            // last one.
             ("A <a@x.com>, B <b@y.com>", "a@x.com"),
             ("A <a@x.com> <b@x.com>, B <c@y.com>", "b@x.com"),
             (r#""A, <a@x.com>" <b@x.com>, C <c@y.com>"#, "b@x.com"),
             ("Bob <bob@x.com> <alice@y.com>, c@y.com", "alice@y.com"),
             (
                 "x@blocked.example, Alice <alice@ok.example>",
-                "x@blocked.example",
+                "alice@ok.example",
             ),
             (
                 "Alice <alice@ok.example>, x@blocked.example",
                 "alice@ok.example",
             ),
+            ("John <john@x.com, c@z.com, D <d@z.com>", "d@z.com"),
             // A mailbox naming no address is passed over.
             ("Doe, Jane <jane@y.com>, b@y.com", "jane@y.com"),
-            // No `<`: RFC 5322's first mailbox, a group's first member.
+            // No `<...>`: RFC 5322's first mailbox, a group's first member.
             ("a@x.com, b@y.com", "a@x.com"),
             ("Team: a@x.com, b@y.com;", "a@x.com"),
+            ("John <john@x.com, c@z.com", "c@z.com"),
             // Nothing parses and nothing is bracketed: the bare token.
             ("Bob, alice@y.com (x <bob@x.com>)", "alice@y.com"),
         ] {
@@ -3048,6 +3119,8 @@ mod tests {
             "=?utf-8?q?x=40blocked.example?=",
             "(=?utf-8?q?=29_=3Calice=40ok.example=3E?=)",
             "(=?utf-8?q?D=C3=A6mon?=)",
+            "\"john.doe\"@example.com",
+            "\"a,b\"@x.example",
         ];
         // xorshift64, seeded: the same headers on every run.
         let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
@@ -3075,16 +3148,11 @@ mod tests {
             let undecoded = undecoded_value(&header);
             let stored = stored_address_list(&header);
             let read = mailbox_addresses(&stored);
-            for address in raw_addresses(&undecoded) {
-                for piece in address
-                    .split(|c: char| c.is_whitespace() || ADDRESS_SYNTAX.contains(&c))
-                    .filter(|piece| piece.contains('@'))
-                {
-                    assert!(
-                        read.iter().any(|known| known == piece),
-                        "{wire:?} is stored {stored:?}, which hides {piece}"
-                    );
-                }
+            for piece in raw_mailboxes(&undecoded) {
+                assert!(
+                    read.contains(&piece),
+                    "{wire:?} is stored {stored:?}, which hides {piece}"
+                );
             }
             let uncommented: String = uncommented_chars(&undecoded)
                 .iter()
@@ -3184,11 +3252,11 @@ mod tests {
             ),
             (r#""john doe"@example.com (J)"#, r#""john doe"@example.com"#),
             (r#""a,b"@x.example, c@y.example"#, r#""a,b"@x.example"#),
-            // Several mailboxes: the first, each by its last `<...>`.
+            // Several mailboxes: the first holding a `<...>`, by its last one.
             ("A <a@x.example>, B <b@y.example>", "a@x.example"),
             (
                 "x@blocked.example, Alice <alice@ok.example>",
-                "x@blocked.example",
+                "alice@ok.example",
             ),
             (
                 "<x@blocked.example>, Alice <alice@ok.example>",
@@ -3199,10 +3267,18 @@ mod tests {
                 "alice@y.example",
             ),
             ("Doe, Jane <jane@y.example>", "jane@y.example"),
-            ("alice@y.example (Bob, <bob@x.example>", "alice@y.example"),
+            ("alice@y.example (Bob, <bob@x.example>", "bob@x.example"),
             (
                 r#"x@blocked.example ("), alice@ok.example"#,
                 "x@blocked.example",
+            ),
+            // An older row's encoded-word name decoded to an address and a
+            // comma: the bracketed mailbox, as main answered.
+            ("x@blocked.example, <alice@ok.example>", "alice@ok.example"),
+            // Only a `"` never closed is a literal.
+            (
+                r#""Doe, <x@y.example>" Bo"b <b@x.example>, c@y.example"#,
+                "b@x.example",
             ),
         ] {
             assert_eq!(extract_email_address(from), address, "{from}");
@@ -3402,6 +3478,30 @@ mod tests {
                 r"CORP\robin <r@x.com>",
                 r"CORP\robin",
                 r"CORP\robin <r@x.com>",
+            ),
+            // A quoted string closed before a `"` never closed is opened.
+            (
+                r#""Doe, Jane" Bo"b <b@x.com>"#,
+                r#"Doe, Jane Bo"b"#,
+                r#"Doe, Jane Bo"b <b@x.com>"#,
+            ),
+            // Several mailboxes: the name is that of the one a reply goes
+            // to, and the reader shows the header whole.
+            ("A <a@x.com>, B <b@y.com>", "A", "A <a@x.com>, B <b@y.com>"),
+            (
+                "x@blocked.example, Alice <alice@ok.example>",
+                "Alice",
+                "x@blocked.example, Alice <alice@ok.example>",
+            ),
+            (
+                "x@blocked.example, <alice@ok.example>",
+                "alice@ok.example",
+                "x@blocked.example, <alice@ok.example>",
+            ),
+            (
+                r#""Doe, Jane" <jane@x.com>, B <b@y.com>"#,
+                "Doe, Jane",
+                r#"Doe, Jane <jane@x.com>, B <b@y.com>"#,
             ),
         ] {
             assert_eq!(sender_display_name(raw), name, "{raw}");

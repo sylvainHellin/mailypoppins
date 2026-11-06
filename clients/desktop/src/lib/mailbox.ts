@@ -3,7 +3,8 @@
 // outside a quoted string, and each names the address in its last `<...>`
 // outside a quoted string, else its own address, else its bare tokens holding
 // an `@`, never one inside a quoted string but a quoted local part
-// (`"john.doe"@x`); Copy sender copies the first mailbox's. The daemon
+// (`"john.doe"@x`); Copy sender copies the address a reply goes to, that of
+// the first mailbox holding a `<...>`, else the first one's. The daemon
 // stores a name quoted whenever it holds syntax (`"Bob <bob@x>" <alice@y>`); a
 // row an older build stored may hold it decoded and bare (`bob@x, <alice@y>`),
 // so a row, the reader and Copy sender read it here, and name the mailbox a
@@ -11,14 +12,19 @@
 
 /**
  * The index in `raw` of every character outside its comments, honouring
- * quoted strings when `quotes`; null when one is never closed.
+ * quoted strings when `quotes`. A `"` never closed is a literal and what
+ * follows it is read with no quoted string, as an unclosed `(` is a literal
+ * and what follows it read afresh (`mp_core::parse::uncommented`).
  */
-function uncommented(raw: string, quotes: boolean): number[] | null {
+function uncommented(raw: string, quotes: boolean): number[] {
   const kept: number[] = [];
   let depth = 0;
   let opened = 0;
   let quoted = false;
   let escaped = false;
+  // Where the quoted string still open starts, and how many indexes were kept before it.
+  let quoteAt = 0;
+  let quoteKept = 0;
   for (let at = 0; at < raw.length; at++) {
     const c = raw[at];
     if (escaped) {
@@ -26,6 +32,10 @@ function uncommented(raw: string, quotes: boolean): number[] | null {
     } else if (c === "\\" && (quoted || depth > 0)) {
       escaped = true;
     } else if (quotes && c === '"' && depth === 0) {
+      if (!quoted) {
+        quoteAt = at;
+        quoteKept = kept.length;
+      }
       quoted = !quoted;
     } else if (c === "(" && !quoted) {
       if (depth === 0) opened = at;
@@ -37,21 +47,26 @@ function uncommented(raw: string, quotes: boolean): number[] | null {
     }
     if (depth === 0) kept.push(at);
   }
-  if (quoted) return null;
+  if (quoted) {
+    // The `"` never closed: a literal, and what follows is read with no quoted string.
+    const rest = uncommented(raw.slice(quoteAt + 1), false);
+    return [...kept.slice(0, quoteKept), quoteAt, ...rest.map((at) => quoteAt + 1 + at)];
+  }
   if (depth > 0) {
     // The outermost `(` never closed: a literal, and what follows is read afresh.
     const rest = uncommented(raw.slice(opened + 1), quotes);
-    return rest === null ? null : [...kept, opened, ...rest.map((at) => opened + 1 + at)];
+    return [...kept, opened, ...rest.map((at) => opened + 1 + at)];
   }
   return kept;
 }
 
 /**
  * The index of every character of `raw` outside its `(comments)`; an
- * unclosed `(` or `"` is text, as a decoded display name may hold one.
+ * unclosed `(` or `"` is text, as a decoded display name may hold one, and a
+ * quoted string closed before such a `"` still holds its `(`.
  */
 function uncommentedOffsets(raw: string): number[] {
-  return uncommented(raw, true) ?? uncommented(raw, false) ?? Array.from({ length: raw.length }, (_, at) => at);
+  return uncommented(raw, true);
 }
 
 /** A character of a From outside its comments (`uncommentedChars`). */
@@ -64,13 +79,17 @@ interface UncommentedChar {
 
 /**
  * Every character of `raw` outside its comments, with its index and whether it
- * lies in a quoted string; a `"` never closed quotes nothing. A `<`, `>`, `,`,
- * `;` or `:` is syntax only outside a quoted string (`mp_core::parse::uncommented_chars`).
+ * lies in a quoted string; a `"` never closed quotes nothing from it on, and a
+ * quoted string closed before it still does. A `<`, `>`, `,`, `;` or `:` is
+ * syntax only outside a quoted string (`mp_core::parse::uncommented_chars`).
  */
 function uncommentedChars(raw: string): UncommentedChar[] {
   let quoted = false;
   let escaped = false;
-  const chars = uncommentedOffsets(raw).map((at) => {
+  // The index in `chars` of the `"` opening the quoted string still open.
+  let opened = 0;
+  const chars: UncommentedChar[] = [];
+  for (const at of uncommentedOffsets(raw)) {
     const c = raw[at];
     let inside = quoted;
     if (escaped) {
@@ -80,69 +99,68 @@ function uncommentedChars(raw: string): UncommentedChar[] {
       escaped = true;
       inside = true;
     } else if (c === '"') {
+      if (!quoted) opened = chars.length;
       quoted = !quoted;
       inside = true;
     }
-    return { at, c, quoted: inside };
-  });
-  if (quoted) for (const char of chars) char.quoted = false;
+    chars.push({ at, c, quoted: inside });
+  }
+  if (quoted) for (const char of chars.slice(opened)) char.quoted = false;
   return chars;
 }
 
-/** `name` with its quoted strings opened, a `\` escape in one undone; as written when a `"` is never closed. */
+/**
+ * `name` with its quoted strings opened, a `\` escape in one undone; taken as
+ * written from a `"` never closed on (`mp_core::parse::unquoted_display_name`).
+ */
 function unquotedName(name: string): string {
   let out = "";
   let quoted = false;
   let escaped = false;
-  for (const c of name) {
+  // Where the open quoted string starts, in `name` and in `out`.
+  let openedAt = 0;
+  let openedOut = 0;
+  for (let at = 0; at < name.length; at++) {
+    const c = name[at];
     if (escaped) {
       out += c;
       escaped = false;
     } else if (quoted && c === "\\") {
       escaped = true;
     } else if (c === '"') {
+      if (!quoted) {
+        openedAt = at;
+        openedOut = out.length;
+      }
       quoted = !quoted;
     } else {
       out += c;
     }
   }
-  return (quoted ? name : out).trim();
+  if (quoted) out = out.slice(0, openedOut) + name.slice(openedAt);
+  return out.trim();
 }
 
 /**
- * The display name and address of the mailbox `from` names, or null when it
- * holds no `<...>` outside a comment and a quoted string. The address is read
- * without comments, the name keeps them (`Alice (Team) <a@x>`). The name is
- * empty when there is none or it only repeats the address, as Graph's often
- * does (`"a@x" <a@x>`).
+ * A display name, `name` unquoted and unescaped, with the `address` after it
+ * (`mp_core::parse::named_mailbox`). A comment stays in the name
+ * (`Alice (Team) <a@x>`). The name is empty when there is none or it only
+ * repeats the address, as Graph's often does (`"a@x" <a@x>`).
+ */
+function namedMailbox(name: string, address: string): { name: string; address: string } {
+  const unquoted = unquotedName(name);
+  return { name: unquoted.toLowerCase() === address.toLowerCase() ? "" : unquoted, address };
+}
+
+/**
+ * The display name and address of the mailbox of `from` a reply goes to
+ * (`replyMailbox`), the name its text before its `<`: `A <a@x>, B <b@y>` is
+ * `A` and `a@x` (`mp_core::parse::display_mailbox`). Null when no mailbox of
+ * it holds a `<...>` outside a comment and a quoted string.
  */
 function displayMailbox(from: string): { name: string; address: string } | null {
-  const chars = uncommentedChars(from);
-  let open = -1;
-  for (let i = chars.length - 1; i >= 0; i--) {
-    if (chars[i].c === "<" && !chars[i].quoted) {
-      open = i;
-      break;
-    }
-  }
-  if (open < 0) return null;
-  // `>` is searched only after the `<`: a name may hold one (`Alerts > Prod <a@x>`).
-  let close = -1;
-  for (let i = open + 1; i < chars.length; i++) {
-    if (chars[i].c === ">" && !chars[i].quoted) {
-      close = i;
-      break;
-    }
-  }
-  if (close < 0) return null;
-  const address = chars
-    .slice(open + 1, close)
-    .map((char) => char.c)
-    .join("")
-    .trim();
-  if (!address) return null;
-  const name = unquotedName(from.slice(0, chars[open].at));
-  return { name: name.toLowerCase() === address.toLowerCase() ? "" : name, address };
+  const m = replyMailbox(from);
+  return m ? namedMailbox(from.slice(m.start, m.open), m.address) : null;
 }
 
 /** `"Doe, Jane" <jane@example.com>` to `Doe, Jane`; a bare address stays. */
@@ -160,25 +178,34 @@ interface AddressChar {
   local: boolean;
 }
 
+/** One mailbox of a From (`mailboxParts`). */
+interface MailboxPart {
+  /** The index in the From its text starts at, its comments included. */
+  start: number;
+  chars: UncommentedChar[];
+}
+
 /**
  * The mailboxes of a From given as `uncommentedChars` answers it: cut at every
- * `,` and `;` outside a quoted string (`mp_core::parse::mailbox_parts`).
+ * `,` and `;` outside a quoted string, each with the index its text starts at
+ * (`mp_core::parse::mailbox_parts`).
  */
-function mailboxParts(chars: UncommentedChar[]): UncommentedChar[][] {
-  const parts: UncommentedChar[][] = [[]];
+function mailboxParts(chars: UncommentedChar[]): MailboxPart[] {
+  const parts: MailboxPart[] = [{ start: 0, chars: [] }];
   for (const char of chars) {
-    if (!char.quoted && (char.c === "," || char.c === ";")) parts.push([]);
-    else parts[parts.length - 1].push(char);
+    if (!char.quoted && (char.c === "," || char.c === ";")) parts.push({ start: char.at + 1, chars: [] });
+    else parts[parts.length - 1].chars.push(char);
   }
   return parts;
 }
 
 /**
- * The address in the last `<...>` of one mailbox outside a quoted string, the
- * `>` searched only after it, trimmed; null when there is none, it is never
- * closed or it holds nothing (`mp_core::parse::bracketed_in`).
+ * The last `<...>` of one mailbox outside a quoted string, the `>` searched
+ * only after it: the index in the From its `<` is at, and the address it
+ * holds, trimmed; null when there is none, it is never closed or it holds
+ * nothing (`mp_core::parse::bracketed_in`).
  */
-function lastBracketed(part: UncommentedChar[]): string | null {
+function bracketedIn(part: UncommentedChar[]): { open: number; address: string } | null {
   let open = -1;
   for (let i = part.length - 1; i >= 0; i--) {
     if (part[i].c === "<" && !part[i].quoted) {
@@ -200,7 +227,20 @@ function lastBracketed(part: UncommentedChar[]): string | null {
     .map((char) => char.c)
     .join("")
     .trim();
-  return address || null;
+  return address ? { open: part[open].at, address } : null;
+}
+
+/**
+ * The first mailbox of `from` whose last `<...>` names an address: the index
+ * its text starts at, that of its `<`, and the address; null when no mailbox
+ * holds one (`mp_core::parse::reply_mailbox`).
+ */
+function replyMailbox(from: string): { start: number; open: number; address: string } | null {
+  for (const part of mailboxParts(uncommentedChars(from))) {
+    const bracketed = bracketedIn(part.chars);
+    if (bracketed) return { start: part.start, ...bracketed };
+  }
+  return null;
 }
 
 /**
@@ -270,8 +310,8 @@ function listedMember(text: AddressChar[]): string | null {
  */
 function partAddresses(part: UncommentedChar[]): string[] {
   if (part.some((char) => char.c === "<" && !char.quoted)) {
-    const address = lastBracketed(part);
-    return address === null ? [] : [address];
+    const bracketed = bracketedIn(part);
+    return bracketed === null ? [] : [bracketed.address];
   }
   const text = addressText(part);
   const member = listedMember(text);
@@ -293,7 +333,7 @@ function partAddresses(part: UncommentedChar[]): string[] {
 function mailboxAddresses(from: string): string[] {
   const addresses: string[] = [];
   for (const part of mailboxParts(uncommentedChars(from))) {
-    for (const address of partAddresses(part)) {
+    for (const address of partAddresses(part.chars)) {
       if (!addresses.includes(address)) addresses.push(address);
     }
   }
@@ -301,31 +341,37 @@ function mailboxAddresses(from: string): string[] {
 }
 
 /**
- * The address of the first mailbox `from` names (`mp_core::parse::extract_email_address`):
- * `"Bob <bob@x>" <alice@example.com>` to `alice@example.com`,
- * `x@example.com (Cron Daemon)` to `x@example.com`; a field naming no address stays, trimmed.
+ * The address a reply to `from` goes to (`mp_core::parse::extract_email_address`):
+ * that of the first mailbox holding a `<...>`, else the first address it names,
+ * else the field trimmed. `"Bob <bob@x>" <alice@example.com>` and
+ * `x@y, Alice <alice@example.com>` to `alice@example.com`,
+ * `x@example.com (Cron Daemon)` to `x@example.com`.
  */
 export function senderAddress(from: string): string {
-  return mailboxAddresses(from)[0] ?? from.trim();
+  return replyMailbox(from)?.address ?? mailboxAddresses(from)[0] ?? from.trim();
 }
 
 /**
- * A From as a reader is shown it: `Name <address>` with the name unquoted and
- * unescaped, the bare address when there is no name or it repeats the
- * address. For display only: the name is no longer quoted.
+ * A From as a reader is shown it, whole: `Name <address>` with the address
+ * its last `<...>` holds and the name everything before it, unquoted and
+ * unescaped (`A <a@x>, B <b@y>` is shown as it is), the bare address when
+ * there is no name or it repeats the address. For display only: the name is
+ * no longer quoted (`mp_core::parse::readable_sender`).
  */
 export function readableSender(from: string): string {
-  const m = displayMailbox(from);
-  if (!m) return from.trim();
+  const bracketed = bracketedIn(uncommentedChars(from));
+  if (!bracketed) return from.trim();
+  const m = namedMailbox(from.slice(0, bracketed.open), bracketed.address);
   return m.name ? `${m.name} <${m.address}>` : m.address;
 }
 
 /**
  * A comma-separated address list split at every `,` outside a quoted name and
  * a comment, each part kept whole with its comments; a `(` or `"` never closed
- * is a literal (`mp_core::addresses::split_addresses`).
+ * is a literal, and a quoted string closed before such a `"` still holds its
+ * `,` (`mp_core::addresses::split_addresses`).
  */
-function splitAddresses(list: string): string[] {
+export function splitAddresses(list: string): string[] {
   const parts: string[] = [];
   const push = (part: string) => {
     if (part.trim()) parts.push(part.trim());

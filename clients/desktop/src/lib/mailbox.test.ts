@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readableRecipients, readableSender, senderAddress, senderName } from "@/lib/mailbox";
+import { readableRecipients, readableSender, senderAddress, senderName, splitAddresses } from "@/lib/mailbox";
 
 describe("the sender's address", () => {
   it("is what the last angle brackets hold, else the whole field", () => {
@@ -43,14 +43,19 @@ describe("the sender's address", () => {
     ['John <"john.doe"@example.com>', '"john.doe"@example.com'],
     ['"john doe"@example.com (J)', '"john doe"@example.com'],
     ['"a,b"@x.example, c@y.example', '"a,b"@x.example'],
-    // Several mailboxes: the first, each by its last `<...>`.
+    // Several mailboxes: the first holding a `<...>`, by its last one.
     ["A <a@x.example>, B <b@y.example>", "a@x.example"],
-    ["x@blocked.example, Alice <alice@ok.example>", "x@blocked.example"],
+    ["x@blocked.example, Alice <alice@ok.example>", "alice@ok.example"],
     ["<x@blocked.example>, Alice <alice@ok.example>", "x@blocked.example"],
     ["Bob <bob@x.example> <alice@y.example>, c@z.example", "alice@y.example"],
     ["Doe, Jane <jane@y.example>", "jane@y.example"],
-    ["alice@y.example (Bob, <bob@x.example>", "alice@y.example"],
+    ["alice@y.example (Bob, <bob@x.example>", "bob@x.example"],
     ['x@blocked.example ("), alice@ok.example', "x@blocked.example"],
+    // An older row's encoded-word name decoded to an address and a comma:
+    // the bracketed mailbox, as main answered.
+    ["x@blocked.example, <alice@ok.example>", "alice@ok.example"],
+    // Only a `"` never closed is a literal.
+    ['"Doe, <x@y.example>" Bo"b <b@x.example>, c@y.example', "b@x.example"],
   ])("reads %s as the daemon does", (from, address) => {
     expect(senderAddress(from)).toBe(address);
   });
@@ -70,6 +75,23 @@ describe("the sender's name", () => {
     expect(senderAddress("Alice (Team) <alice@x.example> (via <list@y.example>)")).toBe("alice@x.example");
     // An unclosed `(` is text, and the `<...>` after it still names the mailbox.
     expect(senderAddress("bob@x.example ( <alice@y.example>")).toBe("alice@y.example");
+    // A quoted string closed before a `"` never closed is opened.
+    expect(senderName('"Doe, Jane" Bo"b <b@x.example>')).toBe('Doe, Jane Bo"b');
+  });
+
+  // `mp_core::parse::tests::a_sender_is_shown_unquoted_and_by_the_mailbox_mailbox_addresses_reads`.
+  it.each([
+    ["A <a@x.example>, B <b@y.example>", "A", "A <a@x.example>, B <b@y.example>"],
+    [
+      "x@blocked.example, Alice <alice@ok.example>",
+      "Alice",
+      "x@blocked.example, Alice <alice@ok.example>",
+    ],
+    ["x@blocked.example, <alice@ok.example>", "alice@ok.example", "x@blocked.example, <alice@ok.example>"],
+    ['"Doe, Jane" <jane@x.example>, B <b@y.example>', "Doe, Jane", "Doe, Jane <jane@x.example>, B <b@y.example>"],
+  ])("of %s is that of the mailbox a reply goes to", (from, name, readable) => {
+    expect(senderName(from)).toBe(name);
+    expect(readableSender(from)).toBe(readable);
   });
 });
 
@@ -122,12 +144,20 @@ describe("a header as a reader is shown it", () => {
 
   // `mp_core::addresses::tests::split_addresses_keeps_a_comment_whole`.
   it.each([
-    ['x@blocked.example ("), alice@ok.example', 'x@blocked.example ("), alice@ok.example'],
-    ["a@x.example (Team, eng), b@y.example", "a@x.example (Team, eng), b@y.example"],
-    ["a@x.example (\\), b), b@y.example", "a@x.example (\\), b), b@y.example"],
-    ["bob@x.example ( , <alice@y.example>", "bob@x.example (, alice@y.example"],
-    ['Bo"b <b@x.example>, c@y.example', 'Bo"b <b@x.example>, c@y.example'],
-  ])("never cuts a recipient inside a comment: %s", (list, readable) => {
-    expect(readableRecipients(list)).toBe(readable);
+    ['x@blocked.example ("), alice@ok.example', ['x@blocked.example (")', "alice@ok.example"]],
+    ["a@x.example (Team, eng), b@y.example", ["a@x.example (Team, eng)", "b@y.example"]],
+    ["a@x.example (\\), b), b@y.example", ["a@x.example (\\), b)", "b@y.example"]],
+    ["bob@x.example ( , <alice@y.example>", ["bob@x.example (", "<alice@y.example>"]],
+    ['Bo"b <b@x.example>, c@y.example', ['Bo"b <b@x.example>', "c@y.example"]],
+    [
+      '"Doe, Jane" <jane@x.example>, Bo"b <b@x.example>, c@y.example',
+      ['"Doe, Jane" <jane@x.example>', 'Bo"b <b@x.example>', "c@y.example"],
+    ],
+    [
+      '"Smith (Ops), A" <a@x.example>, Bo"b (c, d) <b@x.example>, c@y.example',
+      ['"Smith (Ops), A" <a@x.example>', 'Bo"b (c, d) <b@x.example>', "c@y.example"],
+    ],
+  ])("never cuts a recipient inside a comment or a closed quote: %s", (list, recipients) => {
+    expect(splitAddresses(list)).toEqual(recipients);
   });
 });

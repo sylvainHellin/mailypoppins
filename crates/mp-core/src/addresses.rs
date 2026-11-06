@@ -164,7 +164,8 @@ pub fn format_recipient(display_name: &str, address: &str) -> String {
 /// name never ends the quote, and a `"` inside a comment opens no quote
 /// (PERSO-261). Comments and quotes are read as
 /// [`crate::parse::mailbox_addresses`] reads them: a `(` or a `"` never
-/// closed is a literal.
+/// closed is a literal, and a quoted string closed before such a `"` still
+/// holds its `,` (`"Doe, Jane" <j@x>, Bo"b <b@x>` is two entries).
 pub fn split_addresses(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut push = |part: &str| {
@@ -222,7 +223,8 @@ mod tests {
 
     /// A comment is never cut: a `,` or a `"` inside one is the comment's,
     /// as the store writes one back (`x@y (")`, an encoded-word decoded to
-    /// a `"`). A `(` or a `"` never closed is a literal (PERSO-261).
+    /// a `"`). A `(` or a `"` never closed is a literal, and a quoted name
+    /// closed before such a `"` still holds its `,` (PERSO-261).
     #[test]
     fn split_addresses_keeps_a_comment_whole() {
         for (list, parts) in [
@@ -245,6 +247,22 @@ mod tests {
             (
                 r#"Bo"b <b@x.com>, c@y.com"#,
                 vec![r#"Bo"b <b@x.com>"#, "c@y.com"],
+            ),
+            (
+                r#""Doe, Jane" <jane@x.com>, Bo"b <b@x.com>, c@y.com"#,
+                vec![
+                    r#""Doe, Jane" <jane@x.com>"#,
+                    r#"Bo"b <b@x.com>"#,
+                    "c@y.com",
+                ],
+            ),
+            (
+                r#""Smith (Ops), A" <a@x.com>, Bo"b (c, d) <b@x.com>, c@y.com"#,
+                vec![
+                    r#""Smith (Ops), A" <a@x.com>"#,
+                    r#"Bo"b (c, d) <b@x.com>"#,
+                    "c@y.com",
+                ],
             ),
         ] {
             assert_eq!(split_addresses(list), parts, "{list}");

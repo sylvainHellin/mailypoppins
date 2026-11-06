@@ -859,14 +859,10 @@ mod tests {
                 r#"<x@blocked.example>, "< G":;"#,
             ),
             // A From naming several mailboxes: every one is tested, and the
-            // first is the one a reply goes to.
+            // first holding a `<...>` is the one a reply goes to.
             (
                 "<x@blocked.example>, Alice <alice@ok.example>",
                 "<x@blocked.example>, Alice <alice@ok.example>",
-            ),
-            (
-                "x@blocked.example, Alice <alice@ok.example>",
-                "x@blocked.example, Alice <alice@ok.example>",
             ),
             // Two `<...>` and no comma: the raw value names both, and so does
             // the store, though the decoded text reads as one name.
@@ -915,11 +911,31 @@ mod tests {
                 "{wire}"
             );
         }
+        // A bare mailbox before a bracketed one is blocked all the same, and
+        // a reply passes over it, as it would an older row's name decoded to
+        // an address and a comma.
+        let wire = "x@blocked.example, Alice <alice@ok.example>";
+        let message_id = fx.ingest(cases.len() as i64 + 1, wire);
+        let from: String = fx
+            .store
+            .conn()
+            .query_row(
+                "SELECT from_ FROM messages WHERE message_id = ?1",
+                [&message_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(from, wire);
+        assert!(matches(&entries, &from));
+        assert_eq!(
+            crate::parse::extract_email_address(&from),
+            "alice@ok.example"
+        );
         assert_eq!(
             move_existing(&fx.store, &account(), &entries).unwrap(),
             Moved::Rows {
                 mailbox: "Junk".to_string(),
-                count: cases.len()
+                count: cases.len() + 1
             }
         );
     }

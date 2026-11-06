@@ -804,9 +804,12 @@ fn others_message_recipients(
         let self_addr = extract_email_address(default_from).to_lowercase();
         let primary: Vec<String> = primaries.iter().map(|p| p.to_lowercase()).collect();
         let mut all_recipients: Vec<String> = Vec::new();
+        // Only what looks like an address (holds an `@`) is a recipient, as
+        // in `header_addresses`: a `(unknown)` From or a fragment of a header
+        // read astray never becomes a Cc.
         let push = |email: String, list: &mut Vec<String>| {
             let lower = email.to_lowercase();
-            if !email.is_empty()
+            if email.contains('@')
                 && lower != self_addr
                 && !primary.contains(&lower)
                 && !list.iter().any(|r| r.to_lowercase() == lower)
@@ -3802,8 +3805,9 @@ mod tests {
 
     /// A reply and a reply-all name every mailbox as ingest stores it
     /// (PERSO-261): a quoted local part stays whole, a comment the store
-    /// wrote back holding a `"` cuts no recipient out, and a From naming
-    /// several mailboxes is answered at its first.
+    /// wrote back holding a `"` cuts no recipient out, a `"` never closed
+    /// keeps the quoted names before it whole, and a From naming several
+    /// mailboxes is answered at the first holding a `<...>`.
     #[test]
     fn reply_all_keeps_a_quoted_local_part_and_each_recipient_beside_a_comment() {
         let raw = concat!(
@@ -3842,6 +3846,48 @@ mod tests {
         };
         let (to, cc) = reply_recipients(&source, true);
         assert_eq!(to.as_deref(), Some("a@x.com"));
+        assert_eq!(cc, None);
+
+        // An older row holding an encoded-word name decoded to an address
+        // and a comma: the reply goes to the bracketed mailbox, as on main.
+        for from in [
+            "x@blocked.example, <alice@ok.example>",
+            "x@blocked.example, Alice <alice@ok.example>",
+        ] {
+            let source = SourceMessage {
+                from: from.into(),
+                to: "me@example.com".into(),
+                subject: "s".into(),
+                ..Default::default()
+            };
+            let (to, _) = reply_recipients(&source, true);
+            assert_eq!(to.as_deref(), Some("alice@ok.example"), "{from}");
+        }
+
+        // Only the `"` never closed is a literal: the quoted name before it
+        // still holds its comma, and no fragment of it is a Cc.
+        let source = SourceMessage {
+            from: "a@x.com".into(),
+            to: r#""Doe, Jane" <jane@x.example>, Bo"b <b@x.example>, c@y.example"#.into(),
+            subject: "s".into(),
+            ..Default::default()
+        };
+        let (_, cc) = reply_recipients(&source, true);
+        assert_eq!(
+            cc.as_deref(),
+            Some("jane@x.example, b@x.example, c@y.example")
+        );
+
+        // A From naming no address is no Cc beside a Reply-To.
+        let source = SourceMessage {
+            from: "(unknown)".into(),
+            reply_to: Some("r@x.com".into()),
+            to: "me@example.com, Team".into(),
+            subject: "s".into(),
+            ..Default::default()
+        };
+        let (to, cc) = reply_recipients(&source, true);
+        assert_eq!(to.as_deref(), Some("r@x.com"));
         assert_eq!(cc, None);
     }
 
