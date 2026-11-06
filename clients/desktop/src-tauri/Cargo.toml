@@ -22,6 +22,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# The embedded WebDriver server the end-to-end tests drive the window
+# through (e2e/, `pnpm test:e2e`, PERSO-271). Only the debug build of
+# scripts/e2e.ts turns it on: src/lib.rs refuses it in a release build, and
+# scripts/check-bundle.ts fails `pnpm bundle` if the server is in the app.
+e2e = ["dep:tauri-plugin-wdio-webdriver", "dep:objc2"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2.6"
@@ -53,6 +60,8 @@ tauri-plugin-updater = "2.13"
 # RFC 3339 for update-state.json and an update's date; already in the tree
 # through the updater, at this version.
 time = { version = "0.3", features = ["formatting", "parsing"] }
+# The `e2e` feature's embedded WebDriver server, listening on 127.0.0.1.
+tauri-plugin-wdio-webdriver = { version = "1.5.1", optional = true }
 
 # The press-and-hold default (src/lib.rs `key_repeat`); already in the tree
 # through tao and wry, at this version.
@@ -61,6 +70,10 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 # The hidden traffic lights of the overlay title bar (src/chrome.rs,
 # PERSO-97); already in the tree through tao, at this version.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSResponder", "NSWindow", "NSView", "NSControl", "NSButton"] }
+# The `e2e` feature's switch that keeps the off-screen test window's page
+# visible (src/e2e.rs); already in the tree through tao and wry, at this
+# version.
+objc2 = { version = "0.6.4", optional = true }
 
 # TypeScript bindings for the result and event types (src/ts_bindings.rs). A
 # dev-dependency with `cfg_attr(test, ...)` derives, so a plain `cargo test`

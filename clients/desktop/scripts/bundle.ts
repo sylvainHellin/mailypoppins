@@ -18,6 +18,9 @@
 //    also writes the updater archive, bundle/macos/mailypoppins.app.tar.gz,
 //    and its minisign signature, .app.tar.gz.sig; without it a local bundle
 //    builds as before, with no updater artifacts.
+// 5. Fails when the built app carries the end-to-end tests' WebDriver server
+//    (scripts/check-bundle.ts --app), the `e2e` feature src-tauri/src/lib.rs
+//    already refuses in a release build.
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
@@ -103,5 +106,14 @@ execFileSync(
   ],
   { cwd: desktop, stdio: "inherit" },
 );
-const out = join(process.env.CARGO_TARGET_DIR ?? join(desktop, "src-tauri", "target"), target, "release", "bundle");
+const profile = passthrough.includes("--debug") || passthrough.includes("-d") ? "debug" : "release";
+const out = join(process.env.CARGO_TARGET_DIR ?? join(desktop, "src-tauri", "target"), target, profile, "bundle");
+try {
+  execFileSync("node", [join(desktop, "scripts", "check-bundle.ts"), "--app", join(out, "macos", "mailypoppins.app")], {
+    stdio: "inherit",
+  });
+} catch {
+  console.error(`bundle: the app in ${out} must not ship`);
+  process.exit(1);
+}
 console.log(`bundle: done, in ${out}`);

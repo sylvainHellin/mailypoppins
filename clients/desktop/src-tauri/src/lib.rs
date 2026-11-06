@@ -31,6 +31,8 @@ pub mod configuration;
 pub mod connector;
 pub mod contacts;
 pub mod daemon_files;
+#[cfg(feature = "e2e")]
+mod e2e;
 pub mod editor;
 pub mod error;
 pub mod fixture;
@@ -48,6 +50,15 @@ pub mod updates;
 
 #[cfg(test)]
 mod ts_bindings;
+
+// The `e2e` feature's WebDriver server lets any local process drive the
+// window over HTTP, so it exists in the end-to-end tests' debug build only
+// (scripts/e2e.ts, PERSO-271); scripts/check-bundle.ts is the backstop that
+// fails `pnpm bundle` on an app carrying it.
+#[cfg(all(feature = "e2e", not(debug_assertions)))]
+compile_error!(
+    "the `e2e` feature embeds a WebDriver server and is for the end-to-end tests' debug build only, never a release build"
+);
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -127,7 +138,7 @@ pub fn run() {
     let session = SessionHandle::new(fixture);
     let setup_session = session.clone();
 
-    let result = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // Driven from Rust only (src/updates.rs); the webview has no
@@ -135,7 +146,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Driven from Rust only (src/reminders.rs); the webview has no
         // `notification:*` permission.
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+    // The end-to-end tests' WebDriver server, on the fixtures only, so even
+    // a test build never opens a real mailbox to it (src/e2e.rs).
+    #[cfg(feature = "e2e")]
+    let builder = e2e::builder(builder, fixture);
+    let result = builder
         .manage(session)
         .manage(updates::Updates::default())
         .menu(menu::build)
@@ -163,6 +179,8 @@ pub fn run() {
             });
         })
         .setup(move |app| {
+            #[cfg(feature = "e2e")]
+            e2e::setup(app, fixture);
             // Logged here, the first point the bundle's version is known: the
             // crate's own `CARGO_PKG_VERSION` stays `0.1.0` whatever `mp`
             // release the bundle carries (`commands::bundle_version`).
@@ -218,7 +236,11 @@ pub fn run() {
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
                 .hidden_title(true);
+            #[cfg(feature = "e2e")]
+            let builder = e2e::window(builder, fixture);
             let window = builder.build()?;
+            #[cfg(feature = "e2e")]
+            e2e::out_of_sight(&window, fixture);
             chrome::hide_traffic_lights(&window.as_ref().window());
             updates::spawn_startup_check(app.handle().clone());
             Ok(())
