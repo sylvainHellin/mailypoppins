@@ -21,6 +21,8 @@
 //! the rows, hatched, under its reason. The rows neither collapse nor jump
 //! under the field being typed in.
 
+use std::ops::Range;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use mp_client::format::{availability_row, slot_of};
 use ratatui::style::{Modifier, Style};
@@ -134,42 +136,127 @@ fn cut_middle(text: &str, width: usize) -> String {
     format!("{head}\u{2026}{tail}")
 }
 
+/// `text` in `width` cells around `differ`, the chars where it differs from
+/// the rows it would read the same as: whole when it fits, else its middle
+/// cut ending a few cells past the start of `differ` (centring `differ`
+/// when it is narrower than the cells left), then an ellipsis when that
+/// cuts the text short.
+fn cut_around(text: &str, differ: Range<usize>, width: usize) -> String {
+    let byte = |chars: usize| {
+        text.char_indices()
+            .nth(chars)
+            .map_or(text.len(), |(at, _)| at)
+    };
+    let (start, end) = (byte(differ.start), byte(differ.end));
+    // The cells `cut_middle` keeps of the end of a text cut to `width - 1`.
+    let room = width - 1 - (width - 1) / 3 - 1;
+    let part = display_width(&text[start..end]);
+    let cut = start + take_width(&text[start..], room.min((room + part) / 2)).len();
+    if cut == text.len() {
+        return cut_middle(text, width);
+    }
+    format!("{}\u{2026}", cut_middle(&text[..cut], width - 1))
+}
+
+/// The chars where `text` differs from `others`: from the first char not
+/// all of them share at its start to the last not all share at its end.
+fn differ(text: &str, others: &[&str]) -> Range<usize> {
+    fn shared(a: impl Iterator<Item = char>, b: impl Iterator<Item = char>) -> usize {
+        a.zip(b).take_while(|(a, b)| a == b).count()
+    }
+    let len = text.chars().count();
+    let start = others
+        .iter()
+        .map(|other| shared(text.chars(), other.chars()))
+        .min()
+        .unwrap_or(len);
+    let end = others
+        .iter()
+        .map(|other| len - shared(text.chars().rev(), other.chars().rev()))
+        .max()
+        .unwrap_or(start);
+    start..end.max(start)
+}
+
 /// Each row's name column: "You" for the user, the address's local part
-/// for the others, after the glyph for a room. Rows whose names would read
-/// the same once cut name themselves by the end that tells them apart
+/// for the others, after the glyph for a room.
+///
+/// Rows whose names read the same name themselves by a longer text
 /// instead: the whole address when another row has the same local part
-/// (info@a.com and info@b.com), else the local part, either cut in the
-/// middle to its start and as much of its end as fits when too long. Two
-/// rows that differ only in a middle part that does not fit still read
-/// the same.
+/// (info@a.com and info@b.com), else the local part. Each such row takes
+/// the first of three forms of that text that reads unlike every other
+/// row's name: cut at its end (`office@ls1.…`), cut in the middle to its
+/// start and as much of its end as fits (`info…ny-a.de`), or cut around
+/// where it differs from the rows it still reads the same as
+/// (`con…pt-1.ex…`). No two rows read the same unless they do in every
+/// form; the third shows the first char where a row differs from the rest
+/// of its group, so this takes three or more rows that differ from each
+/// other at places too far apart for one name, or two that differ only
+/// in chars the terminal draws alike.
 fn row_names(rows: &[Row]) -> Vec<String> {
     fn local(row: &Row) -> &str {
         row.address.split('@').next().unwrap_or_default()
     }
     let glyph = |row: &Row| if row.kind == Kind::Room { ROOM } else { "" };
-    let column = |row: &Row, text: &str| match row.kind {
-        Kind::You => name_column("You"),
-        _ => name_column(&format!("{}{text}", glyph(row))),
-    };
-    let short: Vec<String> = rows.iter().map(|row| column(row, local(row))).collect();
-    rows.iter()
-        .zip(&short)
-        .map(|(row, cut)| {
-            if row.kind == Kind::You || short.iter().filter(|other| *other == cut).count() < 2 {
-                return cut.clone();
-            }
+    let column = |row: &Row, text: &str| name_column(&format!("{}{text}", glyph(row)));
+    let width = |row: &Row| NAME - 1 - display_width(glyph(row));
+    let texts: Vec<&str> = rows
+        .iter()
+        .map(|row| {
             let shared = rows
                 .iter()
                 .filter(|other| local(other) == local(row))
                 .count()
                 > 1;
-            let text = if shared {
+            if shared {
                 row.address.as_str()
             } else {
                 local(row)
-            };
-            column(row, &cut_middle(text, NAME - 1 - display_width(glyph(row))))
+            }
         })
+        .collect();
+    let mut names: Vec<Option<String>> = rows
+        .iter()
+        .map(|row| (row.kind == Kind::You).then(|| name_column("You")))
+        .collect();
+    let mut forms: Vec<String> = rows.iter().map(|row| column(row, local(row))).collect();
+    for form in 0..4 {
+        let open: Vec<usize> = (0..rows.len()).filter(|&i| names[i].is_none()).collect();
+        if form > 0 {
+            let before = forms.clone();
+            for &i in &open {
+                let (row, text) = (&rows[i], texts[i]);
+                let cut = match form {
+                    1 => text.to_string(),
+                    2 => cut_middle(text, width(row)),
+                    _ => {
+                        let others: Vec<&str> = open
+                            .iter()
+                            .filter(|&&j| j != i && before[j] == before[i])
+                            .map(|&j| texts[j])
+                            .collect();
+                        cut_around(text, differ(text, &others), width(row))
+                    }
+                };
+                forms[i] = column(row, &cut);
+            }
+        }
+        let unique: Vec<usize> = open
+            .iter()
+            .copied()
+            .filter(|&i| {
+                open.iter().filter(|&&j| forms[j] == forms[i]).count() == 1
+                    && !names.contains(&Some(forms[i].clone()))
+            })
+            .collect();
+        for i in unique {
+            names[i] = Some(forms[i].clone());
+        }
+    }
+    names
+        .into_iter()
+        .zip(forms)
+        .map(|(name, form)| name.unwrap_or(form))
         .collect()
 }
 
