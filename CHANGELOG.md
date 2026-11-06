@@ -79,6 +79,7 @@ All notable changes to this project are documented in this file.
 - Desktop: Cmd+P opens the command palette, beside `:` and Ctrl+P; the palette row and the key help list it.
 
 ### Changed
+- `mp search`, `message.search` and `message.search_server` list hits newest first by default; `--sort oldest|relevance` (`order` on the wire) picks another order, applied in the store's SQL and in the server search's cut, so the limit keeps the right rows (PERSO-273).
 - Desktop: Enter in the list filter (`/`) keeps the filter and moves to the filtered list, whose rows j, k and the arrows walk, and Escape in the field clears it, as in the TUI; the local search Enter used to run moved to Cmd+Enter (Ctrl+Enter) and the palette's Search the store, and Shift+Enter still searches the server (PERSO-274).
 - `mp delete`, and any delete a client asks to settle, of a message another client already moved or deleted before the next sync (the phone, Outlook) now succeeds and the message stays deleted, on IMAP and on Microsoft 365 (Graph) accounts, instead of failing with "not found" (PERSO-245).
   `mp move` and `mp archive` of such a message still fail and put it back, now saying it was already moved or deleted elsewhere and that the next sync will show where.

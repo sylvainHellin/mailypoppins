@@ -3530,6 +3530,14 @@ The fixture settles a send 400 ms after it answers, so a spec checks a send's ou
 `pnpm exec` and `pnpm test` run pnpm's dependency check first, and when a worktree's copied `node_modules` lags the lockfile (the `@wdio/*` packages PERSO-271 added), pnpm installs into it, stops on the blocked build scripts and leaves an untracked `clients/desktop/pnpm-workspace.yaml`.
 An agent in a worktree runs `./node_modules/.bin/vitest run` and `./node_modules/.bin/tsc -b` directly, or brings `node_modules` up to the lockfile in the main session first.
 
+## A deliberate default change passes the parity oracle through an args adapter (2026-11-06, PERSO-273)
+
+The pre-daemon parity oracle cannot learn a new flag, so a change of default order runs today's binary with the flag that names the old behaviour (`parity::without_sort_relevance`) and the oracle without it, rather than rewriting the oracle's reordered output.
+
+## `date_sort` is a Unix timestamp, so undated is NULL or 0, never `<= 0` (2026-11-06, PERSO-273)
+
+Ingest stamps 0 for an unparsable Date, and a real Date before 1970 is negative, so an undated test written as `<= 0` sorts those rows with the undated ones; test `IS NULL OR = 0`.
+
 ## The desktop list filter matches substrings, the store's search whole words (2026-11-06, PERSO-274)
 
 The list header's filter matches typed text anywhere in the subject and sender, while `message.search` quotes each word as a whole-word FTS term over subject, sender and body, so `dach` filters in "Angebot Dachsanierung" and finds nothing in the store.
