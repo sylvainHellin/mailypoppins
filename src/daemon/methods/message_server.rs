@@ -1020,12 +1020,12 @@ impl<'a> Stream<'a> {
 
 /// The `seq` of every published hit, `date_sort` keys indexed by `seq`, in
 /// `order` by date, an unknown date (an empty key) last, the stream's order
-/// among equals.
+/// among equals: [`SearchOrder::by_date_sort`], the comparator both clients
+/// merge the two passes with.
 fn hit_order(date_sorts: &[String], order: SearchOrder) -> Vec<u64> {
     let mut seqs: Vec<usize> = (0..date_sorts.len()).collect();
-    let key = |seq: usize| Some(date_sorts[seq].as_str()).filter(|key| !key.is_empty());
     // Stable, so equal dates keep the order they streamed in.
-    seqs.sort_by(|a, b| order.by_date(key(*a), key(*b)));
+    seqs.sort_by(|a, b| order.by_date_sort(&date_sorts[*a], &date_sorts[*b]));
     seqs.into_iter().map(|seq| seq as u64).collect()
 }
 
@@ -1607,7 +1607,19 @@ mod tests {
         .to_vec();
         assert_eq!(hit_order(&streamed, SearchOrder::Newest), [2, 4, 0, 3, 1]);
         assert_eq!(hit_order(&streamed, SearchOrder::Oldest), [3, 0, 2, 4, 1]);
+        // A relevance search is answered newest first on the server.
+        assert_eq!(
+            hit_order(&streamed, SearchOrder::Relevance),
+            [2, 4, 0, 3, 1]
+        );
         assert!(hit_order(&[], SearchOrder::Newest).is_empty());
+
+        // Several undated hits stay last, in stream order, in both orders.
+        let undated: Vec<String> = ["", "2026-02-01T10:00:00", "", "2026-01-01T10:00:00"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(hit_order(&undated, SearchOrder::Newest), [1, 3, 0, 2]);
+        assert_eq!(hit_order(&undated, SearchOrder::Oldest), [3, 1, 0, 2]);
     }
 
     /// `order` is newest when absent or `null`, one of the three spellings

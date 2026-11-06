@@ -133,23 +133,25 @@ pub(crate) const SYNC_SKIPPED_MARKER: &str = "Sync skipped: another engine is sy
 /// the store read this function used to make go away. What is left is the
 /// mapping, unchanged, so the overlay's row is derived by the same rule it
 /// always was.
+///
+/// `date_sort` is [`resolve_date`](super::app::resolve_date)'s key, the one
+/// the daemon gives a server hit and renders a stored row's with: the store
+/// stamps a row with the unix time of its `Date:` (`0` when it does not
+/// parse), the wire spells that instant in UTC, and an unparsable `Date:` is
+/// the empty key, the unknown date. Only the display falls back to the raw
+/// header's first ten characters.
 pub(super) fn fetched_to_email_entry(
     msg: Option<MessageRef>,
     selector: Option<String>,
     fetched: &FetchedEmail,
 ) -> EmailEntry {
     let (date_display, date_sort) =
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&fetched.date) {
-            (
-                dt.format("%Y-%m-%d").to_string(),
-                dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            )
-        } else {
-            (
-                fetched.date.chars().take(10).collect(),
-                fetched.date.clone(),
-            )
-        };
+        super::app::resolve_date(&Some(fetched.date.clone()), &None, Path::new(""));
+    let date_display = if date_display.is_empty() {
+        fetched.date.chars().take(10).collect()
+    } else {
+        date_display
+    };
 
     EmailEntry {
         draft_sync: None,
@@ -559,42 +561,59 @@ mod tests {
         assert_eq!(entry.date_display, "2024-01-01");
     }
 
-    /// known-bug. The sort key keeps the sender's local wallclock instead of
-    /// being normalised to UTC, so two hits from different timezones on the
-    /// same day sort by wallclock rather than by instant. `resolve_date` in
-    /// `src/tui/app/types.rs` normalises (that was the fix for #0024); this
-    /// path never got it, so a search result and the same email loaded from
-    /// disk carry different sort keys.
-    /// Target: `date_sort` in UTC, i.e. `2024-01-01T08:00:00` below.
+    /// The sort key is the instant in UTC, the key the daemon renders from
+    /// the store's unix-time `date_sort` (`resolve_date`, the fix for #0024),
+    /// so two hits from different timezones on the same day sort by instant
+    /// rather than by the sender's wallclock, while the display keeps the
+    /// sender's calendar day.
     #[test]
-    fn fetched_to_email_entry_sort_key_keeps_the_sender_local_wallclock() {
+    fn fetched_to_email_entry_sort_key_is_the_utc_instant() {
         let entry = fetched_to_email_entry(None, None, &fetched("Mon, 01 Jan 2024 10:00:00 +0200"));
         assert_eq!(entry.date_display, "2024-01-01");
-        assert_eq!(entry.date_sort, "2024-01-01T10:00:00");
+        assert_eq!(entry.date_sort, "2024-01-01T08:00:00");
 
-        // 10:00+0200 is 08:00 UTC, so this later message (09:00 UTC) must sort
-        // after it. On the recorded wallclock keys it sorts before.
+        // 10:00+0200 is 08:00 UTC, so this later message (09:00 UTC) sorts
+        // after it.
         let later = fetched_to_email_entry(None, None, &fetched("Mon, 01 Jan 2024 09:00:00 +0000"));
         assert_eq!(later.date_sort, "2024-01-01T09:00:00");
         assert!(
-            later.date_sort < entry.date_sort,
-            "the later message sorts first"
+            later.date_sort > entry.date_sort,
+            "the later message sorts later"
+        );
+
+        // Across midnight the display is the sender's day, the key the UTC one.
+        let early = fetched_to_email_entry(None, None, &fetched("Mon, 01 Jan 2024 01:30:00 +0200"));
+        assert_eq!(early.date_display, "2024-01-01");
+        assert_eq!(early.date_sort, "2023-12-31T23:30:00");
+
+        // The same key the store's unix stamp reads as on the wire.
+        let stamped = chrono::DateTime::parse_from_rfc2822("Mon, 01 Jan 2024 10:00:00 +0200")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            chrono::DateTime::from_timestamp(stamped, 0)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string(),
+            entry.date_sort
         );
     }
 
-    /// parity. A `Date:` header that is not RFC 2822 (or the `(unknown date)`
+    /// A `Date:` header that is not RFC 2822 (or the `(unknown date)`
     /// placeholder from `parse_rfc822_to_fetched_email`) degrades to its first
     /// ten characters for display, counted in characters so a multi-byte date
-    /// string cannot panic, with the raw string as the sort key.
+    /// string cannot panic, and to the empty sort key, the unknown date the
+    /// store stamps `0` and the daemon sends as `""`, which every order lists
+    /// last.
     #[test]
     fn fetched_to_email_entry_falls_back_to_the_first_ten_chars() {
         let entry = fetched_to_email_entry(None, None, &fetched("2024-01-01 12:00 (approx)"));
         assert_eq!(entry.date_display, "2024-01-01");
-        assert_eq!(entry.date_sort, "2024-01-01 12:00 (approx)");
+        assert_eq!(entry.date_sort, "");
 
         let placeholder = fetched_to_email_entry(None, None, &fetched("(unknown date)"));
         assert_eq!(placeholder.date_display, "(unknown d");
-        assert_eq!(placeholder.date_sort, "(unknown date)");
+        assert_eq!(placeholder.date_sort, "");
 
         let unicode = fetched_to_email_entry(None, None, &fetched("日本語の日付です、これは長い"));
         assert_eq!(unicode.date_display, "日本語の日付です、こ");
