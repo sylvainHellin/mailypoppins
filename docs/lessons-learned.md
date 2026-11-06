@@ -3492,6 +3492,11 @@ A read joined only while in flight costs nothing in release, since nothing is ca
 A full-block fill on two adjacent TUI rows merges into one tall block; the seven-eighths block (U+2587) keeps each row's busy cells apart.
 In the default theme `theme.code` equals `theme.selection`, so the golden frames' style runs tag a `code`-coloured cell as `fg:selection`, and the goldens do not tag `heading` at all, so a focus cue in that colour shows there only as `bold`.
 
+## Naming rows that clash needs a cascade of cuts (2026-11-06, PERSO-255)
+
+No single truncation tells clashing addresses apart in a twelve-cell column: a start cut loses a difference at the end (info@company-a.de, info@company-b.de), a middle cut loses one just after the @ (office@ls1.tum.de, office@ls2.tum.de).
+`row_names` in `clients/tui/src/ui/availability.rs` gives each row the first of a start cut, a middle cut and a cut around where it differs that reads unlike every other row, and settles rows round by round so no later row lands on a taken name; a review that removed each cut in turn found every one pinned by a test.
+
 ## A wrapped Paragraph clamps its scroll by its rendered rows (2026-11-05, PERSO-270)
 
 A wrapped `Paragraph` cannot clamp its scroll by `lines.len()`: the event card counts its rendered rows with `Paragraph::line_count(width)` (ratatui feature `unstable-rendered-line-info`, which a ratatui upgrade may rename) and clamps the stored offset in the `&mut App` renderer, so `k` moves the view at once however often `j` was pressed past the end.
