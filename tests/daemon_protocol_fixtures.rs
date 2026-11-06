@@ -173,6 +173,21 @@ const FREEBUSY_FIXTURES: &[&str] = &[
     "notification.calendar_freebusy_finished.json",
 ];
 
+/// The fixtures PERSO-261 adds for the blocked senders: a pair per method and
+/// one `sender.blocklist_changed`.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const SENDER_FIXTURES: &[&str] = &[
+    "sender.block.request.json",
+    "sender.block.response.json",
+    "sender.list.request.json",
+    "sender.list.response.json",
+    "sender.unblock.request.json",
+    "sender.unblock.response.json",
+    "notification.sender_blocklist_changed.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -244,6 +259,7 @@ fn every_required_fixture_is_committed() {
         .chain(CALENDAR_WRITE_FIXTURES)
         .chain(REMINDER_FIXTURES)
         .chain(FREEBUSY_FIXTURES)
+        .chain(SENDER_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();

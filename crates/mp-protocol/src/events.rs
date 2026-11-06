@@ -209,6 +209,12 @@ pub const KIND_SIGNATURE_CHANGED: &str = "signature.changed";
 /// leftovers, 2026-10-22).
 pub const KIND_SIGNATURE_REMOVED: &str = "signature.removed";
 
+/// The `kind` a change of the blocked senders travels as (PERSO-261): a
+/// `sender.block` that added an entry or a `sender.unblock` that removed one.
+/// The payload is [`crate::sender::BlockedSenders`], the whole list after the
+/// change.
+pub const KIND_SENDER_BLOCKLIST_CHANGED: &str = "sender.blocklist_changed";
+
 /// The `kind` an account's contact index travels as once it was written (the
 /// daemon leftovers, 2026-10-22).
 pub const KIND_CONTACT_CHANGED: &str = "contact.changed";

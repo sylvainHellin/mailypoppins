@@ -1,0 +1,9 @@
+{
+  "id": 93,
+  "jsonrpc": "2.0",
+  "result": {
+    "entries": [
+      "@spam.example"
+    ]
+  }
+}

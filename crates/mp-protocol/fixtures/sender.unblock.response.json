@@ -1,0 +1,11 @@
+{
+  "id": 92,
+  "jsonrpc": "2.0",
+  "result": {
+    "entries": [
+      "@spam.example"
+    ],
+    "entry": "offers@shop.example",
+    "removed": true
+  }
+}

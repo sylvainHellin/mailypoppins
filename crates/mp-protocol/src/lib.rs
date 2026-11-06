@@ -22,6 +22,7 @@ pub mod operation;
 pub mod reminder;
 pub mod rendition;
 pub mod send;
+pub mod sender;
 pub mod signature;
 pub mod state;
 

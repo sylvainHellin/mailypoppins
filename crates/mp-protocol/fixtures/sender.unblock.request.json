@@ -1,0 +1,8 @@
+{
+  "id": 92,
+  "jsonrpc": "2.0",
+  "method": "sender.unblock",
+  "params": {
+    "address": "Offers@Shop.example"
+  }
+}

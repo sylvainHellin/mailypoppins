@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use mp_protocol::{
     account, calendar, contact, diagnostic, draft, events, listing, operation, reminder, rendition,
-    send, signature, state,
+    send, sender, signature, state,
 };
 use ts_rs::{Config, TS};
 
@@ -120,6 +120,13 @@ fn export_into(dir: &Path) -> usize {
         events::ContactChanged,
         signature::SignatureListing,
         signature::SignatureFile,
+        sender::SenderBlockParams,
+        sender::SenderUnblockParams,
+        sender::BlockedSenders,
+        sender::BlockMoved,
+        sender::BlockSkipped,
+        sender::SenderBlocked,
+        sender::SenderUnblocked,
         contact::VcardDraft,
         contact::RefusedRebuild,
         events::ConfigInvalid,

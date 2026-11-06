@@ -1,0 +1,9 @@
+{
+  "id": 91,
+  "jsonrpc": "2.0",
+  "method": "sender.block",
+  "params": {
+    "address": "@spam.example",
+    "move_existing": true
+  }
+}

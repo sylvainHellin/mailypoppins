@@ -1,0 +1,25 @@
+{
+  "id": 91,
+  "jsonrpc": "2.0",
+  "result": {
+    "added": true,
+    "entries": [
+      "@spam.example",
+      "offers@shop.example"
+    ],
+    "entry": "@spam.example",
+    "moved": [
+      {
+        "account": "tum",
+        "count": 3,
+        "mailbox": "Junk Email"
+      }
+    ],
+    "skipped": [
+      {
+        "account": "perso",
+        "reason": "perso has no Junk folder; its Inbox keeps the sender's mail"
+      }
+    ]
+  }
+}

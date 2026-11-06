@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "sender.blocklist_changed",
+    "payload": {
+      "entries": [
+        "@spam.example"
+      ]
+    },
+    "revision": 4242
+  }
+}
