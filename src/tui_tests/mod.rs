@@ -38,5 +38,6 @@ mod oracle;
 mod preview;
 mod queries;
 mod reminders;
+mod senders;
 mod signatures;
 mod types;

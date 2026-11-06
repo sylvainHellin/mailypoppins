@@ -802,6 +802,8 @@ impl App {
             | Overlay::Dir(_)
             | Overlay::Mailbox(_)
             | Overlay::Signatures(_)
+            | Overlay::BlockSender(_)
+            | Overlay::BlockedSenders(_)
             | Overlay::Rsvp(_)
             | Overlay::EventForm(_)
             | Overlay::EventRemove(_)
@@ -2207,9 +2209,10 @@ impl App {
         }
     }
 
-    /// One `signature.*` call on the session: the answer, or the sentence
-    /// the daemon refused with (`no daemon session` for an `App` with none).
-    pub(crate) fn signature_call(
+    /// One call the UI thread waits for on the session (a `signature.*` or a
+    /// `sender.*`): the answer, or the sentence the daemon refused with
+    /// (`no daemon session` for an `App` with none).
+    pub(crate) fn daemon_call(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -2231,7 +2234,7 @@ impl App {
         account: &str,
     ) -> Result<mp_protocol::signature::SignatureListing, String> {
         let answer =
-            self.signature_call("signature.list", serde_json::json!({ "account": account }))?;
+            self.daemon_call("signature.list", serde_json::json!({ "account": account }))?;
         serde_json::from_value(answer).map_err(|e| format!("reading signature.list: {e}"))
     }
 
@@ -2251,6 +2254,32 @@ impl App {
             Err(e) => {
                 self.set_status_level(format!("Cannot list signatures: {e}"), StatusLevel::Error)
             }
+        }
+    }
+
+    pub fn blocked_senders_mut(&mut self) -> Option<&mut BlockedSendersOverlay> {
+        match &mut self.overlay {
+            Overlay::BlockedSenders(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// The daemon's `sender.list`.
+    pub(crate) fn blocked_senders(&self) -> Result<Vec<String>, String> {
+        let answer = self.daemon_call(
+            mp_protocol::sender::METHOD_SENDER_LIST,
+            serde_json::json!({}),
+        )?;
+        serde_json::from_value::<mp_protocol::sender::BlockedSenders>(answer)
+            .map(|listed| listed.entries)
+            .map_err(|e| format!("reading sender.list: {e}"))
+    }
+
+    /// A `sender.blocklist_changed` from any client: an open blocked-senders
+    /// overlay takes the list it carries, which is the whole list.
+    pub fn apply_blocklist(&mut self, entries: Vec<String>) {
+        if let Some(overlay) = self.blocked_senders_mut() {
+            overlay.apply(entries);
         }
     }
 

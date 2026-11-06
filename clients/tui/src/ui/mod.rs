@@ -319,6 +319,8 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::Dir(picker) => overlays::render_dir_picker(picker, frame, area),
         Overlay::Mailbox(picker) => overlays::render_mailbox_picker(picker, frame, area),
         Overlay::Signatures(overlay) => overlays::render_signatures_overlay(overlay, frame, area),
+        Overlay::BlockSender(chooser) => overlays::render_block_chooser(chooser, frame, area),
+        Overlay::BlockedSenders(overlay) => overlays::render_blocked_senders(overlay, frame, area),
         Overlay::Rsvp(overlay) => overlays::render_rsvp_overlay(overlay, frame, area),
         Overlay::EventForm(form) => {
             overlays::render_event_form(form, &app.calendar_view.availability, frame, area)

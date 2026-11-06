@@ -1,6 +1,8 @@
 pub mod actions;
 pub mod app;
 pub mod bg;
+#[cfg(test)]
+mod block_tests;
 pub(crate) mod clipboard;
 pub mod commands;
 #[cfg(test)]

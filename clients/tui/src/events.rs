@@ -51,8 +51,9 @@ use mp_protocol::events::{
     KIND_CALENDAR_CHANGED, KIND_CALENDAR_REMINDER, KIND_CALENDAR_REMINDERS_CHANGED,
     KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
     KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
-    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
-    KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
+    KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED,
+    KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -393,6 +394,19 @@ impl App {
             // daemon for its listing again. Nothing else holds a signature.
             KIND_SIGNATURE_CHANGED | KIND_SIGNATURE_REMOVED => {
                 self.refresh_signatures_overlay();
+                Applied::Ignored
+            }
+            // The blocked senders changed, here or in another client
+            // (PERSO-261): the payload is the whole list, which an open
+            // blocked-senders overlay takes as it is. The mail a block moved
+            // arrives as the counts and rows of a move.
+            KIND_SENDER_BLOCKLIST_CHANGED => {
+                match serde_json::from_value::<mp_protocol::sender::BlockedSenders>(
+                    event.payload.clone(),
+                ) {
+                    Ok(listed) => self.apply_blocklist(listed.entries),
+                    Err(e) => log::warn!("[events] a blocklist_changed payload is not a list: {e}"),
+                }
                 Applied::Ignored
             }
             // The active account's contact index was written (a rebuild, a

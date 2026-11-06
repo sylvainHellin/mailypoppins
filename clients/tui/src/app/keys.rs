@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
-    ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog,
-    DirPicker, DirPickerMode, EmailEntry, EntryKey, EventFormRow, Focus, MailboxKind,
-    MailboxPicker, Message, MessageRef, Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, RsvpRow,
-    SearchField, SearchOverlayFocus, SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel,
-    ThreadEntry, ThreadOverlay,
+    AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, BlockChooser,
+    BlockedSendersOverlay, CommandPalette, ComposeField, ComposeMode, ComposeSuggestion,
+    ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode, EmailEntry, EntryKey,
+    EventFormRow, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay, PickerPurpose,
+    RsvpChoice, RsvpOverlay, RsvpRow, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
+    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -26,6 +26,8 @@ impl App {
             Overlay::Dir(_) => return self.handle_dir_picker_key(key),
             Overlay::Mailbox(_) => return self.handle_mailbox_picker_key(key),
             Overlay::Signatures(_) => return self.handle_signatures_key(key),
+            Overlay::BlockSender(_) => return self.handle_block_chooser_key(key),
+            Overlay::BlockedSenders(_) => return self.handle_blocked_senders_key(key),
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
             Overlay::EventForm(_) => return self.handle_event_form_key(key),
             Overlay::EventRemove(_) => return self.handle_event_remove_key(key),
@@ -249,6 +251,10 @@ impl App {
             A::OpenSignatures => {
                 self.pending_prefix = None;
                 self.open_signatures_overlay();
+            }
+            A::OpenBlockedSenders => {
+                self.pending_prefix = None;
+                self.open_blocked_senders();
             }
             A::OpenActivityOverlay => {
                 self.pending_prefix = None;
@@ -838,6 +844,10 @@ impl App {
                 self.pending_prefix = None;
                 self.push_action(Action::CopyMessageRef);
             }
+            A::BlockSender => {
+                self.pending_prefix = None;
+                self.open_block_chooser();
+            }
             A::ToggleRead => {
                 self.pending_prefix = None;
                 if !self.selection.is_empty() {
@@ -1106,7 +1116,7 @@ impl App {
                             let name = overlay.selected_name().map(str::to_string);
                             if let Some(name) = name {
                                 let deleted = self
-                                    .signature_call(
+                                    .daemon_call(
                                         "signature.delete",
                                         serde_json::json!({
                                             "account": overlay.account,
@@ -2814,7 +2824,7 @@ impl App {
             Some(name.as_str())
         };
         let set = self
-            .signature_call(
+            .daemon_call(
                 "signature.set_default",
                 serde_json::json!({"account": account, "name": target}),
             )
@@ -2850,7 +2860,7 @@ impl App {
             Overlay::Signatures(overlay) => overlay.input.clone(),
             _ => return,
         };
-        match self.signature_call("signature.create", serde_json::json!({"name": name})) {
+        match self.daemon_call("signature.create", serde_json::json!({"name": name})) {
             Ok(_) => {
                 if let Some(overlay) = self.signatures_overlay_mut() {
                     overlay.mode = SignaturesMode::Browse;
@@ -2886,7 +2896,7 @@ impl App {
             _ => return,
         };
         let renamed = self
-            .signature_call(
+            .daemon_call(
                 "signature.rename",
                 serde_json::json!({"account": account, "old": old, "new": new}),
             )
@@ -2923,7 +2933,7 @@ impl App {
         };
         // The file the daemon would delete, as `signature.read` names it.
         let detail = self
-            .signature_call("signature.read", serde_json::json!({"name": name}))
+            .daemon_call("signature.read", serde_json::json!({"name": name}))
             .ok()
             .and_then(|answer| answer["path"].as_str().map(str::to_string))
             .unwrap_or_else(|| format!("{name}.md"));
@@ -2932,6 +2942,146 @@ impl App {
             detail,
             action: ConfirmAction::DeleteSignature(overlay),
         });
+    }
+
+    // -----------------------------------------------------------------
+    // Blocked senders (PERSO-261)
+    // -----------------------------------------------------------------
+
+    /// `B`: the chooser between the cursor message's sender address and its
+    /// `@domain`. A draft, a server-only hit and a sender with no address
+    /// have nothing to block, which the status line says.
+    fn open_block_chooser(&mut self) {
+        let Some(email) = self.selected_email() else {
+            return;
+        };
+        if email.msg.is_none() {
+            self.set_status("Block needs a received message".to_string());
+            return;
+        }
+        match BlockChooser::for_sender(&email.from) {
+            Some(chooser) => self.overlay = Overlay::BlockSender(chooser),
+            None => self.set_status(format!("No address to block in '{}'", email.from)),
+        }
+    }
+
+    /// The chooser: `j`/`k` (and the arrows, Tab) move between the address
+    /// and the domain, `a` and `d` pick one, Enter blocks the picked one,
+    /// Esc or `q` cancels.
+    fn handle_block_chooser_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::BlockSender(chooser) = &mut self.overlay else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => chooser.selected = 1,
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => chooser.selected = 0,
+            KeyCode::Char('a') => chooser.selected = 0,
+            KeyCode::Char('d') => chooser.selected = 1,
+            KeyCode::Enter => {
+                let entry = chooser.entry().to_string();
+                self.close_overlay();
+                self.block_sender(&entry);
+            }
+            KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// `sender.block` on `entry`, the existing Inbox mail moved too, and the
+    /// answer on the status line.
+    fn block_sender(&mut self, entry: &str) {
+        let blocked = self
+            .daemon_call(
+                mp_protocol::sender::METHOD_SENDER_BLOCK,
+                serde_json::json!({"address": entry}),
+            )
+            .and_then(|answer| {
+                serde_json::from_value::<mp_protocol::sender::SenderBlocked>(answer)
+                    .map_err(|e| format!("reading sender.block: {e}"))
+            });
+        match blocked {
+            Ok(blocked) => {
+                let level = if blocked.skipped.is_empty() {
+                    StatusLevel::Success
+                } else {
+                    StatusLevel::Warning
+                };
+                self.set_status_level(block_summary(&blocked), level);
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot block {entry}: {e}"), StatusLevel::Error)
+            }
+        }
+    }
+
+    /// `sb`: the blocked senders, read from the daemon.
+    fn open_blocked_senders(&mut self) {
+        match self.blocked_senders() {
+            Ok(entries) => {
+                let mut overlay = BlockedSendersOverlay::default();
+                overlay.apply(entries);
+                self.overlay = Overlay::BlockedSenders(overlay);
+            }
+            Err(e) => self.set_status_level(
+                format!("Cannot list the blocked senders: {e}"),
+                StatusLevel::Error,
+            ),
+        }
+    }
+
+    /// The list: `j`/`k` move, `u` unblocks the entry under the cursor, Esc
+    /// or `q` closes.
+    fn handle_blocked_senders_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::BlockedSenders(overlay) = &mut self.overlay else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if overlay.selected + 1 < overlay.entries.len() {
+                    overlay.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Char('u') => match overlay.selected_entry().map(str::to_string) {
+                Some(entry) => self.unblock_sender(&entry),
+                None => self.set_status("No blocked sender to unblock".to_string()),
+            },
+            KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// `sender.unblock` on `entry`; the answer's list replaces the overlay's.
+    fn unblock_sender(&mut self, entry: &str) {
+        let unblocked = self
+            .daemon_call(
+                mp_protocol::sender::METHOD_SENDER_UNBLOCK,
+                serde_json::json!({"address": entry}),
+            )
+            .and_then(|answer| {
+                serde_json::from_value::<mp_protocol::sender::SenderUnblocked>(answer)
+                    .map_err(|e| format!("reading sender.unblock: {e}"))
+            });
+        match unblocked {
+            Ok(unblocked) => {
+                self.apply_blocklist(unblocked.entries);
+                self.set_status(if unblocked.removed {
+                    format!(
+                        "Unblocked {}; its mail already in Junk stays there",
+                        unblocked.entry
+                    )
+                } else {
+                    format!("{} was not blocked", unblocked.entry)
+                });
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot unblock {entry}: {e}"), StatusLevel::Error)
+            }
+        }
     }
 
     /// Command-palette input (`:` / `Ctrl+p`, #0100): a text-input fuzzy finder
@@ -3454,6 +3604,36 @@ fn confirm_title(verb: &str, email: &EmailEntry) -> String {
         Some(n) if n > 1 => format!("{verb} the {n} emails of this conversation?"),
         _ => format!("{verb} this email?"),
     }
+}
+
+/// The status line after a `sender.block` (PERSO-261): what was blocked, how
+/// many messages moved to Junk and on which accounts, and the daemon's own
+/// sentence for each account that has no Junk folder.
+pub(crate) fn block_summary(blocked: &mp_protocol::sender::SenderBlocked) -> String {
+    let mut out = if blocked.added {
+        format!("Blocked {}", blocked.entry)
+    } else {
+        format!("{} was already blocked", blocked.entry)
+    };
+    let moved: u64 = blocked.moved.iter().map(|m| m.count).sum();
+    if moved > 0 {
+        let accounts: Vec<String> = blocked
+            .moved
+            .iter()
+            .map(|m| format!("{} {}", m.account, m.count))
+            .collect();
+        let noun = if moved == 1 { "message" } else { "messages" };
+        out.push_str(&format!(
+            "; {moved} {noun} moved to Junk ({})",
+            accounts.join(", ")
+        ));
+    } else {
+        out.push_str("; no Inbox mail from it");
+    }
+    for skipped in &blocked.skipped {
+        out.push_str(&format!("; {}", skipped.reason));
+    }
+    out
 }
 
 /// Build the visible-index view of `emails` for `query` from scratch.

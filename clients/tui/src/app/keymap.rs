@@ -344,6 +344,11 @@ pub enum KeyAction {
     Send,
     SendAll,
     CopyMessageRef,
+    /// `B`: the chooser between the cursor message's sender address and its
+    /// `@domain`, whose Enter blocks the one picked (PERSO-261).
+    BlockSender,
+    /// `sb`: the blocked senders, to unblock one (PERSO-261).
+    OpenBlockedSenders,
     OpenAttachment,
     SaveAttachment,
     /// Leader `t e`: save the message itself as `<date>_<subject>.eml` into a
@@ -423,6 +428,7 @@ impl KeyAction {
                 | KeyAction::ToggleActivityLog
                 | KeyAction::OpenActivityOverlay
                 | KeyAction::OpenReminders
+                | KeyAction::OpenBlockedSenders
                 | KeyAction::OpenLogFile
                 | KeyAction::OpenConfigFile
                 | KeyAction::SwitchView
@@ -888,6 +894,17 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Open log file in $EDITOR",
         false,
     ),
+    // The blocked senders (PERSO-261): one list for every account, so it is
+    // a system setting beside the config and the log, live in every view.
+    p(
+        "sb",
+        Chord::Char('b'),
+        's',
+        KeyCtx::Global,
+        KeyAction::OpenBlockedSenders,
+        "Blocked senders (unblock one)",
+        false,
+    ),
     // View switcher leader (#0033): Space opens the leader, then m/c/a picks a
     // view. Manual (view-agnostic) so it works from every pane and view.
     leader(' ', KeyCtx::Global, KeyAction::Manual),
@@ -1036,6 +1053,16 @@ pub static KEYMAP: &[KeyBinding] = &[
         Guard::NonEmptyList,
         KeyAction::CopyMessageRef,
         "Copy selector (mp://)",
+        false,
+    ),
+    // PERSO-261: `B` is bound in no context of either client.
+    bg(
+        "B",
+        Chord::Char('B'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::BlockSender,
+        "Block the sender (address or @domain), its mail to Junk",
         false,
     ),
     short(

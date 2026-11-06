@@ -5,10 +5,11 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::super::app::{
-    AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
-    ConfirmDialog, DirPicker, DirPickerMode, EventForm, EventFormRow, EventRemoveOverlay,
-    EventScopeChooser, MailboxPicker, PersistentError, PickerPurpose, RsvpOverlay, RsvpRow,
-    SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, BlockChooser,
+    BlockedSendersOverlay, CommandPalette, ConfirmDialog, DirPicker, DirPickerMode, EventForm,
+    EventFormRow, EventRemoveOverlay, EventScopeChooser, MailboxPicker, PersistentError,
+    PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay, ThreadEntry,
+    ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -809,6 +810,175 @@ pub(super) fn render_account_picker(
                 Style::default().fg(theme::active().text_muted),
             )),
             footer_area,
+        );
+    }
+}
+
+/// The header row of a picker-shaped modal: `title` on the left and an
+/// ` esc close ` chip on the right edge.
+fn render_modal_title(frame: &mut Frame, header: Rect, title: &str) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme::active().border_focused)
+                .add_modifier(Modifier::BOLD),
+        )),
+        header,
+    );
+    let chip_w = 10u16.min(header.width);
+    let chip = Rect {
+        x: header.x + header.width.saturating_sub(chip_w),
+        y: header.y,
+        width: chip_w,
+        height: 1,
+    };
+    render_action_button(
+        frame,
+        chip,
+        Some("esc"),
+        "close",
+        theme::active().border_focused,
+    );
+}
+
+/// The block chooser (`B`, PERSO-261): the sender's address and its
+/// `@domain`, the cursor row highlighted, then what a block does, and the
+/// footer naming what Enter blocks.
+pub(super) fn render_block_chooser(chooser: &BlockChooser, frame: &mut Frame, area: Rect) {
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        60,
+        10,
+        theme::active().warning,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 1, 1);
+    render_modal_title(frame, stack.header, "Block sender");
+
+    const TAGS: [&str; 2] = ["  this address", "  everyone at this domain"];
+    let width = inner.width as usize;
+    // The tags line up after the longer entry.
+    let column = chooser
+        .entries()
+        .iter()
+        .map(|e| e.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(width.saturating_sub(TAGS[1].len()));
+    let mut lines: Vec<Line> = chooser
+        .entries()
+        .iter()
+        .zip(TAGS)
+        .enumerate()
+        .map(|(i, (entry, tag))| {
+            let style = if i == chooser.selected {
+                Style::default()
+                    .fg(theme::active().heading)
+                    .bg(theme::active().surface)
+            } else {
+                Style::default().fg(theme::active().text)
+            };
+            Line::from(vec![
+                Span::styled(format!("{:<column$}", truncate(entry, column)), style),
+                Span::styled(tag, Style::default().fg(theme::active().text_faint)),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(""));
+    for sentence in [
+        "Its mail in every account's Inbox moves to Junk,",
+        "now and as it arrives. Unblock it with s b.",
+    ] {
+        lines.push(Line::from(Span::styled(
+            truncate(sentence, width),
+            Style::default().fg(theme::active().text_muted),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), stack.content);
+
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "j/k choose  ",
+                    Style::default().fg(theme::active().text_muted),
+                ),
+                Span::styled("Enter", Style::default().fg(theme::active().warning)),
+                Span::styled(
+                    truncate(
+                        &format!(" block {}  Esc cancel", chooser.entry()),
+                        width.saturating_sub(17),
+                    ),
+                    Style::default().fg(theme::active().text_muted),
+                ),
+            ])),
+            footer,
+        );
+    }
+}
+
+/// The blocked senders (`sb`, PERSO-261): one row per entry, the cursor row
+/// highlighted and kept in view, or the sentence that says how to add one.
+pub(super) fn render_blocked_senders(
+    overlay: &BlockedSendersOverlay,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    const MAX_ROWS: usize = 15;
+    let rows = overlay.entries.len().clamp(1, MAX_ROWS);
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        56,
+        rows as u16 + 4,
+        theme::active().border_focused,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 1, 1);
+    render_modal_title(frame, stack.header, "Blocked senders");
+
+    let width = inner.width as usize;
+    let shown = (stack.content.height as usize).max(1);
+    let first = overlay.selected.saturating_sub(shown - 1);
+    let lines: Vec<Line> = if overlay.entries.is_empty() {
+        vec![Line::from(Span::styled(
+            "No blocked senders; B on a message blocks its sender",
+            Style::default().fg(theme::active().text_faint),
+        ))]
+    } else {
+        overlay
+            .entries
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(shown)
+            .map(|(i, entry)| {
+                let style = if i == overlay.selected {
+                    Style::default()
+                        .fg(theme::active().heading)
+                        .bg(theme::active().surface)
+                } else {
+                    Style::default().fg(theme::active().text)
+                };
+                Line::from(Span::styled(truncate(entry, width), style))
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(lines), stack.content);
+
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "j/k nav  u unblock  Esc close",
+                Style::default().fg(theme::active().text_muted),
+            )),
+            footer,
         );
     }
 }

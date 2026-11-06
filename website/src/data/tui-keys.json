@@ -26,6 +26,7 @@
       { "key": "sl", "action": "Activity log overlay" },
       { "key": "sc", "action": "Open config.toml in $EDITOR" },
       { "key": "sf", "action": "Open log file in $EDITOR" },
+      { "key": "sb", "action": "Blocked senders (unblock one)" },
       { "key": "Space m", "action": "Switch to Mail view" },
       { "key": "Space c", "action": "Switch to Contacts view" },
       { "key": "Space a", "action": "Switch to Calendar view" }
@@ -44,6 +45,7 @@
       { "key": "*", "action": "Toggle flag/star" },
       { "key": "M", "action": "Move to mailbox (fuzzy picker)" },
       { "key": "y", "action": "Copy selector (mp://)" },
+      { "key": "B", "action": "Block the sender (address or @domain), its mail to Junk" },
       { "key": "Esc", "action": "Clear selection / return to list" },
       { "key": "gj / gk", "action": "Next / previous message" },
       { "key": "fm", "action": "Filter the current list" },

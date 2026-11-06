@@ -2828,6 +2828,10 @@ pub enum Overlay {
     /// Signature management (`cs`, #0107): the account's signature files, the
     /// default marked, with create / rename / edit / delete.
     Signatures(SignaturesOverlay),
+    /// The sender's address or its `@domain`, to block (`B`, PERSO-261).
+    BlockSender(BlockChooser),
+    /// The blocked senders, to unblock one (`sb`, PERSO-261).
+    BlockedSenders(BlockedSendersOverlay),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
     /// The event form (`n` in the Calendar view, `E` on an event, PERSO-255).
@@ -3034,6 +3038,78 @@ impl SignaturesOverlay {
             (Some(name), Some(default)) => name == default,
             _ => false,
         }
+    }
+}
+
+/// The chooser `B` opens on a received message (PERSO-261): the sender's
+/// address and its `@domain`, the cursor on one. It is the confirmation too:
+/// it names what Enter blocks and says where the mail goes, and nothing is
+/// blocked until Enter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockChooser {
+    /// The address a reply goes to, lowercase, as the list would hold it.
+    pub address: String,
+    /// The address's domain with its `@`, lowercase.
+    pub domain: String,
+    /// `0` for the address, `1` for the domain.
+    pub selected: usize,
+}
+
+impl BlockChooser {
+    /// The chooser for a message whose `From` is `from`, on the address;
+    /// `None` when it names no address with a domain to block.
+    pub fn for_sender(from: &str) -> Option<Self> {
+        let address = mp_core::parse::extract_email_address(from)
+            .trim()
+            .to_lowercase();
+        let (local, domain) = address.rsplit_once('@')?;
+        if local.is_empty() || domain.is_empty() || domain.contains(char::is_whitespace) {
+            return None;
+        }
+        let domain = format!("@{domain}");
+        Some(Self {
+            address,
+            domain,
+            selected: 0,
+        })
+    }
+
+    /// The two entries, in the order the rows show them.
+    pub fn entries(&self) -> [&str; 2] {
+        [&self.address, &self.domain]
+    }
+
+    /// The entry Enter blocks.
+    pub fn entry(&self) -> &str {
+        self.entries()[self.selected.min(1)]
+    }
+}
+
+/// The blocked senders overlay (`sb`, PERSO-261): the daemon's one list for
+/// every account as `sender.list` last answered it, or as the last
+/// `sender.blocklist_changed` carried it, with the cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockedSendersOverlay {
+    /// The entries, lowercase and sorted.
+    pub entries: Vec<String>,
+    /// Cursor into `entries`.
+    pub selected: usize,
+}
+
+impl BlockedSendersOverlay {
+    /// Take a new list, keeping the cursor on its entry when it is still
+    /// there, else in range.
+    pub fn apply(&mut self, entries: Vec<String>) {
+        let kept = self
+            .selected_entry()
+            .and_then(|old| entries.iter().position(|e| e == old));
+        self.entries = entries;
+        self.selected = kept.unwrap_or(self.selected.min(self.entries.len().saturating_sub(1)));
+    }
+
+    /// The entry under the cursor, `None` on an empty list.
+    pub fn selected_entry(&self) -> Option<&str> {
+        self.entries.get(self.selected).map(String::as_str)
     }
 }
 

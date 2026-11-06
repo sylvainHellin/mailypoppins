@@ -1573,10 +1573,10 @@ fn note_compose_signature_edited(app: &mut App) {
 /// daemon's, and this process only runs the editor on the path it is given.
 fn signature_path(app: &App, name: &str) -> std::result::Result<PathBuf, String> {
     let named = json!({ "name": name });
-    let file = match app.signature_call("signature.read", named.clone()) {
+    let file = match app.daemon_call("signature.read", named.clone()) {
         Ok(file) => file,
         Err(e) if e.starts_with("no signature named") => {
-            app.signature_call("signature.create", named)?
+            app.daemon_call("signature.create", named)?
         }
         Err(e) => return Err(e),
     };

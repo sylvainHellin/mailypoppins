@@ -47,10 +47,10 @@ use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use crate::app::{
-    AccountPicker, AccountState, App, CalendarEvent, CalendarEventTime, CalendarInfo,
-    CalendarLayout, CommandPalette, ComposeField, ComposeMode, ComposeWizard, EmailEntry, EntryKey,
-    MailboxInfo, MailboxKind, MessageRef, Overlay, SearchField, SearchOverlayFocus, SignaturesMode,
-    SignaturesOverlay, View,
+    AccountPicker, AccountState, App, BlockChooser, BlockedSendersOverlay, CalendarEvent,
+    CalendarEventTime, CalendarInfo, CalendarLayout, CommandPalette, ComposeField, ComposeMode,
+    ComposeWizard, EmailEntry, EntryKey, MailboxInfo, MailboxKind, MessageRef, Overlay,
+    SearchField, SearchOverlayFocus, SignaturesMode, SignaturesOverlay, View,
 };
 use crate::theme::{self, Theme};
 use mp_core::types::EventFrontmatter;
@@ -958,6 +958,43 @@ pub fn signatures_overlay_app() -> App {
 #[test]
 pub fn golden_signatures_overlay() {
     let mut app = signatures_overlay_app();
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The block chooser (`B`, PERSO-261) on a sender's address and its domain,
+/// the cursor on the domain: the two rows, what a block does, and the footer
+/// naming what Enter blocks.
+pub fn block_chooser_app() -> App {
+    let mut app = mail_fixture();
+    let mut chooser = BlockChooser::for_sender("Offers <Offers@Shop.Example>").expect("an address");
+    chooser.selected = 1;
+    app.overlay = Overlay::BlockSender(chooser);
+    app
+}
+
+#[test]
+pub fn golden_block_chooser() {
+    let mut app = block_chooser_app();
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The blocked senders (`sb`, PERSO-261): an address and a domain, the cursor
+/// on the second.
+pub fn blocked_senders_app() -> App {
+    let mut app = mail_fixture();
+    app.overlay = Overlay::BlockedSenders(BlockedSendersOverlay {
+        entries: vec![
+            "@spam.example".to_string(),
+            "offers@shop.example".to_string(),
+        ],
+        selected: 1,
+    });
+    app
+}
+
+#[test]
+pub fn golden_blocked_senders() {
+    let mut app = blocked_senders_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
