@@ -17,7 +17,10 @@ use mp_protocol::sender::{BlockMoved, BlockSkipped, SenderBlocked};
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
-use crate::app::{App, BlockChooser, EmailEntry, KeyAction, MessageRef, Overlay, StatusLevel};
+use crate::app::{
+    Action, App, BgResult, BlockChooser, EmailEntry, KeyAction, MailboxInfo, MailboxKind,
+    MessageRef, Overlay, StatusLevel,
+};
 
 const INSTANCE: &str = "block-tests";
 const SKIPPED: &str = "home has no Junk folder, so its Inbox keeps this sender's mail";
@@ -230,6 +233,106 @@ fn enter_blocks_the_picked_entry_and_the_status_line_counts_the_moves() {
         ),
         "an account left alone is a warning"
     );
+}
+
+/// A block that moved the active account's Inbox mail reads its listings
+/// again, since the daemon publishes the counts of the move and no row: the
+/// Inbox and Junk caches go, the sidebar is recounted, and the open Inbox is
+/// loaded afresh, so the moved messages, the cursor one included, leave the
+/// list.
+#[test]
+fn a_block_that_moved_the_open_inbox_reloads_it() {
+    let mailbox = |label: &str, id: &str, kind: MailboxKind| MailboxInfo {
+        label: label.to_string(),
+        icon: "",
+        id: id.to_string(),
+        kind,
+        server_name: None,
+    };
+    let kept = received(2, "Alice <alice@example.org>");
+    let (mut app, daemon) = app(
+        vec![
+            received(1, "Offers <offers@shop.example>"),
+            kept.clone(),
+            received(3, "Deals <deals@shop.example>"),
+        ],
+        &[],
+    );
+    app.account_config.name = "work".to_string();
+    app.mailboxes = vec![
+        mailbox("Inbox", "inbox", MailboxKind::Inbox),
+        mailbox("Junk", "Junk", MailboxKind::Extra),
+        mailbox("Sent", "sent", MailboxKind::Sent),
+    ];
+    let cached = Some(Arc::new(Vec::new()));
+    app.email_cache = vec![Some(Arc::clone(&app.emails)), cached.clone(), cached];
+    app.mailbox_counts = vec![3, 0, 0];
+
+    press(&mut app, 'B');
+    press(&mut app, 'j');
+    key(&mut app, KeyCode::Enter);
+
+    assert!(app.email_cache[0].is_none(), "the Inbox listing is stale");
+    assert!(app.email_cache[1].is_none(), "the Junk listing is stale");
+    assert!(app.email_cache[2].is_some(), "Sent did not move");
+    assert!(
+        calls(&daemon).iter().any(|(m, _)| m == "mailbox.list"),
+        "the sidebar is recounted"
+    );
+    let load = app
+        .pending_actions
+        .iter()
+        .find_map(|a| match a {
+            Action::LoadMailbox {
+                mailbox_idx,
+                generation,
+            } => Some((*mailbox_idx, *generation)),
+            _ => None,
+        })
+        .expect("the open Inbox is read again");
+    assert_eq!(load, (0, app.mailbox_load_generation));
+
+    // The Inbox as the daemon lists it after the move.
+    app.bg_count += 1;
+    let account_index = app.active_account;
+    crate::bg::handle_bg_result(
+        &mut app,
+        BgResult::MailboxLoaded {
+            account_index,
+            mailbox_idx: load.0,
+            generation: load.1,
+            entries: vec![kept],
+        },
+    );
+    let listed: Vec<&str> = app.visible_emails().map(|e| e.from.as_str()).collect();
+    assert_eq!(listed, ["Alice <alice@example.org>"]);
+    assert_eq!(
+        app.selected_email().map(|e| e.from.as_str()),
+        Some("Alice <alice@example.org>"),
+        "the cursor leaves the moved message"
+    );
+}
+
+/// A block that moved another account's mail drops that account's cached
+/// listings and leaves the open list alone.
+#[test]
+fn a_block_that_moved_another_account_drops_its_caches() {
+    let (mut app, _daemon) = app(vec![received(1, "Offers <offers@shop.example>")], &[]);
+    app.account_config.name = "home".to_string();
+    let mut work = crate::app::AccountState::for_tests("work");
+    work.email_cache = vec![Some(Arc::new(Vec::new()))];
+    app.accounts = vec![crate::app::AccountState::for_tests("home"), work];
+    press(&mut app, 'B');
+    key(&mut app, KeyCode::Enter);
+    assert!(app.accounts[1].email_cache[0].is_none());
+    assert!(
+        app.email_cache[0].is_some(),
+        "the open list is not reloaded"
+    );
+    assert!(!app
+        .pending_actions
+        .iter()
+        .any(|a| matches!(a, Action::LoadMailbox { .. })));
 }
 
 /// A refusal reaches the status line as the daemon's sentence, as an error.

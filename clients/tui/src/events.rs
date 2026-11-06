@@ -399,7 +399,9 @@ impl App {
             // The blocked senders changed, here or in another client
             // (PERSO-261): the payload is the whole list, which an open
             // blocked-senders overlay takes as it is. The mail a block moved
-            // arrives as the counts and rows of a move.
+            // arrives as the counts invalidates of the mailboxes it left and
+            // entered, with no row event; the TUI that blocked reloads its
+            // listings on the answer (`land_block_moves`).
             KIND_SENDER_BLOCKLIST_CHANGED => {
                 match serde_json::from_value::<mp_protocol::sender::BlockedSenders>(
                     event.payload.clone(),

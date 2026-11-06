@@ -965,6 +965,7 @@ An `address` that is neither a full address nor `@domain` is `-32602` with the s
 After every tick that ran a body, each ready account with a server judges the Inbox rows that arrived since its last scan and moves the ones from a blocked sender to Junk the same way ([architecture.md](architecture.md#watchers)); a message the user moved back to the Inbox after it was judged stays there.
 `sender.unblock` only removes the entry: nothing moves back.
 Both writers publish `sender.blocklist_changed` `{entries}` when the list changed, and the mailbox counts of every account whose mail moved.
+As for a `message.move`, no row event names the moved messages: the client that blocked reads its listings of the accounts in `moved` again on the answer.
 
 ### The server search leg
 
