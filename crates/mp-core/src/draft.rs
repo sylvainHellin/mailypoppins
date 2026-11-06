@@ -658,20 +658,23 @@ where
 
 /// The header fields a forward quotes above the original, in Outlook's order
 /// and with its English labels: `From:`, `Sent:`, `To:`, `Cc:` when the
-/// original had one, `Subject:`. The values stay as written, but for the
-/// date, which Outlook's long form in this machine's zone replaces.
+/// original had one, `Subject:`. The addresses read as Outlook shows them,
+/// `Name <address>` with the name unquoted and unescaped and a name that only
+/// repeats its address dropped ([`crate::parse::readable_sender`]), as the
+/// reply attribution names the sender; the date is Outlook's long form in
+/// this machine's zone; the subject stays as written.
 fn forward_header_fields(source: &SourceMessage) -> Vec<(&'static str, String)> {
     let sent = source.date.as_deref().map_or_else(
         || "(unknown date)".to_string(),
         |date| outlook_sent_date(date, &chrono::Local),
     );
     let mut fields = vec![
-        ("From:", source.from.clone()),
+        ("From:", crate::parse::readable_sender(&source.from)),
         ("Sent:", sent),
-        ("To:", source.to.clone()),
+        ("To:", crate::parse::readable_recipients(&source.to)),
     ];
     if let Some(cc) = source.cc.as_deref().filter(|cc| !cc.trim().is_empty()) {
-        fields.push(("Cc:", cc.to_string()));
+        fields.push(("Cc:", crate::parse::readable_recipients(cc)));
     }
     fields.push(("Subject:", source.subject.clone()));
     fields
@@ -1070,8 +1073,8 @@ pub fn create_forward_draft_with(
     // join into one paragraph that clients show as one long line (PERSO-169).
     // Not a trailing backslash: the plain part is this Markdown as written,
     // so a backslash would show there, while trailing spaces are invisible.
-    // The values stay as written; `markdown_to_html` shows tag-shaped text in
-    // them as text.
+    // No value is Markdown-escaped; `markdown_to_html` shows tag-shaped text
+    // in them as text.
     let header_fields = forward_header_fields(inbox);
     let fwd_header = header_fields
         .iter()
@@ -4078,7 +4081,7 @@ mod tests {
     }
 
     /// Every forward header value is escaped in the HTML, the subject and the
-    /// recipient lists included, and left as written in the Markdown draft.
+    /// recipient lists included, and not escaped in the Markdown draft.
     #[test]
     fn forward_header_escapes_every_value_in_html_only() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4109,6 +4112,38 @@ mod tests {
         let path =
             create_forward_draft_from(&bare, "me@example.com", Some(tmp.path()), None).unwrap();
         assert!(companion_html(&path).contains("<b>From:</b> bare@example.com<br>"));
+    }
+
+    /// A forward's header block names From, To and Cc as Outlook shows them
+    /// and as the reply attribution names the sender: `Name <address>` with
+    /// a quoted name unquoted and unescaped, the address kept, and a name that
+    /// only repeats its address dropped. Markdown and HTML alike.
+    #[test]
+    fn a_forward_header_shows_quoted_names_unquoted_with_their_address() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            to: r#""Doe, Jane" <jane@x.com>, "Ops <team>" <ops@x.com>"#.into(),
+            cc: Some(r#""A@x.com" <a@x.com>, "Say \"hi\"" <s@x.com>"#.into()),
+            ..html_source(r#""Ops <team>" <ops@example.com>"#)
+        };
+        let path =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        let md = fs::read_to_string(&path).unwrap();
+        for line in [
+            "From: Ops <team> <ops@example.com>  \n",
+            "To: Doe, Jane <jane@x.com>, Ops <team> <ops@x.com>  \n",
+            "Cc: a@x.com, Say \"hi\" <s@x.com>  \n",
+        ] {
+            assert!(md.contains(line), "{line} missing: {md}");
+        }
+        let html = companion_html(&path);
+        for line in [
+            "<b>From:</b> Ops &lt;team&gt; &lt;ops@example.com&gt;<br>",
+            "<b>To:</b> Doe, Jane &lt;jane@x.com&gt;, Ops &lt;team&gt; &lt;ops@x.com&gt;<br>",
+            "<b>Cc:</b> a@x.com, Say &quot;hi&quot; &lt;s@x.com&gt;<br>",
+        ] {
+            assert!(html.contains(line), "{line} missing: {html}");
+        }
     }
 
     /// The HTML of a forward is Outlook's: the bold header block under a 1pt
@@ -4192,7 +4227,7 @@ mod tests {
     /// a forward whose companion is gone shows one header field per line
     /// instead of one long paragraph (PERSO-169). Two spaces rather than a
     /// trailing backslash: the plain part is the Markdown as written, and a
-    /// backslash would show there. The values themselves stay as written.
+    /// backslash would show there. No value is Markdown-escaped.
     #[test]
     fn markdown_forward_header_puts_each_field_on_its_own_line() {
         let tmp = tempfile::tempdir().unwrap();

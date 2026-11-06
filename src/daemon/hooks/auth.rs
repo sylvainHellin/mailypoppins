@@ -382,7 +382,7 @@ fn method_result(clause: &str) -> Option<MethodResult> {
 /// tokens either side of it stay apart.
 ///
 /// An unclosed `(` hides everything after it. `mp_core::parse` keeps its own
-/// `strip_comments` for address headers on the opposite rule, an unclosed `(`
+/// comment reader for address headers on the opposite rule, an unclosed `(`
 /// being literal text there, since a decoded display name may hold one. This
 /// header is raw, never decoded, and a comment in it may quote what a sender
 /// chose (an SPF domain, a HELO name): read as text after a truncated

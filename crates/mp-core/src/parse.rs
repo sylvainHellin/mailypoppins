@@ -1557,9 +1557,10 @@ pub fn extract_email_address(raw: &str) -> String {
 /// its last mailbox only: a blocked sender earlier in it goes unseen, the
 /// safe side for a block, and no `From` names two mailboxes in practice.
 pub fn mailbox_addresses(raw: &str) -> Vec<String> {
-    let bare = strip_comments(raw);
+    let kept = uncommented_offsets(raw);
+    let bare: String = kept.iter().map(|&at| char_at(raw, at)).collect();
     if bare.contains('<') {
-        return last_bracketed(raw)
+        return bracketed_in(raw, &kept)
             .map(|(_, address)| address)
             .into_iter()
             .collect();
@@ -1590,10 +1591,13 @@ pub fn mailbox_addresses(raw: &str) -> Vec<String> {
 /// it holds, comments dropped and trimmed; `None` when no `<` is outside a
 /// comment, or the last one is never closed or holds nothing.
 fn last_bracketed(raw: &str) -> Option<(usize, String)> {
-    let chars: Vec<(usize, char)> = uncommented_offsets(raw)
-        .into_iter()
-        .map(|at| (at, char_at(raw, at)))
-        .collect();
+    bracketed_in(raw, &uncommented_offsets(raw))
+}
+
+/// [`last_bracketed`] over `kept`, the offsets [`uncommented_offsets`]
+/// answers for `raw`, for a caller that already holds them.
+fn bracketed_in(raw: &str, kept: &[usize]) -> Option<(usize, String)> {
+    let chars: Vec<(usize, char)> = kept.iter().map(|&at| (at, char_at(raw, at))).collect();
     let open = chars.iter().rposition(|&(_, c)| c == '<')?;
     // `>` is searched only after the `<`: a display name may carry one of its
     // own (`Alerts > Prod <a@x>`), and reading up to it would run backwards.
@@ -1624,7 +1628,7 @@ fn display_mailbox(raw: &str) -> Option<(String, String)> {
 /// `name` with its quoted strings opened: the `"` dropped and a `\` escape
 /// inside one replaced by the character it escapes; trimmed. A `"` never
 /// closed opens nothing, the whole name then being taken as written, as
-/// [`strip_comments`] takes it.
+/// [`uncommented_offsets`] takes it.
 fn unquoted_display_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let (mut quoted, mut escaped) = (false, false);
@@ -1680,8 +1684,9 @@ pub fn readable_recipients(raw: &str) -> String {
         .join(", ")
 }
 
-/// `raw` without its RFC 5322 comments (`(...)`, nested, outside a quoted
-/// string).
+/// The byte offset in `raw` of every character outside its RFC 5322 comments
+/// (`(...)`, nested, outside a quoted string), which is `raw` with its
+/// comments dropped.
 ///
 /// A `(` never closed opens no comment and a `"` never closed opens no quoted
 /// string: either may be the decoded text of an encoded-word display name
@@ -1691,14 +1696,6 @@ pub fn readable_recipients(raw: &str) -> String {
 /// opposite rule: that header is raw, never decoded text, and a comment there
 /// may quote what a sender chose (an SPF domain, a HELO name), so an unclosed
 /// `(` must hide everything after it rather than let it read as a `pass`.
-fn strip_comments(raw: &str) -> String {
-    uncommented_offsets(raw)
-        .into_iter()
-        .map(|at| char_at(raw, at))
-        .collect()
-}
-
-/// The byte offset in `raw` of every character [`strip_comments`] keeps.
 fn uncommented_offsets(raw: &str) -> Vec<usize> {
     uncommented(raw, true)
         .or_else(|| uncommented(raw, false))

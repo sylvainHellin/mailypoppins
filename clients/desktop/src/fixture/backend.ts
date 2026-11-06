@@ -637,10 +637,13 @@ export function resetMock(): void {
   mock.updateRestartFailure = null;
 }
 
-/** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
+/**
+ * `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces;
+ * the bare address when there is no name or it only repeats the address.
+ */
 export function formatRecipient(name: string, address: string): string {
   const n = name.trim();
-  if (!n) return address;
+  if (!n || n.toLowerCase() === address.trim().toLowerCase()) return address;
   const atext = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~. \t]*$/.test(n);
   const quoted = atext ? n : `"${n.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   return `${quoted} <${address}>`;

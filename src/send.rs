@@ -1932,10 +1932,11 @@ mod tests {
 
     /// The sender's address survives the quote header of a sent reply,
     /// reply-all and forward in both parts (PERSO-169): the plain part
-    /// carries `Name <addr>` as written, and the HTML part, rendered to text
-    /// the way a mail client shows it, still names the address. Checked with
-    /// a companion HTML original (the escaped header) and without one (the
-    /// Markdown header, where `<addr>` is an email autolink).
+    /// carries `Name <addr>` with the name unquoted, and the HTML part,
+    /// rendered to text the way a mail client shows it, still names the
+    /// address. Checked with a companion HTML original (the escaped header)
+    /// and without one (the Markdown header, where `<addr>` is an email
+    /// autolink).
     #[test]
     fn a_sent_quote_header_keeps_the_sender_address_in_both_parts() {
         use crate::draft::{create_forward_draft_from, create_reply_draft_from, SourceMessage};
@@ -1988,12 +1989,9 @@ mod tests {
                     .unwrap();
                     let (plain, html) = text_parts(&built.raw);
                     let case = format!("{from} / {kind} / html {with_html}");
-                    // A reply's attribution names the sender unquoted; a
-                    // forward's header block carries the From as written.
-                    let written = match kind {
-                        "forward" => from.to_string(),
-                        _ => crate::parse::readable_sender(from),
-                    };
+                    // A reply's attribution and a forward's header block
+                    // both name the sender unquoted.
+                    let written = crate::parse::readable_sender(from);
                     let from = written.as_str();
                     assert!(plain[0].contains(from), "{case}: plain {}", plain[0]);
                     let shown = crate::parse::html_to_plain(&html[0]);
@@ -2050,9 +2048,9 @@ mod tests {
     /// field on its own line, and tag-shaped text in the subject, the
     /// recipients and the sender's display name (`Q&A <draft>`, `Ops <team>`)
     /// shows as text instead of being passed through as an unknown tag that
-    /// clients drop; the reply attribution keeps the name the same way. The
-    /// addresses still render (as autolinks) and the plain part carries every
-    /// value as written, with no Markdown escape in it.
+    /// clients drop; the reply attribution keeps the name the same way. Both
+    /// name the sender unquoted, the addresses still render (as autolinks)
+    /// and the plain part carries no Markdown escape.
     #[test]
     fn a_markdown_quote_header_keeps_its_lines_and_tag_shaped_text() {
         use crate::draft::{create_forward_draft_from, create_reply_draft_from, SourceMessage};
@@ -2096,16 +2094,18 @@ mod tests {
             let (plain, html) = text_parts(&built.raw);
             let shown = crate::parse::html_to_plain(&html[0]);
             let lines: Vec<&str> = shown.lines().map(str::trim).collect();
-            // The forward's header block carries the From as written; the
-            // reply's attribution names the sender unquoted.
-            let (name, written) = match kind {
-                "forward" => ("\"Ops <team>\"", from),
-                _ => (
-                    "Ops <team> ",
-                    "On Tue, 21 Oct 2026 20:12:00 +0200, Ops <team> <ops@example.com> wrote:",
-                ),
+            // The forward's header block and the reply's attribution both
+            // name the sender unquoted.
+            let written = match kind {
+                "forward" => "From: Ops <team> <ops@example.com>  ",
+                _ => "On Tue, 21 Oct 2026 20:12:00 +0200, Ops <team> <ops@example.com> wrote:",
             };
-            assert!(shown.contains(name), "{kind}: {shown}\n{}", html[0]);
+            assert!(
+                shown.contains("Ops <team> "),
+                "{kind}: {shown}\n{}",
+                html[0]
+            );
+            assert!(!shown.contains("\"Ops"), "{kind}: {shown}\n{}", html[0]);
             assert!(shown.contains("ops@example.com"), "{kind}: {shown}");
             assert!(plain[0].contains(written), "{kind}: {}", plain[0]);
             assert!(!plain[0].contains('\\'), "{kind}: {}", plain[0]);

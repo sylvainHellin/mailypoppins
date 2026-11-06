@@ -92,11 +92,12 @@ fn quote_display_name(name: &str) -> String {
 /// Emits `Name <addr>` with the display name wrapped in a quoted-string when it
 /// contains characters outside atext + FWS (e.g. the `,` in a `"Last, First"`
 /// contact name), so the result survives [`split_addresses`] as ONE recipient
-/// and parses cleanly. When `display_name` is empty (after trimming) the bare
-/// address is returned.
+/// and parses cleanly. The bare address when `display_name` is empty or only
+/// repeats the address (trimmed, in any case), as a contact harvested from a
+/// Graph `"a@x" <a@x>` often does.
 pub fn format_recipient(display_name: &str, address: &str) -> String {
     let name = display_name.trim();
-    if name.is_empty() {
+    if name.is_empty() || name.to_lowercase() == address.trim().to_lowercase() {
         return address.to_string();
     }
     format!("{} <{}>", quote_display_name(name), address)
@@ -245,5 +246,17 @@ mod tests {
         assert_eq!(format_recipient("", "bob@x.com"), "bob@x.com");
         // Whitespace-only display name is treated as empty.
         assert_eq!(format_recipient("   ", "bob@x.com"), "bob@x.com");
+    }
+
+    /// A name that only repeats the address, in any case and padding, adds
+    /// nothing to it: the recipient is the bare address, not `"a@x" <a@x>`.
+    #[test]
+    fn format_recipient_name_repeating_the_address_is_bare_address() {
+        assert_eq!(format_recipient("bob@x.com", "bob@x.com"), "bob@x.com");
+        assert_eq!(format_recipient(" Bob@X.com ", "bob@x.com"), "bob@x.com");
+        assert_eq!(
+            format_recipient("bob@x.com", "alice@x.com"),
+            "\"bob@x.com\" <alice@x.com>"
+        );
     }
 }

@@ -437,7 +437,7 @@ Snooze and Dismiss live in the frontend's reminder banner, which lists every wai
 
 `contact_search` is `contact.search {account, query, limit}`: the account's contacts a query fuzzy-matches, best first, or for an empty query the whole index in rank order (sent To, then Cc, then received, then recency), at most `limit`.
 The Contacts view asks with a `limit` of 1000, where the TUI lists the whole index from its cache file.
-Each row is the daemon's inline `{address, display_name, sent_to, sent_cc, received, score}` plus `recipient`, which the layer formats with `mp_core::addresses::format_recipient`: `Name <address>`, the name quoted when it holds a character outside atext and spaces (`"Doe, Jane" <jane@example.com>`), or the bare address when no message named one.
+Each row is the daemon's inline `{address, display_name, sent_to, sent_cc, received, score}` plus `recipient`, which the layer formats with `mp_core::addresses::format_recipient`: `Name <address>`, the name quoted when it holds a character outside atext and spaces (`"Doe, Jane" <jane@example.com>`), or the bare address when no message named one or the name only repeats the address.
 The webview puts `recipient` in To as it is and never quotes a name itself.
 `score` is the fuzzy match score of a query; every row of an empty query carries `4294967295` (`u32::MAX`), which the view does not show.
 With no cache on disk the daemon builds the index inside the query, which walks the whole store, so a first search can take seconds; when the cache guard refuses that build (another writer's index appeared meanwhile), the answer is the kept index and `rebuild` carries the protocol's `RefusedRebuild` `{saved, contacts, kept}`, which the webview says as a notice, and `null` otherwise.
