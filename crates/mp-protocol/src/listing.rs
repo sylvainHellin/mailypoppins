@@ -639,6 +639,41 @@ impl SearchOrder {
             (None, None) => Ordering::Equal,
         }
     }
+
+    /// Two wire `date_sort` keys in this order, [`Self::by_date`] with an
+    /// empty key (a `Date:` that did not parse) as the unknown date: the
+    /// comparator the daemon's `hit_order` sorts a server search's hits by.
+    pub fn by_date_sort(self, a: &str, b: &str) -> std::cmp::Ordering {
+        self.by_date((!a.is_empty()).then_some(a), (!b.is_empty()).then_some(b))
+    }
+
+    /// The date order a server search's hits merge into the local pass's in,
+    /// `self` being the order the server answers (`on_server`) and `local`
+    /// the one the local pass echoed, `None` when it listed no hit.
+    ///
+    /// Two runs in the same date order are one list in it; under relevance,
+    /// or when the two passes echoed different orders, there is no common
+    /// order to merge in, so `None`, and the server's hits follow the local
+    /// pass's.
+    pub fn date_merge(self, local: Option<SearchOrder>) -> Option<SearchOrder> {
+        (self != SearchOrder::Relevance && local.is_none_or(|local| local == self)).then_some(self)
+    }
+
+    /// Where a hit dated `date_sort` goes in `run`, a list already in this
+    /// date order: after every hit dated before it or the same, so a tie
+    /// keeps the local hit first and the stream's order among the server's,
+    /// which is where the merge of [`ServerSearchSettled::arrange_after`]
+    /// puts it once the search settles.
+    pub fn date_position<T>(
+        self,
+        run: &[T],
+        date_sort: &str,
+        date_of: impl Fn(&T) -> &str,
+    ) -> usize {
+        run.partition_point(|hit| {
+            self.by_date_sort(date_of(hit), date_sort) != std::cmp::Ordering::Greater
+        })
+    }
 }
 
 impl std::fmt::Display for SearchOrder {
@@ -755,6 +790,54 @@ impl ServerSearchSettled {
         keyed.into_iter().map(|(_, hit)| hit).collect()
     }
 
+    /// The one list a settled search shows: the local pass's hits, in the
+    /// order the store listed them, and the streamed server hits, each with
+    /// its `seq`, [`Self::arrange`]d (PERSO-273).
+    ///
+    /// Under `newest` and `oldest`, when the local pass echoed the same order
+    /// as [`Self::order`] (or listed nothing), the two runs are one list in
+    /// that order: a stable merge on `date_sort` with
+    /// [`SearchOrder::by_date_sort`], the daemon's own comparator, an
+    /// unknown date last and a tie to the local hit. A server-only hit is
+    /// usually today's mail the account has not synced, so appending it would
+    /// put the newest hit under up to fifty older local ones. Under relevance,
+    /// or two different echoes, the server's hits follow the local pass's.
+    ///
+    /// A settle from a daemon that predates PERSO-273 reads `newest` here,
+    /// but that daemon's local pass echoes no order, which reads as
+    /// relevance, so nothing merges.
+    pub fn arrange_after<T>(
+        &self,
+        local_order: Option<SearchOrder>,
+        local: Vec<T>,
+        server: impl IntoIterator<Item = (u64, T)>,
+        date_of: impl Fn(&T) -> &str,
+    ) -> Vec<T> {
+        let server = self.arrange(server);
+        let Some(order) = self.order.date_merge(local_order) else {
+            return local.into_iter().chain(server).collect();
+        };
+        let mut merged = Vec::with_capacity(local.len() + server.len());
+        let mut local = local.into_iter().peekable();
+        let mut server = server.into_iter().peekable();
+        loop {
+            let from_local = match (local.peek(), server.peek()) {
+                (Some(l), Some(s)) => {
+                    order.by_date_sort(date_of(l), date_of(s)) != std::cmp::Ordering::Greater
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            merged.extend(if from_local {
+                local.next()
+            } else {
+                server.next()
+            });
+        }
+        merged
+    }
+
     /// The caveat a client appends to its hit count, `local store only:
     /// has:attachment`, or `None` when the server answered every term: the
     /// words `mp search` prints in its result header.
@@ -868,6 +951,153 @@ mod tests {
         assert_eq!(settled.arrange(streamed), ["c", "a", "b", "stray"]);
         let older = ServerSearchSettled::default();
         assert_eq!(older.arrange([(1, "x"), (0, "y")]), ["x", "y"]);
+    }
+
+    /// A hit of the merge cases below: its name and its wire `date_sort`.
+    type Dated = (&'static str, &'static str);
+
+    fn names(hits: Vec<Dated>) -> Vec<&'static str> {
+        hits.into_iter().map(|(name, _)| name).collect()
+    }
+
+    fn date_of(hit: &Dated) -> &str {
+        hit.1
+    }
+
+    /// Under newest first, a server-only hit dated today lands above the
+    /// older local hits rather than under them, a tie goes to the local hit,
+    /// and an undated hit of either run sinks to the bottom. The server's run
+    /// is taken in `hit_order`, not in the order it streamed.
+    #[test]
+    fn newest_first_merges_the_server_hits_into_the_local_ones_by_date() {
+        let settled = ServerSearchSettled {
+            order: SearchOrder::Newest,
+            hit_order: vec![1, 0, 2],
+            ..Default::default()
+        };
+        let local = vec![
+            ("local-may", "2026-05-01T09:00:00"),
+            ("local-march", "2026-03-01T09:00:00"),
+            ("local-undated", ""),
+        ];
+        let server = [
+            (0, ("server-march", "2026-03-01T09:00:00")),
+            (1, ("server-today", "2026-07-02T08:00:00")),
+            (2, ("server-undated", "")),
+        ];
+        assert_eq!(
+            names(settled.arrange_after(Some(SearchOrder::Newest), local, server, date_of)),
+            [
+                "server-today",
+                "local-may",
+                "local-march",
+                "server-march",
+                "local-undated",
+                "server-undated"
+            ]
+        );
+    }
+
+    /// Oldest first merges the same way, the other way round.
+    #[test]
+    fn oldest_first_merges_the_server_hits_into_the_local_ones_by_date() {
+        let settled = ServerSearchSettled {
+            order: SearchOrder::Oldest,
+            hit_order: vec![0, 1],
+            ..Default::default()
+        };
+        let local = vec![
+            ("local-march", "2026-03-01T09:00:00"),
+            ("local-may", "2026-05-01T09:00:00"),
+        ];
+        let server = [
+            (0, ("server-january", "2026-01-01T09:00:00")),
+            (1, ("server-today", "2026-07-02T08:00:00")),
+        ];
+        assert_eq!(
+            names(settled.arrange_after(Some(SearchOrder::Oldest), local, server, date_of)),
+            ["server-january", "local-march", "local-may", "server-today"]
+        );
+    }
+
+    /// With no local hit there is nothing to merge into: the server's run in
+    /// `hit_order`.
+    #[test]
+    fn a_server_run_alone_keeps_its_hit_order() {
+        let settled = ServerSearchSettled {
+            order: SearchOrder::Newest,
+            hit_order: vec![1, 0],
+            ..Default::default()
+        };
+        let server = [
+            (0, ("older", "2026-03-01T09:00:00")),
+            (1, ("newer", "2026-05-01T09:00:00")),
+        ];
+        assert_eq!(
+            names(settled.arrange_after(None, Vec::new(), server, date_of)),
+            ["newer", "older"]
+        );
+    }
+
+    /// Best match first has no date to merge on, and neither have two passes
+    /// that echoed different orders (an older daemon's local pass reads as
+    /// relevance): the server's hits follow the local pass's.
+    #[test]
+    fn relevance_or_two_different_orders_keep_the_local_pass_first() {
+        let settled = ServerSearchSettled {
+            order: SearchOrder::Newest,
+            hit_order: vec![0],
+            ..Default::default()
+        };
+        let local = || vec![("local-march", "2026-03-01T09:00:00")];
+        let server = || [(0, ("server-today", "2026-07-02T08:00:00"))];
+        for echoed in [SearchOrder::Relevance, SearchOrder::Oldest] {
+            assert_eq!(
+                names(settled.arrange_after(Some(echoed), local(), server(), date_of)),
+                ["local-march", "server-today"],
+                "local pass echoed {echoed}"
+            );
+        }
+        assert_eq!(SearchOrder::Relevance.date_merge(None), None);
+        assert_eq!(
+            SearchOrder::Newest.date_merge(Some(SearchOrder::Relevance)),
+            None
+        );
+        assert_eq!(
+            SearchOrder::Oldest.date_merge(Some(SearchOrder::Oldest)),
+            Some(SearchOrder::Oldest)
+        );
+    }
+
+    /// A hit streamed in lands where the settle's merge will put it: after
+    /// every hit dated before it or the same, an undated one at the bottom.
+    #[test]
+    fn a_streamed_hit_takes_its_date_position() {
+        let run: Vec<Dated> = vec![
+            ("may", "2026-05-01T09:00:00"),
+            ("march", "2026-03-01T09:00:00"),
+            ("undated", ""),
+        ];
+        let newest = SearchOrder::Newest;
+        assert_eq!(
+            newest.date_position(&run, "2026-07-02T08:00:00", date_of),
+            0
+        );
+        assert_eq!(
+            newest.date_position(&run, "2026-03-01T09:00:00", date_of),
+            2
+        );
+        assert_eq!(
+            newest.date_position(&run, "2026-04-01T09:00:00", date_of),
+            1
+        );
+        assert_eq!(newest.date_position(&run, "", date_of), 3);
+        let oldest: Vec<Dated> = run.iter().rev().skip(1).copied().collect();
+        assert_eq!(
+            SearchOrder::Oldest.date_position(&oldest, "2026-04-01T09:00:00", date_of),
+            1
+        );
+        assert_eq!(newest.date_position(&[], "2026-04-01T09:00:00", date_of), 0);
     }
 
     /// The committed fixture decodes into the typed row, `selector` included.

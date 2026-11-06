@@ -1474,7 +1474,9 @@ pub(super) fn draft_from_message(
 /// resolution handed in rather than looked up in the store.
 ///
 /// `seq` is the hit's number in its search's stream, which the settle's
-/// `hit_order` lists (PERSO-273).
+/// `hit_order` lists (PERSO-273). The row's `date_sort` is the daemon's, the
+/// key a local hit's row carries and the one the overlay merges the two
+/// passes on, rather than one derived here from the header.
 pub(super) fn hit_entry(
     hit: &mp_protocol::listing::ServerSearchHit,
     seq: u64,
@@ -1502,11 +1504,12 @@ pub(super) fn hit_entry(
         calendar_ics: None,
         event: None,
     };
-    let entry = super::helpers::fetched_to_email_entry(
+    let mut entry = super::helpers::fetched_to_email_entry(
         hit.row_id.map(super::app::MessageRef::new),
         hit.selector.clone(),
         &fetched,
     );
+    entry.date_sort = hit.date_sort.clone();
     super::app::SearchResultEntry {
         entry,
         fetched,
@@ -1534,7 +1537,10 @@ const LOCAL_SEARCH_LIMIT: usize = 50;
 ///
 /// Both passes ask for `app.search_order` (PERSO-273), the desktop's
 /// `order` too, and the list keeps the daemon's orders: the local pass's hits
-/// as the store listed them, then the server's in the settle's `hit_order`.
+/// as the store listed them, the server's in the settle's `hit_order`, the
+/// two merged by date under newest and oldest first
+/// ([`mp_protocol::listing::ServerSearchSettled::arrange_after`]) and the
+/// server's after the local pass's under best match first.
 pub fn start_search(
     app: &mut App,
     commands: &dyn Queries,

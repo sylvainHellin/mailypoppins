@@ -660,11 +660,14 @@ pub(super) fn apply_search_hit_fetch(app: &mut App, message_id: &str, result: Re
 /// One streamed `message.server_hit` (`LST-08`, #0126).
 ///
 /// The overlay's list is the local-first pass's (#0105) with the server's hits
-/// appended as they arrive, where it used to grow by one batch when the last
+/// added as they arrive, where it used to grow by one batch when the last
 /// mailbox answered. The daemon did the dedup against the Message-IDs the
 /// local pass was showing, and it orders the hits in its settle's `hit_order`
-/// (PERSO-273), so what is left here is the append and the running footer:
-/// an append moves no row, which keeps the cursor on its hit.
+/// (PERSO-273). Under newest or oldest first a hit goes in at its date, where
+/// the settle's merge will leave it, so the list is never out of order while
+/// the hits stream; under best match first it is appended after the local
+/// pass's ranked hits, and so is every hit of a daemon that numbers none (one
+/// that predates PERSO-273 and orders nothing). The cursor stays on its hit.
 ///
 /// A hit for an operation this overlay is not showing is dropped: a fast
 /// retype leaves two searches in flight, and the id is what tells them apart.
@@ -681,9 +684,24 @@ pub(super) fn apply_server_hit(app: &mut App, payload: &serde_json::Value) {
                 return;
             }
         };
-    let seq = payload["seq"].as_u64().unwrap_or_default();
-    app.server_search_results
-        .push(super::commands::hit_entry(&hit, seq));
+    let seq = payload["seq"].as_u64();
+    let entry = super::commands::hit_entry(&hit, seq.unwrap_or_default());
+    let results = &app.server_search_results;
+    let merge = app
+        .search_order
+        .on_server()
+        .date_merge(app.server_search_local_order)
+        .filter(|_| seq.is_some());
+    let at = match merge {
+        Some(order) => order.date_position(results, &entry.entry.date_sort, |hit| {
+            hit.entry.date_sort.as_str()
+        }),
+        None => results.len(),
+    };
+    if at <= app.server_search_index && at < results.len() {
+        app.server_search_index += 1;
+    }
+    app.server_search_results.insert(at, entry);
     let count = app.server_search_results.len();
     app.server_search_status = Some(format!(
         "{count} result{}; searching server...",
@@ -694,41 +712,43 @@ pub(super) fn apply_server_hit(app: &mut App, payload: &serde_json::Value) {
     }
 }
 
-/// A settled server search's hits in its `hit_order` (PERSO-273), after the
-/// local pass's, which keep the store's order; the cursor stays on its hit.
+/// A settled server search's hits in its `hit_order` (PERSO-273), merged by
+/// date with the local pass's under newest and oldest first and after them
+/// under best match first
+/// ([`mp_protocol::listing::ServerSearchSettled::arrange_after`]); the cursor
+/// stays on its hit.
 ///
 /// The hits streamed mailbox by mailbox as each one's survivors downloaded,
 /// so the order they arrived in is no order at all; the settle's is the one
 /// list every client shows. The order it echoes is what the overlay names
 /// for them, and an older daemon's settle, which echoes none, reads as
 /// relevance, as its local pass does.
+///
+/// The cursor follows the row it was on by the row's place before the
+/// settle, not by its `seq`: an older daemon numbers no hit, so every server
+/// hit carries the same `seq`.
 fn arrange_server_hits(app: &mut App, settled: &serde_json::Value) {
     let decoded: mp_protocol::listing::ServerSearchSettled =
         serde_json::from_value(settled.clone()).unwrap_or_default();
-    let cursor = app
-        .server_search_results
-        .get(app.server_search_index)
-        .and_then(|hit| hit.seq);
+    let cursor = app.server_search_index;
     let (local, server): (Vec<_>, Vec<_>) = std::mem::take(&mut app.server_search_results)
         .into_iter()
-        .partition(|hit| hit.seq.is_none());
+        .enumerate()
+        .partition(|(_, hit)| hit.seq.is_none());
     app.server_search_server_order =
         (!server.is_empty()).then(|| mp_client::queries::decode_search_order(settled));
-    let server = decoded.arrange(
+    let arranged = decoded.arrange_after(
+        app.server_search_local_order,
+        local,
         server
             .into_iter()
-            .map(|hit| (hit.seq.unwrap_or_default(), hit)),
+            .map(|(at, hit)| (hit.seq.unwrap_or_default(), (at, hit))),
+        |(_, hit)| hit.entry.date_sort.as_str(),
     );
-    app.server_search_results = local.into_iter().chain(server).collect();
-    if let Some(seq) = cursor {
-        if let Some(at) = app
-            .server_search_results
-            .iter()
-            .position(|hit| hit.seq == Some(seq))
-        {
-            app.server_search_index = at;
-        }
+    if let Some(at) = arranged.iter().position(|(was, _)| *was == cursor) {
+        app.server_search_index = at;
     }
+    app.server_search_results = arranged.into_iter().map(|(_, hit)| hit).collect();
 }
 
 #[cfg(test)]
@@ -820,8 +840,9 @@ mod tests {
     // The order of the streamed hits (PERSO-273)
     // -----------------------------------------------------------------------
 
-    /// One overlay row of the local pass, its message named by `subject`.
-    fn local_row(subject: &str) -> crate::app::SearchResultEntry {
+    /// One overlay row of the local pass, its message named by `subject`,
+    /// dated by the wire `date_sort` the store's row carries.
+    fn local_row(subject: &str, date_sort: &str) -> crate::app::SearchResultEntry {
         let fetched = mp_core::parse::FetchedEmail {
             from: "a@example.com".into(),
             to: "me@example.com".into(),
@@ -840,24 +861,61 @@ mod tests {
             calendar_ics: None,
             event: None,
         };
+        let mut entry = crate::helpers::fetched_to_email_entry(None, None, &fetched);
+        entry.date_sort = date_sort.into();
         crate::app::SearchResultEntry {
-            entry: crate::helpers::fetched_to_email_entry(None, None, &fetched),
+            entry,
             fetched,
             source_label: "inbox".into(),
             seq: None,
         }
     }
 
-    /// The `message.server_hit` payload of hit `seq` of operation `op-1`.
-    fn hit_event(seq: u64, subject: &str) -> serde_json::Value {
+    /// The `message.server_hit` payload of hit `seq` of operation `op-1`,
+    /// dated `date_sort`; a `seq` of `None` is an older daemon's, which
+    /// numbers no hit.
+    fn hit_event(seq: Option<u64>, subject: &str, date_sort: &str) -> serde_json::Value {
         let hit = mp_protocol::listing::ServerSearchHit {
             account: "tum".into(),
             mailbox: "Archive".into(),
             subject: subject.into(),
             message_id: Some(format!("<{subject}@example.com>")),
+            date_sort: date_sort.into(),
             ..Default::default()
         };
-        serde_json::json!({"operation_id": "op-1", "seq": seq, "hit": hit})
+        let mut event = serde_json::json!({"operation_id": "op-1", "hit": hit});
+        if let Some(seq) = seq {
+            event["seq"] = serde_json::json!(seq);
+        }
+        event
+    }
+
+    /// Settle the overlay's search `op-1` (generation 2) with `settled`.
+    fn settle(app: &mut App, settled: serde_json::Value) {
+        handle_bg_result(
+            app,
+            BgResult::ServerSearch {
+                generation: 2,
+                result: Ok(settled),
+            },
+        );
+    }
+
+    /// An overlay whose local pass listed `local`, echoing `local_order`, and
+    /// whose server search `op-1` is running.
+    fn searching(
+        order: mp_protocol::listing::SearchOrder,
+        local: Vec<crate::app::SearchResultEntry>,
+        local_order: Option<mp_protocol::listing::SearchOrder>,
+    ) -> App {
+        let mut app = App::default_for_tests();
+        app.search_order = order;
+        app.server_search_generation = 2;
+        app.server_search_operation = Some("op-1".into());
+        app.server_search_loading = true;
+        app.server_search_results = local;
+        app.server_search_local_order = local_order;
+        app
     }
 
     fn subjects(app: &App) -> Vec<&str> {
@@ -867,30 +925,87 @@ mod tests {
             .collect()
     }
 
-    /// The server's hits are appended as they stream, which moves no row and
-    /// so no cursor, and the settle lists them in its `hit_order` after the
-    /// local pass's hits, which keep the store's order: the client sorts
-    /// nothing itself. The footer names the orders the daemon echoed.
+    /// Newest first, a server-only hit dated today goes above the older local
+    /// hits the moment it streams in, not under them, and every other one at
+    /// its date, so the list is never out of order; the cursor stays on its
+    /// hit as rows go in above it. The settle's merge leaves the list as the
+    /// stream built it, and the footer reads plainly "newest first".
     #[test]
-    fn the_settle_lists_the_streamed_hits_in_its_hit_order_after_the_local_pass() {
-        let mut app = App::default_for_tests();
-        app.server_search_generation = 2;
-        app.server_search_operation = Some("op-1".into());
-        app.server_search_loading = true;
-        app.server_search_results = vec![local_row("local-b"), local_row("local-a")];
-        app.server_search_local_order = Some(mp_protocol::listing::SearchOrder::Relevance);
+    fn newest_first_puts_each_server_hit_at_its_date_among_the_local_hits() {
+        use mp_protocol::listing::SearchOrder;
+        let mut app = searching(
+            SearchOrder::Newest,
+            vec![
+                local_row("local-may", "2026-05-01T09:00:00"),
+                local_row("local-march", "2026-03-01T09:00:00"),
+            ],
+            Some(SearchOrder::Newest),
+        );
+        app.server_search_index = 1;
 
-        for (seq, subject) in [
-            (0, "arrived-first"),
-            (1, "arrived-second"),
-            (2, "arrived-third"),
-        ] {
-            apply_server_hit(&mut app, &hit_event(seq, subject));
-        }
+        apply_server_hit(
+            &mut app,
+            &hit_event(Some(0), "server-april", "2026-04-01T09:00:00"),
+        );
+        apply_server_hit(
+            &mut app,
+            &hit_event(Some(1), "server-today", "2026-07-02T08:00:00"),
+        );
+        apply_server_hit(&mut app, &hit_event(Some(2), "server-undated", ""));
         // A hit of a search the overlay no longer shows is dropped.
-        let mut stale = hit_event(3, "stale");
+        let mut stale = hit_event(Some(3), "stale", "2026-07-03T08:00:00");
         stale["operation_id"] = serde_json::json!("op-0");
         apply_server_hit(&mut app, &stale);
+        let streamed = [
+            "server-today",
+            "local-may",
+            "server-april",
+            "local-march",
+            "server-undated",
+        ];
+        assert_eq!(subjects(&app), streamed, "each hit went in at its date");
+        assert_eq!(
+            app.server_search_index, 3,
+            "the cursor stays on local-march as rows go in above it"
+        );
+
+        settle(
+            &mut app,
+            serde_json::json!({
+                "account": "tum", "query": "ledger", "hits": 3,
+                "order": "newest", "hit_order": [1, 0, 2],
+            }),
+        );
+        assert_eq!(subjects(&app), streamed);
+        assert_eq!(app.server_search_index, 3, "still on local-march");
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("5 results, newest first")
+        );
+    }
+
+    /// Best match first, the local pass's ranked hits stay on top: the
+    /// server's are appended as they stream and the settle lists them in its
+    /// `hit_order` after the local pass's, the cursor following its hit, and
+    /// the footer names both orders the daemon echoed.
+    #[test]
+    fn best_match_first_lists_the_server_hits_in_hit_order_after_the_local_pass() {
+        use mp_protocol::listing::SearchOrder;
+        let mut app = searching(
+            SearchOrder::Relevance,
+            vec![
+                local_row("local-b", "2026-03-01T09:00:00"),
+                local_row("local-a", "2026-05-01T09:00:00"),
+            ],
+            Some(SearchOrder::Relevance),
+        );
+        for (seq, subject, date) in [
+            (0, "arrived-first", "2026-04-01T09:00:00"),
+            (1, "arrived-second", "2026-02-01T09:00:00"),
+            (2, "arrived-third", "2026-07-02T08:00:00"),
+        ] {
+            apply_server_hit(&mut app, &hit_event(Some(seq), subject, date));
+        }
         assert_eq!(
             subjects(&app),
             [
@@ -904,17 +1019,13 @@ mod tests {
         );
         app.server_search_index = 3;
 
-        handle_bg_result(
+        settle(
             &mut app,
-            BgResult::ServerSearch {
-                generation: 2,
-                result: Ok(serde_json::json!({
-                    "account": "tum", "query": "ledger", "hits": 3,
-                    "order": "newest", "hit_order": [2, 0, 1],
-                })),
-            },
+            serde_json::json!({
+                "account": "tum", "query": "ledger", "hits": 3,
+                "order": "newest", "hit_order": [2, 0, 1],
+            }),
         );
-
         assert_eq!(
             subjects(&app),
             [
@@ -935,31 +1046,51 @@ mod tests {
         );
     }
 
-    /// A settle from a daemon that predates PERSO-273 echoes no order and no
-    /// `hit_order`: the hits stay in the order they arrived, and the footer
+    /// A daemon that predates PERSO-273 numbers no hit and echoes no order
+    /// and no `hit_order`: the hits are appended and stay in the order they
+    /// arrived, the cursor stays on the hit it was on rather than jumping to
+    /// the first server hit (every one carries the same `seq`), and the footer
     /// reads them as relevance, as `mp search` does, rather than naming the
     /// order the overlay asked for.
     #[test]
-    fn an_older_daemons_settle_keeps_the_arrival_order_and_reads_as_relevance() {
-        let mut app = App::default_for_tests();
-        app.server_search_generation = 2;
-        app.server_search_operation = Some("op-1".into());
-        app.search_order = mp_protocol::listing::SearchOrder::Oldest;
-        for (seq, subject) in [(0, "one"), (1, "two")] {
-            apply_server_hit(&mut app, &hit_event(seq, subject));
-        }
-        handle_bg_result(
-            &mut app,
-            BgResult::ServerSearch {
-                generation: 2,
-                result: Ok(serde_json::json!({"account": "tum", "query": "x", "hits": 2})),
-            },
+    fn an_older_daemons_settle_keeps_the_arrival_order_and_the_cursor() {
+        use mp_protocol::listing::SearchOrder;
+        let mut app = searching(
+            SearchOrder::Oldest,
+            vec![local_row("local", "2026-05-01T09:00:00")],
+            Some(SearchOrder::Relevance),
         );
-        assert_eq!(subjects(&app), ["one", "two"]);
+        for (subject, date) in [
+            ("one", "2026-07-02T08:00:00"),
+            ("two", "2026-01-01T09:00:00"),
+            ("three", "2026-03-01T09:00:00"),
+        ] {
+            apply_server_hit(&mut app, &hit_event(None, subject, date));
+        }
+        app.server_search_index = 2;
+        settle(
+            &mut app,
+            serde_json::json!({"account": "tum", "query": "x", "hits": 3}),
+        );
+        assert_eq!(subjects(&app), ["local", "one", "two", "three"]);
+        assert_eq!(app.server_search_index, 2, "the cursor stays on two");
         assert_eq!(
             app.server_search_status.as_deref(),
-            Some("2 results, best match first")
+            Some("4 results, best match first")
         );
+
+        // With no local hit either, nothing is merged or moved.
+        let mut app = searching(SearchOrder::Oldest, Vec::new(), None);
+        for (subject, date) in [("one", "2026-07-02T08:00:00"), ("two", "")] {
+            apply_server_hit(&mut app, &hit_event(None, subject, date));
+        }
+        app.server_search_index = 1;
+        settle(
+            &mut app,
+            serde_json::json!({"account": "tum", "query": "x", "hits": 2}),
+        );
+        assert_eq!(subjects(&app), ["one", "two"]);
+        assert_eq!(app.server_search_index, 1);
     }
 
     #[test]

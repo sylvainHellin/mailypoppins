@@ -11,6 +11,9 @@ import {
   NO_MAILBOX_TARGET,
   REROUTED_NOTICE,
   advancedActive,
+  arrangeAfter,
+  dateMerge,
+  datePosition,
   submitServerSearch,
   type FormRun,
 } from "@/app/search";
@@ -176,6 +179,94 @@ describe("submitting the form", () => {
       { type: "search_run", run: { account: "work", query: 'to:"diyan"', local: false, mailbox: "Inbox", form } },
       { type: "search_run", run: { account: "work", query: "subject:x in:Archive", local: true, mailbox: "Archive", form: advanced } },
     ]);
+  });
+});
+
+// The cases of `ServerSearchSettled::arrange_after` and
+// `SearchOrder::date_position` in crates/mp-protocol, one for one.
+describe("merging the two passes by date (PERSO-273)", () => {
+  type Dated = readonly [string, string];
+  const dateOf = (hit: Dated) => hit[1];
+  const names = (hits: Dated[]) => hits.map(([name]) => name);
+
+  it("newest first merges the server hits into the local ones by date", () => {
+    const local: Dated[] = [
+      ["local-may", "2026-05-01T09:00:00"],
+      ["local-march", "2026-03-01T09:00:00"],
+      ["local-undated", ""],
+    ];
+    const server = [
+      [0, ["server-march", "2026-03-01T09:00:00"]],
+      [1, ["server-today", "2026-07-02T08:00:00"]],
+      [2, ["server-undated", ""]],
+    ] as const;
+    expect(names(arrangeAfter({ order: "newest", hitOrder: [1, 0, 2] }, "newest", local, server, dateOf))).toEqual([
+      "server-today",
+      "local-may",
+      "local-march",
+      "server-march",
+      "local-undated",
+      "server-undated",
+    ]);
+  });
+
+  it("oldest first merges the server hits into the local ones by date", () => {
+    const local: Dated[] = [
+      ["local-march", "2026-03-01T09:00:00"],
+      ["local-may", "2026-05-01T09:00:00"],
+    ];
+    const server = [
+      [0, ["server-january", "2026-01-01T09:00:00"]],
+      [1, ["server-today", "2026-07-02T08:00:00"]],
+    ] as const;
+    expect(names(arrangeAfter({ order: "oldest", hitOrder: [0, 1] }, "oldest", local, server, dateOf))).toEqual([
+      "server-january",
+      "local-march",
+      "local-may",
+      "server-today",
+    ]);
+  });
+
+  it("a server run alone keeps its hit_order", () => {
+    const server = [
+      [0, ["older", "2026-03-01T09:00:00"]],
+      [1, ["newer", "2026-05-01T09:00:00"]],
+    ] as const;
+    expect(names(arrangeAfter<Dated>({ order: "newest", hitOrder: [1, 0] }, null, [], server, dateOf))).toEqual(["newer", "older"]);
+  });
+
+  it("relevance or two different orders keep the local pass first", () => {
+    const local: Dated[] = [["local-march", "2026-03-01T09:00:00"]];
+    const server = [[0, ["server-today", "2026-07-02T08:00:00"]]] as const;
+    for (const echoed of ["relevance", "oldest"] as const) {
+      expect(names(arrangeAfter({ order: "newest", hitOrder: [0] }, echoed, local, server, dateOf))).toEqual([
+        "local-march",
+        "server-today",
+      ]);
+    }
+    // An older daemon's settle echoes no order, which reads as relevance.
+    expect(names(arrangeAfter({ order: "relevance", hitOrder: [] }, null, local, server, dateOf))).toEqual([
+      "local-march",
+      "server-today",
+    ]);
+    expect(dateMerge("relevance", null)).toBeNull();
+    expect(dateMerge("newest", "relevance")).toBeNull();
+    expect(dateMerge("oldest", "oldest")).toBe("oldest");
+  });
+
+  it("a streamed hit takes its date position", () => {
+    const run: Dated[] = [
+      ["may", "2026-05-01T09:00:00"],
+      ["march", "2026-03-01T09:00:00"],
+      ["undated", ""],
+    ];
+    expect(datePosition("newest", run, "2026-07-02T08:00:00", dateOf)).toBe(0);
+    expect(datePosition("newest", run, "2026-03-01T09:00:00", dateOf)).toBe(2);
+    expect(datePosition("newest", run, "2026-04-01T09:00:00", dateOf)).toBe(1);
+    expect(datePosition("newest", run, "", dateOf)).toBe(3);
+    const oldest = [...run].reverse().slice(1);
+    expect(datePosition("oldest", oldest, "2026-04-01T09:00:00", dateOf)).toBe(1);
+    expect(datePosition<Dated>("newest", [], "2026-04-01T09:00:00", dateOf)).toBe(0);
   });
 });
 

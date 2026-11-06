@@ -697,4 +697,38 @@ describe("the order of the results (PERSO-273)", () => {
     });
     expect(mock.calls.some((c) => c.cmd === "search_local")).toBe(false);
   });
+
+  it("newest first, the server's hits go in at their dates among the store's, and the button reads plainly newest first", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const list = await searchLocal(user, "ledger");
+    await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(3));
+    await user.click(within(status() as HTMLElement).getByRole("button", { name: "Search server" }));
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    // The store's hits are dated 29 September (Sent, Inbox) and 12 August
+    // (Archive); a server-only hit dated after them is the newest of all.
+    const hits: [string, string][] = [
+      ["server today", "2026-10-02T08:00:00"],
+      ["server september", "2026-09-01T08:00:00"],
+      ["server undated", ""],
+    ];
+    for (const [seq, [subject, date_sort]] of hits.entries()) {
+      event("message.server_hit", { operation_id: "op-1", seq, hit: { ...serverHit("Server", null, subject), date_sort } });
+    }
+    const shown = () =>
+      within(list)
+        .getAllByRole("option")
+        .map((o) => o.getAttribute("aria-label")?.match(/server \w+|Re: Quarterly|Quarterly|Ledger template/)?.[0]);
+    const merged = ["server today", "Re: Quarterly", "Quarterly", "server september", "Ledger template", "server undated"];
+    await waitFor(() => expect(shown()).toEqual(merged));
+
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: { account: "work", query: "ledger", hits: 3, deduplicated: 0, unreachable: [], order: "newest", hit_order: [0, 1, 2] },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(shown()).toEqual(merged);
+    expect(orderButton()).toHaveAccessibleName(/^Search order: newest first\./);
+  });
 });

@@ -144,8 +144,10 @@ A settled server search shows the count, then the caveat `mp search` prints when
 ### The order of the results
 
 Every run sends `order` to `search_local` and `search_server_start`, `state.searchOrder` when it started (`search.order`), newest first until the user picks another (PERSO-273).
-The client sorts nothing: the local hits are the store's order, and a server search's hits, appended as they stream, take the settle's `hit_order` once it lands (`arrange` in `src/app/search.ts`), after the local pass's.
-The results header's order button (`SearchOrderButton`) names the order the daemon echoed, `search.echoed`, for each pass that listed hits: the local answer's `order`, which the Tauri layer reads as `relevance` from a daemon that echoes none, and the settle's, which a server answers `newest` for `relevance`, so a chained best-match search reads "best match first, then the server's newest first".
+The local hits are the store's order, and a server search's hits take the settle's `hit_order` once it lands (`arrangeAfter` in `src/app/search.ts`, the mirror of `ServerSearchSettled::arrange_after`, with the same test cases).
+Under newest and oldest first, when both passes echoed that order, the two runs are one list: each server hit goes in at its date as it streams (`datePosition`), and the settle merges the runs on `date_sort` with the daemon's comparator, an empty date last and a tie to the local hit, so a server-only hit, usually today's unsynced mail, is not listed under older local ones.
+Under best match first, two different echoes, or a daemon that numbers no hit, the server's hits are appended as they stream and follow the local pass's.
+The results header's order button (`SearchOrderButton`) names the order the daemon echoed, `search.echoed`, for each pass that listed hits: the local answer's `order`, which the Tauri layer reads as `relevance` from a daemon that echoes none, and the settle's, which a server answers `newest` for `relevance`; a date merge reads plainly "newest first", and a chained best-match search reads "best match first, then the server's newest first".
 The button, `S` from the list, and the palette's "Order search results: newest first", "oldest first" and "best match first" set `state.searchOrder` and run the shown search again in it (`orderSearch`): the local pass chained to the server leg when one followed it, or the server leg alone when it ran alone.
 
 ### The Server Search form

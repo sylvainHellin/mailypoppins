@@ -1290,10 +1290,12 @@ pub struct SearchTarget {
 }
 
 /// What the search overlay says its hits are in (PERSO-273): the order the
-/// daemon echoed for each pass that listed hits, the local pass's first,
-/// since its hits come first, and the server's after it when the two differ
-/// (a server gives no score, so it answers `relevance` newest first).
-/// `None` when neither pass listed a hit.
+/// daemon echoed for each pass that listed hits. Two passes that echoed the
+/// same date order are one list merged in it, which reads plainly `newest
+/// first`; when the two differ (a server gives no score, so it answers
+/// `relevance` newest first) the server's hits follow the local pass's, and
+/// the label says so, the local pass's order first. `None` when neither pass
+/// listed a hit.
 pub fn search_order_label(
     local: Option<mp_protocol::listing::SearchOrder>,
     server: Option<mp_protocol::listing::SearchOrder>,

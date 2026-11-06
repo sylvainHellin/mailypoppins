@@ -110,8 +110,9 @@ export type SearchRun = { account?: string; mailbox?: string | null; chain?: boo
 
 // ---------------------------------------------------------------------------
 // The order of the hits (PERSO-273): newest first by default, oldest first or
-// best match first on request. The daemon sorts; the client keeps its order
-// and names the one it echoed.
+// best match first on request. The daemon sorts each pass; the client keeps
+// its orders, merges the two passes by date under newest and oldest first,
+// and names the order it echoed.
 // ---------------------------------------------------------------------------
 
 /** The orders, in the order `S` and the results header's button cycle them. */
@@ -131,9 +132,11 @@ export function nextOrder(order: SearchOrder): SearchOrder {
 
 /**
  * What the results header says the hits are in: the order the daemon echoed
- * for each pass that listed hits, the local pass's first, since its hits come
- * first, and the server's after it when the two differ; null when neither
- * listed a hit. The TUI's `search_order_label`.
+ * for each pass that listed hits. Two passes that echoed the same date order
+ * are one list merged in it, which reads plainly "newest first"; when the two
+ * differ the server's hits follow the local pass's, and the label says so,
+ * the local pass's order first. Null when neither listed a hit. The TUI's
+ * `search_order_label`.
  */
 export function searchOrderLabel(echoed: SearchState["echoed"]): string | null {
   const { local, server } = echoed;
@@ -163,19 +166,87 @@ export function orderSearch(s: AppState, order: SearchOrder): AppState {
   return startSearch(next, "local", search.query, { ...run, chain: search.mode === "server" || search.chain });
 }
 
+/** The order a server search applies: a mail server gives no score, so relevance is answered newest first. `SearchOrder::on_server`. */
+export function onServer(order: SearchOrder): SearchOrder {
+  return order === "relevance" ? "newest" : order;
+}
+
 /**
- * A settled server search's hits in its `hit_order`, after the local pass's,
- * which keep the store's order; a hit the order does not name (an older
- * daemon's) follows in the order it arrived. The TUI's `arrange_server_hits`.
+ * Two wire `date_sort` keys in `order`, an empty key (a `Date:` that did not
+ * parse) last either way: the daemon's comparator, `SearchOrder::by_date_sort`.
  */
-function arrange(hits: SearchHit[], hitOrder: unknown): SearchHit[] {
-  const order = Array.isArray(hitOrder) ? hitOrder : [];
-  const rank = new Map<unknown, number>(order.map((seq, at) => [seq, at]));
-  const at = (h: SearchHit) => (h.seq === null ? Number.MAX_SAFE_INTEGER : (rank.get(h.seq) ?? Number.MAX_SAFE_INTEGER));
-  const local = hits.filter((h) => h.origin === "local");
+export function byDateSort(order: SearchOrder, a: string, b: string): number {
+  if (a === "" || b === "") return (a === "" ? 1 : 0) - (b === "" ? 1 : 0);
+  const cmp = a < b ? -1 : a > b ? 1 : 0;
+  return order === "oldest" ? cmp : -cmp;
+}
+
+/**
+ * The date order the server's hits merge into the local pass's in, `server`
+ * the order the server answers and `local` the one the local pass echoed,
+ * null when it listed no hit; null under relevance or two different orders,
+ * where the server's hits follow the local pass's. `SearchOrder::date_merge`.
+ */
+export function dateMerge(server: SearchOrder, local: SearchOrder | null): SearchOrder | null {
+  return server !== "relevance" && (local === null || local === server) ? server : null;
+}
+
+/**
+ * Where a hit dated `dateSort` goes in `run`, a list already in `order`:
+ * after every hit dated before it or the same, which is where the settle's
+ * merge puts it. `SearchOrder::date_position`.
+ */
+export function datePosition<T>(order: SearchOrder, run: readonly T[], dateSort: string, dateOf: (hit: T) => string): number {
+  let lo = 0;
+  let hi = run.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (byDateSort(order, dateOf(run[mid]), dateSort) <= 0) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * The one list a settled search shows: the local pass's hits in the store's
+ * order, and the streamed server hits, each with its `seq`, in the settle's
+ * `hit_order`, a hit it does not name (an older daemon's) after the named
+ * ones in the order it arrived. Under newest and oldest first, when the local
+ * pass echoed the settle's order or listed nothing, the two runs are merged
+ * on `date_sort` with the daemon's comparator, a tie to the local hit, so a
+ * server-only hit (usually today's unsynced mail) is not listed under older
+ * local ones; otherwise the server's follow the local pass's.
+ * `ServerSearchSettled::arrange_after`.
+ */
+export function arrangeAfter<T>(
+  settled: { order: SearchOrder; hitOrder: unknown },
+  localOrder: SearchOrder | null,
+  local: readonly T[],
+  server: readonly (readonly [number | null, T])[],
+  dateOf: (hit: T) => string,
+): T[] {
+  const named = Array.isArray(settled.hitOrder) ? settled.hitOrder : [];
+  const rank = new Map<unknown, number>(named.map((seq, at) => [seq, at]));
+  const at = (seq: number | null) => (seq === null ? Number.MAX_SAFE_INTEGER : (rank.get(seq) ?? Number.MAX_SAFE_INTEGER));
   // `sort` is stable, so the hits the order does not name keep their arrival order.
-  const server = hits.filter((h) => h.origin === "server").sort((a, b) => at(a) - at(b));
-  return [...local, ...server];
+  const arranged = [...server].sort((a, b) => at(a[0]) - at(b[0])).map(([, hit]) => hit);
+  const order = dateMerge(settled.order, localOrder);
+  if (order === null) return [...local, ...arranged];
+  const merged: T[] = [];
+  let l = 0;
+  let s = 0;
+  while (l < local.length || s < arranged.length) {
+    const fromLocal = s >= arranged.length || (l < local.length && byDateSort(order, dateOf(local[l]), dateOf(arranged[s])) <= 0);
+    merged.push(fromLocal ? local[l++] : arranged[s++]);
+  }
+  return merged;
+}
+
+/** A settled server search's hits as the list shows them, `arrangeAfter` over the search's own hits. The TUI's `arrange_server_hits`. */
+function arrange(search: SearchState, settled: { order: SearchOrder; hitOrder: unknown }): SearchHit[] {
+  const local = search.hits.filter((h) => h.origin === "local");
+  const server = search.hits.filter((h) => h.origin === "server").map((h) => [h.seq, h] as const);
+  return arrangeAfter(settled, search.echoed.local, local, server, (h) => h.date_sort);
 }
 
 /** Start a run: a new query, or the server leg of the one shown. */
@@ -359,10 +430,22 @@ function addHit(search: SearchState, hit: SearchHit): SearchState {
   // and is keyed by its position instead.
   if (hit.message_id === null) {
     const keyed = { ...hit, key: `${hit.mailbox}\u0000#${search.hits.length}` };
-    return { ...search, hits: [...search.hits, keyed] };
+    return { ...search, hits: placed(search, keyed) };
   }
   if (search.hits.some((h) => h.message_id === hit.message_id && h.mailbox === hit.mailbox)) return search;
-  return { ...search, hits: [...search.hits, hit] };
+  return { ...search, hits: placed(search, hit) };
+}
+
+/**
+ * The hits with a streamed one in: at its date under newest or oldest first,
+ * where the settle's merge will leave it, so the list is never out of order
+ * while the hits stream; appended under best match first, and for a daemon
+ * that numbers no hit (one that predates PERSO-273 and orders nothing).
+ */
+function placed(search: SearchState, hit: SearchHit): SearchHit[] {
+  const order = hit.seq === null ? null : dateMerge(onServer(search.order), search.echoed.local);
+  const at = order === null ? search.hits.length : datePosition(order, search.hits, hit.date_sort, (h) => h.date_sort);
+  return [...search.hits.slice(0, at), hit, ...search.hits.slice(at)];
 }
 
 function summaryOf(result: unknown): SearchState["summary"] {
@@ -393,12 +476,13 @@ function applySignal(search: SearchState, sig: SearchSignal): SearchState {
     case "finish":
       switch (sig.state) {
         case "succeeded": {
-          // The hits streamed mailbox by mailbox; the settle's `hit_order`
-          // is the one list every client shows (PERSO-273).
+          // The hits streamed mailbox by mailbox; the settle's `hit_order`,
+          // merged by date with the local pass's under newest and oldest
+          // first, is the one list every client shows (PERSO-273).
           const r = (typeof sig.result === "object" && sig.result !== null ? sig.result : {}) as Partial<
             Record<keyof ServerSearchSettled, unknown>
           >;
-          const hits = arrange(search.hits, r.hit_order);
+          const hits = arrange(search, { order: echoedOrder(r.order), hitOrder: r.hit_order });
           const server = hits.some((h) => h.origin === "server") ? echoedOrder(r.order) : null;
           return {
             ...search,
