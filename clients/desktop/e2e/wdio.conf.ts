@@ -41,8 +41,10 @@ const env: Record<string, string> = {
 export const config: WebdriverIO.Config = {
   runner: "local",
   specs: ["./specs/**/*.e2e.ts"],
-  // One app per run: the service starts it once, so the specs run one
-  // after another in a single worker and share the fixture's state.
+  // One app per run: the service starts it once in the launcher's
+  // `onPrepare`, and each spec file gets its own worker and session on that
+  // app, one file after another, so the files share the fixture's state but
+  // not their module-level variables.
   maxInstances: 1,
   capabilities: [
     ({

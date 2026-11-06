@@ -42,9 +42,14 @@ describe("sends on the fixtures", () => {
     await simulate("send_hold:0");
     await simulate("send_fail");
     await sendSelected(ANGEBOT);
-    await expect(row(ANGEBOT)).toBeExisting();
     await press("g", "o");
     await expect(chip("Failed")).toBeDisplayed();
+    // The fixture settles a send 400 ms after it answers, so the draft is
+    // checked once the failure has landed, not while the row is still sending.
+    await press("Escape");
+    await openMailbox("Drafts");
+    await expect(row(ANGEBOT)).toBeExisting();
+    await press("g", "o");
   });
 
   it("a retry whose last recipient is refused leaves a partly delivered row", async () => {
