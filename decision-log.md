@@ -500,3 +500,10 @@ Why: works the same for Exchange over IMAP, Microsoft 365 and Proton; a Graph in
 Rejected: an Outlook inbox rule through Graph messageRules (Microsoft 365 only, new consent), hiding blocked mail locally without moving it (other clients still show it).
 Source: chat with Sylvain, 2026-11-06.
 Status: accepted
+
+## 2026-11-06 - Blocking refuses your own address and the domain of any of your account addresses
+
+Why: blocking `@tum.de` from a Sent message would move every colleague's mail to Junk on every account at each sync, and unblocking moves nothing back; the daemon refuses it so `mp block` is guarded as well as the clients, whose chooser dims such an option and says why.
+Rejected: a warning only (one Enter away from the damage); a guard in the clients only (the CLI would stay open).
+Source: review of the block-senders-ui branch, 2026-11-06, settled by Jean-Claude under Sylvain's PERSO-261 request.
+Status: accepted
