@@ -542,6 +542,19 @@ describe("compose keys (the TUI's)", () => {
     expect(callsOf("message_fetch")).toEqual([]);
   });
 
+  it("B on a server-only hit says to fetch it first, as the TUI does, and opens no chooser", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
+    await user.keyboard("thread{Shift>}{Enter}{/Shift}");
+    await waitFor(() => expect(callsOf("search_server_start")).toHaveLength(1));
+    act(() => emitEnvelope("message.server_hit", { operation_id: "op-1", hit: serverOnlyHit("The old thread") }));
+    await user.click(await screen.findByRole("option", { name: /The old thread/ }));
+    await user.keyboard("B");
+    expect(await screen.findByText("Not in the local store; press F to fetch it first")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("on a server-only hit, r and ca build the draft from the hit's own headers, and cf and cF ask for the recipients first (PERSO-155)", async () => {
     const { user } = renderApp();
     await shellReady();

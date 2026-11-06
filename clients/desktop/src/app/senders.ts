@@ -52,6 +52,10 @@ function cursorFrom(s: AppState): { from: string } | { refusal: string } {
   const account = s.search?.account ?? s.selection.account;
   const m = s.selection.message;
   if ((draftsShown(s) && s.selection.draft) || (!m && s.selection.draft)) return { refusal: "Block needs a received message" };
+  // A server-only hit has no row to block from: the TUI's words, with the
+  // desktop's fetch key.
+  const hit = s.search && s.selection.hit ? s.search.hits.find((h) => h.key === s.selection.hit) : undefined;
+  if (!m && hit && hit.row_id === null) return { refusal: "Not in the local store; press F to fetch it first" };
   if (!account || !m) return { refusal: "Select a message first" };
   const list = s.messages.data;
   const from =
