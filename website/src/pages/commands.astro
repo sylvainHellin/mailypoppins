@@ -632,7 +632,7 @@ mp calendar reminder dismiss AAMkADev2 -A evoqs`}
       <h2 id="search-syntax">Search Query Syntax</h2>
       <p>
         The <code>mp search</code> command, its <code>--local</code> mode and the TUI
-        server search overlay (<code>f</code>) all speak <strong>one grammar</strong>.
+        server search overlay (<code>ff</code>) all speak <strong>one grammar</strong>.
         Fields AND together, <code>(a OR b)</code> groups an alternation, and quoted
         values are supported (e.g., <code>from:"John Doe"</code>). Sylvain's example
         <code>from:boss@corp.com (invoice OR receipt) has:attachment</code> runs on
@@ -651,6 +651,15 @@ mp calendar reminder dismiss AAMkADev2 -A evoqs`}
         <code>More results than the 20 shown: raise -n to see them.</code>, and the
         TUI and the desktop app end their count with the same sentence and a
         narrower search as the remedy.
+      </p>
+      <p>
+        Hits come newest first everywhere. <code>mp search --sort</code> picks oldest
+        first or best match first instead; in the TUI overlay's results and in the
+        desktop app's search results, <code>S</code> cycles newest, oldest and best
+        match first and runs the search again, and the desktop's results header has a
+        button for it and the palette one command per order. Each names the order the
+        daemon answered in. Under best match first the store's hits are ranked, and the
+        server's follow them newest first, since a mail server gives no score.
       </p>
       <CommandTable commands={searchSyntax} />
 
