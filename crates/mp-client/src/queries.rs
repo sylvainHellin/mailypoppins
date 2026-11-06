@@ -69,7 +69,7 @@ use mp_protocol::calendar::{
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
 use mp_protocol::listing::{
-    ConversationListing, MessageListRow, MessageListing, ThreadListing,
+    ConversationListing, MessageListRow, MessageListing, SearchOrder, ThreadListing,
     METHOD_MESSAGE_LIST_CONVERSATIONS,
 };
 use mp_protocol::reminder::{
@@ -288,6 +288,19 @@ pub fn decode_search_hits(answer: &Value) -> Vec<SearchHit> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The order a `message.search` answer's hits are in, which a listing names:
+/// the `order` the daemon echoes (PERSO-273).
+///
+/// A daemon from before PERSO-273 echoes none, because it ignores the
+/// `order` param and ranks by bm25, so an answer without one is in
+/// [`SearchOrder::Relevance`] whatever the call asked for.
+pub fn decode_search_order(answer: &Value) -> SearchOrder {
+    answer
+        .get("order")
+        .and_then(|order| serde_json::from_value(order.clone()).ok())
+        .unwrap_or(SearchOrder::Relevance)
 }
 
 // ---------------------------------------------------------------------------
@@ -999,6 +1012,24 @@ mod tests {
         assert_eq!(hits[0].row.uid, 9);
         assert_eq!(hits[0].body.as_deref(), Some("hello"));
         assert_eq!(hits[1].body, None);
+    }
+
+    /// The order a listing names is the one the daemon answered in: the echoed
+    /// `order`, or bm25 when a daemon from before PERSO-273 echoes none.
+    #[test]
+    fn a_search_answer_names_its_order_and_an_old_daemon_ranks() {
+        assert_eq!(
+            decode_search_order(&json!({"order": "oldest", "hits": []})),
+            SearchOrder::Oldest
+        );
+        assert_eq!(
+            decode_search_order(&json!({"order": "newest", "hits": []})),
+            SearchOrder::Newest
+        );
+        assert_eq!(
+            decode_search_order(&json!({"account": "work", "hits": []})),
+            SearchOrder::Relevance
+        );
     }
 
     #[test]

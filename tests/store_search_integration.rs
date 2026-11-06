@@ -525,6 +525,70 @@ fn hits_come_back_newest_oldest_or_best_first() {
     assert_eq!(undated(SearchOrder::Oldest), vec![old, titled, new]);
 }
 
+/// `date_sort` is a Unix timestamp, so a `Date:` before 1970 is negative: it
+/// is the oldest of the dated rows, never lumped with the undated one (0),
+/// which stays last in every order (PERSO-273).
+#[test]
+fn a_date_before_1970_is_a_date_not_an_undated_row() {
+    let f = Fixture::new();
+    let modern = f.ingest(
+        "inbox",
+        1,
+        &dated(
+            email("modern", "a@example.com", "Lunch", "the invoice"),
+            "Mon, 5 Jan 2026 09:00:00 +0000",
+        ),
+    );
+    // The epoch east of UTC: -3600.
+    let epoch_east = f.ingest(
+        "inbox",
+        2,
+        &dated(
+            email("epoch", "b@example.com", "Lunch", "an invoice"),
+            "Thu, 1 Jan 1970 00:00:00 +0100",
+        ),
+    );
+    let dateless = f.ingest(
+        "inbox",
+        3,
+        &dated(
+            email("nodate", "c@example.com", "Lunch", "one invoice"),
+            "not a date",
+        ),
+    );
+    let date_sort: i64 = f
+        .store
+        .conn()
+        .query_row(
+            "SELECT date_sort FROM messages WHERE id = ?1",
+            [epoch_east],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(date_sort, -3600, "the fixture stores a negative date_sort");
+
+    let ordered = |query: &str, order: SearchOrder| -> Vec<i64> {
+        search(&f.store, "acct", query, None, 20, order)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.row.id)
+            .collect()
+    };
+    assert_eq!(
+        ordered("invoice", SearchOrder::Newest),
+        vec![modern, epoch_east, dateless]
+    );
+    assert_eq!(
+        ordered("invoice", SearchOrder::Oldest),
+        vec![epoch_east, modern, dateless]
+    );
+    // Without a text term every rank ties, so relevance is newest first.
+    assert_eq!(
+        ordered("before:2030-01-01", SearchOrder::Relevance),
+        vec![modern, epoch_east, dateless]
+    );
+}
+
 /// The search covers every mailbox at once, and `--mailbox` narrows it.
 #[test]
 fn search_spans_mailboxes_and_can_be_scoped_to_one() {

@@ -81,7 +81,8 @@ fn filename_like_pattern(needle: &str) -> String {
 ///
 /// The order is the SQL's, so `limit` keeps the first rows of it: the newest
 /// or the oldest matches, or the best ones. A row whose `Date:` did not parse
-/// (`date_sort` 0) is last in both date orders. The bm25 weights `relevance`
+/// (`date_sort` 0) is last in both date orders, and a `Date:` before 1970
+/// (a negative `date_sort`) is a date like any other. The bm25 weights `relevance`
 /// ranks by are `subject`, `from_`, `body_text` in that order: a word in the
 /// subject outranks the same word buried in a quoted reply chain.
 pub fn search(
@@ -96,17 +97,33 @@ pub fn search(
     search_ast(store, account, &parsed, mailbox, limit, order)
 }
 
+/// The `ORDER BY` term true for a row whose `Date:` did not parse: ingest
+/// stamps it 0 (`date_sort_for`), an older row may carry none. `date_sort` is
+/// a Unix timestamp, so a negative one is a real date before 1970, not a
+/// missing one.
+macro_rules! undated_last {
+    () => {
+        "(messages.date_sort IS NULL OR messages.date_sort = 0)"
+    };
+}
+
 /// The `ORDER BY` of one search `order`, over the `rank` column the query
-/// selects.
+/// selects: an undated row last in every order, as
+/// [`SearchOrder::by_date`] and the server search put it.
 fn order_by(order: SearchOrder) -> &'static str {
     match order {
-        SearchOrder::Newest => "messages.date_sort DESC, messages.id DESC",
-        // A dateless row is stamped 0 (or carries none), which ascending
-        // would put first; it goes last, as it does newest first.
+        SearchOrder::Newest => concat!(
+            undated_last!(),
+            ", messages.date_sort DESC, messages.id DESC"
+        ),
         SearchOrder::Oldest => {
-            "COALESCE(messages.date_sort, 0) <= 0, messages.date_sort ASC, messages.id ASC"
+            concat!(undated_last!(), ", messages.date_sort ASC, messages.id ASC")
         }
-        SearchOrder::Relevance => "rank ASC, messages.date_sort DESC, messages.id DESC",
+        SearchOrder::Relevance => concat!(
+            "rank ASC, ",
+            undated_last!(),
+            ", messages.date_sort DESC, messages.id DESC"
+        ),
     }
 }
 

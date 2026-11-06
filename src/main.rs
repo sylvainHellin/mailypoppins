@@ -2786,7 +2786,9 @@ async fn routed_dump(
 }
 
 /// `mp search --local`: the hits of the daemon's index read in `order`, which
-/// the text listing maps onto store rows and `--json` prints as they came.
+/// the text listing maps onto store rows and `--json` prints as they came,
+/// and the order the daemon answered in, which the listing names: a daemon
+/// from before PERSO-273 ignores `order` and ranks by bm25.
 ///
 /// The flags travel as the user typed them and the daemon builds the query with
 /// `search::from_cli`, so one parser serves every backend. `body` is `--full`;
@@ -2799,7 +2801,10 @@ async fn routed_search(
     limit: usize,
     order: mp_protocol::listing::SearchOrder,
     full: bool,
-) -> Result<Vec<mp_client::queries::SearchHit>> {
+) -> Result<(
+    Vec<mp_client::queries::SearchHit>,
+    mp_protocol::listing::SearchOrder,
+)> {
     let mut params = search_params(account, query, flags, limit, order);
     params["body"] = serde_json::json!(full);
     if let Some(mailbox) = mailbox {
@@ -2810,7 +2815,10 @@ async fn routed_search(
     let result = daemon_try_call(&mut connection, "message.search", params)
         .await
         .map_err(|e| refusal(account, e))?;
-    Ok(mp_client::queries::decode_search_hits(&result))
+    Ok((
+        mp_client::queries::decode_search_hits(&result),
+        mp_client::queries::decode_search_order(&result),
+    ))
 }
 
 /// The parameters `message.search` and `message.search_server` share: the
@@ -6608,7 +6616,7 @@ async fn main() -> Result<()> {
                 let mailbox_key = mailbox_name;
                 // One hit past the limit tells a cut answer from one that
                 // had exactly `limit` hits (PERSO-175).
-                let mut hits = routed_search(
+                let (mut hits, answered_order) = routed_search(
                     &account_config.name,
                     &query,
                     mailbox_key.as_deref(),
@@ -6652,7 +6660,7 @@ async fn main() -> Result<()> {
                         mailypoppins::read_cmd::render_search(
                             &account_config.name,
                             &query,
-                            sort,
+                            answered_order,
                             &rows
                         )
                     );
