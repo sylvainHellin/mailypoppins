@@ -14,7 +14,6 @@ import {
   noticeLevel,
   syncLine,
 } from "@/app/activity";
-import { senderAddress } from "@/app/interop";
 import { loadPrefs, PREFS_KEY } from "@/app/prefs";
 import { DEFAULT_PREFS, initialState, visibleNotices, type AppState } from "@/app/state";
 import type { SyncCompleted } from "@/protocol/types";
@@ -192,14 +191,5 @@ describe("hiding the activity area's notices", () => {
     expect(loadPrefs(storage).activityHidden).toBe(true);
     store.set(PREFS_KEY, JSON.stringify({ activityHidden: "yes" }));
     expect(loadPrefs(storage).activityHidden).toBe(false);
-  });
-});
-
-describe("the sender's address", () => {
-  it("is what the angle brackets hold, else the whole field", () => {
-    expect(senderAddress('"Meyer, Robin" <robin@example.com>')).toBe("robin@example.com");
-    expect(senderAddress("Robin <robin@example.com> ")).toBe("robin@example.com");
-    expect(senderAddress("  robin@example.com ")).toBe("robin@example.com");
-    expect(senderAddress("Robin")).toBe("Robin");
   });
 });

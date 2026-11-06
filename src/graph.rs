@@ -887,17 +887,19 @@ struct GraphMessageIdLookupEntry {
 /// `Name <addr>`, the name quoted when it holds a character that would make
 /// the mailbox parse as something else (`Doe, Jane`, `Bob <bob@x>`), so the
 /// stored header names the one mailbox Graph sent
-/// ([`crate::parse::mailbox_addresses`]).
+/// ([`crate::parse::mailbox_addresses`]). The bare address when there is no
+/// name or the name only repeats the address, which Graph often sends.
 fn format_recipient(r: &GraphRecipient) -> String {
     let addr = r.email_address.address.as_deref().unwrap_or("");
-    match r.email_address.name.as_deref() {
-        Some(name) if name.contains(['<', '>', ',', ';', ':', '@', '"']) => {
-            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            format!("\"{escaped}\" <{addr}>")
-        }
-        Some(name) if !name.is_empty() => format!("{name} <{addr}>"),
-        _ => addr.to_string(),
+    let name = r.email_address.name.as_deref().unwrap_or("").trim();
+    if name.is_empty() || name.to_lowercase() == addr.trim().to_lowercase() {
+        return addr.to_string();
     }
+    if name.contains(['<', '>', ',', ';', ':', '@', '"']) {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("\"{escaped}\" <{addr}>");
+    }
+    format!("{name} <{addr}>")
 }
 
 fn format_recipients(recipients: &[GraphRecipient]) -> String {
@@ -6707,6 +6709,35 @@ mod tests {
             format_recipient(&recipient("J. O'Neil")),
             "J. O'Neil <alice@ok.example>"
         );
+    }
+
+    #[test]
+    fn format_recipient_drops_a_name_that_only_repeats_the_address() {
+        let recipient = |name: Option<&str>| GraphRecipient {
+            email_address: GraphEmailAddress {
+                name: name.map(str::to_string),
+                address: Some("Alice@ok.example".to_string()),
+            },
+        };
+        for name in [
+            Some("Alice@ok.example"),
+            Some(" alice@OK.example "),
+            Some(""),
+            Some("  "),
+            None,
+        ] {
+            assert_eq!(
+                format_recipient(&recipient(name)),
+                "Alice@ok.example",
+                "{name:?}"
+            );
+        }
+        for name in ["Alice", " Alice "] {
+            assert_eq!(
+                format_recipient(&recipient(Some(name))),
+                "Alice <Alice@ok.example>"
+            );
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ use super::super::app::{App, SearchField, SearchOverlayFocus};
 use super::super::theme;
 use super::headers::header_line;
 use super::util::truncate;
+use mp_core::parse::{readable_recipients, readable_sender};
 
 pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
     let overlay_width = (area.width * 9 / 10)
@@ -277,7 +278,7 @@ fn render_search_results_list(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(i, result)| {
             let is_cursor = list_focus && i == app.server_search_index;
-            let contact = truncate(&result.entry.from, contact_width);
+            let contact = truncate(&readable_sender(&result.entry.from), contact_width);
             let subject_prefix = if result.entry.has_attachments {
                 "\u{f0c6} "
             } else {
@@ -347,15 +348,14 @@ fn render_search_result_headers(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
+    // A search hit carries its headers as stored, which a reply reads; the
+    // pane shows them as a reader is shown them, quoted names unquoted.
     let entry = &result.unwrap().entry;
-    let mut lines: Vec<Line> = vec![
-        header_line("From", &entry.from),
-        header_line("To", &entry.to),
-    ];
-    if let Some(ref cc) = entry.cc {
-        if !cc.is_empty() {
-            lines.push(header_line("Cc", cc));
-        }
+    let (from, to) = (readable_sender(&entry.from), readable_recipients(&entry.to));
+    let cc = entry.cc.as_deref().map(readable_recipients);
+    let mut lines: Vec<Line> = vec![header_line("From", &from), header_line("To", &to)];
+    if let Some(cc) = cc.as_deref().filter(|cc| !cc.is_empty()) {
+        lines.push(header_line("Cc", cc));
     }
     lines.push(header_line("Subject", &entry.subject));
     lines.push(header_line("Date", &entry.date_display));
@@ -390,4 +390,68 @@ fn render_search_result_body(app: &App, frame: &mut Frame, area: Rect) {
         .scroll((app.server_search_scroll, 0));
 
     frame.render_widget(content, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{MessageRef, SearchResultEntry};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A hit's quoted display names show unquoted and unescaped in the
+    /// result row and the headers pane, while the hit keeps them as stored.
+    #[test]
+    fn a_hit_shows_its_quoted_names_unquoted() {
+        let from = r#""Doe, \"JJ\" Jane" <jane@x.com>"#;
+        let fetched = mp_core::parse::FetchedEmail {
+            from: from.into(),
+            to: r#""Roe, Rob" <rob@x.com>"#.into(),
+            cc: Some(r#""c@x.com" <c@x.com>"#.into()),
+            reply_to: None,
+            bcc: None,
+            subject: "Angebot".into(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".into(),
+            body_text: String::new(),
+            html_body: None,
+            has_attachments: false,
+            server_has_attachments: None,
+            message_id: Some("<1@x.com>".into()),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        let entry =
+            crate::helpers::fetched_to_email_entry(Some(MessageRef::new(1)), None, &fetched);
+        let mut app = App::default_for_tests();
+        app.server_search_results = vec![SearchResultEntry {
+            entry,
+            fetched,
+            source_label: "INBOX".into(),
+        }];
+        let (w, h) = (100, 8);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| {
+                let [list, headers] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
+                    .areas(frame.area());
+                render_search_results_list(&app, frame, list);
+                render_search_result_headers(&app, frame, headers);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..h)
+            .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(r#"From: Doe, "JJ" Jane <jane@x.com>"#),
+            "{text}"
+        );
+        assert!(text.contains("To: Roe, Rob <rob@x.com>"), "{text}");
+        assert!(text.contains("Cc: c@x.com"), "{text}");
+        assert!(!text.contains('\\'), "{text}");
+        assert_eq!(app.server_search_results[0].entry.from, from);
+    }
 }

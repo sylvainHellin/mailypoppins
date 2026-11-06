@@ -865,11 +865,14 @@ pub fn create_reply_draft_from(
     // text/plain or the result of html_to_plain() at fetch time). Use as-is.
     let clean_body = original_body.to_string();
 
-    // Build quoted body with attribution
+    // Build quoted body with attribution. The sender is text a reader is
+    // shown, so its name is unquoted (`"Doe, Jane" <j@x>` reads
+    // `Doe, Jane <j@x>`) and Graph's name that repeats the address dropped.
+    let sender = crate::parse::readable_sender(&inbox.from);
     let attribution = format!(
         "On {}, {} wrote:",
         inbox.date.as_deref().unwrap_or("(unknown date)"),
-        inbox.from
+        sender
     );
     let quoted_body: String = clean_body
         .trim()
@@ -975,7 +978,7 @@ pub fn create_reply_draft_from(
                  {}\n\
                  </div>",
                 escape_html_text(inbox.date.as_deref().unwrap_or("(unknown date)")),
-                escape_html_text(&inbox.from),
+                escape_html_text(&sender),
                 html_content,
             );
             let draft_html = dest.with_extension("html");
@@ -4017,27 +4020,36 @@ mod tests {
         assert_eq!(escape_html_text("plain"), "plain");
     }
 
-    /// The reply and reply-all attribution carries the address as text in the
-    /// HTML and as written in the Markdown draft, for a plain name, a
-    /// non-ASCII name, a name with `&` and a bare address.
+    /// The reply and reply-all attribution carries the sender as text, its
+    /// name unquoted and unescaped, escaped in the HTML only, for a plain
+    /// name, a non-ASCII name, a quoted name with `&` and an escaped `"`, a
+    /// name that only repeats the address and a bare address.
     #[test]
     fn reply_quote_header_escapes_the_sender_in_html_only() {
         let cases = [
             (
                 "Sylvain Hellin <s.hellin@evoqs.com>",
+                "Sylvain Hellin <s.hellin@evoqs.com>",
                 "Sylvain Hellin &lt;s.hellin@evoqs.com&gt;",
             ),
             (
                 "Zoë Müller-Łukasz <zoe@example.de>",
+                "Zoë Müller-Łukasz <zoe@example.de>",
                 "Zoë Müller-Łukasz &lt;zoe@example.de&gt;",
             ),
             (
-                "\"AT&T Support\" <help@att.com>",
-                "&quot;AT&amp;T Support&quot; &lt;help@att.com&gt;",
+                r#""AT&T \"Support\"" <help@att.com>"#,
+                r#"AT&T "Support" <help@att.com>"#,
+                "AT&amp;T &quot;Support&quot; &lt;help@att.com&gt;",
             ),
-            ("bare@example.com", "bare@example.com"),
+            (
+                r#""help@att.com" <help@att.com>"#,
+                "help@att.com",
+                "help@att.com",
+            ),
+            ("bare@example.com", "bare@example.com", "bare@example.com"),
         ];
-        for (from, escaped) in cases {
+        for (from, shown, escaped) in cases {
             for all in [false, true] {
                 let tmp = tempfile::tempdir().unwrap();
                 let path = create_reply_draft_from(
@@ -4057,7 +4069,7 @@ mod tests {
                 let md = fs::read_to_string(&path).unwrap();
                 assert!(
                     md.contains(&format!(
-                        "On Wed, 21 Oct 2026 20:12:00 +0200, {from} wrote:\n"
+                        "On Wed, 21 Oct 2026 20:12:00 +0200, {shown} wrote:\n"
                     )),
                     "{from}: {md}"
                 );

@@ -104,13 +104,24 @@ pub fn format_recipient(display_name: &str, address: &str) -> String {
 
 /// Split a comma-separated address list respecting quoted display names.
 /// e.g. `"Doe, Jane" <jane@x.com>, bob@x.com` → two entries, not three.
+/// A `\` inside a quoted name escapes the character after it, so the `\"`
+/// [`format_recipient`] writes for a `"` in a name never ends the quote.
 pub fn split_addresses(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
+    let (mut in_quotes, mut escaped) = (false, false);
 
     for ch in s.chars() {
+        if escaped {
+            escaped = false;
+            current.push(ch);
+            continue;
+        }
         match ch {
+            '\\' if in_quotes => {
+                escaped = true;
+                current.push(ch);
+            }
             '"' => {
                 in_quotes = !in_quotes;
                 current.push(ch);
@@ -156,6 +167,16 @@ mod tests {
     fn split_addresses_single_quoted_name() {
         let r = split_addresses("\"Doe, Jane\" <jane@x.com>");
         assert_eq!(r, vec!["\"Doe, Jane\" <jane@x.com>"]);
+    }
+
+    /// An escaped `"` inside a quoted name leaves the quote open, so the
+    /// comma after it stays in the name.
+    #[test]
+    fn split_addresses_escaped_quote_in_display_name() {
+        let one = format_recipient("Jane \"JJ\", Doe \\", "jane@x.com");
+        assert_eq!(one, r#""Jane \"JJ\", Doe \\" <jane@x.com>"#);
+        let r = split_addresses(&format!("{one}, bob@x.com"));
+        assert_eq!(r, vec![one.as_str(), "bob@x.com"]);
     }
 
     #[test]

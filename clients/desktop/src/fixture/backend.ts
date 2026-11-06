@@ -49,6 +49,7 @@ import type {
 import { FakeBridge } from "@/fixture/terminal-bridge";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
+import { senderAddress } from "@/lib/mailbox";
 import type {
   AccountDraft,
   AccountInfo,
@@ -1303,7 +1304,7 @@ const CANNED_MEMBERS = [
 export const CANNED_DRAFT = { account: "work", id: "offsite-note" };
 
 const threadOf = (r: FixtureRow) => (CANNED_MEMBERS.includes(r.message_id) ? CANNED_THREAD : r.message_id);
-const addressOf = (from: string) => (/<([^>]+)>/.exec(from)?.[1] ?? from).trim().toLowerCase();
+const addressOf = (from: string) => senderAddress(from).toLowerCase();
 /** The fixture account's own address, `FIXTURE_FROM` in src-tauri/src/fixture.rs, which decides a member's `own`. */
 const FIXTURE_ADDRESS = "me@example.com";
 

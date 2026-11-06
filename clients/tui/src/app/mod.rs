@@ -1715,7 +1715,7 @@ impl App {
             ));
             let preview = self.message_preview(msg).unwrap_or_default();
             let recipients = MemberRecipients {
-                to: extract_display_name(preview.to.as_deref().unwrap_or_default()),
+                to: first_recipient_name(preview.to.as_deref().unwrap_or_default()),
                 cc: preview.cc,
             };
             self.preview_body

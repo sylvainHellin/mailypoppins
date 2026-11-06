@@ -1558,14 +1558,9 @@ pub fn extract_email_address(raw: &str) -> String {
 /// safe side for a block, and no `From` names two mailboxes in practice.
 pub fn mailbox_addresses(raw: &str) -> Vec<String> {
     let bare = strip_comments(raw);
-    if let Some(start) = bare.rfind('<') {
-        // `>` is searched only after the `<`: a display name may carry one of
-        // its own (`Alerts > Prod <a@x>`), and slicing to it would run
-        // backwards.
-        return bare[start + 1..]
-            .find('>')
-            .map(|len| bare[start + 1..start + 1 + len].trim().to_string())
-            .filter(|address| !address.is_empty())
+    if bare.contains('<') {
+        return last_bracketed(raw)
+            .map(|(_, address)| address)
             .into_iter()
             .collect();
     }
@@ -1591,23 +1586,129 @@ pub fn mailbox_addresses(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Where in `raw` its last `<...>` outside comments opens, and the address
+/// it holds, comments dropped and trimmed; `None` when no `<` is outside a
+/// comment, or the last one is never closed or holds nothing.
+fn last_bracketed(raw: &str) -> Option<(usize, String)> {
+    let chars: Vec<(usize, char)> = uncommented_offsets(raw)
+        .into_iter()
+        .map(|at| (at, char_at(raw, at)))
+        .collect();
+    let open = chars.iter().rposition(|&(_, c)| c == '<')?;
+    // `>` is searched only after the `<`: a display name may carry one of its
+    // own (`Alerts > Prod <a@x>`), and reading up to it would run backwards.
+    let close = open + 1 + chars[open + 1..].iter().position(|&(_, c)| c == '>')?;
+    let address: String = chars[open + 1..close].iter().map(|&(_, c)| c).collect();
+    let address = address.trim();
+    (!address.is_empty()).then(|| (chars[open].0, address.to_string()))
+}
+
+/// The display name and the address of the mailbox a `From` names, read as
+/// [`mailbox_addresses`] reads it: the address in the last `<...>` once
+/// comments are dropped, the name everything before that `<`, unquoted and
+/// unescaped (`"Doe, Jane" <jane@x>` names `Doe, Jane`). A comment stays in
+/// the name (`Alice (Team) <a@x>`), which is how senders use one. The name is
+/// empty when there is none or it only repeats the address, as Graph's often
+/// does (`"a@x" <a@x>`). `None` when the header holds no `<...>` to read.
+fn display_mailbox(raw: &str) -> Option<(String, String)> {
+    let (open, address) = last_bracketed(raw)?;
+    let name = unquoted_display_name(&raw[..open]);
+    let name = if name.to_lowercase() == address.to_lowercase() {
+        String::new()
+    } else {
+        name
+    };
+    Some((name, address))
+}
+
+/// `name` with its quoted strings opened: the `"` dropped and a `\` escape
+/// inside one replaced by the character it escapes; trimmed. A `"` never
+/// closed opens nothing, the whole name then being taken as written, as
+/// [`strip_comments`] takes it.
+fn unquoted_display_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let (mut quoted, mut escaped) = (false, false);
+    for c in name.chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else {
+            out.push(c);
+        }
+    }
+    if quoted {
+        return name.trim().to_string();
+    }
+    out.trim().to_string()
+}
+
+/// The name a reader is shown for the sender of a `From`: its display name
+/// unquoted and unescaped, else its address, else `raw` trimmed (`(unknown)`,
+/// a bare `a@x`). The mailbox is the one [`mailbox_addresses`] reads, so the
+/// name shown is never that of a mailbox the header only carries as text.
+pub fn sender_display_name(raw: &str) -> String {
+    match display_mailbox(raw) {
+        Some((name, address)) if name.is_empty() => address,
+        Some((name, _)) => name,
+        None => raw.trim().to_string(),
+    }
+}
+
+/// A `From` as a reader is shown it: `Name <address>` with the name unquoted
+/// and unescaped, the bare address when there is no name or it only repeats
+/// the address, else `raw` trimmed. For display only: the name is no longer
+/// quoted, so the result is not a header to parse again.
+pub fn readable_sender(raw: &str) -> String {
+    match display_mailbox(raw) {
+        Some((name, address)) if name.is_empty() => address,
+        Some((name, address)) => format!("{name} <{address}>"),
+        None => raw.trim().to_string(),
+    }
+}
+
+/// A recipient list (`To`, `Cc`) as a reader is shown it: each recipient
+/// as [`readable_sender`] shows a sender, comma-separated.
+pub fn readable_recipients(raw: &str) -> String {
+    crate::addresses::split_addresses(raw)
+        .iter()
+        .map(|recipient| readable_sender(recipient))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `raw` without its RFC 5322 comments (`(...)`, nested, outside a quoted
 /// string).
 ///
 /// A `(` never closed opens no comment and a `"` never closed opens no quoted
 /// string: either may be the decoded text of an encoded-word display name
 /// (`bob@x ( <alice@y>`), and taken for syntax it would hide the `<...>`
-/// after it or keep a comment's.
+/// after it or keep a comment's. The daemon's `Authentication-Results`
+/// reader keeps a `strip_comments` of its own (`daemon::hooks::auth`) on the
+/// opposite rule: that header is raw, never decoded text, and a comment there
+/// may quote what a sender chose (an SPF domain, a HELO name), so an unclosed
+/// `(` must hide everything after it rather than let it read as a `pass`.
 fn strip_comments(raw: &str) -> String {
-    uncommented(raw, true)
-        .or_else(|| uncommented(raw, false))
-        .unwrap_or_else(|| raw.to_string())
+    uncommented_offsets(raw)
+        .into_iter()
+        .map(|at| char_at(raw, at))
+        .collect()
 }
 
-/// [`strip_comments`] honouring quoted strings when `quotes`: `None` when one
-/// is never closed.
-fn uncommented(raw: &str, quotes: bool) -> Option<String> {
-    let mut out = String::with_capacity(raw.len());
+/// The byte offset in `raw` of every character [`strip_comments`] keeps.
+fn uncommented_offsets(raw: &str) -> Vec<usize> {
+    uncommented(raw, true)
+        .or_else(|| uncommented(raw, false))
+        .unwrap_or_else(|| raw.char_indices().map(|(at, _)| at).collect())
+}
+
+/// [`uncommented_offsets`] honouring quoted strings when `quotes`: `None`
+/// when one is never closed.
+fn uncommented(raw: &str, quotes: bool) -> Option<Vec<usize>> {
+    let mut kept = Vec::with_capacity(raw.len());
     let (mut depth, mut opened, mut quoted, mut escaped) = (0usize, 0usize, false, false);
     for (at, c) in raw.char_indices() {
         if escaped {
@@ -1627,7 +1728,7 @@ fn uncommented(raw: &str, quotes: bool) -> Option<String> {
             continue;
         }
         if depth == 0 {
-            out.push(c);
+            kept.push(at);
         }
     }
     if quoted {
@@ -1636,10 +1737,20 @@ fn uncommented(raw: &str, quotes: bool) -> Option<String> {
     if depth > 0 {
         // The outermost `(` never closed: a literal, and what follows it is
         // read afresh.
-        out.push('(');
-        out.push_str(&uncommented(&raw[opened + 1..], quotes)?);
+        kept.push(opened);
+        let rest = opened + 1;
+        kept.extend(
+            uncommented(&raw[rest..], quotes)?
+                .into_iter()
+                .map(|at| rest + at),
+        );
     }
-    Some(out)
+    Some(kept)
+}
+
+/// The character starting at byte `at` of `raw`, a char boundary.
+fn char_at(raw: &str, at: usize) -> char {
+    raw[at..].chars().next().unwrap_or_default()
 }
 
 /// The parenthesis after `Fetched Emails`: the count, then `note` when there
@@ -2081,6 +2192,61 @@ mod tests {
         assert!(mailbox_addresses("(unknown)").is_empty());
         assert!(mailbox_addresses("undisclosed-recipients:;").is_empty());
         assert!(mailbox_addresses("John <john@x.com").is_empty());
+    }
+
+    #[test]
+    fn a_sender_is_shown_unquoted_and_by_the_mailbox_mailbox_addresses_reads() {
+        for (raw, name, readable) in [
+            (
+                r#""Doe, Jane" <jane@x.com>"#,
+                "Doe, Jane",
+                "Doe, Jane <jane@x.com>",
+            ),
+            (
+                r#""Say \"hi\" \\ bye" <a@x.com>"#,
+                r#"Say "hi" \ bye"#,
+                r#"Say "hi" \ bye <a@x.com>"#,
+            ),
+            (
+                r#""Bob <bob@x.com>" <alice@y.com>"#,
+                "Bob <bob@x.com>",
+                "Bob <bob@x.com> <alice@y.com>",
+            ),
+            // A comment stays in the name, the address is read without one.
+            (
+                "Jane (work) <jane@x.com> (via <list@y.com>)",
+                "Jane (work)",
+                "Jane (work) <jane@x.com>",
+            ),
+            // Graph's name that only repeats the address.
+            (r#""A@X.com" <a@x.com>"#, "a@x.com", "a@x.com"),
+            ("<a@x.com>", "a@x.com", "a@x.com"),
+            (" a@x.com ", "a@x.com", "a@x.com"),
+            ("(unknown)", "(unknown)", "(unknown)"),
+            // An unclosed `(` is text, and the `<...>` after it names the
+            // mailbox.
+            (
+                "bob@x.com ( <alice@y.com>",
+                "bob@x.com (",
+                "bob@x.com ( <alice@y.com>",
+            ),
+            // An unclosed quote is text, as written.
+            (r#"Bo"b <b@x.com>"#, r#"Bo"b"#, r#"Bo"b <b@x.com>"#),
+            // A backslash outside a quoted string is text too.
+            (
+                r"CORP\robin <r@x.com>",
+                r"CORP\robin",
+                r"CORP\robin <r@x.com>",
+            ),
+        ] {
+            assert_eq!(sender_display_name(raw), name, "{raw}");
+            assert_eq!(readable_sender(raw), readable, "{raw}");
+        }
+        assert_eq!(
+            readable_recipients(r#""Doe, Jane" <jane@x.com>, "b@y.com" <b@y.com>,c@z.com"#),
+            "Doe, Jane <jane@x.com>, b@y.com, c@z.com"
+        );
+        assert_eq!(readable_recipients(""), "");
     }
 
     // -----------------------------------------------------------------------

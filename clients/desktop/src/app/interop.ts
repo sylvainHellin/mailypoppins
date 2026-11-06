@@ -7,6 +7,7 @@ import type { Action } from "@/app/reducer";
 import type { AppState } from "@/app/state";
 import type { MessageMeta } from "@/lib/gui-types";
 import { copyText } from "@/lib/clipboard";
+import { senderAddress } from "@/lib/mailbox";
 import * as cmd from "@/lib/commands";
 import { asGuiError, fixtureNotice, type EditorLaunch } from "@/lib/gui-types";
 
@@ -34,15 +35,6 @@ export function openConfig(dispatch: Dispatch<Action>): Promise<void> {
 /** `sf`: the daemon's log file (`diagnostic.log_path`) in the external editor. */
 export function openLog(dispatch: Dispatch<Action>): Promise<void> {
   return openInEditor(dispatch, "the daemon log", "Open log failed", cmd.logOpen);
-}
-
-/**
- * The address of a `From:` header: what its angle brackets hold, else the
- * whole field, trimmed.
- */
-export function senderAddress(from: string): string {
-  const m = /<([^<>]*)>/.exec(from);
-  return (m ? m[1] : from).trim();
 }
 
 /** What the reader shows for the selected message, or null when it shows none. */

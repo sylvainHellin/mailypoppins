@@ -1,7 +1,8 @@
 import { memo, type MouseEvent } from "react";
 import { CornerUpLeft, Pencil, Star } from "lucide-react";
 import type { ThreadMessage } from "@/protocol/types";
-import { senderAddress, senderName, shortDate } from "@/components/list/format";
+import { shortDate } from "@/components/list/format";
+import { readableSender, senderAddress, senderName } from "@/lib/mailbox";
 import { MarkBox, PendingMark } from "@/components/list/RowControls";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 
@@ -63,7 +64,8 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
   const unread = draft === null && !member.flags.seen;
   const own = member.own;
   const sender = draft !== null ? "Draft" : own ? "Me" : senderName(member.from);
-  const detail = draft !== null ? "Draft reply" : own ? senderAddress(member.from) : member.from || "(no sender)";
+  const detail =
+    draft !== null ? "Draft reply" : own ? senderAddress(member.from) : readableSender(member.from) || "(no sender)";
   const date = shortDate(member.date_display);
   const state = [
     marked ? "marked" : null,

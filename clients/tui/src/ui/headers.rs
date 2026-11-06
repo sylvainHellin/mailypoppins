@@ -7,6 +7,7 @@ use ratatui::Frame;
 use super::super::app::{App, EmailEntry, Focus, MemberRecipients};
 use super::super::theme;
 use super::util::{display_width, pane_border_style};
+use mp_core::parse::readable_recipients;
 
 /// Nerd Font paperclip: the header-pane attachment affordance, the same glyph
 /// the list uses so a message that has attachments reads the same in both
@@ -122,10 +123,10 @@ impl HeaderFields {
     fn from_entry(email: &EmailEntry) -> Self {
         HeaderFields {
             from: email.from.clone(),
-            reply_to: email.reply_to.clone(),
+            reply_to: email.reply_to.as_deref().map(readable_recipients),
             to: email.to.clone(),
-            cc: email.cc.clone(),
-            bcc: email.bcc.clone(),
+            cc: email.cc.as_deref().map(readable_recipients),
+            bcc: email.bcc.as_deref().map(readable_recipients),
             subject: email.subject.clone(),
             date_status: match email.draft_sync.and_then(crate::app::draft_sync_word) {
                 Some(sync) => format!("{}  [{}, {sync}]", email.date_display, email.status),
@@ -150,7 +151,9 @@ impl HeaderFields {
         }
         if let Some(recipients) = recipients {
             self.to = recipients.to;
-            self.cc = self.cc.or(recipients.cc);
+            self.cc = self
+                .cc
+                .or_else(|| recipients.cc.as_deref().map(readable_recipients));
         }
         self
     }
@@ -238,6 +241,19 @@ mod tests {
             text.contains("blind@example.com"),
             "missing Bcc value:\n{text}"
         );
+    }
+
+    /// A quoted display name shows unquoted and unescaped, in the From line
+    /// the list's name feeds and in a Cc read off the header.
+    #[test]
+    fn a_quoted_display_name_shows_unquoted() {
+        let mut quoted = entry(None, None, false);
+        quoted.from = crate::app::extract_display_name(r#""Doe, \"JJ\" Jane" <jane@x.com>"#);
+        quoted.cc = Some(r#""Roe, Rob" <rob@x.com>, "c@x.com" <c@x.com>"#.to_string());
+        let text = render_text(&mut app_showing(quoted), 80, 14);
+        assert!(text.contains(r#"From: Doe, "JJ" Jane"#), "{text}");
+        assert!(text.contains("Cc: Roe, Rob <rob@x.com>, c@x.com"), "{text}");
+        assert!(!text.contains('\\'), "{text}");
     }
 
     /// A message without those headers draws neither row: no empty labelled

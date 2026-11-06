@@ -1,7 +1,8 @@
 import { memo, type MouseEvent } from "react";
 import { CalendarDays, Cloud, Paperclip, Star } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { senderName, shortDate } from "@/components/list/format";
+import { shortDate } from "@/components/list/format";
+import { senderName } from "@/lib/mailbox";
 import { MarkBox, PendingMark } from "@/components/list/RowControls";
 import type { SearchHit } from "@/app/state";
 

@@ -1988,6 +1988,13 @@ mod tests {
                     .unwrap();
                     let (plain, html) = text_parts(&built.raw);
                     let case = format!("{from} / {kind} / html {with_html}");
+                    // A reply's attribution names the sender unquoted; a
+                    // forward's header block carries the From as written.
+                    let written = match kind {
+                        "forward" => from.to_string(),
+                        _ => crate::parse::readable_sender(from),
+                    };
+                    let from = written.as_str();
                     assert!(plain[0].contains(from), "{case}: plain {}", plain[0]);
                     let shown = crate::parse::html_to_plain(&html[0]);
                     assert!(shown.contains(addr), "{case}: shown {shown}\n{}", html[0]);
@@ -2089,13 +2096,18 @@ mod tests {
             let (plain, html) = text_parts(&built.raw);
             let shown = crate::parse::html_to_plain(&html[0]);
             let lines: Vec<&str> = shown.lines().map(str::trim).collect();
-            assert!(
-                shown.contains("\"Ops <team>\""),
-                "{kind}: {shown}\n{}",
-                html[0]
-            );
+            // The forward's header block carries the From as written; the
+            // reply's attribution names the sender unquoted.
+            let (name, written) = match kind {
+                "forward" => ("\"Ops <team>\"", from),
+                _ => (
+                    "Ops <team> ",
+                    "On Tue, 21 Oct 2026 20:12:00 +0200, Ops <team> <ops@example.com> wrote:",
+                ),
+            };
+            assert!(shown.contains(name), "{kind}: {shown}\n{}", html[0]);
             assert!(shown.contains("ops@example.com"), "{kind}: {shown}");
-            assert!(plain[0].contains(from), "{kind}: {}", plain[0]);
+            assert!(plain[0].contains(written), "{kind}: {}", plain[0]);
             assert!(!plain[0].contains('\\'), "{kind}: {}", plain[0]);
             if kind == "forward" {
                 for prefix in ["From: ", "Sent: ", "To: ", "Subject: "] {
@@ -2121,7 +2133,7 @@ mod tests {
             } else {
                 assert!(
                     lines.iter().any(|l| l.starts_with("On Tue, 21 Oct 2026")
-                        && l.contains("\"Ops <team>\"")
+                        && l.contains("Ops <team>")
                         && l.ends_with("wrote:")),
                     "{shown}\n{}",
                     html[0]

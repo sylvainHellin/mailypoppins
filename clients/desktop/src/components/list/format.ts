@@ -1,19 +1,5 @@
-// Display helpers for list rows; pure, so rows stay pure.
-
-/** "Ivana Petrova <ivana@example.com>" to "Ivana Petrova"; a bare address stays. */
-export function senderName(from: string): string {
-  const f = from.trim();
-  if (!f) return "(no sender)";
-  const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(f);
-  if (m) return m[1].trim() || m[2].trim();
-  return f;
-}
-
-/** "Ivana Petrova <ivana@example.com>" and "<ivana@example.com>" to "ivana@example.com"; a bare address stays. */
-export function senderAddress(from: string): string {
-  const f = from.trim();
-  return (/<([^>]+)>\s*$/.exec(f)?.[1] ?? f).trim();
-}
+// Display helpers for list rows; pure, so rows stay pure. A sender's name
+// and address are read in `@/lib/mailbox`.
 
 const sameDay = (a: Date, b: Date) =>
   a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();

@@ -378,7 +378,15 @@ fn method_result(clause: &str) -> Option<MethodResult> {
 }
 
 /// Remove `(comments)`, nested ones included, outside quoted strings, and
-/// unfold the header onto one line.
+/// unfold the header onto one line; a closed comment leaves a space, so the
+/// tokens either side of it stay apart.
+///
+/// An unclosed `(` hides everything after it. `mp_core::parse` keeps its own
+/// `strip_comments` for address headers on the opposite rule, an unclosed `(`
+/// being literal text there, since a decoded display name may hold one. This
+/// header is raw, never decoded, and a comment in it may quote what a sender
+/// chose (an SPF domain, a HELO name): read as text after a truncated
+/// comment, that could pass for a `dkim=pass` clause, so it never is.
 fn strip_comments(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut depth = 0usize;
@@ -677,5 +685,17 @@ mod tests {
         assert_eq!(parsed.results[0].result, "pass");
         assert_eq!(parsed.results[0].property("header.d"), Some("hellin.me"));
         assert_eq!(parsed.results[1].property("smtp.mailfrom"), Some("a@b.c"));
+    }
+
+    /// A comment never closed hides the rest of the header: the text a
+    /// sender put in it never reads as a clause of its own.
+    #[test]
+    fn an_unclosed_comment_hides_every_clause_after_it() {
+        let parsed = parse_authentication_results(
+            "mx.google.com; spf=fail (domain of x; dkim=pass header.i=@hellin.me",
+        );
+        assert_eq!(parsed.results.len(), 1);
+        assert_eq!(parsed.results[0].method, "spf");
+        assert_eq!(parsed.results[0].result, "fail");
     }
 }

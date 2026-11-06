@@ -1,7 +1,8 @@
 import { memo, type MouseEvent } from "react";
 import { CalendarDays, CornerUpLeft, Paperclip } from "lucide-react";
 import type { MessageListRow } from "@/protocol/types";
-import { senderName, shortDate } from "@/components/list/format";
+import { shortDate } from "@/components/list/format";
+import { senderName } from "@/lib/mailbox";
 import { FlagToggle, MarkBox, PendingMark, UnreadToggle } from "@/components/list/RowControls";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 

@@ -2,6 +2,7 @@ import { CalendarDays, Download, ExternalLink, Paperclip } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatSize } from "@/components/list/format";
+import { readableRecipients, readableSender } from "@/lib/mailbox";
 import { messageItems, openItem } from "@/app/attachments";
 import { InlineTag } from "@/components/attachments/AttachmentsDialog";
 import { useDispatch } from "@/app/store";
@@ -30,9 +31,9 @@ export function ReaderHeader({ meta }: { meta: MessageMeta }) {
     <header className="flex flex-col gap-3 border-b border-border px-5 py-4">
       <h2 className="text-lg leading-snug font-semibold break-words">{meta.subject ?? "(no subject)"}</h2>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-        <Field name="From" value={meta.from} />
-        <Field name="To" value={meta.to} />
-        <Field name="Cc" value={meta.cc} />
+        <Field name="From" value={meta.from === null ? null : readableSender(meta.from)} />
+        <Field name="To" value={meta.to === null ? null : readableRecipients(meta.to)} />
+        <Field name="Cc" value={meta.cc === null ? null : readableRecipients(meta.cc)} />
         <Field name="Date" value={meta.date ?? "(no date)"} />
       </dl>
       {meta.flags.length > 0 || meta.invite ? (

@@ -461,7 +461,7 @@ pub fn fill_draft_member(entry: &mut EmailEntry, frontmatter: &mp_core::types::E
     if let Some(from) = frontmatter.from.as_deref().filter(|f| !f.trim().is_empty()) {
         entry.from = extract_display_name(from);
     }
-    entry.to = extract_display_name(frontmatter.to.as_deref().unwrap_or_default());
+    entry.to = first_recipient_name(frontmatter.to.as_deref().unwrap_or_default());
     entry.cc = frontmatter.cc.clone();
     entry.bcc = frontmatter.bcc.clone();
     entry.reply_to = frontmatter.reply_to.clone();
@@ -590,7 +590,7 @@ pub fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
         skip: None,
         selector: Some(row.selector),
         from: extract_display_name(&row.from),
-        to: extract_display_name(&row.to),
+        to: first_recipient_name(&row.to),
         cc: row.cc,
         reply_to: row.reply_to,
         bcc: row.bcc,
@@ -631,7 +631,7 @@ pub fn entry_from_draft(row: DraftEntry) -> EmailEntry {
         skip: None,
         selector: Some(row.selector),
         from: String::new(),
-        to: extract_display_name(row.to.as_deref().unwrap_or_default()),
+        to: first_recipient_name(row.to.as_deref().unwrap_or_default()),
         cc: row.cc,
         // Drafts index carries no reply_to/bcc column yet; the header pane
         // shows them for stored messages (#0096).
@@ -843,19 +843,21 @@ impl PreviewInvite {
     }
 }
 
-/// Extract a short display name from an email address.
-pub fn extract_display_name(addr: &str) -> String {
-    let addr = addr.trim().trim_matches('"');
-    if let Some(idx) = addr.find('<') {
-        let name = addr[..idx].trim().trim_matches('"');
-        if name.is_empty() {
-            addr.trim_matches(|c| c == '<' || c == '>').to_string()
-        } else {
-            name.to_string()
-        }
-    } else {
-        addr.to_string()
-    }
+/// The short name a row and the header pane show for a `From`: its display
+/// name unquoted and unescaped (`"Doe, Jane" <j@x>` shows `Doe, Jane`), else
+/// its address, read off the mailbox the daemon matches a block on
+/// ([`mp_core::parse::sender_display_name`]).
+pub fn extract_display_name(from: &str) -> String {
+    mp_core::parse::sender_display_name(from)
+}
+
+/// The short name of the first recipient of a `To` list, as
+/// [`extract_display_name`] shows a sender; empty for an empty list.
+pub fn first_recipient_name(to: &str) -> String {
+    mp_core::addresses::split_addresses(to)
+        .first()
+        .map(|first| extract_display_name(first))
+        .unwrap_or_default()
 }
 
 /// Resolve date for display and sorting.
@@ -3544,6 +3546,39 @@ mod tests {
     #[test]
     fn test_extract_display_name_empty() {
         assert_eq!(extract_display_name(""), "");
+    }
+
+    #[test]
+    fn a_quoted_display_name_is_shown_unquoted_and_unescaped() {
+        assert_eq!(
+            extract_display_name(r#""Doe, Jane" <jane@x.com>"#),
+            "Doe, Jane"
+        );
+        assert_eq!(
+            extract_display_name(r#""Jane \"JJ\" Doe" <jane@x.com>"#),
+            r#"Jane "JJ" Doe"#
+        );
+        // The name of the mailbox the last `<...>` holds, never one a
+        // quoted name carries.
+        assert_eq!(
+            extract_display_name(r#""Bob <bob@x.com>" <alice@y.com>"#),
+            "Bob <bob@x.com>"
+        );
+        // Graph's name that only repeats the address.
+        assert_eq!(
+            extract_display_name(r#""jane@x.com" <jane@x.com>"#),
+            "jane@x.com"
+        );
+    }
+
+    #[test]
+    fn a_recipient_list_shows_its_first_recipient_unquoted() {
+        assert_eq!(
+            first_recipient_name(r#""Doe, Jane" <jane@x.com>, Bob <bob@y.com>"#),
+            "Doe, Jane"
+        );
+        assert_eq!(first_recipient_name("bob@y.com, c@z.com"), "bob@y.com");
+        assert_eq!(first_recipient_name(""), "");
     }
 
     // -----------------------------------------------------------------------
