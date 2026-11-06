@@ -3540,3 +3540,10 @@ Ingest stamps 0 for an unparsable Date, and a real Date before 1970 is negative,
 
 ## The desktop list filter matches substrings, the store's search whole words (2026-11-06, PERSO-274)
 
+The list header's filter matches typed text anywhere in the subject and sender, while `message.search` quotes each word as a whole-word FTS term over subject, sender and body, so `dach` filters in "Angebot Dachsanierung" and finds nothing in the store.
+Both fixtures (`clients/desktop/src/fixture/backend.ts`, `src-tauri/src/fixture.rs`) answer `search_local` by substring, so a part-word query passes in the tests and fails against a live daemon.
+
+## A debounce keyed on a derived query outlasts slow typing in a test (2026-11-06)
+
+The desktop availability grid restarts its 500 ms wait when the query changes, not on each keystroke, so a test typing several characters that leave the query unchanged can outlast it under load and see an intermediate query.
+Freeze `setTimeout` and `clearTimeout` with `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })` before the component mounts, drive input with `fireEvent` (user-event hangs under vitest's frozen clock), and move the clock with `act(() => vi.advanceTimersByTimeAsync(n))`.
