@@ -3538,10 +3538,10 @@ The pre-daemon parity oracle cannot learn a new flag, so a change of default ord
 
 Ingest stamps 0 for an unparsable Date, and a real Date before 1970 is negative, so an undated test written as `<= 0` sorts those rows with the undated ones; test `IS NULL OR = 0`.
 
-## The desktop list filter matches substrings, the store's search whole words (2026-11-06, PERSO-274)
+## The desktop list filter and the store's search both match parts of words (2026-11-06, PERSO-274, PERSO-276)
 
-The list header's filter matches typed text anywhere in the subject and sender, while `message.search` quotes each word as a whole-word FTS term over subject, sender and body, so `dach` filters in "Angebot Dachsanierung" and finds nothing in the store.
-Both fixtures (`clients/desktop/src/fixture/backend.ts`, `src-tauri/src/fixture.rs`) answer `search_local` by substring, so a part-word query passes in the tests and fails against a live daemon.
+The list header's filter matches typed text anywhere in the subject and sender, and since PERSO-276 `message.search` matches a term of three characters or more anywhere in a word through a trigram index, and a shorter one as a word beginning.
+Both fixtures (`clients/desktop/src/fixture/backend.ts`, `src-tauri/src/fixture.rs`) answer `search_local` by substring, so a one- or two-letter query inside a word passes in the tests and finds nothing against a live daemon.
 
 ## A debounce keyed on a derived query outlasts slow typing in a test (2026-11-06)
 
@@ -3566,3 +3566,22 @@ Restore a cursor across a re-arrange by the row's prior index, not by a key an o
 
 A row's wire `date_sort` is the UTC instant of the store's Unix stamp, `""` when undated (`resolve_date`, `wire_date_sort_of`).
 A client deriving one from a raw `Date:` header goes through `resolve_date` too, or its rows sort by the sender's wall clock against the daemon's.
+
+## A second FTS5 table joined with its own MATCH re-runs per row (2026-11-06, PERSO-276)
+
+Joining two FTS5 tables each with a MATCH (`a MATCH ? AND b MATCH ?` on rowid) makes SQLite probe b by rowid per row of a and re-run b's MATCH each time: 1.4 s for `mail ab` on 2,250 messages.
+Materialising each MATCH once in a `WITH ... AS MATERIALIZED` CTE that keeps its `bm25` score runs it once (17 ms).
+
+## A trigram index alone loses what the word tokenizer's phrase matched (2026-11-06, PERSO-276)
+
+Under unicode61, `don't` is the phrase `don` `t`, which matches "don’t" with the typographic apostrophe Outlook and Apple Mail write, and `follow-up` matches "follow up"; a trigram needle matches only the literal characters.
+A substring term is therefore the word index's former rendering OR the trigram needle, which also keeps a body the retention sweep evicted before the trigram backfill findable by its whole words.
+
+## SQLite's per-statement limits bound a query built per user term (2026-11-06, PERSO-276)
+
+A join takes at most 64 tables, a compound SELECT 500 terms, and a statement 32,766 bound parameters in the bundled build, so a query that grows per typed word must not add a join per word.
+Search tags each MATCH arm with its clause in one `UNION ALL` (chunked by 250), keeps the rows every clause matched with `GROUP BY id HAVING COUNT(DISTINCT clause) = n`, drops repeated AND clauses before rendering (a repeated phrase also counts twice in `bm25`), and checks the bind count against `Connection::limit` (rusqlite feature `limits`) before `prepare`, because the prepare error carries the whole generated SQL.
+
+## The soak fixture template is cached by FIXTURE_VERSION (2026-11-06, PERSO-276)
+
+The `daemon_soak` fixture template is cached under the temp dir by `FIXTURE_VERSION`, so an additive store table that a fresh store fills at creation but an old one backfills must bump it, or the soak's growth row reads the backfill as store growth.
