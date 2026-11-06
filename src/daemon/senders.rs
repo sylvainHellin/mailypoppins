@@ -5,8 +5,9 @@
 //!
 //! An entry is a full address (`spam@example.com`) or a domain
 //! (`@example.com`), stored lowercase and matched case-insensitively against
-//! the address in a message's `From`; a domain entry matches that exact
-//! domain, not its subdomains. The list lives in
+//! the mailbox addresses of a message's `From`, never an address its display
+//! name or a comment carries ([`crate::parse::mailbox_addresses`]); a domain
+//! entry matches that exact domain, not its subdomains. The list lives in
 //! `<data_dir>/blocked-senders.json` ([`list_path`]): it is something the user
 //! typed, so it may not live only in a store the daemon drops and rebuilds,
 //! and `config.toml` is the user's file, which the daemon never writes.
@@ -168,18 +169,21 @@ pub fn normalize(raw: &str) -> std::result::Result<String, String> {
 }
 
 /// Whether `from`, a `From` header as the store holds it, names a sender on
-/// `entries`.
+/// `entries`: one of its mailbox addresses does, so a `From` naming several
+/// mailboxes matches when any of them is blocked.
 pub fn matches(entries: &[String], from: &str) -> bool {
     if entries.is_empty() {
         return false;
     }
-    let address = crate::parse::extract_email_address(from).to_lowercase();
-    let Some((_, domain)) = address.rsplit_once('@') else {
-        return false;
-    };
-    entries.iter().any(|entry| match entry.strip_prefix('@') {
-        Some(blocked) => domain == blocked,
-        None => *entry == address,
+    crate::parse::mailbox_addresses(from).iter().any(|address| {
+        let address = address.to_lowercase();
+        let Some((_, domain)) = address.rsplit_once('@') else {
+            return false;
+        };
+        entries.iter().any(|entry| match entry.strip_prefix('@') {
+            Some(blocked) => domain == blocked,
+            None => *entry == address,
+        })
     })
 }
 
@@ -302,13 +306,18 @@ pub struct Scanned {
 }
 
 /// Judge every Inbox row of `account` not judged yet, and move the ones from a
-/// sender on `entries` to Junk; then mark every row of the store judged.
+/// sender on the list at `list` to Junk; then mark every row of the store
+/// judged.
+///
+/// The list is read under [`LOCK`], so a block that lands while the scan
+/// waits for it is judged against.
 ///
 /// Nothing is judged before the Inbox has synced once: the first scan after
 /// that arms, marking everything already in the store as judged, so mail that
 /// was there before the scan first ran never moves on its own.
-pub fn scan(store: &Store, account: &AccountConfig, entries: &[String]) -> Result<Scanned> {
+pub fn scan(store: &Store, account: &AccountConfig, list: &Path) -> Result<Scanned> {
     let _turn = locked();
+    let entries = load(list)?;
     let name = account.name.as_str();
     let catalogue = Catalogue::from_store(store, account);
     let inbox = inbox_key(&catalogue);
@@ -349,7 +358,7 @@ pub fn scan(store: &Store, account: &AccountConfig, entries: &[String]) -> Resul
     let remembered = moved_memory(store)?;
     let mut owed = Vec::new();
     for row in &rows {
-        if !matches(entries, &row.from) {
+        if !matches(&entries, &row.from) {
             continue;
         }
         if remembered.contains(&row.message_id) {
@@ -512,7 +521,7 @@ mod tests {
     }
 
     struct Fixture {
-        _dir: tempfile::TempDir,
+        dir: tempfile::TempDir,
         store: Store,
         blobs: BlobStore,
     }
@@ -529,11 +538,7 @@ mod tests {
                 listed.push(ListedFolder::named("Junk").with_attributes(&["\\Junk"]));
             }
             crate::catalogue::listing::replace(&store, ACCOUNT, &listed).unwrap();
-            Fixture {
-                _dir: dir,
-                store,
-                blobs,
-            }
+            Fixture { dir, store, blobs }
         }
 
         fn ingest(&self, uid: i64, from: &str) -> String {
@@ -569,6 +574,13 @@ mod tests {
                 },
             )
             .unwrap();
+        }
+
+        /// One [`scan`] against `entries`, written as the list file first.
+        fn scan(&self, entries: &[String]) -> Result<Scanned> {
+            let list = self.dir.path().join(LIST_FILE);
+            save(&list, entries)?;
+            scan(&self.store, &account(), &list)
         }
 
         fn mailbox_of(&self, message_id: &str) -> String {
@@ -622,6 +634,73 @@ mod tests {
         assert!(!matches(&entries, "ham@x.com"));
         assert!(!matches(&entries, "a@sub.bulk.example"));
         assert!(!matches(&entries, ""));
+        assert!(!matches(&entries, "(unknown)"));
+    }
+
+    #[test]
+    fn a_from_matches_on_its_mailbox_addresses_never_one_in_a_name_or_comment() {
+        let entries = list(&["@blocked.example"]);
+        for unrelated in [
+            // A quoted display name holding a blocked address (IMAP rows).
+            r#""Bob <bob@blocked.example>" <alice@ok.example>"#,
+            // Graph's unquoted display name holding one.
+            "Bob <bob@blocked.example> <alice@ok.example>",
+            // A comment holding one.
+            "alice@ok.example (Bob <bob@blocked.example>)",
+            // An encoded-word name, as the store holds it decoded.
+            "bob@blocked.example <alice@ok.example>",
+        ] {
+            assert!(!matches(&entries, unrelated), "{unrelated} is Alice's");
+        }
+        // A display name naming someone else hides no blocked address.
+        assert!(matches(
+            &entries,
+            r#""PayPal <service@paypal.com>" <x@blocked.example>"#
+        ));
+        assert!(matches(
+            &entries,
+            "PayPal <service@paypal.com> <x@blocked.example>"
+        ));
+        // A From naming several mailboxes is a blocked sender's when any is.
+        assert!(matches(
+            &entries,
+            "alice@ok.example, Bob <bob@blocked.example>"
+        ));
+        assert!(matches(
+            &entries,
+            "Team: alice@ok.example, x@blocked.example;"
+        ));
+        assert!(!matches(&entries, "alice@ok.example, carol@ok.example"));
+    }
+
+    #[test]
+    fn an_encoded_word_name_decoding_to_a_blocked_address_moves_nothing() {
+        let fx = Fixture::new(true);
+        let entries = list(&["@blocked.example"]);
+        let alice = fx.ingest(1, "=?utf-8?q?bob=40blocked.example?= <alice@ok.example>");
+        let spam = fx.ingest(2, "=?utf-8?q?alice=40ok.example?= <x@blocked.example>");
+        let stored: String = fx
+            .store
+            .conn()
+            .query_row(
+                "SELECT from_ FROM messages WHERE message_id = ?1",
+                [&alice],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.contains("bob@blocked.example"),
+            "the store holds the name decoded: {stored}"
+        );
+        assert_eq!(
+            move_existing(&fx.store, &account(), &entries).unwrap(),
+            Moved::Rows {
+                mailbox: "Junk".to_string(),
+                count: 1
+            }
+        );
+        assert_eq!(fx.mailbox_of(&alice), "inbox");
+        assert_eq!(fx.mailbox_of(&spam), "Junk");
     }
 
     #[test]
@@ -645,14 +724,11 @@ mod tests {
         let fx = Fixture::new(true);
         let entries = list(&["@spam.example"]);
         let old = fx.ingest(1, "a@spam.example");
-        assert_eq!(
-            scan(&fx.store, &account(), &entries).unwrap(),
-            Scanned::default()
-        );
+        assert_eq!(fx.scan(&entries).unwrap(), Scanned::default());
         fx.synced();
-        assert!(scan(&fx.store, &account(), &entries).unwrap().armed);
+        assert!(fx.scan(&entries).unwrap().armed);
         assert_eq!(fx.mailbox_of(&old), "inbox", "mail already there stays");
-        assert_eq!(scan(&fx.store, &account(), &entries).unwrap().judged, 0);
+        assert_eq!(fx.scan(&entries).unwrap().judged, 0);
     }
 
     #[test]
@@ -660,17 +736,17 @@ mod tests {
         let fx = Fixture::new(true);
         let entries = list(&["@spam.example"]);
         fx.synced();
-        scan(&fx.store, &account(), &entries).unwrap();
+        fx.scan(&entries).unwrap();
         let spam = fx.ingest(2, "Spam <x@SPAM.example>");
         let ham = fx.ingest(3, "friend@ham.example");
-        let outcome = scan(&fx.store, &account(), &entries).unwrap();
+        let outcome = fx.scan(&entries).unwrap();
         assert_eq!((outcome.judged, outcome.moved), (2, 1));
         assert_eq!(fx.mailbox_of(&spam), "Junk");
         assert_eq!(fx.mailbox_of(&ham), "inbox");
 
         // Moved back in place (mp's own move keeps the row): judged already.
         fx.move_back(&spam);
-        assert_eq!(scan(&fx.store, &account(), &entries).unwrap().judged, 0);
+        assert_eq!(fx.scan(&entries).unwrap().judged, 0);
         assert_eq!(fx.mailbox_of(&spam), "inbox");
 
         // Moved back from another client: a new row, kept by the memory.
@@ -681,7 +757,7 @@ mod tests {
                 [&spam],
             )
             .unwrap();
-        let outcome = scan(&fx.store, &account(), &entries).unwrap();
+        let outcome = fx.scan(&entries).unwrap();
         assert_eq!((outcome.moved, outcome.kept), (0, 1));
         assert_eq!(fx.mailbox_of(&spam), "inbox");
     }
@@ -691,9 +767,9 @@ mod tests {
         let fx = Fixture::new(false);
         let entries = list(&["x@spam.example"]);
         fx.synced();
-        scan(&fx.store, &account(), &entries).unwrap();
+        fx.scan(&entries).unwrap();
         let spam = fx.ingest(2, "x@spam.example");
-        let outcome = scan(&fx.store, &account(), &entries).unwrap();
+        let outcome = fx.scan(&entries).unwrap();
         assert_eq!((outcome.moved, outcome.no_junk), (0, 1));
         assert_eq!(fx.mailbox_of(&spam), "inbox");
         assert_eq!(

@@ -1527,15 +1527,88 @@ pub fn slugify_sender(from: &str) -> String {
     crate::types::collapse_hyphens(&slug)
 }
 
+/// The address of the first mailbox `raw` names, or `raw` trimmed when it
+/// names none (`(unknown)`, an empty group, a broken `John <john@x`).
+///
+/// The address is the mailbox's own, never one its display name or a comment
+/// carries: `"Bob <bob@x>" <alice@y>`, Graph's unquoted
+/// `Bob <bob@x> <alice@y>` and `alice@y (Bob <bob@x>)` are all Alice's
+/// ([`mailbox_addresses`]).
 pub fn extract_email_address(raw: &str) -> String {
-    // `>` is searched only after the `<`: a display name may carry one of its
-    // own (`"Alerts > Prod" <a@x>`), and slicing to it would run backwards.
-    if let Some(start) = raw.find('<') {
-        if let Some(len) = raw[start + 1..].find('>') {
-            return raw[start + 1..start + 1 + len].trim().to_string();
+    mailbox_addresses(raw)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| raw.trim().to_string())
+}
+
+/// The address of every mailbox an address header names, in order, a group's
+/// members included; empty when it names none.
+///
+/// The header is parsed as RFC 5322, so a `<...>` inside a quoted display
+/// name or a comment is never taken for the address. A header that does not
+/// parse (Graph writes a display name unquoted: `Bob <bob@x> <alice@y>`)
+/// yields at most one address, looked for once its comments are dropped: the
+/// text in its last `<...>`, since a mailbox's address comes after its name,
+/// or, with no `<` at all, the last bare token holding an `@`.
+pub fn mailbox_addresses(raw: &str) -> Vec<String> {
+    if let Ok(list) = mailparse::addrparse(raw) {
+        let addresses: Vec<String> = list
+            .iter()
+            .flat_map(|addr| match addr {
+                mailparse::MailAddr::Single(info) => std::slice::from_ref(info),
+                mailparse::MailAddr::Group(group) => group.addrs.as_slice(),
+            })
+            .map(|info| info.addr.trim().to_string())
+            .filter(|address| !address.is_empty())
+            .collect();
+        if !addresses.is_empty() {
+            return addresses;
         }
     }
-    raw.trim().to_string()
+    let bare = strip_comments(raw);
+    if let Some(start) = bare.rfind('<') {
+        // `>` is searched only after the `<`: a display name may carry one of
+        // its own (`Alerts > Prod <a@x>`), and slicing to it would run
+        // backwards.
+        return bare[start + 1..]
+            .find('>')
+            .map(|len| bare[start + 1..start + 1 + len].trim().to_string())
+            .filter(|address| !address.is_empty())
+            .into_iter()
+            .collect();
+    }
+    bare.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .map(|token| token.trim_matches('"'))
+        .rfind(|token| token.contains('@'))
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
+
+/// `raw` without its RFC 5322 comments (`(...)`, nested, outside a quoted
+/// string).
+fn strip_comments(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    for c in raw.chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && (quoted || depth > 0) {
+            escaped = true;
+        } else if c == '"' && depth == 0 {
+            quoted = !quoted;
+        } else if c == '(' && !quoted {
+            depth += 1;
+            continue;
+        } else if c == ')' && depth > 0 {
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The parenthesis after `Fetched Emails`: the count, then `note` when there
@@ -1898,6 +1971,50 @@ mod tests {
         );
         assert_eq!(extract_email_address("plain@x.com"), "plain@x.com");
         assert_eq!(extract_email_address("broken <a@x"), "broken <a@x");
+    }
+
+    #[test]
+    fn extract_email_address_takes_the_mailbox_address_never_one_in_a_name_or_comment() {
+        for (raw, address) in [
+            // A quoted display name holding an address (IMAP rows store it so).
+            (r#""Bob <bob@x.com>" <alice@y.com>"#, "alice@y.com"),
+            (
+                r#""PayPal <service@paypal.com>" <x@spam.example>"#,
+                "x@spam.example",
+            ),
+            // Graph's unquoted display name: does not parse, the last `<...>`.
+            ("Bob <bob@x.com> <alice@y.com>", "alice@y.com"),
+            ("Doe, Jane <jane@y.com>", "jane@y.com"),
+            // A comment holding an address.
+            ("alice@y.com (Bob <bob@x.com>)", "alice@y.com"),
+            ("alice@y.com (Bob, <bob@x.com>", "alice@y.com"),
+            // A decoded encoded-word name that reads as an address.
+            ("bob@x.com <alice@y.com>", "alice@y.com"),
+            // A group: its first member.
+            ("Team: a@x.com, b@y.com;", "a@x.com"),
+            // Nothing parses and nothing is bracketed: the bare token.
+            ("Bob, alice@y.com (x <bob@x.com>)", "alice@y.com"),
+        ] {
+            assert_eq!(extract_email_address(raw), address, "{raw}");
+        }
+        // Naming no mailbox keeps the old answer: the header, trimmed.
+        assert_eq!(extract_email_address(" (unknown) "), "(unknown)");
+        assert_eq!(
+            extract_email_address("undisclosed-recipients:;"),
+            "undisclosed-recipients:;"
+        );
+    }
+
+    #[test]
+    fn mailbox_addresses_names_every_mailbox_and_a_groups_members() {
+        assert_eq!(
+            mailbox_addresses(r#"a@x.com, "B <z@z.com>" <b@y.com>, Team: c@x.com;"#),
+            ["a@x.com", "b@y.com", "c@x.com"]
+        );
+        assert!(mailbox_addresses("").is_empty());
+        assert!(mailbox_addresses("(unknown)").is_empty());
+        assert!(mailbox_addresses("undisclosed-recipients:;").is_empty());
+        assert!(mailbox_addresses("John <john@x.com").is_empty());
     }
 
     // -----------------------------------------------------------------------

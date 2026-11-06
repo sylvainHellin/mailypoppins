@@ -106,8 +106,7 @@ pub async fn scan_once(
         let Some(store) = crate::store::open_store(&scan_cfg.name) else {
             return anyhow::Ok(senders::Scanned::default());
         };
-        let entries = senders::load(&senders::list_path())?;
-        senders::scan(&store, &scan_cfg, &entries)
+        senders::scan(&store, &scan_cfg, &senders::list_path())
     })
     .await;
     let outcome = match scanned {
