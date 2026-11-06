@@ -985,7 +985,8 @@ pub fn to_graph(q: &Query) -> Result<GraphQuery, RenderError> {
 /// groups) that may match as substrings, each answered by either index, so
 /// the word index's answer is a floor the trigram index only widens. All are
 /// absent when the query has only attachment, filename or date predicates;
-/// the rest are SQL predicates neither index can express.
+/// the rest are SQL predicates neither index can express. A text clause the
+/// query repeats is rendered once ([`dedup_clauses`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FtsRender {
     pub match_expr: Option<String>,
@@ -1228,8 +1229,29 @@ fn render_fts(q: &Query, substring: bool) -> Result<FtsRender, RenderError> {
         }
     }
 
+    // A repeated AND clause changes nothing but the work, and its score would
+    // count twice, so only its first occurrence stays (PERSO-276).
+    dedup_clauses(&mut word_parts, String::clone);
+    dedup_clauses(&mut render.either, |clause| {
+        format!("{}\u{0}{}", clause.words, clause.trigrams)
+    });
     render.match_expr = (!word_parts.is_empty()).then(|| word_parts.join(" "));
     Ok(render)
+}
+
+/// Keep the first of the clauses that render alike up to ASCII case, in
+/// their order, so a query without a repeat renders as before.
+///
+/// Both indexes fold ASCII case (`unicode61` and `trigram case_sensitive 0`),
+/// so `Rechnung` and `rechnung` match the same rows with the same score. The
+/// rest of a rendering is generated with one spelling (`OR`, the column
+/// names, the quotes), so folding it too merges nothing it should not.
+/// Non-ASCII case is left alone: a fold that differed from the tokenizer's
+/// could merge two terms the index tells apart, where a missed merge only
+/// costs a repeat.
+fn dedup_clauses<T>(clauses: &mut Vec<T>, rendering: impl Fn(&T) -> String) {
+    let mut seen = std::collections::HashSet::new();
+    clauses.retain(|clause| seen.insert(rendering(clause).to_ascii_lowercase()));
 }
 
 /// The alternatives of one OR group as one `MATCH` term: the term itself when
@@ -1871,6 +1893,31 @@ mod tests {
                 "(\"invoice\" OR \"receipt\")"
             )]
         );
+    }
+
+    #[test]
+    fn a_repeated_clause_is_rendered_once_whatever_its_ascii_case() {
+        let r = to_fts_substring(&q(
+            "Rechnung ab rechnung subject:dach AB RECHNUNG (x OR y) (x OR y) subject:Dach",
+        ))
+        .unwrap();
+        assert_eq!(
+            r.either,
+            vec![
+                either("\"Rechnung\"", "\"Rechnung\""),
+                either("subject:\"dach\"", "subject:\"dach\""),
+            ]
+        );
+        assert_eq!(r.match_expr.as_deref(), Some("\"ab\"* (\"x\"* OR \"y\"*)"));
+        // A prefix is not the whole word, and a column is not the whole row.
+        let r = to_fts(&q("invoi invoi* subject:invoi INVOI")).unwrap();
+        assert_eq!(
+            r.match_expr.as_deref(),
+            Some("\"invoi\" \"invoi\"* subject:\"invoi\"")
+        );
+        // Non-ASCII case is the tokenizer's to fold, not the renderer's.
+        let r = to_fts(&q("zürich ZÜRICH")).unwrap();
+        assert_eq!(r.match_expr.as_deref(), Some("\"zürich\" \"ZÜRICH\""));
     }
 
     #[test]

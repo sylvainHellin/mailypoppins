@@ -531,7 +531,8 @@ fn a_query_mixes_substring_and_word_beginning_terms() {
 fn a_pasted_paragraph_of_many_terms_is_answered() {
     let f = Fixture::new();
     // A fresh store has nothing to backfill, so the query takes the
-    // substring path, the one that builds a set per term.
+    // substring path, the one that unions an arm per index and term and
+    // groups them by row.
     assert!(mailypoppins::store::fts::trigram_ready(f.store.conn()).unwrap());
     let words: Vec<String> = (0..300).map(|i| format!("term{i:03}")).collect();
     let body = format!("{} we meet at noon", words.join(" "));
@@ -551,6 +552,69 @@ fn a_pasted_paragraph_of_many_terms_is_answered() {
     assert_eq!(f.hits(&first_eighty).tap_sorted(), vec![all, short_of_one]);
     let query = format!("{} at \"meet at noon\"", words.join(" "));
     assert_eq!(f.hits(&query), vec![all]);
+}
+
+/// A word typed again, in any ASCII case, is the same AND clause: the query
+/// finds and ranks what the query without the repeats does, and a repeat
+/// costs no work and no bound parameter (PERSO-276).
+#[test]
+fn a_repeated_word_finds_and_ranks_as_once() {
+    let f = Fixture::new();
+    f.ingest(
+        "inbox",
+        1,
+        &email(
+            "a",
+            "a@example.com",
+            "Rechnung Dach",
+            "die Rechnung am Montag",
+        ),
+    );
+    f.ingest(
+        "inbox",
+        2,
+        &email("b", "b@example.com", "Termin", "Dachrechnung am Dienstag"),
+    );
+    f.ingest(
+        "inbox",
+        3,
+        &email("c", "c@example.com", "Lunch", "am Mittag"),
+    );
+    let ranked = |query: &str| -> Vec<(i64, f64)> {
+        search(&f.store, "acct", query, None, 20, SearchOrder::Relevance)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.row.id, h.rank))
+            .collect()
+    };
+    let once = ranked("rechnung dach am");
+    assert_eq!(once.len(), 2);
+    // Past the parameter limit a query of distinct words would hit.
+    let repeated = ["Rechnung", "dach", "am", "RECHNUNG", "Dach", "AM"]
+        .repeat(3_000)
+        .join(" ");
+    assert_eq!(ranked(&repeated), once);
+}
+
+/// A query of more distinct words than SQLite binds parameters for is refused
+/// in plain words, not with the generated SQL (PERSO-276).
+#[test]
+fn too_many_distinct_words_are_refused_in_plain_words() {
+    let f = Fixture::new();
+    f.ingest("inbox", 1, &email("a", "a@example.com", "Notes", "w00001"));
+    let query = (0..17_000)
+        .map(|i| format!("w{i:05}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let err = search(&f.store, "acct", &query, None, 20, SearchOrder::Relevance)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.starts_with("the search has too many distinct words (17000); the limit is "),
+        "{err}"
+    );
+    assert!(!err.contains("SELECT") && !err.contains("WITH"), "{err}");
+    assert!(err.len() < 100, "{err}");
 }
 
 /// Non-ASCII text survives the round trip through the tokenizer, and so does a

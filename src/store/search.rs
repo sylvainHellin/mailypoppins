@@ -217,7 +217,8 @@ pub fn search_ast(
     // re-runs its `MATCH` for every row of the first (`mail ab` took 1.4 s on
     // the TUM store that way and 17 ms as a set); joined as one set per
     // clause, a pasted paragraph exceeds SQLite's 64-table cap on a join and
-    // fails.
+    // fails. A clause the query repeats is already rendered once
+    // ([`crate::search::to_fts_substring`]), so a repeat costs no arm.
     binds.push(Box::new(account.to_string()));
     let arm = |binds: &mut Vec<Box<dyn rusqlite::ToSql>>, table: &str, expr: &str, clause| {
         binds.push(Box::new(expr.to_string()));
@@ -233,11 +234,13 @@ pub fn search_ast(
         arms.push(arm(&mut binds, WORD_TABLE, words, clauses));
         clauses += 1;
     }
+    let before_either = binds.len();
     for clause in &render.either {
         arms.push(arm(&mut binds, WORD_TABLE, &clause.words, clauses));
         arms.push(arm(&mut binds, TRIGRAM_TABLE, &clause.trigrams, clauses));
         clauses += 1;
     }
+    let either_binds = binds.len() - before_either;
     let (with_clause, from_clause, rank_expr) = if arms.is_empty() {
         (String::new(), "messages", "0.0")
     } else {
@@ -306,6 +309,7 @@ pub fn search_ast(
     }
     let limit_placeholder = binds.len() + 1;
     binds.push(Box::new(limit as i64));
+    check_bind_count(store, binds.len(), either_binds, render.either.len())?;
 
     let order_by = order_by(order);
     let sql = format!(
@@ -339,6 +343,36 @@ pub fn search_ast(
         out.push(hit.context("reading a search hit")?);
     }
     Ok(out)
+}
+
+/// Refuse a query whose statement would bind more parameters than SQLite
+/// takes (`SQLITE_LIMIT_VARIABLE_NUMBER`, 32,766 in the bundled build), in
+/// plain words: `prepare` would fail with the whole generated SQL in its
+/// error. Each distinct substring clause binds the same number of parameters
+/// (`either_binds` over `either_clauses`), so the limit on them is what the
+/// rest of the statement leaves, divided by that.
+fn check_bind_count(
+    store: &Store,
+    binds: usize,
+    either_binds: usize,
+    either_clauses: usize,
+) -> Result<()> {
+    let max = usize::try_from(
+        store
+            .conn()
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER),
+    )
+    .unwrap_or(0);
+    if binds <= max {
+        return Ok(());
+    }
+    if let Some(per_clause) = either_binds.checked_div(either_clauses) {
+        let room = max.saturating_sub(binds - either_binds) / per_clause;
+        anyhow::bail!(
+            "the search has too many distinct words ({either_clauses}); the limit is {room}"
+        );
+    }
+    anyhow::bail!("the search has too many terms ({binds} parameters); the limit is {max}");
 }
 
 /// How far the indexes have drifted from the rows: `(rows not indexed, index
