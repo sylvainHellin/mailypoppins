@@ -197,6 +197,42 @@ fn filename_wildcard_characters_match_literally() {
     assert_eq!(f.hits("filename:\"100%\""), vec![underscored]);
 }
 
+/// A `filename:` term typed again, in any ASCII case, is the same predicate:
+/// the query finds what the query without the repeats does, and a repeat
+/// binds no parameter (PERSO-276).
+#[test]
+fn a_repeated_filename_finds_as_once() {
+    let f = Fixture::new();
+    let invoice = f.ingest(
+        "inbox",
+        1,
+        &with_attachments(
+            email("a", "a@example.com", "Billing", "see attached"),
+            &["Invoice-2026_03.PDF", "logo.png"],
+        ),
+    );
+    f.ingest(
+        "inbox",
+        2,
+        &with_attachments(
+            email("b", "b@example.com", "Minutes", "see attached"),
+            &["notes.pdf"],
+        ),
+    );
+    let once = f.hits("filename:invoice (filename:logo OR filename:notes)");
+    assert_eq!(once, vec![invoice]);
+    // Past the parameter limit were each repeat bound again.
+    let repeated = [
+        "filename:invoice",
+        "(filename:logo OR filename:notes)",
+        "filename:INVOICE*",
+        "(filename:LOGO OR filename:Notes)",
+    ]
+    .repeat(12_000)
+    .join(" ");
+    assert_eq!(f.hits(&repeated), once);
+}
+
 /// `filename:` folds case beyond ASCII (PERSO-134): an umlaut matches across
 /// case both ways, and `ẞ` folds to `ß`. `ß` against `SS` is not folded, so
 /// `filename:STRASSE` misses `straße.pdf`; the test pins that as the known

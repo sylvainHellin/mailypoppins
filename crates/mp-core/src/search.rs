@@ -998,7 +998,8 @@ pub struct FtsRender {
     /// than the index. Each inner list is one OR group of case-insensitive
     /// substrings (a lone `filename:x` is a group of one); the groups are
     /// AND-ed. A trailing `*` is already stripped, since a substring match
-    /// subsumes a prefix one.
+    /// subsumes a prefix one. A group the query repeats is kept once
+    /// ([`dedup_clauses`]).
     pub filenames: Vec<Vec<String>>,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1235,6 +1236,9 @@ fn render_fts(q: &Query, substring: bool) -> Result<FtsRender, RenderError> {
     dedup_clauses(&mut render.either, |clause| {
         format!("{}\u{0}{}", clause.words, clause.trigrams)
     });
+    // A `filename:` match folds case further than ASCII, so a group equal up
+    // to ASCII case matches the same names and binds and checks them again.
+    dedup_clauses(&mut render.filenames, |group| group.join("\u{0}"));
     render.match_expr = (!word_parts.is_empty()).then(|| word_parts.join(" "));
     Ok(render)
 }
@@ -1918,6 +1922,32 @@ mod tests {
         // Non-ASCII case is the tokenizer's to fold, not the renderer's.
         let r = to_fts(&q("zürich ZÜRICH")).unwrap();
         assert_eq!(r.match_expr.as_deref(), Some("\"zürich\" \"ZÜRICH\""));
+    }
+
+    #[test]
+    fn a_repeated_filename_group_is_kept_once_whatever_its_ascii_case() {
+        let r = to_fts_substring(&q("filename:Invoice filename:pdf filename:INVOICE* \
+             (filename:a OR filename:b) (filename:A OR filename:B) (filename:b OR filename:a) \
+             filename:übersicht filename:ÜBERSICHT"))
+        .unwrap();
+        let groups = |gs: &[&[&str]]| -> Vec<Vec<String>> {
+            gs.iter()
+                .map(|g| g.iter().map(|s| s.to_string()).collect())
+                .collect()
+        };
+        // The first spelling stays; another order of an OR group is another
+        // rendering, and non-ASCII case is left to the SQL fold.
+        assert_eq!(
+            r.filenames,
+            groups(&[
+                &["Invoice"],
+                &["pdf"],
+                &["a", "b"],
+                &["b", "a"],
+                &["übersicht"],
+                &["ÜBERSICHT"],
+            ])
+        );
     }
 
     #[test]

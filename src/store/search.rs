@@ -279,6 +279,8 @@ pub fn search_ast(
     // ASCII case only, so both sides are folded first: the stored name by the
     // store's `mp_fold` function, the pattern by the same Rust fold
     // (PERSO-134). `ß` and `SS` still differ, as a per-character fold leaves them.
+    // A group the query repeats is already kept once
+    // ([`crate::search::to_fts_substring`]), so a repeat costs no `EXISTS`.
     for group in &render.filenames {
         let mut alternatives: Vec<String> = Vec::new();
         for needle in group {
