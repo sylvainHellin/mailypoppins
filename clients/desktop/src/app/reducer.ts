@@ -1445,8 +1445,11 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     }
     case "draft.changed":
     case "draft.invalid": {
-      const account = (payload as { account: string }).account;
-      const next = staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
+      const { account, id } = payload as { account: string; id: string };
+      // The named draft's file moved: its preview, and no other, reads it again (PERSO-272).
+      const key = targetKey({ account, draft: id });
+      const draftRevs = { ...s.draftRevs, of: { ...s.draftRevs.of, [key]: (s.draftRevs.of[key] ?? 0) + 1 } };
+      const next = staleListIf(staleMailboxes({ ...s, draftRevs }, account), (a, m) => a === account && m === "drafts");
       return staleConversations(next, account);
     }
     // A signature file was written, created, deleted or renamed away, here
@@ -1587,6 +1590,8 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         composeDialog: closeCompose ? null : next.composeDialog,
         composeLeave: closeLeave ? null : next.composeLeave,
         overlay: closeOverlay ? null : next.overlay,
+        // A draft written while the events were missed names no draft: every preview reads its draft again.
+        draftRevs: { epoch: next.draftRevs.epoch + 1, of: {} },
         },
         e.bootstrap,
         sameInstance,
@@ -1636,6 +1641,21 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
 
 function loaded<T>(l: Loadable<T>, gen: number, data: T): Loadable<T> {
   return { ...l, data, loadedGen: gen, error: null };
+}
+
+/** Whether two values decoded from the daemon's JSON are equal, member by member. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    const bs = b as unknown[];
+    return a.length === bs.length && a.every((x, i) => sameJson(x, bs[i]));
+  }
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  const keys = Object.keys(ao);
+  return keys.length === Object.keys(bo).length && keys.every((k) => k in bo && sameJson(ao[k], bo[k]));
 }
 
 function failed<T>(l: Loadable<T>, gen: number, error: GuiError): Loadable<T> {
@@ -1821,7 +1841,11 @@ function reduce(s: AppState, a: Action): AppState {
       if (listAnswerIsStale(s, a.key, a.lgen, a.gen)) return drop();
       // An answer of the mode the list was in before a switch is not this list's.
       if (a.list.kind !== "drafts" && (a.list.kind === "conversations") !== grouped) return drop();
-      const list = overlayPending(s, a.list);
+      // An answer equal to the shown list keeps its object, so nothing that
+      // reads the list renders again (PERSO-272): a sync tick, an account
+      // state change or another draft's save reloads a list that did not move.
+      const answer = overlayPending(s, a.list);
+      const list = s.messages.data !== null && sameJson(s.messages.data, answer) ? s.messages.data : answer;
       const next = { ...s, messages: { ...loaded(s.messages, a.gen, list), key: s.messages.key } };
       return pickTopRow(pruneMarks(reverify(next, list), list));
     }

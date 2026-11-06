@@ -1,12 +1,15 @@
 // The reader pane for a draft: `draft_preview`'s record (the headers, the
 // status and the body the dry run renders), `draft_validate`'s report and
 // the `attachments:` list `draft_attachments` reads from the file, read
-// again whenever the listing's row changes (a save in the editor).
+// again whenever the row or the file's version (`draftRevision`, a
+// `draft.changed` naming this draft) moves; a reload of the list for any
+// other reason reads nothing, and a re-read keeps the last preview up until
+// it lands, so a sync never flashes the skeleton (PERSO-272).
 // The body is the Markdown as written; `tt` switches it to the HTML a send
 // would build (`draft.html`, PERSO-136) in the reader's sandboxed frame and
 // back, through `state.draftHtml`, whatever the reader mode is (docs/reader.md,
 // "Drafts and server-only hits"). The frame is fetched again with the rest
-// when the row changes, and every draft opens on its Markdown.
+// when the row or the version moves, and every draft opens on its Markdown.
 // `ComposeSummary` is the same preview after an embedded editor exited with
 // 0 on a draft the selection does not show.
 
@@ -20,13 +23,15 @@ import { openInEditor, setShownStatus } from "@/app/compose";
 import { draftItemsOf, openItem, removeItem } from "@/app/attachments";
 import { ReaderBody, draftReaderUrl } from "@/components/reader/ReaderBody";
 import { useAppState, useDispatch } from "@/app/store";
-import { draftsShown, filteredDrafts, targetKey, type DraftItem } from "@/app/state";
+import { draftRevision, draftsShown, filteredDrafts, targetKey, type DraftItem } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type DraftAttachments } from "@/lib/gui-types";
 import { joinRead } from "@/lib/inflight";
 import type { DraftPreview as Preview, DraftReport } from "@/protocol/types";
 
 type Loaded = {
+  /** The draft the answer is about, `account/id`: a re-read of the same draft shows it until its own answer lands. */
+  draft: string;
   key: string;
   preview: Preview | null;
   report: DraftReport | null;
@@ -75,8 +80,10 @@ export function DraftPreview({
   const s = useAppState();
   const dispatch = useDispatch();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  // A row that changed (a save, an approve) is read again.
-  const key = `${account}/${draft.id}|${draft.path}|${draft.status}|${draft.subject}|${draft.to}|${draft.valid}|${s.messages.loadedGen}`;
+  // A row that changed (an approve) or a file written again (a body-only
+  // save, a server sync) is read again; a list reload alone is neither.
+  const shown = `${account}/${draft.id}`;
+  const key = `${shown}|${draft.path}|${draft.status}|${draft.subject}|${draft.to}|${draft.valid}|${draftRevision(s, account, draft.id)}`;
   const invalid = draft.diagnostic !== null || !draft.valid;
   const showsHtml = s.draftHtml === targetKey({ account, draft: draft.id });
 
@@ -96,6 +103,7 @@ export function DraftPreview({
     ).then(([p, v, a]) => {
       if (!live) return;
       setLoaded({
+        draft: shown,
         key,
         preview: p.status === "fulfilled" ? p.value : null,
         report: v.status === "fulfilled" ? (v.value.reports.find((r) => r.id === draft.id) ?? null) : null,
@@ -112,11 +120,13 @@ export function DraftPreview({
 
   const pending = targetKey({ account, draft: draft.id }) in s.pending;
   const editing = targetKey({ account, draft: draft.id }) in s.compose;
-  const p = loaded?.key === key ? loaded.preview : null;
-  const report = loaded?.key === key ? loaded.report : null;
+  // The last answer about this draft, until the re-read's lands (PERSO-272).
+  const last = loaded?.draft === shown ? loaded : null;
+  const p = last?.preview ?? null;
+  const report = last?.report ?? null;
   const subject = p?.subject || draft.subject || (invalid ? draft.id : "(no subject)");
   const status = draft.status;
-  const attachments = loaded?.key === key && loaded.attachments ? draftItemsOf(loaded.attachments) : [];
+  const attachments = last?.attachments ? draftItemsOf(last.attachments) : [];
   const owner = { kind: "draft" as const, account, draftId: draft.id };
 
   return (
@@ -175,9 +185,9 @@ export function DraftPreview({
           <p className="break-words">{draft.diagnostic ?? "The file's frontmatter does not read."}</p>
           <p className="text-muted-foreground">Fix it in the editor; the list follows each save.</p>
         </div>
-      ) : loaded?.key === key && loaded.error ? (
+      ) : last?.error ? (
         <p data-slot="draft-diagnostic" className="text-destructive">
-          The preview did not load: {loaded.error}
+          The preview did not load: {last.error}
         </p>
       ) : !p ? (
         <div className="flex flex-col gap-2" aria-busy="true" aria-label="Loading the draft">
@@ -245,7 +255,7 @@ export function DraftPreview({
                     aria-label={`Remove ${item.name}`}
                     onClick={() =>
                       void removeItem(account, draft.id, item, dispatch).then(
-                        (list) => list && setLoaded((l) => (l && l.key === key ? { ...l, attachments: list } : l)),
+                        (list) => list && setLoaded((l) => (l && l.draft === shown ? { ...l, attachments: list } : l)),
                       )
                     }
                   >
@@ -256,7 +266,7 @@ export function DraftPreview({
             </ul>
           ) : null}
           {showsHtml ? (
-            // Keyed on the row, so a save or a reload fetches the rendition again.
+            // Keyed on the row and the version, so a save fetches the rendition again and a list reload does not.
             <ReaderBody key={key} htmlUrl={draftReaderUrl(account, draft.id)} subject={subject} label="Draft as sent" />
           ) : (
             <pre data-slot="draft-body" className="font-sans break-words whitespace-pre-wrap">

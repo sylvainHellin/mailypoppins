@@ -353,6 +353,11 @@ export function targetKey(t: Target): string {
   return "row_id" in t ? `${t.account}#${t.row_id}` : `${t.account}#draft:${t.draft}`;
 }
 
+/** The version of a draft's file its preview keys on (`AppState.draftRevs`, PERSO-272). */
+export function draftRevision(s: Pick<AppState, "draftRevs">, account: string, draft: string): string {
+  return `${s.draftRevs.epoch}.${s.draftRevs.of[targetKey({ account, draft })] ?? 0}`;
+}
+
 /** The draft a `targetKey` of a draft names; null for a row's key. */
 export function draftOfKey(key: string): { account: string; draft: string } | null {
   const at = key.lastIndexOf("#draft:");
@@ -895,6 +900,15 @@ export type AppState = {
    * when the preview goes, so every draft opens on its Markdown (PERSO-136).
    */
   draftHtml: string | null;
+  /**
+   * The version of each draft's file a preview keys on (PERSO-272): `of`
+   * counts, by `targetKey`, the `draft.changed` and `draft.invalid` events
+   * that named the draft, so a write re-reads that draft's preview and no
+   * other; `epoch` moves with each rebootstrap, whose missed events name no
+   * draft. A Drafts list reload is not a version: a sync tick or another
+   * draft's save reloads it too.
+   */
+  draftRevs: { epoch: number; of: Record<string, number> };
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
@@ -1157,6 +1171,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     // readerMode.ts's DEFAULT_READER_MODE, spelled out for the same reason.
     readerMode: "html",
     draftHtml: null,
+    draftRevs: { epoch: 0, of: {} },
     bootstrap: null,
     accounts: emptyLoadable(),
     mailboxes: {},

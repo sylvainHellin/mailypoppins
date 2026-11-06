@@ -154,7 +154,7 @@ Under the headers, `draft_validate`'s report says "Valid" or "Not sendable" with
 Under the report, the "Attachments" list shows each entry of the draft's `attachments:` as the file spells it, from `draft_attachments`, with "Open <entry>" and "Remove <entry>" buttons.
 An entry with no file behind it carries a "missing" badge and its Open is disabled, since the send would fail on it.
 Remove calls `draft_attachment_remove`, which takes the entry out of the file and leaves the file it named alone.
-The three, and the frame while it is shown, are read again whenever the listing's row or the list itself changes, which is what a save in the editor or an attach does through `draft.changed`.
+The three, and the frame while it is shown, are read again whenever the listing's row changes or a `draft.changed` or `draft.invalid` names the draft (`state.draftRevs`), which is what a save in the editor or an attach does; a list reload alone (a sync tick, an account state change, another draft's save) reads nothing, and a re-read keeps the last preview up until its answer lands, so the reader never flashes the skeleton (PERSO-272).
 Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), Attach file (`ta`), and Approve (`cA`) or Back to draft (`cD`).
 Approve and Back to draft act on the draft the preview shows and ask nothing, even with drafts marked; a draft being sent is refused with a notice, as by the keys.
 A conversation's draft member (#0142) shows the same preview, built from a `draft_preview` read again whenever the conversation list lands, with the same toolbar less Attach file, which stays in Drafts (PERSO-146).
