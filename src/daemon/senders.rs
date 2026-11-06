@@ -169,8 +169,10 @@ pub fn normalize(raw: &str) -> std::result::Result<String, String> {
 }
 
 /// Whether `from`, a `From` header as the store holds it, names a sender on
-/// `entries`: one of its mailbox addresses does, so a `From` naming several
-/// mailboxes matches when any of them is blocked.
+/// `entries`: one of its mailbox addresses does
+/// ([`crate::parse::mailbox_addresses`]), so a `From` naming several bare
+/// addresses matches when any of them is blocked, and one holding a `<` is
+/// judged by the address in its last `<...>`.
 pub fn matches(entries: &[String], from: &str) -> bool {
     if entries.is_empty() {
         return false;
@@ -647,8 +649,14 @@ mod tests {
             "Bob <bob@blocked.example> <alice@ok.example>",
             // A comment holding one.
             "alice@ok.example (Bob <bob@blocked.example>)",
-            // An encoded-word name, as the store holds it decoded.
+            // An encoded-word name, as the store holds it decoded, a comma
+            // after it making it a mailbox of its own to RFC 5322.
             "bob@blocked.example <alice@ok.example>",
+            "bob@blocked.example, <alice@ok.example>",
+            "bob@blocked.example, Sales <alice@ok.example>",
+            "bob@blocked.example ( <alice@ok.example>",
+            // A Graph name holding a comma.
+            "Doe, Jane <jane@ok.example>",
         ] {
             assert!(!matches(&entries, unrelated), "{unrelated} is Alice's");
         }
@@ -661,16 +669,26 @@ mod tests {
             &entries,
             "PayPal <service@paypal.com> <x@blocked.example>"
         ));
-        // A From naming several mailboxes is a blocked sender's when any is.
-        assert!(matches(
-            &entries,
-            "alice@ok.example, Bob <bob@blocked.example>"
-        ));
+        // A From naming several bare mailboxes is a blocked sender's when any
+        // is.
+        assert!(matches(&entries, "alice@ok.example, x@blocked.example"));
         assert!(matches(
             &entries,
             "Team: alice@ok.example, x@blocked.example;"
         ));
         assert!(!matches(&entries, "alice@ok.example, carol@ok.example"));
+        // One with a `<` is judged by its last mailbox only: a blocked one
+        // before it goes unseen, which is the safe side.
+        assert!(matches(
+            &entries,
+            "Alice <alice@ok.example>, Bob <bob@blocked.example>"
+        ));
+        assert!(!matches(
+            &entries,
+            "Bob <bob@blocked.example>, Alice <alice@ok.example>"
+        ));
+        // A `<` never closed names no mailbox.
+        assert!(!matches(&entries, "Bob <bob@blocked.example"));
     }
 
     #[test]
@@ -678,20 +696,25 @@ mod tests {
         let fx = Fixture::new(true);
         let entries = list(&["@blocked.example"]);
         let alice = fx.ingest(1, "=?utf-8?q?bob=40blocked.example?= <alice@ok.example>");
-        let spam = fx.ingest(2, "=?utf-8?q?alice=40ok.example?= <x@blocked.example>");
-        let stored: String = fx
-            .store
-            .conn()
-            .query_row(
-                "SELECT from_ FROM messages WHERE message_id = ?1",
-                [&alice],
-                |row| row.get(0),
-            )
-            .unwrap();
+        // The decoded name ends on a comma: RFC 5322 reads two mailboxes.
+        let comma = fx.ingest(2, "=?utf-8?q?bob=40blocked.example=2C?= <alice@ok.example>");
+        let spam = fx.ingest(3, "=?utf-8?q?alice=40ok.example?= <x@blocked.example>");
+        let from_of = |message_id: &str| -> String {
+            fx.store
+                .conn()
+                .query_row(
+                    "SELECT from_ FROM messages WHERE message_id = ?1",
+                    [message_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let stored = from_of(&comma);
         assert!(
-            stored.contains("bob@blocked.example"),
+            stored.contains("bob@blocked.example,"),
             "the store holds the name decoded: {stored}"
         );
+        assert!(from_of(&alice).contains("bob@blocked.example"));
         assert_eq!(
             move_existing(&fx.store, &account(), &entries).unwrap(),
             Moved::Rows {
@@ -700,7 +723,26 @@ mod tests {
             }
         );
         assert_eq!(fx.mailbox_of(&alice), "inbox");
+        assert_eq!(fx.mailbox_of(&comma), "inbox");
         assert_eq!(fx.mailbox_of(&spam), "Junk");
+
+        // A reply to it goes to Alice, the mailbox, never to the name.
+        let source = crate::draft::SourceMessage {
+            from: stored,
+            subject: "s2".to_string(),
+            ..Default::default()
+        };
+        let drafts = fx.dir.path().join("drafts");
+        let reply = crate::draft::create_reply_draft_from(
+            &source,
+            false,
+            "me@alpha.example",
+            Some(&drafts),
+            None,
+        )
+        .unwrap();
+        let draft = crate::draft::parse_email_draft(&reply).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("alice@ok.example"));
     }
 
     #[test]

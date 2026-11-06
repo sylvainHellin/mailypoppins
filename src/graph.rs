@@ -884,10 +884,18 @@ struct GraphMessageIdLookupEntry {
 // Format helpers
 // ---------------------------------------------------------------------------
 
+/// `Name <addr>`, the name quoted when it holds a character that would make
+/// the mailbox parse as something else (`Doe, Jane`, `Bob <bob@x>`), so the
+/// stored header names the one mailbox Graph sent
+/// ([`crate::parse::mailbox_addresses`]).
 fn format_recipient(r: &GraphRecipient) -> String {
     let addr = r.email_address.address.as_deref().unwrap_or("");
     match r.email_address.name.as_deref() {
-        Some(name) if !name.is_empty() => format!("{} <{}>", name, addr),
+        Some(name) if name.contains(['<', '>', ',', ';', ':', '@', '"']) => {
+            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\" <{addr}>")
+        }
+        Some(name) if !name.is_empty() => format!("{name} <{addr}>"),
         _ => addr.to_string(),
     }
 }
@@ -6665,6 +6673,40 @@ mod tests {
             },
         };
         assert_eq!(format_recipient(&r), "John Doe <john@example.com>");
+    }
+
+    #[test]
+    fn format_recipient_quotes_a_name_that_would_parse_as_more() {
+        let recipient = |name: &str| GraphRecipient {
+            email_address: GraphEmailAddress {
+                name: Some(name.to_string()),
+                address: Some("alice@ok.example".to_string()),
+            },
+        };
+        for (name, stored) in [
+            ("Doe, Jane", r#""Doe, Jane" <alice@ok.example>"#),
+            (
+                "bob@blocked.example, <x@y>",
+                r#""bob@blocked.example, <x@y>" <alice@ok.example>"#,
+            ),
+            (
+                r#"Say "hi" \ bye;"#,
+                r#""Say \"hi\" \\ bye;" <alice@ok.example>"#,
+            ),
+        ] {
+            let formatted = format_recipient(&recipient(name));
+            assert_eq!(formatted, stored, "{name}");
+            assert_eq!(
+                crate::parse::mailbox_addresses(&formatted),
+                ["alice@ok.example"]
+            );
+            assert_eq!(crate::send::split_addresses(&formatted).len(), 1);
+        }
+        // A plain name, even with a dot or an apostrophe, stays bare.
+        assert_eq!(
+            format_recipient(&recipient("J. O'Neil")),
+            "J. O'Neil <alice@ok.example>"
+        );
     }
 
     #[test]

@@ -1530,10 +1530,8 @@ pub fn slugify_sender(from: &str) -> String {
 /// The address of the first mailbox `raw` names, or `raw` trimmed when it
 /// names none (`(unknown)`, an empty group, a broken `John <john@x`).
 ///
-/// The address is the mailbox's own, never one its display name or a comment
-/// carries: `"Bob <bob@x>" <alice@y>`, Graph's unquoted
-/// `Bob <bob@x> <alice@y>` and `alice@y (Bob <bob@x>)` are all Alice's
-/// ([`mailbox_addresses`]).
+/// The address is read as [`mailbox_addresses`] reads it, so it is never one
+/// a display name or a comment carries.
 pub fn extract_email_address(raw: &str) -> String {
     mailbox_addresses(raw)
         .into_iter()
@@ -1541,30 +1539,24 @@ pub fn extract_email_address(raw: &str) -> String {
         .unwrap_or_else(|| raw.trim().to_string())
 }
 
-/// The address of every mailbox an address header names, in order, a group's
-/// members included; empty when it names none.
+/// The address of every mailbox an address header names, in order; empty
+/// when it names none.
 ///
-/// The header is parsed as RFC 5322, so a `<...>` inside a quoted display
-/// name or a comment is never taken for the address. A header that does not
-/// parse (Graph writes a display name unquoted: `Bob <bob@x> <alice@y>`)
-/// yields at most one address, looked for once its comments are dropped: the
-/// text in its last `<...>`, since a mailbox's address comes after its name,
-/// or, with no `<` at all, the last bare token holding an `@`.
+/// The store holds a header decoded and not always quoted again: an IMAP
+/// row's encoded-word display name comes back as whatever it encoded
+/// (`bob@x, <alice@y>`), and a Graph row written before names were quoted
+/// holds its display name bare (`Bob <bob@x> <alice@y>`). Parsed as RFC 5322,
+/// such a header names mailboxes the sender never named, so it is read on the
+/// rule that a display name comes before its mailbox's `<...>`: once its
+/// comments are dropped, a header holding a `<` names one mailbox, the text
+/// in its last `<...>`, and none when that `<` is never closed. A header with
+/// no `<` is parsed as RFC 5322 (`a@x, b@y`, a group's members), and failing
+/// that names its last bare token holding an `@`.
+///
+/// A genuine list of bracketed mailboxes (`A <a@x>, B <b@y>`) is so read as
+/// its last mailbox only: a blocked sender earlier in it goes unseen, the
+/// safe side for a block, and no `From` names two mailboxes in practice.
 pub fn mailbox_addresses(raw: &str) -> Vec<String> {
-    if let Ok(list) = mailparse::addrparse(raw) {
-        let addresses: Vec<String> = list
-            .iter()
-            .flat_map(|addr| match addr {
-                mailparse::MailAddr::Single(info) => std::slice::from_ref(info),
-                mailparse::MailAddr::Group(group) => group.addrs.as_slice(),
-            })
-            .map(|info| info.addr.trim().to_string())
-            .filter(|address| !address.is_empty())
-            .collect();
-        if !addresses.is_empty() {
-            return addresses;
-        }
-    }
     let bare = strip_comments(raw);
     if let Some(start) = bare.rfind('<') {
         // `>` is searched only after the `<`: a display name may carry one of
@@ -1577,6 +1569,20 @@ pub fn mailbox_addresses(raw: &str) -> Vec<String> {
             .into_iter()
             .collect();
     }
+    if let Ok(list) = mailparse::addrparse(&bare) {
+        let addresses: Vec<String> = list
+            .iter()
+            .flat_map(|addr| match addr {
+                mailparse::MailAddr::Single(info) => std::slice::from_ref(info),
+                mailparse::MailAddr::Group(group) => group.addrs.as_slice(),
+            })
+            .map(|info| info.addr.trim().to_string())
+            .filter(|address| address.contains('@'))
+            .collect();
+        if !addresses.is_empty() {
+            return addresses;
+        }
+    }
     bare.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
         .map(|token| token.trim_matches('"'))
         .rfind(|token| token.contains('@'))
@@ -1587,17 +1593,33 @@ pub fn mailbox_addresses(raw: &str) -> Vec<String> {
 
 /// `raw` without its RFC 5322 comments (`(...)`, nested, outside a quoted
 /// string).
+///
+/// A `(` never closed opens no comment and a `"` never closed opens no quoted
+/// string: either may be the decoded text of an encoded-word display name
+/// (`bob@x ( <alice@y>`), and taken for syntax it would hide the `<...>`
+/// after it or keep a comment's.
 fn strip_comments(raw: &str) -> String {
+    uncommented(raw, true)
+        .or_else(|| uncommented(raw, false))
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// [`strip_comments`] honouring quoted strings when `quotes`: `None` when one
+/// is never closed.
+fn uncommented(raw: &str, quotes: bool) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
-    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
-    for c in raw.chars() {
+    let (mut depth, mut opened, mut quoted, mut escaped) = (0usize, 0usize, false, false);
+    for (at, c) in raw.char_indices() {
         if escaped {
             escaped = false;
         } else if c == '\\' && (quoted || depth > 0) {
             escaped = true;
-        } else if c == '"' && depth == 0 {
+        } else if quotes && c == '"' && depth == 0 {
             quoted = !quoted;
         } else if c == '(' && !quoted {
+            if depth == 0 {
+                opened = at;
+            }
             depth += 1;
             continue;
         } else if c == ')' && depth > 0 {
@@ -1608,7 +1630,16 @@ fn strip_comments(raw: &str) -> String {
             out.push(c);
         }
     }
-    out
+    if quoted {
+        return None;
+    }
+    if depth > 0 {
+        // The outermost `(` never closed: a literal, and what follows it is
+        // read afresh.
+        out.push('(');
+        out.push_str(&uncommented(&raw[opened + 1..], quotes)?);
+    }
+    Some(out)
 }
 
 /// The parenthesis after `Fetched Emails`: the count, then `note` when there
@@ -1982,15 +2013,43 @@ mod tests {
                 r#""PayPal <service@paypal.com>" <x@spam.example>"#,
                 "x@spam.example",
             ),
-            // Graph's unquoted display name: does not parse, the last `<...>`.
+            // Graph's unquoted display name: the last `<...>`.
             ("Bob <bob@x.com> <alice@y.com>", "alice@y.com"),
             ("Doe, Jane <jane@y.com>", "jane@y.com"),
             // A comment holding an address.
             ("alice@y.com (Bob <bob@x.com>)", "alice@y.com"),
-            ("alice@y.com (Bob, <bob@x.com>", "alice@y.com"),
-            // A decoded encoded-word name that reads as an address.
+            ("<alice@y.com> (Bob <bob@x.com>)", "alice@y.com"),
+            // A decoded encoded-word name that reads as an address, a comma
+            // after it making it a mailbox of its own to RFC 5322.
             ("bob@x.com <alice@y.com>", "alice@y.com"),
-            // A group: its first member.
+            (
+                "bob@blocked.example, <alice@ok.example>",
+                "alice@ok.example",
+            ),
+            (
+                "bob@blocked.example, Sales <alice@ok.example>",
+                "alice@ok.example",
+            ),
+            // One opening a comment or a quoted string it never closes: a
+            // literal, which hides neither the `<...>` after it nor a comment.
+            (
+                "bob@blocked.example ( <alice@ok.example>",
+                "alice@ok.example",
+            ),
+            (
+                "x (y <alice@ok.example> (Bob <bob@x.com>)",
+                "alice@ok.example",
+            ),
+            (
+                r#"bob@blocked.example" <alice@ok.example> (Bob <bob@x.com>)"#,
+                "alice@ok.example",
+            ),
+            // So is a comment never closed: the `<...>` in it is the last.
+            ("alice@y.com (Bob, <bob@x.com>", "bob@x.com"),
+            // Several bracketed mailboxes: the last one.
+            ("A <a@x.com>, B <b@y.com>", "b@y.com"),
+            // No `<`: RFC 5322's first mailbox, a group's first member.
+            ("a@x.com, b@y.com", "a@x.com"),
             ("Team: a@x.com, b@y.com;", "a@x.com"),
             // Nothing parses and nothing is bracketed: the bare token.
             ("Bob, alice@y.com (x <bob@x.com>)", "alice@y.com"),
@@ -2006,12 +2065,19 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_addresses_names_every_mailbox_and_a_groups_members() {
+    fn mailbox_addresses_names_every_unbracketed_mailbox_and_one_bracketed() {
         assert_eq!(
-            mailbox_addresses(r#"a@x.com, "B <z@z.com>" <b@y.com>, Team: c@x.com;"#),
+            mailbox_addresses("a@x.com, Team: b@y.com, c@x.com;"),
             ["a@x.com", "b@y.com", "c@x.com"]
         );
+        // A `<` reads as one mailbox, the last: an earlier one goes unseen.
+        assert_eq!(
+            mailbox_addresses(r#"A <a@x.com>, "B <z@z.com>" <b@y.com>"#),
+            ["b@y.com"]
+        );
         assert!(mailbox_addresses("").is_empty());
+        assert!(mailbox_addresses("<>").is_empty());
+        assert!(mailbox_addresses("Bob <bob@x.com> <alice@y.com").is_empty());
         assert!(mailbox_addresses("(unknown)").is_empty());
         assert!(mailbox_addresses("undisclosed-recipients:;").is_empty());
         assert!(mailbox_addresses("John <john@x.com").is_empty());
