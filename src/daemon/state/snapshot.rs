@@ -118,6 +118,10 @@ pub enum Change {
         ready: bool,
         /// Where it stands against its server copy (#0143), when known.
         server: Option<DraftServer>,
+        /// The file's content version, the hex SHA-256 of its bytes
+        /// (PERSO-272): carried by the event only, so a client re-reads the
+        /// file when it moved and not when only `server` did.
+        version: Option<String>,
     },
     /// A draft is on disk and would not parse (P3b-U10).
     ///
@@ -211,6 +215,7 @@ impl Change {
                 valid,
                 ready,
                 server,
+                version,
             } => {
                 let mut payload = json!({
                     "account": account, "id": id, "path": path, "to": to,
@@ -218,6 +223,9 @@ impl Change {
                 });
                 if let Some(server) = server {
                     payload["server"] = json!(server);
+                }
+                if let Some(version) = version {
+                    payload["version"] = json!(version);
                 }
                 payload
             }

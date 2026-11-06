@@ -321,6 +321,14 @@ pub struct DraftChanged {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub server: Option<crate::state::DraftServer>,
+    /// The file's content version, the hex SHA-256 of its bytes as the
+    /// watcher read them (PERSO-272): a change of `server` alone describes
+    /// the draft again with the same version, so a client that shows the
+    /// file reads it again only when the version moved. Absent from an older
+    /// daemon, whose every `draft.changed` is a write to read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub version: Option<String>,
 }
 
 /// One draft the daemon could not parse, as `draft.invalid` carries it and as

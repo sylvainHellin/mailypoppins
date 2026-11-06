@@ -1568,7 +1568,22 @@ function draftChanged(account: string, d: DraftEntry): void {
     status: d.status,
     valid: d.valid,
     ready: d.ready,
+    version: draftVersion(account, d),
   });
+}
+
+/**
+ * The content version the daemon hashes the file's bytes into (PERSO-272):
+ * here a 32-bit FNV-1a of what the fixture keeps of the file, its row, its
+ * body and its attachments, so a write that changes nothing keeps it.
+ */
+function draftVersion(account: string, d: DraftEntry): string {
+  const key = `${account}/${d.id}`;
+  const body = mock.draftExtra[key]?.body ?? fixtures.draftBodies[d.id] ?? "";
+  const text = JSON.stringify([d, body, mock.draftAttachments[key] ?? []]);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 /** Write a new draft at the top of the listing, as a rescan orders it (newest first). */

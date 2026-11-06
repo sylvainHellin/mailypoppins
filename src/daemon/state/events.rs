@@ -640,6 +640,7 @@ mod tests {
                 valid: true,
                 ready: false,
                 server: None,
+                version: None,
             },
             Change::DraftInvalid {
                 account: account(),

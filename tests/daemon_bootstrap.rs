@@ -357,6 +357,8 @@ fn reduce(snapshot: &mut Value, change: &Change) {
             valid,
             ready,
             server,
+            // The event's alone: a snapshot row carries no content version.
+            version: _,
         } => {
             let mut draft = json!({
                 "id": id, "path": path, "to": to, "subject": subject,
@@ -921,6 +923,7 @@ fn a_reconstructed_client_state_equals_a_snapshot_taken_now() {
             valid: true,
             ready: true,
             server: None,
+            version: None,
         });
 
         let mut tracker = StateTracker::new(revision.get(), instance.as_str());

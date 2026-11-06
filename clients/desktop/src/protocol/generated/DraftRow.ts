@@ -2,8 +2,9 @@
 import type { DraftServer } from "./DraftServer";
 
 /**
- * One draft row: the same fields the `draft.changed` event carries, so a
- * client's reducer is "replace the row with the payload".
+ * One draft row: the same fields the `draft.changed` event carries less its
+ * content `version`, so a client's reducer is "replace the row with the
+ * payload".
  *
  * Every field but `id` defaults: the P2 fixture predates `path`, `to` and
  * `ready`, and a snapshot section a client does not read yet must not be able

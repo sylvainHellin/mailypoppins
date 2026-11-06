@@ -357,8 +357,8 @@ const DRAFT_METHODS: [&str; 10] = [
 ];
 
 /// The keys a `draft.changed` payload carries, sorted.
-const DRAFT_CHANGED_KEYS: [&str; 8] = [
-    "account", "id", "path", "ready", "status", "subject", "to", "valid",
+const DRAFT_CHANGED_KEYS: [&str; 9] = [
+    "account", "id", "path", "ready", "status", "subject", "to", "valid", "version",
 ];
 
 /// The keys a `draft.invalid` payload carries, sorted.
@@ -483,6 +483,7 @@ fn a_draft_change_commits_a_draft_upsert_keyed_by_account_and_id() {
         ready: true,
         server: None,
         owes_push: false,
+        version: Some("0f1e".to_string()),
     };
     let event = WatchEvent::DraftChanged(summary.clone());
 
@@ -501,6 +502,7 @@ fn a_draft_change_commits_a_draft_upsert_keyed_by_account_and_id() {
             valid: true,
             ready: true,
             server: None,
+            version: Some("0f1e".to_string()),
         },
         "a parsed draft is valid by construction; `ready` is the second axis"
     );
@@ -596,6 +598,7 @@ fn the_three_payload_types_round_trip_through_json() {
         valid: true,
         ready: false,
         server: None,
+        version: Some("0f1e".to_string()),
     };
     let json = serde_json::to_value(&changed).expect("a draft.changed payload serialises");
     assert_keys(&json, &DRAFT_CHANGED_KEYS, "DraftChanged");
@@ -1508,6 +1511,7 @@ fn two_accounts_are_two_inventories() {
             valid: true,
             ready: true,
             server: None,
+            version: None,
         })
         .resource(),
         "the same id under two accounts is two resources"
@@ -1996,6 +2000,13 @@ async fn a_direct_write_reaches_a_subscribed_client_as_draft_changed() {
     assert_eq!(event.payload["status"], json!("draft"));
     assert_eq!(event.payload["valid"], json!(true));
     assert_eq!(event.payload["ready"], json!(true));
+    assert_eq!(
+        event.payload["version"],
+        json!(mailypoppins::draft_mirror::file_hash(
+            &fs::read(&path).unwrap()
+        )),
+        "the content version is the hash of the file's bytes"
+    );
 
     let typed: DraftChanged = serde_json::from_value(event.payload.clone())
         .unwrap_or_else(|e| panic!("the payload is a DraftChanged: {e}; got {event:?}"));
@@ -2614,6 +2625,68 @@ fn a_draft_is_described_again_with_its_server_state_once_the_mirror_is_read() {
         DraftSyncState::Pending
     );
     assert!(changed(&events[0]).owes_push);
+}
+
+/// A mirror state that moved describes the draft again with the content
+/// version the last description carried, since the file did not change: a
+/// push that lands moves `server` alone, and a client keys a re-read of the
+/// file on the version (PERSO-272). A write moves the version.
+#[test]
+fn a_mirror_state_recommit_of_an_unchanged_file_keeps_its_content_version() {
+    use mp_protocol::state::DraftSyncState;
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let path = dir.join("angebot.md");
+    fs::write(
+        &path,
+        draft_document("d-one", "r@example.com", "A", "draft", "Body."),
+    )
+    .unwrap();
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let (_, t1) = settle(&mut watcher, Instant::now(), unit_config().debounce);
+    let (events, t2) = described_with(&mut watcher, mirror(&[], &[]), t1);
+    let saved = changed(&events[0]).clone();
+    assert_eq!(
+        saved.version,
+        Some(mailypoppins::draft_mirror::file_hash(
+            &fs::read(&path).unwrap()
+        )),
+        "the version is the hash of the file's bytes"
+    );
+    assert!(saved.owes_push);
+
+    // The push lands: the row moves, the file does not.
+    let hash = saved.version.clone().unwrap();
+    let (events, t3) = described_with(&mut watcher, mirror(&[("d-one", hash)], &[]), t2);
+    assert_eq!(events.len(), 1, "described again: {events:?}");
+    let pushed = changed(&events[0]);
+    assert_eq!(
+        pushed.server.as_ref().unwrap().state,
+        DraftSyncState::Synced
+    );
+    assert_eq!(
+        pushed.version, saved.version,
+        "the same bytes, the same version"
+    );
+    let change = events[0].as_change().expect("a draft change");
+    assert_eq!(
+        change.payload()["version"],
+        json!(saved.version),
+        "and the event carries it"
+    );
+
+    fs::write(
+        &path,
+        draft_document("d-one", "r@example.com", "A", "draft", "Edited."),
+    )
+    .unwrap();
+    let debounce = unit_config().debounce;
+    let (events, _) = settle(&mut watcher, t3 + debounce, debounce);
+    assert_ne!(
+        changed(&events[0]).version,
+        saved.version,
+        "a write moves the version"
+    );
 }
 
 /// A conflict copy is `conflict` and is never pushed, and the draft beside it

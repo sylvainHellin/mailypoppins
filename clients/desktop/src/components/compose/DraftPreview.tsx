@@ -285,8 +285,11 @@ export function DraftPreview({
  * Drafts list shows it, else a row built from a fresh `draft_preview`. A
  * draft that is gone closes the summary, so the reader shows the selection,
  * the message it showed before. `member` is a conversation's draft member
- * (PERSO-146), shown with its draft actions and read again with each list
- * the conversation re-read lands, which is how an approve reaches it.
+ * (PERSO-146), shown with its draft actions and read again whenever its
+ * file's version moves (`draftRevision`, a `draft.changed` naming it), which
+ * is how an approve or a back to draft reaches its toolbar; a conversation
+ * list reload alone reads nothing (PERSO-272). A member whose file is gone
+ * closes with the selection, which the draft's `state.remove` clears.
  */
 export function ComposeSummary({ account, draftId, member = false }: { account: string; draftId: string; member?: boolean }) {
   const s = useAppState();
@@ -294,13 +297,13 @@ export function ComposeSummary({ account, draftId, member = false }: { account: 
   const listed = draftsShown(s) && s.selection.account === account ? filteredDrafts(s.messages.data, "").find((d) => d.id === draftId) : undefined;
   const [read, setRead] = useState<DraftItem | null>(null);
   const known = listed !== undefined;
-  const landed = member ? s.messages.loadedGen : 0;
+  const version = member ? draftRevision(s, account, draftId) : "";
 
   useEffect(() => {
     if (known) return;
     let live = true;
-    // StrictMode's remount joins the read on its way; a re-read list (`landed`) asks again.
-    joinRead(`draft_summary:${account}/${draftId}@${landed}`, () => cmd.draftPreview(account, draftId)).then(
+    // StrictMode's remount joins the read on its way; a new version of the file asks again.
+    joinRead(`draft_summary:${account}/${draftId}@${version}`, () => cmd.draftPreview(account, draftId)).then(
       (p) => {
         if (!live) return;
         setRead({
@@ -324,7 +327,7 @@ export function ComposeSummary({ account, draftId, member = false }: { account: 
     return () => {
       live = false;
     };
-  }, [account, draftId, known, landed, dispatch]);
+  }, [account, draftId, known, version, dispatch]);
 
   const draft = listed ?? read;
   if (!draft) {

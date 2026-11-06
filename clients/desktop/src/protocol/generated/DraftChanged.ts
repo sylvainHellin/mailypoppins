@@ -45,4 +45,12 @@ ready: boolean,
  * Where the draft stands against its server copy (#0143), absent until
  * the account's runtime has read its mirror state.
  */
-server?: DraftServer, };
+server?: DraftServer,
+/**
+ * The file's content version, the hex SHA-256 of its bytes as the
+ * watcher read them (PERSO-272): a change of `server` alone describes
+ * the draft again with the same version, so a client that shows the
+ * file reads it again only when the version moved. Absent from an older
+ * daemon, whose every `draft.changed` is a write to read again.
+ */
+version?: string, };

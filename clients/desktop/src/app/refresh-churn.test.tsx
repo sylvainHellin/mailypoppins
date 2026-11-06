@@ -205,6 +205,42 @@ describe("a refresh event keeps the shown draft (PERSO-272)", () => {
     expect(readerFrame()).toBe(before);
   });
 
+  it("a draft.changed of the shown draft with the version it carried before neither re-reads it nor reloads its frame; a new version does", async () => {
+    const { user, probe } = renderProbed();
+    await openDraft(user);
+    await user.keyboard("tt");
+    await waitFor(() => expect(readerFrame()).not.toBeNull());
+    const previews = () => mock.calls.filter((c) => c.cmd === "draft_preview").length;
+    const shown = (version: string) => ({
+      account: "work",
+      id: "angebot-antwort",
+      path: "/fixture/work/drafts/angebot-antwort.md",
+      to: "robin@example.com",
+      subject: "Re: Angebot Dachsanierung",
+      status: "draft",
+      valid: true,
+      ready: true,
+      version,
+    });
+    // A save: the first version the window sees of the file.
+    let reads = previews();
+    let before = readerFrame();
+    await refresh(probe, "draft.changed", shown("v1"));
+    await waitFor(() => expect(previews()).toBeGreaterThan(reads));
+    await waitFor(() => expect(readerFrame()).not.toBe(before));
+    // Its push lands: the row's server state moved, the file did not.
+    reads = previews();
+    before = readerFrame();
+    await refresh(probe, "draft.changed", { ...shown("v1"), server: { state: "synced", synced_at: "2026-11-06T12:00:00Z" } });
+    expect(previews()).toBe(reads);
+    expect(readerFrame()).toBe(before);
+    // Another save.
+    await refresh(probe, "draft.changed", shown("v2"));
+    await waitFor(() => expect(previews()).toBeGreaterThan(reads));
+    await waitFor(() => expect(readerFrame()).not.toBe(before));
+    expect(readerFrame()).not.toBeNull();
+  });
+
   it("a sync.completed of the account does not reload the shown draft's HTML frame", async () => {
     const { user, probe } = renderProbed();
     await openDraft(user);
@@ -240,6 +276,17 @@ describe("a refresh event keeps a conversation's shown draft member (PERSO-272)"
     { name: "a sync.completed of the account", kind: "sync.completed", payload: tick("work") },
     { name: "an account.state_changed of the account", kind: "account.state_changed", payload: { account: "work", state: "ready" } },
   ];
+
+  it("a sync.completed of the account reads the member's draft again no more", async () => {
+    const { user, probe } = renderProbed({ conversations: true });
+    await openMember(user);
+    const previews = () => mock.calls.filter((c) => c.cmd === "draft_preview").length;
+    const reads = previews();
+    await refresh(probe, "sync.completed", tick("work"));
+    await refresh(probe, "sync.completed", tick("work"));
+    expect(previews()).toBe(reads);
+    expect(draftBody()).toHaveTextContent("Notes for the offsite agenda.");
+  });
 
   for (const c of cases) {
     it(`${c.name} does not blank the member's preview`, async () => {

@@ -1445,10 +1445,18 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     }
     case "draft.changed":
     case "draft.invalid": {
-      const { account, id } = payload as { account: string; id: string };
-      // The named draft's file moved: its preview, and no other, reads it again (PERSO-272).
+      const { account, id, version } = payload as { account: string; id: string; version?: string };
+      // The named draft's file moved: its preview, and no other, reads it
+      // again; the same content version again (a push that landed) moved
+      // its row's server state alone, which the list reload shows (PERSO-272).
       const key = targetKey({ account, draft: id });
-      const draftRevs = { ...s.draftRevs, of: { ...s.draftRevs.of, [key]: (s.draftRevs.of[key] ?? 0) + 1 } };
+      let draftRevs = s.draftRevs;
+      if (typeof version !== "string" || draftRevs.seen[key] !== version) {
+        const seen = { ...draftRevs.seen };
+        if (typeof version === "string") seen[key] = version;
+        else delete seen[key];
+        draftRevs = { ...draftRevs, of: { ...draftRevs.of, [key]: (draftRevs.of[key] ?? 0) + 1 }, seen };
+      }
       const next = staleListIf(staleMailboxes({ ...s, draftRevs }, account), (a, m) => a === account && m === "drafts");
       return staleConversations(next, account);
     }
@@ -1591,7 +1599,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         composeLeave: closeLeave ? null : next.composeLeave,
         overlay: closeOverlay ? null : next.overlay,
         // A draft written while the events were missed names no draft: every preview reads its draft again.
-        draftRevs: { epoch: next.draftRevs.epoch + 1, of: {} },
+        draftRevs: { epoch: next.draftRevs.epoch + 1, of: {}, seen: {} },
         },
         e.bootstrap,
         sameInstance,

@@ -906,9 +906,12 @@ export type AppState = {
    * that named the draft, so a write re-reads that draft's preview and no
    * other; `epoch` moves with each rebootstrap, whose missed events name no
    * draft. A Drafts list reload is not a version: a sync tick or another
-   * draft's save reloads it too.
+   * draft's save reloads it too. `seen` is the content version the last
+   * `draft.changed` carried: one with the same version (a push that landed
+   * moved the draft's `server` alone) counts nothing, and one without (an
+   * older daemon, a `draft.invalid`) always counts.
    */
-  draftRevs: { epoch: number; of: Record<string, number> };
+  draftRevs: { epoch: number; of: Record<string, number>; seen: Record<string, string> };
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
@@ -1171,7 +1174,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     // readerMode.ts's DEFAULT_READER_MODE, spelled out for the same reason.
     readerMode: "html",
     draftHtml: null,
-    draftRevs: { epoch: 0, of: {} },
+    draftRevs: { epoch: 0, of: {}, seen: {} },
     bootstrap: null,
     accounts: emptyLoadable(),
     mailboxes: {},

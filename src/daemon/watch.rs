@@ -183,6 +183,11 @@ pub struct DraftSummary {
     /// pushable, and its bytes are not the ones its copy was written from.
     /// What makes the daemon ask the account's runtime for a drain.
     pub owes_push: bool,
+    /// The file's content version, the hex SHA-256 of the bytes this
+    /// description read, `None` when they did not read (PERSO-272): a
+    /// description a mirror-state move asked for carries the version the
+    /// last one did, so a client re-reads the file only when it moved.
+    pub version: Option<String>,
 }
 
 /// One account's drafts mirror as its runtime last read it from the store
@@ -315,6 +320,7 @@ impl WatchEvent {
                 valid: true,
                 ready: summary.ready,
                 server: summary.server.clone(),
+                version: summary.version.clone(),
             }),
             WatchEvent::DraftInvalid {
                 account,
@@ -659,9 +665,10 @@ fn describe(root: &Root, path: &Path, mirror: Option<&MirrorState>) -> WatchEven
     match crate::draft::parse_email_draft(path) {
         Ok(draft) => {
             let id = field(draft.frontmatter.id.as_deref());
-            let hash = std::fs::read(path)
-                .map(|bytes| crate::draft_mirror::file_hash(&bytes))
-                .unwrap_or_default();
+            let version = std::fs::read(path)
+                .ok()
+                .map(|bytes| crate::draft_mirror::file_hash(&bytes));
+            let hash = version.clone().unwrap_or_default();
             let announced = id.clone().unwrap_or_else(|| stem(path));
             WatchEvent::DraftChanged(DraftSummary {
                 account,
@@ -681,6 +688,7 @@ fn describe(root: &Root, path: &Path, mirror: Option<&MirrorState>) -> WatchEven
                 status: draft.frontmatter.status.to_string(),
                 ready: crate::draft::validate_draft(&draft).is_ok(),
                 path: path.to_path_buf(),
+                version,
             })
         }
         Err(e) => WatchEvent::DraftInvalid {
