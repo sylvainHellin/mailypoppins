@@ -1,35 +1,69 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { mock } from "@/test/tauri-mock";
+import { AVAILABILITY_DEBOUNCE_MS } from "@/app/availability";
 import type { CalendarFreeBusyParams } from "@/protocol/types";
 
 const asked = () => mock.calls.filter((c) => c.cmd === "calendar_freebusy").map((c) => (c.args as { params: CalendarFreeBusyParams }).params);
 const rowOf = (grid: HTMLElement, address: string) => grid.querySelector(`[data-slot="availability-row"][data-address="${address}"]`);
+
+// The grid asks once its query has stood still for AVAILABILITY_DEBOUNCE_MS
+// of wall time, which typing on a loaded machine can spend between two
+// keystrokes (the query stands still while ", someone@gmail" is typed), so
+// every test holds setTimeout still before the form opens and moves the
+// clock itself with `settle`. Under the held clock the input goes through
+// fireEvent: user-event's async wrapper waits on a setTimeout that only
+// jest's fake timers would advance, and hangs under vitest's.
+
+/** Hold setTimeout still until the test's end. */
+function holdClock() {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+}
+
+/** Move the held clock by `ms`, then let the answers it asked for land. */
+async function settle(ms: number) {
+  await act(() => vi.advanceTimersByTimeAsync(ms));
+}
+
+/** Type `text` at the end of `field` a keystroke at a time, the held clock not moving between them. */
+async function typeInto(field: HTMLElement, text: string) {
+  const input = field as HTMLInputElement;
+  for (const char of text) {
+    fireEvent.change(input, { target: { value: input.value + char } });
+    await settle(0);
+  }
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 async function openForm(before?: () => void) {
   const r = renderApp(1400, before);
   await shellReady();
   await r.user.keyboard(" a");
   await screen.findByRole("region", { name: "Calendar" });
-  await r.user.click(screen.getByRole("button", { name: "New event" }));
-  const dialog = await screen.findByRole("dialog", { name: /New event/ });
-  return { ...r, dialog };
+  holdClock();
+  fireEvent.click(screen.getByRole("button", { name: "New event" }));
+  await settle(0);
+  return { dialog: screen.getByRole("dialog", { name: /New event/ }) };
 }
 
 describe("the event form's availability grid", () => {
   it("asks calendar_freebusy once the typed attendee stands still and shows a row per person, the chosen time outlined", async () => {
-    const { user, dialog } = await openForm();
-    await user.type(within(dialog).getByLabelText("Attendees"), "robin@example.com, someone@gmail.com");
-    const grid = await within(dialog).findByRole("region", { name: "Availability" });
-    await waitFor(() => expect(rowOf(grid, "robin@example.com")).not.toBeNull(), { timeout: 3000 });
-    // Typing asked nothing per keystroke: every query is the empty form's
-    // or the finished one's.
+    const { dialog } = await openForm();
+    await typeInto(within(dialog).getByLabelText("Attendees"), "robin@example.com, someone@gmail.com");
+    const grid = within(dialog).getByRole("region", { name: "Availability" });
+    // Typing asked nothing per keystroke, and the finished query is asked
+    // once it has stood still for the debounce, not before.
+    expect(asked()).toEqual([]);
+    await settle(AVAILABILITY_DEBOUNCE_MS - 1);
+    expect(asked()).toEqual([]);
+    await settle(1);
     const calls = asked();
-    expect(calls.length).toBeGreaterThan(0);
-    for (const call of calls) {
-      expect([[], ["robin@example.com", "someone@gmail.com"]]).toContainEqual(call.addresses);
-    }
+    expect(calls.map((c) => c.addresses)).toEqual([["robin@example.com", "someone@gmail.com"]]);
+    expect(rowOf(grid, "robin@example.com")).not.toBeNull();
     const last = calls[calls.length - 1];
     expect(last).toMatchObject({ account: "home", start: last.end, interval_minutes: 30, zone: "Europe/Berlin" });
 
@@ -48,16 +82,17 @@ describe("the event form's availability grid", () => {
   });
 
   it("keeps the last answer's rows, dimmed, while a changed query is asked again", async () => {
-    const { user, dialog } = await openForm();
+    const { dialog } = await openForm();
     const attendees = within(dialog).getByLabelText("Attendees");
-    await user.type(attendees, "robin@example.com");
-    const grid = await within(dialog).findByRole("region", { name: "Availability" });
-    await waitFor(() => expect(rowOf(grid, "robin@example.com")).not.toBeNull(), { timeout: 3000 });
+    await typeInto(attendees, "robin@example.com");
+    const grid = within(dialog).getByRole("region", { name: "Availability" });
+    await settle(AVAILABILITY_DEBOUNCE_MS);
+    expect(rowOf(grid, "robin@example.com")).not.toBeNull();
     const body = () => grid.querySelector('[data-slot="availability-rows"]')!;
     expect(body().hasAttribute("data-stale")).toBe(false);
     expect(grid.getAttribute("aria-busy")).toBe("false");
 
-    await user.type(attendees, ", ada@example.org");
+    await typeInto(attendees, ", ada@example.org");
     // The new query waits out the debounce; the old rows stand meanwhile.
     expect(rowOf(grid, "robin@example.com")).not.toBeNull();
     expect(rowOf(grid, "ada@example.org")).toBeNull();
@@ -65,7 +100,8 @@ describe("the event form's availability grid", () => {
     expect(grid.getAttribute("aria-busy")).toBe("true");
     expect(within(grid).getByText("(checking…)")).toBeInTheDocument();
 
-    await waitFor(() => expect(rowOf(grid, "ada@example.org")).not.toBeNull(), { timeout: 3000 });
+    await settle(AVAILABILITY_DEBOUNCE_MS);
+    expect(rowOf(grid, "ada@example.org")).not.toBeNull();
     expect(body().hasAttribute("data-stale")).toBe(false);
     expect(rowOf(grid, "robin@example.com")).not.toBeNull();
   });
@@ -83,12 +119,17 @@ describe("the event form's availability grid", () => {
     const cursor = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-event-id");
     for (let i = 0; i < 6 && cursor() !== "AAMkAD-robin"; i++) await r.user.keyboard("j");
     expect(cursor()).toBe("AAMkAD-robin");
-    await r.user.keyboard("E");
-    const dialog = await screen.findByRole("dialog", { name: "Edit event" });
-    const grid = await within(dialog).findByRole("region", { name: "Availability" });
-    await waitFor(() => expect(rowOf(grid, "robin@example.com")).not.toBeNull(), { timeout: 3000 });
+    holdClock();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "E" });
+    await settle(0);
+    const dialog = screen.getByRole("dialog", { name: "Edit event" });
+    const grid = within(dialog).getByRole("region", { name: "Availability" });
+    expect(asked()).toEqual([]);
+    await settle(AVAILABILITY_DEBOUNCE_MS);
+    expect(rowOf(grid, "robin@example.com")).not.toBeNull();
     const first = asked();
-    expect(first[first.length - 1]).toMatchObject({ account: "home", addresses: ["robin@example.com"], start: "2099-10-14", end: "2099-10-14" });
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ account: "home", addresses: ["robin@example.com"], start: "2099-10-14", end: "2099-10-14" });
 
     // 10:00 to 10:30 is the meeting itself: busy on the user's row, ringed
     // on every row, and chosen while the time is unchanged.
@@ -109,23 +150,23 @@ describe("the event form's availability grid", () => {
     const end = within(dialog).getByLabelText("End");
     fireEvent.change(start, { target: { value: "2099-10-14T11:00" } });
     fireEvent.change(end, { target: { value: "2099-10-14T11:30" } });
-    await waitFor(() => expect(marks("me@example.com", "data-chosen")).toEqual([8]));
+    expect(marks("me@example.com", "data-chosen")).toEqual([8]);
     expect(marks("me@example.com", "data-current")).toEqual([6]);
 
     // A new attendee asks again after the same debounce.
-    const before = asked().length;
-    await r.user.type(within(dialog).getByLabelText("Attendees"), ", ada@example.org");
-    expect(asked().length).toBe(before);
-    await waitFor(() => expect(rowOf(grid, "ada@example.org")).not.toBeNull(), { timeout: 3000 });
-    expect(asked()[asked().length - 1].addresses).toEqual(["robin@example.com", "ada@example.org"]);
+    await typeInto(within(dialog).getByLabelText("Attendees"), ", ada@example.org");
+    expect(asked()).toHaveLength(1);
+    await settle(AVAILABILITY_DEBOUNCE_MS);
+    expect(rowOf(grid, "ada@example.org")).not.toBeNull();
+    expect(asked().map((c) => c.addresses)).toEqual([["robin@example.com"], ["robin@example.com", "ada@example.org"]]);
   });
 
   it("is not shown on a calendar whose backend serves no free/busy", async () => {
-    const { user, dialog } = await openForm(() => {
+    const { dialog } = await openForm(() => {
       mock.calendars = mock.calendars.map((c) => ({ ...c, features: c.features.filter((f) => f !== "free-busy") }));
     });
-    await user.type(within(dialog).getByLabelText("Attendees"), "robin@example.com");
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await typeInto(within(dialog).getByLabelText("Attendees"), "robin@example.com");
+    await settle(AVAILABILITY_DEBOUNCE_MS * 2);
     expect(within(dialog).queryByRole("region", { name: "Availability" })).toBeNull();
     expect(asked()).toHaveLength(0);
   });
