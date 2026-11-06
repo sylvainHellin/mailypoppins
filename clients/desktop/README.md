@@ -114,7 +114,7 @@ The plugin has no commands and no permissions, so [src-tauri/capabilities/defaul
 ## Whole-desktop checks in a macOS VM
 
 What the specs cannot see runs in a Lume macOS 26 VM driven by Cua Driver, on the Mac only (Apple Virtualization.framework).
-Lume (`~/.local/bin/lume`, installed with `--no-background-service`) keeps its download cache on the microSD card (`lume config cache dir`) and the VMs under `~/.lume`, where APFS clones make a copy cost only its changes.
+Lume (`~/.local/bin/lume`, installed with `--no-background-service`) keeps the VMs under `~/.lume`, where APFS clones make a copy cost only its changes; its image cache is off (`lume config caching`), so a pull writes straight into the VM and nothing duplicates the 23 GB image, and a new base VM downloads it again.
 
 | VM | State |
 | --- | --- |
