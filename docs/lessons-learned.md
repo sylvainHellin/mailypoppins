@@ -3598,3 +3598,13 @@ Read a stored header mailbox by mailbox, cut at `,` and `;` outside quotes and c
 A block tests every mailbox, but a reply picks one, the first holding a `<...>`, else the first: an older row stored decoded can read `x@blocked.example, <alice@ok.example>` from a name that decoded to `x@blocked.example,`, and the list row and the draft slug name that same mailbox.
 A quoted string directly before `@` is a local part (blanking it turned `"john.doe"@x` into `@x`), a `<`, `,` or `:` inside a quoted string is never syntax, and an unclosed `"` voids only itself and what follows, or one stray quote splits `"Doe, Jane"` and Ccs the fragment `"Doe`.
 Every change to these readers is mirrored in `clients/desktop/src/lib/mailbox.ts`, with a row in the table both test suites share.
+
+## A daemon-side move publishes no row event (2026-11-06, PERSO-261)
+
+`message.move`, `sender.block` and the sender runner publish counts but no row event, so a client's flat list drops moved rows only through its own optimistic removal or a reload.
+A command whose moves the client did not make row by row (a block) is followed by a reload of the listings its answer's `moved` list names; `MessageRowDelta::Remove` for a `message:` resource is decoded by the TUI but nothing publishes it yet (PERSO-286).
+
+## A rule the daemon enforces and a client must not offer against lives in mp-core (2026-11-06, PERSO-261)
+
+What the blocked-senders list takes (`mp_core::blocklist`: no quoted local part, never the user's own address or domain) is one function the daemon, the TUI and the Tauri fixture call, and the desktop's TypeScript mirror is one function its fixture reads too.
+A client offers a sender as `comparable_address` reads it, not as `extract_email_address` answers it, or the chooser offers `"john.doe"@x`, which the daemon always refuses.
