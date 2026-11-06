@@ -44,47 +44,85 @@ pub fn normalize_address_for_smtp(addr: &str) -> String {
     format!("{} <{}>", quote_display_name(name_part), email_part)
 }
 
+/// RFC 5322 atext, plus FWS (space/tab) and `.` (allowed in dot-atom phrases).
+fn is_atext_or_fws(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '/'
+                | '='
+                | '?'
+                | '^'
+                | '_'
+                | '`'
+                | '{'
+                | '|'
+                | '}'
+                | '~'
+                | '.'
+                | ' '
+                | '\t'
+        )
+}
+
+/// `name` bare when every character is `bare`, otherwise wrapped in a
+/// quoted-string with `"` and `\` escaped.
+fn quoted_unless(name: &str, bare: impl Fn(char) -> bool) -> String {
+    if name.chars().all(bare) {
+        return name.to_string();
+    }
+    // Escape backslashes and double quotes per RFC 5322 quoted-string.
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
 /// Return an RFC 5322 `display-name` for `name`: the bare name if it is made
 /// entirely of atext + FWS, otherwise wrapped in a quoted-string with `"` and
 /// `\` escaped. Shared by [`normalize_address_for_smtp`] and
 /// [`format_recipient`] so the quoting rule lives in exactly one place.
 fn quote_display_name(name: &str) -> String {
-    // RFC 5322 atext, plus FWS (space/tab) and `.` (allowed in dot-atom phrases).
-    fn is_atext_or_fws(c: char) -> bool {
-        c.is_ascii_alphanumeric()
-            || matches!(
-                c,
-                '!' | '#'
-                    | '$'
-                    | '%'
-                    | '&'
-                    | '\''
-                    | '*'
-                    | '+'
-                    | '-'
-                    | '/'
-                    | '='
-                    | '?'
-                    | '^'
-                    | '_'
-                    | '`'
-                    | '{'
-                    | '|'
-                    | '}'
-                    | '~'
-                    | '.'
-                    | ' '
-                    | '\t'
-            )
-    }
+    quoted_unless(name, is_atext_or_fws)
+}
 
-    if name.chars().all(is_atext_or_fws) {
-        return name.to_string();
-    }
+/// A display name as the store keeps one ([`stored_mailbox`]): its control
+/// characters (a decoded encoded-word may hold a line break) turned to
+/// spaces, trimmed, and quoted unless every character is atext, FWS, `.` or
+/// non-ASCII, which RFC 6532 lets stand in atext. A name holding any other
+/// ASCII character (`(`, `"`, `<`, `,`, `@`, `\`) is so always quoted, and no
+/// reader takes a character of it for syntax.
+pub fn stored_display_name(name: &str) -> String {
+    quoted_unless(&plain_name(name), |c| !c.is_ascii() || is_atext_or_fws(c))
+}
 
-    // Quote it. Escape backslashes and double quotes per RFC 5322 quoted-string.
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{}\"", escaped)
+/// `name` with its control characters turned to spaces, trimmed.
+fn plain_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    name.trim().to_string()
+}
+
+/// One mailbox as the store keeps an address header that came as RFC 822
+/// (`crate::parse::address_headers`): `Name <address>` with the name as
+/// [`stored_display_name`] writes it, so `"Doe, Jane" <j@x>` and
+/// `Jürgen Müller <j@x>` read as they always did, and the bare address when
+/// there is no name or the name only repeats the address, as
+/// [`format_recipient`] writes one.
+pub fn stored_mailbox(display_name: &str, address: &str) -> String {
+    let name = plain_name(display_name);
+    if name.is_empty() || name.to_lowercase() == address.trim().to_lowercase() {
+        return address.to_string();
+    }
+    format!("{} <{address}>", stored_display_name(&name))
 }
 
 /// Build a single RFC 5322 recipient string from a display name and address.
@@ -258,5 +296,27 @@ mod tests {
             format_recipient("bob@x.com", "alice@x.com"),
             "\"bob@x.com\" <alice@x.com>"
         );
+    }
+
+    /// The store's mailbox quotes every name holding ASCII syntax, never one
+    /// that is only non-ASCII, and keeps no control character.
+    #[test]
+    fn stored_mailbox_quotes_a_name_holding_syntax_only() {
+        for (name, address, stored) in [
+            ("Jürgen Müller", "j@x.com", "Jürgen Müller <j@x.com>"),
+            ("(", "x@y.com", r#""(" <x@y.com>"#),
+            (r#"""#, "x@y.com", r#""\"" <x@y.com>"#),
+            (r"CORP\robin", "r@x.com", r#""CORP\\robin" <r@x.com>"#),
+            (
+                "Bob\r\n <b@y.com>",
+                "a@x.com",
+                r#""Bob   <b@y.com>" <a@x.com>"#,
+            ),
+            ("", "a@x.com", "a@x.com"),
+            ("\t", "a@x.com", "a@x.com"),
+            ("A@X.com", "a@x.com", "a@x.com"),
+        ] {
+            assert_eq!(stored_mailbox(name, address), stored, "{name:?}");
+        }
     }
 }

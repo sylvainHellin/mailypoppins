@@ -59,6 +59,14 @@ pub const META_ARRIVAL_MARK_SWEPT: &str = "arrival_mark_zero_swept";
 /// them.
 pub const META_INLINE_ONLY_SWEPT: &str = "inline_only_swept";
 
+/// `meta` key holding the row id below which a row with its raw message may
+/// still hold its address headers as an earlier build stored them, decoded
+/// before they were parsed ([`crate::ingest::rewrite_stored_addresses`],
+/// PERSO-261); `0` once every row is through. Absent from a file an earlier
+/// build wrote, where the backfill starts above the highest row, and `0` from
+/// creation on a store this build made.
+pub const META_ADDRESSES_REWRITTEN_BELOW: &str = "addresses_rewritten_below";
+
 /// Tables that must exist for a store to count as a valid v4 file. Checked on
 /// open so that a file which is stamped v4 but structurally incomplete (a
 /// half-written create, a hand-edited database) is rebuilt rather than used.
@@ -370,6 +378,7 @@ pub fn create(conn: &Connection) -> Result<()> {
     // The trigram index exists before the first row does, so every row is
     // indexed by the write that adds it and there is nothing to backfill.
     set_meta(conn, super::fts::META_TRIGRAM_COMPLETE, "1")?;
+    set_meta(conn, META_ADDRESSES_REWRITTEN_BELOW, "0")?;
     super::calendar::stamp_model_version(conn)?;
     Ok(())
 }

@@ -732,6 +732,15 @@ pub async fn run_sync(
             Err(e) => warn!("[sync] {account}: could not classify stored attachments: {e:#}"),
         }
         span.mark("inline");
+        // The address headers an older build stored decoded (PERSO-261),
+        // stored again from the raw message: local only, a bounded batch
+        // per pass.
+        match ingest::rewrite_stored_addresses(store, blobs, ingest::ADDRESS_REWRITES_PER_PASS) {
+            Ok(0) => {}
+            Ok(n) => info!("[sync] {account}: stored the addresses of {n} message(s) again"),
+            Err(e) => warn!("[sync] {account}: could not store the addresses again: {e:#}"),
+        }
+        span.mark("addresses");
     }
 
     Ok(result)

@@ -1475,8 +1475,9 @@ fn server_attachments(att_list: GraphAttachmentList) -> Vec<crate::ingest::Serve
 
 /// The local half of the PERSO-165 inline backfill of one Graph account:
 /// queue its inline-only rows for the attachment repair (once per store) and
-/// classify a batch of the rows that carry a raw message. Failures are logged
-/// and leave the work for the next pass.
+/// classify a batch of the rows that carry a raw message; then the PERSO-261
+/// address backfill of a batch of those rows. Failures are logged and leave
+/// the work for the next pass.
 fn classify_stored_inline_locally(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
@@ -1496,6 +1497,17 @@ fn classify_stored_inline_locally(
         Ok(0) => {}
         Ok(n) => info!("Classified the attachments of {n} stored message(s) from their raw"),
         Err(e) => warn!("Could not classify the stored attachments from their raw: {e:#}"),
+    }
+    // The outbox's Sent copies keep their raw too, and an older build stored
+    // their address headers decoded (PERSO-261).
+    match crate::ingest::rewrite_stored_addresses(
+        store,
+        blobs,
+        crate::ingest::ADDRESS_REWRITES_PER_PASS,
+    ) {
+        Ok(0) => {}
+        Ok(n) => info!("Stored the addresses of {n} message(s) again from their raw"),
+        Err(e) => warn!("Could not store the addresses again from their raw: {e:#}"),
     }
 }
 

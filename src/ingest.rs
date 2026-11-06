@@ -2080,6 +2080,97 @@ pub fn classify_inline_from_raw(
     Ok(classified.len())
 }
 
+/// How many rows [`rewrite_stored_addresses`] reads in one pass: a header
+/// parse of the raw message each, so a store of tens of thousands of
+/// messages is through in a few dozen passes.
+pub const ADDRESS_REWRITES_PER_PASS: usize = 1000;
+
+/// Store the address headers of up to `limit` rows an earlier build wrote as
+/// ingest now stores them, parsed from the raw message before decoding
+/// ([`crate::parse::address_headers`], PERSO-261), newest rows first;
+/// returns how many rows changed.
+///
+/// An earlier build stored them decoded, where a `(` or a `"` an
+/// encoded-word decoded to reads as syntax, so a blocked sender's mail could
+/// name no mailbox or another one. The rows still owed are those with a raw
+/// message below the row id `meta` keeps
+/// ([`crate::store::schema::META_ADDRESSES_REWRITTEN_BELOW`]): a row ingested
+/// since needs none, and one rewritten again is rewritten to the same text. A
+/// row whose raw blob was evicted keeps what it holds, read by
+/// [`crate::parse::mailbox_addresses`]'s rule for decoded text, and the
+/// update only lands on a row still holding the raw it was computed from. The
+/// search index keeps the old `from_` text, whose words are the same. Local
+/// only: no server is asked.
+pub fn rewrite_stored_addresses(store: &Store, blobs: &BlobStore, limit: usize) -> Result<usize> {
+    use crate::store::schema::{get_meta, set_meta, META_ADDRESSES_REWRITTEN_BELOW};
+    let below: i64 = match get_meta(store.conn(), META_ADDRESSES_REWRITTEN_BELOW)? {
+        Some(below) => below.parse().unwrap_or(0),
+        None => store
+            .conn()
+            .query_row("SELECT IFNULL(MAX(id), 0) + 1 FROM messages", [], |row| {
+                row.get(0)
+            })
+            .context("reading the highest message row")?,
+    };
+    if below <= 0 {
+        return Ok(0);
+    }
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT id, raw_blob FROM messages
+             WHERE id < ?1 AND raw_blob IS NOT NULL
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![below, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading the rows owed an address rewrite")?
+    };
+    let mut rewrites = Vec::with_capacity(rows.len());
+    for (row_id, raw_hash) in &rows {
+        let Some(raw) = crate::store::read::load_raw(store, blobs, *row_id) else {
+            continue;
+        };
+        let Ok((headers, _)) = mailparse::parse_headers(&raw) else {
+            continue;
+        };
+        rewrites.push((*row_id, raw_hash, crate::parse::address_headers(&headers)));
+    }
+    let next = match rows.last() {
+        Some((last, _)) if rows.len() == limit => *last,
+        _ => 0,
+    };
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the address rewrite transaction")?;
+    let mut changed = 0;
+    for (row_id, raw_hash, headers) in &rewrites {
+        changed += tx
+            .execute(
+                "UPDATE messages SET from_ = ?3, to_ = ?4, cc = ?5, reply_to = ?6, bcc = ?7
+                 WHERE id = ?1 AND raw_blob = ?2
+                   AND (from_ IS NOT ?3 OR to_ IS NOT ?4 OR cc IS NOT ?5
+                        OR reply_to IS NOT ?6 OR bcc IS NOT ?7)",
+                rusqlite::params![
+                    row_id,
+                    raw_hash,
+                    headers.from,
+                    headers.to,
+                    headers.cc,
+                    headers.reply_to,
+                    headers.bcc
+                ],
+            )
+            .context("rewriting a row's address headers")?;
+    }
+    set_meta(&tx, META_ADDRESSES_REWRITTEN_BELOW, &next.to_string())?;
+    tx.commit().context("committing the address rewrite")?;
+    Ok(changed)
+}
+
 /// A row without a raw message whose attachments the Graph inline pass owes
 /// a look (PERSO-165).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2731,6 +2822,93 @@ mod tests {
         assert!(id.starts_with("<sha256-"), "{id}");
         assert!(id.ends_with("@local.invalid>"), "{id}");
         assert_eq!(id.len(), "<sha256-".len() + 16 + "@local.invalid>".len());
+    }
+
+    /// A row an older build stored with its `From` decoded, where a decoded
+    /// `(` hides the mailbox, is stored again from its raw message, newest
+    /// first and once; a row whose raw was evicted keeps what it holds.
+    #[test]
+    fn the_address_backfill_stores_an_old_rows_addresses_again_once() {
+        use crate::store::schema::{clear_meta, get_meta, META_ADDRESSES_REWRITTEN_BELOW};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let wire = "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29?=)";
+        let raw = |uid: i64, from: &str| {
+            format!(
+                "From: {from}\r\nTo: me@x.com\r\nSubject: s{uid}\r\nMessage-ID: <m{uid}@x>\r\n\r\nbody\r\n"
+            )
+        };
+        let ingest = |uid: i64, from: &str| -> i64 {
+            let raw = raw(uid, from);
+            let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+            ingest_message(
+                &store,
+                &blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox: "inbox",
+                    uid,
+                    email: &email,
+                    raw: Some(raw.as_bytes()),
+                },
+            )
+            .unwrap()
+            .row_id
+        };
+        let from_of = |row: i64| -> String {
+            store
+                .conn()
+                .query_row("SELECT from_ FROM messages WHERE id = ?1", [row], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let old = ingest(1, wire);
+        let evicted = ingest(2, wire);
+        let fresh = ingest(3, "Jane <jane@x.com>");
+        assert_eq!(from_of(old), r#""(" <x@blocked.example>"#);
+        assert_eq!(
+            get_meta(store.conn(), META_ADDRESSES_REWRITTEN_BELOW)
+                .unwrap()
+                .as_deref(),
+            Some("0"),
+            "a store this build made owes nothing"
+        );
+        assert_eq!(rewrite_stored_addresses(&store, &blobs, 2).unwrap(), 0);
+
+        // As an older build left them: decoded, and no cursor in `meta`.
+        for row in [old, evicted] {
+            store
+                .conn()
+                .execute(
+                    "UPDATE messages SET from_ = '( <x@blocked.example> ())' WHERE id = ?1",
+                    [row],
+                )
+                .unwrap();
+        }
+        clear_meta(store.conn(), META_ADDRESSES_REWRITTEN_BELOW).unwrap();
+        std::fs::remove_file(blobs.path_for(&BlobHash::of(raw(2, wire).as_bytes()))).unwrap();
+
+        // Newest first: the fresh row is as stored, the evicted one is left.
+        assert_eq!(rewrite_stored_addresses(&store, &blobs, 2).unwrap(), 0);
+        assert_eq!(from_of(fresh), "Jane <jane@x.com>");
+        assert_eq!(from_of(evicted), "( <x@blocked.example> ())");
+        assert_eq!(from_of(old), "( <x@blocked.example> ())");
+        assert_eq!(rewrite_stored_addresses(&store, &blobs, 2).unwrap(), 1);
+        assert_eq!(from_of(old), r#""(" <x@blocked.example>"#);
+        assert_eq!(
+            crate::parse::extract_email_address(&from_of(old)),
+            "x@blocked.example"
+        );
+        // Through: nothing more is read.
+        assert_eq!(
+            get_meta(store.conn(), META_ADDRESSES_REWRITTEN_BELOW)
+                .unwrap()
+                .as_deref(),
+            Some("0")
+        );
+        assert_eq!(rewrite_stored_addresses(&store, &blobs, 2).unwrap(), 0);
     }
 
     #[test]

@@ -1,9 +1,10 @@
 // A From read as the daemon reads it (`mp_core::parse::mailbox_addresses`):
 // once comments are dropped, a header holding a `<` names one mailbox, the
-// address in its last `<...>`, its display name everything before. The store
-// holds a From decoded and not always quoted again (`"Bob <bob@x>" <alice@y>`,
-// `bob@x, <alice@y>`), so a row, the reader and Copy sender read it here, and
-// name the mailbox a block matches and a reply goes to.
+// address in its last `<...>`, its display name everything before; one with
+// none names its first bare address. The daemon stores a name quoted whenever
+// it holds syntax (`"Bob <bob@x>" <alice@y>`); a row an older build stored may
+// hold it decoded and bare (`bob@x, <alice@y>`), so a row, the reader and Copy
+// sender read it here, and name the mailbox a block matches and a reply goes to.
 
 /**
  * The index in `raw` of every character outside its comments, honouring
@@ -113,9 +114,39 @@ export function senderName(from: string): string {
   return m ? m.name || m.address : f;
 }
 
-/** `"Bob <bob@x>" <alice@example.com>` to `alice@example.com`; a field with no `<...>` stays, trimmed. */
+/**
+ * The address of a From with no `<...>`, as `mailbox_addresses` reads it
+ * first: comments dropped, its first comma- or semicolon-separated address
+ * when each holds an `@` and no whitespace (`a@x, b@y`, a group's members),
+ * else its last bare token holding an `@`; null when it holds none, or a
+ * `<` (`John <john@x`, which names no mailbox).
+ */
+function bareAddress(from: string): string | null {
+  const bare = uncommentedOffsets(from)
+    .map((at) => from[at])
+    .join("");
+  if (bare.includes("<")) return null;
+  const unquote = (token: string) => token.replace(/^"+|"+$/g, "");
+  const listed = bare
+    .split(/[,;]/)
+    .map((part) => unquote(part.slice(part.lastIndexOf(":") + 1).trim()))
+    .filter((part) => part !== "");
+  if (listed.length > 0 && listed.every((part) => part.includes("@") && !/\s/.test(part))) {
+    return listed[0];
+  }
+  const tokens = bare
+    .split(/[\s,;]+/)
+    .map(unquote)
+    .filter((token) => token.includes("@"));
+  return tokens.length > 0 ? tokens[tokens.length - 1] : null;
+}
+
+/**
+ * `"Bob <bob@x>" <alice@example.com>` to `alice@example.com`,
+ * `x@example.com (Cron Daemon)` to `x@example.com`; a field naming no address stays, trimmed.
+ */
 export function senderAddress(from: string): string {
-  return displayMailbox(from)?.address ?? from.trim();
+  return displayMailbox(from)?.address ?? bareAddress(from) ?? from.trim();
 }
 
 /**

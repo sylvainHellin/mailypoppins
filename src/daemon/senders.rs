@@ -672,6 +672,10 @@ mod tests {
         // A From naming several bare mailboxes is a blocked sender's when any
         // is.
         assert!(matches(&entries, "alice@ok.example, x@blocked.example"));
+        // So is one a comment between two addresses parses as one address
+        // holding whitespace: every token holding an `@` is tested.
+        assert!(matches(&entries, "x@blocked.example (c) alice@ok.example"));
+        assert!(matches(&entries, "alice@ok.example (c) x@blocked.example"));
         assert!(matches(
             &entries,
             "Team: alice@ok.example, x@blocked.example;"
@@ -743,6 +747,72 @@ mod tests {
         .unwrap();
         let draft = crate::draft::parse_email_draft(&reply).unwrap();
         assert_eq!(draft.frontmatter.to.as_deref(), Some("alice@ok.example"));
+    }
+
+    /// An encoded-word decoding to a `(` or a `"` that, read as syntax in the
+    /// decoded text, would hide the blocked mailbox or name one a comment
+    /// carries: ingest stores the name quoted, so the block, the reader and a
+    /// reply all name the mailbox every other client shows.
+    #[test]
+    fn an_encoded_word_decoding_to_syntax_hides_no_blocked_sender() {
+        let fx = Fixture::new(true);
+        let entries = list(&["@blocked.example"]);
+        let rows: Vec<String> = [
+            "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29?=)",
+            "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29_=3Calice=40ok.example=3E_=28?=)",
+            "=?utf-8?q?=22?= <x@blocked.example> (=?utf-8?q?=22=3Calice=40ok.example=3E?=)",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(at, wire)| fx.ingest(at as i64 + 1, wire))
+        .collect();
+        let drafts = fx.dir.path().join("drafts");
+        for message_id in &rows {
+            let from: String = fx
+                .store
+                .conn()
+                .query_row(
+                    "SELECT from_ FROM messages WHERE message_id = ?1",
+                    [message_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(matches(&entries, &from), "{from} is blocked");
+            assert_eq!(
+                crate::parse::readable_sender(&from)
+                    .rsplit_once(' ')
+                    .unwrap()
+                    .1,
+                "<x@blocked.example>",
+                "{from}"
+            );
+            let source = crate::draft::SourceMessage {
+                from: from.clone(),
+                subject: "s".to_string(),
+                ..Default::default()
+            };
+            let reply = crate::draft::create_reply_draft_from(
+                &source,
+                false,
+                "me@alpha.example",
+                Some(&drafts),
+                None,
+            )
+            .unwrap();
+            let draft = crate::draft::parse_email_draft(&reply).unwrap();
+            assert_eq!(
+                draft.frontmatter.to.as_deref(),
+                Some("x@blocked.example"),
+                "{from}"
+            );
+        }
+        assert_eq!(
+            move_existing(&fx.store, &account(), &entries).unwrap(),
+            Moved::Rows {
+                mailbox: "Junk".to_string(),
+                count: 3
+            }
+        );
     }
 
     #[test]

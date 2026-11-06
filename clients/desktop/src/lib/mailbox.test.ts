@@ -15,6 +15,23 @@ describe("the sender's address", () => {
     expect(senderAddress("Alice <alice@y.example> (via <list@z.example>)")).toBe("alice@y.example");
     expect(senderAddress("Alerts > Prod <a@x.example>")).toBe("a@x.example");
   });
+
+  // The table `mp_core::parse::tests::the_sender_address_the_desktop_reads_too`
+  // runs through `extract_email_address`, so Copy sender copies what a reply goes to.
+  it.each([
+    ['"(" <x@blocked.example>', "x@blocked.example"],
+    ['"\\"" <x@blocked.example>', "x@blocked.example"],
+    ['"bob@blocked.example," <alice@ok.example>', "alice@ok.example"],
+    ["x@y.example (Cron Daemon)", "x@y.example"],
+    ["x@blocked.example (c) alice@ok.example", "alice@ok.example"],
+    ["a@x.example, b@y.example", "a@x.example"],
+    ["Team: a@x.example, b@y.example;", "a@x.example"],
+    ["Bob, alice@y.example (x <bob@x.example>)", "alice@y.example"],
+    ["John <john@x.example", "John <john@x.example"],
+    ["MAILER-DAEMON", "MAILER-DAEMON"],
+  ])("reads %s as the daemon does", (from, address) => {
+    expect(senderAddress(from)).toBe(address);
+  });
 });
 
 describe("the sender's name", () => {
