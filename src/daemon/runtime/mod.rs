@@ -35,7 +35,10 @@
 //! watcher and bound to the runtime the same way. [`scheduler`] is #0134's:
 //! the periodic quick tick that keeps a store fresh where the watcher cannot
 //! see, bound the same way again, and [`publish`] is what the three share to
-//! commit a tick's outcome and the counts that moved.
+//! commit a tick's outcome and the counts that moved. [`fts_backfill`] is
+//! PERSO-276's: the background fill of the trigram index in a store an older
+//! build wrote, bound to the runtime the same way and ended when the index is
+//! complete.
 //!
 //! ## Why a probe classifies instead of deciding
 //!
@@ -60,6 +63,7 @@ use serde::{Deserialize, Serialize};
 pub mod account;
 pub mod drafts_poll;
 pub mod drainer;
+pub mod fts_backfill;
 pub mod hook_runner;
 pub mod pool;
 pub mod publish;

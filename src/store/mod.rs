@@ -15,9 +15,10 @@
 //! "A cache" is true of every table but one, so the rebuild is not quite an
 //! empty file (#0066, implemented in [`rebuild`]):
 //!
-//! - `messages`, `message_blobs`, `messages_fts`, `mailboxes`, `sync_cursors`,
-//!   `drafts`, `pending_ops` and `meta` are dropped. The server holds the
-//!   first five back, the drafts directory on disk is truth for `drafts`,
+//! - `messages`, `message_blobs`, `messages_fts`, `messages_fts_tri`,
+//!   `mailboxes`, `sync_cursors`, `drafts`, `pending_ops` and `meta` are
+//!   dropped. The server holds the first six back, the drafts directory on
+//!   disk is truth for `drafts`,
 //!   `pending_ops` is shape only so far (#0039), and `meta` is stamped afresh
 //!   by [`schema::create`].
 //! - `outbox` is carried: every row still in `pending_send`,
@@ -53,6 +54,7 @@ pub mod blobs;
 pub mod calendar;
 pub mod draft_sync;
 pub mod drafts;
+pub mod fts;
 pub mod read;
 pub mod rebuild;
 pub mod reminders;

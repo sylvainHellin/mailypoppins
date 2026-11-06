@@ -470,6 +470,8 @@ The order is the SQL's, so `limit` keeps the first rows of it, and each hit is a
 An absent `limit` means every hit.
 A query the search layer cannot use, a lone quote or bare punctuation, is `-32602` and not `-32603`: the parameter is wrong, not the store.
 A query nothing matches is an empty `hits` array, not an error.
+A term of a single word of three characters or more matches any part of a word in the subject, the sender or the body, whatever the case (`sanierung` and `DACH` both find "Dachsanierung"), a shorter one matches the beginning of a word, and a quoted phrase of several words matches those whole words in order (PERSO-276).
+A store an older build wrote fills its substring index in the background after the daemon starts, and until it is complete the same query matches whole words only; the answer does not say which, since nothing about the call changes.
 
 `message.thread` takes `{"account": str, "row_id": i64}`, `{"account": str, "id": str}` or `{"account": str, "selector": str, "mailbox": str|null}` and returns the conversation the addressed message belongs to (`LST-10`):
 

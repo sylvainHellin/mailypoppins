@@ -477,7 +477,8 @@ enum Commands {
         #[arg(long)]
         full: bool,
         /// Search the local store's full-text index instead of the server
-        /// (offline, covers every synced mailbox at once)
+        /// (offline, covers every synced mailbox at once; a term of three
+        /// characters or more matches any part of a word, whatever the case)
         #[arg(long)]
         local: bool,
         /// Emit one JSON object {account, query, source: local|server,

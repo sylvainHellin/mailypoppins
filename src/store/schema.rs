@@ -148,7 +148,9 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[];
 ///   What stays true either way: only `rowid`-returning `MATCH` queries are
 ///   usable (`snippet()`, `highlight()` and selecting a column value all fail),
 ///   and there is nothing to rebuild from, because a store that loses its index
-///   is dropped and refilled by the next sync.
+///   is dropped and refilled by the next sync. The trigram index beside it
+///   (`messages_fts_tri`, PERSO-276) is declared the same way and is additive,
+///   so it lives in [`additive_tables`] rather than here ([`super::fts`]).
 /// - `sync_cursors.arrival_mark` is what a *later* pass is held to: the UID
 ///   above which the mailbox still owes the store a message the
 ///   server lists (a bulk move whose destination copies did not fit the
@@ -365,6 +367,9 @@ pub fn create(conn: &Connection) -> Result<()> {
     // what keeps the sweep to the one-shot it is meant to be.
     set_meta(conn, META_ARRIVAL_MARK_SWEPT, "1")?;
     set_meta(conn, META_INLINE_ONLY_SWEPT, "1")?;
+    // The trigram index exists before the first row does, so every row is
+    // indexed by the write that adds it and there is nothing to backfill.
+    set_meta(conn, super::fts::META_TRIGRAM_COMPLETE, "1")?;
     super::calendar::stamp_model_version(conn)?;
     Ok(())
 }
@@ -594,6 +599,11 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 /// beside them ([`super::reminders`], PERSO-255) is not part of that cache:
 /// losing it fires once more each reminder already fired for an event that
 /// has not ended.
+///
+/// The trigram index ([`super::fts::TRIGRAM_TABLE`], PERSO-276) is created
+/// empty in a store an older build wrote, and the daemon's backfill
+/// ([`super::fts::backfill_trigram`]) fills it from the rows and their body
+/// blobs; the search keeps to the word index until it is complete.
 fn additive_tables() -> Vec<(&'static str, String)> {
     let mut tables = vec![
         (
@@ -631,6 +641,7 @@ fn additive_tables() -> Vec<(&'static str, String)> {
     ];
     tables.extend(super::calendar::create_sql());
     tables.push((super::reminders::TABLE, super::reminders::create_sql()));
+    tables.push((super::fts::TRIGRAM_TABLE, super::fts::trigram_create_sql()));
     tables
 }
 

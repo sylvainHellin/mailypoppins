@@ -128,8 +128,7 @@ pub fn delete_row(store: &Store, blobs: &BlobStore, id: i64) -> Result<Option<Mu
         .unchecked_transaction()
         .context("opening a delete transaction")?;
     let hashes = blob_refs(&tx, id)?;
-    tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", [id])
-        .context("removing the FTS entry")?;
+    super::fts::unindex(&tx, id).context("removing the FTS entry")?;
     tx.execute("DELETE FROM messages WHERE id = ?1", [id])
         .context("deleting the message row")?;
     for hash in hashes {
@@ -319,16 +318,21 @@ mod tests {
         assert_eq!(previous.mailbox, "inbox");
         assert!(row_coordinates(&fx.store, id).unwrap().is_none());
         assert!(read::find_by_id(&fx.store, id).unwrap().is_none());
-        let fts: i64 = fx
-            .store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM messages_fts WHERE rowid = ?1",
-                [id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(fts, 0, "the FTS entry outlived its row");
+        for table in [
+            crate::store::fts::WORD_TABLE,
+            crate::store::fts::TRIGRAM_TABLE,
+        ] {
+            let fts: i64 = fx
+                .store
+                .conn()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE rowid = ?1"),
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(fts, 0, "the {table} entry outlived its row");
+        }
         let refs: i64 = fx
             .store
             .conn()

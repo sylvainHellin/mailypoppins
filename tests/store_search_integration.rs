@@ -360,7 +360,8 @@ fn a_phrase_matches_adjacent_words_only() {
     assert_eq!(f.hits("lease agreement").len(), 2);
 }
 
-/// A trailing `*` is a prefix query; without it the term is a whole token.
+/// A trailing `*` still reads as a prefix, which the substring match a term
+/// of three characters or more makes already covers (PERSO-276).
 #[test]
 fn a_trailing_star_matches_a_prefix() {
     let f = Fixture::new();
@@ -370,10 +371,110 @@ fn a_trailing_star_matches_a_prefix() {
         &email("a", "a@example.com", "Bill", "the invoicing run finished"),
     );
     assert_eq!(f.hits("invoic*"), vec![row]);
-    assert!(
-        f.hits("invoic").is_empty(),
-        "a bare term must not match a longer token"
+    assert_eq!(f.hits("invoic"), vec![row]);
+    assert_eq!(f.hits("in*"), vec![row]);
+}
+
+/// The substring match of PERSO-276: a term of three characters or more
+/// matches any part of a word in the subject, the sender or the body, whatever
+/// its case or the case of the text.
+#[test]
+fn a_term_matches_any_part_of_a_word_whatever_the_case() {
+    let f = Fixture::new();
+    let roof = f.ingest(
+        "inbox",
+        1,
+        &email(
+            "a",
+            "Hausverwaltung Mueller <info@hv-mueller.de>",
+            "Angebot Dachsanierung",
+            "Anbei das Angebot fuer die Fassadenreinigung.",
+        ),
     );
+    f.ingest(
+        "inbox",
+        2,
+        &email("b", "Bob <bob@example.com>", "Lunch", "pizza at noon"),
+    );
+
+    // The subject, from the middle and the end of a word, in any case.
+    assert_eq!(f.hits("sanierung"), vec![roof]);
+    assert_eq!(f.hits("DACH"), vec![roof]);
+    assert_eq!(f.hits("chSaNi"), vec![roof]);
+    assert_eq!(f.hits("subject:SANIERUNG"), vec![roof]);
+    // The sender's name and address.
+    assert_eq!(f.hits("verwaltung"), vec![roof]);
+    assert_eq!(f.hits("from:MUELLER.DE"), vec![roof]);
+    assert!(f.hits("subject:verwaltung").is_empty(), "the column holds");
+    // The body.
+    assert_eq!(f.hits("REINIGUNG"), vec![roof]);
+    assert_eq!(f.hits("body:ssadenr"), vec![roof]);
+    assert!(f.hits("body:sanierung").is_empty(), "the column holds");
+    // Accents fold as they did in the word index.
+    assert_eq!(f.hits("fassadenréinigung"), vec![roof]);
+    assert!(f.hits("sanierungen").is_empty());
+}
+
+/// A term of one or two characters has no trigram, so it matches the
+/// beginning of a word through the word index rather than nothing.
+#[test]
+fn a_short_term_matches_the_beginning_of_a_word() {
+    let f = Fixture::new();
+    let roof = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Dachsanierung", "Termin am Montag"),
+    );
+    assert_eq!(f.hits("da"), vec![roof]);
+    assert_eq!(f.hits("DA"), vec![roof]);
+    assert_eq!(f.hits("subject:d"), vec![roof]);
+    assert!(
+        f.hits("ch").is_empty(),
+        "two letters match a word's beginning, not its middle"
+    );
+    assert!(f.hits("body:da").is_empty(), "the column holds");
+}
+
+/// A query mixing short and long terms runs as one statement over both
+/// indexes, AND-ed, with OR groups inside one index or split across both.
+#[test]
+fn a_query_mixes_substring_and_word_beginning_terms() {
+    let f = Fixture::new();
+    let roof = f.ingest(
+        "inbox",
+        1,
+        &dated(
+            email("a", "a@example.com", "Dachsanierung", "Termin am Montag"),
+            "Mon, 5 Jan 2026 09:00:00 +0000",
+        ),
+    );
+    let facade = f.ingest(
+        "inbox",
+        2,
+        &dated(
+            email("b", "b@example.com", "Fassade", "Termin am Dienstag"),
+            "Tue, 6 Jan 2026 09:00:00 +0000",
+        ),
+    );
+
+    assert_eq!(f.hits("am sanierung"), vec![roof]);
+    assert_eq!(f.hits("fa termin"), vec![facade]);
+    assert!(f.hits("fa sanierung").is_empty(), "the terms are AND-ed");
+    // An OR group split across both indexes.
+    let mut either = f.hits("(fa OR sanierung) termin");
+    either.sort_unstable();
+    assert_eq!(either, vec![roof, facade].tap_sorted());
+    assert_eq!(f.hits("(fa OR sanierung) montag"), vec![roof]);
+    // A phrase of several words stays a phrase of whole words.
+    assert_eq!(f.hits("\"am montag\" dach"), vec![roof]);
+    // The SQL predicates and the orders still apply.
+    assert_eq!(f.hits("termin after:2026-01-06"), vec![facade]);
+    let newest: Vec<i64> = search(&f.store, "acct", "min am", None, 20, SearchOrder::Newest)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.row.id)
+        .collect();
+    assert_eq!(newest, vec![facade, roof]);
 }
 
 /// Non-ASCII text survives the round trip through the tokenizer, and so does a
@@ -757,6 +858,133 @@ fn a_moved_row_is_found_under_its_new_mailbox() {
     assert!(f.hits_in("filed", "inbox").is_empty());
     assert_eq!(f.hits_in("filed", "archive"), vec![row]);
     assert_eq!(index_drift(&f.store).unwrap(), (0, 0));
+}
+
+/// A store an older build wrote has no trigram index: its next open creates
+/// it empty, the search keeps matching whole words until the backfill has
+/// indexed every row, and then matches substrings (PERSO-276). Rows written,
+/// rewritten or deleted while it runs keep both indexes in step.
+#[test]
+fn the_backfill_fills_an_older_store_and_the_search_switches_over() {
+    use mailypoppins::store::fts::{
+        backfill_trigram_bounded, trigram_ready, META_TRIGRAM_COMPLETE, TRIGRAM_TABLE,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("store.sqlite3");
+    let blobs = BlobStore::new(tmp.path().join("blobs"));
+    let ingest = |store: &Store, uid: i64, subject: &str, body: &str| {
+        ingest_message(
+            store,
+            &blobs,
+            &IngestInput {
+                account: "acct",
+                mailbox: "inbox",
+                uid,
+                email: &email(&format!("m{uid}"), "a@example.com", subject, body),
+                raw: None,
+            },
+        )
+        .unwrap()
+        .row_id
+    };
+    let hits = |store: &Store, query: &str| -> Vec<i64> {
+        let mut ids: Vec<i64> = search(store, "acct", query, None, 50, SearchOrder::Newest)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.row.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    let mut rows = Vec::new();
+    {
+        let store = Store::open(&path).unwrap();
+        for uid in 1..=7 {
+            rows.push(ingest(
+                &store,
+                uid,
+                &format!("Dachsanierung {uid}"),
+                "Angebot",
+            ));
+        }
+        // What an older build left: no trigram table, no completion stamp.
+        store
+            .conn()
+            .execute_batch(&format!(
+                "DROP TABLE {TRIGRAM_TABLE}; DELETE FROM meta WHERE key = '{META_TRIGRAM_COMPLETE}';"
+            ))
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert!(!trigram_ready(store.conn()).unwrap());
+    assert!(
+        hits(&store, "sanierung").is_empty(),
+        "whole words until complete"
+    );
+    assert_eq!(hits(&store, "dachsanierung"), rows);
+    assert_eq!(hits(&store, "dachsanierung 3"), vec![rows[2]]);
+    assert_eq!(
+        index_drift(&store).unwrap(),
+        (0, 0),
+        "an unfilled index owes rows by design"
+    );
+
+    // Two rows per batch: four batches, the last one stamping completion.
+    let first = backfill_trigram_bounded(&store, &blobs, 2, usize::MAX).unwrap();
+    assert_eq!((first.indexed, first.complete), (2, false));
+    // Writes during the backfill index both tables themselves.
+    let late = ingest(&store, 8, "Dachsanierung spaet", "Angebot");
+    ingest(
+        &store,
+        4,
+        "Fassadenreinigung",
+        "rewritten before the backfill reached it",
+    );
+    mailypoppins::store::write::delete_row(&store, &blobs, rows[5]).unwrap();
+    let mut batches = 1;
+    loop {
+        let batch = backfill_trigram_bounded(&store, &blobs, 2, usize::MAX).unwrap();
+        batches += 1;
+        if batch.complete {
+            break;
+        }
+        assert!(batches < 10, "the backfill never completed");
+    }
+    assert!(trigram_ready(store.conn()).unwrap());
+    assert_eq!(index_drift(&store).unwrap(), (0, 0));
+
+    let mut expected = vec![rows[0], rows[1], rows[2], rows[4], rows[6], late];
+    expected.sort_unstable();
+    assert_eq!(hits(&store, "sanierung"), expected);
+    assert_eq!(hits(&store, "REINIGUNG"), vec![rows[3]]);
+    // A completed store answers at once and indexes nothing more.
+    let done = backfill_trigram_bounded(&store, &blobs, 2, usize::MAX).unwrap();
+    assert_eq!((done.indexed, done.complete), (0, true));
+}
+
+/// The byte bound ends a batch early but never before its first row, so a
+/// store of large bodies still progresses one row at a time.
+#[test]
+fn the_backfill_bounds_a_batch_by_body_bytes() {
+    use mailypoppins::store::fts::{backfill_trigram_bounded, META_TRIGRAM_COMPLETE};
+    let f = Fixture::new();
+    for uid in 1..=3 {
+        f.ingest(
+            "inbox",
+            uid,
+            &email(&format!("m{uid}"), "a@example.com", "Big", &"x".repeat(100)),
+        );
+    }
+    f.store
+        .conn()
+        .execute("DELETE FROM meta WHERE key = ?1", [META_TRIGRAM_COMPLETE])
+        .unwrap();
+    let batch = backfill_trigram_bounded(&f.store, &f.blobs, 10, 1).unwrap();
+    assert_eq!((batch.indexed, batch.complete), (1, false));
+    let batch = backfill_trigram_bounded(&f.store, &f.blobs, 10, 150).unwrap();
+    assert_eq!((batch.indexed, batch.complete), (2, true));
 }
 
 /// `limit` is honoured, and it takes the best-ranked hits rather than an

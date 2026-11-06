@@ -699,6 +699,9 @@ pub async fn start_account(
                 super::runtime::scheduler::spawn(&runtime, Arc::clone(canonical), &cfg_for_watch);
                 // The drafts mirror's reconcile between those ticks (#0143).
                 super::runtime::drafts_poll::spawn(&runtime, &cfg_for_watch);
+                // The trigram index of a store an older build wrote, filled
+                // in the background until complete (PERSO-276).
+                super::runtime::fts_backfill::spawn(&runtime, &cfg_for_watch);
                 // The mail hooks, run after every tick that ingested (#0135).
                 super::runtime::hook_runner::spawn(&runtime, &cfg_for_watch);
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);

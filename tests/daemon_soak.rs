@@ -538,8 +538,10 @@ server = "Archive"
 }
 
 /// Bumped whenever [`build_template`] would produce a different tree, so a
-/// cache from an older checkout is never reused.
-const FIXTURE_VERSION: &str = "v1";
+/// cache from an older checkout is never reused. v2: the store carries the
+/// trigram index (PERSO-276); a v1 store gains it empty and the daemon
+/// backfills it during the row, which moves the store size row (c) pins.
+const FIXTURE_VERSION: &str = "v2";
 
 /// `--rows`, the one number `docs/baselines/pre-daemon/workloads.md` pins.
 const FIXTURE_ROWS: usize = 5000;

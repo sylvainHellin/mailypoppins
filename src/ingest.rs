@@ -63,7 +63,9 @@
 //! `messages_fts` is contentless with `contentless_delete=1` (see the schema
 //! doc comment), so there is nothing to rebuild from and ingest maintains the
 //! index explicitly: delete the previous entry by rowid, insert the new one,
-//! both inside the message's transaction.
+//! both inside the message's transaction. The trigram index beside it
+//! (`messages_fts_tri`, PERSO-276) is written the same way in the same
+//! transaction, through [`crate::store::fts`].
 //!
 //! The delete needs the rowid and nothing else, which is what fixes the #0037
 //! known issue: while the index was external-content, undoing an entry meant
@@ -715,8 +717,7 @@ fn ingest_in_tx(
     //    entry from its rowid alone, so this holds whatever became of the old
     //    body blob (see the module docs). Unconditional: a rowid that carries
     //    no entry is a no-op delete.
-    tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", [row_id])
-        .context("removing the previous FTS row")?;
+    crate::store::fts::unindex(tx, row_id).context("removing the previous FTS row")?;
 
     // 5. Re-point blob references. Acquire first, release second: a hash that
     //    both versions share must never pass through refcount zero, because
@@ -734,12 +735,9 @@ fn ingest_in_tx(
         blobs.release(tx, &hash)?;
     }
 
-    // 6. Index the new content.
-    tx.execute(
-        "INSERT INTO messages_fts (rowid, subject, from_, body_text) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![row_id, email.subject, email.from, email.body_text],
-    )
-    .context("inserting the FTS row")?;
+    // 6. Index the new content, in the word and the trigram index.
+    crate::store::fts::index(tx, row_id, &email.subject, &email.from, &email.body_text)
+        .context("inserting the FTS row")?;
 
     Ok(IngestOutcome {
         row_id,

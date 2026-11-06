@@ -485,3 +485,10 @@ One installed `mp` and one daemon socket mean a worktree tests but never install
 Rejected: hand-made `/var/tmp/mp-<purpose>-<id>` worktrees with `cp -cR` target clones and a shared `CARGO_TARGET_DIR` (manual, and the shared dir broke worktrees); a tracked `.config/wt.toml` and `.worktreeinclude` (public repo, per-machine approval of project hooks).
 Source: chat with Sylvain, 2026-11-06 (pi-remote); dotfiles decision of the same day.
 Status: accepted
+
+## 2026-11-06 - The full search matches any part of a word, case-insensitively, through a second trigram index beside the word index
+
+Why: Sylvain wants a search for "sanierung" or "DACH" to find "Dachsanierung", as the desktop's list filter does; on the real TUM store a trigram index costs about 60 MB against 4 MB and still answers in milliseconds; keeping the word index lets one- and two-letter terms match word beginnings, which trigram cannot match, and lets search keep working while the new index fills.
+Rejected: replacing the word index with trigram (short terms silently match nothing, and a schema bump forces a full resync of every store); a LIKE scan of bodies (bodies live in blobs outside SQLite).
+Source: chat with Sylvain, 2026-11-06.
+Status: accepted

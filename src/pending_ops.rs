@@ -414,8 +414,7 @@ pub fn apply_delete(
         return Ok(None);
     };
     let hashes = blob_refs_in(&tx, id)?;
-    tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", [id])
-        .context("removing the FTS entry")?;
+    crate::store::fts::unindex(&tx, id).context("removing the FTS entry")?;
     tx.execute("DELETE FROM messages WHERE id = ?1", [id])
         .context("deleting the message row")?;
     for hash in &hashes {
@@ -1986,7 +1985,7 @@ fn roll_move_back(tx: &Connection, blobs: &BlobStore, previous: &MutatedRow) -> 
         }
         Some(holder) => {
             let hashes = blob_refs_in(tx, previous.id)?;
-            tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", [previous.id])
+            crate::store::fts::unindex(tx, previous.id)
                 .context("removing the placeholder's FTS entry")?;
             tx.execute("DELETE FROM messages WHERE id = ?1", [previous.id])
                 .context("deleting the moved placeholder row")?;
@@ -2441,6 +2440,11 @@ mod tests {
             "the placeholder is gone"
         );
         assert_eq!(
+            crate::store::search::index_drift(&fx.store).unwrap(),
+            (0, 0),
+            "the placeholder's entries left both indexes"
+        );
+        assert_eq!(
             read::find_by_id(&fx.store, refetched)
                 .unwrap()
                 .unwrap()
@@ -2568,6 +2572,11 @@ mod tests {
         apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().is_none());
         assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
+        // Both the word and the trigram index let the row go with it.
+        assert_eq!(
+            crate::store::search::index_drift(&fx.store).unwrap(),
+            (0, 0)
+        );
 
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS {

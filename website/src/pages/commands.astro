@@ -157,9 +157,9 @@ const inviteOptions = [
 ];
 
 const localSearchSyntax = [
-  { command: 'word', description: 'Matches the whole word in subject, sender or body; several words all have to match' },
-  { command: '"a phrase"', description: 'Matches the words adjacent, in that order' },
-  { command: 'word*', description: 'Prefix match (invoi* finds invoicing)' },
+  { command: 'word', description: 'Matches any part of a word in subject, sender or body, whatever the case (sanierung and DACH both find Dachsanierung); several words all have to match' },
+  { command: 'ab', description: 'One or two letters match the beginning of a word' },
+  { command: '"a phrase"', description: 'Matches the whole words adjacent, in that order' },
   { command: 'subject:', description: 'Restrict the term to the subject' },
   { command: 'from:', description: 'Restrict the term to the sender' },
   { command: 'body:', description: 'Restrict the term to the body text' },
@@ -699,7 +699,9 @@ mp calendar reminder dismiss AAMkADev2 -A evoqs`}
         the same transaction as the message it describes, so it is never stale
         with respect to what <code>mp sync</code> has pulled, and it holds only
         what has been synced, which is what the server-side search is still for.
-        Punctuation is searched as text, not as query syntax.
+        Punctuation is searched as text, not as query syntax. A store an older
+        version wrote builds its part-of-a-word index in the background after
+        the daemon starts, and matches whole words until that is done.
       </p>
       <CommandTable commands={localSearchSyntax} />
     </section>

@@ -1,23 +1,35 @@
 //! Full-text search over the store's FTS5 index (#0043).
 //!
-//! Search is a `SELECT`, not a file stream. The index (`messages_fts`) has
-//! existed since #0038 and is written inside the same transaction as the
-//! `messages` row it describes ([`crate::ingest`]), and removed by every
-//! delete path (`store::write::delete_row`, `pending_ops::apply_delete`, and
-//! the prune through `delete_by_uid`), so it never needs a reconcile pass.
-//! What was missing was a way to ask it a question; this module is that.
+//! Search is a `SELECT`, not a file stream. The word index (`messages_fts`)
+//! has existed since #0038 and the trigram index (`messages_fts_tri`) since
+//! PERSO-276 ([`super::fts`]); both are written inside the same transaction
+//! as the `messages` row they describe ([`crate::ingest`]), and removed by
+//! every delete path (`store::write::delete_row`, `pending_ops::apply_delete`,
+//! and the prune through `delete_by_uid`), so they never need a reconcile
+//! pass. What was missing was a way to ask them a question; this module is
+//! that.
 //!
-//! Two constraints come from the index being *contentless*
+//! A term of a single word of three characters or more matches any part of a
+//! word, whatever the case, through the trigram index; a shorter one matches
+//! the beginning of a word through the word index, and a phrase of several
+//! words stays a word-index phrase ([`crate::search::to_fts_substring`]). A
+//! store whose trigram index is still being backfilled
+//! ([`super::fts::trigram_ready`]) answers from the word index alone, whole
+//! words as before ([`crate::search::to_fts`]).
+//!
+//! Two constraints come from the indexes being *contentless*
 //! (`content=''`, `contentless_delete=1`, see [`super::schema`]):
 //!
 //! - Only `rowid`-returning `MATCH` queries work. `snippet()` and
 //!   `highlight()` fail, so a hit is rendered from the `messages` row it joins
 //!   to (which is where the stored snippet lives) and never from the index.
-//! - There is nothing to rebuild the index *from*: the body text lives in a
-//!   blob and the index keeps no copy. That is not a gap, because the store is
-//!   a cache with a drop-and-rebuild contract: a file whose index is suspect is
+//! - Neither index can be rebuilt from itself: the body text lives in a blob
+//!   and the index keeps no copy. That is not a gap, because the store is a
+//!   cache with a drop-and-rebuild contract: a file whose index is suspect is
 //!   deleted and refilled by the next sync. [`index_drift`] is the check that
 //!   says whether it is suspect, so the question can be asked without guessing.
+//!   The trigram backfill reads the body blobs ([`super::fts::backfill_trigram`]),
+//!   which is what lets an older store gain the second index without a resync.
 //!
 //! The user's query is *not* passed to FTS5 verbatim. A bare MATCH expression
 //! makes half of ordinary typing a syntax error (`c++`, `foo:bar`, a stray
@@ -32,11 +44,15 @@
 
 use anyhow::{Context, Result};
 
+use super::fts::{TRIGRAM_TABLE, WORD_TABLE};
 use super::read::{row_columns, row_from_sql, MessageRow, CALENDAR_SIDECAR_NAME};
 use super::{fold_case, Store, FOLD_FUNCTION};
 
 pub use crate::search::fts_expression;
 pub use mp_protocol::listing::SearchOrder;
+
+/// The bm25 column weights of either index: `subject`, `from_`, `body_text`.
+const BM25_WEIGHTS: &str = "10.0, 5.0, 1.0";
 
 /// One ranked hit: the message row and the bm25 score it matched with.
 #[derive(Debug, Clone)]
@@ -44,6 +60,10 @@ pub struct SearchHit {
     pub row: MessageRow,
     /// bm25 rank. FTS5 returns a *negative* number and a smaller (more
     /// negative) one is a better match, which is why the ordering is `ASC`.
+    /// A query answered by both indexes ranks by the sum of the two scores.
+    /// The trigram index counts every three-character run as a token, so its
+    /// scores sit on another scale than the word index's (a longer needle
+    /// scores higher) and only compare among hits of one query.
     pub rank: f64,
 }
 
@@ -84,7 +104,9 @@ fn filename_like_pattern(needle: &str) -> String {
 /// (`date_sort` 0) is last in both date orders, and a `Date:` before 1970
 /// (a negative `date_sort`) is a date like any other. The bm25 weights `relevance`
 /// ranks by are `subject`, `from_`, `body_text` in that order: a word in the
-/// subject outranks the same word buried in a quoted reply chain.
+/// subject outranks the same word buried in a quoted reply chain. A query
+/// whose only text terms are OR groups split across both indexes has no
+/// score, and relevance is then newest first.
 pub fn search(
     store: &Store,
     account: &str,
@@ -138,11 +160,20 @@ pub fn search_ast(
     limit: usize,
     order: SearchOrder,
 ) -> Result<Vec<SearchHit>> {
-    let render = crate::search::to_fts(parsed).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Substrings once the trigram index holds every row, whole words until
+    // then (PERSO-276).
+    let render = if super::fts::trigram_ready(store.conn())? {
+        crate::search::to_fts_substring(parsed)
+    } else {
+        crate::search::to_fts(parsed)
+    }
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // A query with no clause at all (an empty string, or bare punctuation) has
     // nothing to answer, the same honest refusal the old parser gave.
     if render.match_expr.is_none()
+        && render.trigram_expr.is_none()
+        && render.either.is_empty()
         && !render.has_attachment
         && render.filenames.is_empty()
         && render.before.is_none()
@@ -160,18 +191,67 @@ pub fn search_ast(
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut predicates = String::new();
 
-    // `?1` is always the account; the FTS `MATCH`, when present, is `?2`.
+    // `?1` is always the account. An index with a `MATCH` of its own ranks by
+    // its bm25, and both together by the sum, in one SQL statement, so the
+    // order and the limit are the SQL's whatever mix of terms the query holds.
+    // The trigram index is joined on the rowid; the word index beside it is a
+    // materialised set joined on the id. Joined as a second FTS table instead,
+    // it re-runs its `MATCH` for every trigram hit: `mail ab` took 1.4 s on
+    // the TUM store that way and 17 ms this way.
     binds.push(Box::new(account.to_string()));
-    let (from_clause, rank_expr, base_where) = if let Some(ref expr) = render.match_expr {
-        binds.push(Box::new(expr.clone()));
-        (
-            "messages_fts JOIN messages ON messages.id = messages_fts.rowid",
-            "bm25(messages_fts, 10.0, 5.0, 1.0)",
-            "messages_fts MATCH ?2 AND messages.account = ?1",
-        )
-    } else {
-        ("messages", "0.0", "messages.account = ?1")
+    let (trigram, word) = (TRIGRAM_TABLE, WORD_TABLE);
+    let mut with_clause = String::new();
+    let (from_clause, rank_expr, matches) = match (&render.trigram_expr, &render.match_expr) {
+        (Some(trigrams), Some(words)) => {
+            with_clause = format!(
+                "WITH words AS MATERIALIZED (\
+                     SELECT rowid AS id, bm25({word}, {BM25_WEIGHTS}) AS score \
+                     FROM {word} WHERE {word} MATCH ?{}) ",
+                binds.len() + 1
+            );
+            binds.push(Box::new(words.clone()));
+            let matches = format!(" AND {trigram} MATCH ?{}", binds.len() + 1);
+            binds.push(Box::new(trigrams.clone()));
+            (
+                format!(
+                    "{trigram} JOIN messages ON messages.id = {trigram}.rowid \
+                         JOIN words ON words.id = messages.id"
+                ),
+                format!("bm25({trigram}, {BM25_WEIGHTS}) + words.score"),
+                matches,
+            )
+        }
+        (Some(expr), None) | (None, Some(expr)) => {
+            let table = if render.trigram_expr.is_some() {
+                trigram
+            } else {
+                word
+            };
+            let matches = format!(" AND {table} MATCH ?{}", binds.len() + 1);
+            binds.push(Box::new(expr.clone()));
+            (
+                format!("{table} JOIN messages ON messages.id = {table}.rowid"),
+                format!("bm25({table}, {BM25_WEIGHTS})"),
+                matches,
+            )
+        }
+        (None, None) => ("messages".to_string(), "0.0".to_string(), String::new()),
     };
+    let base_where = format!("messages.account = ?1{matches}");
+
+    // An OR group split across the indexes matches a row either one matches.
+    for group in &render.either {
+        predicates.push_str(&format!(
+            " AND (messages.id IN (SELECT rowid FROM {words} WHERE {words} MATCH ?{w}) \
+             OR messages.id IN (SELECT rowid FROM {trigrams} WHERE {trigrams} MATCH ?{t}))",
+            words = WORD_TABLE,
+            trigrams = TRIGRAM_TABLE,
+            w = binds.len() + 1,
+            t = binds.len() + 2,
+        ));
+        binds.push(Box::new(group.words.clone()));
+        binds.push(Box::new(group.trigrams.clone()));
+    }
 
     if let Some(mb) = mailbox {
         predicates.push_str(&format!(" AND messages.mailbox = ?{}", binds.len() + 1));
@@ -219,7 +299,7 @@ pub fn search_ast(
 
     let order_by = order_by(order);
     let sql = format!(
-        "SELECT {columns}, {rank_expr} AS rank
+        "{with_clause}SELECT {columns}, {rank_expr} AS rank
          FROM {from_clause}
          WHERE {base_where}{predicates}
          ORDER BY {order_by}
@@ -251,36 +331,42 @@ pub fn search_ast(
     Ok(out)
 }
 
-/// How far the index has drifted from the rows: `(rows not indexed, index
-/// entries with no row)`.
+/// How far the indexes have drifted from the rows: `(rows not indexed, index
+/// entries with no row)`, summed over the word and the trigram index.
 ///
 /// Both are zero in a store every writer went through, because every write
 /// path indexes inside the transaction that writes the row and every delete
-/// path removes the entry in the transaction that removes it. It is here so
+/// path removes the entries in the transaction that removes it. It is here so
 /// the invariant is *checkable* rather than merely claimed, which is what the
-/// tests assert after ingest, re-ingest, delete and prune. A non-zero answer
+/// tests assert after ingest, re-ingest, delete and prune. A trigram index
+/// still being backfilled ([`super::fts::trigram_ready`]) owes rows by
+/// design, so only its orphans count until it is complete. A non-zero answer
 /// is not repairable in place (a contentless index cannot be rebuilt from the
 /// store), so the remedy is the drop-and-rebuild contract the store already
 /// has: delete the file and sync.
 pub fn index_drift(store: &Store) -> Result<(i64, i64)> {
-    let unindexed: i64 = store
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM messages
-             WHERE id NOT IN (SELECT rowid FROM messages_fts)",
-            [],
-            |r| r.get(0),
+    let conn = store.conn();
+    let count = |sql: String, what: &str| -> Result<i64> {
+        conn.query_row(&sql, [], |r| r.get(0))
+            .with_context(|| format!("counting {what}"))
+    };
+    let unindexed_in = |table: &str| {
+        count(
+            format!("SELECT COUNT(*) FROM messages WHERE id NOT IN (SELECT rowid FROM {table})"),
+            "unindexed messages",
         )
-        .context("counting unindexed messages")?;
-    let orphaned: i64 = store
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM messages_fts
-             WHERE rowid NOT IN (SELECT id FROM messages)",
-            [],
-            |r| r.get(0),
+    };
+    let orphaned_in = |table: &str| {
+        count(
+            format!("SELECT COUNT(*) FROM {table} WHERE rowid NOT IN (SELECT id FROM messages)"),
+            "orphaned index entries",
         )
-        .context("counting orphaned index entries")?;
+    };
+    let mut unindexed = unindexed_in(super::fts::WORD_TABLE)?;
+    if super::fts::trigram_ready(conn)? {
+        unindexed += unindexed_in(super::fts::TRIGRAM_TABLE)?;
+    }
+    let orphaned = orphaned_in(super::fts::WORD_TABLE)? + orphaned_in(super::fts::TRIGRAM_TABLE)?;
     Ok((unindexed, orphaned))
 }
 
