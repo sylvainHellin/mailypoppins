@@ -11,6 +11,7 @@ import type {
   OperationProgressPayload,
   Progress,
   StateInvalidatePayload,
+  SearchOrder,
   StateRemovePayload,
   SyncCompletedPayload,
   ThreadListing,
@@ -40,6 +41,7 @@ import {
   localHit,
   localRerouted,
   openServerSearch,
+  orderSearch,
   runForm,
   serverHitSignal,
   serverStarted,
@@ -388,7 +390,8 @@ export type Action =
   | { type: "palette_ran"; id: string }
   | { type: "error"; error: GuiError | null }
   | { type: "search_local"; query: string }
-  | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[] }
+  /** `order` is the one the daemon echoed (PERSO-273). */
+  | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[]; order: SearchOrder }
   | { type: "search_local_failed"; seq: number; error: GuiError }
   /** `search_local` refused a query only the server can answer: run it there. */
   | { type: "search_local_rerouted"; seq: number; mailbox: string | null }
@@ -401,6 +404,8 @@ export type Action =
   | { type: "search_server_failed"; seq: number; error: GuiError }
   | { type: "search_server_cancelled"; operation_id: string; outcome: "cancelled" | "already_settled" }
   | { type: "exit_search" }
+  /** The order every search asks for, and the shown one run again in it (PERSO-273). */
+  | { type: "search_order"; order: SearchOrder }
   | { type: "intercepted_fetched"; urls: InterceptedUrl[] }
   | { type: "dismiss_intercept"; entry: InterceptedUrl }
   /** Hide a health line until its check's detail changes (src/app/health.ts). */
@@ -2160,7 +2165,8 @@ function reduce(s: AppState, a: Action): AppState {
           const e = h.row_id === null ? undefined : s.pending[targetKey({ account: h.account, row_id: h.row_id })];
           return !e?.leave;
         });
-      return afterLocalPass({ ...s, search: { ...search, status: "done", hits } });
+      const echoed = { ...search.echoed, local: hits.length > 0 ? a.order : null };
+      return afterLocalPass({ ...s, search: { ...search, status: "done", hits, echoed } });
     }
     case "search_local_failed": {
       const search = s.search;
@@ -2190,6 +2196,8 @@ function reduce(s: AppState, a: Action): AppState {
     }
     case "exit_search":
       return s.search ? withFocus(endSearch(s), "list") : s;
+    case "search_order":
+      return orderSearch(s, a.order);
     case "intercepted_fetched": {
       const seen = new Set(s.intercepted.map((u) => `${u.at}|${u.source}|${u.url}`));
       const fresh = a.urls.filter((u) => !seen.has(`${u.at}|${u.source}|${u.url}`));

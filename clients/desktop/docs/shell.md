@@ -141,6 +141,13 @@ With nothing typed and no search shown, the server button opens the Server Searc
 A failed or dropped search's status wraps, so the daemon's whole sentence reads; progress stays on one line.
 A settled server search shows the count, then the caveat `mp search` prints when the settle's `coverage` is `local` ("1 result on the server (local store only: has:attachment)"), then the mailboxes it could not reach; on plain IMAP the daemon answers `has:attachment` from the store, so un-synced mail is not among the hits (PERSO-131).
 
+### The order of the results
+
+Every run sends `order` to `search_local` and `search_server_start`, `state.searchOrder` when it started (`search.order`), newest first until the user picks another (PERSO-273).
+The client sorts nothing: the local hits are the store's order, and a server search's hits, appended as they stream, take the settle's `hit_order` once it lands (`arrange` in `src/app/search.ts`), after the local pass's.
+The results header's order button (`SearchOrderButton`) names the order the daemon echoed, `search.echoed`, for each pass that listed hits: the local answer's `order`, which the Tauri layer reads as `relevance` from a daemon that echoes none, and the settle's, which a server answers `newest` for `relevance`, so a chained best-match search reads "best match first, then the server's newest first".
+The button, `S` from the list, and the palette's "Order search results: newest first", "oldest first" and "best match first" set `state.searchOrder` and run the shown search again in it (`orderSearch`): the local pass chained to the server leg when one followed it, or the server leg alone when it ran alone.
+
 ### The Server Search form
 
 `ff` (the TUI's "Search all mail"), the palette's entry for it and the header's form button open `ServerSearchDialog`, the TUI overlay's form (#0086b), on the account a search would run on (`state.serverSearchDialog`).

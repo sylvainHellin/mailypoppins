@@ -61,6 +61,7 @@ fn export_into(dir: &Path) -> usize {
         commands::MessageMeta,
         commands::LocalSearchParams,
         commands::LocalSearchHit,
+        commands::LocalSearchAnswer,
         commands::ServerSearchParams,
         commands::SearchForm,
         commands::SearchPlan,

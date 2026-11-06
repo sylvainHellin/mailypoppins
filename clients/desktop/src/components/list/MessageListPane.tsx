@@ -8,6 +8,7 @@ import { ConversationRow } from "@/components/list/ConversationRow";
 import { DraftRow } from "@/components/list/DraftRow";
 import { MessageRow } from "@/components/list/MessageRow";
 import { revealRow, useWindow, WINDOW_FROM } from "@/components/list/useWindow";
+import { SearchOrderButton } from "@/components/search/SearchOrderButton";
 import { SearchResults } from "@/components/search/SearchResults";
 import { SearchStatusBar } from "@/components/search/SearchStatusBar";
 import { FILTER_INPUT_ID, markOpenRead, runAction, runMutation } from "@/app/actions";
@@ -198,7 +199,10 @@ export function MessageListPane() {
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="truncate text-sm font-semibold">{search ? `Search: ${search.query}` : label}</h2>
           {search ? (
-            <span className="text-xs text-muted-foreground tabular-nums">{`${search.hits.length} results`}</span>
+            <span className="flex min-w-0 items-center gap-1">
+              <SearchOrderButton search={search} onCycle={() => runAction("cycle_search_order", s, dispatch)} />
+              <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{`${search.hits.length} results`}</span>
+            </span>
           ) : total !== null ? (
             <span className="text-xs text-muted-foreground tabular-nums">
               {f ? `${count} of ${total}` : `${total} ${noun}`}

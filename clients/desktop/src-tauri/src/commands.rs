@@ -26,7 +26,7 @@ use mp_protocol::draft::{
     DraftValidation,
 };
 use mp_protocol::events::DraftInvalid;
-use mp_protocol::listing::{ConversationRow, MessageListRow, ThreadListing};
+use mp_protocol::listing::{ConversationRow, MessageListRow, SearchOrder, ThreadListing};
 use mp_protocol::send::{HoldListing, OutboxListing};
 use mp_protocol::state::{AccountState, Bootstrap, FolderPolicy, OutboxCounts, SyncHealthState};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
@@ -296,6 +296,10 @@ pub struct LocalSearchParams {
     pub mailbox: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The order of the hits (PERSO-273); the daemon's newest first when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<SearchOrder>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +331,18 @@ pub struct LocalSearchHit {
     pub row: MessageListRow,
 }
 
+/// A local search's answer: the hits, in the order the daemon echoes
+/// (PERSO-273), which is what the results name rather than the order asked
+/// for; a daemon from before PERSO-273 echoes none and ranks, so its answer
+/// is `relevance`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct LocalSearchAnswer {
+    pub order: SearchOrder,
+    pub hits: Vec<LocalSearchHit>,
+}
+
 /// `message.search_server`'s params.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -341,6 +357,11 @@ pub struct ServerSearchParams {
     pub mailboxes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The order of the hits (PERSO-273); the daemon's newest first when
+    /// absent, and a server, which gives no score, answers `relevance`
+    /// newest first. The settle echoes it beside `hit_order`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<SearchOrder>,
     /// The Message-IDs the local pass already shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_message_ids: Option<Vec<String>>,
@@ -924,7 +945,7 @@ pub fn message_html_meta_on(
 pub fn search_local_on(
     door: &Door,
     params: &LocalSearchParams,
-) -> Result<Vec<LocalSearchHit>, GuiError> {
+) -> Result<LocalSearchAnswer, GuiError> {
     let mut wire = serde_json::to_value(params).map_err(GuiError::internal)?;
     wire["body"] = json!(false);
     let answer = call(
@@ -934,13 +955,16 @@ pub fn search_local_on(
         SEARCH_BUDGET,
         Addressing::Params,
     )?;
-    Ok(queries::decode_search_hits(&answer)
-        .into_iter()
-        .map(|hit| LocalSearchHit {
-            mailbox: hit.mailbox,
-            row: hit.row,
-        })
-        .collect())
+    Ok(LocalSearchAnswer {
+        order: queries::decode_search_order(&answer),
+        hits: queries::decode_search_hits(&answer)
+            .into_iter()
+            .map(|hit| LocalSearchHit {
+                mailbox: hit.mailbox,
+                row: hit.row,
+            })
+            .collect(),
+    })
 }
 
 pub fn search_server_start_on(
@@ -1810,7 +1834,7 @@ pub async fn message_html_meta(
 pub async fn search_local(
     session: State<'_, SessionHandle>,
     params: LocalSearchParams,
-) -> Result<Vec<LocalSearchHit>, GuiError> {
+) -> Result<LocalSearchAnswer, GuiError> {
     with_door(&session, move |_, door| search_local_on(door, &params)).await
 }
 
@@ -2904,7 +2928,7 @@ mod tests {
 
     #[test]
     fn local_search_flattens_the_row_beside_the_mailbox() {
-        let hits = search_local_on(
+        let answer = search_local_on(
             &door(),
             &LocalSearchParams {
                 account: "work".into(),
@@ -2913,6 +2937,8 @@ mod tests {
             },
         )
         .expect("hits");
+        assert_eq!(answer.order, SearchOrder::Newest, "the daemon's default");
+        let hits = answer.hits;
         assert!(hits.len() >= 2);
         let value = serde_json::to_value(&hits[0]).expect("json");
         assert!(value["mailbox"].is_string());

@@ -23,6 +23,7 @@ import type {
   MessageListRow,
   OutboxListing,
   Progress,
+  SearchOrder,
   ThreadListing,
   ThreadMessage,
 } from "@/protocol/types";
@@ -258,6 +259,12 @@ export type SearchHit = {
   is_invite: boolean;
   origin: "local" | "server";
   /**
+   * A server hit's place in its search's stream, which the settle's
+   * `hit_order` lists (PERSO-273); null for a local hit, and for a server
+   * hit of a daemon that numbers none.
+   */
+  seq: number | null;
+  /**
    * A server hit's headers and bodies under the hit's own names, what
    * `draft_from_message` builds a reply or a forward from; null for a local hit.
    */
@@ -330,6 +337,16 @@ export type SearchState = {
   chain: boolean;
   /** The Server Search form this search came from, which `ff` opens with again; null for the list header's field. */
   form: SearchFormState | null;
+  /** The order both passes ask for (PERSO-273), the app's `searchOrder` when the run started. */
+  order: SearchOrder;
+  /**
+   * The order the daemon echoed for each pass that listed hits, null for a
+   * pass that listed none or has not answered: what the results header names,
+   * rather than what was asked for, since a daemon from before PERSO-273
+   * ranks whatever it is asked (`relevance`), and a server, which gives no
+   * score, answers `relevance` newest first.
+   */
+  echoed: { local: SearchOrder | null; server: SearchOrder | null };
 };
 
 /**
@@ -949,6 +966,11 @@ export type AppState = {
    * an ended search must not land on a new one.
    */
   searchSeq: number;
+  /**
+   * The order every search asks for, newest first until the results
+   * header's order button, `S` or the palette picks another (PERSO-273).
+   */
+  searchOrder: SearchOrder;
   sidebarCursor: { account: string; slug: string } | null;
   /**
    * The sidebar's hand-set expansion per account name, for the session only
@@ -1186,6 +1208,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     view: "mail",
     search: null,
     searchSeq: 0,
+    searchOrder: "newest",
     sidebarCursor: null,
     sidebarExpanded: {},
     focus: "list",

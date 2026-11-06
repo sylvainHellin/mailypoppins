@@ -14,6 +14,7 @@ import { asGuiError } from "@/lib/gui-types";
 import type {
   OperationFinishedPayload,
   OperationStatus,
+  SearchOrder,
   ServerHitPayload,
   ServerSearchHit,
   ServerSearchSettled,
@@ -44,11 +45,13 @@ export function localHit(account: string, h: LocalSearchHit): SearchHit {
     has_attachments: h.has_attachments,
     is_invite: h.is_invite,
     origin: "local",
+    seq: null,
     source: null,
   };
 }
 
-export function serverHit(h: ServerSearchHit): SearchHit {
+/** A streamed server hit, `seq` its place in the stream (PERSO-273). */
+export function serverHit(h: ServerSearchHit, seq: number | null = null): SearchHit {
   return {
     key: `${h.mailbox}\u0000${h.message_id}`,
     account: h.account,
@@ -64,6 +67,7 @@ export function serverHit(h: ServerSearchHit): SearchHit {
     has_attachments: h.has_attachments,
     is_invite: h.is_invite,
     origin: "server",
+    seq,
     source: {
       from: h.from ?? "",
       to: h.to ?? "",
@@ -104,6 +108,76 @@ export function isLive(search: SearchState | null): boolean {
  */
 export type SearchRun = { account?: string; mailbox?: string | null; chain?: boolean; form?: SearchFormState | null };
 
+// ---------------------------------------------------------------------------
+// The order of the hits (PERSO-273): newest first by default, oldest first or
+// best match first on request. The daemon sorts; the client keeps its order
+// and names the one it echoed.
+// ---------------------------------------------------------------------------
+
+/** The orders, in the order `S` and the results header's button cycle them. */
+export const SEARCH_ORDERS: readonly SearchOrder[] = ["newest", "oldest", "relevance"];
+
+/** What a listing says its hits are in, the words of `mp search` and the TUI. */
+export const ORDER_WORDS: Record<SearchOrder, string> = {
+  newest: "newest first",
+  oldest: "oldest first",
+  relevance: "best match first",
+};
+
+/** The order after `order` in the cycle. */
+export function nextOrder(order: SearchOrder): SearchOrder {
+  return SEARCH_ORDERS[(SEARCH_ORDERS.indexOf(order) + 1) % SEARCH_ORDERS.length];
+}
+
+/**
+ * What the results header says the hits are in: the order the daemon echoed
+ * for each pass that listed hits, the local pass's first, since its hits come
+ * first, and the server's after it when the two differ; null when neither
+ * listed a hit. The TUI's `search_order_label`.
+ */
+export function searchOrderLabel(echoed: SearchState["echoed"]): string | null {
+  const { local, server } = echoed;
+  if (local && server && local !== server) return `${ORDER_WORDS[local]}, then the server's ${ORDER_WORDS[server]}`;
+  const one = local ?? server;
+  return one ? ORDER_WORDS[one] : null;
+}
+
+/** The `order` an answer echoes; a daemon from before PERSO-273 echoes none and ranks, which reads as relevance. */
+function echoedOrder(order: unknown): SearchOrder {
+  return typeof order === "string" && (SEARCH_ORDERS as readonly string[]).includes(order) ? (order as SearchOrder) : "relevance";
+}
+
+/**
+ * The order every search asks for from now on, and the shown search run
+ * again in it: the local pass, chained to the server leg when one followed
+ * it, or the server leg alone when it ran alone, over the same scope.
+ */
+export function orderSearch(s: AppState, order: SearchOrder): AppState {
+  const next: AppState = { ...s, searchOrder: order };
+  const search = s.search;
+  if (!search) return next;
+  const run = { account: search.account, mailbox: search.mailbox, form: search.form };
+  if (search.mode === "server" && !search.hits.some((h) => h.origin === "local")) {
+    return startSearch(next, "server", search.query, run);
+  }
+  return startSearch(next, "local", search.query, { ...run, chain: search.mode === "server" || search.chain });
+}
+
+/**
+ * A settled server search's hits in its `hit_order`, after the local pass's,
+ * which keep the store's order; a hit the order does not name (an older
+ * daemon's) follows in the order it arrived. The TUI's `arrange_server_hits`.
+ */
+function arrange(hits: SearchHit[], hitOrder: unknown): SearchHit[] {
+  const order = Array.isArray(hitOrder) ? hitOrder : [];
+  const rank = new Map<unknown, number>(order.map((seq, at) => [seq, at]));
+  const at = (h: SearchHit) => (h.seq === null ? Number.MAX_SAFE_INTEGER : (rank.get(h.seq) ?? Number.MAX_SAFE_INTEGER));
+  const local = hits.filter((h) => h.origin === "local");
+  // `sort` is stable, so the hits the order does not name keep their arrival order.
+  const server = hits.filter((h) => h.origin === "server").sort((a, b) => at(a) - at(b));
+  return [...local, ...server];
+}
+
 /** Start a run: a new query, or the server leg of the one shown. */
 export function startSearch(s: AppState, mode: "local" | "server", query: string, run: SearchRun = {}): AppState {
   const account = run.account ?? s.search?.account ?? s.selection.account;
@@ -136,6 +210,9 @@ export function startSearch(s: AppState, mode: "local" | "server", query: string
     mailbox,
     chain: mode === "local" && (run.chain ?? false),
     form,
+    order: s.searchOrder,
+    // The kept hits keep the order their pass echoed.
+    echoed: { local: keep.length > 0 && prev ? prev.echoed.local : null, server: null },
   };
   return { ...s, search, searchSeq: search.seq };
 }
@@ -315,8 +392,22 @@ function applySignal(search: SearchState, sig: SearchSignal): SearchState {
       return addHit(search, sig.hit);
     case "finish":
       switch (sig.state) {
-        case "succeeded":
-          return { ...search, status: "done", summary: summaryOf(sig.result) };
+        case "succeeded": {
+          // The hits streamed mailbox by mailbox; the settle's `hit_order`
+          // is the one list every client shows (PERSO-273).
+          const r = (typeof sig.result === "object" && sig.result !== null ? sig.result : {}) as Partial<
+            Record<keyof ServerSearchSettled, unknown>
+          >;
+          const hits = arrange(search.hits, r.hit_order);
+          const server = hits.some((h) => h.origin === "server") ? echoedOrder(r.order) : null;
+          return {
+            ...search,
+            hits,
+            status: "done",
+            summary: summaryOf(sig.result),
+            echoed: { ...search.echoed, server },
+          };
+        }
         case "cancelled":
           return { ...search, status: "cancelled" };
         case "failed":
@@ -343,7 +434,7 @@ export function signal(s: AppState, sig: SearchSignal): AppState {
 
 export function serverHitSignal(payload: unknown): SearchSignal {
   const p = payload as ServerHitPayload;
-  return { kind: "hit", operation_id: p.operation_id, hit: serverHit(p.hit) };
+  return { kind: "hit", operation_id: p.operation_id, hit: serverHit(p.hit, typeof p.seq === "number" ? p.seq : null) };
 }
 
 export function finishedSignal(payload: unknown): SearchSignal {

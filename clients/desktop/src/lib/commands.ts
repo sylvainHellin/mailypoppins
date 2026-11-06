@@ -50,7 +50,7 @@ import type {
   InterceptedUrl,
   InviteCard,
   InviteRefusal,
-  LocalSearchHit,
+  LocalSearchAnswer,
   LocalSearchParams,
   MailboxListing,
   MessageList,
@@ -116,8 +116,8 @@ export const messageText = (account: string, row_id: number): Promise<MessageTex
 export const messageHtmlMeta = (account: string, row_id: number): Promise<MessageMeta> =>
   invoke<MessageMeta>("message_html_meta", { account, row_id });
 
-export const searchLocal = (params: LocalSearchParams): Promise<LocalSearchHit[]> =>
-  invoke<LocalSearchHit[]>("search_local", { params });
+export const searchLocal = (params: LocalSearchParams): Promise<LocalSearchAnswer> =>
+  invoke<LocalSearchAnswer>("search_local", { params });
 
 /** The Server Search form as a query, built by `mp-core`'s parser; no daemon call. */
 export const searchQuery = (form: SearchForm): Promise<SearchPlan> => invoke<SearchPlan>("search_query", { form });

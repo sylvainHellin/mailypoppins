@@ -378,6 +378,12 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           handled();
           if (s.focus !== "sidebar") run("fetch_hit");
           return;
+        // The TUI search overlay's `S`: the next order of the shown search's
+        // hits (PERSO-273); bare `S` is free in every mail context.
+        case "S":
+          handled();
+          if (s.search) run("cycle_search_order");
+          return;
         // The TUI's `x` is global: it sends the Drafts list's cursor draft from any pane.
         case "x":
           return handled(), run("send");

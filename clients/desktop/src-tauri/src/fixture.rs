@@ -3417,6 +3417,31 @@ fn refused_with(method: &str, code: i32, message: &str, data: Option<Value>) -> 
     })
 }
 
+/// The `order` param of `message.search` and `message.search_server`
+/// (PERSO-273): newest when absent, and an unknown one refused as the daemon
+/// refuses it.
+fn param_order(method: &str, params: &Value) -> Result<mp_protocol::listing::SearchOrder> {
+    match params.get("order") {
+        None | Some(Value::Null) => Ok(Default::default()),
+        Some(order) => serde_json::from_value(order.clone()).map_err(|_| {
+            refused(
+                method,
+                -32602,
+                &format!("order is one of newest, oldest, relevance, not {order}"),
+            )
+        }),
+    }
+}
+
+/// `hits` by their `date_sort` in `order`; the fixture has no rank, so
+/// `relevance` leaves them in the fixture's own order.
+fn sort_by_date(order: mp_protocol::listing::SearchOrder, hits: &mut [Value]) {
+    if order == mp_protocol::listing::SearchOrder::Relevance {
+        return;
+    }
+    hits.sort_by(|a, b| order.by_date(a["date_sort"].as_str(), b["date_sort"].as_str()));
+}
+
 fn param_str<'a>(method: &str, params: &'a Value, key: &str) -> Result<&'a str> {
     params[key]
         .as_str()
@@ -4440,6 +4465,7 @@ impl Fixture {
                     .as_u64()
                     .map(|l| l as usize)
                     .unwrap_or(usize::MAX);
+                let order = param_order(method, &params)?;
                 let only = params["mailbox"].as_str();
                 let Some(boxes) = s.messages.get(account) else {
                     return Err(refused(
@@ -4448,19 +4474,24 @@ impl Fixture {
                         &format!("account_unknown: {account}"),
                     ));
                 };
-                let hits: Vec<Value> = boxes
+                let mut hits: Vec<Value> = boxes
                     .iter()
                     .filter(|(mailbox, _)| only.is_none_or(|m| m == mailbox.as_str()))
                     .flat_map(|(mailbox, rows)| rows.iter().map(move |r| (mailbox, r)))
                     .filter(|(_, r)| matches(r, &query))
-                    .take(limit)
                     .map(|(mailbox, r)| {
                         let mut hit = wire_row(r);
                         hit["mailbox"] = json!(mailbox);
                         hit
                     })
                     .collect();
-                Ok(json!({"account": account, "query": params["query"], "hits": hits}))
+                // The daemon sorts before the limit, so the limit keeps the
+                // first rows of the order, and echoes it (PERSO-273).
+                sort_by_date(order, &mut hits);
+                hits.truncate(limit);
+                Ok(json!({
+                    "account": account, "query": params["query"], "order": order, "hits": hits
+                }))
             }
             "message.search_server" => {
                 let account = param_str(method, &params, "account")?.to_string();
@@ -4470,6 +4501,8 @@ impl Fixture {
                     .trim()
                     .to_lowercase();
                 let limit = params["limit"].as_u64().unwrap_or(50) as usize;
+                // A server gives no score: relevance is answered newest first.
+                let order = param_order(method, &params)?.on_server();
                 let exclude: Vec<String> = params["exclude_message_ids"]
                     .as_array()
                     .map(|a| {
@@ -4493,10 +4526,20 @@ impl Fixture {
                     .map(|(mailbox, r)| server_hit(&account, mailbox, r))
                     .collect();
                 hits.push(server_only_hit(&account, &query));
-                // The daemon's cut (PERSO-175): the newest `limit`, and
-                // `truncated` when more matched.
+                // The daemon's cut (PERSO-175): the first `limit` of the
+                // order asked for (PERSO-273), and `truncated` when more
+                // matched. The survivors stream mailbox by mailbox, and the
+                // settle's `hit_order` is what lists them in that order.
                 let truncated = hits.len() > limit;
-                hits.truncate(limit);
+                let mut ranked = hits.clone();
+                sort_by_date(order, &mut ranked);
+                ranked.truncate(limit);
+                hits.retain(|hit| ranked.contains(hit));
+                let hit_order: Vec<u64> = ranked
+                    .iter()
+                    .filter_map(|hit| hits.iter().position(|h| h == hit))
+                    .map(|at| at as u64)
+                    .collect();
                 drop(s);
                 Ok(json!({
                     "operation_id": self.start_server_search(
@@ -4504,6 +4547,8 @@ impl Fixture {
                         params["query"].clone(),
                         hits,
                         truncated,
+                        order,
+                        hit_order,
                     )
                 }))
             }
@@ -6078,6 +6123,8 @@ impl Fixture {
         query: Value,
         hits: Vec<Value>,
         truncated: bool,
+        order: mp_protocol::listing::SearchOrder,
+        hit_order: Vec<u64>,
     ) -> String {
         let id = {
             let mut s = self.state();
@@ -6097,14 +6144,14 @@ impl Fixture {
         let delay = self.state().hit_delay;
         std::thread::spawn(move || {
             let total = hits.len();
-            for hit in hits {
+            for (seq, hit) in hits.into_iter().enumerate() {
                 std::thread::sleep(delay);
                 if !fixture.running(&op) {
                     return;
                 }
                 fixture.emit(
                     "message.server_hit",
-                    json!({"operation_id": op, "hit": hit}),
+                    json!({"operation_id": op, "seq": seq, "hit": hit}),
                 );
             }
             if fixture.running(&op) {
@@ -6124,7 +6171,8 @@ impl Fixture {
                     "account": account, "query": query, "hits": total,
                     "deduplicated": 0, "unreachable": [],
                     "coverage": coverage, "local_terms": local_terms,
-                    "truncated": truncated, "capped": false
+                    "truncated": truncated, "capped": false,
+                    "order": order, "hit_order": hit_order
                 });
                 fixture.settle(&op, "succeeded", Some(result));
             }

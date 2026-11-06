@@ -42,6 +42,7 @@ import type {
   MessageListRow,
   OutboxListing,
   OutboxRow,
+  SearchOrder,
   ThreadListing,
   ThreadMessage,
 } from "@/protocol/types";
@@ -211,6 +212,12 @@ export const mock = {
   nextOp: 1,
   /** What `search_server_cancel` answers. */
   cancelOutcome: "cancelled" as "cancelled" | "already_settled",
+  /**
+   * The order `search_local` echoes: undefined echoes the one asked for, as
+   * the daemon does, and null is a daemon from before PERSO-273, which echoes
+   * none, so the Tauri layer answers `relevance`.
+   */
+  searchEcho: undefined as SearchOrder | null | undefined,
   /** What the native picker (`openPicker`) answers: a path, or null as when the user closes it. */
   picked: null as string | null,
   /** A rejection of the native picker, as when the window has none (a browser under `pnpm dev`). */
@@ -560,6 +567,7 @@ export function resetMock(): void {
   mock.interceptLog = [];
   mock.nextOp = 1;
   mock.cancelOutcome = "cancelled";
+  mock.searchEcho = undefined;
   mock.picked = null;
   mock.pickerFailure = null;
   mock.pickerCalls = [];
@@ -1818,7 +1826,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       return null;
     case "search_local": {
       // fixture.rs's `matches`: subject, sender or body, case-insensitive.
-      const params = args.params as { account: string; query: string; mailbox?: string };
+      const params = args.params as { account: string; query: string; mailbox?: string; order?: SearchOrder };
       const q = params.query.trim().toLowerCase();
       // The daemon's refusal of a query that does not parse.
       const unparsed = parseRefusal(params.query.trim());
@@ -1836,7 +1844,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
           if (text.includes(q)) hits.push({ ...strip(r), id: r.id + mock.rowShift, mailbox });
         }
       }
-      return hits;
+      // The daemon's order (PERSO-273), newest first when none is asked; the
+      // fixture has no rank, so relevance keeps its own order. A test sets
+      // `searchEcho` to answer as a daemon that echoes another, or none.
+      const order = params.order ?? "newest";
+      if (order !== "relevance") {
+        const sign = order === "oldest" ? 1 : -1;
+        hits.sort((a, b) => sign * (a.date_sort < b.date_sort ? -1 : a.date_sort > b.date_sort ? 1 : 0));
+      }
+      const echoed: SearchOrder = mock.searchEcho === undefined ? order : (mock.searchEcho ?? "relevance");
+      return { hits, order: echoed };
     }
     case "search_query":
       return searchPlan(args.form as SearchForm);

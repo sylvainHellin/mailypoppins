@@ -45,6 +45,7 @@ export type { InterceptSource } from "./InterceptSource";
 export type { InterceptedUrl } from "./InterceptedUrl";
 export type { InviteCard } from "./InviteCard";
 export type { InviteRefusal } from "./InviteRefusal";
+export type { LocalSearchAnswer } from "./LocalSearchAnswer";
 export type { LocalSearchHit } from "./LocalSearchHit";
 export type { LocalSearchParams } from "./LocalSearchParams";
 export type { MailboxInfo } from "./MailboxInfo";

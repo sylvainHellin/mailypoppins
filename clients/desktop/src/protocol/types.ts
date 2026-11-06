@@ -13,7 +13,7 @@ import type {
   OperationStatus,
   Progress,
   RpcError,
-  ServerSearchHit,
+  ServerSearchHitEvent,
   SyncCompleted,
 } from "./generated";
 
@@ -35,8 +35,12 @@ export type StateInvalidatePayload = { resource: string; scope: unknown };
 export type StateRemovePayload = { resource: string };
 export type AccountStateChangedPayload = { account: string; state: AccountState; reason?: string };
 
-/** `message.server_hit`: one hit of a running `message.search_server`. */
-export type ServerHitPayload = { operation_id: string; hit: ServerSearchHit };
+/**
+ * `message.server_hit`: one hit of a running `message.search_server`, with
+ * its `seq` in the stream, which the settle's `hit_order` lists (PERSO-273);
+ * a daemon from before it sends none.
+ */
+export type ServerHitPayload = Omit<ServerSearchHitEvent, "seq"> & { seq?: number };
 
 /** `operation.finished`: `result` on success, `error` on failure or cancellation. */
 export type OperationFinishedPayload = {

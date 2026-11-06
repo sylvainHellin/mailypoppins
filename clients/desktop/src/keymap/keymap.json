@@ -359,6 +359,10 @@
         "action": "Save attachment to disk"
       },
       {
+        "key": "S",
+        "action": "Order the results: newest, oldest, best match first"
+      },
+      {
         "key": "Tab",
         "action": "Switch focus"
       },

@@ -12,6 +12,7 @@ import { openEventRsvp, openRsvp } from "@/app/rsvp";
 import { newEvent } from "@/app/eventForm";
 import { editEvent, removeEvent } from "@/app/eventChange";
 import { newInvitation } from "@/app/invite";
+import { nextOrder } from "@/app/search";
 import { manageSignatures } from "@/app/signatures";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
@@ -245,6 +246,17 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
         .catch((e: unknown) => dispatch({ type: "notice", text: `The cancel failed: ${asGuiError(e).message}` }));
       return;
     }
+    // The order of the hits (PERSO-273): the next one, or one by name; the
+    // shown search runs again in it, and with none shown the next search
+    // asks for it.
+    case "cycle_search_order":
+      return dispatch({ type: "search_order", order: nextOrder(s.searchOrder) });
+    case "search_order_newest":
+      return dispatch({ type: "search_order", order: "newest" });
+    case "search_order_oldest":
+      return dispatch({ type: "search_order", order: "oldest" });
+    case "search_order_relevance":
+      return dispatch({ type: "search_order", order: "relevance" });
     case "show_intercepted":
       return dispatch({ type: "overlay", overlay: "intercepted" });
     case "archive":

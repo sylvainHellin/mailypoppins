@@ -87,7 +87,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_thread` | `account`, `row_id`, `mailbox` (slug) | `ThreadListing`: the conversation of the row as the expansion under its conversation row, `message.thread` with `prefer_mailbox` the listed mailbox and `include_drafts`, oldest first, which the list shows reversed; each member carries its `selector` and a draft member its `path` (#0142) |
 | `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
-| `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
+| `search_local` | `params: LocalSearchParams` | `LocalSearchAnswer`: the hits in the daemon's order and the `order` it echoed, `relevance` from a daemon that predates PERSO-273 and echoes none |
 | `search_query` | `form: SearchForm` | `SearchPlan`: `blank`, `invalid { message }`, or `query { query, local, in_mailbox }`; the Server Search form's fields lowered by `mp_core::search::SearchFields::build_query`, which the TUI's `SearchForm::build_query` calls too, `local` false for a query the store's index cannot answer; no daemon call |
 | `search_server_start` | `params: ServerSearchParams` | `{ operation_id }` |
 | `search_server_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the search is no longer awaited |
@@ -224,14 +224,17 @@ type MessageMeta = {
   flags: string[]; invite: boolean; attachments: { name: string; size: number }[];
 };
 
+type SearchOrder = "newest" | "oldest" | "relevance";
 type LocalSearchParams = {
-  account: string; query: string; mailbox?: string; limit?: number;
+  account: string; query: string; mailbox?: string; limit?: number; order?: SearchOrder;
   from?: string; to?: string; cc?: string; subject?: string; body_query?: string;
   filename?: string; has_attachment?: boolean; after?: string; before?: string;
 };
 type LocalSearchHit = MessageListRow & { mailbox: string };
+type LocalSearchAnswer = { order: SearchOrder; hits: LocalSearchHit[] };
 type ServerSearchParams = {
-  account: string; query: string; mailboxes?: string[]; limit?: number; exclude_message_ids?: string[];
+  account: string; query: string; mailboxes?: string[]; limit?: number; order?: SearchOrder;
+  exclude_message_ids?: string[];
 };
 
 type MutationAck = {
@@ -837,7 +840,7 @@ type GuiEvent =
 
 `event` carries the daemon's envelope verbatim and only when it applied above the watermark; duplicates are dropped in Rust.
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
-A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
+A server search streams `message.server_hit` events, each with its `seq` in the stream, and ends with `operation.finished`, whose result lists those numbers in `hit_order`, the order the frontend shows the hits in (PERSO-273), both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
 A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, a retry started by `outbox_retry`, an RSVP, an invitation, a contact index rebuild and a sign-in end the same three ways.
 A hit, a progress report or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 `operation.progress` reaches the webview only for an operation this window awaits, so another client's contacts rebuild or sign-in code never shows here.

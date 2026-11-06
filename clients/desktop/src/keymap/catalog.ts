@@ -48,6 +48,11 @@ export type ActionId =
   | "search_server"
   | "open_server_search"
   | "cancel_search"
+  /** `S` and the results header's order button: the next of newest, oldest and best match first (PERSO-273). */
+  | "cycle_search_order"
+  | "search_order_newest"
+  | "search_order_oldest"
+  | "search_order_relevance"
   | "show_intercepted"
   | "archive"
   | "delete"
@@ -326,6 +331,9 @@ export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     // server-only hit's `.eml` downloaded by the daemon (PERSO-174).
     "Forward as attachment (.eml)": { id: "forward_as_attachment", keys: ["cF"] },
     "Export message as .eml": { id: "export_message", keys: ["te"] },
+    // The overlay's `S` is the desktop's too, free in every mail context of
+    // both clients; the results header's order button runs it (PERSO-273).
+    "Order the results: newest, oldest, best match first": { id: "cycle_search_order" },
     // The form is a dialog: Tab and Shift+Tab move through its fields, and
     // Escape closes it (ServerSearchDialog.tsx).
     "Switch focus": { badge: "key" },
@@ -425,6 +433,11 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "SEARCH", label: "Server Search form: search", keys: ["Enter"], id: null, badge: "key" },
   { section: "SEARCH", label: "Server Search form: close", keys: ["Esc"], id: null, badge: "key" },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
+  // One order each, beside `S`'s cycle (PERSO-273): the shown search runs
+  // again in it, and every search after it asks for it.
+  { section: "SEARCH", label: "Order search results: newest first", keys: [], id: "search_order_newest", badge: null },
+  { section: "SEARCH", label: "Order search results: oldest first", keys: [], id: "search_order_oldest", badge: null },
+  { section: "SEARCH", label: "Order search results: best match first", keys: [], id: "search_order_relevance", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
   // The reader mode (src/app/readerMode.ts), stored in desktop.json: `tt`
   // toggles it, as the TUI's thread key, which the desktop does not have yet.

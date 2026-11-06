@@ -389,7 +389,7 @@ describe("the search reducer", () => {
     s = run(s, { type: "select_message", message: { row_id: row.id, message_id: row.message_id, selector: row.selector } });
     s = run(s, { type: "search_local", query: "ledger" });
     const seq = s.search!.seq;
-    s = run(s, { type: "search_local_loaded", seq, hits: [] });
+    s = run(s, { type: "search_local_loaded", seq, hits: [], order: "newest" });
     s = run(s, {
       type: "gui_event",
       event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } },
@@ -710,7 +710,7 @@ describe("mutations and pending state", () => {
       let s = run(booted(), { type: "search_local", query: "x" });
       const hits = inbox("work", "inbox");
       if (hits.kind !== "messages") throw new Error("unreachable");
-      s = run(s, { type: "search_local_loaded", seq: s.search!.seq, hits: hits.rows.slice(0, 3).map((r) => ({ ...r, mailbox: "inbox" })) });
+      s = run(s, { type: "search_local_loaded", seq: s.search!.seq, hits: hits.rows.slice(0, 3).map((r) => ({ ...r, mailbox: "inbox" })), order: "newest" });
       s = run(s, { type: "move_selection", to: 1, relative: false });
       expect(s.selection.message?.row_id).toBe(1002);
       s = run(s, archive(1, 1002));

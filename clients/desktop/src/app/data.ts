@@ -373,6 +373,7 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
           query: search.query,
           mailbox: search.mailbox,
           chain: search.chain,
+          order: search.order,
         }
       : null;
   const wantKey = want ? `${want.mode}:${want.seq}` : null;
@@ -387,11 +388,11 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
   useEffect(() => {
     if (!want || started.current === wantKey) return;
     started.current = wantKey;
-    const { mode, seq, account, query, mailbox, chain } = want;
+    const { mode, seq, account, query, mailbox, chain, order } = want;
     if (mode === "local") {
       cmd
-        .searchLocal({ account, query, ...(mailbox ? { mailbox } : {}) })
-        .then((hits) => dispatch({ type: "search_local_loaded", seq, hits }))
+        .searchLocal({ account, query, ...(mailbox ? { mailbox } : {}), order })
+        .then(({ hits, order: echoed }) => dispatch({ type: "search_local_loaded", seq, hits, order: echoed }))
         .catch(async (e: unknown) => {
           const error = asGuiError(e);
           // A query the store's index cannot answer (`to:diyan` typed in
@@ -418,6 +419,7 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
         account,
         query,
         ...(mailbox ? { mailboxes: [mailbox] } : {}),
+        order,
         ...(ids.length ? { exclude_message_ids: ids } : {}),
       })
       .then(({ operation_id }) => {

@@ -118,13 +118,13 @@ describe("the list header's filter (PERSO-274)", () => {
     await user.click(input());
     await user.keyboard("ledger{Control>}{Enter}{/Control}");
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
-    expect(mock.calls.filter((c) => c.cmd === "search_local").map((c) => c.args)).toEqual([{ params: { account: "work", query: "ledger" } }]);
+    expect(mock.calls.filter((c) => c.cmd === "search_local").map((c) => c.args)).toEqual([{ params: { account: "work", query: "ledger", order: "newest" } }]);
     await user.keyboard("{Escape}");
     await waitFor(() => expect(status()).toBeNull());
     await user.click(input());
     await user.keyboard("ledger{Shift>}{Enter}{/Shift}");
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
-    expect(mock.calls.filter((c) => c.cmd === "search_server_start").map((c) => c.args)).toEqual([{ params: { account: "work", query: "ledger" } }]);
+    expect(mock.calls.filter((c) => c.cmd === "search_server_start").map((c) => c.args)).toEqual([{ params: { account: "work", query: "ledger", order: "newest" } }]);
     expect(mock.calls.filter((c) => c.cmd === "search_local")).toHaveLength(1);
   });
 
@@ -144,7 +144,7 @@ describe("the list header's filter (PERSO-274)", () => {
     await user.keyboard("{Enter}");
     await waitFor(() => expect(palette).not.toBeInTheDocument());
     expect(within(await results()).getAllByRole("option")).toHaveLength(3);
-    expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({ params: { account: "work", query: "ledger" } });
+    expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({ params: { account: "work", query: "ledger", order: "newest" } });
   });
 });
 
@@ -153,10 +153,11 @@ describe("local search", () => {
     const { user } = renderApp();
     await shellReady();
     const list = await searchLocal(user, "ledger");
-    expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({ params: { account: "work", query: "ledger" } });
+    expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({ params: { account: "work", query: "ledger", order: "newest" } });
     await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(3));
     const badges = [...list.querySelectorAll('[data-slot="mailbox-badge"]')].map((b) => b.textContent);
-    expect(badges).toEqual(["Inbox", "Sent", "Archive"]);
+    // Newest first, the daemon's default order (PERSO-273).
+    expect(badges).toEqual(["Sent", "Inbox", "Archive"]);
     const options = within(list).getAllByRole("option");
     expect(options.map((o) => o.getAttribute("aria-posinset"))).toEqual(["1", "2", "3"]);
     for (const o of options) expect(o).toHaveAttribute("aria-setsize", "3");
@@ -186,9 +187,9 @@ describe("local search", () => {
     const list = await searchLocal(user, "ledger");
     await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(3));
     await user.keyboard("j");
-    expect(selectedLabel()).toMatch(/Quarterly ledger review/);
-    await user.keyboard("j");
     expect(selectedLabel()).toMatch(/Re: Quarterly ledger review/);
+    await user.keyboard("j");
+    expect(selectedLabel()).toMatch(/, Quarterly ledger review/);
 
     await user.keyboard("{Escape}");
     expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
@@ -213,7 +214,7 @@ describe("server search", () => {
     const { user } = renderApp();
     await shellReady();
     const start = await searchServer(user, "handover");
-    expect(start?.args).toEqual({ params: { account: "work", query: "handover" } });
+    expect(start?.args).toEqual({ params: { account: "work", query: "handover", order: "newest" } });
     expect(status()).toHaveTextContent("Searching the server… 0 results so far");
 
     event("message.server_hit", { operation_id: "op-1", hit: serverHit("Inbox", 1005, "Re: BIM model handover") });
@@ -347,7 +348,9 @@ describe("server search", () => {
       params: {
         account: "work",
         query: "ledger",
-        exclude_message_ids: [ids.inbox[0].message_id, ids.sent[0].message_id, ids.archive[0].message_id],
+        order: "newest",
+        // The local pass's hits, newest first.
+        exclude_message_ids: [ids.sent[0].message_id, ids.inbox[0].message_id, ids.archive[0].message_id],
       },
     });
     expect(within(await results()).getAllByRole("option")).toHaveLength(3);
@@ -466,7 +469,7 @@ describe("server search", () => {
     await user.keyboard(`to:diyan${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
     expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
-      params: { account: "work", query: "to:diyan" },
+      params: { account: "work", query: "to:diyan", order: "newest" },
     });
     expect(await screen.findByText(REROUTED_NOTICE)).toBeInTheDocument();
   });
@@ -478,7 +481,7 @@ describe("server search", () => {
     await user.keyboard(`to:x in:Archive${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
     expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
-      params: { account: "work", query: "to:x in:Archive", mailboxes: ["Archive"] },
+      params: { account: "work", query: "to:x in:Archive", mailboxes: ["Archive"], order: "newest" },
     });
   });
 
@@ -534,7 +537,7 @@ describe("the Server Search form (PERSO-115)", () => {
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
     expect(mock.calls.find((c) => c.cmd === "search_query")?.args).toMatchObject({ form: { to: "diyan" } });
     expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
-      params: { account: "work", query: 'to:"diyan"' },
+      params: { account: "work", query: 'to:"diyan"', order: "newest" },
     });
     // The store's index cannot answer `to:`, so no local pass ran.
     expect(mock.calls.some((c) => c.cmd === "search_local")).toBe(false);
@@ -554,13 +557,14 @@ describe("the Server Search form (PERSO-115)", () => {
     await user.keyboard("ledger{Enter}");
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
     expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({
-      params: { account: "work", query: "ledger", mailbox: "Inbox" },
+      params: { account: "work", query: "ledger", mailbox: "Inbox", order: "newest" },
     });
     expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
       params: {
         account: "work",
         query: "ledger",
         mailboxes: ["Inbox"],
+        order: "newest",
         exclude_message_ids: [fixtures.messages.work.inbox[0].message_id],
       },
     });
@@ -610,5 +614,87 @@ describe("the Server Search form (PERSO-115)", () => {
     await user.click(screen.getByRole("button", { name: "Server Search form" }));
     dialog = await form();
     expect(field(dialog, "To")).toHaveValue("diyan");
+  });
+});
+
+describe("the order of the results (PERSO-273)", () => {
+  const orderButton = () => screen.getByRole("button", { name: /^Search order:/ });
+  const badges = (list: HTMLElement) => [...list.querySelectorAll('[data-slot="mailbox-badge"]')].map((b) => b.textContent);
+  const localOrders = () => mock.calls.filter((c) => c.cmd === "search_local").map((c) => (c.args?.params as { order?: string }).order);
+
+  it("the header's order button names the order the store echoed, and a click runs the search again in the next one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const list = await searchLocal(user, "ledger");
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/^Search order: newest first\./));
+    expect(badges(list)).toEqual(["Sent", "Inbox", "Archive"]);
+
+    await user.click(orderButton());
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/^Search order: oldest first\./));
+    expect(localOrders()).toEqual(["newest", "oldest"]);
+    expect(badges(await results())).toEqual(["Archive", "Inbox", "Sent"]);
+    expect(orderButton()).toHaveTextContent("oldest first");
+  });
+
+  it("S cycles the order of the shown search, and the palette picks one by name", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchLocal(user, "ledger");
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/newest first/));
+    await user.keyboard("S");
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/oldest first/));
+    await user.keyboard("S");
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/best match first/));
+    expect(localOrders()).toEqual(["newest", "oldest", "relevance"]);
+
+    await user.keyboard(":");
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.keyboard("Order search results: newest first");
+    await waitFor(() => {
+      const top = palette.querySelector("[data-testid='palette-item']");
+      expect(top).toHaveAttribute("data-label", "Order search results: newest first");
+    });
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/newest first/));
+    expect(localOrders()).toEqual(["newest", "oldest", "relevance", "newest"]);
+  });
+
+  it("a daemon that echoes no order reads as best match first, whatever was asked", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    mock.searchEcho = null;
+    await searchLocal(user, "ledger");
+    await waitFor(() => expect(orderButton()).toHaveAccessibleName(/^Search order: best match first\./));
+    expect(localOrders()).toEqual(["newest"]);
+  });
+
+  it("the server's hits take the settle's hit_order, and the button names the order it echoed", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchServer(user, "handover");
+    expect(orderButton()).toHaveAccessibleName(/^Search order: not answered yet\./);
+    for (const [seq, subject] of ["arrived first", "arrived second", "arrived third"].entries()) {
+      event("message.server_hit", { operation_id: "op-1", seq, hit: serverHit("Archive", null, subject) });
+    }
+    const list = await results();
+    const subjects = () => within(list).getAllByRole("option").map((o) => o.getAttribute("aria-label")?.match(/arrived \w+/)?.[0]);
+    await waitFor(() => expect(subjects()).toEqual(["arrived first", "arrived second", "arrived third"]));
+
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: { account: "work", query: "handover", hits: 3, deduplicated: 0, unreachable: [], order: "oldest", hit_order: [2, 0, 1] },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(subjects()).toEqual(["arrived third", "arrived first", "arrived second"]);
+    expect(orderButton()).toHaveAccessibleName(/^Search order: oldest first\./);
+
+    // A click runs the server leg alone again, in the next order.
+    await user.click(orderButton());
+    await waitFor(() => expect(mock.calls.filter((c) => c.cmd === "search_server_start")).toHaveLength(2));
+    expect(mock.calls.filter((c) => c.cmd === "search_server_start").pop()?.args).toEqual({
+      params: { account: "work", query: "handover", order: "oldest" },
+    });
+    expect(mock.calls.some((c) => c.cmd === "search_local")).toBe(false);
   });
 });

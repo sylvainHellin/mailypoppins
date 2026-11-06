@@ -97,7 +97,7 @@ describe("running the Server Search form", () => {
     expect(s.focus).toBe("list");
     expect(s.search).toMatchObject({ mode: "local", status: "searching", chain: true, mailbox: "Inbox", query: "ledger" });
     const seq = s.search!.seq;
-    s = run(s, { type: "search_local_loaded", seq, hits: [localHit(1001, "<a@x>")] });
+    s = run(s, { type: "search_local_loaded", seq, hits: [localHit(1001, "<a@x>")], order: "newest" });
     expect(s.search).toMatchObject({ mode: "server", status: "searching", chain: false, mailbox: "Inbox", seq: seq + 1 });
     expect(s.search?.hits.map((h) => h.message_id)).toEqual(["<a@x>"]);
     expect(s.search?.form?.fields.keywords).toBe("ledger");
@@ -185,7 +185,7 @@ describe("a search's seq", () => {
     expect(first.search?.seq).toBe(1);
     const next = run(first, { type: "exit_search" }, { type: "search_local", query: "from: borrmann" });
     expect(next.search?.seq).toBe(2);
-    const late = run(next, { type: "search_local_loaded", seq: 1, hits: [localHit(1001, "<late@fixture.example>")] });
+    const late = run(next, { type: "search_local_loaded", seq: 1, hits: [localHit(1001, "<late@fixture.example>")], order: "newest" });
     expect(late.search).toEqual(next.search);
   });
 
