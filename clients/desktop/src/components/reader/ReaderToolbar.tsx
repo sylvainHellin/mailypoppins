@@ -1,5 +1,6 @@
 import {
   Archive,
+  Ban,
   ChevronDown,
   Copy,
   FileDown,
@@ -21,6 +22,7 @@ import { copyFromMessage } from "@/app/interop";
 import { openMessageTarget, runMutation, type MutationActionId } from "@/app/actions";
 import * as compose from "@/app/compose";
 import { exportMessage, openHtml } from "@/app/attachments";
+import { openBlockSender } from "@/app/senders";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey } from "@/app/state";
@@ -32,7 +34,8 @@ import type { MessageMeta } from "@/lib/gui-types";
  * for the recipients first, Archive and Delete ask first, Move opens the
  * picker. They act on this message only, whatever the list has marked. Open
  * in browser hands the daemon's rendition to the default browser, and Export
- * .eml opens the Export dialog (`te`, PERSO-174). Copy is a menu of the sender's
+ * .eml opens the Export dialog (`te`, PERSO-174), and Block sender the chooser
+ * between its address and its domain (`B`, PERSO-261). Copy is a menu of the sender's
  * address, the `mp://` link (what `y` copies) and the subject. HTML | Text
  * is the reader mode (`tt`), the current one pressed.
  */
@@ -95,6 +98,10 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
       <Button size="sm" variant="ghost" title="Export message as .eml (t e)" onClick={() => exportMessage(s, dispatch)}>
         <FileDown aria-hidden="true" />
         Export .eml
+      </Button>
+      <Button size="sm" variant="ghost" title="Block the sender (B)" onClick={() => openBlockSender(s, dispatch)}>
+        <Ban aria-hidden="true" />
+        Block sender
       </Button>
       <div role="group" aria-label="Reader mode" className="flex">
         {READER_MODES.map((mode, i) => (

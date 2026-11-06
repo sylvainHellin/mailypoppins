@@ -168,9 +168,9 @@ use mp_protocol::draft::{
 };
 use mp_protocol::events::{
     Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
-    KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
-    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
+    KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS, KIND_SENDER_BLOCKLIST_CHANGED,
+    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
+    KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::reminder::{CalendarReminder, PRESENTER_GUI};
 use mp_protocol::send::{
@@ -872,6 +872,8 @@ struct State {
     /// The per-run directory the draft files live under.
     root: PathBuf,
     signatures: Value,
+    /// The blocked senders, lowercase and sorted (PERSO-261).
+    blocked: Vec<String>,
     /// Every stubbed `editor_open`, oldest first.
     editor_opens: Vec<EditorOpen>,
     /// Every file the system opener was asked to open, oldest first.
@@ -1889,6 +1891,109 @@ impl State {
             other => Err(refused(other, -32601, &format!("unknown method {other}"))),
         }
     }
+}
+
+/// The blocked senders (PERSO-261): the daemon's one list for every account,
+/// kept in memory. No mailbox of `bootstrap.json` has the `junk` role, so
+/// no fixture account has a Junk folder: a block moves nothing and names
+/// each account in `skipped` with the daemon's sentence, in the snapshot's
+/// account order, as `src/daemon/senders.rs` answers an account whose
+/// catalogue resolves none.
+impl State {
+    fn sender_method(&mut self, method: &str, params: &Value) -> Result<Answered> {
+        let changed =
+            |entries: &[String]| (KIND_SENDER_BLOCKLIST_CHANGED, json!({"entries": entries}));
+        match method {
+            "sender.list" => {
+                only(method, params, &[])?;
+                Ok((json!({"entries": self.blocked}), Vec::new()))
+            }
+            "sender.block" => {
+                only(method, params, &["address", "move_existing"])?;
+                let entry = blocked_entry(method, param_str(method, params, "address")?)?;
+                let added = !self.blocked.contains(&entry);
+                if added {
+                    self.blocked.push(entry.clone());
+                    self.blocked.sort();
+                }
+                let skipped: Vec<Value> = self.bootstrap["snapshot"]["accounts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a["name"].as_str())
+                    .map(|account| {
+                        json!({
+                            "account": account,
+                            "reason": format!("{account} has no Junk folder; its Inbox keeps the sender's mail"),
+                        })
+                    })
+                    .collect();
+                let answer = json!({
+                    "entry": entry, "added": added, "entries": self.blocked,
+                    "moved": [], "skipped": skipped,
+                });
+                let events = if added {
+                    vec![changed(&self.blocked)]
+                } else {
+                    Vec::new()
+                };
+                Ok((answer, events))
+            }
+            "sender.unblock" => {
+                only(method, params, &["address"])?;
+                let entry = param_str(method, params, "address")?.trim().to_lowercase();
+                let removed = self.blocked.contains(&entry);
+                self.blocked.retain(|e| *e != entry);
+                let answer = json!({"entry": entry, "removed": removed, "entries": self.blocked});
+                let events = if removed {
+                    vec![changed(&self.blocked)]
+                } else {
+                    Vec::new()
+                };
+                Ok((answer, events))
+            }
+            other => Err(refused(other, -32601, &format!("unknown method {other}"))),
+        }
+    }
+}
+
+/// The daemon's `senders::normalize`: an entry as the list holds it, or its
+/// refusal as `-32602` with the daemon's sentence.
+fn blocked_entry(method: &str, raw: &str) -> Result<String> {
+    let entry = raw.trim().to_lowercase();
+    let refuse = |why: &str| {
+        Err(refused(
+            method,
+            -32602,
+            &format!(
+                "'{}' is not a sender to block: {why}; give a full address (spam@example.com) or a domain (@example.com)",
+                raw.trim()
+            ),
+        ))
+    };
+    if entry.is_empty() {
+        return refuse("it is empty");
+    }
+    if entry
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | ',' | ';' | '"'))
+    {
+        return refuse("it holds a space or a character no address has");
+    }
+    let Some((_, domain)) = entry.split_once('@') else {
+        return refuse("it has no @");
+    };
+    if domain.contains('@') {
+        return refuse("it has more than one @");
+    }
+    if domain.is_empty()
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+    {
+        return refuse("its domain is not one");
+    }
+    Ok(entry)
 }
 
 /// The configuration's accounts: what `config.add_account` and
@@ -3635,6 +3740,7 @@ impl Fixture {
             drafts: BTreeMap::new(),
             root,
             signatures,
+            blocked: Vec::new(),
             editor_opens: Vec::new(),
             opened: Vec::new(),
             home: crate::attachments::home_dir(),
@@ -4375,6 +4481,13 @@ impl Fixture {
             | "signature.delete"
             | "signature.set_default" => {
                 let (answer, events) = s.signature_method(method, &params)?;
+                for (kind, payload) in events {
+                    self.emit_locked(&mut s, kind, payload);
+                }
+                Ok(answer)
+            }
+            "sender.block" | "sender.unblock" | "sender.list" => {
+                let (answer, events) = s.sender_method(method, &params)?;
                 for (kind, payload) in events {
                     self.emit_locked(&mut s, kind, payload);
                 }

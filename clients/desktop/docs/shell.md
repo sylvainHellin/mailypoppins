@@ -28,6 +28,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/eventChange.ts` | The edit form on an event and the fields it changed, the cancel or delete confirmation, and the changes this window awaits |
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
+| `src/app/senders.ts` | The blocked senders: the Block sender chooser's two entries, a block and an unblock with their notices, and the list the Blocked senders dialog shows |
 | `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
 | `src/app/health.ts` | The daemon's health checks that are not ok: the snapshot's seed, `diagnostic.check_changed` by name, each check's log line and label, and which the banner shows |
 | `src/app/interop.ts` | `sc` and `sf` (config.toml and the daemon log in the editor), and the reader's copies |
@@ -56,6 +57,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/components/calendar` | The Calendar view, its agenda list and rows, its day and week grid, the calendars panel, the event cards (the reader's invitation card reuses one), the respond choice, the event form and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 | `src/components/signatures` | The Signatures dialog |
+| `src/components/senders` | The Block sender chooser and the Blocked senders dialog |
 | `src/components/activity` | The activity log dialog |
 | `src/components/settings` | The Settings view, the password dialog, the config.toml banner, the account wizard and the device-code dialog |
 
@@ -100,6 +102,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `signature.changed`, `signature.removed` | every account's signature listing stale, read again while the Signatures dialog or a new-draft or forward wizard is open |
+| `event` `sender.blocklist_changed` | the blocked senders replaced by the payload's whole list, which the Blocked senders dialog shows at once; a read under way is dropped when it lands |
 | `event` `contact.changed` | that account's contact list stale, read again when the Contacts view shows it (see Contacts, "Staleness") |
 | `event` `calendar.changed` | the Calendar view's events and calendars and that account's invitation cards stale, read again when they show (see Calendar, "Staleness") |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds`, and a line in the activity log when it fires or is cancelled |
@@ -889,6 +892,55 @@ Every `signature.changed` and `signature.removed`, every change the dialog makes
 Only the listing of the open dialog or the open wizard is read; a stale one is read when one of them opens again.
 The daemon publishes nothing for a delete, so another client's delete shows on the next open, and this dialog's own delete shows at once because it reads the listing again.
 
+## Blocked senders
+
+The blocked senders are the TUI's `B` chooser and `sb` list (MSG-10, PERSO-261): the daemon keeps one list for every account, a block moves the sender's mail in each account's Inbox to that account's Junk folder now and after every sync, and an unblock only removes the entry.
+The commands behind them are in [rust-layer.md](rust-layer.md), "Blocked senders".
+
+### Entry points
+
+- `B`, the TUI's MESSAGE key, from the list or the reader, the reader toolbar's "Block sender" button, and the palette's "Block the sender (address or @domain), its mail to Junk" open the chooser on the cursor message's sender.
+  Over the outbox view and a full-pane view the key does nothing and the palette row says why, as for every action on the mailbox selection.
+- `sb`, the TUI's GLOBAL key, from every view, and the palette's "Blocked senders (unblock one)" open the list.
+
+On a draft the chooser does not open and the notice line says "Block needs a received message"; with no message under the cursor it says "Select a message first", and a sender with no address "No address to block in '<from>'".
+
+### The chooser
+
+`BlockSenderDialog.tsx` is the overlay `block_sender`, and `state.blockDialog` is `{address, domain}`: the address a reply goes to (`senderAddress`), lowercase and with a quoted local part that needs no quotes unquoted (`comparableAddress`, `mp_core::parse::comparable_address`), as the list would hold it, and its `@domain`.
+It is the confirmation too: a `radiogroup` named "What to block" with the address ("this address") picked on open and the domain ("everyone at this domain"), the sentence "Its mail in every account's Inbox moves to Junk, now and as it arrives", and the button "Block <entry>", which names what Enter blocks; nothing is blocked before it.
+
+| Key | Action | Command |
+|---|---|---|
+| `j`, Down, `d` | pick the domain | none |
+| `k`, Up, `a` | pick the address | none |
+| Enter | block the picked entry, moving the mail already in each Inbox | `sender_block` |
+| Escape | cancel | none |
+
+A block that went through closes the chooser and says what it came to on the notice line, the TUI's status line: "Blocked <entry>" or "<entry> was already blocked", then "<n> messages moved to Junk (<account> <n>, ...)" or "no Inbox mail from it", then the daemon's own sentence for each account with no Junk folder, the notice a warning when there is one.
+A refusal keeps the chooser open with "Cannot block <entry>: " and the daemon's sentence in its alert line.
+The moved rows leave the Inbox as a move's do: the daemon publishes the mailbox counts, and the lists read again.
+
+### The list
+
+`BlockedSendersDialog.tsx` is the overlay `blocked_senders`: a single-select `listbox` named "Blocked senders", one row per entry, the first under the cursor on open, and "No blocked senders; B on a message blocks its sender" when there are none.
+
+| Key | Action | Command |
+|---|---|---|
+| `j`, Down | cursor down | none |
+| `k`, Up | cursor up | none |
+| `u` | unblock the cursor entry; the cursor moves to the next row, else the one before | `sender_unblock` |
+| Escape, `q` | close | none |
+
+The footer's Unblock button does what `u` does, and the notice line says "Unblocked <entry>; its mail already in Junk stays there", the TUI's words.
+The dialog owns every key while it is open, and reads them in the capture phase, as the Signatures dialog does.
+
+### Staleness
+
+`state.blockedSenders` keeps the list as a `Loadable`.
+Every open of the dialog and every bootstrap make it stale, and it is read (`sender_list`) only while the dialog is open.
+Every `sender.blocklist_changed`, from this window or another client, and every block or unblock answer carry the whole list and replace it, so an open dialog follows another client's change with no read, and a read asked before the change is dropped when it lands.
+
 ## Activity log
 
 The activity log is the TUI's ACTIVITY LOG overlay and status log (OBS-01): every line this window reported, in one place, after its notice left.
@@ -1215,8 +1267,8 @@ Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab
 An account's header in the sidebar is a button with `aria-expanded` and `tabindex="-1"`, reached by pointer, as the outbox line is.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the account picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the event form, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the account picker on the current account, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, the event form in Title, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the account picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the event form, the New invitation form, the Signatures dialog with its delete confirmation, the Block sender chooser, the Blocked senders dialog, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the account picker on the current account, the attachment picker on its first file, the RSVP choice, the Signatures dialog and the Blocked senders dialog on their listbox, the Block sender chooser on its choices, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, the event form in Title, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -1250,6 +1302,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `cn`, `r`, `cr`, `ca`, `cf`, `cF`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
   On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it opens the daemon's rendition of the server's copy, with no fetch first (PERSO-155) (see Compose, "A message's rendition").
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
+- `B`: the Block sender chooser on the cursor message's sender, from the list or the reader (the TUI's MESSAGE key); `sb`: the Blocked senders dialog, from every view; see Blocked senders.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser (on a draft, the HTML its send would build), from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
 - `tt`: toggle the reader between html and text mode from the list or the reader, and on a draft its Markdown and its send HTML without storing the mode (PERSO-136), a desktop key that takes the TUI's thread key, which the desktop does not have yet; the palette's row is "Toggle reader text mode", beside "Reader: HTML" and "Reader: text", which it leaves out while a draft is shown (see [reader.md](reader.md), "Text mode").

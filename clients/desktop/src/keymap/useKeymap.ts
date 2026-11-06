@@ -32,6 +32,7 @@ const MESSAGE_KEYS: Record<string, ActionId> = {
   u: "toggle_read",
   "*": "toggle_flag",
   M: "move",
+  B: "block_sender",
 };
 
 const BADGE_TEXT: Record<Badge, string> = {

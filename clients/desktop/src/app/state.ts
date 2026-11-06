@@ -192,7 +192,9 @@ export const LIST_WIDTH_STEP = 40;
  * confirmation `eventRemoveDialog` describes; `event_scope` is the choice
  * between an occurrence and its whole series `eventScopeDialog` describes;
  * `signatures` is the Signatures
- * dialog `signaturesDialog` describes; `activity` is the activity log;
+ * dialog `signaturesDialog` describes; `block_sender` is the chooser
+ * `blockDialog` describes; `blocked_senders` is the Blocked senders dialog,
+ * which reads `blockedSenders`; `activity` is the activity log;
  * `password` is the password dialog `passwordDialog` describes;
  * `account_wizard` is the account wizard `accountWizard` describes;
  * `device_code` is the sign-in `signIn` describes; `compose_leave` is the
@@ -211,6 +213,8 @@ export type Overlay =
   | "invite"
   | "event"
   | "signatures"
+  | "block_sender"
+  | "blocked_senders"
   | "activity"
   | "password"
   | "account_wizard"
@@ -854,6 +858,13 @@ export type ContactsView = { account: string; query: string; cursor: string | nu
 export type SignaturesDialog = { account: string };
 
 /**
+ * The Block sender chooser (`B`, PERSO-261): the sender's address, as the
+ * blocked senders would hold it, and its `@domain`; which one is picked is
+ * the dialog's own.
+ */
+export type BlockDialog = { address: string; domain: string };
+
+/**
  * The password dialog: which password of which account it stores. The
  * value itself lives in the dialog's own state and never in the model.
  */
@@ -1139,6 +1150,15 @@ export type AppState = {
   signatures: Record<string, Loadable<SignatureListing>>;
   /** What the `signatures` overlay shows; null whenever another overlay or none is open. */
   signaturesDialog: SignaturesDialog | null;
+  /** What the `block_sender` overlay offers; null whenever another overlay or none is open. */
+  blockDialog: BlockDialog | null;
+  /**
+   * The blocked senders (`sender_list`, PERSO-261), the one list of every
+   * account: stale on every open of the Blocked senders dialog and every
+   * bootstrap, read while the dialog is open, and replaced whole by every
+   * `sender.blocklist_changed` and every block or unblock answer.
+   */
+  blockedSenders: Loadable<string[]>;
   /**
    * The daemon's configuration (`config_get`), read when the Settings view
    * opens and while it shows, stale again on every `config.changed` and
@@ -1277,6 +1297,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     progress: {},
     signatures: {},
     signaturesDialog: null,
+    blockDialog: null,
+    blockedSenders: emptyLoadable<string[]>(),
     config: emptyLoadable(),
     credentials: emptyLoadable(),
     configProblem: null,

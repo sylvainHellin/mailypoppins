@@ -14,6 +14,7 @@ import { editEvent, removeEvent } from "@/app/eventChange";
 import { newInvitation } from "@/app/invite";
 import { nextOrder } from "@/app/search";
 import { manageSignatures } from "@/app/signatures";
+import { openBlockSender } from "@/app/senders";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { copyFromMessage, openConfig, openLog, openMeta } from "@/app/interop";
@@ -325,6 +326,10 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return compose.newDraft(s, dispatch);
     case "manage_signatures":
       return manageSignatures(s, dispatch);
+    case "block_sender":
+      return openBlockSender(s, dispatch);
+    case "blocked_senders":
+      return dispatch({ type: "open_blocked_senders" });
     case "reply":
     case "reply_all":
       return compose.reply(compose.cursorSource(s), id === "reply_all", dispatch);

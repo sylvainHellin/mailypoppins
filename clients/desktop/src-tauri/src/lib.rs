@@ -42,6 +42,7 @@ pub mod navigation;
 pub mod paths;
 pub mod reader;
 pub mod reminders;
+pub mod senders;
 pub mod session;
 pub mod settings;
 pub mod signatures;
@@ -283,6 +284,9 @@ pub fn run() {
             signatures::signature_rename,
             signatures::signature_delete,
             signatures::signature_set_default,
+            senders::sender_block,
+            senders::sender_unblock,
+            senders::sender_list,
             editor::editor_open,
             editor::editor_setting_get,
             editor::editor_setting_set,

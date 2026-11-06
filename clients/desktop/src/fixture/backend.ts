@@ -20,7 +20,10 @@ import type {
   AccountCredentials,
   RefusedRebuild,
   AgendaEvent,
+  BlockedSenders,
   Bootstrap,
+  SenderBlocked,
+  SenderUnblocked,
   CalendarEvent,
   CalendarFreeBusyParams,
   CalendarFreeBusyResult,
@@ -49,7 +52,7 @@ import type {
 import { FakeBridge } from "@/fixture/terminal-bridge";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
-import { senderAddress } from "@/lib/mailbox";
+import { comparableAddress, mailboxAddresses, senderAddress } from "@/lib/mailbox";
 import type {
   AccountDraft,
   AccountInfo,
@@ -353,6 +356,8 @@ export const mock = {
   vcards: [] as { account: string; id: string; vcf: string }[],
   /** The signatures and each account's default, what the `signature_*` commands read and change. */
   signatures: clone(fixtures.signatures),
+  /** The blocked senders, lowercase and sorted, what the `sender_*` commands read and change (PERSO-261). */
+  blocked: [] as string[],
   /** `config.get`'s `state`: `absent` makes `config_open` refuse with fixture.rs's `NO_CONFIG`. */
   configState: "ok" as "ok" | "absent" | "invalid",
   /** Whether the daemon's log file exists, which `log_open` checks. */
@@ -619,6 +624,7 @@ export function resetMock(): void {
   mock.searchRebuildRefused = null;
   mock.vcards = [];
   mock.signatures = clone(fixtures.signatures);
+  mock.blocked = [];
   mock.configState = "ok";
   mock.logExists = true;
   mock.configRevision = 0;
@@ -1491,6 +1497,83 @@ export function simulateSignatureChanged(): void {
   emitEnvelope("signature.changed", { name: "work", path: signaturePath("work") });
 }
 
+// ---------------------------------------------------------------------------
+// The blocked senders (PERSO-261), as the daemon keeps them: one list for
+// every account. fixture.rs answers the same for the fixture's accounts,
+// none of which has a Junk folder, so each is in `skipped`; a test that gives
+// an account a mailbox of the `junk` role gets its Inbox mail moved there, as
+// the daemon moves it.
+// ---------------------------------------------------------------------------
+
+/** The daemon's `senders::normalize`: the entry as the list holds it, or its refusal as a `protocol` error. */
+function blockedEntry(raw: string): string {
+  const entry = raw.trim().toLowerCase();
+  const refuse = (why: string): never => {
+    throw {
+      kind: "protocol",
+      message: `'${raw.trim()}' is not a sender to block: ${why}; give a full address (spam@example.com) or a domain (@example.com)`,
+      code: null,
+    } satisfies GuiError;
+  };
+  if (entry === "") refuse("it is empty");
+  if (/[\s<>,;"]/.test(entry)) refuse("it holds a space or a character no address has");
+  const at = entry.indexOf("@");
+  if (at < 0) refuse("it has no @");
+  const domain = entry.slice(at + 1);
+  if (domain.includes("@")) refuse("it has more than one @");
+  if (domain === "" || !domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) refuse("its domain is not one");
+  return entry;
+}
+
+/** The daemon's `senders::matches` for one entry: a mailbox address of `from` is it, or is at its domain. */
+function blockedBy(entry: string, from: string): boolean {
+  return mailboxAddresses(from).some((a) => {
+    const address = comparableAddress(a);
+    const at = address.lastIndexOf("@");
+    if (at < 0) return false;
+    return entry.startsWith("@") ? address.slice(at + 1) === entry.slice(1) : address === entry;
+  });
+}
+
+/** `sender_block`: the entry added, and each account's Inbox mail from it moved to its Junk folder. */
+function blockSender(raw: string): SenderBlocked {
+  const entry = blockedEntry(raw);
+  const added = !mock.blocked.includes(entry);
+  if (added) mock.blocked = [...mock.blocked, entry].sort();
+  const moved: SenderBlocked["moved"] = [];
+  const skipped: SenderBlocked["skipped"] = [];
+  for (const { name: account } of mock.bootstrap.snapshot.accounts) {
+    const boxes = mock.bootstrap.snapshot.mailboxes[account] ?? [];
+    const junk = boxes.find((m) => m.role === "junk")?.slug;
+    const inbox = boxes.find((m) => m.role === "inbox")?.slug;
+    if (!junk) {
+      skipped.push({ account, reason: `${account} has no Junk folder; its Inbox keeps the sender's mail` });
+      continue;
+    }
+    const rows = (inbox && mock.rows[account]?.[inbox]) || [];
+    const leaving = rows.filter((r) => blockedBy(entry, r.from ?? ""));
+    if (leaving.length === 0 || !inbox) continue;
+    mock.rows[account][inbox] = rows.filter((r) => !leaving.includes(r));
+    const target = (mock.rows[account][junk] ??= []);
+    for (const r of leaving) target.unshift({ ...r, selector: `mp://${account}/${junk}/${r.message_id.replace(/^<|>$/g, "")}` });
+    moved.push({ account, mailbox: junk, count: leaving.length });
+    for (const slug of [inbox, junk]) emitEnvelope("state.invalidate", { resource: `mailbox:${account}/${slug}`, scope: { query: "counts" } });
+  }
+  if (added) emitEnvelope("sender.blocklist_changed", { entries: mock.blocked });
+  return { entry, added, entries: [...mock.blocked], moved, skipped };
+}
+
+/** `sender_unblock`: the entry removed; nothing moves back. */
+function unblockSender(raw: string): SenderUnblocked {
+  const entry = raw.trim().toLowerCase();
+  const removed = mock.blocked.includes(entry);
+  if (removed) {
+    mock.blocked = mock.blocked.filter((e) => e !== entry);
+    emitEnvelope("sender.blocklist_changed", { entries: mock.blocked });
+  }
+  return { entry, removed, entries: [...mock.blocked] };
+}
+
 /** One of the five message mutations over `row_ids`, in order, as fixture.rs answers it. */
 function mutate(cmd: string, account: string, args: Record<string, unknown>): MutationBatch {
   knownAccount(cmd, account);
@@ -2156,6 +2239,12 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       return signatureListing(account);
     }
+    case "sender_block":
+      return blockSender(String(args.address ?? ""));
+    case "sender_unblock":
+      return unblockSender(String(args.address ?? ""));
+    case "sender_list":
+      return { entries: [...mock.blocked] } satisfies BlockedSenders;
     case "editor_open": {
       const path = String(args.path);
       mock.editorOpens.push(path);

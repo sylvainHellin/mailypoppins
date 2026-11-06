@@ -28,6 +28,8 @@ export const VIEW_AGNOSTIC_COMBOS: Readonly<Record<string, ActionId>> = {
   sl: "activity_log",
   sc: "open_config",
   sf: "open_log",
+  // The blocked senders, one list for every account (PERSO-261).
+  sb: "blocked_senders",
   "Space m": "view_mail",
   "Space c": "view_contacts",
   "Space a": "view_calendar",

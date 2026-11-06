@@ -239,6 +239,21 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     );
   }, [hasBootstrap, signaturesAccount, signatures, dispatch]);
 
+  // The blocked senders, read while their dialog is open (PERSO-261); an
+  // event or a block's answer replaces the list without a read.
+  const blockedOpen = state.overlay === "blocked_senders";
+  const blocked = state.blockedSenders;
+  useEffect(() => {
+    if (!hasBootstrap || !blockedOpen || !isStale(blocked)) return;
+    const gen = blocked.gen;
+    run(`blocked_senders@${gen}`, () =>
+      cmd
+        .senderList()
+        .then((listed) => dispatch({ type: "blocked_senders_loaded", gen, entries: listed.entries }))
+        .catch((e: unknown) => dispatch({ type: "blocked_senders_failed", gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, blockedOpen, blocked, dispatch]);
+
   // The selected mailbox's list.
   // The answer carries the list generation it was asked at, so a reload that
   // started before an optimistic mutation is dropped when it lands.

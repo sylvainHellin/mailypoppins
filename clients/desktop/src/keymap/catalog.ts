@@ -131,6 +131,10 @@ export type ActionId =
   | "open_config"
   | "open_log"
   | "copy_sender"
+  /** `B`: the chooser between the sender's address and its `@domain`, whose Block blocks one (PERSO-261). */
+  | "block_sender"
+  /** `sb`: the Blocked senders dialog, to unblock one (PERSO-261). */
+  | "blocked_senders"
   | "copy_link"
   | "copy_subject"
   | "theme_dark"
@@ -207,6 +211,8 @@ export const BY_ACTION: Record<string, Binding> = {
   "Toggle flag/star": { id: "toggle_flag" },
   "Move to mailbox (fuzzy picker)": { id: "move" },
   "Copy selector (mp://)": { id: "copy_selector" },
+  "Block the sender (address or @domain), its mail to Junk": { id: "block_sender" },
+  "Blocked senders (unblock one)": { id: "blocked_senders" },
   "Clear selection / return to list": { id: "clear_selection" },
   "Filter the current list": { id: "focus_filter" },
   // The desktop has no thread view yet, and its `tt` toggles the reader's

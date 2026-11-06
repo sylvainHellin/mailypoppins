@@ -252,6 +252,8 @@ describe("what the outbox view hides", () => {
         "approve",
         "archive",
         "attach_file",
+        // `B`, on the cursor message's sender (PERSO-261).
+        "block_sender",
         // `h` and `l`, the KEYMAP's conversation rows (ticket 0142).
         "collapse_conversation",
         "copy_link",

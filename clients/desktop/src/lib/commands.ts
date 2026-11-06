@@ -5,6 +5,7 @@
 import { invoke, type Channel } from "@/lib/tauri";
 import type {
   AccountCredentials,
+  BlockedSenders,
   Bootstrap,
   CalendarFreeBusyParams,
   CalendarFreeBusyResult,
@@ -24,6 +25,8 @@ import type {
   EventUpdateParams,
   HoldListing,
   OutboxListing,
+  SenderBlocked,
+  SenderUnblocked,
   ThreadListing,
 } from "@/protocol/types";
 import type {
@@ -273,6 +276,19 @@ export const signatureDelete = (account: string, name: string): Promise<Signatur
 /** Makes `name` the account's default, or clears it with null; answers `account`'s listing. */
 export const signatureSetDefault = (account: string, name: string | null): Promise<SignatureListing> =>
   invoke<SignatureListing>("signature_set_default", { account, name });
+
+/**
+ * Blocks a full address or `@domain` for every account (PERSO-261), moving
+ * the mail already in each Inbox to its Junk folder; a refused entry is a
+ * `protocol` error with the daemon's sentence.
+ */
+export const senderBlock = (address: string): Promise<SenderBlocked> => invoke<SenderBlocked>("sender_block", { address });
+
+/** Removes an entry from the blocked senders; nothing moves back. */
+export const senderUnblock = (address: string): Promise<SenderUnblocked> => invoke<SenderUnblocked>("sender_unblock", { address });
+
+/** The blocked senders, lowercase and sorted. */
+export const senderList = (): Promise<BlockedSenders> => invoke<BlockedSenders>("sender_list");
 
 /** Opens the file in the resolved editor and never waits for it; a launch failure is `setup`. */
 export const editorOpen = (path: string): Promise<EditorLaunch> => invoke<EditorLaunch>("editor_open", { path });

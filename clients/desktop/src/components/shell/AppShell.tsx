@@ -23,6 +23,8 @@ import { EventScopeDialog } from "@/components/calendar/EventScopeDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
 import { ServerSearchDialog } from "@/components/search/ServerSearchDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
+import { BlockSenderDialog } from "@/components/senders/BlockSenderDialog";
+import { BlockedSendersDialog } from "@/components/senders/BlockedSendersDialog";
 import { ActivityLogDialog } from "@/components/activity/ActivityLogDialog";
 import { PasswordDialog } from "@/components/settings/PasswordDialog";
 import { AccountWizard } from "@/components/settings/AccountWizard";
@@ -146,6 +148,8 @@ export function AppShell() {
       <EventScopeDialog dialog={s.overlay === "event_scope" ? s.eventScopeDialog : null} onOpenChange={close} />
       <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />
       <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
+      <BlockSenderDialog dialog={s.overlay === "block_sender" ? s.blockDialog : null} onOpenChange={close} />
+      <BlockedSendersDialog open={s.overlay === "blocked_senders"} onOpenChange={close} />
       <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />
       <PasswordDialog dialog={s.overlay === "password" ? s.passwordDialog : null} onOpenChange={close} />
       <AccountWizard dialog={s.overlay === "account_wizard" ? s.accountWizard : null} onOpenChange={close} />

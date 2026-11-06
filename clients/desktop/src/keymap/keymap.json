@@ -99,6 +99,10 @@
         "action": "Open log file in $EDITOR"
       },
       {
+        "key": "sb",
+        "action": "Blocked senders (unblock one)"
+      },
+      {
         "key": "Space m",
         "action": "Switch to Mail view"
       },
@@ -154,6 +158,10 @@
       {
         "key": "y",
         "action": "Copy selector (mp://)"
+      },
+      {
+        "key": "B",
+        "action": "Block the sender (address or @domain), its mail to Junk"
       },
       {
         "key": "Esc",

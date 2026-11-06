@@ -110,6 +110,7 @@ import {
   targetKey,
   type AccountWizard,
   type AppState,
+  type BlockDialog,
   type ActivityKind,
   type ActivityLevel,
   type AttachmentDialog,
@@ -257,6 +258,7 @@ import {
   signInStartFailed,
   signInStarting,
 } from "@/app/signin";
+import { blockedSendersFailed, blockedSendersLoaded, blockedSendersReplaced, openBlockedSenders } from "@/app/senders";
 import {
   dropSignatures,
   openSignaturesDialog,
@@ -513,6 +515,13 @@ export type Action =
   | { type: "signatures_failed"; account: string; gen: number; error: GuiError }
   /** A change of the dialog's own, answered or refused: every listing is read again. */
   | { type: "signatures_changed" }
+  // The blocked senders (app/senders.ts, PERSO-261).
+  | { type: "open_block_sender"; dialog: BlockDialog }
+  | { type: "open_blocked_senders" }
+  | { type: "blocked_senders_loaded"; gen: number; entries: string[] }
+  | { type: "blocked_senders_failed"; gen: number; error: GuiError }
+  /** The whole list, as a block or an unblock answered it. */
+  | { type: "blocked_senders_set"; entries: string[] }
   // The Settings view (app/settings.ts).
   | { type: "config_loaded"; gen: number; snapshot: ConfigSnapshot }
   | { type: "config_failed"; gen: number; error: GuiError }
@@ -1471,6 +1480,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "signature.changed":
     case "signature.removed":
       return staleAllSignatures(s);
+    // The blocked senders changed, in this window or another client
+    // (PERSO-261): the payload is the whole list. The mail a block moved
+    // arrives as a move's counts do.
+    case "sender.blocklist_changed": {
+      const entries = (payload as { entries?: unknown }).entries;
+      return Array.isArray(entries) ? blockedSendersReplaced(s, entries.filter((e): e is string => typeof e === "string")) : s;
+    }
     // An account's contact index was written: by a rebuild, a sync's or a
     // send's bump, from any client. Its list is read again when the view
     // shows it.
@@ -1598,6 +1614,8 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         // config.toml banner comes from its own config.get or config.invalid.
         config: markStale(next.config),
         credentials: markStale(next.credentials),
+        // Events may have been missed: the list is read again while it shows.
+        blockedSenders: markStale(next.blockedSenders),
         configProblem: sameInstance ? next.configProblem : null,
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
@@ -2059,6 +2077,7 @@ function reduce(s: AppState, a: Action): AppState {
         eventScopeDialog: a.overlay === "event_scope" ? s.eventScopeDialog : null,
         serverSearchDialog: a.overlay === "server_search" ? s.serverSearchDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
+        blockDialog: a.overlay === "block_sender" ? s.blockDialog : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
         accountWizard: a.overlay === "account_wizard" ? s.accountWizard : null,
         composeLeave: a.overlay === "compose_leave" ? s.composeLeave : null,
@@ -2398,6 +2417,16 @@ function reduce(s: AppState, a: Action): AppState {
       return signaturesFailed(s, a.account, a.gen, a.error);
     case "signatures_changed":
       return staleAllSignatures(s);
+    case "open_block_sender":
+      return { ...s, overlay: "block_sender", blockDialog: a.dialog };
+    case "open_blocked_senders":
+      return openBlockedSenders(s);
+    case "blocked_senders_loaded":
+      return blockedSendersLoaded(s, a.gen, a.entries);
+    case "blocked_senders_failed":
+      return blockedSendersFailed(s, a.gen, a.error);
+    case "blocked_senders_set":
+      return blockedSendersReplaced(s, a.entries);
     case "config_loaded":
       return configLoaded(s, a.gen, a.snapshot);
     case "config_failed":

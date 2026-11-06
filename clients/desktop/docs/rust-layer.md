@@ -476,6 +476,19 @@ A refusal is the daemon's `-32602` carrying `mp_core::signatures`' sentence as i
 The daemon's watcher publishes `signature.changed {name, path}` when a signature file is written or created and `signature.removed {name}` when one is deleted or renamed away, whichever client made the change.
 So the frontend reads the listing again after each change it makes, and on either event while the Signatures dialog or the new-draft wizard is open ([shell.md](shell.md), "Signatures").
 
+## Blocked senders
+
+The daemon keeps one list of blocked senders for every account (PERSO-261), each entry a full address or `@domain`, lowercase.
+Every command in `src/senders.rs` is one call of the daemon's `sender.*` family, as the TUI's `B` chooser and `sb` list make it, and answers the `mp_protocol::sender` type as it stands (`src/protocol/generated/`).
+
+- `sender_block {address}` is `sender.block`: the entry added, and the sender's mail in each account's Inbox moved to its Junk folder through the mutation queue; the answer is `{entry, added, entries, moved: [{account, mailbox, count}], skipped: [{account, reason}]}`, `skipped` naming each account with no Junk folder in the daemon's words.
+- `sender_unblock {address}` is `sender.unblock`: the entry removed, nothing moved back; `{entry, removed, entries}`.
+- `sender_list` is `sender.list`: `{entries}`, sorted.
+
+An entry that is neither a full address nor `@domain` is the daemon's `-32602` carrying its sentence ("'nobody' is not a sender to block: it has no @; give a full address (spam@example.com) or a domain (@example.com)"), a `protocol` error with no code.
+Both writers publish `sender.blocklist_changed {entries}` when the list changed, which the event channel hands the webview as it is, and the moves publish the mailbox counts a `message.move` does ([shell.md](shell.md), "Blocked senders").
+The fixture keeps the list in memory with the daemon's sentences; no fixture account has a Junk folder, so a block moves nothing and names each in `skipped`.
+
 ## config.toml, the daemon log and a message's Markdown rendition
 
 `config_open` is the TUI's `sc`, `log_open` its `sf` (INT-01, INT-02), and `message_markdown_path` and `message_markdown_open` its `e` on a received message (RD-06, PERSO-92), in `daemon_files.rs`.

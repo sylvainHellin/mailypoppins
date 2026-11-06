@@ -330,7 +330,7 @@ function partAddresses(part: UncommentedChar[]): string[] {
 }
 
 /** The address of every mailbox `from` names, each once, in order (`mp_core::parse::mailbox_addresses`). */
-function mailboxAddresses(from: string): string[] {
+export function mailboxAddresses(from: string): string[] {
   const addresses: string[] = [];
   for (const part of mailboxParts(uncommentedChars(from))) {
     for (const address of partAddresses(part.chars)) {
@@ -349,6 +349,24 @@ function mailboxAddresses(from: string): string[] {
  */
 export function senderAddress(from: string): string {
   return replyMailbox(from)?.address ?? mailboxAddresses(from)[0] ?? from.trim();
+}
+
+/**
+ * `address` as a blocked-senders entry is compared with it
+ * (`mp_core::parse::comparable_address`, PERSO-261): lowercased, and a quoted
+ * local part that would be a dot-atom unquoted (`"john.doe"@x`) written
+ * unquoted; any other quoted local part stays quoted.
+ */
+export function comparableAddress(address: string): string {
+  const lower = address.toLowerCase();
+  const at = lower.lastIndexOf("@");
+  if (at < 0) return lower;
+  const local = lower.slice(0, at);
+  if (local.length < 2 || !local.startsWith('"') || !local.endsWith('"')) return lower;
+  const inner = local.slice(1, -1);
+  const atext = (c: string) => c.charCodeAt(0) > 127 || /[a-z0-9!#$%&'*+\-/=?^_`{|}~]/.test(c);
+  const dotAtom = inner.split(".").every((atom) => atom.length > 0 && [...atom].every(atext));
+  return dotAtom ? `${inner}${lower.slice(at)}` : lower;
 }
 
 /**
