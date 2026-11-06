@@ -489,6 +489,7 @@ Status: accepted
 ## 2026-11-06 - The full search matches any part of a word, case-insensitively, through a second trigram index beside the word index
 
 Why: Sylvain wants a search for "sanierung" or "DACH" to find "Dachsanierung", as the desktop's list filter does; on the real TUM store a trigram index costs about 60 MB against 4 MB and still answers in milliseconds; keeping the word index lets one- and two-letter terms match word beginnings, which trigram cannot match, and lets search keep working while the new index fills.
-Rejected: replacing the word index with trigram (short terms silently match nothing, and a schema bump forces a full resync of every store); a LIKE scan of bodies (bodies live in blobs outside SQLite).
-Source: chat with Sylvain, 2026-11-06.
+The word index's previous answer is a floor: a term sent to the trigram index matches the trigram substring or the word index's former rendering of it, so a typographic apostrophe (`don't` against "don’t"), a hyphen typed as a space (`follow-up` against "follow up") and a body the retention sweep evicted before the backfill still match as before.
+Rejected: replacing the word index with trigram (short terms silently match nothing, and a schema bump forces a full resync of every store); a LIKE scan of bodies (bodies live in blobs outside SQLite); the trigram substring alone for a term of three characters or more (the cases above stop matching).
+Source: chat with Sylvain, 2026-11-06; the floor from the review of the substring-search branch, 2026-11-06.
 Status: accepted

@@ -10,12 +10,13 @@
 //! that.
 //!
 //! A term of a single word of three characters or more matches any part of a
-//! word, whatever the case, through the trigram index; a shorter one matches
-//! the beginning of a word through the word index, and a phrase of several
-//! words stays a word-index phrase ([`crate::search::to_fts_substring`]). A
-//! store whose trigram index is still being backfilled
-//! ([`super::fts::trigram_ready`]) answers from the word index alone, whole
-//! words as before ([`crate::search::to_fts`]).
+//! word, whatever the case, through the trigram index, or what the word index
+//! matched for it before, so the substring search never finds less than the
+//! word search did; a shorter one matches the beginning of a word through the
+//! word index, and a phrase of several words stays a word-index phrase
+//! ([`crate::search::to_fts_substring`]). A store whose trigram index is still
+//! being backfilled ([`super::fts::trigram_ready`]) answers from the word
+//! index alone, whole words as before ([`crate::search::to_fts`]).
 //!
 //! Two constraints come from the indexes being *contentless*
 //! (`content=''`, `contentless_delete=1`, see [`super::schema`]):
@@ -60,7 +61,12 @@ pub struct SearchHit {
     pub row: MessageRow,
     /// bm25 rank. FTS5 returns a *negative* number and a smaller (more
     /// negative) one is a better match, which is why the ordering is `ASC`.
-    /// A query answered by both indexes ranks by the sum of the two scores.
+    /// The rank is the sum of a score per clause: the word index's bm25 for
+    /// the word-only terms, and for each substring clause the word index's
+    /// bm25 plus the trigram index's, each counted when that index matched
+    /// the row. A term found as a whole word therefore ranks above the same
+    /// term found only inside a word, and a row found by one side alone (an
+    /// evicted body by its word, a mid-word hit by its trigrams) still ranks.
     /// The trigram index counts every three-character run as a token, so its
     /// scores sit on another scale than the word index's (a longer needle
     /// scores higher) and only compare among hits of one query.
@@ -104,9 +110,9 @@ fn filename_like_pattern(needle: &str) -> String {
 /// (`date_sort` 0) is last in both date orders, and a `Date:` before 1970
 /// (a negative `date_sort`) is a date like any other. The bm25 weights `relevance`
 /// ranks by are `subject`, `from_`, `body_text` in that order: a word in the
-/// subject outranks the same word buried in a quoted reply chain. A query
-/// whose only text terms are OR groups split across both indexes has no
-/// score, and relevance is then newest first.
+/// subject outranks the same word buried in a quoted reply chain
+/// ([`SearchHit::rank`]). A query with no text term has no score, and
+/// relevance is then newest first.
 pub fn search(
     store: &Store,
     account: &str,
@@ -172,7 +178,6 @@ pub fn search_ast(
     // A query with no clause at all (an empty string, or bare punctuation) has
     // nothing to answer, the same honest refusal the old parser gave.
     if render.match_expr.is_none()
-        && render.trigram_expr.is_none()
         && render.either.is_empty()
         && !render.has_attachment
         && render.filenames.is_empty()
@@ -191,67 +196,55 @@ pub fn search_ast(
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut predicates = String::new();
 
-    // `?1` is always the account. An index with a `MATCH` of its own ranks by
-    // its bm25, and both together by the sum, in one SQL statement, so the
-    // order and the limit are the SQL's whatever mix of terms the query holds.
-    // The trigram index is joined on the rowid; the word index beside it is a
-    // materialised set joined on the id. Joined as a second FTS table instead,
-    // it re-runs its `MATCH` for every trigram hit: `mail ab` took 1.4 s on
-    // the TUM store that way and 17 ms this way.
+    // `?1` is always the account. Every text clause is one materialised set
+    // of `(id, score)` joined on the id, in one SQL statement, so each `MATCH`
+    // runs once and the order and the limit are the SQL's whatever mix of
+    // terms the query holds: the word-only terms are one word-index `MATCH`,
+    // and each substring clause the union of its word-index and trigram
+    // matches, summed per row ([`SearchHit::rank`]). Joined as FTS tables
+    // instead, the second index re-runs its `MATCH` for every row of the
+    // first: `mail ab` took 1.4 s on the TUM store that way and 17 ms as a
+    // materialised set.
     binds.push(Box::new(account.to_string()));
     let (trigram, word) = (TRIGRAM_TABLE, WORD_TABLE);
-    let mut with_clause = String::new();
-    let (from_clause, rank_expr, matches) = match (&render.trigram_expr, &render.match_expr) {
-        (Some(trigrams), Some(words)) => {
-            with_clause = format!(
-                "WITH words AS MATERIALIZED (\
-                     SELECT rowid AS id, bm25({word}, {BM25_WEIGHTS}) AS score \
-                     FROM {word} WHERE {word} MATCH ?{}) ",
-                binds.len() + 1
-            );
-            binds.push(Box::new(words.clone()));
-            let matches = format!(" AND {trigram} MATCH ?{}", binds.len() + 1);
-            binds.push(Box::new(trigrams.clone()));
-            (
-                format!(
-                    "{trigram} JOIN messages ON messages.id = {trigram}.rowid \
-                         JOIN words ON words.id = messages.id"
-                ),
-                format!("bm25({trigram}, {BM25_WEIGHTS}) + words.score"),
-                matches,
-            )
-        }
-        (Some(expr), None) | (None, Some(expr)) => {
-            let table = if render.trigram_expr.is_some() {
-                trigram
-            } else {
-                word
-            };
-            let matches = format!(" AND {table} MATCH ?{}", binds.len() + 1);
-            binds.push(Box::new(expr.clone()));
-            (
-                format!("{table} JOIN messages ON messages.id = {table}.rowid"),
-                format!("bm25({table}, {BM25_WEIGHTS})"),
-                matches,
-            )
-        }
-        (None, None) => ("messages".to_string(), "0.0".to_string(), String::new()),
+    let word_match = |binds: &mut Vec<Box<dyn rusqlite::ToSql>>, expr: &str| {
+        binds.push(Box::new(expr.to_string()));
+        format!(
+            "SELECT rowid AS id, bm25({word}, {BM25_WEIGHTS}) AS score \
+             FROM {word} WHERE {word} MATCH ?{}",
+            binds.len()
+        )
     };
-    let base_where = format!("messages.account = ?1{matches}");
-
-    // An OR group split across the indexes matches a row either one matches.
-    for group in &render.either {
-        predicates.push_str(&format!(
-            " AND (messages.id IN (SELECT rowid FROM {words} WHERE {words} MATCH ?{w}) \
-             OR messages.id IN (SELECT rowid FROM {trigrams} WHERE {trigrams} MATCH ?{t}))",
-            words = WORD_TABLE,
-            trigrams = TRIGRAM_TABLE,
-            w = binds.len() + 1,
-            t = binds.len() + 2,
-        ));
-        binds.push(Box::new(group.words.clone()));
-        binds.push(Box::new(group.trigrams.clone()));
+    let mut sets: Vec<String> = Vec::new();
+    if let Some(words) = &render.match_expr {
+        sets.push(word_match(&mut binds, words));
     }
+    for clause in &render.either {
+        let words = word_match(&mut binds, &clause.words);
+        binds.push(Box::new(clause.trigrams.clone()));
+        sets.push(format!(
+            "SELECT id, SUM(score) AS score FROM ({words} UNION ALL \
+             SELECT rowid AS id, bm25({trigram}, {BM25_WEIGHTS}) AS score \
+             FROM {trigram} WHERE {trigram} MATCH ?{}) GROUP BY id",
+            binds.len()
+        ));
+    }
+    let (with_clause, from_clause, rank_expr) = if sets.is_empty() {
+        (String::new(), "messages".to_string(), "0.0".to_string())
+    } else {
+        let ctes: Vec<String> = sets
+            .iter()
+            .enumerate()
+            .map(|(i, set)| format!("m{i} AS MATERIALIZED ({set})"))
+            .collect();
+        let mut from = "m0 JOIN messages ON messages.id = m0.id".to_string();
+        for i in 1..sets.len() {
+            from.push_str(&format!(" JOIN m{i} ON m{i}.id = messages.id"));
+        }
+        let rank: Vec<String> = (0..sets.len()).map(|i| format!("m{i}.score")).collect();
+        (format!("WITH {} ", ctes.join(", ")), from, rank.join(" + "))
+    };
+    let base_where = "messages.account = ?1";
 
     if let Some(mb) = mailbox {
         predicates.push_str(&format!(" AND messages.mailbox = ?{}", binds.len() + 1));

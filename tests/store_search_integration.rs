@@ -415,6 +415,52 @@ fn a_term_matches_any_part_of_a_word_whatever_the_case() {
     assert!(f.hits("sanierungen").is_empty());
 }
 
+/// A term with punctuation inside still finds what the word index found for
+/// it, the words in order across any punctuation or space, beside the literal
+/// substring: a typographic apostrophe, as Outlook and Apple Mail write it,
+/// and a hyphen typed as a space (PERSO-276).
+#[test]
+fn a_punctuated_term_finds_what_the_word_index_found() {
+    let f = Fixture::new();
+    let straight = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Note", "please don't reply"),
+    );
+    let curly = f.ingest(
+        "inbox",
+        2,
+        &email("b", "b@example.com", "Note", "please don\u{2019}t reply"),
+    );
+    let hyphen = f.ingest(
+        "inbox",
+        3,
+        &email("c", "c@example.com", "Re: follow-up", "see below"),
+    );
+    let spaced = f.ingest(
+        "inbox",
+        4,
+        &email("d", "d@example.com", "A follow up", "see below"),
+    );
+    let obrien = f.ingest(
+        "inbox",
+        5,
+        &email("e", "Pat O'Brien <pat@example.com>", "Hello", "hi"),
+    );
+    let obrien_curly = f.ingest(
+        "inbox",
+        6,
+        &email("f", "a@example.com", "Call O\u{2019}Brien", "hi"),
+    );
+
+    assert_eq!(f.hits("don't").tap_sorted(), vec![straight, curly]);
+    assert_eq!(f.hits("follow-up").tap_sorted(), vec![hyphen, spaced]);
+    assert_eq!(f.hits("O'Brien").tap_sorted(), vec![obrien, obrien_curly]);
+    // The substring side still widens it.
+    assert_eq!(f.hits("llow-u"), vec![hyphen]);
+    assert_eq!(f.hits("brie").tap_sorted(), vec![obrien, obrien_curly]);
+}
+
 /// A term of one or two characters has no trigram, so it matches the
 /// beginning of a word through the word index rather than nothing.
 #[test]
@@ -962,6 +1008,91 @@ fn the_backfill_fills_an_older_store_and_the_search_switches_over() {
     // A completed store answers at once and indexes nothing more.
     let done = backfill_trigram_bounded(&store, &blobs, 2, usize::MAX).unwrap();
     assert_eq!((done.indexed, done.complete), (0, true));
+}
+
+/// A body the retention sweep evicted before the backfill reached its row
+/// leaves the row in the trigram index by subject and sender only, and the
+/// word index's entry, which the sweep keeps, still finds it by a whole body
+/// word once the search answers from both (PERSO-276).
+#[test]
+fn an_evicted_body_is_still_found_by_a_whole_word_after_the_backfill() {
+    use mailypoppins::config::RetentionPolicy;
+    use mailypoppins::store::fts::{
+        backfill_trigram_bounded, trigram_ready, META_TRIGRAM_COMPLETE, TRIGRAM_TABLE,
+    };
+    use mailypoppins::store::sweep::{sweep, SweepDecision, SweepOptions};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("store.sqlite3");
+    let blobs = BlobStore::new(tmp.path().join("blobs"));
+    let row = {
+        let store = Store::open(&path).unwrap();
+        let row = ingest_message(
+            &store,
+            &blobs,
+            &IngestInput {
+                account: "acct",
+                mailbox: "inbox",
+                uid: 1,
+                email: &email(
+                    "a",
+                    "a@example.com",
+                    "Angebot",
+                    "Die Dachsanierung beginnt im Mai.",
+                ),
+                raw: None,
+            },
+        )
+        .unwrap()
+        .row_id;
+        // What an older build left: no trigram table, no completion stamp.
+        store
+            .conn()
+            .execute_batch(&format!(
+                "DROP TABLE {TRIGRAM_TABLE}; DELETE FROM meta WHERE key = '{META_TRIGRAM_COMPLETE}';"
+            ))
+            .unwrap();
+        row
+    };
+
+    let store = Store::open(&path).unwrap();
+    // The retention sweep over a one-byte cap: the first breach warns, the
+    // second evicts the body blob and keeps the row and its word-index entry.
+    let policy = RetentionPolicy {
+        metadata_horizon_days: 0,
+        body_horizon_days: 0,
+        attachment_horizon_days: 0,
+        max_disk_bytes: 1,
+    };
+    let force = SweepOptions {
+        dry_run: false,
+        force: true,
+    };
+    sweep(&store, &blobs, &policy, force).unwrap();
+    let evicted = sweep(&store, &blobs, &policy, force).unwrap();
+    assert_eq!(evicted.decision, SweepDecision::Evicted);
+    assert!(!evicted.evicted.is_empty(), "the body blob was evicted");
+
+    while !backfill_trigram_bounded(&store, &blobs, 10, usize::MAX)
+        .unwrap()
+        .complete
+    {}
+    assert!(trigram_ready(store.conn()).unwrap());
+    assert_eq!(index_drift(&store).unwrap(), (0, 0));
+
+    let hits = |query: &str| -> Vec<i64> {
+        search(&store, "acct", query, None, 20, SearchOrder::Relevance)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.row.id)
+            .collect()
+    };
+    assert_eq!(hits("dachsanierung"), vec![row], "a whole body word");
+    assert_eq!(hits("body:Dachsanierung beginnt"), vec![row]);
+    assert_eq!(hits("gebot"), vec![row], "the subject by substring");
+    assert!(
+        hits("sanierung").is_empty(),
+        "an evicted body has no substrings to match"
+    );
 }
 
 /// The byte bound ends a batch early but never before its first row, so a

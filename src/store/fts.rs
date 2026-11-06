@@ -133,8 +133,11 @@ struct Pending {
 /// still what was read: one that a re-ingest rewrote or a delete removed in
 /// between was indexed or unindexed in both tables by that writer, which is
 /// also why the rows written after the table was created need no backfill. A
-/// row whose body blob is gone (evicted by the retention sweep) is indexed
-/// with its subject and sender alone.
+/// row whose body blob is gone (evicted by the retention sweep) or unreadable
+/// is indexed with its subject and sender alone; the word index keeps the
+/// entry ingest wrote, and the search answers a substring term from either
+/// index ([`crate::search::FtsEither`]), so that body stays findable by whole
+/// word, not by substring.
 ///
 /// At most [`BACKFILL_ROWS`] rows, and fewer once [`BACKFILL_BYTES`] of body
 /// text is read. A store already complete answers at once with nothing done.

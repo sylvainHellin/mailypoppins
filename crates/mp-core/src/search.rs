@@ -980,20 +980,17 @@ pub fn to_graph(q: &Query) -> Result<GraphQuery, RenderError> {
 /// The store keeps two indexes over subject, sender and body (PERSO-276): the
 /// word index (`unicode61`, whole words and word prefixes) and the trigram
 /// index (case-insensitive substrings of three characters or more).
-/// `match_expr` is the word index's FTS5 `MATCH` string and `trigram_expr` the
-/// trigram index's; each is absent when no term goes to that index, and both
-/// are when the query has only attachment, filename or date predicates.
-/// `either` holds the OR groups whose terms go to both. The rest are SQL
-/// predicates neither index can express.
+/// `match_expr` is the word index's FTS5 `MATCH` string for the terms only it
+/// answers, absent when there are none. `either` holds the terms (and OR
+/// groups) that may match as substrings, each answered by either index, so
+/// the word index's answer is a floor the trigram index only widens. All are
+/// absent when the query has only attachment, filename or date predicates;
+/// the rest are SQL predicates neither index can express.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FtsRender {
     pub match_expr: Option<String>,
-    /// The trigram index's `MATCH` string, the AND of the terms that match as
-    /// substrings. Always `None` from [`to_fts`].
-    pub trigram_expr: Option<String>,
-    /// The OR groups mixing a substring term with a word term: each is AND-ed
-    /// with the rest and matches a row either index matches. Always empty
-    /// from [`to_fts`].
+    /// The clauses holding a substring term, each AND-ed with the rest and
+    /// matching a row either index matches. Always empty from [`to_fts`].
     pub either: Vec<FtsEither>,
     pub has_attachment: bool,
     /// `filename:` terms, answered from the stored attachment names rather
@@ -1006,9 +1003,18 @@ pub struct FtsRender {
     pub after: Option<String>,
 }
 
-/// An OR group of [`FtsRender::either`]: the word index's alternatives and
-/// the trigram index's, each a parenthesised `OR` of its own (or a single
-/// term). A row matches the group when either index matches it.
+/// One clause of [`FtsRender::either`], a single term or an OR group: the
+/// word index's rendering of every alternative, exactly what [`to_fts`]
+/// renders for the clause, and the trigram index's rendering of the
+/// alternatives that match as substrings, each a parenthesised `OR` of its
+/// own (or a single term). A row matches the clause when either index
+/// matches it.
+///
+/// The word side is what keeps a substring search from finding less than the
+/// word search did: `don't` as a word-index phrase finds "don’t" with a
+/// typographic apostrophe and `follow-up` finds "follow up", which the literal
+/// substring misses, and a row whose body blob the retention sweep evicted
+/// before the trigram backfill read it is still found by a whole body word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtsEither {
     pub words: String,
@@ -1020,11 +1026,12 @@ pub struct FtsEither {
 /// nothing.
 pub const TRIGRAM_MIN_CHARS: usize = 3;
 
-/// Which index one rendered term goes to.
+/// One text term as the indexes match it: the word index's rendering, and
+/// the trigram index's when the term matches as a substring.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum FtsPart {
-    Words(String),
-    Trigrams(String),
+struct FtsTerm {
+    words: String,
+    trigrams: Option<String>,
 }
 
 /// True when the term carries something an FTS5 tokenizer would index.
@@ -1040,13 +1047,14 @@ fn indexable(term: &str) -> bool {
 /// a word prefix under a trailing `*`.
 ///
 /// Substring rendering (PERSO-276): a single word of at least
-/// [`TRIGRAM_MIN_CHARS`] goes to the trigram index and matches anywhere in a
-/// word, whatever the case, so a trailing `*` adds nothing and is dropped; a
-/// shorter one cannot, and matches word beginnings in the word index instead;
-/// a phrase of several words stays a word-index phrase, which matches its
-/// words in order across any whitespace or punctuation, where a substring
-/// would need the exact spacing.
-fn fts_text_term(column: Option<&str>, value: &str, substring: bool) -> Option<FtsPart> {
+/// [`TRIGRAM_MIN_CHARS`] also goes to the trigram index and matches anywhere
+/// in a word, whatever the case, so a trailing `*` adds nothing there and is
+/// dropped; its word rendering stays beside it as the floor
+/// ([`FtsEither`]). A shorter one has no trigram, and matches word beginnings
+/// in the word index instead; a phrase of several words stays a word-index
+/// phrase, which matches its words in order across any whitespace or
+/// punctuation, where a substring would need the exact spacing.
+fn fts_text_term(column: Option<&str>, value: &str, substring: bool) -> Option<FtsTerm> {
     let mut v = value.to_string();
     let prefix = v.ends_with('*');
     if prefix {
@@ -1061,13 +1069,23 @@ fn fts_text_term(column: Option<&str>, value: &str, substring: bool) -> Option<F
         None => format!("\"{escaped}\""),
     };
     let star = if prefix { "*" } else { "" };
+    let words = format!("{quoted}{star}");
     if !substring || v.chars().any(char::is_whitespace) {
-        return Some(FtsPart::Words(format!("{quoted}{star}")));
+        return Some(FtsTerm {
+            words,
+            trigrams: None,
+        });
     }
     Some(if v.chars().count() >= TRIGRAM_MIN_CHARS {
-        FtsPart::Trigrams(quoted)
+        FtsTerm {
+            words,
+            trigrams: Some(quoted),
+        }
     } else {
-        FtsPart::Words(format!("{quoted}*"))
+        FtsTerm {
+            words: format!("{quoted}*"),
+            trigrams: None,
+        }
     })
 }
 
@@ -1079,7 +1097,7 @@ fn filename_needle(value: &str) -> String {
 
 /// Map a text term to its FTS column, or report the fields the index cannot
 /// answer (`to`/`cc` are not indexed).
-fn fts_term(term: &Term, substring: bool) -> Result<Option<FtsPart>, RenderError> {
+fn fts_term(term: &Term, substring: bool) -> Result<Option<FtsTerm>, RenderError> {
     match term {
         Term::From(s) => Ok(fts_text_term(Some("from_"), s, substring)),
         Term::Subject(s) => Ok(fts_text_term(Some("subject"), s, substring)),
@@ -1109,10 +1127,11 @@ pub fn to_fts(q: &Query) -> Result<FtsRender, RenderError> {
 
 /// Lower a [`Query`] to both local indexes (PERSO-276): a term of a single
 /// word matches any part of a word, whatever the case, through the trigram
-/// index when it has [`TRIGRAM_MIN_CHARS`] or more, and the beginning of a
-/// word through the word index when it is shorter; a phrase of several words
-/// stays a word-index phrase ([`fts_text_term`]). The SQL predicates are
-/// [`to_fts`]'s.
+/// index when it has [`TRIGRAM_MIN_CHARS`] or more, or what [`to_fts`]
+/// matched for it through the word index ([`FtsEither`]); a shorter one
+/// matches the beginning of a word through the word index, and a phrase of
+/// several words stays a word-index phrase ([`fts_text_term`]). The SQL
+/// predicates are [`to_fts`]'s.
 pub fn to_fts_substring(q: &Query) -> Result<FtsRender, RenderError> {
     render_fts(q, true)
 }
@@ -1126,7 +1145,6 @@ fn render_fts(q: &Query, substring: bool) -> Result<FtsRender, RenderError> {
     }
     let mut render = FtsRender::default();
     let mut word_parts: Vec<String> = Vec::new();
-    let mut trigram_parts: Vec<String> = Vec::new();
 
     for clause in &q.clauses {
         match clause {
@@ -1162,8 +1180,14 @@ fn render_fts(q: &Query, substring: bool) -> Result<FtsRender, RenderError> {
                 }
             }
             Clause::Single(t) => match fts_term(t, substring)? {
-                Some(FtsPart::Words(part)) => word_parts.push(part),
-                Some(FtsPart::Trigrams(part)) => trigram_parts.push(part),
+                Some(FtsTerm {
+                    words,
+                    trigrams: Some(trigrams),
+                }) => render.either.push(FtsEither { words, trigrams }),
+                Some(FtsTerm {
+                    words,
+                    trigrams: None,
+                }) => word_parts.push(words),
                 None => {}
             },
             Clause::Or(terms) => {
@@ -1181,30 +1205,30 @@ fn render_fts(q: &Query, substring: bool) -> Result<FtsRender, RenderError> {
                                 "an OR group mixing filename: with other terms is not supported on --local".into(),
                             ))
                         }
-                        _ => match fts_term(t, substring)? {
-                            Some(FtsPart::Words(part)) => words.push(part),
-                            Some(FtsPart::Trigrams(part)) => trigrams.push(part),
-                            None => {}
-                        },
+                        _ => {
+                            if let Some(term) = fts_term(t, substring)? {
+                                words.push(term.words);
+                                trigrams.extend(term.trigrams);
+                            }
+                        }
                     }
                 }
-                // A group whose terms all go to one index is one alternative
-                // of that index's `MATCH`; one split across both is answered
-                // by either index ([`FtsRender::either`]).
+                // A group with no substring term is one alternative of the
+                // word index's `MATCH`; one with a substring term is answered
+                // by either index ([`FtsRender::either`]), the word side
+                // holding every alternative as the word rendering has it.
                 match (or_group(words), or_group(trigrams)) {
                     (Some(words), None) => word_parts.push(words),
-                    (None, Some(trigrams)) => trigram_parts.push(trigrams),
                     (Some(words), Some(trigrams)) => {
                         render.either.push(FtsEither { words, trigrams })
                     }
-                    (None, None) => {}
+                    (None, _) => {}
                 }
             }
         }
     }
 
     render.match_expr = (!word_parts.is_empty()).then(|| word_parts.join(" "));
-    render.trigram_expr = (!trigram_parts.is_empty()).then(|| trigram_parts.join(" "));
     Ok(render)
 }
 
@@ -1759,54 +1783,93 @@ mod tests {
 
     // -- to_fts_substring (PERSO-276) ----------------------------------------
 
+    /// One [`FtsEither`] from its two sides.
+    fn either(words: &str, trigrams: &str) -> FtsEither {
+        FtsEither {
+            words: words.into(),
+            trigrams: trigrams.into(),
+        }
+    }
+
     #[test]
-    fn substring_sends_a_word_of_three_or_more_to_the_trigram_index() {
+    fn substring_sends_a_word_of_three_or_more_to_either_index() {
         let r = to_fts_substring(&q("sanierung DACH")).unwrap();
-        assert_eq!(r.trigram_expr.as_deref(), Some("\"sanierung\" \"DACH\""));
+        assert_eq!(
+            r.either,
+            vec![
+                either("\"sanierung\"", "\"sanierung\""),
+                either("\"DACH\"", "\"DACH\""),
+            ]
+        );
         assert!(r.match_expr.is_none());
-        assert!(r.either.is_empty());
 
         // Column filters keep their column; a trailing star adds nothing to a
-        // substring and is dropped.
+        // substring and is dropped there, and stays a prefix on the word side.
         let r = to_fts_substring(&q("from:ada subject:invoi* body:led")).unwrap();
         assert_eq!(
-            r.trigram_expr.as_deref(),
-            Some("from_:\"ada\" subject:\"invoi\" body_text:\"led\"")
+            r.either,
+            vec![
+                either("from_:\"ada\"", "from_:\"ada\""),
+                either("subject:\"invoi\"*", "subject:\"invoi\""),
+                either("body_text:\"led\"", "body_text:\"led\""),
+            ]
         );
+    }
+
+    /// The word side of a substring term is what [`to_fts`] renders for it,
+    /// so a punctuated term stays the word-index phrase it was: `don't` finds
+    /// "don’t" and `follow-up` finds "follow up" through it.
+    #[test]
+    fn substring_keeps_the_word_rendering_of_a_term_as_its_floor() {
+        for (query, words, trigrams) in [
+            ("don't", "\"don't\"", "\"don't\""),
+            ("follow-up", "\"follow-up\"", "\"follow-up\""),
+            ("O'Brien", "\"O'Brien\"", "\"O'Brien\""),
+        ] {
+            let r = to_fts_substring(&q(query)).unwrap();
+            assert_eq!(r.either, vec![either(words, trigrams)], "{query}");
+            assert_eq!(
+                to_fts(&q(query)).unwrap().match_expr.as_deref(),
+                Some(words),
+                "{query}: the word side is the word rendering"
+            );
+        }
     }
 
     #[test]
     fn substring_keeps_a_short_term_as_a_word_prefix() {
         let r = to_fts_substring(&q("ab subject:x* sanierung")).unwrap();
         assert_eq!(r.match_expr.as_deref(), Some("\"ab\"* subject:\"x\"*"));
-        assert_eq!(r.trigram_expr.as_deref(), Some("\"sanierung\""));
+        assert_eq!(r.either, vec![either("\"sanierung\"", "\"sanierung\"")]);
     }
 
     #[test]
     fn substring_keeps_a_phrase_of_several_words_in_the_word_index() {
         let r = to_fts_substring(&q("\"lease agreement\" urgent")).unwrap();
         assert_eq!(r.match_expr.as_deref(), Some("\"lease agreement\""));
-        assert_eq!(r.trigram_expr.as_deref(), Some("\"urgent\""));
+        assert_eq!(r.either, vec![either("\"urgent\"", "\"urgent\"")]);
     }
 
     #[test]
-    fn substring_or_groups_go_to_one_index_or_to_either() {
+    fn substring_or_groups_go_to_the_word_index_or_to_either() {
         let r = to_fts_substring(&q("(invoice OR receipt) (ab OR cd)")).unwrap();
         assert_eq!(
-            r.trigram_expr.as_deref(),
-            Some("(\"invoice\" OR \"receipt\")")
+            r.either,
+            vec![either(
+                "(\"invoice\" OR \"receipt\")",
+                "(\"invoice\" OR \"receipt\")"
+            )]
         );
         assert_eq!(r.match_expr.as_deref(), Some("(\"ab\"* OR \"cd\"*)"));
-        assert!(r.either.is_empty());
 
         let r = to_fts_substring(&q("(ab OR invoice OR receipt)")).unwrap();
-        assert!(r.match_expr.is_none() && r.trigram_expr.is_none());
+        assert!(r.match_expr.is_none());
         assert_eq!(
             r.either,
-            vec![FtsEither {
-                words: "\"ab\"*".into(),
-                trigrams: "(\"invoice\" OR \"receipt\")".into(),
-            }]
+            vec![either(
+                "(\"ab\"* OR \"invoice\" OR \"receipt\")",
+                "(\"invoice\" OR \"receipt\")"
+            )]
         );
     }
 
@@ -1815,7 +1878,7 @@ mod tests {
         assert!(to_fts_substring(&q("to:bob")).is_err());
         assert!(to_fts_substring(&q("(filename:pdf OR invoice)")).is_err());
         let r = to_fts_substring(&q("has:attachment filename:pdf after:2026-01-01")).unwrap();
-        assert!(r.match_expr.is_none() && r.trigram_expr.is_none());
+        assert!(r.match_expr.is_none() && r.either.is_empty());
         assert!(r.has_attachment);
     }
 
@@ -1826,7 +1889,6 @@ mod tests {
             r.match_expr.as_deref(),
             Some("\"sanierung\" (\"ab\" OR \"invoice\")")
         );
-        assert!(r.trigram_expr.is_none());
         assert!(r.either.is_empty());
     }
 
