@@ -339,7 +339,8 @@ account's Inbox to that account's Junk folder, on the server too, and after
 every sync the daemon moves what arrived from a blocked sender since. A message
 moved back to the Inbox stays there. An account with no Junk folder keeps the
 mail, and the command says so. Nothing is set on the server, so mail moves only
-while the daemon runs.
+while the daemon runs. An account's own address (its default_from) and its
+domain are refused, since blocking them would move your own mail to Junk.
 
 Examples:
   mp block offers@shop.example

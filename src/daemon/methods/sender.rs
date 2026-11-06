@@ -16,7 +16,10 @@
 //! removes the entry and moves nothing back.
 //!
 //! An entry that is neither a full address nor `@domain` is `-32602` with the
-//! sentence [`senders::normalize`] refuses it with. Both writers publish
+//! sentence [`mp_core::blocklist::normalize`] refuses it with, and so is a
+//! block of one of the user's own addresses or of its domain, which would
+//! move the user's own mail to Junk ([`mp_core::blocklist::checked`]): the
+//! own addresses are every configured account's `default_from`. Both writers publish
 //! `sender.blocklist_changed` with the whole list when it changed, and the
 //! counts of every account whose mail moved.
 
@@ -125,7 +128,9 @@ impl SenderMethod {
     async fn block(&self, params: &Value) -> Result<Outcome, DomainError> {
         let method = self.spec.name;
         only_params(method, params, &["address", "move_existing"])?;
-        let entry = entry_param(params)?;
+        let own = mp_core::blocklist::own_addresses(self.config.accounts().iter());
+        let entry = mp_core::blocklist::checked(&string_param(params, "address")?, &own)
+            .map_err(invalid_params)?;
         let move_existing = match params.get("move_existing") {
             None | Some(Value::Null) => true,
             Some(Value::Bool(value)) => *value,
@@ -250,7 +255,7 @@ impl SenderMethod {
 /// `address`, normalised, or `-32602` with the sentence that refuses it.
 fn entry_param(params: &Value) -> Result<String, DomainError> {
     let raw = string_param(params, "address")?;
-    senders::normalize(&raw).map_err(|why| invalid_params(why).into())
+    mp_core::blocklist::normalize(&raw).map_err(|why| invalid_params(why).into())
 }
 
 /// Run a file or store operation off the dispatcher's thread.

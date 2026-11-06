@@ -205,4 +205,29 @@ mod tests {
         }
         assert!(drained(&rx).is_empty());
     }
+
+    /// The fixture accounts' own address, `me@example.com`, and its domain are
+    /// refused as the daemon refuses them; a colleague at that domain is not.
+    #[test]
+    fn an_own_address_or_its_domain_is_refused_with_the_daemons_sentence() {
+        let (d, rx) = fixture_door();
+        for (raw, sentence) in [
+            (
+                "Me@Example.com",
+                "'me@example.com' is one of your own addresses; blocking it would move your own mail to Junk",
+            ),
+            (
+                "@example.com",
+                "'@example.com' is the domain of your own address me@example.com; blocking it would move your own mail to Junk",
+            ),
+        ] {
+            match sender_block_on(&d, raw) {
+                Err(GuiError::Protocol { message, .. }) => assert_eq!(message, sentence),
+                other => panic!("{raw:?}: {other:?}"),
+            }
+        }
+        assert!(drained(&rx).is_empty());
+        let colleague = sender_block_on(&d, "ivana@example.com").expect("a colleague");
+        assert_eq!(colleague.entries, ["ivana@example.com"]);
+    }
 }

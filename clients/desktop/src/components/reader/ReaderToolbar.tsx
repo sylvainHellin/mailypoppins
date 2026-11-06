@@ -99,7 +99,7 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
         <FileDown aria-hidden="true" />
         Export .eml
       </Button>
-      <Button size="sm" variant="ghost" title="Block the sender (B)" onClick={() => openBlockSender(s, dispatch)}>
+      <Button size="sm" variant="ghost" title="Block the sender (B)" onClick={() => void openBlockSender(s, dispatch)}>
         <Ban aria-hidden="true" />
         Block sender
       </Button>

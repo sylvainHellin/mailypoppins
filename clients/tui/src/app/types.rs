@@ -3045,6 +3045,9 @@ impl SignaturesOverlay {
 /// address and its `@domain`, the cursor on one. It is the confirmation too:
 /// it names what Enter blocks and says where the mail goes, and nothing is
 /// blocked until Enter.
+///
+/// A row the daemon would refuse is shown with the reason and never picked:
+/// the user's own address or its domain (`mp_core::blocklist::own_mail`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockChooser {
     /// The address a reply goes to, as the list would hold it: lowercase,
@@ -3052,31 +3055,60 @@ pub struct BlockChooser {
     pub address: String,
     /// The address's domain with its `@`, lowercase.
     pub domain: String,
-    /// `0` for the address, `1` for the domain.
+    /// Why each row is not offered, `None` for one Enter may block.
+    pub refused: [Option<&'static str>; 2],
+    /// `0` for the address, `1` for the domain; always an offered row.
     pub selected: usize,
 }
 
 impl BlockChooser {
-    /// The chooser for a message whose `From` is `from`, on the address;
-    /// `None` when it names no address with a domain to block.
-    pub fn for_sender(from: &str) -> Option<Self> {
+    /// The chooser for a message whose `From` is `from`, on the first row
+    /// offered, given the user's own addresses `own`
+    /// (`mp_core::blocklist::own_addresses`); else the status line that says
+    /// why nothing is offered: no address with a domain, or both rows refused.
+    pub fn for_sender(from: &str, own: &[String]) -> Result<Self, String> {
         let address =
             mp_core::parse::comparable_address(mp_core::parse::extract_email_address(from).trim());
-        let (local, domain) = address.rsplit_once('@')?;
+        let nothing = || format!("No address to block in '{from}'");
+        let Some((local, domain)) = address.rsplit_once('@') else {
+            return Err(nothing());
+        };
         if local.is_empty() || domain.is_empty() || domain.contains(char::is_whitespace) {
-            return None;
+            return Err(nothing());
         }
         let domain = format!("@{domain}");
-        Some(Self {
+        let refused = [
+            mp_core::blocklist::own_mail(&address, own).map(|_| "your own address"),
+            mp_core::blocklist::own_mail(&domain, own).map(|_| "your own domain"),
+        ];
+        let selected = match refused {
+            [None, _] => 0,
+            [Some(_), None] => 1,
+            [Some(why_address), Some(why_domain)] => {
+                return Err(format!(
+                    "Cannot block {address} ({why_address}) or {domain} ({why_domain})"
+                ))
+            }
+        };
+        Ok(Self {
             address,
             domain,
-            selected: 0,
+            refused,
+            selected,
         })
     }
 
     /// The two entries, in the order the rows show them.
     pub fn entries(&self) -> [&str; 2] {
         [&self.address, &self.domain]
+    }
+
+    /// Put the cursor on `row` when it is offered; a refused row keeps it
+    /// where it was.
+    pub fn select(&mut self, row: usize) {
+        if self.refused.get(row).is_some_and(Option::is_none) {
+            self.selected = row;
+        }
     }
 
     /// The entry Enter blocks.

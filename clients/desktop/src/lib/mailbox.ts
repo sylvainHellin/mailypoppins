@@ -370,6 +370,26 @@ export function comparableAddress(address: string): string {
 }
 
 /**
+ * The user's own addresses (`mp_core::blocklist::own_addresses`, PERSO-261):
+ * each account's `default_from`, its address alone as a sender is compared;
+ * an account with none owns nothing.
+ */
+export function ownAddresses(accounts: readonly { default_from: string }[]): string[] {
+  const own = accounts.map((a) => comparableAddress(senderAddress(a.default_from).trim())).filter((a) => a.includes("@"));
+  return [...new Set(own)].sort();
+}
+
+/**
+ * The own address of `own` that `entry`, as the blocked senders hold it,
+ * would block: the address itself, or one at the domain `entry` names; null
+ * when it blocks none (`mp_core::blocklist::own_mail`).
+ */
+export function ownMail(entry: string, own: readonly string[]): string | null {
+  const domain = entry.startsWith("@") ? entry.slice(1) : null;
+  return own.find((a) => (domain === null ? a === entry : a.slice(a.lastIndexOf("@") + 1) === domain)) ?? null;
+}
+
+/**
  * A From as a reader is shown it, whole: `Name <address>` with the address
  * its last `<...>` holds and the name everything before it, unquoted and
  * unescaped (`A <a@x>, B <b@y>` is shown as it is), the bare address when

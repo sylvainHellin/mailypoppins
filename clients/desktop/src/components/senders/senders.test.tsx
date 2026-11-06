@@ -11,6 +11,15 @@ function workHasJunk() {
   mock.bootstrap.snapshot.mailboxes.work.push({ role: "junk", slug: "junk", label: "Junk", total: 0, unread: 0, badge: 0 } as never);
 }
 
+/**
+ * Give both accounts an own address away from the fixture senders' domain,
+ * so `@example.com` is offered; by default it is, as `me@example.com`'s, the
+ * user's own domain and not offered.
+ */
+function ownAddressElsewhere() {
+  for (const account of mock.config.accounts) account.default_from = "Me <me@elsewhere.example>";
+}
+
 const SKIPPED_HOME = "home has no Junk folder; its Inbox keeps the sender's mail";
 
 async function chooserOnFirstRow(before?: () => void) {
@@ -44,7 +53,7 @@ const cursor = (list: HTMLElement) => within(list).queryByRole("option", { selec
 
 describe("blocking a sender", () => {
   it("B opens the chooser on the sender's address and its domain; Escape blocks nothing", async () => {
-    const { user, dialog } = await chooserOnFirstRow();
+    const { user, dialog } = await chooserOnFirstRow(ownAddressElsewhere);
     expect(choices(dialog)).toEqual([
       ["address", "ivana@example.com, this address", "true"],
       ["domain", "@example.com, everyone at this domain", "false"],
@@ -61,7 +70,10 @@ describe("blocking a sender", () => {
   });
 
   it("d picks the domain and Enter blocks it: the Inbox mail moves to Junk and the notice counts it and names the account with no Junk folder", async () => {
-    const { user, dialog } = await chooserOnFirstRow(workHasJunk);
+    const { user, dialog } = await chooserOnFirstRow(() => {
+      workHasJunk();
+      ownAddressElsewhere();
+    });
     await user.keyboard("d");
     expect(choices(dialog).map((c) => c[2])).toEqual(["false", "true"]);
     await user.keyboard("{Enter}");
@@ -76,6 +88,47 @@ describe("blocking a sender", () => {
     const inbox = await screen.findByRole("listbox", { name: /Inbox/ });
     await waitFor(() => expect(within(inbox).queryByText("Quarterly ledger review")).toBeNull());
     expect(within(inbox).getByText("Re: BIM model handover")).toBeInTheDocument();
+  });
+
+  it("the user's own domain is not offered: its row says why, d and j stay on the address, and Enter blocks the address", async () => {
+    const { user, dialog } = await chooserOnFirstRow();
+    expect(choices(dialog)).toEqual([
+      ["address", "ivana@example.com, this address", "true"],
+      ["domain", "@example.com, not offered: your own domain", "false"],
+    ]);
+    const domainRow = within(dialog).getByRole("radio", { name: /^@example.com/ });
+    expect(domainRow).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("d");
+    await user.keyboard("j");
+    await user.click(domainRow);
+    expect(choices(dialog).map((c) => c[2])).toEqual(["true", "false"]);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Block sender" })).toBeNull());
+    expect(callsOf("sender_block")).toEqual([{ address: "ivana@example.com" }]);
+  });
+
+  it("B on the user's own message opens nothing and says why", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.rows.work.inbox[0].from = "Me <me@example.com>";
+    });
+    await shellReady();
+    await user.keyboard("j");
+    await screen.findByRole("toolbar", { name: "Message actions" });
+    await user.keyboard("B");
+    expect(await screen.findByText("Cannot block me@example.com (your own address) or @example.com (your own domain)")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Block sender" })).toBeNull();
+    expect(callsOf("sender_block")).toEqual([]);
+  });
+
+  it("an own domain the configuration gained after the chooser opened is the daemon's refusal, in the chooser", async () => {
+    const { user, dialog } = await chooserOnFirstRow(ownAddressElsewhere);
+    mock.config.accounts[0].default_from = "Me <me@example.com>";
+    await user.keyboard("d");
+    await user.keyboard("{Enter}");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Cannot block @example.com: '@example.com' is the domain of your own address me@example.com; blocking it would move your own mail to Junk",
+    );
+    expect(mock.blocked).toEqual([]);
   });
 
   it("the Block button blocks the address, and a sender already blocked says so", async () => {

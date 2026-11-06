@@ -345,6 +345,54 @@ async fn blocking_moves_existing_inbox_mail_to_junk_and_names_an_account_without
     }
 }
 
+/// One of the user's own addresses, or the domain of one, is refused with a
+/// sentence that says why, and nothing is written or moved; a colleague at
+/// that domain is taken.
+#[tokio::test]
+async fn blocking_an_own_address_or_its_domain_is_refused() {
+    let slice = Slice::start(|root| {
+        ingest(root, ALPHA, 1, "self@x", "Alpha <alpha@example.com>");
+        ingest(root, ALPHA, 2, "colleague@x", "Gamma <gamma@example.com>");
+    });
+    let mut conn = slice.connect().await;
+    for (address, sentence) in [
+        (
+            "Alpha@Example.com",
+            "'alpha@example.com' is one of your own addresses; blocking it would move your own mail to Junk",
+        ),
+        (
+            "beta@example.com",
+            "'beta@example.com' is one of your own addresses; blocking it would move your own mail to Junk",
+        ),
+        (
+            "@EXAMPLE.com",
+            "'@example.com' is the domain of your own address alpha@example.com; blocking it would move your own mail to Junk",
+        ),
+    ] {
+        match call(&mut conn, "sender.block", json!({"address": address})).await {
+            Err(ClientError::Rpc(error)) => {
+                assert_eq!(error.code, -32602, "{address}: {error:?}");
+                assert_eq!(error.message, sentence, "{address}");
+            }
+            other => panic!("{address}: expected -32602, got {other:?}"),
+        }
+    }
+    let listed = call(&mut conn, "sender.list", json!({})).await.unwrap();
+    assert_eq!(listed, json!({"entries": []}));
+    assert_eq!(slice.mailbox_of(ALPHA, "self@x"), "inbox");
+
+    let blocked = call(
+        &mut conn,
+        "sender.block",
+        json!({"address": "gamma@example.com"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked["moved"][0]["count"], 1, "{blocked}");
+    assert_eq!(slice.mailbox_of(ALPHA, "colleague@x"), "Junk");
+    assert_eq!(slice.mailbox_of(ALPHA, "self@x"), "inbox");
+}
+
 /// `move_existing: false` leaves the Inbox alone, and unblocking removes the
 /// entry and moves nothing back.
 #[tokio::test]
@@ -510,5 +558,16 @@ fn mp_block_unblock_and_blocked_round_trip() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let out = slice.daemon.mp_routed(&["block", "@example.com"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "'@example.com' is the domain of your own address alpha@example.com; blocking it would move your own mail to Junk"
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = slice.daemon.mp_routed(&["blocked"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "No blocked senders\n");
     assert_eq!(slice.mailbox_of(ALPHA, "spam1@x"), "Junk");
 }

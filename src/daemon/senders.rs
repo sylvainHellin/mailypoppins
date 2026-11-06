@@ -7,7 +7,9 @@
 //! (`@example.com`), stored lowercase and matched case-insensitively against
 //! the mailbox addresses of a message's `From`, never an address its display
 //! name or a comment carries ([`crate::parse::mailbox_addresses`]); a domain
-//! entry matches that exact domain, not its subdomains. The list lives in
+//! entry matches that exact domain, not its subdomains. What an entry may be,
+//! and the refusal of one naming the user's own address or its domain, is
+//! [`mp_core::blocklist`], which the clients read too. The list lives in
 //! `<data_dir>/blocked-senders.json` ([`list_path`]): it is something the user
 //! typed, so it may not live only in a store the daemon drops and rebuilds,
 //! and `config.toml` is the user's file, which the daemon never writes.
@@ -45,6 +47,8 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+
+use mp_core::blocklist::normalize;
 
 use crate::catalogue::{Catalogue, FolderRole};
 use crate::config::AccountConfig;
@@ -130,42 +134,6 @@ fn save(path: &Path, entries: &[String]) -> Result<()> {
         .with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
-}
-
-/// An entry as the list holds it, or the sentence that refuses it: a full
-/// address or `@domain`, trimmed and lowercased, one `@`, no space, no angle
-/// bracket, and a domain with a dot in it.
-pub fn normalize(raw: &str) -> std::result::Result<String, String> {
-    let entry = raw.trim().to_lowercase();
-    let refuse = |why: &str| {
-        Err(format!(
-            "'{}' is not a sender to block: {why}; give a full address (spam@example.com) or a domain (@example.com)",
-            raw.trim()
-        ))
-    };
-    if entry.is_empty() {
-        return refuse("it is empty");
-    }
-    if entry
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | ',' | ';' | '"'))
-    {
-        return refuse("it holds a space or a character no address has");
-    }
-    let Some((_, domain)) = entry.split_once('@') else {
-        return refuse("it has no @");
-    };
-    if domain.contains('@') {
-        return refuse("it has more than one @");
-    }
-    if domain.is_empty()
-        || !domain.contains('.')
-        || domain.starts_with('.')
-        || domain.ends_with('.')
-    {
-        return refuse("its domain is not one");
-    }
-    Ok(entry)
 }
 
 /// Whether `from`, a `From` header as the store holds it, names a sender on
@@ -611,23 +579,6 @@ mod tests {
 
     fn list(entries: &[&str]) -> Vec<String> {
         entries.iter().map(|e| e.to_string()).collect()
-    }
-
-    #[test]
-    fn an_entry_is_an_address_or_a_domain_lowercased() {
-        assert_eq!(normalize(" Spam@X.com ").unwrap(), "spam@x.com");
-        assert_eq!(normalize("@X.com").unwrap(), "@x.com");
-        for bad in [
-            "",
-            "x.com",
-            "a@b@c.com",
-            "a@",
-            "@com",
-            "<a@b.com>",
-            "a b@c.com",
-        ] {
-            assert!(normalize(bad).is_err(), "{bad:?} is refused");
-        }
     }
 
     #[test]

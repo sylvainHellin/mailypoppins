@@ -40,7 +40,7 @@ const imapCommands = [
   { command: 'mp list-mailboxes [--json]', description: 'List every folder on the server with its sync policy (sync, status-only, ignore) and its role, or why it is ignored (--json prints them as JSON on stdout)' },
   { command: 'mp archive <selector>... [--mailbox <name>]', description: 'Archive one or more received emails (server + local); a refusal is reported per selector and the rest still run' },
   { command: 'mp move <selector>... <mailbox> [--mailbox <name>]', description: 'Move one or more received emails to another mailbox (server + local), named by role, slug or label (inbox, Junk, archive); an unknown name lists the account\'s mailboxes, and the mailbox the message is already in is refused' },
-  { command: 'mp block <address|@domain> [--keep-existing] [--json]', description: "Block a sender for every account: its mail in each Inbox moves to that account's Junk folder (server + local), and after every sync the daemon moves what arrived from it since; a message moved back to the Inbox stays there, an account with no Junk folder keeps the mail and is named, and --keep-existing moves only new mail" },
+  { command: 'mp block <address|@domain> [--keep-existing] [--json]', description: "Block a sender for every account: its mail in each Inbox moves to that account's Junk folder (server + local), and after every sync the daemon moves what arrived from it since; a message moved back to the Inbox stays there, an account with no Junk folder keeps the mail and is named, an account's own address and its domain are refused, and --keep-existing moves only new mail" },
   { command: 'mp unblock <address|@domain> [--json]', description: 'Remove a sender from the block list; nothing moves back from Junk' },
   { command: 'mp blocked [--json]', description: 'List the blocked senders, one address or @domain per line' },
   { command: 'mp delete <selector>... [--mailbox <name>]', description: 'Delete one or more received emails (server + local), or local drafts with drafts selectors; a refusal is reported per selector and the rest still run' },
@@ -403,10 +403,11 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
       <p>
         The daemon keeps one block list for every account. A blocked address or domain has its mail
         in each account's Inbox moved to that account's Junk folder at once, and what arrives from it
-        later after each sync, while the daemon runs. In the TUI, <code>B</code> on a message offers its
-        sender's address or its <code>@domain</code> and <code>s b</code> lists the blocked senders to
-        unblock one; the Mac app has the same keys, a Block sender button in the reader and two rows
-        in the command palette.
+        later after each sync, while the daemon runs. Your own addresses and their domains are refused,
+        so a block never sends your own mail or a colleague's to Junk. In the TUI, <code>B</code> on a
+        message offers its sender's address or its <code>@domain</code>, leaving out your own, and
+        <code>s b</code> lists the blocked senders to unblock one; the Mac app has the same keys, a Block
+        sender button in the reader and two rows in the command palette.
       </p>
     </section>
 

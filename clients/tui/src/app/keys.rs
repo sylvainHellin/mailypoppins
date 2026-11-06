@@ -2950,7 +2950,8 @@ impl App {
 
     /// `B`: the chooser between the cursor message's sender address and its
     /// `@domain`. A draft, a server-only hit and a sender with no address
-    /// have nothing to block, which the status line says.
+    /// have nothing to block, which the status line says; so does a sender
+    /// whose address and domain are both the user's own.
     fn open_block_chooser(&mut self) {
         let Some(email) = self.selected_email() else {
             return;
@@ -2959,10 +2960,21 @@ impl App {
             self.set_status("Block needs a received message".to_string());
             return;
         }
-        match BlockChooser::for_sender(&email.from) {
-            Some(chooser) => self.overlay = Overlay::BlockSender(chooser),
-            None => self.set_status(format!("No address to block in '{}'", email.from)),
+        match BlockChooser::for_sender(&email.from, &self.own_addresses()) {
+            Ok(chooser) => self.overlay = Overlay::BlockSender(chooser),
+            Err(why) => self.set_status(why),
         }
+    }
+
+    /// Every configured account's own address, which the daemon refuses to
+    /// block (`mp_core::blocklist`).
+    fn own_addresses(&self) -> Vec<String> {
+        mp_core::blocklist::own_addresses(
+            self.accounts
+                .iter()
+                .map(|acct| &acct.account_config)
+                .chain(std::iter::once(&self.account_config)),
+        )
     }
 
     /// The chooser: `j`/`k` (and the arrows, Tab) move between the address
@@ -2973,10 +2985,8 @@ impl App {
             return None;
         };
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => chooser.selected = 1,
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => chooser.selected = 0,
-            KeyCode::Char('a') => chooser.selected = 0,
-            KeyCode::Char('d') => chooser.selected = 1,
+            KeyCode::Char('j' | 'd') | KeyCode::Down | KeyCode::Tab => chooser.select(1),
+            KeyCode::Char('k' | 'a') | KeyCode::Up | KeyCode::BackTab => chooser.select(0),
             KeyCode::Enter => {
                 let entry = chooser.entry().to_string();
                 self.close_overlay();

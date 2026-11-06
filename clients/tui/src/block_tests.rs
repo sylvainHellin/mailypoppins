@@ -168,18 +168,79 @@ fn listed(app: &App) -> Vec<String> {
 /// a `From` with no address has nothing to block.
 #[test]
 fn the_chooser_offers_the_reply_address_and_its_domain() {
-    let c = BlockChooser::for_sender("Offers <Offers@Shop.Example>").expect("an address");
+    let c = BlockChooser::for_sender("Offers <Offers@Shop.Example>", &[]).expect("an address");
     assert_eq!(c.entries(), ["offers@shop.example", "@shop.example"]);
     assert_eq!(c.entry(), "offers@shop.example");
-    let first = BlockChooser::for_sender("x@y.org, Alice <alice@z.org>").expect("an address");
+    assert_eq!(c.refused, [None, None]);
+    let first = BlockChooser::for_sender("x@y.org, Alice <alice@z.org>", &[]).expect("an address");
     assert_eq!(first.address, "alice@z.org");
     // A quoted local part that needs no quotes is offered unquoted, the
     // entry the daemon takes and matches it by.
-    let quoted = BlockChooser::for_sender("John <\"John.Doe\"@Example.com>").expect("an address");
+    let quoted =
+        BlockChooser::for_sender("John <\"John.Doe\"@Example.com>", &[]).expect("an address");
     assert_eq!(quoted.entries(), ["john.doe@example.com", "@example.com"]);
     for none in ["(unknown)", "", "Undisclosed recipients:;", "@example.com"] {
-        assert_eq!(BlockChooser::for_sender(none), None, "{none:?}");
+        assert_eq!(
+            BlockChooser::for_sender(none, &[]),
+            Err(format!("No address to block in '{none}'")),
+            "{none:?}"
+        );
     }
+}
+
+/// The user's own domain is not offered and the cursor cannot reach it; a
+/// sender whose address and domain are both the user's own opens nothing.
+#[test]
+fn the_chooser_does_not_offer_the_users_own_address_or_domain() {
+    let own = ["me@company.example".to_string()];
+    let mut colleague =
+        BlockChooser::for_sender("Robin <Robin@Company.example>", &own).expect("the address");
+    assert_eq!(colleague.refused, [None, Some("your own domain")]);
+    colleague.select(1);
+    assert_eq!(colleague.entry(), "robin@company.example");
+    assert_eq!(
+        BlockChooser::for_sender("Me <me@company.example>", &own),
+        Err("Cannot block me@company.example (your own address) or @company.example (your own domain)".to_string())
+    );
+}
+
+/// `B` on a colleague's message offers only the address, `j` and `d` stay
+/// on it, and Enter blocks it; on the user's own message `B` opens nothing
+/// and says why. The own addresses are every account's `default_from`.
+#[test]
+fn b_offers_no_entry_that_blocks_the_users_own_mail() {
+    let (mut app, daemon) = app(
+        vec![
+            received(1, "Robin <robin@company.example>"),
+            received(2, "Me <me@company.example>"),
+        ],
+        &[],
+    );
+    let mut home = crate::app::AccountState::for_tests("home");
+    home.account_config.default_from = "Me <Me@Company.example>".to_string();
+    app.accounts = vec![crate::app::AccountState::for_tests("work"), home];
+    press(&mut app, 'B');
+    assert_eq!(chooser(&app).refused, [None, Some("your own domain")]);
+    press(&mut app, 'j');
+    press(&mut app, 'd');
+    assert_eq!(chooser(&app).entry(), "robin@company.example");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        calls(&daemon),
+        [(
+            "sender.block".to_string(),
+            json!({"address": "robin@company.example"})
+        )]
+    );
+
+    press(&mut app, 'j');
+    press(&mut app, 'B');
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Cannot block me@company.example (your own address) or @company.example (your own domain)")
+    );
+    assert_eq!(calls(&daemon).len(), 1, "nothing more is called");
 }
 
 /// `B` opens the chooser on the address; `j` moves to the domain and `k`

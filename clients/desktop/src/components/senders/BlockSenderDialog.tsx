@@ -17,22 +17,33 @@ type Choice = "address" | "domain";
 
 const HINTS: Record<Choice, string> = { address: "this address", domain: "everyone at this domain" };
 
+/** The row a dialog opens on: the address, unless the daemon would refuse it. */
+function firstOffered(dialog: BlockDialog | null): Choice {
+  return dialog?.refused.address ? "domain" : "address";
+}
+
 /**
- * Two radios, the address first and picked on open: `j`/Down and `k`/Up move,
- * `a` and `d` pick each, Enter blocks the picked one, Escape cancels. The
- * dialog owns every key while it is open.
+ * Two radios, the first one offered picked on open: `j`/Down and `k`/Up move,
+ * `a` and `d` pick each, Enter blocks the picked one, Escape cancels. A row
+ * the daemon would refuse (the user's own address or domain) is disabled,
+ * says why, and is never picked. The dialog owns every key while it is open.
  */
 export function BlockSenderDialog({ dialog, onOpenChange }: BlockSenderDialogProps) {
   const dispatch = useDispatch();
   const groupRef = useRef<HTMLDivElement>(null);
   const open = dialog !== null;
-  const [choice, setChoice] = useState<Choice>("address");
+  const [choice, setChoiceRaw] = useState<Choice>(firstOffered(dialog));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refusedRef = useRef(dialog?.refused);
+  refusedRef.current = dialog?.refused;
+  const setChoice = (c: Choice) => {
+    if (!refusedRef.current?.[c]) setChoiceRaw(c);
+  };
 
-  // A new dialog starts on the address.
+  // A new dialog starts on its first offered row.
   useEffect(() => {
-    setChoice("address");
+    setChoiceRaw(firstOffered(dialog));
     setBusy(false);
     setError(null);
   }, [dialog]);
@@ -101,22 +112,33 @@ export function BlockSenderDialog({ dialog, onOpenChange }: BlockSenderDialogPro
           tabIndex={0}
           className="flex flex-col gap-0.5 rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
         >
-          {(["address", "domain"] as const).map((c) => (
-            <div
-              key={c}
-              role="radio"
-              aria-checked={choice === c}
-              aria-label={`${dialog?.[c] ?? ""}, ${HINTS[c]}`}
-              data-choice={c}
-              onClick={() => setChoice(c)}
-              className="flex cursor-default items-baseline justify-between gap-3 rounded-md px-2 py-1.5 aria-checked:bg-accent aria-checked:text-accent-foreground"
-            >
-              <span className="truncate font-medium">{dialog?.[c]}</span>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {HINTS[c]} <Kbd aria-hidden="true">{c === "address" ? "a" : "d"}</Kbd>
-              </span>
-            </div>
-          ))}
+          {(["address", "domain"] as const).map((c) => {
+            const refused = dialog?.refused[c] ?? null;
+            const hint = refused ? `not offered: ${refused}` : HINTS[c];
+            return (
+              <div
+                key={c}
+                role="radio"
+                aria-checked={choice === c}
+                aria-disabled={refused ? true : undefined}
+                aria-label={`${dialog?.[c] ?? ""}, ${hint}`}
+                data-choice={c}
+                onClick={() => setChoice(c)}
+                className="flex cursor-default items-baseline justify-between gap-3 rounded-md px-2 py-1.5 aria-checked:bg-accent aria-checked:text-accent-foreground aria-disabled:opacity-50"
+              >
+                <span className="truncate font-medium">{dialog?.[c]}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {hint}
+                  {!refused && (
+                    <>
+                      {" "}
+                      <Kbd aria-hidden="true">{c === "address" ? "a" : "d"}</Kbd>
+                    </>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
         <p role="alert" data-slot="block-sender-error" className="min-h-5 text-sm text-destructive">
           {error}

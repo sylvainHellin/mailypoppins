@@ -859,10 +859,15 @@ export type SignaturesDialog = { account: string };
 
 /**
  * The Block sender chooser (`B`, PERSO-261): the sender's address, as the
- * blocked senders would hold it, and its `@domain`; which one is picked is
- * the dialog's own.
+ * blocked senders would hold it, and its `@domain`, each with why it is not
+ * offered (null when it is); which one is picked is the dialog's own, and
+ * never a refused one.
  */
-export type BlockDialog = { address: string; domain: string };
+export type BlockDialog = {
+  address: string;
+  domain: string;
+  refused: { address: string | null; domain: string | null };
+};
 
 /**
  * The password dialog: which password of which account it stores. The

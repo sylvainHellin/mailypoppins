@@ -966,8 +966,9 @@ pub fn golden_signatures_overlay() {
 /// naming what Enter blocks.
 pub fn block_chooser_app() -> App {
     let mut app = mail_fixture();
-    let mut chooser = BlockChooser::for_sender("Offers <Offers@Shop.Example>").expect("an address");
-    chooser.selected = 1;
+    let mut chooser =
+        BlockChooser::for_sender("Offers <Offers@Shop.Example>", &[]).expect("an address");
+    chooser.select(1);
     app.overlay = Overlay::BlockSender(chooser);
     app
 }
@@ -975,6 +976,26 @@ pub fn block_chooser_app() -> App {
 #[test]
 pub fn golden_block_chooser() {
     let mut app = block_chooser_app();
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The block chooser on a colleague's message: the domain is the user's own,
+/// so its row is dimmed with the reason and the cursor stays on the address.
+pub fn block_chooser_own_domain_app() -> App {
+    let mut app = mail_fixture();
+    let mut chooser = BlockChooser::for_sender(
+        "Robin <robin@company.example>",
+        &["me@company.example".to_string()],
+    )
+    .expect("the address is offered");
+    chooser.select(1);
+    app.overlay = Overlay::BlockSender(chooser);
+    app
+}
+
+#[test]
+pub fn golden_block_chooser_own_domain() {
+    let mut app = block_chooser_own_domain_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 

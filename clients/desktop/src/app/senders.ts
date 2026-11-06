@@ -11,21 +11,32 @@ import type { Action } from "@/app/reducer";
 import { draftsShown, expandedMember, listedRow, markStale, readerKey, type AppState, type BlockDialog } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiError } from "@/lib/gui-types";
-import { comparableAddress, senderAddress } from "@/lib/mailbox";
+import { comparableAddress, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
 import type { SenderBlocked } from "@/protocol/types";
 
 /**
- * The chooser for a message whose `From` is `from`: the address a reply goes
- * to as the list would hold it, and its `@domain`; null when it names no
- * address with a domain (`mp-tui`'s `BlockChooser::for_sender`).
+ * The chooser for a message whose `From` is `from`, given the user's own
+ * addresses `own`: the address a reply goes to as the list would hold it,
+ * and its `@domain`, a row the daemon would refuse carrying why; else the
+ * notice that says why nothing is offered: no address with a domain, or both
+ * rows refused (`mp-tui`'s `BlockChooser::for_sender`).
  */
-export function blockChoice(from: string): BlockDialog | null {
+export function blockChoice(from: string, own: readonly string[]): BlockDialog | { notice: string } {
   const address = comparableAddress(senderAddress(from).trim());
+  const nothing = { notice: `No address to block in '${from}'` };
   const at = address.lastIndexOf("@");
-  if (at <= 0) return null;
-  const domain = address.slice(at + 1);
-  if (domain === "" || /\s/.test(domain)) return null;
-  return { address, domain: `@${domain}` };
+  if (at <= 0) return nothing;
+  const bare = address.slice(at + 1);
+  if (bare === "" || /\s/.test(bare)) return nothing;
+  const domain = `@${bare}`;
+  const refused = {
+    address: ownMail(address, own) ? "your own address" : null,
+    domain: ownMail(domain, own) ? "your own domain" : null,
+  };
+  if (refused.address && refused.domain) {
+    return { notice: `Cannot block ${address} (${refused.address}) or ${domain} (${refused.domain})` };
+  }
+  return { address, domain, refused };
 }
 
 /** The cursor message's `From`, wherever the model shows it, or why there is nothing to block. */
@@ -43,13 +54,19 @@ function cursorFrom(s: AppState): { from: string } | { refusal: string } {
   return from ? { from } : { refusal: "This message has no sender" };
 }
 
-/** `B` and the palette's row: the chooser on the cursor message's sender, or a notice that says why not. */
-export function openBlockSender(s: AppState, dispatch: Dispatch<Action>): void {
+/**
+ * `B` and the palette's row: the chooser on the cursor message's sender, or a
+ * notice that says why not. The own addresses are the configuration's, read
+ * from the daemon each time; a read that fails offers both rows, and the
+ * daemon still refuses an own one.
+ */
+export async function openBlockSender(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
   const found = cursorFrom(s);
   if ("refusal" in found) return dispatch({ type: "notice", text: found.refusal });
-  const dialog = blockChoice(found.from);
-  if (!dialog) return dispatch({ type: "notice", text: `No address to block in '${found.from}'` });
-  dispatch({ type: "open_block_sender", dialog });
+  const config = await cmd.configGet().catch(() => null);
+  const choice = blockChoice(found.from, ownAddresses(config?.config.accounts ?? []));
+  if ("notice" in choice) return dispatch({ type: "notice", text: choice.notice });
+  dispatch({ type: "open_block_sender", dialog: choice });
 }
 
 /**

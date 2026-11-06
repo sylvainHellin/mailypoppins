@@ -1898,8 +1898,25 @@ impl State {
 /// no fixture account has a Junk folder: a block moves nothing and names
 /// each account in `skipped` with the daemon's sentence, in the snapshot's
 /// account order, as `src/daemon/senders.rs` answers an account whose
-/// catalogue resolves none.
+/// catalogue resolves none. An entry is checked as the daemon checks it
+/// ([`mp_core::blocklist::checked`]), against the configuration's own
+/// addresses, so `@example.com` is refused for `me@example.com`.
 impl State {
+    /// The configuration's own addresses, each account's `default_from`.
+    fn own_addresses(&self) -> Vec<String> {
+        let accounts: Vec<mp_core::config::AccountConfig> = self.config["accounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a["default_from"].as_str())
+            .map(|from| mp_core::config::AccountConfig {
+                default_from: from.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        mp_core::blocklist::own_addresses(&accounts)
+    }
+
     fn sender_method(&mut self, method: &str, params: &Value) -> Result<Answered> {
         let changed =
             |entries: &[String]| (KIND_SENDER_BLOCKLIST_CHANGED, json!({"entries": entries}));
@@ -1910,7 +1927,10 @@ impl State {
             }
             "sender.block" => {
                 only(method, params, &["address", "move_existing"])?;
-                let entry = blocked_entry(method, param_str(method, params, "address")?)?;
+                let own = self.own_addresses();
+                let entry =
+                    mp_core::blocklist::checked(param_str(method, params, "address")?, &own)
+                        .map_err(|why| refused(method, -32602, &why))?;
                 let added = !self.blocked.contains(&entry);
                 if added {
                     self.blocked.push(entry.clone());
@@ -1955,45 +1975,6 @@ impl State {
             other => Err(refused(other, -32601, &format!("unknown method {other}"))),
         }
     }
-}
-
-/// The daemon's `senders::normalize`: an entry as the list holds it, or its
-/// refusal as `-32602` with the daemon's sentence.
-fn blocked_entry(method: &str, raw: &str) -> Result<String> {
-    let entry = raw.trim().to_lowercase();
-    let refuse = |why: &str| {
-        Err(refused(
-            method,
-            -32602,
-            &format!(
-                "'{}' is not a sender to block: {why}; give a full address (spam@example.com) or a domain (@example.com)",
-                raw.trim()
-            ),
-        ))
-    };
-    if entry.is_empty() {
-        return refuse("it is empty");
-    }
-    if entry
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | ',' | ';' | '"'))
-    {
-        return refuse("it holds a space or a character no address has");
-    }
-    let Some((_, domain)) = entry.split_once('@') else {
-        return refuse("it has no @");
-    };
-    if domain.contains('@') {
-        return refuse("it has more than one @");
-    }
-    if domain.is_empty()
-        || !domain.contains('.')
-        || domain.starts_with('.')
-        || domain.ends_with('.')
-    {
-        return refuse("its domain is not one");
-    }
-    Ok(entry)
 }
 
 /// The configuration's accounts: what `config.add_account` and

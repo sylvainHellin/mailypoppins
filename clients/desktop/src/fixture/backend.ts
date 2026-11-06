@@ -52,7 +52,7 @@ import type {
 import { FakeBridge } from "@/fixture/terminal-bridge";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
-import { comparableAddress, mailboxAddresses, senderAddress } from "@/lib/mailbox";
+import { comparableAddress, mailboxAddresses, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
 import type {
   AccountDraft,
   AccountInfo,
@@ -1502,7 +1502,8 @@ export function simulateSignatureChanged(): void {
 // every account. fixture.rs answers the same for the fixture's accounts,
 // none of which has a Junk folder, so each is in `skipped`; a test that gives
 // an account a mailbox of the `junk` role gets its Inbox mail moved there, as
-// the daemon moves it.
+// the daemon moves it. The configuration's own address, `me@example.com`,
+// and its domain are refused as the daemon refuses them.
 // ---------------------------------------------------------------------------
 
 /** The daemon's `senders::normalize`: the entry as the list holds it, or its refusal as a `protocol` error. */
@@ -1535,9 +1536,24 @@ function blockedBy(entry: string, from: string): boolean {
   });
 }
 
+/**
+ * The daemon's `mp_core::blocklist::checked` past `normalize`: an entry that
+ * is one of the configuration's own addresses, or the domain of one, refused
+ * as a `protocol` error with the daemon's sentence.
+ */
+function refuseOwnMail(entry: string): void {
+  const own = ownMail(entry, ownAddresses(mock.config.accounts));
+  if (!own) return;
+  const message = entry.startsWith("@")
+    ? `'${entry}' is the domain of your own address ${own}; blocking it would move your own mail to Junk`
+    : `'${entry}' is one of your own addresses; blocking it would move your own mail to Junk`;
+  throw { kind: "protocol", message, code: null } satisfies GuiError;
+}
+
 /** `sender_block`: the entry added, and each account's Inbox mail from it moved to its Junk folder. */
 function blockSender(raw: string): SenderBlocked {
   const entry = blockedEntry(raw);
+  refuseOwnMail(entry);
   const added = !mock.blocked.includes(entry);
   if (added) mock.blocked = [...mock.blocked, entry].sort();
   const moved: SenderBlocked["moved"] = [];

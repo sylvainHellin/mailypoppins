@@ -22,6 +22,7 @@
 
 pub mod addresses;
 pub mod app_state;
+pub mod blocklist;
 pub mod calendar;
 pub mod calendar_freebusy;
 pub mod calendar_model;

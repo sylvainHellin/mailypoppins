@@ -904,21 +904,23 @@ The commands behind them are in [rust-layer.md](rust-layer.md), "Blocked senders
 - `sb`, the TUI's GLOBAL key, from every view, and the palette's "Blocked senders (unblock one)" open the list.
 
 On a draft the chooser does not open and the notice line says "Block needs a received message"; with no message under the cursor it says "Select a message first", and a sender with no address "No address to block in '<from>'".
+The user's own addresses, each account's `default_from` as `config_get` answers it when the chooser opens, and their domains are never offered: a sender whose address and domain are both the user's own opens nothing, and the notice line says "Cannot block <address> (your own address) or <@domain> (your own domain)".
 
 ### The chooser
 
-`BlockSenderDialog.tsx` is the overlay `block_sender`, and `state.blockDialog` is `{address, domain}`: the address a reply goes to (`senderAddress`), lowercase and with a quoted local part that needs no quotes unquoted (`comparableAddress`, `mp_core::parse::comparable_address`), as the list would hold it, and its `@domain`.
-It is the confirmation too: a `radiogroup` named "What to block" with the address ("this address") picked on open and the domain ("everyone at this domain"), the sentence "Its mail in every account's Inbox moves to Junk, now and as it arrives", and the button "Block <entry>", which names what Enter blocks; nothing is blocked before it.
+`BlockSenderDialog.tsx` is the overlay `block_sender`, and `state.blockDialog` is `{address, domain, refused}`: the address a reply goes to (`senderAddress`), lowercase and with a quoted local part that needs no quotes unquoted (`comparableAddress`, `mp_core::parse::comparable_address`), as the list would hold it, its `@domain`, and for each why the daemon would refuse it, null when it would not.
+It is the confirmation too: a `radiogroup` named "What to block" with the address ("this address") and the domain ("everyone at this domain"), the first offered one picked on open, the sentence "Its mail in every account's Inbox moves to Junk, now and as it arrives", and the button "Block <entry>", which names what Enter blocks; nothing is blocked before it.
+A row the daemon would refuse is `aria-disabled`, dimmed, reads "not offered: <why>" in place of its hint and is never picked: the domain of the user's own address ("your own domain") and the user's own address ("your own address"), as `mp_core::blocklist` refuses them (`ownAddresses` and `ownMail` in `src/lib/mailbox.ts`).
 
 | Key | Action | Command |
 |---|---|---|
-| `j`, Down, `d` | pick the domain | none |
-| `k`, Up, `a` | pick the address | none |
+| `j`, Down, `d` | pick the domain, when it is offered | none |
+| `k`, Up, `a` | pick the address, when it is offered | none |
 | Enter | block the picked entry, moving the mail already in each Inbox | `sender_block` |
 | Escape | cancel | none |
 
 A block that went through closes the chooser and says what it came to on the notice line, the TUI's status line: "Blocked <entry>" or "<entry> was already blocked", then "<n> messages moved to Junk (<account> <n>, ...)" or "no Inbox mail from it", then the daemon's own sentence for each account with no Junk folder, the notice a warning when there is one.
-A refusal keeps the chooser open with "Cannot block <entry>: " and the daemon's sentence in its alert line.
+A refusal keeps the chooser open with "Cannot block <entry>: " and the daemon's sentence in its alert line, among them the daemon's own refusal of an own address or domain the configuration gained after the chooser opened.
 The moved rows leave the Inbox as a move's do: the daemon publishes the mailbox counts, and the lists read again.
 
 ### The list

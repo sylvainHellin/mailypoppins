@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { blockChoice, blockedSendersLoaded, blockSummary } from "@/app/senders";
 import { reducer, type Action } from "@/app/reducer";
 import { initialState, isStale, type AppState } from "@/app/state";
-import { comparableAddress } from "@/lib/mailbox";
+import { comparableAddress, ownAddresses, ownMail } from "@/lib/mailbox";
 import { fixtures } from "@/test/tauri-mock";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
@@ -18,10 +18,34 @@ function changed(entries: string[], revision: number): Action {
 
 describe("the blocked senders model", () => {
   it("offers the address a reply goes to, as the list holds it, and its domain", () => {
-    expect(blockChoice("Offers <Offers@Shop.Example>")).toEqual({ address: "offers@shop.example", domain: "@shop.example" });
-    expect(blockChoice("x@y.org, Alice <alice@z.org>")).toEqual({ address: "alice@z.org", domain: "@z.org" });
-    expect(blockChoice('John <"John.Doe"@Example.com>')).toEqual({ address: "john.doe@example.com", domain: "@example.com" });
-    for (const none of ["(unknown)", "", "Undisclosed recipients:;", "@example.com"]) expect(blockChoice(none)).toBeNull();
+    const offered = { address: null, domain: null };
+    expect(blockChoice("Offers <Offers@Shop.Example>", [])).toEqual({ address: "offers@shop.example", domain: "@shop.example", refused: offered });
+    expect(blockChoice("x@y.org, Alice <alice@z.org>", [])).toEqual({ address: "alice@z.org", domain: "@z.org", refused: offered });
+    expect(blockChoice('John <"John.Doe"@Example.com>', [])).toEqual({
+      address: "john.doe@example.com",
+      domain: "@example.com",
+      refused: offered,
+    });
+    for (const none of ["(unknown)", "", "Undisclosed recipients:;", "@example.com"]) {
+      expect(blockChoice(none, [])).toEqual({ notice: `No address to block in '${none}'` });
+    }
+  });
+
+  it("does not offer the user's own address or domain, as mp_core::blocklist refuses them", () => {
+    const own = ownAddresses([{ default_from: "Me <Me@Company.example>" }, { default_from: "" }, { default_from: "me@company.example" }]);
+    expect(own).toEqual(["me@company.example"]);
+    expect(ownMail("@company.example", own)).toBe("me@company.example");
+    expect(ownMail("me@company.example", own)).toBe("me@company.example");
+    expect(ownMail("robin@company.example", own)).toBeNull();
+    expect(ownMail("@sub.company.example", own)).toBeNull();
+    expect(blockChoice("Robin <robin@company.example>", own)).toEqual({
+      address: "robin@company.example",
+      domain: "@company.example",
+      refused: { address: null, domain: "your own domain" },
+    });
+    expect(blockChoice("Me <me@company.example>", own)).toEqual({
+      notice: "Cannot block me@company.example (your own address) or @company.example (your own domain)",
+    });
   });
 
   it("compares an address as mp_core does: lowercase, a quoted local part unquoted where it needs no quotes", () => {

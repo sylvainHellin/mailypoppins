@@ -327,7 +327,7 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "manage_signatures":
       return manageSignatures(s, dispatch);
     case "block_sender":
-      return openBlockSender(s, dispatch);
+      return void openBlockSender(s, dispatch);
     case "blocked_senders":
       return dispatch({ type: "open_blocked_senders" });
     case "reply":
