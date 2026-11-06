@@ -111,6 +111,12 @@ const signatureCommands = [
   { command: 'mp signature default [<name>|--none]', description: "Print the account's default signature, set it, or clear it with --none" },
 ];
 
+const blockCommands = [
+  { command: 'mp block <address|@domain> [--keep-existing] [--json]', description: "Block a sender for every account and move its mail from each Inbox to Junk; --keep-existing leaves what is already there" },
+  { command: 'mp unblock <address|@domain> [--json]', description: 'Remove a sender from the block list; its mail already in Junk stays there' },
+  { command: 'mp blocked [--json]', description: 'List the blocked senders' },
+];
+
 const syncOptions = [
   { command: '-n, --limit <N>', description: 'Max messages per mailbox (default: 50)' },
   { command: '--mailbox <name>...', description: 'Mailboxes to sync (default: INBOX, Archive, Sent)' },
@@ -388,6 +394,19 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
         A signature is one Markdown file under the configuration directory, and each account
         has its own default; <code>-A</code> names the account. The TUI's <code>cs</code> overlay
         and the Mac app's Signatures dialog manage the same files through the same daemon calls.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="blocked-senders">Blocked Senders</h2>
+      <CommandTable commands={blockCommands} />
+      <p>
+        The daemon keeps one block list for every account. A blocked address or domain has its mail
+        in each account's Inbox moved to that account's Junk folder at once, and what arrives from it
+        later after each sync, while the daemon runs. In the TUI, <code>B</code> on a message offers its
+        sender's address or its <code>@domain</code> and <code>s b</code> lists the blocked senders to
+        unblock one; the Mac app has the same keys, a Block sender button in the reader and two rows
+        in the command palette.
       </p>
     </section>
 
