@@ -82,6 +82,7 @@ Live only while `held_send` is set, ahead of the table dispatch in `dispatch_nor
 - `b` (1220) opens its HTML part in the browser.
 - `o` (1223) opens the attachment picker in Open mode over the hit.
 - `O` (1226) opens it in Save mode.
+- `S`, added by PERSO-273 after the freeze, cycles the order of the hits (newest, oldest, best match first) and runs the search again in it.
 - `Tab` / `Shift+Tab` (1229) returns focus to the Advanced field.
 - `Esc` (1232) closes the overlay.
 

@@ -238,6 +238,19 @@ pub struct App {
     /// are two ids, and the one this is not is dropped. The generation counter
     /// stays for the settle, which lands through the operation table.
     pub server_search_operation: Option<String>,
+    /// The order every search asks for, `S` in the results list cycling it
+    /// (PERSO-273): newest first until then, the daemon's own default.
+    pub search_order: mp_protocol::listing::SearchOrder,
+    /// The order the daemon echoed for the local pass's hits, `None` when it
+    /// listed none; what the overlay names, rather than what it asked for,
+    /// because a daemon from before PERSO-273 ranks whatever it is asked.
+    pub server_search_local_order: Option<mp_protocol::listing::SearchOrder>,
+    /// The order the settle echoed for the server's hits, `None` before the
+    /// settle or when the server listed none.
+    pub server_search_server_order: Option<mp_protocol::listing::SearchOrder>,
+    /// The search the overlay last ran, which `S` runs again in the next
+    /// order; `None` until one ran.
+    pub server_search_last: Option<LastSearch>,
 
     // Config (loaded once at startup)
     pub global_config: mp_core::config::GlobalConfig,
@@ -440,6 +453,10 @@ impl App {
             server_search_scope_label: "All".to_string(),
             server_search_generation: 0,
             server_search_operation: None,
+            search_order: Default::default(),
+            server_search_local_order: None,
+            server_search_server_order: None,
+            server_search_last: None,
             global_config,
             session: None,
             events: super::events::EventState::default(),
@@ -523,6 +540,10 @@ impl App {
             server_search_scope_label: "All".to_string(),
             server_search_generation: 0,
             server_search_operation: None,
+            search_order: Default::default(),
+            server_search_local_order: None,
+            server_search_server_order: None,
+            server_search_last: None,
             global_config: mp_core::config::GlobalConfig::default(),
             session: None,
             events: super::events::EventState::default(),

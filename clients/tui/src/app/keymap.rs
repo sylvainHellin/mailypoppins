@@ -1495,6 +1495,15 @@ pub static KEYMAP: &[KeyBinding] = &[
     manual("b", KeyCtx::ServerSearch, "Open HTML in browser", false),
     manual("o", KeyCtx::ServerSearch, "Open attachment", false),
     manual("O", KeyCtx::ServerSearch, "Save attachment to disk", false),
+    // The order of the hits (PERSO-273), the desktop's `S` and its results
+    // header's order button: bare `S` is free in every mail context of both
+    // clients, where `s` is the sync family's prefix.
+    manual(
+        "S",
+        KeyCtx::ServerSearch,
+        "Order the results: newest, oldest, best match first",
+        false,
+    ),
     manual("Tab", KeyCtx::ServerSearch, "Switch focus", true),
     manual("Esc", KeyCtx::ServerSearch, "Close overlay", true),
     // -- CONTACTS (#0033) -------------------------------------------------

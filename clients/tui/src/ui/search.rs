@@ -49,9 +49,17 @@ pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect
         format!(" {} ", first)
     } else if app.server_search_focus == SearchOverlayFocus::List {
         // The list's own keys (#0104); navigating clears the status message
-        // above, which is what uncovers this line.
-        " Enter: open | e: read | y: path | f: fetch | r/R: reply | w: forward | a: archive | b: browser | o/O: attach "
-            .to_string()
+        // above, which is what uncovers this line. `S` names the order the
+        // daemon echoed (PERSO-273), so the line keeps saying it.
+        let order = crate::app::search_order_label(
+            app.server_search_local_order,
+            app.server_search_server_order,
+        )
+        .map(|label| format!("S: {label}"))
+        .unwrap_or_else(|| "S: order".to_string());
+        format!(
+            " {order} | Enter: open | e: read | y: path | f: fetch | r/R: reply | w: forward | a: archive | b: browser | o/O: attach "
+        )
     } else {
         " Tab/Shift+Tab: fields | Space: toggle | Enter: search | Esc: close ".to_string()
     };

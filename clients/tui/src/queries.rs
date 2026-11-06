@@ -274,6 +274,7 @@ fn search_hit(hit: wire::SearchHit) -> crate::app::SearchResultEntry {
         entry: entry_from_row(row, &status),
         fetched,
         source_label: mailbox,
+        seq: None,
     }
 }
 

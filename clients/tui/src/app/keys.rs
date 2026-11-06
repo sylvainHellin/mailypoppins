@@ -913,6 +913,9 @@ impl App {
                 self.server_search_focus = SearchOverlayFocus::Field(SearchField::From);
                 self.server_search_loading = false;
                 self.server_search_status = None;
+                self.server_search_local_order = None;
+                self.server_search_server_order = None;
+                self.server_search_last = None;
                 self.overlay = Overlay::Search;
             }
             A::OpenAttachment => {
@@ -1307,6 +1310,29 @@ impl App {
         });
     }
 
+    /// `S` in the results list (PERSO-273): the next order of newest, oldest
+    /// and best match first, and the last search run again in it, the
+    /// desktop's `S` and its results header's order button. The overlay
+    /// names the order from the daemon's answer once it lands, so what it
+    /// says until then is the search's own progress line.
+    fn cycle_search_order(&mut self) {
+        use mp_protocol::listing::SearchOrder;
+        let at = SearchOrder::ALL
+            .iter()
+            .position(|order| *order == self.search_order)
+            .unwrap_or_default();
+        self.search_order = SearchOrder::ALL[(at + 1) % SearchOrder::ALL.len()];
+        let Some(last) = self.server_search_last.clone() else {
+            return;
+        };
+        self.server_search_generation = self.server_search_generation.wrapping_add(1);
+        self.push_action(Action::ServerSearch {
+            query: last.query,
+            targets: last.targets,
+            local_mailbox: last.local_mailbox,
+        });
+    }
+
     fn handle_search_overlay_list_key(&mut self, key: KeyEvent) -> Option<Message> {
         let len = self.server_search_results.len();
         if len == 0 {
@@ -1417,6 +1443,9 @@ impl App {
             }
             KeyCode::Char('O') => {
                 self.open_search_result_attachment_picker(AttachmentPickerMode::Save);
+            }
+            KeyCode::Char('S') => {
+                self.cycle_search_order();
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.server_search_focus = SearchOverlayFocus::Field(SearchField::Advanced);

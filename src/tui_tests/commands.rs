@@ -479,7 +479,16 @@ fn the_local_pass_finds_the_row_the_index_holds() {
     drop(store);
 
     let query = crate::search::parse("zolvertrix").unwrap();
-    let hits = local_search(&daemon, ACCOUNT, &query, Some("inbox"), 50);
+    let pass = local_search(
+        &daemon,
+        ACCOUNT,
+        &query,
+        Some("inbox"),
+        50,
+        mp_protocol::listing::SearchOrder::Newest,
+    );
+    assert_eq!(pass.order, Some(mp_protocol::listing::SearchOrder::Newest));
+    let hits = pass.hits;
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].entry.subject, "Quarterly zolvertrix");
     assert_eq!(hits[0].source_label, "inbox");
@@ -492,7 +501,16 @@ fn the_local_pass_finds_the_row_the_index_holds() {
     // A query nothing matches is an empty pass, not a failure: the server
     // leg is what answers next either way.
     let miss = crate::search::parse("nothingmatchesthis").unwrap();
-    assert!(local_search(&daemon, ACCOUNT, &miss, None, 50).is_empty());
+    assert!(local_search(
+        &daemon,
+        ACCOUNT,
+        &miss,
+        None,
+        50,
+        mp_protocol::listing::SearchOrder::Newest
+    )
+    .hits
+    .is_empty());
 }
 
 /// The three sentences a finished `send.draft` shows, which are the ones

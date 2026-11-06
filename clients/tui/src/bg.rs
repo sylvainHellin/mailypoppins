@@ -137,11 +137,19 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
 /// no limit.
 ///
 /// `count` is the list's, not the settle's `hits`: the list also holds the
-/// local pass's hits, which the daemon deduplicated against.
-pub(crate) fn server_search_footer(count: usize, settled: &serde_json::Value) -> String {
+/// local pass's hits, which the daemon deduplicated against. `order` is what
+/// the hits are in, [`crate::app::search_order_label`]'s words (PERSO-273).
+pub(crate) fn server_search_footer(
+    count: usize,
+    order: Option<&str>,
+    settled: &serde_json::Value,
+) -> String {
     let settled: mp_protocol::listing::ServerSearchSettled =
         serde_json::from_value(settled.clone()).unwrap_or_default();
     let mut line = format!("{count} result{}", if count == 1 { "" } else { "s" });
+    if let Some(order) = order {
+        line.push_str(&format!(", {order}"));
+    }
     if let Some(note) = settled.local_store_note() {
         line.push_str(&format!(" ({note})"));
     }
@@ -441,9 +449,16 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                     // dedup against the local pass was the daemon's. What is
                     // left is the count the footer prints and the mailboxes
                     // that refused, which do not fail the search, and the
-                    // terms the store answered (PERSO-131).
+                    // terms the store answered (PERSO-131). The server's hits
+                    // take the settle's `hit_order` (PERSO-273).
+                    arrange_server_hits(app, &settled);
                     let count = app.server_search_results.len();
-                    app.server_search_status = Some(server_search_footer(count, &settled));
+                    let order = crate::app::search_order_label(
+                        app.server_search_local_order,
+                        app.server_search_server_order,
+                    );
+                    app.server_search_status =
+                        Some(server_search_footer(count, order.as_deref(), &settled));
                     if count > 0 {
                         app.server_search_focus = SearchOverlayFocus::List;
                     }
@@ -647,8 +662,9 @@ pub(super) fn apply_search_hit_fetch(app: &mut App, message_id: &str, result: Re
 /// The overlay's list is the local-first pass's (#0105) with the server's hits
 /// appended as they arrive, where it used to grow by one batch when the last
 /// mailbox answered. The daemon did the dedup against the Message-IDs the
-/// local pass was showing, so what is left here is the ordering and the
-/// running footer.
+/// local pass was showing, and it orders the hits in its settle's `hit_order`
+/// (PERSO-273), so what is left here is the append and the running footer:
+/// an append moves no row, which keeps the cursor on its hit.
 ///
 /// A hit for an operation this overlay is not showing is dropped: a fast
 /// retype leaves two searches in flight, and the id is what tells them apart.
@@ -665,23 +681,9 @@ pub(super) fn apply_server_hit(app: &mut App, payload: &serde_json::Value) {
                 return;
             }
         };
-    let entry = super::commands::hit_entry(&hit);
-    // The cursor stays on the entry it was on, which is what makes a list
-    // that grows under the user usable at all.
-    let selected_id = app
-        .server_search_results
-        .get(app.server_search_index)
-        .and_then(|r| r.fetched.message_id.clone());
-    app.server_search_results.push(entry);
+    let seq = payload["seq"].as_u64().unwrap_or_default();
     app.server_search_results
-        .sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
-    app.server_search_index = selected_id
-        .and_then(|id| {
-            app.server_search_results
-                .iter()
-                .position(|r| r.fetched.message_id.as_deref() == Some(id.as_str()))
-        })
-        .unwrap_or(0);
+        .push(super::commands::hit_entry(&hit, seq));
     let count = app.server_search_results.len();
     app.server_search_status = Some(format!(
         "{count} result{}; searching server...",
@@ -689,6 +691,43 @@ pub(super) fn apply_server_hit(app: &mut App, payload: &serde_json::Value) {
     ));
     if app.server_search_focus != SearchOverlayFocus::List {
         app.server_search_focus = SearchOverlayFocus::List;
+    }
+}
+
+/// A settled server search's hits in its `hit_order` (PERSO-273), after the
+/// local pass's, which keep the store's order; the cursor stays on its hit.
+///
+/// The hits streamed mailbox by mailbox as each one's survivors downloaded,
+/// so the order they arrived in is no order at all; the settle's is the one
+/// list every client shows. The order it echoes is what the overlay names
+/// for them, and an older daemon's settle, which echoes none, reads as
+/// relevance, as its local pass does.
+fn arrange_server_hits(app: &mut App, settled: &serde_json::Value) {
+    let decoded: mp_protocol::listing::ServerSearchSettled =
+        serde_json::from_value(settled.clone()).unwrap_or_default();
+    let cursor = app
+        .server_search_results
+        .get(app.server_search_index)
+        .and_then(|hit| hit.seq);
+    let (local, server): (Vec<_>, Vec<_>) = std::mem::take(&mut app.server_search_results)
+        .into_iter()
+        .partition(|hit| hit.seq.is_none());
+    app.server_search_server_order =
+        (!server.is_empty()).then(|| mp_client::queries::decode_search_order(settled));
+    let server = decoded.arrange(
+        server
+            .into_iter()
+            .map(|hit| (hit.seq.unwrap_or_default(), hit)),
+    );
+    app.server_search_results = local.into_iter().chain(server).collect();
+    if let Some(seq) = cursor {
+        if let Some(at) = app
+            .server_search_results
+            .iter()
+            .position(|hit| hit.seq == Some(seq))
+        {
+            app.server_search_index = at;
+        }
     }
 }
 
@@ -715,18 +754,18 @@ mod tests {
             "coverage": "local", "local_terms": ["has:attachment"],
         });
         assert_eq!(
-            server_search_footer(2, &local),
+            server_search_footer(2, None, &local),
             "2 results (local store only: has:attachment)"
         );
         assert_eq!(
-            server_search_footer(0, &local),
+            server_search_footer(0, None, &local),
             "0 results (local store only: has:attachment)"
         );
 
         let mut refused = local.clone();
         refused["unreachable"] = serde_json::json!([{"mailbox": "Archive", "error": "timeout"}]);
         assert_eq!(
-            server_search_footer(1, &refused),
+            server_search_footer(1, None, &refused),
             "1 result (local store only: has:attachment); 1 mailbox unreachable"
         );
 
@@ -735,7 +774,11 @@ mod tests {
             "deduplicated": 0, "unreachable": [],
             "coverage": "server", "local_terms": [],
         });
-        assert_eq!(server_search_footer(3, &server), "3 results");
+        assert_eq!(server_search_footer(3, None, &server), "3 results");
+        assert_eq!(
+            server_search_footer(3, Some("oldest first"), &server),
+            "3 results, oldest first"
+        );
 
         let older = serde_json::json!({
             "account": "tum", "query": "from:borrmann", "hits": 3,
@@ -743,7 +786,7 @@ mod tests {
             "unreachable": [{"mailbox": "Archive", "error": "timeout"}, {"mailbox": "Sent", "error": "no"}],
         });
         assert_eq!(
-            server_search_footer(3, &older),
+            server_search_footer(3, None, &older),
             "3 results; 2 mailboxes unreachable"
         );
     }
@@ -760,16 +803,162 @@ mod tests {
             "truncated": true, "capped": false,
         });
         assert_eq!(
-            server_search_footer(53, &cut),
+            server_search_footer(53, None, &cut),
             "53 results. More results than the 53 shown: narrow the search to see the rest."
         );
 
         let mut capped = cut.clone();
         capped["capped"] = serde_json::json!(true);
         assert_eq!(
-            server_search_footer(1000, &capped),
+            server_search_footer(1000, None, &capped),
             "1000 results. Microsoft Graph stops a search at 1000 results: narrow the query \
              (after:, before:, in:) to reach the rest."
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The order of the streamed hits (PERSO-273)
+    // -----------------------------------------------------------------------
+
+    /// One overlay row of the local pass, its message named by `subject`.
+    fn local_row(subject: &str) -> crate::app::SearchResultEntry {
+        let fetched = mp_core::parse::FetchedEmail {
+            from: "a@example.com".into(),
+            to: "me@example.com".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: subject.into(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".into(),
+            body_text: String::new(),
+            html_body: None,
+            has_attachments: false,
+            server_has_attachments: None,
+            message_id: Some(format!("<{subject}@example.com>")),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        crate::app::SearchResultEntry {
+            entry: crate::helpers::fetched_to_email_entry(None, None, &fetched),
+            fetched,
+            source_label: "inbox".into(),
+            seq: None,
+        }
+    }
+
+    /// The `message.server_hit` payload of hit `seq` of operation `op-1`.
+    fn hit_event(seq: u64, subject: &str) -> serde_json::Value {
+        let hit = mp_protocol::listing::ServerSearchHit {
+            account: "tum".into(),
+            mailbox: "Archive".into(),
+            subject: subject.into(),
+            message_id: Some(format!("<{subject}@example.com>")),
+            ..Default::default()
+        };
+        serde_json::json!({"operation_id": "op-1", "seq": seq, "hit": hit})
+    }
+
+    fn subjects(app: &App) -> Vec<&str> {
+        app.server_search_results
+            .iter()
+            .map(|hit| hit.entry.subject.as_str())
+            .collect()
+    }
+
+    /// The server's hits are appended as they stream, which moves no row and
+    /// so no cursor, and the settle lists them in its `hit_order` after the
+    /// local pass's hits, which keep the store's order: the client sorts
+    /// nothing itself. The footer names the orders the daemon echoed.
+    #[test]
+    fn the_settle_lists_the_streamed_hits_in_its_hit_order_after_the_local_pass() {
+        let mut app = App::default_for_tests();
+        app.server_search_generation = 2;
+        app.server_search_operation = Some("op-1".into());
+        app.server_search_loading = true;
+        app.server_search_results = vec![local_row("local-b"), local_row("local-a")];
+        app.server_search_local_order = Some(mp_protocol::listing::SearchOrder::Relevance);
+
+        for (seq, subject) in [
+            (0, "arrived-first"),
+            (1, "arrived-second"),
+            (2, "arrived-third"),
+        ] {
+            apply_server_hit(&mut app, &hit_event(seq, subject));
+        }
+        // A hit of a search the overlay no longer shows is dropped.
+        let mut stale = hit_event(3, "stale");
+        stale["operation_id"] = serde_json::json!("op-0");
+        apply_server_hit(&mut app, &stale);
+        assert_eq!(
+            subjects(&app),
+            [
+                "local-b",
+                "local-a",
+                "arrived-first",
+                "arrived-second",
+                "arrived-third"
+            ],
+            "a streamed hit is appended where it arrived"
+        );
+        app.server_search_index = 3;
+
+        handle_bg_result(
+            &mut app,
+            BgResult::ServerSearch {
+                generation: 2,
+                result: Ok(serde_json::json!({
+                    "account": "tum", "query": "ledger", "hits": 3,
+                    "order": "newest", "hit_order": [2, 0, 1],
+                })),
+            },
+        );
+
+        assert_eq!(
+            subjects(&app),
+            [
+                "local-b",
+                "local-a",
+                "arrived-third",
+                "arrived-first",
+                "arrived-second"
+            ]
+        );
+        assert_eq!(
+            app.server_search_index, 4,
+            "the cursor follows its hit, arrived-second"
+        );
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("5 results, best match first, then the server's newest first")
+        );
+    }
+
+    /// A settle from a daemon that predates PERSO-273 echoes no order and no
+    /// `hit_order`: the hits stay in the order they arrived, and the footer
+    /// reads them as relevance, as `mp search` does, rather than naming the
+    /// order the overlay asked for.
+    #[test]
+    fn an_older_daemons_settle_keeps_the_arrival_order_and_reads_as_relevance() {
+        let mut app = App::default_for_tests();
+        app.server_search_generation = 2;
+        app.server_search_operation = Some("op-1".into());
+        app.search_order = mp_protocol::listing::SearchOrder::Oldest;
+        for (seq, subject) in [(0, "one"), (1, "two")] {
+            apply_server_hit(&mut app, &hit_event(seq, subject));
+        }
+        handle_bg_result(
+            &mut app,
+            BgResult::ServerSearch {
+                generation: 2,
+                result: Ok(serde_json::json!({"account": "tum", "query": "x", "hits": 2})),
+            },
+        );
+        assert_eq!(subjects(&app), ["one", "two"]);
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("2 results, best match first")
         );
     }
 

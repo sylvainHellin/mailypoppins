@@ -1472,8 +1472,12 @@ pub(super) fn draft_from_message(
 /// hit is built from it. The list row is then
 /// `helpers::fetched_to_email_entry` exactly as it was, with the daemon's
 /// resolution handed in rather than looked up in the store.
+///
+/// `seq` is the hit's number in its search's stream, which the settle's
+/// `hit_order` lists (PERSO-273).
 pub(super) fn hit_entry(
     hit: &mp_protocol::listing::ServerSearchHit,
+    seq: u64,
 ) -> super::app::SearchResultEntry {
     let fetched = mp_core::parse::FetchedEmail {
         from: hit.from.clone(),
@@ -1507,6 +1511,7 @@ pub(super) fn hit_entry(
         entry,
         fetched,
         source_label: hit.mailbox.clone(),
+        seq: Some(seq),
     }
 }
 
@@ -1526,6 +1531,10 @@ const LOCAL_SEARCH_LIMIT: usize = 50;
 /// pass is already showing travel as `exclude_message_ids` only when there
 /// are some, so the dedup is the daemon's and the count it settles with is a
 /// fact any client reproduces.
+///
+/// Both passes ask for `app.search_order` (PERSO-273), the desktop's
+/// `order` too, and the list keeps the daemon's orders: the local pass's hits
+/// as the store listed them, then the server's in the settle's `hit_order`.
 pub fn start_search(
     app: &mut App,
     commands: &dyn Queries,
@@ -1537,6 +1546,12 @@ pub fn start_search(
     // against that account's store (#0038).
     let account = app.account_config.name.clone();
     let generation = app.server_search_generation;
+    let order = app.search_order;
+    app.server_search_last = Some(super::app::LastSearch {
+        query: query.clone(),
+        targets: targets.map(<[SearchTarget]>::to_vec),
+        local_mailbox: local_mailbox.map(str::to_string),
+    });
 
     // Local-first pass (#0105): the FTS index answers in milliseconds, so its
     // hits render before the server round trip starts. A query the local
@@ -1545,13 +1560,24 @@ pub fn start_search(
     app.server_search_index = 0;
     app.server_search_scroll = 0;
     app.server_search_headers_scroll = 0;
-    app.server_search_results =
-        local_search(commands, &account, query, local_mailbox, LOCAL_SEARCH_LIMIT);
+    let local = local_search(
+        commands,
+        &account,
+        query,
+        local_mailbox,
+        LOCAL_SEARCH_LIMIT,
+        order,
+    );
+    app.server_search_results = local.hits;
     let local_count = app.server_search_results.len();
+    app.server_search_local_order = local.order.filter(|_| local_count > 0);
+    app.server_search_server_order = None;
     app.server_search_status = Some(if local_count > 0 {
+        let label = super::app::search_order_label(app.server_search_local_order, None);
         format!(
-            "{local_count} local hit{}; searching server...",
-            if local_count == 1 { "" } else { "s" }
+            "{local_count} local hit{}, {}; searching server...",
+            if local_count == 1 { "" } else { "s" },
+            label.unwrap_or_default()
         )
     } else {
         "Searching server...".to_string()
@@ -1569,6 +1595,7 @@ pub fn start_search(
     let mut params = json!({
         "account": account,
         "query": mp_core::search::to_query_string(query),
+        "order": order,
     });
     if let Some(targets) = targets {
         let mailboxes: Vec<&str> = targets
@@ -1585,28 +1612,44 @@ pub fn start_search(
     }
 }
 
+/// What the local pass answered: its hits, in the order the daemon listed
+/// them, and that order as the daemon echoed it (PERSO-273), `None` when the
+/// pass could not run.
+#[derive(Debug, Default)]
+pub struct LocalPass {
+    pub hits: Vec<super::app::SearchResultEntry>,
+    pub order: Option<mp_protocol::listing::SearchOrder>,
+}
+
 pub fn local_search(
     commands: &dyn Queries,
     account: &str,
     query: &mp_core::search::Query,
     mailbox: Option<&str>,
     limit: usize,
-) -> Vec<super::app::SearchResultEntry> {
+    order: mp_protocol::listing::SearchOrder,
+) -> LocalPass {
     let params = json!({
         "account": account,
         "query": mp_core::search::to_query_string(query),
         "mailbox": mailbox,
         "limit": limit,
+        "order": order,
         "body": true,
     });
     match commands.call("message.search", params) {
-        Ok(answer) => super::queries::decode_search_hits(&answer),
+        // The order the daemon names, not the one asked for: a daemon from
+        // before PERSO-273 echoes none and ranks, which reads as relevance.
+        Ok(answer) => LocalPass {
+            hits: super::queries::decode_search_hits(&answer),
+            order: Some(mp_client::queries::decode_search_order(&answer)),
+        },
         Err(e) => {
             // The same silence the store-backed pass kept: a local pass that
             // cannot run leaves the server leg to answer, and the overlay says
             // "Searching server..." either way.
             log::warn!("[commands] the local pass over {account} found nothing: {e:#}");
-            Vec::new()
+            LocalPass::default()
         }
     }
 }
@@ -2097,8 +2140,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        attachment_files, draft_from_message, draft_from_source, eml_file, markdown_rendition,
-        MessageAddress,
+        attachment_files, draft_from_message, draft_from_source, eml_file, local_search,
+        markdown_rendition, MessageAddress,
     };
     use crate::queries::Queries;
 
@@ -2122,6 +2165,24 @@ mod tests {
             self.calls.borrow_mut().push((method.to_string(), params));
             Ok(self.answer.clone())
         }
+    }
+
+    /// The local pass asks for the overlay's order and names the one the
+    /// daemon echoes; a daemon from before PERSO-273 echoes none and ranks
+    /// whatever it is asked, so its answer reads as relevance, not as the
+    /// order the pass asked for.
+    #[test]
+    fn the_local_pass_names_the_echoed_order_and_an_older_daemons_as_relevance() {
+        use mp_protocol::listing::SearchOrder;
+        let query = mp_core::search::parse("ledger").unwrap();
+        let door = Recorder::answering(json!({"hits": [], "order": "oldest"}));
+        let pass = local_search(&door, "alice", &query, None, 50, SearchOrder::Oldest);
+        assert_eq!(pass.order, Some(SearchOrder::Oldest));
+        assert_eq!(door.calls.borrow()[0].1["order"], json!("oldest"));
+
+        let older = Recorder::answering(json!({"hits": []}));
+        let pass = local_search(&older, "alice", &query, None, 50, SearchOrder::Oldest);
+        assert_eq!(pass.order, Some(SearchOrder::Relevance));
     }
 
     /// `cF` makes the call `mp forward --as-attachment` makes: `draft.forward`

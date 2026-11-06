@@ -1289,6 +1289,36 @@ pub struct SearchTarget {
     pub label: String,
 }
 
+/// What the search overlay says its hits are in (PERSO-273): the order the
+/// daemon echoed for each pass that listed hits, the local pass's first,
+/// since its hits come first, and the server's after it when the two differ
+/// (a server gives no score, so it answers `relevance` newest first).
+/// `None` when neither pass listed a hit.
+pub fn search_order_label(
+    local: Option<mp_protocol::listing::SearchOrder>,
+    server: Option<mp_protocol::listing::SearchOrder>,
+) -> Option<String> {
+    match (local, server) {
+        (Some(local), Some(server)) if local != server => Some(format!(
+            "{}, then the server's {}",
+            local.describe(),
+            server.describe()
+        )),
+        (Some(order), _) | (None, Some(order)) => Some(order.describe().to_string()),
+        (None, None) => None,
+    }
+}
+
+/// The search the overlay last ran, which `S` runs again in the next order
+/// (PERSO-273): the fields of [`Action::ServerSearch`], kept as it was
+/// submitted, so a form edited since and not searched does not leak in.
+#[derive(Debug, Clone)]
+pub struct LastSearch {
+    pub query: mp_core::search::Query,
+    pub targets: Option<Vec<SearchTarget>>,
+    pub local_mailbox: Option<String>,
+}
+
 /// A single server search result held in memory.
 ///
 /// It used to carry the path it had been saved to; nothing saves a hit to a
@@ -1298,6 +1328,10 @@ pub struct SearchResultEntry {
     pub entry: EmailEntry,
     pub fetched: FetchedEmail,
     pub source_label: String,
+    /// The hit's `seq` in its server search's stream, which the settle's
+    /// `hit_order` orders the server's hits by (PERSO-273); `None` for a hit
+    /// of the local pass, which the store answered in its own order.
+    pub seq: Option<u64>,
 }
 
 /// Which control of the Outlook-shape server-search form (#0086b) is focused,

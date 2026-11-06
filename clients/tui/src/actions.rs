@@ -2355,6 +2355,7 @@ mod tests {
             entry,
             fetched,
             source_label: "INBOX".into(),
+            seq: None,
         }
     }
 

@@ -1308,8 +1308,97 @@ fn an_account_wide_search_sends_the_desktops_request() {
     .expect("the form is not blank");
     assert_eq!(
         fixture.calls_to("message.search_server"),
-        vec![json!({"account": ACCOUNT, "query": desktop_query})],
+        vec![json!({"account": ACCOUNT, "query": desktop_query, "order": "newest"})],
         "the TUI's account-wide search is not the desktop's request"
+    );
+}
+
+/// `S` in the results list cycles the order, newest, oldest, then best
+/// match first, and runs the last search again in it: both passes ask for
+/// the new `order`, the local pass's hits come back in it, and the footer
+/// names the order the daemon echoed (PERSO-273).
+#[test]
+fn s_in_the_results_cycles_the_order_and_runs_the_search_again_in_it() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    app.overlay = Overlay::Search;
+    app.server_search_focus = SearchOverlayFocus::Field(SearchField::Keywords);
+    for c in "body".chars() {
+        app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+    let run = |app: &mut App| {
+        let Some(Action::ServerSearch {
+            query,
+            targets,
+            local_mailbox,
+        }) = app.pending_actions.pop_front()
+        else {
+            panic!("the key queues the search");
+        };
+        fixture.forget();
+        crate::tui::commands::start_search(
+            app,
+            &fixture,
+            &query,
+            targets.as_deref(),
+            local_mailbox.as_deref(),
+        );
+        let local: Vec<Value> = fixture.calls_to("message.search");
+        let server: Vec<Value> = fixture.calls_to("message.search_server");
+        assert_eq!(local.len(), 1, "one local pass");
+        assert_eq!(server.len(), 1, "one server leg");
+        assert_eq!(
+            local[0]["order"], server[0]["order"],
+            "both passes ask for one order"
+        );
+        let subjects: Vec<String> = app
+            .server_search_results
+            .iter()
+            .map(|hit| hit.entry.subject.clone())
+            .collect();
+        (local[0]["order"].clone(), subjects)
+    };
+
+    let (order, subjects) = run(&mut app);
+    assert_eq!(
+        order,
+        json!("newest"),
+        "a search asks for newest first by default"
+    );
+    assert_eq!(subjects, ["c", "b", "a"]);
+    assert_eq!(
+        app.server_search_status.as_deref(),
+        Some("3 local hits, newest first; searching server...")
+    );
+    assert_eq!(app.server_search_focus, SearchOverlayFocus::List);
+
+    app.handle_key(KeyEvent::from(KeyCode::Char('S')));
+    let (order, subjects) = run(&mut app);
+    assert_eq!(order, json!("oldest"));
+    assert_eq!(subjects, ["a", "b", "c"]);
+    assert_eq!(
+        app.server_search_status.as_deref(),
+        Some("3 local hits, oldest first; searching server...")
+    );
+
+    app.handle_key(KeyEvent::from(KeyCode::Char('S')));
+    let (order, _) = run(&mut app);
+    assert_eq!(order, json!("relevance"));
+    assert_eq!(
+        app.server_search_status.as_deref(),
+        Some("3 local hits, best match first; searching server...")
+    );
+
+    app.handle_key(KeyEvent::from(KeyCode::Char('S')));
+    let (order, _) = run(&mut app);
+    assert_eq!(
+        order,
+        json!("newest"),
+        "the cycle comes back to newest first"
     );
 }
 
