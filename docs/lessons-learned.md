@@ -3521,3 +3521,13 @@ WebKit marks the page of a hidden, off-screen or occluded window hidden (no anim
 WebDriver clicks on an `<option>` do not change a native `<select>` in WKWebView; the specs set `value` through the prototype setter and dispatch `change`.
 The fixture settles a send 400 ms after it answers, so a spec checks a send's outcome after the outbox chip shows it, never right after the confirmation closes.
 `tauri build --bundles dmg` opens Finder windows while it lays out the DMG; an agent building on a Mac someone is using passes `--bundles app`.
+
+## In a worktree, pnpm exec and pnpm test install into the copied node_modules (2026-11-06, PERSO-274)
+
+`pnpm exec` and `pnpm test` run pnpm's dependency check first, and when a worktree's copied `node_modules` lags the lockfile (the `@wdio/*` packages PERSO-271 added), pnpm installs into it, stops on the blocked build scripts and leaves an untracked `clients/desktop/pnpm-workspace.yaml`.
+An agent in a worktree runs `./node_modules/.bin/vitest run` and `./node_modules/.bin/tsc -b` directly, or brings `node_modules` up to the lockfile in the main session first.
+
+## The desktop list filter matches substrings, the store's search whole words (2026-11-06, PERSO-274)
+
+The list header's filter matches typed text anywhere in the subject and sender, while `message.search` quotes each word as a whole-word FTS term over subject, sender and body, so `dach` filters in "Angebot Dachsanierung" and finds nothing in the store.
+Both fixtures (`clients/desktop/src/fixture/backend.ts`, `src-tauri/src/fixture.rs`) answer `search_local` by substring, so a part-word query passes in the tests and fails against a live daemon.
