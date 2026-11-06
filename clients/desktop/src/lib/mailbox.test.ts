@@ -29,6 +29,14 @@ describe("the sender's address", () => {
     ["Bob, alice@y.example (x <bob@x.example>)", "alice@y.example"],
     ["John <john@x.example", "John <john@x.example"],
     ["MAILER-DAEMON", "MAILER-DAEMON"],
+    ["Team: alice@ok.example;, x@blocked.example", "alice@ok.example"],
+    ["a@x.example, , b@y.example", "a@x.example"],
+    ['x@blocked.example, "< G":;', "x@blocked.example"],
+    ['<x@blocked.example>, "< G":;', "x@blocked.example"],
+    ["x@blocked.example, alice@ok.example", "x@blocked.example"],
+    ['"Bob <bob@x.example>"', '"Bob <bob@x.example>"'],
+    ['"Bob <bob@x.example>" alice@y.example', "alice@y.example"],
+    ["Cron Dæmon <root@x.example>", "root@x.example"],
   ])("reads %s as the daemon does", (from, address) => {
     expect(senderAddress(from)).toBe(address);
   });
@@ -48,6 +56,33 @@ describe("the sender's name", () => {
     expect(senderAddress("Alice (Team) <alice@x.example> (via <list@y.example>)")).toBe("alice@x.example");
     // An unclosed `(` is text, and the `<...>` after it still names the mailbox.
     expect(senderAddress("bob@x.example ( <alice@y.example>")).toBe("alice@y.example");
+  });
+});
+
+describe("an ordinary From", () => {
+  // As the daemon stores it, which is how main stored it
+  // (`mp_core::parse::tests::an_ordinary_address_header_reads_as_it_always_did`).
+  it.each([
+    ["Jane Doe <jane@x.example>", "Jane Doe <jane@x.example>", "Jane Doe", "jane@x.example"],
+    ['"Doe, Jane" <jane@x.example>', "Doe, Jane <jane@x.example>", "Doe, Jane", "jane@x.example"],
+    ["jane@x.example", "jane@x.example", "jane@x.example", "jane@x.example"],
+    ["<jane@x.example>", "jane@x.example", "jane@x.example", "jane@x.example"],
+    ["Jürgen Müller <j@x.example>", "Jürgen Müller <j@x.example>", "Jürgen Müller", "j@x.example"],
+    ["Alice (Team) <a@x.example>", "Alice (Team) <a@x.example>", "Alice (Team)", "a@x.example"],
+    ["root@x.example (Cron Daemon)", "root@x.example (Cron Daemon)", "root@x.example (Cron Daemon)", "root@x.example"],
+    ["CCBE [TUBVCMS] <r@x.example>", "CCBE [TUBVCMS] <r@x.example>", "CCBE [TUBVCMS]", "r@x.example"],
+  ])("%s reads as it always did", (from, readable, name, address) => {
+    expect(readableSender(from)).toBe(readable);
+    expect(senderName(from)).toBe(name);
+    expect(senderAddress(from)).toBe(address);
+  });
+
+  it("shows a quoted bracket as the name's", () => {
+    expect(readableSender('"Bob <bob@x.example>" <alice@y.example>')).toBe("Bob <bob@x.example> <alice@y.example>");
+    expect(readableSender('"Bob <bob@x.example>"')).toBe('"Bob <bob@x.example>"');
+    expect(senderName('"Bob <bob@x.example>"')).toBe('"Bob <bob@x.example>"');
+    expect(senderAddress('"Alerts > Prod" <a@x.example> ("<b@y.example>")')).toBe("a@x.example");
+    expect(senderAddress('" <x@y.example>')).toBe("x@y.example");
   });
 });
 

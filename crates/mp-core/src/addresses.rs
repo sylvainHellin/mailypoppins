@@ -102,6 +102,20 @@ pub fn stored_display_name(name: &str) -> String {
     quoted_unless(&plain_name(name), |c| !c.is_ascii() || is_atext_or_fws(c))
 }
 
+/// A comment's text as the store writes it inside `(...)`: its control
+/// characters turned to spaces, trimmed, and `\`, `(` and `)` escaped, so no
+/// character of it closes the comment or opens another.
+pub fn stored_comment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in plain_name(text).chars() {
+        if matches!(c, '\\' | '(' | ')') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// `name` with its control characters turned to spaces, trimmed.
 fn plain_name(name: &str) -> String {
     let name: String = name
@@ -111,8 +125,9 @@ fn plain_name(name: &str) -> String {
     name.trim().to_string()
 }
 
-/// One mailbox as the store keeps an address header that came as RFC 822
-/// (`crate::parse::address_headers`): `Name <address>` with the name as
+/// One mailbox as the store keeps it, from an RFC 822 address header holding
+/// an encoded-word (`crate::parse::address_headers`) or from Graph's
+/// recipients (`graph::format_recipient`): `Name <address>` with the name as
 /// [`stored_display_name`] writes it, so `"Doe, Jane" <j@x>` and
 /// `Jürgen Müller <j@x>` read as they always did, and the bare address when
 /// there is no name or the name only repeats the address, as
@@ -318,5 +333,14 @@ mod tests {
         ] {
             assert_eq!(stored_mailbox(name, address), stored, "{name:?}");
         }
+    }
+
+    /// A comment written back closes where it should: its own parentheses
+    /// and backslashes escaped, its line breaks turned to spaces.
+    #[test]
+    fn stored_comment_escapes_what_would_close_it() {
+        assert_eq!(stored_comment("Cron Dæmon"), "Cron Dæmon");
+        assert_eq!(stored_comment(r" ) <a@x> (\ "), r"\) <a@x> \(\\");
+        assert_eq!(stored_comment("a\r\nb"), "a  b");
     }
 }

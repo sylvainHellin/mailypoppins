@@ -2092,9 +2092,12 @@ pub const ADDRESS_REWRITES_PER_PASS: usize = 1000;
 ///
 /// An earlier build stored them decoded, where a `(` or a `"` an
 /// encoded-word decoded to reads as syntax, so a blocked sender's mail could
-/// name no mailbox or another one. The rows still owed are those with a raw
-/// message below the row id `meta` keeps
-/// ([`crate::store::schema::META_ADDRESSES_REWRITTEN_BELOW`]): a row ingested
+/// name no mailbox or another one. Only a header whose raw value holds an
+/// encoded-word is written again ([`crate::parse::encoded_address_header`]):
+/// any other keeps what the row holds, decoding having changed nothing in
+/// it. The rows still owed are those with a raw message below the row id
+/// `meta` keeps ([`crate::store::schema::META_ADDRESSES_REWRITTEN_BELOW`]):
+/// a row ingested
 /// since needs none, and one rewritten again is rewritten to the same text. A
 /// row whose raw blob was evicted keeps what it holds, read by
 /// [`crate::parse::mailbox_addresses`]'s rule for decoded text, and the
@@ -2136,7 +2139,12 @@ pub fn rewrite_stored_addresses(store: &Store, blobs: &BlobStore, limit: usize) 
         let Ok((headers, _)) = mailparse::parse_headers(&raw) else {
             continue;
         };
-        rewrites.push((*row_id, raw_hash, crate::parse::address_headers(&headers)));
+        // From, To, Cc, Reply-To and Bcc, as the columns below.
+        let encoded = crate::parse::ADDRESS_HEADER_NAMES
+            .map(|name| crate::parse::encoded_address_header(&headers, name));
+        if encoded.iter().any(Option::is_some) {
+            rewrites.push((*row_id, raw_hash, encoded));
+        }
     }
     let next = match rows.last() {
         Some((last, _)) if rows.len() == limit => *last,
@@ -2147,22 +2155,20 @@ pub fn rewrite_stored_addresses(store: &Store, blobs: &BlobStore, limit: usize) 
         .unchecked_transaction()
         .context("opening the address rewrite transaction")?;
     let mut changed = 0;
-    for (row_id, raw_hash, headers) in &rewrites {
+    for (row_id, raw_hash, [from, to, cc, reply_to, bcc]) in &rewrites {
+        // A `NULL` parameter is a header with no encoded-word: its column is
+        // kept.
         changed += tx
             .execute(
-                "UPDATE messages SET from_ = ?3, to_ = ?4, cc = ?5, reply_to = ?6, bcc = ?7
+                "UPDATE messages SET from_ = IFNULL(?3, from_), to_ = IFNULL(?4, to_),
+                        cc = IFNULL(?5, cc), reply_to = IFNULL(?6, reply_to),
+                        bcc = IFNULL(?7, bcc)
                  WHERE id = ?1 AND raw_blob = ?2
-                   AND (from_ IS NOT ?3 OR to_ IS NOT ?4 OR cc IS NOT ?5
-                        OR reply_to IS NOT ?6 OR bcc IS NOT ?7)",
-                rusqlite::params![
-                    row_id,
-                    raw_hash,
-                    headers.from,
-                    headers.to,
-                    headers.cc,
-                    headers.reply_to,
-                    headers.bcc
-                ],
+                   AND (from_ IS NOT IFNULL(?3, from_) OR to_ IS NOT IFNULL(?4, to_)
+                        OR cc IS NOT IFNULL(?5, cc)
+                        OR reply_to IS NOT IFNULL(?6, reply_to)
+                        OR bcc IS NOT IFNULL(?7, bcc))",
+                rusqlite::params![row_id, raw_hash, from, to, cc, reply_to, bcc],
             )
             .context("rewriting a row's address headers")?;
     }
@@ -2826,7 +2832,8 @@ mod tests {
 
     /// A row an older build stored with its `From` decoded, where a decoded
     /// `(` hides the mailbox, is stored again from its raw message, newest
-    /// first and once; a row whose raw was evicted keeps what it holds.
+    /// first and once; a row whose raw was evicted keeps what it holds, and a
+    /// header with no encoded-word is never written again.
     #[test]
     fn the_address_backfill_stores_an_old_rows_addresses_again_once() {
         use crate::store::schema::{clear_meta, get_meta, META_ADDRESSES_REWRITTEN_BELOW};
@@ -2887,16 +2894,36 @@ mod tests {
                 )
                 .unwrap();
         }
+        // A header with no encoded-word is never written again, whatever the
+        // row holds for it.
+        let set = |column: &str, row: i64, value: &str| {
+            store
+                .conn()
+                .execute(
+                    &format!("UPDATE messages SET {column} = ?2 WHERE id = ?1"),
+                    rusqlite::params![row, value],
+                )
+                .unwrap();
+        };
+        set("from_", fresh, r#""Jane" <jane@x.com>"#);
+        set("to_", old, "Me <me@x.com>");
         clear_meta(store.conn(), META_ADDRESSES_REWRITTEN_BELOW).unwrap();
         std::fs::remove_file(blobs.path_for(&BlobHash::of(raw(2, wire).as_bytes()))).unwrap();
 
         // Newest first: the fresh row is as stored, the evicted one is left.
         assert_eq!(rewrite_stored_addresses(&store, &blobs, 2).unwrap(), 0);
-        assert_eq!(from_of(fresh), "Jane <jane@x.com>");
+        assert_eq!(from_of(fresh), r#""Jane" <jane@x.com>"#);
         assert_eq!(from_of(evicted), "( <x@blocked.example> ())");
         assert_eq!(from_of(old), "( <x@blocked.example> ())");
         assert_eq!(rewrite_stored_addresses(&store, &blobs, 2).unwrap(), 1);
         assert_eq!(from_of(old), r#""(" <x@blocked.example>"#);
+        let to_of_old: String = store
+            .conn()
+            .query_row("SELECT to_ FROM messages WHERE id = ?1", [old], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(to_of_old, "Me <me@x.com>");
         assert_eq!(
             crate::parse::extract_email_address(&from_of(old)),
             "x@blocked.example"

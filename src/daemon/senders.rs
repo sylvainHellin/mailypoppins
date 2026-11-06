@@ -749,42 +749,70 @@ mod tests {
         assert_eq!(draft.frontmatter.to.as_deref(), Some("alice@ok.example"));
     }
 
-    /// An encoded-word decoding to a `(` or a `"` that, read as syntax in the
-    /// decoded text, would hide the blocked mailbox or name one a comment
-    /// carries: ingest stores the name quoted, so the block, the reader and a
-    /// reply all name the mailbox every other client shows.
+    /// An encoded-word decoding to a `(`, `)`, `"` or `<` that, read as syntax
+    /// in the decoded text, would hide the blocked mailbox or name one a
+    /// comment carries: ingest stores the name quoted, or the bare addresses
+    /// the raw value names when the parser rejects it, so the block, the
+    /// reader, Copy sender and a reply all name the blocked mailbox.
     #[test]
     fn an_encoded_word_decoding_to_syntax_hides_no_blocked_sender() {
         let fx = Fixture::new(true);
         let entries = list(&["@blocked.example"]);
-        let rows: Vec<String> = [
-            "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29?=)",
-            "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29_=3Calice=40ok.example=3E_=28?=)",
-            "=?utf-8?q?=22?= <x@blocked.example> (=?utf-8?q?=22=3Calice=40ok.example=3E?=)",
-        ]
-        .iter()
-        .enumerate()
-        .map(|(at, wire)| fx.ingest(at as i64 + 1, wire))
-        .collect();
+        let cases = [
+            (
+                "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29?=)",
+                r#""(" <x@blocked.example>"#,
+            ),
+            (
+                "=?utf-8?q?=28?= <x@blocked.example> (=?utf-8?q?=29_=3Calice=40ok.example=3E_=28?=)",
+                r#""(" <x@blocked.example>"#,
+            ),
+            (
+                "=?utf-8?q?=22?= <x@blocked.example> (=?utf-8?q?=22=3Calice=40ok.example=3E?=)",
+                r#""\"" <x@blocked.example>"#,
+            ),
+            (
+                "Spam <x@blocked.example>, =?utf-8?q?=3C?=",
+                "x@blocked.example",
+            ),
+            ("x@blocked.example, =?utf-8?q?=3C?=", "x@blocked.example"),
+            (
+                "x@blocked.example, =?utf-8?q?=3C?= alice@ok.example =?utf-8?q?=3E?=",
+                "x@blocked.example, alice@ok.example",
+            ),
+            (
+                "x@blocked.example (c), =?utf-8?q?=3C?= alice@ok.example =?utf-8?q?=3E?=",
+                "x@blocked.example, alice@ok.example",
+            ),
+            ("=?utf-8?q?=28?=<x@blocked.example>, )", "x@blocked.example"),
+            (
+                "x@blocked.example, =?utf-8?q?=3C?= G:;",
+                r#"x@blocked.example, "< G":;"#,
+            ),
+            (
+                "<x@blocked.example>; =?utf-8?q?=3C?= G:;",
+                r#"<x@blocked.example>, "< G":;"#,
+            ),
+        ];
         let drafts = fx.dir.path().join("drafts");
-        for message_id in &rows {
+        for (at, (wire, stored)) in cases.iter().enumerate() {
+            let message_id = fx.ingest(at as i64 + 1, wire);
             let from: String = fx
                 .store
                 .conn()
                 .query_row(
                     "SELECT from_ FROM messages WHERE message_id = ?1",
-                    [message_id],
+                    [&message_id],
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(matches(&entries, &from), "{from} is blocked");
+            assert_eq!(from, *stored, "{wire}");
+            assert!(matches(&entries, &from), "{wire}: {from} is blocked");
+            // Copy sender, here and in the desktop's table.
             assert_eq!(
-                crate::parse::readable_sender(&from)
-                    .rsplit_once(' ')
-                    .unwrap()
-                    .1,
-                "<x@blocked.example>",
-                "{from}"
+                crate::parse::extract_email_address(&from),
+                "x@blocked.example",
+                "{wire}"
             );
             let source = crate::draft::SourceMessage {
                 from: from.clone(),
@@ -803,14 +831,14 @@ mod tests {
             assert_eq!(
                 draft.frontmatter.to.as_deref(),
                 Some("x@blocked.example"),
-                "{from}"
+                "{wire}"
             );
         }
         assert_eq!(
             move_existing(&fx.store, &account(), &entries).unwrap(),
             Moved::Rows {
                 mailbox: "Junk".to_string(),
-                count: 3
+                count: cases.len()
             }
         );
     }

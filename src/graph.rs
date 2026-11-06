@@ -884,22 +884,18 @@ struct GraphMessageIdLookupEntry {
 // Format helpers
 // ---------------------------------------------------------------------------
 
-/// `Name <addr>`, the name quoted when it holds a character that would make
-/// the mailbox parse as something else (`Doe, Jane`, `Bob <bob@x>`), so the
-/// stored header names the one mailbox Graph sent
-/// ([`crate::parse::mailbox_addresses`]). The bare address when there is no
-/// name or the name only repeats the address, which Graph often sends.
+/// One recipient as the store keeps a mailbox, by the rule IMAP ingest
+/// writes one with ([`mp_core::addresses::stored_mailbox`]): `Name <addr>`
+/// with the name quoted whenever it holds an ASCII special (`Doe, Jane`,
+/// `Bob <bob@x>`, `Ops (EU)`), so the stored header names the one mailbox
+/// Graph sent ([`crate::parse::mailbox_addresses`]); the bare address when
+/// there is no name or the name only repeats the address, which Graph often
+/// sends.
 fn format_recipient(r: &GraphRecipient) -> String {
-    let addr = r.email_address.address.as_deref().unwrap_or("");
-    let name = r.email_address.name.as_deref().unwrap_or("").trim();
-    if name.is_empty() || name.to_lowercase() == addr.trim().to_lowercase() {
-        return addr.to_string();
-    }
-    if name.contains(['<', '>', ',', ';', ':', '@', '"']) {
-        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-        return format!("\"{escaped}\" <{addr}>");
-    }
-    format!("{name} <{addr}>")
+    mp_core::addresses::stored_mailbox(
+        r.email_address.name.as_deref().unwrap_or(""),
+        r.email_address.address.as_deref().unwrap_or(""),
+    )
 }
 
 fn format_recipients(recipients: &[GraphRecipient]) -> String {
