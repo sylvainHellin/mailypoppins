@@ -3555,3 +3555,14 @@ Input through the VM's VNC port (`scripts/vm.sh vnc`, vncdotool, which Lume itse
 In the `macos-tahoe-cua` image that prompt then refuses the right password anyway: the guest's log shows `MKB password verification for keybag 3 returned -13` while `dscl . -authonly lume lume` succeeds, so the login password and the keybag disagree; the check stops at the prompt and `xattr -dr com.apple.quarantine` opens the app.
 CuaDriver.app does not start its daemon at guest login (`open -g -a /Applications/CuaDriver.app` does, without fronting anything), and its first screenshot raises a screen-capture consent alert inside the guest, which `get_desktop_state` reports as `direct_capture_consent_required`; once allowed it survives reboots, so it belongs in the golden VM.
 A pixel click through Cua Driver needs a `get_window_state` of that window in the same session, so it goes inside one `run_script`; separate `cua-driver call` processes refuse it with `window_never_read`.
+
+## Two runs sorted the same way are merged, not concatenated (2026-11-06, PERSO-273)
+
+The server leg excludes the local pass's Message-IDs, so its hits are mostly the newest, unsynced mail; listing them after up to 50 local hits under newest first hid exactly the mail the user searched the server for.
+A client showing two passes in one date order merges them with the daemon's comparator (`ServerSearchSettled::arrange_after`, ties to the local hit) and inserts each streamed hit at its date (`SearchOrder::date_position`); only relevance concatenates.
+Restore a cursor across a re-arrange by the row's prior index, not by a key an older peer may leave constant: an old daemon's hits all read `seq` 0.
+
+## A wire `date_sort` is the UTC instant, empty when undated (2026-11-06, PERSO-273)
+
+A row's wire `date_sort` is the UTC instant of the store's Unix stamp, `""` when undated (`resolve_date`, `wire_date_sort_of`).
+A client deriving one from a raw `Date:` header goes through `resolve_date` too, or its rows sort by the sender's wall clock against the daemon's.
