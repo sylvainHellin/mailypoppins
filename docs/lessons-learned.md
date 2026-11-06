@@ -3547,7 +3547,6 @@ Both fixtures (`clients/desktop/src/fixture/backend.ts`, `src-tauri/src/fixture.
 
 The desktop availability grid restarts its 500 ms wait when the query changes, not on each keystroke, so a test typing several characters that leave the query unchanged can outlast it under load and see an intermediate query.
 Freeze `setTimeout` and `clearTimeout` with `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })` before the component mounts, drive input with `fireEvent` (user-event hangs under vitest's frozen clock), and move the clock with `act(() => vi.advanceTimersByTimeAsync(n))`.
-||||||| parent of 0e4851b0 (Desktop: whole-desktop checks in a Lume macOS VM driven by Cua Driver, scripts/vm.sh and the README how-to (PERSO-271))
 
 ## Driving the desktop app in a Lume macOS VM (2026-11-06, PERSO-271)
 
