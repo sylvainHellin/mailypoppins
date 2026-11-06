@@ -188,11 +188,12 @@ fn differ(text: &str, others: &[&str]) -> Range<usize> {
 /// row's name: cut at its end (`office@ls1.…`), cut in the middle to its
 /// start and as much of its end as fits (`info…ny-a.de`), or cut around
 /// where it differs from the rows it still reads the same as
-/// (`con…pt-1.ex…`). No two rows read the same unless they do in every
-/// form; the third shows the first char where a row differs from the rest
-/// of its group, so this takes three or more rows that differ from each
-/// other at places too far apart for one name, or two that differ only
-/// in chars the terminal draws alike.
+/// (`con…pt-1.ex…`). The third shows the first char where a row differs
+/// from the rows it still reads the same as, so rows keep reading the same
+/// only when three or more differ from each other at places too far apart
+/// for one name (contact@dept-1.example.org, …dept-2….org, …dept-1….com,
+/// …dept-2….com), or when two differ only in chars the terminal draws
+/// alike.
 fn row_names(rows: &[Row]) -> Vec<String> {
     fn local(row: &Row) -> &str {
         row.address.split('@').next().unwrap_or_default()
