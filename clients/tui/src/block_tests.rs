@@ -170,8 +170,10 @@ fn the_chooser_offers_the_reply_address_and_its_domain() {
     assert_eq!(c.entry(), "offers@shop.example");
     let first = BlockChooser::for_sender("x@y.org, Alice <alice@z.org>").expect("an address");
     assert_eq!(first.address, "alice@z.org");
-    let quoted = BlockChooser::for_sender("\"john.doe\"@example.com").expect("an address");
-    assert_eq!(quoted.domain, "@example.com");
+    // A quoted local part that needs no quotes is offered unquoted, the
+    // entry the daemon takes and matches it by.
+    let quoted = BlockChooser::for_sender("John <\"John.Doe\"@Example.com>").expect("an address");
+    assert_eq!(quoted.entries(), ["john.doe@example.com", "@example.com"]);
     for none in ["(unknown)", "", "Undisclosed recipients:;", "@example.com"] {
         assert_eq!(BlockChooser::for_sender(none), None, "{none:?}");
     }

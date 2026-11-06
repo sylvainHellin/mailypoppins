@@ -174,13 +174,13 @@ pub fn normalize(raw: &str) -> std::result::Result<String, String> {
 /// mailboxes matches when any of them is blocked, each judged by the address
 /// in its last `<...>` or, with none, its own. A quoted local part that
 /// needs no quotes names the mailbox its unquoted form does
-/// (`"john.doe"@x` is `john.doe@x`, [`comparable`]).
+/// (`"john.doe"@x` is `john.doe@x`, [`crate::parse::comparable_address`]).
 pub fn matches(entries: &[String], from: &str) -> bool {
     if entries.is_empty() {
         return false;
     }
     crate::parse::mailbox_addresses(from).iter().any(|address| {
-        let address = comparable(address);
+        let address = crate::parse::comparable_address(address);
         let Some((_, domain)) = address.rsplit_once('@') else {
             return false;
         };
@@ -189,26 +189,6 @@ pub fn matches(entries: &[String], from: &str) -> bool {
             None => *entry == address,
         })
     })
-}
-
-/// `address` as an entry is compared with it: lowercased, and a quoted local
-/// part that would be a dot-atom unquoted (`"john.doe"@x`) written unquoted,
-/// since RFC 5321 makes the two the same mailbox. Any other quoted local part
-/// (`"john doe"@x`) stays quoted, and only a domain entry can match it, since
-/// [`normalize`] refuses an entry holding a `"` or a space.
-fn comparable(address: &str) -> String {
-    let address = address.to_lowercase();
-    let unquoted = address.rsplit_once('@').and_then(|(local, domain)| {
-        let inner = local.strip_prefix('"')?.strip_suffix('"')?;
-        let atext = |c: char| {
-            !c.is_ascii() || c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~".contains(c)
-        };
-        let dot_atom = inner
-            .split('.')
-            .all(|atom| !atom.is_empty() && atom.chars().all(atext));
-        dot_atom.then(|| format!("{inner}@{domain}"))
-    });
-    unquoted.unwrap_or(address)
 }
 
 /// What one list edit did.
@@ -756,6 +736,7 @@ mod tests {
         assert!(matches(&domain, r#""john doe"@example.com"#));
         assert!(matches(&domain, r#""a@b"@example.com"#));
         assert!(!matches(&domain, r#""a@example.com"@y.com"#));
+        let comparable = crate::parse::comparable_address;
         assert_eq!(comparable(r#""John.Doe"@X.com"#), "john.doe@x.com");
         assert_eq!(comparable(r#""john doe"@x.com"#), r#""john doe"@x.com"#);
     }

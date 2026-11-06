@@ -1856,6 +1856,28 @@ pub fn extract_email_address(raw: &str) -> String {
         .unwrap_or_else(|| raw.trim().to_string())
 }
 
+/// `address` as a blocked-senders entry is compared with it (PERSO-261):
+/// lowercased, and a quoted local part that would be a dot-atom unquoted
+/// (`"john.doe"@x`) written unquoted, since RFC 5321 makes the two the same
+/// mailbox. Any other quoted local part (`"john doe"@x`) stays quoted, and
+/// only a domain entry can match it, since the daemon refuses an entry
+/// holding a `"` or a space. The daemon matches a `From` by it, and a client
+/// offers the sender to block in it.
+pub fn comparable_address(address: &str) -> String {
+    let address = address.to_lowercase();
+    let unquoted = address.rsplit_once('@').and_then(|(local, domain)| {
+        let inner = local.strip_prefix('"')?.strip_suffix('"')?;
+        let atext = |c: char| {
+            !c.is_ascii() || c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~".contains(c)
+        };
+        let dot_atom = inner
+            .split('.')
+            .all(|atom| !atom.is_empty() && atom.chars().all(atext));
+        dot_atom.then(|| format!("{inner}@{domain}"))
+    });
+    unquoted.unwrap_or(address)
+}
+
 /// The first mailbox of `raw` ([`mailbox_parts`]) whose last `<...>` outside
 /// a quoted string names an address, read as [`bracketed_in`] reads it: the
 /// byte offset in `raw` its text starts at, that of its `<`, and the address.
@@ -3280,6 +3302,21 @@ mod tests {
             ),
         ] {
             assert_eq!(extract_email_address(from), address, "{from}");
+        }
+    }
+
+    /// An address is compared lowercase, a quoted local part that needs no
+    /// quotes unquoted and any other kept quoted (PERSO-261).
+    #[test]
+    fn an_address_is_compared_lowercase_and_unquoted_where_it_can_be() {
+        for (address, comparable) in [
+            ("Spam@Example.COM", "spam@example.com"),
+            (r#""John.Doe"@Example.com"#, "john.doe@example.com"),
+            (r#""john doe"@example.com"#, r#""john doe"@example.com"#),
+            (r#""john..doe"@example.com"#, r#""john..doe"@example.com"#),
+            ("(unknown)", "(unknown)"),
+        ] {
+            assert_eq!(comparable_address(address), comparable, "{address}");
         }
     }
 

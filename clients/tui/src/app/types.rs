@@ -3047,7 +3047,8 @@ impl SignaturesOverlay {
 /// blocked until Enter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockChooser {
-    /// The address a reply goes to, lowercase, as the list would hold it.
+    /// The address a reply goes to, as the list would hold it: lowercase,
+    /// and a quoted local part that needs no quotes unquoted.
     pub address: String,
     /// The address's domain with its `@`, lowercase.
     pub domain: String,
@@ -3059,9 +3060,8 @@ impl BlockChooser {
     /// The chooser for a message whose `From` is `from`, on the address;
     /// `None` when it names no address with a domain to block.
     pub fn for_sender(from: &str) -> Option<Self> {
-        let address = mp_core::parse::extract_email_address(from)
-            .trim()
-            .to_lowercase();
+        let address =
+            mp_core::parse::comparable_address(mp_core::parse::extract_email_address(from).trim());
         let (local, domain) = address.rsplit_once('@')?;
         if local.is_empty() || domain.is_empty() || domain.contains(char::is_whitespace) {
             return None;
