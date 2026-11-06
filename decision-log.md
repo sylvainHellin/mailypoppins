@@ -129,11 +129,12 @@ Rejected: v0.11.1 (the number follows the content); tagging after the account pi
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 5, answered 2026-10-22.
 Status: accepted
 
-## 2026-10-22 - Checks that need a desktop window start with an agent's pre-check in a browser, then a checklist of native-only items for Sylvain
+## 2026-11-06 - Checks that need a desktop window run as WebdriverIO specs in the app's own webview, and what needs the whole desktop runs through Cua in a Lume macOS VM
 
-Why: the desktop app runs in a browser preview on the fixture backend, where an agent can press keys and click, so it takes every check that does not need the native shell; what is left (native file pickers, the terminal editor, logging out for the login service, Gatekeeper, the release install) goes on a one-page checklist Sylvain works through, and each ticket closes as its items come back ticked.
-Rejected: Sylvain running every check from the checklist (the page's recommendation; it leaves work an agent can do); granting the terminal the macOS Accessibility permission for an unattended agent (it could control every app meanwhile).
-Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 6, answered 2026-10-22.
+Why: `pnpm test:e2e` drives the real WKWebView of a debug build on the fixtures through the WebDriver server `tauri-plugin-wdio-webdriver` embeds (the `e2e` cargo feature, refused in a release build and caught by `pnpm bundle`), and keeps the app in the background, so an agent runs it while Sylvain works on the same Mac; the browser preview on the fixture backend stays for quick checks before a build.
+What WebDriver cannot reach (native menus, file and folder pickers, the terminal editor, logging out for the login service, Gatekeeper, the DMG install) goes to Cua driving a macOS VM under Lume (PERSO-271, part B, not installed yet); until that runs, those items stay on a one-page checklist Sylvain works through, and each ticket closes as its items come back ticked.
+Rejected: terminal-mac (too young); Tart (runs the VMs but has no GUI control of its own); Claude Code computer use (takes over the user's screen and apps); the CrabNebula WebDriver for Tauri (paid); Sylvain running every check from the checklist (leaves work an agent can do); granting the terminal the macOS Accessibility permission for an unattended agent (it could control every app meanwhile).
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 6, answered 2026-10-22; Paseo session of 2026-11-05 approving PERSO-271 after the research in `.agents/research/2026-11-05-tauri-macos-gui-testing.md` and `.agents/research/2026-11-05-macos-vm-agent-sandboxes.md`.
 Status: accepted
 
 ## 2026-10-22 - The server half of `mp search` runs on the daemon's server search, which takes over the PERSO-175 semantics
