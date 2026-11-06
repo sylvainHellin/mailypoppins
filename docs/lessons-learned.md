@@ -3585,3 +3585,16 @@ Search tags each MATCH arm with its clause in one `UNION ALL` (chunked by 250), 
 ## The soak fixture template is cached by FIXTURE_VERSION (2026-11-06, PERSO-276)
 
 The `daemon_soak` fixture template is cached under the temp dir by `FIXTURE_VERSION`, so an additive store table that a fresh store fills at creation but an old one backfills must bump it, or the soak's growth row reads the backfill as store growth.
+
+## Parse an address header before RFC 2047 decoding, and rebuild only headers holding an encoded-word (2026-11-06, PERSO-261)
+
+An encoded-word may decode to `(`, `)`, `"` or `<`, even inside a comment, and in the decoded text nothing tells such a character from syntax, so `=?utf-8?q?=28?= <x@y> (=?utf-8?q?=29?=)` decoded names no mailbox.
+Ingest parses a header holding `=?` with `mailparse::addrparse_header` on the raw value and stores each mailbox with its name quoted when it holds syntax (`addresses::stored_mailbox`); a header without `=?` decodes to itself, so it is stored as it came, or every comment and bare display name is silently rewritten.
+mailparse ends a comment at its first `)`, does not consume a `,` after a group's `;`, and reads a bare quoted local part as a display name running into the next mailbox, so its parse is kept only when the stored value reads every address the raw value names, and a rejected header is stored as those bare addresses, never decoded.
+
+## A From is read for a block and for a reply by different rules (2026-11-06, PERSO-261)
+
+Read a stored header mailbox by mailbox, cut at `,` and `;` outside quotes and comments, each by its last unquoted `<...>`; "one `<` means one mailbox" hid every blocked sender before the last.
+A block tests every mailbox, but a reply picks one, the first holding a `<...>`, else the first: an older row stored decoded can read `x@blocked.example, <alice@ok.example>` from a name that decoded to `x@blocked.example,`, and the list row and the draft slug name that same mailbox.
+A quoted string directly before `@` is a local part (blanking it turned `"john.doe"@x` into `@x`), a `<`, `,` or `:` inside a quoted string is never syntax, and an unclosed `"` voids only itself and what follows, or one stray quote splits `"Doe, Jane"` and Ccs the fragment `"Doe`.
+Every change to these readers is mirrored in `clients/desktop/src/lib/mailbox.ts`, with a row in the table both test suites share.
