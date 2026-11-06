@@ -409,9 +409,18 @@ pub const THREAD_MAILBOX_INDEX: &str = "messages_thread_mailbox";
 /// [`ensure_additive_columns`] has run.
 pub const CONVERSATION_INDEX: &str = "messages_conversation";
 
+/// Name of the index of the rows the blocked-senders scan has not judged yet
+/// (PERSO-261, [`crate::daemon::senders`]).
+///
+/// Partial on `sender_judged IS NULL`, so it holds only what arrived since the
+/// last scan, and the scan after every tick reads and marks those rows off it
+/// rather than walking the whole table. It covers `messages.sender_judged`,
+/// an additive column, so it is created after [`ensure_additive_columns`].
+pub const SENDER_UNJUDGED_INDEX: &str = "messages_sender_unjudged";
+
 /// Every index created after [`SCHEMA_VERSION`] was last bumped, as
 /// `(name, CREATE statement)`, each looked up and created on its own.
-fn additive_indexes() -> [(&'static str, String); 4] {
+fn additive_indexes() -> [(&'static str, String); 5] {
     [
         (
             INVITE_INDEX,
@@ -439,6 +448,13 @@ fn additive_indexes() -> [(&'static str, String); 4] {
             format!(
                 "CREATE INDEX IF NOT EXISTS {CONVERSATION_INDEX} \
                  ON messages (account, conversation_id)"
+            ),
+        ),
+        (
+            SENDER_UNJUDGED_INDEX,
+            format!(
+                "CREATE INDEX IF NOT EXISTS {SENDER_UNJUDGED_INDEX} \
+                 ON messages (account, mailbox) WHERE sender_judged IS NULL"
             ),
         ),
     ]
@@ -512,11 +528,19 @@ pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
 /// IMAP row, on a row a local move has taken to a folder not listed since,
 /// and on a Graph row until the first pass of a build that records it: the op
 /// then names no item, and acts only on a folder that holds one copy.
-const ADDITIVE_COLUMNS: [(&str, &str, &str); 6] = [
+///
+/// `messages.sender_judged` is `1` once the blocked-senders scan has judged
+/// the row (PERSO-261, [`crate::daemon::senders`]): `NULL` is a row that
+/// arrived since the last scan. A local move and a UID rebind update the row
+/// in place and keep the mark, so a message the user moved back to the Inbox
+/// is not judged again; a row an older build wrote is marked when the scan
+/// first arms on the store, without being judged.
+const ADDITIVE_COLUMNS: [(&str, &str, &str); 7] = [
     ("drafts", "in_reply_to", "TEXT"),
     ("drafts", "forwarded_from", "TEXT"),
     ("messages", "conversation_id", "TEXT"),
     ("messages", "graph_id", "TEXT"),
+    ("messages", "sender_judged", "INTEGER"),
     ("message_blobs", "content_id", "TEXT"),
     ("message_blobs", "is_inline", "INTEGER"),
 ];

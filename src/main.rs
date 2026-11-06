@@ -330,6 +330,48 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<String>,
     },
+    /// Block a sender: move its mail from every Inbox to Junk, now and as it arrives
+    #[command(after_help = "\
+The daemon keeps one block list for every account. A sender is a full address
+or a domain written @example.com, which leaves its subdomains out, matched
+against the From address in any case. Blocking moves the sender's mail in each
+account's Inbox to that account's Junk folder, on the server too, and after
+every sync the daemon moves what arrived from a blocked sender since. A message
+moved back to the Inbox stays there. An account with no Junk folder keeps the
+mail, and the command says so. Nothing is set on the server, so mail moves only
+while the daemon runs.
+
+Examples:
+  mp block offers@shop.example
+  mp block @spam.example
+  mp block @spam.example --keep-existing")]
+    Block {
+        /// A full address (spam@example.com) or a domain (@example.com)
+        #[arg(value_name = "ADDRESS")]
+        address: String,
+        /// Leave the sender's mail already in the Inbox; only new mail moves
+        #[arg(long)]
+        keep_existing: bool,
+        /// Emit the daemon's answer as one JSON object {entry, added, entries,
+        /// moved: [{account, mailbox, count}], skipped: [{account, reason}]}
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a sender from the block list; nothing moves back from Junk
+    Unblock {
+        /// The address or @domain as it was blocked, in any case
+        #[arg(value_name = "ADDRESS")]
+        address: String,
+        /// Emit the daemon's answer as one JSON object {entry, removed, entries}
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the blocked senders
+    Blocked {
+        /// Emit one JSON object {entries}
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete received emails (server + local) or local drafts
     //
     // Kept to one doc line on purpose: a second paragraph flips clap into its
@@ -5315,6 +5357,100 @@ async fn signature_call(
         .map_err(|error| anyhow!("{}", error.message))
 }
 
+/// `mp block`: the daemon's `sender.block`, the call the TUI and the desktop
+/// make too (PERSO-261); this process only prints.
+async fn routed_block(address: &str, keep_existing: bool, json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call(
+        &mut connection,
+        mp_protocol::sender::METHOD_SENDER_BLOCK,
+        serde_json::json!({"address": address, "move_existing": !keep_existing}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let blocked: mp_protocol::sender::SenderBlocked =
+        serde_json::from_value(answer).context("reading the answer to the block")?;
+    print!("{}", render_blocked(&blocked));
+    Ok(())
+}
+
+/// What `mp block` prints: the entry, then a line per account whose mail
+/// moved and per account that has no Junk folder.
+fn render_blocked(blocked: &mp_protocol::sender::SenderBlocked) -> String {
+    let mut out = if blocked.added {
+        format!("{} Blocked {}\n", "\u{2713}".green(), blocked.entry)
+    } else {
+        format!("{} was already blocked\n", blocked.entry)
+    };
+    for moved in &blocked.moved {
+        out.push_str(&format!(
+            "  {}: moved {} message(s) to {}\n",
+            moved.account, moved.count, moved.mailbox
+        ));
+    }
+    for skipped in &blocked.skipped {
+        out.push_str(&format!("  {} {}\n", "\u{2717}".red(), skipped.reason));
+    }
+    out
+}
+
+/// `mp unblock`: the daemon's `sender.unblock`.
+async fn routed_unblock(address: &str, json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call(
+        &mut connection,
+        mp_protocol::sender::METHOD_SENDER_UNBLOCK,
+        serde_json::json!({"address": address}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let unblocked: mp_protocol::sender::SenderUnblocked =
+        serde_json::from_value(answer).context("reading the answer to the unblock")?;
+    if unblocked.removed {
+        println!(
+            "{} Unblocked {}; its mail already in Junk stays there",
+            "\u{2713}".green(),
+            unblocked.entry
+        );
+    } else {
+        println!("{} was not blocked", unblocked.entry);
+    }
+    Ok(())
+}
+
+/// `mp blocked`: the daemon's `sender.list`, one entry per line.
+async fn routed_blocked(json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call(
+        &mut connection,
+        mp_protocol::sender::METHOD_SENDER_LIST,
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let listed: mp_protocol::sender::BlockedSenders =
+        serde_json::from_value(answer).context("reading the blocked senders")?;
+    if listed.entries.is_empty() {
+        println!("No blocked senders");
+    }
+    for entry in &listed.entries {
+        println!("{entry}");
+    }
+    Ok(())
+}
+
 /// `mp signature list`: the names, the account's default marked.
 fn render_signature_listing(listing: &mp_protocol::signature::SignatureListing) -> String {
     if listing.names.is_empty() {
@@ -6392,6 +6528,22 @@ async fn main() -> Result<()> {
                 &global_config,
             )
             .await?;
+        }
+
+        Some(Commands::Block {
+            address,
+            keep_existing,
+            json,
+        }) => {
+            routed_block(&address, keep_existing, json).await?;
+        }
+
+        Some(Commands::Unblock { address, json }) => {
+            routed_unblock(&address, json).await?;
+        }
+
+        Some(Commands::Blocked { json }) => {
+            routed_blocked(json).await?;
         }
 
         Some(Commands::Delete {

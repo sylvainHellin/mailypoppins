@@ -427,6 +427,13 @@ A blocked runtime, a local-only account and a Graph account (whose rows carry no
 Editing a hook changes the effective account, so `config.reload` restarts the runtime and the runner comes back with the new hooks.
 What it runs, and why only once, is [Mail hooks](#mail-hooks) below.
 
+### The blocked-senders runner
+
+Every ready runtime of an account with a server, IMAP or Graph, also runs a blocked-senders runner (`src/daemon/runtime/sender_runner.rs`, PERSO-261), bound to the runtime the same way and woken by the same ticks as the hook runner.
+Each scan judges the Inbox rows that arrived since the last one against the block list in `<data_dir>/blocked-senders.json` (`mp block`, `mp unblock`, `mp blocked`) and moves a match to the account's Junk folder through the mutation queue, then asks for a drain and publishes the counts that moved.
+The first scan after the Inbox has synced arms on the store and judges nothing, so mail already there never moves on its own; `mp block` moves that mail itself unless given `--keep-existing`.
+An account whose catalogue resolves no Junk folder (the server marks none `\Junk`, none carries a junk name, and `[accounts.mailboxes] junk` names none) keeps the mail, with a warning in the log, and `mp block` names it.
+
 ### The engine lock
 
 A ready runtime holds `<account_dir>/store.lock` for its whole lifetime, not for the length of one operation, which is what makes the daemon *the* engine for that account.

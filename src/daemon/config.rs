@@ -704,6 +704,12 @@ pub async fn start_account(
                 super::runtime::fts_backfill::spawn(&runtime, &cfg_for_watch);
                 // The mail hooks, run after every tick that ingested (#0135).
                 super::runtime::hook_runner::spawn(&runtime, &cfg_for_watch);
+                // The blocked senders, judged after every tick (PERSO-261).
+                super::runtime::sender_runner::spawn(
+                    &runtime,
+                    Arc::clone(canonical),
+                    &cfg_for_watch,
+                );
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);
             }
             change

@@ -493,3 +493,10 @@ The word index's previous answer is a floor: a term sent to the trigram index ma
 Rejected: replacing the word index with trigram (short terms silently match nothing, and a schema bump forces a full resync of every store); a LIKE scan of bodies (bodies live in blobs outside SQLite); the trigram substring alone for a term of three characters or more (the cases above stop matching).
 Source: chat with Sylvain, 2026-11-06; the floor from the review of the substring-search branch, 2026-11-06.
 Status: accepted
+
+## 2026-11-06 - Blocking a sender is a daemon-kept list shared by all accounts that moves matching Inbox mail to Junk, with no server-side provider rule for now
+
+Why: works the same for Exchange over IMAP, Microsoft 365 and Proton; a Graph inbox rule would need the MailboxSettings.ReadWrite permission and a new consent per account, and Proton Bridge exposes no block list.
+Rejected: an Outlook inbox rule through Graph messageRules (Microsoft 365 only, new consent), hiding blocked mail locally without moving it (other clients still show it).
+Source: chat with Sylvain, 2026-11-06.
+Status: accepted

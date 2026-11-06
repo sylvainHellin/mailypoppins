@@ -35,6 +35,7 @@ pub mod message_eml;
 pub mod message_server;
 pub mod reminder;
 pub mod send;
+pub mod sender;
 pub mod signature;
 pub mod state;
 pub mod sync;
@@ -192,6 +193,12 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     );
     self::hook::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::signature::register(dispatcher, Arc::clone(&config), Arc::clone(&canonical));
+    self::sender::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&canonical),
+        Arc::clone(&runtimes),
+    );
     self::diagnostic::register(
         dispatcher,
         Arc::clone(&config),

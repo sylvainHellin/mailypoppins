@@ -620,6 +620,16 @@ On top of that, and not repeated per entry: every daemon-served capability gains
   The daemon has no undo for archive, delete or move, so the rollback notice is the only undo surface.
   Search hits streamed from the server are not laid under the pending changes.
 
+### MSG-10 Block a sender, moving its mail to Junk now and as it arrives
+
+- Classification: GUI parity
+- Source anchor: `mp block <address|@domain> [--keep-existing]`, `mp unblock`, `mp blocked` (`src/main.rs`, PERSO-261); the list, the scan and the moves in `src/daemon/senders.rs`, the post-tick runner in `src/daemon/runtime/sender_runner.rs`
+- Daemon surface: `sender.block` `{address, move_existing?}`, `sender.unblock` `{address}`, `sender.list`, and the lifecycle event `sender.blocklist_changed` `{entries}`; the moves are `message.move`'s queued path, so the counts change as a move's do
+- GUI location: clients/desktop: not designed yet (a "Block sender" action on a row and the reader, and a list to unblock from)
+- Validation: `tests/daemon_block_senders.rs`, unit tests in `src/daemon/senders.rs`, the `sender.*` fixtures in `crates/mp-protocol/fixtures/`
+- Status: CLI routed (PERSO-261); TUI not started; desktop not started
+- Note: one list for every account, kept by the daemon in `<data_dir>/blocked-senders.json`; no rule is written on the server, so blocked mail moves only while the daemon runs (decision log, 2026-11-06).
+
 ## Drafts, composition, reply, and forward
 
 ### DFT-01 Create a draft from the template and print its selector

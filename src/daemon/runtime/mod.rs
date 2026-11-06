@@ -68,6 +68,7 @@ pub mod hook_runner;
 pub mod pool;
 pub mod publish;
 pub mod scheduler;
+pub mod sender_runner;
 pub mod watcher;
 
 /// Mode of the runtime directory: nobody but the owner may even list it.

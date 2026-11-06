@@ -25,6 +25,9 @@ Commands:
   watch           Watch a mailbox for changes using IMAP IDLE
   archive         Archive received emails (server + local)
   move            Move received emails to another mailbox (server + local)
+  block           Block a sender: move its mail from every Inbox to Junk, now and as it arrives
+  unblock         Remove a sender from the block list; nothing moves back from Junk
+  blocked         List the blocked senders
   delete          Delete received emails (server + local) or local drafts
   open            Open a received email's attachment in the default application
   save            Save a received email's attachment(s) to a directory
@@ -335,6 +338,57 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selectors in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp block --help
+Block a sender: move its mail from every Inbox to Junk, now and as it arrives
+
+Usage: mp block [OPTIONS] <ADDRESS>
+
+Arguments:
+  <ADDRESS>  A full address (spam@example.com) or a domain (@example.com)
+
+Options:
+      --keep-existing      Leave the sender's mail already in the Inbox; only new mail moves
+      --json               Emit the daemon's answer as one JSON object {entry, added, entries, moved: [{account, mailbox, count}], skipped: [{account, reason}]}
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+The daemon keeps one block list for every account. A sender is a full address
+or a domain written @example.com, which leaves its subdomains out, matched
+against the From address in any case. Blocking moves the sender's mail in each
+account's Inbox to that account's Junk folder, on the server too, and after
+every sync the daemon moves what arrived from a blocked sender since. A message
+moved back to the Inbox stays there. An account with no Junk folder keeps the
+mail, and the command says so. Nothing is set on the server, so mail moves only
+while the daemon runs.
+
+Examples:
+  mp block offers@shop.example
+  mp block @spam.example
+  mp block @spam.example --keep-existing
+
+$ mp unblock --help
+Remove a sender from the block list; nothing moves back from Junk
+
+Usage: mp unblock [OPTIONS] <ADDRESS>
+
+Arguments:
+  <ADDRESS>  The address or @domain as it was blocked, in any case
+
+Options:
+      --json               Emit the daemon's answer as one JSON object {entry, removed, entries}
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp blocked --help
+List the blocked senders
+
+Usage: mp blocked [OPTIONS]
+
+Options:
+      --json               Emit one JSON object {entries}
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
