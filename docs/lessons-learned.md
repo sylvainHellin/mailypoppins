@@ -3513,3 +3513,11 @@ A match can also come from inside a word: the card's `e` row ("...in $EDITOR") m
 ## insta stops at a test's first failing snapshot (2026-11-04, PERSO-255)
 
 insta stops at a test's first failing snapshot, so a change that moves many snapshots takes one run per snapshot; `INSTA_FORCE_PASS=1` writes every `.snap.new` in one run for review.
+
+## Driving the desktop app with WebDriver while someone uses the Mac (2026-11-06, PERSO-271)
+
+WebKit marks the page of a hidden, off-screen or occluded window hidden (no animation frames, throttled timers), and `ActivationPolicy::Prohibited` does too, so a background end-to-end run keeps the window on screen, transparent, click-through and at the back, as an Accessory app, with WKWebView's `_setWindowOcclusionDetectionEnabled:` off before the window is ordered in again (`clients/desktop/src-tauri/src/e2e.rs`).
+`@wdio/tauri-service` asks `tauri-plugin-wdio` for window states before every find and waits 5 s when the app lacks that plugin; an explicit `switchToWindow` in the `before` hook turns that recovery off.
+WebDriver clicks on an `<option>` do not change a native `<select>` in WKWebView; the specs set `value` through the prototype setter and dispatch `change`.
+The fixture settles a send 400 ms after it answers, so a spec checks a send's outcome after the outbox chip shows it, never right after the confirmation closes.
+`tauri build --bundles dmg` opens Finder windows while it lays out the DMG; an agent building on a Mac someone is using passes `--bundles app`.
