@@ -303,7 +303,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: client-side while the list is whole; `message.filter` if paging lands
 - GUI location: clients/desktop: `/`, `fm` and the palette focus the list header's field, which filters the shown list as it is typed; Enter keeps the filter and moves to the filtered list, Escape clears it, as in the TUI (M1, #0131 read slice; PERSO-274)
 - Validation: TUI golden frames; `clients/desktop/src/components/search/search.test.tsx` (`Enter keeps the filter and hands the keys to the filtered list, whose rows j and ArrowDown walk`, `Enter keeps a cursor row the filter still shows`)
-- Status: not started
+- Status: GUI shipped as a client-side filter (PERSO-274); `message.filter` not started
 
 ### LST-05 Toggle a flagged-only filter
 
