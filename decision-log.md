@@ -476,3 +476,11 @@ What a rule's pattern leaves out is filled from the event's first day (the weekd
 Rejected: trusting the delta to drop the occurrences (ghost occurrences until the daily baseline); reading `GET /instances` after every series write (a second read path, and the design keeps phase 2 off it); reading a master's `cancelledOccurrences` to find an occurrence deleted in Outlook (the delta does not carry it, so one more read per changed series).
 Source: implementation of PERSO-255 on branch `calendar-p2-p2s5`, 2026-11-04.
 Status: accepted
+
+## 2026-11-06 - Parallel work runs in Worktrunk worktrees, each with its own target dir, and only the main checkout installs mp
+
+Why: long tasks and quick fixes run side by side; `wt switch --create` makes a sibling worktree whose setup hook (in the stowed user config, since this repo is public and its `.gitignore` files are local-only) copies the ignored files a bare worktree lacks, and on the Mac clones `target/` by APFS reflink; `wt merge main` rebases, fast-forwards and cleans up in one step, without squashing.
+One installed `mp` and one daemon socket mean a worktree tests but never installs; the live check runs from the main checkout after the merge.
+Rejected: hand-made `/var/tmp/mp-<purpose>-<id>` worktrees with `cp -cR` target clones and a shared `CARGO_TARGET_DIR` (manual, and the shared dir broke worktrees); a tracked `.config/wt.toml` and `.worktreeinclude` (public repo, per-machine approval of project hooks).
+Source: chat with Sylvain, 2026-11-06 (pi-remote); dotfiles decision of the same day.
+Status: accepted

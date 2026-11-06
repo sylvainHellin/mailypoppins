@@ -28,10 +28,13 @@ On the Mac, `scripts/install-local.sh` is the install step for agents and Sylvai
 The script pulls, installs `mp`, bundles and swaps in the desktop app, restarts the daemon once and relaunches the app; it refuses a dirty tree, so commit first.
 
 Test scratch goes to `/var/tmp`, set once in [.cargo/config.toml](.cargo/config.toml) so no run needs a flag: `/tmp` is a small RAM-backed tmpfs and ~2200 tests each building a tempdir sqlite store exhaust it, which surfaces as `Disk quota exceeded` / `SQLITE_IOERR` rather than as a real failure.
-Agent scratch belongs there too, as `/var/tmp/mp-<purpose>-<id>` for worktrees; `/var/tmp` is aged out after 30 days while `~/.cache` accumulates forever.
-Parallel agents in the same checkout share one `CARGO_TARGET_DIR=/var/tmp/mp-shared-target` (and `/var/tmp/mp-shared-desktop-target` for `clients/desktop/src-tauri`) instead of one per agent: a build tree is 5 to 17 GB, twenty of them filled the Mac's disk once, and cargo's build lock makes sharing safe.
-An agent in its own git worktree must not use the shared dir (cargo hashes workspace crates relative to the workspace root, so two worktrees overwrite each other's artifacts and run each other's test binaries): on the Mac it clones it with `cp -cR /var/tmp/mp-shared-target /var/tmp/mp-<purpose>-target` and runs `cargo clean -p` on the workspace crates there; on the home server, where `cp` has no `-c` and `/var/tmp` is ext4, it starts a fresh `/var/tmp/mp-<purpose>-target`.
-An orchestrator deletes the shared dirs when the batch is done.
+Agent scratch belongs there too; `/var/tmp` is aged out after 30 days while `~/.cache` accumulates forever.
+
+Parallel work (a long task beside quick fixes, or several writing agents) runs in Worktrunk worktrees (`code` skill): `wt switch --create <branch>` makes `../mailypoppins.<branch>`, and its setup hook (`[projects]` in `~/.config/worktrunk/config.toml`) copies the local-only `.gitignore` files, `node_modules` and the `.agents`/`.sync` links into it.
+Each worktree builds into its own in-tree `target/`, never a shared `CARGO_TARGET_DIR`: cargo hashes workspace crates relative to the workspace root, so two worktrees on one dir overwrite each other's artifacts and run each other's test binaries.
+On the Mac the hook clones `target/` by APFS reflink, so dependencies stay warm; on the home server (ext4) a worktree builds cold, about 5 to 17 GB, and `wt remove` or `wt merge` deletes it with the worktree.
+A worktree runs `cargo test`, `cargo clippy` and `pnpm` builds, never `cargo install` or `scripts/install-local.sh`: there is one installed `mp` and one daemon, so a live test runs from the main checkout after `wt merge main`.
+Before that merge, `git pull --rebase --autostash` in the main checkout; `wt merge` then rebases the branch onto local main, which no other agent's fetch can move.
 
 Website: `cd website && pnpm install && pnpm dev` (preview) or `pnpm build` (production bundle in `website/dist/`).
 
