@@ -843,14 +843,16 @@ fn render_modal_title(frame: &mut Frame, header: Rect, title: &str) {
 }
 
 /// The block chooser (`B`, PERSO-261): the sender's address and its
-/// `@domain`, the cursor row highlighted and a refused row dimmed with its
-/// reason, then what a block does, and the footer naming what Enter blocks.
+/// `@domain`, the cursor row highlighted and a refused row dimmed and tagged
+/// "not offered" with its reason on the line under the rows, then what a
+/// block does, and the footer naming what Enter blocks.
 pub(super) fn render_block_chooser(chooser: &BlockChooser, frame: &mut Frame, area: Rect) {
+    let refusal = chooser.refused.iter().flatten().next();
     let Some((_, inner)) = render_modal_shell(
         frame,
         area,
         60,
-        10,
+        10 + u16::from(refusal.is_some()),
         theme::active().warning,
         theme::active().panel_bg,
     ) else {
@@ -861,27 +863,25 @@ pub(super) fn render_block_chooser(chooser: &BlockChooser, frame: &mut Frame, ar
 
     const TAGS: [&str; 2] = ["  this address", "  everyone at this domain"];
     let width = inner.width as usize;
-    let tags: Vec<String> = TAGS
-        .iter()
-        .zip(chooser.refused)
-        .map(|(tag, refused)| match refused {
-            Some(why) => format!("  not offered: {why}"),
-            None => tag.to_string(),
-        })
-        .collect();
+    let tags = TAGS.iter().zip(chooser.refused).map(|(tag, refused)| {
+        if refused.is_some() {
+            "  not offered"
+        } else {
+            tag
+        }
+    });
     // The tags line up after the longer entry.
-    let longest_tag = tags.iter().map(|t| t.chars().count()).max().unwrap_or(0);
     let column = chooser
         .entries()
         .iter()
         .map(|e| e.chars().count())
         .max()
         .unwrap_or(0)
-        .min(width.saturating_sub(longest_tag));
+        .min(width.saturating_sub(TAGS[1].len()));
     let mut lines: Vec<Line> = chooser
         .entries()
         .iter()
-        .zip(&tags)
+        .zip(tags)
         .enumerate()
         .map(|(i, (entry, tag))| {
             let style = if chooser.refused[i].is_some() {
@@ -895,13 +895,16 @@ pub(super) fn render_block_chooser(chooser: &BlockChooser, frame: &mut Frame, ar
             };
             Line::from(vec![
                 Span::styled(format!("{:<column$}", truncate(entry, column)), style),
-                Span::styled(
-                    truncate(tag, width.saturating_sub(column)),
-                    Style::default().fg(theme::active().text_faint),
-                ),
+                Span::styled(tag, Style::default().fg(theme::active().text_faint)),
             ])
         })
         .collect();
+    if let Some(why) = refusal {
+        lines.push(Line::from(Span::styled(
+            truncate(&format!("Not offered: {why}."), width),
+            Style::default().fg(theme::active().text_muted),
+        )));
+    }
     lines.push(Line::from(""));
     for sentence in [
         "Its mail in every account's Inbox moves to Junk,",

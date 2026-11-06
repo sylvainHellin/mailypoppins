@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { blockChoice, blockedSendersLoaded, blockSummary } from "@/app/senders";
 import { reducer, type Action } from "@/app/reducer";
 import { initialState, isStale, type AppState } from "@/app/state";
-import { comparableAddress, ownAddresses, ownMail } from "@/lib/mailbox";
+import { comparableAddress, entryRefusal, ownAddresses, ownMail } from "@/lib/mailbox";
 import { fixtures } from "@/test/tauri-mock";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
@@ -29,6 +29,20 @@ describe("the blocked senders model", () => {
     for (const none of ["(unknown)", "", "Undisclosed recipients:;", "@example.com"]) {
       expect(blockChoice(none, [])).toEqual({ notice: `No address to block in '${none}'` });
     }
+  });
+
+  it("offers only the domain of an address whose local part needs its quotes, which the list cannot hold", () => {
+    expect(entryRefusal('"john doe"@example.com')).toBe("it holds a space or a character no address has");
+    expect(entryRefusal("john.doe@example.com")).toBeNull();
+    expect(entryRefusal("@localhost")).toBe("its domain is not one");
+    expect(blockChoice('John <"John Doe"@Example.com>', [])).toEqual({
+      address: '"john doe"@example.com',
+      domain: "@example.com",
+      refused: { address: "a quoted address the list cannot hold", domain: null },
+    });
+    expect(blockChoice('"john doe"@example.com', ["me@example.com"])).toEqual({
+      notice: 'Cannot block "john doe"@example.com (a quoted address the list cannot hold) or @example.com (your own domain)',
+    });
   });
 
   it("does not offer the user's own address or domain, as mp_core::blocklist refuses them", () => {

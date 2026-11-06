@@ -204,6 +204,42 @@ fn the_chooser_does_not_offer_the_users_own_address_or_domain() {
     );
 }
 
+/// An address whose local part needs its quotes is one the list cannot hold
+/// (the daemon refuses a `"` or a space), so only its domain is offered and
+/// `B` then Enter blocks the domain.
+#[test]
+fn a_quoted_address_the_list_cannot_hold_offers_only_its_domain() {
+    let quoted =
+        BlockChooser::for_sender("John <\"John Doe\"@Example.com>", &[]).expect("a domain");
+    assert_eq!(
+        quoted.entries(),
+        ["\"john doe\"@example.com", "@example.com"]
+    );
+    assert_eq!(
+        quoted.refused,
+        [Some("a quoted address the list cannot hold"), None]
+    );
+    assert_eq!(quoted.entry(), "@example.com");
+    assert_eq!(
+        BlockChooser::for_sender("\"john doe\"@example.com", &["me@example.com".to_string()]),
+        Err("Cannot block \"john doe\"@example.com (a quoted address the list cannot hold) or @example.com (your own domain)".to_string())
+    );
+
+    let (mut app, daemon) = app(vec![received(1, "John <\"john doe\"@example.com>")], &[]);
+    press(&mut app, 'B');
+    press(&mut app, 'a');
+    press(&mut app, 'k');
+    assert_eq!(chooser(&app).entry(), "@example.com");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        calls(&daemon),
+        [(
+            "sender.block".to_string(),
+            json!({"address": "@example.com"})
+        )]
+    );
+}
+
 /// `B` on a colleague's message offers only the address, `j` and `d` stay
 /// on it, and Enter blocks it; on the user's own message `B` opens nothing
 /// and says why. The own addresses are every account's `default_from`.

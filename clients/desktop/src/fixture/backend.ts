@@ -52,7 +52,7 @@ import type {
 import { FakeBridge } from "@/fixture/terminal-bridge";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
-import { comparableAddress, mailboxAddresses, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
+import { comparableAddress, entryRefusal, mailboxAddresses, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
 import type {
   AccountDraft,
   AccountInfo,
@@ -1506,24 +1506,17 @@ export function simulateSignatureChanged(): void {
 // and its domain are refused as the daemon refuses them.
 // ---------------------------------------------------------------------------
 
-/** The daemon's `senders::normalize`: the entry as the list holds it, or its refusal as a `protocol` error. */
+/** The daemon's `mp_core::blocklist::normalize`: the entry as the list holds it, or its refusal as a `protocol` error. */
 function blockedEntry(raw: string): string {
-  const entry = raw.trim().toLowerCase();
-  const refuse = (why: string): never => {
+  const why = entryRefusal(raw);
+  if (why) {
     throw {
       kind: "protocol",
       message: `'${raw.trim()}' is not a sender to block: ${why}; give a full address (spam@example.com) or a domain (@example.com)`,
       code: null,
     } satisfies GuiError;
-  };
-  if (entry === "") refuse("it is empty");
-  if (/[\s<>,;"]/.test(entry)) refuse("it holds a space or a character no address has");
-  const at = entry.indexOf("@");
-  if (at < 0) refuse("it has no @");
-  const domain = entry.slice(at + 1);
-  if (domain.includes("@")) refuse("it has more than one @");
-  if (domain === "" || !domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) refuse("its domain is not one");
-  return entry;
+  }
+  return raw.trim().toLowerCase();
 }
 
 /** The daemon's `senders::matches` for one entry: a mailbox address of `from` is it, or is at its domain. */

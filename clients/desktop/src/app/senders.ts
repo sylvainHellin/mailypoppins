@@ -11,15 +11,17 @@ import type { Action } from "@/app/reducer";
 import { draftsShown, expandedMember, listedRow, markStale, readerKey, type AppState, type BlockDialog } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiError } from "@/lib/gui-types";
-import { comparableAddress, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
+import { comparableAddress, entryRefusal, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
 import type { SenderBlocked } from "@/protocol/types";
 
 /**
  * The chooser for a message whose `From` is `from`, given the user's own
  * addresses `own`: the address a reply goes to as the list would hold it,
- * and its `@domain`, a row the daemon would refuse carrying why; else the
- * notice that says why nothing is offered: no address with a domain, or both
- * rows refused (`mp-tui`'s `BlockChooser::for_sender`).
+ * and its `@domain`, a row the daemon would refuse carrying why (an entry the
+ * list cannot hold, such as an address whose local part needs its quotes,
+ * and the user's own address or domain); else the notice that says why
+ * nothing is offered: no address with a domain, or both rows refused
+ * (`mp-tui`'s `BlockChooser::for_sender`).
  */
 export function blockChoice(from: string, own: readonly string[]): BlockDialog | { notice: string } {
   const address = comparableAddress(senderAddress(from).trim());
@@ -30,8 +32,14 @@ export function blockChoice(from: string, own: readonly string[]): BlockDialog |
   if (bare === "" || /\s/.test(bare)) return nothing;
   const domain = `@${bare}`;
   const refused = {
-    address: ownMail(address, own) ? "your own address" : null,
-    domain: ownMail(domain, own) ? "your own domain" : null,
+    address: entryRefusal(address)
+      ? address.includes('"')
+        ? "a quoted address the list cannot hold"
+        : "not an address the list takes"
+      : ownMail(address, own)
+        ? "your own address"
+        : null,
+    domain: entryRefusal(domain) ? "not a domain the list takes" : ownMail(domain, own) ? "your own domain" : null,
   };
   if (refused.address && refused.domain) {
     return { notice: `Cannot block ${address} (${refused.address}) or ${domain} (${refused.domain})` };

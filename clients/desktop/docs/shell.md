@@ -910,7 +910,7 @@ The user's own addresses, each account's `default_from` as `config_get` answers 
 
 `BlockSenderDialog.tsx` is the overlay `block_sender`, and `state.blockDialog` is `{address, domain, refused}`: the address a reply goes to (`senderAddress`), lowercase and with a quoted local part that needs no quotes unquoted (`comparableAddress`, `mp_core::parse::comparable_address`), as the list would hold it, its `@domain`, and for each why the daemon would refuse it, null when it would not.
 It is the confirmation too: a `radiogroup` named "What to block" with the address ("this address") and the domain ("everyone at this domain"), the first offered one picked on open, the sentence "Its mail in every account's Inbox moves to Junk, now and as it arrives", and the button "Block <entry>", which names what Enter blocks; nothing is blocked before it.
-A row the daemon would refuse is `aria-disabled`, dimmed, reads "not offered: <why>" in place of its hint and is never picked: the domain of the user's own address ("your own domain") and the user's own address ("your own address"), as `mp_core::blocklist` refuses them (`ownAddresses` and `ownMail` in `src/lib/mailbox.ts`).
+A row the daemon would refuse is `aria-disabled`, dimmed, reads "not offered: <why>" in place of its hint and is never picked: an address whose local part needs its quotes (`"john doe"@example.com`, "a quoted address the list cannot hold"), which the list cannot hold, the domain of the user's own address ("your own domain") and the user's own address ("your own address"), as `mp_core::blocklist` refuses them (`entryRefusal`, `ownAddresses` and `ownMail` in `src/lib/mailbox.ts`).
 
 | Key | Action | Command |
 |---|---|---|

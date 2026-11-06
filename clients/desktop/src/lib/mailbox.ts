@@ -370,6 +370,24 @@ export function comparableAddress(address: string): string {
 }
 
 /**
+ * Why the blocked senders cannot hold `raw` (`mp_core::blocklist::normalize`,
+ * PERSO-261), the clause of the daemon's refusal, or null when they can: a
+ * full address or `@domain`, one `@`, no space, no `"` or angle bracket, and a
+ * domain with a dot in it.
+ */
+export function entryRefusal(raw: string): string | null {
+  const entry = raw.trim().toLowerCase();
+  if (entry === "") return "it is empty";
+  if (/[\s<>,;"]/.test(entry)) return "it holds a space or a character no address has";
+  const at = entry.indexOf("@");
+  if (at < 0) return "it has no @";
+  const domain = entry.slice(at + 1);
+  if (domain.includes("@")) return "it has more than one @";
+  if (domain === "" || !domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) return "its domain is not one";
+  return null;
+}
+
+/**
  * The user's own addresses (`mp_core::blocklist::own_addresses`, PERSO-261):
  * each account's `default_from`, its address alone as a sender is compared;
  * an account with none owns nothing.

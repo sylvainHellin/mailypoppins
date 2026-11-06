@@ -107,6 +107,23 @@ describe("blocking a sender", () => {
     expect(callsOf("sender_block")).toEqual([{ address: "ivana@example.com" }]);
   });
 
+  it("an address whose local part needs its quotes is not offered: the chooser opens on its domain, and a and k stay there", async () => {
+    const { user, dialog } = await chooserOnFirstRow(() => {
+      ownAddressElsewhere();
+      mock.rows.work.inbox[0].from = 'Ivana <"ivana petrova"@example.com>';
+    });
+    expect(choices(dialog)).toEqual([
+      ["address", '"ivana petrova"@example.com, not offered: a quoted address the list cannot hold', "false"],
+      ["domain", "@example.com, everyone at this domain", "true"],
+    ]);
+    await user.keyboard("a");
+    await user.keyboard("k");
+    expect(within(dialog).getByRole("button", { name: /Block @example.com/ })).toBeEnabled();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Block sender" })).toBeNull());
+    expect(callsOf("sender_block")).toEqual([{ address: "@example.com" }]);
+  });
+
   it("B on the user's own message opens nothing and says why", async () => {
     const { user } = renderApp(1400, () => {
       mock.rows.work.inbox[0].from = "Me <me@example.com>";

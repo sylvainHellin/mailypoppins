@@ -3047,7 +3047,9 @@ impl SignaturesOverlay {
 /// blocked until Enter.
 ///
 /// A row the daemon would refuse is shown with the reason and never picked:
-/// the user's own address or its domain (`mp_core::blocklist::own_mail`).
+/// an entry the list cannot hold, such as an address whose local part needs
+/// its quotes (`"john doe"@example.com`, `mp_core::blocklist::normalize`),
+/// and the user's own address or its domain (`mp_core::blocklist::own_mail`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockChooser {
     /// The address a reply goes to, as the list would hold it: lowercase,
@@ -3077,9 +3079,22 @@ impl BlockChooser {
             return Err(nothing());
         }
         let domain = format!("@{domain}");
+        let held = |entry: &str| mp_core::blocklist::normalize(entry).is_ok();
         let refused = [
-            mp_core::blocklist::own_mail(&address, own).map(|_| "your own address"),
-            mp_core::blocklist::own_mail(&domain, own).map(|_| "your own domain"),
+            if !held(&address) {
+                Some(if address.contains('"') {
+                    "a quoted address the list cannot hold"
+                } else {
+                    "not an address the list takes"
+                })
+            } else {
+                mp_core::blocklist::own_mail(&address, own).map(|_| "your own address")
+            },
+            if !held(&domain) {
+                Some("not a domain the list takes")
+            } else {
+                mp_core::blocklist::own_mail(&domain, own).map(|_| "your own domain")
+            },
         ];
         let selected = match refused {
             [None, _] => 0,
