@@ -216,6 +216,12 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "overlay", overlay: "restart" });
     case "back":
       return dispatch({ type: "back" });
+    case "search_local": {
+      // The typed query, else the one the search shows, else the field to type one in.
+      const query = s.filter.trim() || s.search?.query || "";
+      if (!query) return runAction("focus_filter", s, dispatch);
+      return dispatch({ type: "search_local", query });
+    }
     case "search_server": {
       // The typed query, else the one the search shows, else the form.
       const query = s.filter.trim() || s.search?.query || "";

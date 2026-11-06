@@ -6,6 +6,9 @@ import type { ServerSearchHit } from "@/protocol/types";
 import { FILTER_INPUT_ID } from "@/app/actions";
 import { REROUTED_NOTICE } from "@/app/search";
 
+/** Cmd+Enter, the field's local search; Enter alone moves to the filtered list. */
+const MOD_ENTER = "{Meta>}{Enter}{/Meta}";
+
 const input = () => document.getElementById(FILTER_INPUT_ID) as HTMLInputElement;
 const results = () => screen.findByRole("listbox", { name: /^Search results for/ });
 const status = () => document.querySelector('[data-slot="search-status"]');
@@ -44,7 +47,7 @@ function event(kind: string, payload: unknown, instance = "fixture-instance-1"):
 
 async function searchLocal(user: ReturnType<typeof renderApp>["user"], query: string) {
   await user.click(input());
-  await user.keyboard(`${query}{Enter}`);
+  await user.keyboard(`${query}${MOD_ENTER}`);
   return results();
 }
 
@@ -56,8 +59,97 @@ async function searchServer(user: ReturnType<typeof renderApp>["user"], query: s
   return mock.calls.filter((c) => c.cmd === "search_server_start").pop();
 }
 
+describe("the list header's filter (PERSO-274)", () => {
+  const listbox = () => screen.getByRole("listbox", { name: "Inbox messages" });
+  const options = () => within(listbox()).getAllByRole("option").map((o) => o.getAttribute("aria-label"));
+
+  it("Enter keeps the filter and hands the keys to the filtered list, whose rows j and ArrowDown walk", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    // The cursor on a row the filter leaves out: Enter puts it on the first one shown.
+    await user.keyboard("jj");
+    expect(selectedLabel()).toMatch(/Angebot Dachsanierung/);
+    await user.keyboard("/");
+    await waitFor(() => expect(input()).toHaveFocus());
+    await user.keyboard("ed{Enter}");
+
+    expect(input()).toHaveValue("ed");
+    expect(options()).toHaveLength(3);
+    expect(selectedLabel()).toMatch(/Quarterly ledger review/);
+    await waitFor(() => expect(document.activeElement?.closest('[role="option"]')).toHaveAttribute("aria-selected", "true"));
+    expect(document.querySelector('[data-pane="list"]')).toHaveAttribute("data-focused", "true");
+    expect(document.querySelector('[data-slot="search-status"]')).toBeNull();
+    expect(mock.calls.some((c) => c.cmd.startsWith("search_"))).toBe(false);
+
+    await user.keyboard("j");
+    expect(selectedLabel()).toMatch(/Planned power outage/);
+    await user.keyboard("{ArrowDown}");
+    expect(selectedLabel()).toMatch(/Action required/);
+    await user.keyboard("k");
+    expect(selectedLabel()).toMatch(/Planned power outage/);
+    expect(options()).toHaveLength(3);
+
+    // `/` goes back to the field with the text, and Escape there clears it.
+    await user.keyboard("/");
+    await waitFor(() => expect(input()).toHaveFocus());
+    expect(input()).toHaveValue("ed");
+    await user.keyboard("{Escape}");
+    expect(input()).toHaveValue("");
+    expect(input()).not.toHaveFocus();
+    expect(options()).toHaveLength(8);
+    expect(selectedLabel()).toMatch(/Planned power outage/);
+  });
+
+  it("Enter keeps a cursor row the filter still shows", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jjjj");
+    expect(selectedLabel()).toMatch(/Planned power outage/);
+    await user.click(input());
+    await user.keyboard("ed{Enter}");
+    expect(selectedLabel()).toMatch(/Planned power outage/);
+    await user.keyboard("j");
+    expect(selectedLabel()).toMatch(/Action required/);
+  });
+
+  it("Ctrl+Enter searches the store as Cmd+Enter does, and Shift+Enter the server", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(input());
+    await user.keyboard("ledger{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(mock.calls.filter((c) => c.cmd === "search_local").map((c) => c.args)).toEqual([{ params: { account: "work", query: "ledger" } }]);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(status()).toBeNull());
+    await user.click(input());
+    await user.keyboard("ledger{Shift>}{Enter}{/Shift}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    expect(mock.calls.filter((c) => c.cmd === "search_server_start").map((c) => c.args)).toEqual([{ params: { account: "work", query: "ledger" } }]);
+    expect(mock.calls.filter((c) => c.cmd === "search_local")).toHaveLength(1);
+  });
+
+  it("the palette's Search the store runs the typed text", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(input());
+    await user.keyboard("ledger{Enter}");
+    await user.keyboard(":");
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.keyboard("Search the store");
+    await waitFor(() => {
+      const top = palette.querySelector("[data-testid='palette-item']");
+      expect(top).toHaveAttribute("data-label", "Search the store");
+      expect(top).toHaveAttribute("data-selected", "true");
+    });
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(palette).not.toBeInTheDocument());
+    expect(within(await results()).getAllByRole("option")).toHaveLength(3);
+    expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({ params: { account: "work", query: "ledger" } });
+  });
+});
+
 describe("local search", () => {
-  it("runs search_local on Enter and lists the hits with their mailbox", async () => {
+  it("runs search_local on Cmd+Enter and lists the hits with their mailbox", async () => {
     const { user } = renderApp();
     await shellReady();
     const list = await searchLocal(user, "ledger");
@@ -338,7 +430,7 @@ describe("server search", () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(input());
-    await user.keyboard("from: borrmann{Enter}");
+    await user.keyboard(`from: borrmann${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "failed"));
     const lines = "invalid search query: from: needs a value\n  from: borrmann\n  ^";
     expect(document.querySelector('[data-slot="search-parse-error"]')?.textContent).toBe(lines);
@@ -353,16 +445,16 @@ describe("server search", () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(input());
-    await user.keyboard("ledger{Enter}");
+    await user.keyboard(`ledger${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
     await user.keyboard("{Escape}");
     await waitFor(() => expect(status()).toBeNull());
     await user.click(input());
-    await user.keyboard("from: borrmann{Enter}");
+    await user.keyboard(`from: borrmann${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "failed"));
     await user.keyboard("{Escape}");
     await user.click(input());
-    await user.keyboard("ledger{Enter}");
+    await user.keyboard(`ledger${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
     expect(mock.calls.filter((c) => c.cmd === "search_local")).toHaveLength(3);
   });
@@ -371,7 +463,7 @@ describe("server search", () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(input());
-    await user.keyboard("to:diyan{Enter}");
+    await user.keyboard(`to:diyan${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
     expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
       params: { account: "work", query: "to:diyan" },
@@ -383,7 +475,7 @@ describe("server search", () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(input());
-    await user.keyboard("to:x in:Archive{Enter}");
+    await user.keyboard(`to:x in:Archive${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
     expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
       params: { account: "work", query: "to:x in:Archive", mailboxes: ["Archive"] },
@@ -396,7 +488,7 @@ describe("server search", () => {
     const message = "message.search: the daemon refused the call: the store of work is being rebuilt, try again in a minute (-32603)";
     mock.failing.set("search_local", { kind: "protocol", message, code: -32603 });
     await user.click(input());
-    await user.keyboard("ledger{Enter}");
+    await user.keyboard(`ledger${MOD_ENTER}`);
     await waitFor(() => expect(status()).toHaveAttribute("data-status", "failed"));
     const alert = within(status() as HTMLElement).getByRole("alert");
     expect(alert).toHaveTextContent(`The search failed: ${message}`);
@@ -418,8 +510,8 @@ describe("the Server Search form (PERSO-115)", () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(input());
-    await user.keyboard("handover");
-    await user.keyboard("{Escape}");
+    // Enter leaves the field with the text kept; Escape would clear it.
+    await user.keyboard("handover{Enter}");
     await user.keyboard("ff");
     const dialog = await form();
     expect(field(dialog, "From")).toHaveFocus();

@@ -65,6 +65,7 @@ describe("keyboard routing", () => {
       ["Enter"],
       ["Esc"],
     ]);
+    expect(GUI_ENTRIES.find((e) => e.id === "search_local")?.keys).toEqual(["Cmd+Enter"]);
     expect(GUI_ENTRIES.find((e) => e.id === "search_server")?.keys).toEqual(["Shift+Enter"]);
   });
 

@@ -44,6 +44,7 @@ export type ActionId =
   | "narrow_list"
   | "restart_daemon"
   | "back"
+  | "search_local"
   | "search_server"
   | "open_server_search"
   | "cancel_search"
@@ -413,6 +414,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   // A made-up reminder raised as a system notification (src-tauri/src/reminders.rs),
   // which says whether macOS shows this app's notifications; no key of its own.
   { section: "APP", label: "Show a test reminder notification", keys: [], id: "reminder_notify_test", badge: null },
+  // The list header's field: Enter keeps the filter and moves to the list, as
+  // the TUI's `/` does; Cmd+Enter (Ctrl+Enter too) searches the store.
+  { section: "SEARCH", label: "Search the store", keys: ["Cmd+Enter"], id: "search_local", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["Shift+Enter"], id: "search_server", badge: null },
   // The Server Search form's own keys (ServerSearchDialog.tsx), the TUI
   // overlay's form keys; `ff` opens it ("Search all mail").

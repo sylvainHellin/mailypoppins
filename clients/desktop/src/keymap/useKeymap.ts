@@ -245,8 +245,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           e.preventDefault();
           (e.target as HTMLElement).blur();
           if ((e.target as HTMLElement).id === FILTER_INPUT_ID) {
-            // Out of the field, and out of a search: the mailbox list returns.
-            dispatch(s.search ? { type: "exit_search" } : { type: "focus", pane: "list" });
+            // Out of the field with the filter cleared, as the TUI's Escape
+            // in its `/` field, and out of a search: the mailbox list returns.
+            dispatch(s.search ? { type: "exit_search" } : { type: "filter_clear" });
           }
           // Out of the contacts search, which keeps its query, or the calendar's
           // date field: the list takes the keys.

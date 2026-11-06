@@ -216,11 +216,14 @@ export function MessageListPane() {
               onKeyDown={(e) => {
                 if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
                 e.preventDefault();
+                // Enter keeps the filter and hands the keys to the list, as
+                // the TUI's `/` field does; a modifier searches instead.
+                if (!e.shiftKey && !e.metaKey && !e.ctrlKey) return dispatch({ type: "filter_commit" });
                 if (!query) return;
                 dispatch({ type: e.shiftKey ? "search_server" : "search_local", query });
               }}
-              placeholder="Filter, Enter to search  ( / )"
-              aria-label="Filter this list, or press Enter to search the account, Shift+Enter to search the server"
+              placeholder="Filter, Cmd+Enter to search  ( / )"
+              aria-label="Filter this list: Enter goes to the filtered list, Cmd+Enter searches the account, Shift+Enter searches the server"
               className="h-7 pl-7 text-xs"
             />
           </div>

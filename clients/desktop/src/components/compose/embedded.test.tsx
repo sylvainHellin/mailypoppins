@@ -328,8 +328,8 @@ describe("navigating away from a running editor", () => {
     const { user } = renderApp(1400, nvim);
     await shellReady();
     await replyEmbedded(user);
-    // A mailbox (a digit), a view (Space a, the Calendar) and a search (/ then Enter in the filter).
-    for (const keys of ["2", " a", "/ledger{Enter}"]) {
+    // A mailbox (a digit), a view (Space a, the Calendar) and a search (/ then Cmd+Enter in the filter).
+    for (const keys of ["2", " a", "/ledger{Meta>}{Enter}{/Meta}"]) {
       await user.keyboard(keys);
       const dialog = await screen.findByRole("dialog", { name: "Leave the editor?" });
       await user.click(within(dialog).getByRole("button", { name: "Stay" }));

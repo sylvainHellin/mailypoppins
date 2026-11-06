@@ -72,7 +72,7 @@ describe("the account picker", () => {
     const { user } = renderApp();
     await shellReady();
     await user.keyboard("/");
-    await user.keyboard("ledger{Enter}");
+    await user.keyboard("ledger{Meta>}{Enter}{/Meta}");
     const results = /^Search results for/;
     await screen.findByRole("listbox", { name: results });
     act(() => (document.activeElement as HTMLElement).blur());

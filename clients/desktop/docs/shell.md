@@ -127,8 +127,10 @@ With one account `ga` opens nothing and the which-key popup leaves it out.
 
 ## Search
 
-The list header's field filters the shown list as it is typed, as before.
-Enter runs `search_local` over the selected account and the results replace the list, each with the mailbox it was found in as a badge.
+The list header's field filters the shown list as it is typed, as the TUI's `/` does, matching the typed text anywhere in the subject and the sender (and a conversation's participants).
+Enter in the field keeps the filter and hands the keys to the list (`filter_commit`): the cursor stays on its row when the filter shows it, else goes to the first row shown, and `j`/`k` and the arrows walk the filtered rows; `/` goes back to the field with the text, and Escape in the field clears the filter (`filter_clear`), as the TUI's Escape in its `/` field does (PERSO-274).
+Cmd+Enter (Ctrl+Enter too) and the palette's "Search the store" run `search_local` over the selected account and the results replace the list, each with the mailbox it was found in as a badge.
+The store's index matches whole words where the filter matches any substring: `dach` filters in "Angebot Dachsanierung" but finds nothing in the store, which needs `dachsanierung` or the prefix query `dach*`; the fixtures match substrings for both, so only a live daemon shows the difference.
 A query the store's index cannot answer (recipient and message-id terms, an OR group with a date or attachment term, or one mixing a filename with another term) is refused by `message.search` as `-32602`; `search_query` then confirms that is why, and the same query runs on the server, scoped to the query's own `in:` mailbox, with a notice saying so (PERSO-115).
 A query that does not parse, such as `from: borrmann` with a space after the colon, is refused the same way; `search_query` answers `invalid` with the parser's three lines, and the search ends `failed` with them under "The search failed:", in monospace so the caret sits under the query.
 They are the TUI's words for that query in its search form, since both clients build the query through `mp_core::search::SearchFields::build_query`; the TUI's `/` filter never parses, it matches the typed text literally, as the header's field does while it is typed.
@@ -1224,7 +1226,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:`, `Ctrl+p` or `Cmd+p`: the command palette, `Cmd+p` a desktop key, which the palette row and the key help's DESKTOP section list (`DESKTOP_KEYS` in `src/keymap/catalog.ts`); `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts and on a conversation's draft member the draft's file path (PERSO-100, #0142).
 - `Escape`: in a full-pane view, back to Mail; with the outbox shown and the focus outside the reader, back to the mailbox list; else clear the marks when any are set and the outbox is not shown; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
-- `Enter` in the field: search the store, or the server for a query only it can answer; `Shift+Enter`: search the server; `ff`: the Server Search form (see Search).
+- `Enter` in the field: keep the filter and move to the filtered list; `Escape` in the field: clear the filter; `Cmd+Enter` or `Ctrl+Enter`: search the store, or the server for a query only it can answer; `Shift+Enter`: search the server; `ff`: the Server Search form (see Search).
 - `Cmd+[` or `Alt+Left`: back through the focus history.
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.

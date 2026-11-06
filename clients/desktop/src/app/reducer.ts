@@ -372,6 +372,14 @@ export type Action =
   /** A notice of the activity area from outside a mutation batch. */
   | { type: "activity"; kind: ActivityKind; account: string | null; text: string; rows?: { key: string; label: string; reason: string }[] }
   | { type: "filter"; text: string }
+  /**
+   * Enter in the list header's field, the TUI's Enter in its `/` field: the
+   * filter stays and the list takes the keys, on the selected row when the
+   * filter kept it, else on the first row it shows.
+   */
+  | { type: "filter_commit" }
+  /** Escape in the list header's field, the TUI's Escape in its `/` field: the filter clears and the list takes the keys. */
+  | { type: "filter_clear" }
   /** The notice line; the activity log keeps every text, at `level` (info when absent). */
   | { type: "notice"; text: string | null; level?: ActivityLevel }
   /** `!`: hide or show the activity area's notices. */
@@ -1186,6 +1194,7 @@ const LEAVES_EDITOR: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "select_draft",
   "select_hit",
   "move_selection",
+  "filter_commit",
   "sidebar_enter",
   "jump_mailbox",
   "clear_selection",
@@ -1689,6 +1698,7 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "select_conversation",
   "select_draft",
   "move_selection",
+  "filter_commit",
   "sidebar_enter",
   "jump_mailbox",
   "clear_selection",
@@ -2087,6 +2097,13 @@ function reduce(s: AppState, a: Action): AppState {
       return pushNotice(s, { kind: a.kind, account: a.account, text: a.text, rows: a.rows ?? [] });
     case "filter":
       return { ...s, filter: a.text };
+    case "filter_commit": {
+      const items = visibleItems(s);
+      const next = items.length > 0 && currentIndex(s, items) < 0 ? selectItem(s, items[0]) : s;
+      return withFocus(next, "list");
+    }
+    case "filter_clear":
+      return withFocus({ ...s, filter: "" }, "list");
     case "notice":
       return withNotice(s, a.text, a.level);
     case "toggle_activity_hidden":

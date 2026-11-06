@@ -301,8 +301,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `fm` (`clients/tui/src/app/keymap.rs:1020`)
 - Daemon surface: client-side while the list is whole; `message.filter` if paging lands
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames
+- GUI location: clients/desktop: `/`, `fm` and the palette focus the list header's field, which filters the shown list as it is typed; Enter keeps the filter and moves to the filtered list, Escape clears it, as in the TUI (M1, #0131 read slice; PERSO-274)
+- Validation: TUI golden frames; `clients/desktop/src/components/search/search.test.tsx` (`Enter keeps the filter and hands the keys to the filtered list, whose rows j and ArrowDown walk`, `Enter keeps a cursor row the filter still shows`)
 - Status: not started
 
 ### LST-05 Toggle a flagged-only filter
@@ -330,8 +330,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp search --local`, `src/store/search.rs`, `tests/store_search_integration.rs`
 - Daemon surface: `message.search`, whose params mirror the command's flags and whose hits come back in the store's ranking order
-- GUI location: clients/desktop: Enter in the list header's field searches the selected account's store, and each hit carries its mailbox as a badge (M1, #0129); a query the store's index cannot answer (recipient and message-id terms, an OR group with a date or attachment term, or one mixing a filename with another term), which `message.search` refuses as `-32602`, runs on the server instead, scoped to its `in:` mailbox, with a notice saying why, and a failed search's status wraps rather than cutting the daemon's sentence (PERSO-115)
-- Validation: `tests/store_search_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/components/search/search.test.tsx` (`runs search_local on Enter and lists the hits with their mailbox`, `opens a hit from another mailbox in the reader`, `a to: query typed in the field goes to the server, which can answer it (PERSO-115)`, `a rerouted query keeps its in: mailbox, so the server searches only that one`, `a refusal reads whole: the status wraps instead of cutting the daemon's sentence`), `clients/desktop/src/app/search.test.ts` ("a header query the store cannot answer"), `clients/desktop/src-tauri/src/commands.rs` (`local_search_flattens_the_row_beside_the_mailbox`, `a_recipient_query_is_refused_by_the_local_search`)
+- GUI location: clients/desktop: Cmd+Enter or Ctrl+Enter in the list header's field, or the palette's "Search the store", searches the selected account's store (PERSO-274), and each hit carries its mailbox as a badge (M1, #0129); a query the store's index cannot answer (recipient and message-id terms, an OR group with a date or attachment term, or one mixing a filename with another term), which `message.search` refuses as `-32602`, runs on the server instead, scoped to its `in:` mailbox, with a notice saying why, and a failed search's status wraps rather than cutting the daemon's sentence (PERSO-115)
+- Validation: `tests/store_search_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/components/search/search.test.tsx` (`runs search_local on Cmd+Enter and lists the hits with their mailbox`, `Ctrl+Enter searches the store as Cmd+Enter does, and Shift+Enter the server`, `the palette's Search the store runs the typed text`, `opens a hit from another mailbox in the reader`, `a to: query typed in the field goes to the server, which can answer it (PERSO-115)`, `a rerouted query keeps its in: mailbox, so the server searches only that one`, `a refusal reads whole: the status wraps instead of cutting the daemon's sentence`), `clients/desktop/src/app/search.test.ts` ("a header query the store cannot answer"), `clients/desktop/src-tauri/src/commands.rs` (`local_search_flattens_the_row_beside_the_mailbox`, `a_recipient_query_is_refused_by_the_local_search`)
 - Status: routed (P4-U4); GUI shipped (M1, #0129)
 - Note: `--body` is `body_query` on the wire, because `body` is already the `--full` switch; the client sends what the user typed and the daemon builds the query with `search::from_cli`, so one parser still serves every backend.
 
