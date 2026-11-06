@@ -55,6 +55,12 @@ pub use mp_protocol::listing::SearchOrder;
 /// The bm25 column weights of either index: `subject`, `from_`, `body_text`.
 const BM25_WEIGHTS: &str = "10.0, 5.0, 1.0";
 
+/// The most `MATCH` arms one `UNION ALL` chains before the next chunk opens
+/// as a subquery of its own: SQLite refuses a compound `SELECT` of more than
+/// 500 terms (`SQLITE_MAX_COMPOUND_SELECT`), and a pasted paragraph is two
+/// arms a word.
+const ARMS_PER_UNION: usize = 250;
+
 /// One ranked hit: the message row and the bm25 score it matched with.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
@@ -64,12 +70,14 @@ pub struct SearchHit {
     /// The rank is the sum of a score per clause: the word index's bm25 for
     /// the word-only terms, and for each substring clause the word index's
     /// bm25 plus the trigram index's, each counted when that index matched
-    /// the row. A term found as a whole word therefore ranks above the same
-    /// term found only inside a word, and a row found by one side alone (an
-    /// evicted body by its word, a mid-word hit by its trigrams) still ranks.
-    /// The trigram index counts every three-character run as a token, so its
-    /// scores sit on another scale than the word index's (a longer needle
-    /// scores higher) and only compare among hits of one query.
+    /// the row. A row matching a term on both sides gets both scores added,
+    /// which tends to rank a whole-word hit above a mid-word one, and a row
+    /// found by one side alone (an evicted body by its word, a mid-word hit by
+    /// its trigrams) still ranks. The trigram index counts every
+    /// three-character run as a token, so its scores sit on another scale than
+    /// the word index's (a longer needle scores higher) and only compare among
+    /// hits of one query: a strong mid-word hit can outrank a weak whole-word
+    /// one.
     pub rank: f64,
 }
 
@@ -196,53 +204,62 @@ pub fn search_ast(
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut predicates = String::new();
 
-    // `?1` is always the account. Every text clause is one materialised set
-    // of `(id, score)` joined on the id, in one SQL statement, so each `MATCH`
-    // runs once and the order and the limit are the SQL's whatever mix of
-    // terms the query holds: the word-only terms are one word-index `MATCH`,
-    // and each substring clause the union of its word-index and trigram
-    // matches, summed per row ([`SearchHit::rank`]). Joined as FTS tables
-    // instead, the second index re-runs its `MATCH` for every row of the
-    // first: `mail ab` took 1.4 s on the TUM store that way and 17 ms as a
-    // materialised set.
+    // `?1` is always the account. The text clauses are one materialised set
+    // of `(id, score)` joined to `messages` once, in one SQL statement, so
+    // each `MATCH` runs once and the order and the limit are the SQL's
+    // whatever mix of terms the query holds. Every `MATCH` is an arm tagged
+    // with its clause: the word-only terms are one word-index arm, and each
+    // substring clause a word-index arm and a trigram arm under one tag. The
+    // union of the arms, grouped by row, keeps the rows every clause matched
+    // and sums their scores ([`SearchHit::rank`]); the arms are a set of their
+    // own, since a lone arm flattened into the grouping query loses the FTS
+    // context `bm25` needs. Joined as FTS tables instead, the second index
+    // re-runs its `MATCH` for every row of the first (`mail ab` took 1.4 s on
+    // the TUM store that way and 17 ms as a set); joined as one set per
+    // clause, a pasted paragraph exceeds SQLite's 64-table cap on a join and
+    // fails.
     binds.push(Box::new(account.to_string()));
-    let (trigram, word) = (TRIGRAM_TABLE, WORD_TABLE);
-    let word_match = |binds: &mut Vec<Box<dyn rusqlite::ToSql>>, expr: &str| {
+    let arm = |binds: &mut Vec<Box<dyn rusqlite::ToSql>>, table: &str, expr: &str, clause| {
         binds.push(Box::new(expr.to_string()));
         format!(
-            "SELECT rowid AS id, bm25({word}, {BM25_WEIGHTS}) AS score \
-             FROM {word} WHERE {word} MATCH ?{}",
+            "SELECT rowid AS id, {clause} AS clause, bm25({table}, {BM25_WEIGHTS}) AS score \
+             FROM {table} WHERE {table} MATCH ?{}",
             binds.len()
         )
     };
-    let mut sets: Vec<String> = Vec::new();
+    let mut arms: Vec<String> = Vec::new();
+    let mut clauses = 0usize;
     if let Some(words) = &render.match_expr {
-        sets.push(word_match(&mut binds, words));
+        arms.push(arm(&mut binds, WORD_TABLE, words, clauses));
+        clauses += 1;
     }
     for clause in &render.either {
-        let words = word_match(&mut binds, &clause.words);
-        binds.push(Box::new(clause.trigrams.clone()));
-        sets.push(format!(
-            "SELECT id, SUM(score) AS score FROM ({words} UNION ALL \
-             SELECT rowid AS id, bm25({trigram}, {BM25_WEIGHTS}) AS score \
-             FROM {trigram} WHERE {trigram} MATCH ?{}) GROUP BY id",
-            binds.len()
-        ));
+        arms.push(arm(&mut binds, WORD_TABLE, &clause.words, clauses));
+        arms.push(arm(&mut binds, TRIGRAM_TABLE, &clause.trigrams, clauses));
+        clauses += 1;
     }
-    let (with_clause, from_clause, rank_expr) = if sets.is_empty() {
-        (String::new(), "messages".to_string(), "0.0".to_string())
+    let (with_clause, from_clause, rank_expr) = if arms.is_empty() {
+        (String::new(), "messages", "0.0")
     } else {
-        let ctes: Vec<String> = sets
-            .iter()
-            .enumerate()
-            .map(|(i, set)| format!("m{i} AS MATERIALIZED ({set})"))
-            .collect();
-        let mut from = "m0 JOIN messages ON messages.id = m0.id".to_string();
-        for i in 1..sets.len() {
-            from.push_str(&format!(" JOIN m{i} ON m{i}.id = messages.id"));
-        }
-        let rank: Vec<String> = (0..sets.len()).map(|i| format!("m{i}.score")).collect();
-        (format!("WITH {} ", ctes.join(", ")), from, rank.join(" + "))
+        let union = arms
+            .chunks(ARMS_PER_UNION)
+            .map(|chunk| {
+                format!(
+                    "SELECT id, clause, score FROM ({})",
+                    chunk.join(" UNION ALL ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        (
+            format!(
+                "WITH arms AS MATERIALIZED ({union}), \
+                 hits AS MATERIALIZED (SELECT id, SUM(score) AS score FROM arms \
+                 GROUP BY id HAVING COUNT(DISTINCT clause) = {clauses}) "
+            ),
+            "hits JOIN messages ON messages.id = hits.id",
+            "hits.score",
+        )
     };
     let base_where = "messages.account = ?1";
 

@@ -523,6 +523,36 @@ fn a_query_mixes_substring_and_word_beginning_terms() {
     assert_eq!(newest, vec![facade, roof]);
 }
 
+/// A pasted paragraph is a query too: hundreds of substring terms beside a
+/// short word and a phrase still run, past SQLite's 64-table cap on a join
+/// and its 500-term cap on a compound `SELECT`, and every term still has to
+/// match (PERSO-276).
+#[test]
+fn a_pasted_paragraph_of_many_terms_is_answered() {
+    let f = Fixture::new();
+    // A fresh store has nothing to backfill, so the query takes the
+    // substring path, the one that builds a set per term.
+    assert!(mailypoppins::store::fts::trigram_ready(f.store.conn()).unwrap());
+    let words: Vec<String> = (0..300).map(|i| format!("term{i:03}")).collect();
+    let body = format!("{} we meet at noon", words.join(" "));
+    let all = f.ingest("inbox", 1, &email("a", "a@example.com", "Notes", &body));
+    let short_of_one = f.ingest(
+        "inbox",
+        2,
+        &email(
+            "b",
+            "b@example.com",
+            "Notes",
+            &format!("{} we meet at noon", words[..299].join(" ")),
+        ),
+    );
+
+    let first_eighty = format!("{} at \"meet at noon\"", words[..80].join(" "));
+    assert_eq!(f.hits(&first_eighty).tap_sorted(), vec![all, short_of_one]);
+    let query = format!("{} at \"meet at noon\"", words.join(" "));
+    assert_eq!(f.hits(&query), vec![all]);
+}
+
 /// Non-ASCII text survives the round trip through the tokenizer, and so does a
 /// query typed with the same accents.
 #[test]
