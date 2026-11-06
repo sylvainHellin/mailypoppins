@@ -3800,6 +3800,51 @@ mod tests {
         (draft.frontmatter.to, draft.frontmatter.cc)
     }
 
+    /// A reply and a reply-all name every mailbox as ingest stores it
+    /// (PERSO-261): a quoted local part stays whole, a comment the store
+    /// wrote back holding a `"` cuts no recipient out, and a From naming
+    /// several mailboxes is answered at its first.
+    #[test]
+    fn reply_all_keeps_a_quoted_local_part_and_each_recipient_beside_a_comment() {
+        let raw = concat!(
+            "From: \"john.doe\"@example.com\r\n",
+            "To: x@blocked.example (=?utf-8?q?=22?=), alice@ok.example, me@example.com\r\n",
+            "Cc: \"jane.roe\"@example.com, c@y.com\r\n",
+            "Subject: s\r\n\r\nbody\r\n"
+        );
+        let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+        assert_eq!(
+            email.to,
+            r#"x@blocked.example ("), alice@ok.example, me@example.com"#
+        );
+        let source = SourceMessage {
+            from: email.from,
+            to: email.to,
+            cc: email.cc,
+            subject: "s".into(),
+            ..Default::default()
+        };
+        let (to, cc) = reply_recipients(&source, false);
+        assert_eq!(to.as_deref(), Some(r#""john.doe"@example.com"#));
+        assert_eq!(cc, None);
+        let (to, cc) = reply_recipients(&source, true);
+        assert_eq!(to.as_deref(), Some(r#""john.doe"@example.com"#));
+        assert_eq!(
+            cc.as_deref(),
+            Some(r#"x@blocked.example, alice@ok.example, "jane.roe"@example.com, c@y.com"#)
+        );
+
+        let source = SourceMessage {
+            from: "A <a@x.com>, B <b@y.com>".into(),
+            to: "me@example.com".into(),
+            subject: "s".into(),
+            ..Default::default()
+        };
+        let (to, cc) = reply_recipients(&source, true);
+        assert_eq!(to.as_deref(), Some("a@x.com"));
+        assert_eq!(cc, None);
+    }
+
     #[test]
     fn reply_to_own_message_goes_to_its_recipients() {
         let source = own_source(r#""Bob" <bob@x.com>, carol@x.com"#, None);

@@ -1,8 +1,9 @@
 // A From read as the daemon reads it (`mp_core::parse::mailbox_addresses`):
-// once comments are dropped, a header holding a `<` outside a quoted string
-// names one mailbox, the address in its last such `<...>`, its display name
-// everything before; one with none names its first listed address, else its
-// last bare token holding an `@`, never one inside a quoted string. The daemon
+// once comments are dropped, it is cut into mailboxes at every `,` and `;`
+// outside a quoted string, and each names the address in its last `<...>`
+// outside a quoted string, else its own address, else its bare tokens holding
+// an `@`, never one inside a quoted string but a quoted local part
+// (`"john.doe"@x`); Copy sender copies the first mailbox's. The daemon
 // stores a name quoted whenever it holds syntax (`"Bob <bob@x>" <alice@y>`); a
 // row an older build stored may hold it decoded and bare (`bob@x, <alice@y>`),
 // so a row, the reader and Copy sender read it here, and name the mailbox a
@@ -152,66 +153,160 @@ export function senderName(from: string): string {
   return m ? m.name || m.address : f;
 }
 
+/** A character of one mailbox's text as its address is read (`addressText`). */
+interface AddressChar {
+  c: string;
+  /** Whether it lies in a quoted local part, where nothing is syntax. */
+  local: boolean;
+}
+
 /**
- * The addresses of a From with no `<` outside a quoted string read as a list
- * (`mp_core::parse::listed_addresses`): the text outside quoted strings cut at
- * every `,` and `;`, each part with what comes up to its last `:` dropped (a
- * group's name), trimmed and any `"` of a quote never closed trimmed off, the
- * empty parts dropped; null when there is no member, a member holds no `@` or
- * holds whitespace, or a group's name holds an `@`.
+ * The mailboxes of a From given as `uncommentedChars` answers it: cut at every
+ * `,` and `;` outside a quoted string (`mp_core::parse::mailbox_parts`).
  */
-function listedAddresses(chars: UncommentedChar[]): string[] | null {
-  const members: string[] = [];
-  let part = "";
-  const push = () => {
-    const member = part.trim().replace(/^"+|"+$/g, "");
-    if (member) members.push(member);
-    part = "";
-  };
-  for (const { c, quoted } of chars) {
-    if (quoted) {
-      part += " ";
-    } else if (c === "," || c === ";") {
-      push();
-    } else if (c === ":") {
-      if (part.includes("@")) return null;
-      part = "";
-    } else {
-      part += c;
+function mailboxParts(chars: UncommentedChar[]): UncommentedChar[][] {
+  const parts: UncommentedChar[][] = [[]];
+  for (const char of chars) {
+    if (!char.quoted && (char.c === "," || char.c === ";")) parts.push([]);
+    else parts[parts.length - 1].push(char);
+  }
+  return parts;
+}
+
+/**
+ * The address in the last `<...>` of one mailbox outside a quoted string, the
+ * `>` searched only after it, trimmed; null when there is none, it is never
+ * closed or it holds nothing (`mp_core::parse::bracketed_in`).
+ */
+function lastBracketed(part: UncommentedChar[]): string | null {
+  let open = -1;
+  for (let i = part.length - 1; i >= 0; i--) {
+    if (part[i].c === "<" && !part[i].quoted) {
+      open = i;
+      break;
     }
   }
-  push();
-  const listed = members.length > 0 && members.every((member) => member.includes("@") && !/\s/.test(member));
-  return listed ? members : null;
-}
-
-/**
- * The address of a From with no `<...>`, as `mailbox_addresses` reads it
- * first: comments dropped, its first listed address (`a@x, b@y`, a group's
- * members), else its last bare token holding an `@` outside a quoted string;
- * null when it holds none, or a `<` outside a quoted string (`John <john@x`,
- * which names no mailbox).
- */
-function bareAddress(from: string): string | null {
-  const chars = uncommentedChars(from);
-  if (chars.some((char) => char.c === "<" && !char.quoted)) return null;
-  const listed = listedAddresses(chars);
-  if (listed) return listed[0];
-  const tokens = chars
-    .map((char) => (char.quoted ? " " : char.c))
+  if (open < 0) return null;
+  let close = -1;
+  for (let i = open + 1; i < part.length; i++) {
+    if (part[i].c === ">" && !part[i].quoted) {
+      close = i;
+      break;
+    }
+  }
+  if (close < 0) return null;
+  const address = part
+    .slice(open + 1, close)
+    .map((char) => char.c)
     .join("")
-    .split(/[\s,;]+/)
-    .map((token) => token.replace(/^["<>]+|["<>]+$/g, ""))
-    .filter((token) => token.includes("@"));
-  return tokens.length > 0 ? tokens[tokens.length - 1] : null;
+    .trim();
+  return address || null;
 }
 
 /**
+ * One mailbox's text as its address is read (`mp_core::parse::address_text`):
+ * a quoted string is a name, each character a space, unless an `@` outside a
+ * quoted string follows it, which makes it a local part kept as written.
+ */
+function addressText(part: UncommentedChar[]): AddressChar[] {
+  const text: AddressChar[] = [];
+  let at = 0;
+  while (at < part.length) {
+    if (!part[at].quoted) {
+      text.push({ c: part[at].c, local: false });
+      at += 1;
+      continue;
+    }
+    let end = at;
+    while (end < part.length && part[end].quoted) end += 1;
+    const local = end < part.length && part[end].c === "@" && !part[end].quoted;
+    for (let i = at; i < end; i++) text.push(local ? { c: part[i].c, local: true } : { c: " ", local: false });
+    at = end;
+  }
+  return text;
+}
+
+/** `text` with every character outside a local part that `trimmed` answers cut from both ends. */
+function trimPlain(text: AddressChar[], trimmed: (c: string) => boolean): AddressChar[] {
+  const cut = (char: AddressChar) => !char.local && trimmed(char.c);
+  let start = 0;
+  while (start < text.length && cut(text[start])) start += 1;
+  let end = text.length;
+  while (end > start && cut(text[end - 1])) end -= 1;
+  return text.slice(start, end);
+}
+
+const isSpace = (c: string) => /\s/.test(c);
+const joined = (text: AddressChar[]) => text.map((char) => char.c).join("");
+
+/**
+ * The address one mailbox with no `<` names (`mp_core::parse::listed_member`):
+ * what comes up to its last `:` dropped (a group's name), trimmed and any `"`
+ * of a quote never closed trimmed off; null when it holds no `@`, holds
+ * whitespace outside a local part, or a group's name holds an `@`.
+ */
+function listedMember(text: AddressChar[]): string | null {
+  let colon = -1;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i].c === ":" && !text[i].local) {
+      colon = i;
+      break;
+    }
+  }
+  if (colon >= 0 && text.slice(0, colon).some((char) => char.c === "@" && !char.local)) return null;
+  const member = trimPlain(
+    trimPlain(text.slice(colon + 1), isSpace),
+    (c) => c === '"',
+  );
+  const spaced = member.some((char) => isSpace(char.c) && !char.local);
+  return !spaced && member.some((char) => char.c === "@") ? joined(member) : null;
+}
+
+/**
+ * The addresses one mailbox names (`mp_core::parse::part_addresses`): that in
+ * its last `<...>` when it holds a `<` outside a quoted string, none when that
+ * `<` is never closed; otherwise its address, else every bare token of it
+ * holding an `@`, the last first.
+ */
+function partAddresses(part: UncommentedChar[]): string[] {
+  if (part.some((char) => char.c === "<" && !char.quoted)) {
+    const address = lastBracketed(part);
+    return address === null ? [] : [address];
+  }
+  const text = addressText(part);
+  const member = listedMember(text);
+  if (member !== null) return [member];
+  const tokens: AddressChar[][] = [[]];
+  for (const char of text) {
+    if (!char.local && (isSpace(char.c) || char.c === "," || char.c === ";")) tokens.push([]);
+    else tokens[tokens.length - 1].push(char);
+  }
+  const found: string[] = [];
+  for (const token of tokens.reverse()) {
+    const address = joined(trimPlain(token, (c) => c === '"' || c === "<" || c === ">"));
+    if (address.includes("@") && !found.includes(address)) found.push(address);
+  }
+  return found;
+}
+
+/** The address of every mailbox `from` names, each once, in order (`mp_core::parse::mailbox_addresses`). */
+function mailboxAddresses(from: string): string[] {
+  const addresses: string[] = [];
+  for (const part of mailboxParts(uncommentedChars(from))) {
+    for (const address of partAddresses(part)) {
+      if (!addresses.includes(address)) addresses.push(address);
+    }
+  }
+  return addresses;
+}
+
+/**
+ * The address of the first mailbox `from` names (`mp_core::parse::extract_email_address`):
  * `"Bob <bob@x>" <alice@example.com>` to `alice@example.com`,
  * `x@example.com (Cron Daemon)` to `x@example.com`; a field naming no address stays, trimmed.
  */
 export function senderAddress(from: string): string {
-  return displayMailbox(from)?.address ?? bareAddress(from) ?? from.trim();
+  return mailboxAddresses(from)[0] ?? from.trim();
 }
 
 /**
@@ -226,30 +321,23 @@ export function readableSender(from: string): string {
 }
 
 /**
- * A comma-separated address list split outside quoted names, a `\` in one
- * escaping the character after it (`mp_core::addresses::split_addresses`).
+ * A comma-separated address list split at every `,` outside a quoted name and
+ * a comment, each part kept whole with its comments; a `(` or `"` never closed
+ * is a literal (`mp_core::addresses::split_addresses`).
  */
 function splitAddresses(list: string): string[] {
   const parts: string[] = [];
-  let current = "";
-  let quoted = false;
-  let escaped = false;
-  for (const c of list) {
-    if (escaped) {
-      escaped = false;
-    } else if (quoted && c === "\\") {
-      escaped = true;
-    } else if (c === '"') {
-      quoted = !quoted;
-    }
+  const push = (part: string) => {
+    if (part.trim()) parts.push(part.trim());
+  };
+  let start = 0;
+  for (const { at, c, quoted } of uncommentedChars(list)) {
     if (c === "," && !quoted) {
-      if (current.trim()) parts.push(current.trim());
-      current = "";
-    } else {
-      current += c;
+      push(list.slice(start, at));
+      start = at + 1;
     }
   }
-  if (current.trim()) parts.push(current.trim());
+  push(list.slice(start));
   return parts;
 }
 

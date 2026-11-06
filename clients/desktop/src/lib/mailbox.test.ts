@@ -37,6 +37,20 @@ describe("the sender's address", () => {
     ['"Bob <bob@x.example>"', '"Bob <bob@x.example>"'],
     ['"Bob <bob@x.example>" alice@y.example', "alice@y.example"],
     ["Cron Dæmon <root@x.example>", "root@x.example"],
+    // A quoted local part is the address's (PERSO-261).
+    ['"john.doe"@example.com', '"john.doe"@example.com'],
+    ['"john.doe"@example.com, c@y.example', '"john.doe"@example.com'],
+    ['John <"john.doe"@example.com>', '"john.doe"@example.com'],
+    ['"john doe"@example.com (J)', '"john doe"@example.com'],
+    ['"a,b"@x.example, c@y.example', '"a,b"@x.example'],
+    // Several mailboxes: the first, each by its last `<...>`.
+    ["A <a@x.example>, B <b@y.example>", "a@x.example"],
+    ["x@blocked.example, Alice <alice@ok.example>", "x@blocked.example"],
+    ["<x@blocked.example>, Alice <alice@ok.example>", "x@blocked.example"],
+    ["Bob <bob@x.example> <alice@y.example>, c@z.example", "alice@y.example"],
+    ["Doe, Jane <jane@y.example>", "jane@y.example"],
+    ["alice@y.example (Bob, <bob@x.example>", "alice@y.example"],
+    ['x@blocked.example ("), alice@ok.example', "x@blocked.example"],
   ])("reads %s as the daemon does", (from, address) => {
     expect(senderAddress(from)).toBe(address);
   });
@@ -104,5 +118,16 @@ describe("a header as a reader is shown it", () => {
     expect(readableRecipients('"Jane \\"JJ\\", Doe" <jane@x.example>, bob@y.example')).toBe(
       'Jane "JJ", Doe <jane@x.example>, bob@y.example',
     );
+  });
+
+  // `mp_core::addresses::tests::split_addresses_keeps_a_comment_whole`.
+  it.each([
+    ['x@blocked.example ("), alice@ok.example', 'x@blocked.example ("), alice@ok.example'],
+    ["a@x.example (Team, eng), b@y.example", "a@x.example (Team, eng), b@y.example"],
+    ["a@x.example (\\), b), b@y.example", "a@x.example (\\), b), b@y.example"],
+    ["bob@x.example ( , <alice@y.example>", "bob@x.example (, alice@y.example"],
+    ['Bo"b <b@x.example>, c@y.example', 'Bo"b <b@x.example>, c@y.example'],
+  ])("never cuts a recipient inside a comment: %s", (list, readable) => {
+    expect(readableRecipients(list)).toBe(readable);
   });
 });

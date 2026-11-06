@@ -948,7 +948,7 @@ A replay is `durable`: a CLI that stops waiting leaves the command running to it
 ### The `sender.*` family
 
 The daemon keeps one list of blocked senders for every account, in `<data_dir>/blocked-senders.json` (PERSO-261, `mp_protocol::sender`).
-An entry is a full address (`spam@example.com`) or a domain (`@example.com`), stored trimmed and lowercase and matched case-insensitively against the mailbox addresses of a message's `From`, never an address its display name or a comment carries; a `From` holding a `<` names one mailbox, the one in its last `<...>`, and one without names every bare address in it, matching when any of them does; a domain entry matches that domain exactly, not its subdomains.
+An entry is a full address (`spam@example.com`) or a domain (`@example.com`), stored trimmed and lowercase and matched case-insensitively against the mailbox addresses of a message's `From`, never an address its display name or a comment carries; a `From` naming several mailboxes matches when any of them does, each mailbox named by its last `<...>` or, with none, by its bare address; a quoted local part that needs no quotes matches its unquoted form (`"john.doe"@example.com` is `john.doe@example.com`); a domain entry matches that domain exactly, not its subdomains.
 
 | method | kind | params | result |
 |---|---|---|---|

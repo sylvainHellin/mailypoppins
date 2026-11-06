@@ -156,44 +156,31 @@ pub fn format_recipient(display_name: &str, address: &str) -> String {
     format!("{} <{}>", quote_display_name(name), address)
 }
 
-/// Split a comma-separated address list respecting quoted display names.
-/// e.g. `"Doe, Jane" <jane@x.com>, bob@x.com` → two entries, not three.
-/// A `\` inside a quoted name escapes the character after it, so the `\"`
-/// [`format_recipient`] writes for a `"` in a name never ends the quote.
+/// Split a comma-separated address list at every `,` outside a quoted
+/// display name and a comment, each part trimmed and kept whole, its
+/// comments included: `"Doe, Jane" <jane@x.com>, bob@x.com (Bob, "B)` is
+/// two entries, not four. A `\` inside a quoted name or a comment escapes the
+/// character after it, so the `\"` [`format_recipient`] writes for a `"` in a
+/// name never ends the quote, and a `"` inside a comment opens no quote
+/// (PERSO-261). Comments and quotes are read as
+/// [`crate::parse::mailbox_addresses`] reads them: a `(` or a `"` never
+/// closed is a literal.
 pub fn split_addresses(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
-    let mut current = String::new();
-    let (mut in_quotes, mut escaped) = (false, false);
-
-    for ch in s.chars() {
-        if escaped {
-            escaped = false;
-            current.push(ch);
-            continue;
+    let mut push = |part: &str| {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
         }
-        match ch {
-            '\\' if in_quotes => {
-                escaped = true;
-                current.push(ch);
-            }
-            '"' => {
-                in_quotes = !in_quotes;
-                current.push(ch);
-            }
-            ',' if !in_quotes => {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
+    };
+    let mut start = 0;
+    for (at, c, quoted) in crate::parse::uncommented_chars(s) {
+        if c == ',' && !quoted {
+            push(&s[start..at]);
+            start = at + 1;
         }
     }
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        parts.push(trimmed);
-    }
+    push(&s[start..]);
     parts
 }
 
@@ -231,6 +218,37 @@ mod tests {
         assert_eq!(one, r#""Jane \"JJ\", Doe \\" <jane@x.com>"#);
         let r = split_addresses(&format!("{one}, bob@x.com"));
         assert_eq!(r, vec![one.as_str(), "bob@x.com"]);
+    }
+
+    /// A comment is never cut: a `,` or a `"` inside one is the comment's,
+    /// as the store writes one back (`x@y (")`, an encoded-word decoded to
+    /// a `"`). A `(` or a `"` never closed is a literal (PERSO-261).
+    #[test]
+    fn split_addresses_keeps_a_comment_whole() {
+        for (list, parts) in [
+            (
+                r#"x@blocked.example ("), alice@ok.example"#,
+                vec![r#"x@blocked.example (")"#, "alice@ok.example"],
+            ),
+            (
+                "a@x.com (Team, eng), b@y.com",
+                vec!["a@x.com (Team, eng)", "b@y.com"],
+            ),
+            (
+                r"a@x.com (\), b), b@y.com",
+                vec![r"a@x.com (\), b)", "b@y.com"],
+            ),
+            (
+                "bob@x.com ( , <alice@y.com>",
+                vec!["bob@x.com (", "<alice@y.com>"],
+            ),
+            (
+                r#"Bo"b <b@x.com>, c@y.com"#,
+                vec![r#"Bo"b <b@x.com>"#, "c@y.com"],
+            ),
+        ] {
+            assert_eq!(split_addresses(list), parts, "{list}");
+        }
     }
 
     #[test]

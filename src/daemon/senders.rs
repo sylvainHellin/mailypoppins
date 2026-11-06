@@ -170,15 +170,17 @@ pub fn normalize(raw: &str) -> std::result::Result<String, String> {
 
 /// Whether `from`, a `From` header as the store holds it, names a sender on
 /// `entries`: one of its mailbox addresses does
-/// ([`crate::parse::mailbox_addresses`]), so a `From` naming several bare
-/// addresses matches when any of them is blocked, and one holding a `<` is
-/// judged by the address in its last `<...>`.
+/// ([`crate::parse::mailbox_addresses`]), so a `From` naming several
+/// mailboxes matches when any of them is blocked, each judged by the address
+/// in its last `<...>` or, with none, its own. A quoted local part that
+/// needs no quotes names the mailbox its unquoted form does
+/// (`"john.doe"@x` is `john.doe@x`, [`comparable`]).
 pub fn matches(entries: &[String], from: &str) -> bool {
     if entries.is_empty() {
         return false;
     }
     crate::parse::mailbox_addresses(from).iter().any(|address| {
-        let address = address.to_lowercase();
+        let address = comparable(address);
         let Some((_, domain)) = address.rsplit_once('@') else {
             return false;
         };
@@ -187,6 +189,26 @@ pub fn matches(entries: &[String], from: &str) -> bool {
             None => *entry == address,
         })
     })
+}
+
+/// `address` as an entry is compared with it: lowercased, and a quoted local
+/// part that would be a dot-atom unquoted (`"john.doe"@x`) written unquoted,
+/// since RFC 5321 makes the two the same mailbox. Any other quoted local part
+/// (`"john doe"@x`) stays quoted, and only a domain entry can match it, since
+/// [`normalize`] refuses an entry holding a `"` or a space.
+fn comparable(address: &str) -> String {
+    let address = address.to_lowercase();
+    let unquoted = address.rsplit_once('@').and_then(|(local, domain)| {
+        let inner = local.strip_prefix('"')?.strip_suffix('"')?;
+        let atext = |c: char| {
+            !c.is_ascii() || c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~".contains(c)
+        };
+        let dot_atom = inner
+            .split('.')
+            .all(|atom| !atom.is_empty() && atom.chars().all(atext));
+        dot_atom.then(|| format!("{inner}@{domain}"))
+    });
+    unquoted.unwrap_or(address)
 }
 
 /// What one list edit did.
@@ -649,11 +671,10 @@ mod tests {
             "Bob <bob@blocked.example> <alice@ok.example>",
             // A comment holding one.
             "alice@ok.example (Bob <bob@blocked.example>)",
-            // An encoded-word name, as the store holds it decoded, a comma
-            // after it making it a mailbox of its own to RFC 5322.
+            // An unquoted name before the address, as an older row holds an
+            // encoded-word name decoded: no bare token beside a `<...>` is
+            // tested.
             "bob@blocked.example <alice@ok.example>",
-            "bob@blocked.example, <alice@ok.example>",
-            "bob@blocked.example, Sales <alice@ok.example>",
             "bob@blocked.example ( <alice@ok.example>",
             // A Graph name holding a comma.
             "Doe, Jane <jane@ok.example>",
@@ -681,18 +702,62 @@ mod tests {
             "Team: alice@ok.example, x@blocked.example;"
         ));
         assert!(!matches(&entries, "alice@ok.example, carol@ok.example"));
-        // One with a `<` is judged by its last mailbox only: a blocked one
-        // before it goes unseen, which is the safe side.
-        assert!(matches(
-            &entries,
-            "Alice <alice@ok.example>, Bob <bob@blocked.example>"
-        ));
-        assert!(!matches(
-            &entries,
-            "Bob <bob@blocked.example>, Alice <alice@ok.example>"
-        ));
+        // So is one with a `<`: each mailbox is judged by its own last
+        // `<...>`, or its address when it has none, wherever it stands.
+        for blocked in [
+            "Alice <alice@ok.example>, Bob <bob@blocked.example>",
+            "Bob <bob@blocked.example>, Alice <alice@ok.example>",
+            "<x@blocked.example>, Alice <alice@ok.example>",
+            "x@blocked.example, Alice <alice@ok.example>",
+            "x@blocked.example; Alice <alice@ok.example>",
+            r#""A, <a@ok.example>" <x@blocked.example>, alice@ok.example"#,
+            // An older row's encoded-word name decoded with its comma: now
+            // read as a mailbox of its own, which the backfill rewrites.
+            "bob@blocked.example, <alice@ok.example>",
+            "bob@blocked.example, Sales <alice@ok.example>",
+        ] {
+            assert!(
+                matches(&entries, blocked),
+                "{blocked} names a blocked mailbox"
+            );
+        }
         // A `<` never closed names no mailbox.
         assert!(!matches(&entries, "Bob <bob@blocked.example"));
+        assert!(!matches(
+            &entries,
+            "Bob <bob@blocked.example, alice@ok.example"
+        ));
+    }
+
+    /// A quoted local part that needs no quotes is the mailbox its unquoted
+    /// form names; a domain entry matches any quoted local part.
+    #[test]
+    fn a_quoted_local_part_matches_the_address_it_quotes() {
+        let exact = list(&["john.doe@example.com"]);
+        for from in [
+            r#""john.doe"@example.com"#,
+            r#""John.Doe"@Example.com"#,
+            r#"John <"john.doe"@example.com>"#,
+            r#""john.doe"@example.com, c@y.com"#,
+            r#"c@y.com, "john.doe"@example.com (John)"#,
+            "john.doe@example.com",
+        ] {
+            assert!(matches(&exact, from), "{from}");
+        }
+        for from in [
+            r#""john doe"@example.com"#,
+            r#""john..doe"@example.com"#,
+            r#""john.doe" <c@y.com>"#,
+            r#""john.doe@example.com" <c@y.com>"#,
+        ] {
+            assert!(!matches(&exact, from), "{from}");
+        }
+        let domain = list(&["@example.com"]);
+        assert!(matches(&domain, r#""john doe"@example.com"#));
+        assert!(matches(&domain, r#""a@b"@example.com"#));
+        assert!(!matches(&domain, r#""a@example.com"@y.com"#));
+        assert_eq!(comparable(r#""John.Doe"@X.com"#), "john.doe@x.com");
+        assert_eq!(comparable(r#""john doe"@x.com"#), r#""john doe"@x.com"#);
     }
 
     #[test]
@@ -792,6 +857,22 @@ mod tests {
             (
                 "<x@blocked.example>; =?utf-8?q?=3C?= G:;",
                 r#"<x@blocked.example>, "< G":;"#,
+            ),
+            // A From naming several mailboxes: every one is tested, and the
+            // first is the one a reply goes to.
+            (
+                "<x@blocked.example>, Alice <alice@ok.example>",
+                "<x@blocked.example>, Alice <alice@ok.example>",
+            ),
+            (
+                "x@blocked.example, Alice <alice@ok.example>",
+                "x@blocked.example, Alice <alice@ok.example>",
+            ),
+            // Two `<...>` and no comma: the raw value names both, and so does
+            // the store, though the decoded text reads as one name.
+            (
+                "<x@blocked.example> (=?utf-8?q?=22?=) =?utf-8?q?=22?= <alice@ok.example>",
+                "x@blocked.example, alice@ok.example",
             ),
         ];
         let drafts = fx.dir.path().join("drafts");
