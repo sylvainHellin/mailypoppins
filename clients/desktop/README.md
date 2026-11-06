@@ -106,10 +106,38 @@ What they cannot see:
 
 - The reader's HTML frame: it is sandboxed without `allow-same-origin` ([docs/reader.md](docs/reader.md)), so WebDriver, whose scripts run in the app's page, sees only that it loaded; the body is read in Text mode.
 - Anything native: the App menu, the file and folder pickers behind Browse and Save, notifications, the terminal window an editor opens, the title bar, and keys that macOS handles before the page (WebDriver's keys are synthesized in the page).
-- The installed app: the DMG, its allowance under Privacy & Security, the bundled `mp` and a real daemon, which needs a whole desktop rather than a webview; those checks are for Cua with a Lume macOS VM (PERSO-271, part B).
+- The installed app: the DMG, its allowance under Privacy & Security, the bundled `mp` and a real daemon, which needs a whole desktop rather than a webview; those checks run in a macOS VM (next section).
 
 The feature never ships: [src-tauri/src/lib.rs](src-tauri/src/lib.rs) refuses it in a release build with `compile_error!`, and `pnpm bundle` fails when the app it built carries the WebDriver server (`node scripts/check-bundle.ts --app <app>`).
 The plugin has no commands and no permissions, so [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json) grants it nothing.
+
+## Whole-desktop checks in a macOS VM
+
+What the specs cannot see runs in a Lume macOS 26 VM driven by Cua Driver, on the Mac only (Apple Virtualization.framework).
+Lume (`~/.local/bin/lume`, installed with `--no-background-service`) keeps its download cache on the microSD card (`lume config cache dir`) and the VMs under `~/.lume`, where APFS clones make a copy cost only its changes.
+
+| VM | State |
+| --- | --- |
+| `mp-tahoe-base` | `ghcr.io/trycua/macos-tahoe-cua:latest` as pulled, user and password `lume` |
+| `mp-tahoe-golden` | the base plus an SSH key (`~/.lume/ssh/id_ed25519`), Cua Driver in `/Applications`, its Accessibility and Screen Recording grants and its screen-capture consent, and mailypoppins v0.12.0 installed |
+| `mp-tahoe-work` | a clone of the golden one to run checks in; `lume delete` it and clone the golden one again for a clean start |
+
+```sh
+tuios new-window -s bg lume-vm --cwd /var/tmp --no-focus --keep-open -- lume run mp-tahoe-work --no-display
+scripts/vm.sh ssh 'sw_vers -productVersion'         # once `lume get mp-tahoe-work` shows sshAvailable
+scp -i ~/.lume/ssh/id_ed25519 <app.dmg> lume@<ip>:Downloads/
+scripts/vm.sh shot 01-start                         # guest screenshot to .sync/gui-vm/01-start.png
+echo '{"script":"..."}' | scripts/vm.sh call run_script   # Cua Driver: accessibility tree, clicks, typing
+scripts/vm.sh vnc move 570 440 click 1              # real input through the VM's VNC port
+lume stop mp-tahoe-work
+```
+
+The VM runs with no window, so nothing comes to the front on the Mac; VNC listens on 127.0.0.1 only.
+Cua Driver acts in the guest's background through the accessibility tree, which reaches the app's webview and its native windows; `--screenshot-out-file` on a driver call saves what it saw.
+macOS's secure dialogs ignore its synthetic events, so the admin password prompt takes VNC input, which the guest treats as a keyboard and a mouse.
+
+What the VM has checked (PERSO-83, with the v0.12.0 release DMG): the Gatekeeper block on first open and Open Anyway under Privacy & Security, first launch with its bundled daemon and the setup wizard, the version-mismatch screen against a running v0.11.0 daemon and its Restart daemon, and the native pickers behind Browse (`ta`) and Save.
+The password prompt after Open Anyway refuses the right password in this image (the keybag disagrees with the login password, `MKB password verification ... returned -13` in the guest's log), so the check stops there and `xattr -dr com.apple.quarantine` lets the app open.
 
 ## Install from a local build
 

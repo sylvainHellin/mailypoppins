@@ -3547,3 +3547,12 @@ Both fixtures (`clients/desktop/src/fixture/backend.ts`, `src-tauri/src/fixture.
 
 The desktop availability grid restarts its 500 ms wait when the query changes, not on each keystroke, so a test typing several characters that leave the query unchanged can outlast it under load and see an intermediate query.
 Freeze `setTimeout` and `clearTimeout` with `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })` before the component mounts, drive input with `fireEvent` (user-event hangs under vitest's frozen clock), and move the clock with `act(() => vi.advanceTimersByTimeAsync(n))`.
+||||||| parent of 0e4851b0 (Desktop: whole-desktop checks in a Lume macOS VM driven by Cua Driver, scripts/vm.sh and the README how-to (PERSO-271))
+
+## Driving the desktop app in a Lume macOS VM (2026-11-06, PERSO-271)
+
+Cua Driver reaches the app's webview and native windows in the guest's background through the accessibility tree, but macOS's secure dialogs (the admin password prompt `coreautha` shows after Open Anyway) ignore its synthetic clicks and Return: the password lands in the field and OK does nothing.
+Input through the VM's VNC port (`scripts/vm.sh vnc`, vncdotool, which Lume itself uses for its SIP setup) reaches them as a real keyboard and mouse; the first VNC click only makes the dialog key, a second one presses.
+In the `macos-tahoe-cua` image that prompt then refuses the right password anyway: the guest's log shows `MKB password verification for keybag 3 returned -13` while `dscl . -authonly lume lume` succeeds, so the login password and the keybag disagree; the check stops at the prompt and `xattr -dr com.apple.quarantine` opens the app.
+CuaDriver.app does not start its daemon at guest login (`open -g -a /Applications/CuaDriver.app` does, without fronting anything), and its first screenshot raises a screen-capture consent alert inside the guest, which `get_desktop_state` reports as `direct_capture_consent_required`; once allowed it survives reboots, so it belongs in the golden VM.
+A pixel click through Cua Driver needs a `get_window_state` of that window in the same session, so it goes inside one `run_script`; separate `cua-driver call` processes refuse it with `window_never_read`.
