@@ -355,6 +355,10 @@
         "action": "Archive"
       },
       {
+        "key": "B",
+        "action": "Block the sender of a hit in the store"
+      },
+      {
         "key": "b",
         "action": "Open HTML in browser"
       },

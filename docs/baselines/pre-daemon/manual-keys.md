@@ -79,6 +79,7 @@ Live only while `held_send` is set, ahead of the table dispatch in `dispatch_nor
 - `cF`, added by PERSO-174 after the freeze, forwards it as its `.eml`.
 - `te`, added by PERSO-174 after the freeze, hands its `.eml` to the dir picker.
 - `a` (1217) archives it.
+- `B`, added by PERSO-261 after the freeze, opens the block chooser on the sender of a hit in the local store and returns to the results; a server-only hit is refused on the overlay's status line.
 - `b` (1220) opens its HTML part in the browser.
 - `o` (1223) opens the attachment picker in Open mode over the hit.
 - `O` (1226) opens it in Save mode.

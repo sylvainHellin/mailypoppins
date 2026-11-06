@@ -1519,6 +1519,12 @@ pub static KEYMAP: &[KeyBinding] = &[
     ),
     manual("te", KeyCtx::ServerSearch, "Export message as .eml", false),
     manual("a", KeyCtx::ServerSearch, "Archive", false),
+    manual(
+        "B",
+        KeyCtx::ServerSearch,
+        "Block the sender of a hit in the store",
+        false,
+    ),
     manual("b", KeyCtx::ServerSearch, "Open HTML in browser", false),
     manual("o", KeyCtx::ServerSearch, "Open attachment", false),
     manual("O", KeyCtx::ServerSearch, "Save attachment to disk", false),

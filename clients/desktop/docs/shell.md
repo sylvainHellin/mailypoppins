@@ -901,6 +901,7 @@ The commands behind them are in [rust-layer.md](rust-layer.md), "Blocked senders
 
 - `B`, the TUI's MESSAGE key, from the list or the reader, the reader toolbar's "Block sender" button, and the palette's "Block the sender (address or @domain), its mail to Junk" open the chooser on the cursor message's sender.
   Over the outbox view and a full-pane view the key does nothing and the palette row says why, as for every action on the mailbox selection.
+  On a search hit in the local store it opens on the hit's sender, as the TUI's `B` in its server-search results does; a server-only hit has no row, and the TUI says "Not in the local store; press f to fetch it first" there.
 - `sb`, the TUI's GLOBAL key, from every view, and the palette's "Blocked senders (unblock one)" open the list.
 
 On a draft the chooser does not open and the notice line says "Block needs a received message"; with no message under the cursor it says "Select a message first", and a sender with no address "No address to block in '<from>'".

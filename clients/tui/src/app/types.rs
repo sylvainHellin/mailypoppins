@@ -3061,6 +3061,9 @@ pub struct BlockChooser {
     pub refused: [Option<&'static str>; 2],
     /// `0` for the address, `1` for the domain; always an offered row.
     pub selected: usize,
+    /// Opened from the server-search results, which it returns to when it
+    /// closes, saying what the block came to on their status line.
+    pub from_search: bool,
 }
 
 impl BlockChooser {
@@ -3110,6 +3113,7 @@ impl BlockChooser {
             domain,
             refused,
             selected,
+            from_search: false,
         })
     }
 

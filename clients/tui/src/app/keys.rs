@@ -1445,6 +1445,9 @@ impl App {
             KeyCode::Char('a') => {
                 self.push_action(Action::SearchResultArchive);
             }
+            KeyCode::Char('B') => {
+                self.open_block_chooser_on_hit();
+            }
             KeyCode::Char('b') => {
                 self.push_action(Action::SearchResultOpenInBrowser);
             }
@@ -2966,6 +2969,31 @@ impl App {
         }
     }
 
+    /// `B` in the server-search results: the chooser on the sender of the hit
+    /// under the cursor when the hit is in the local store, as the desktop's
+    /// `B` on a search hit; a server-only hit is refused on the overlay's
+    /// status line, as `a` refuses it. The chooser returns to the results.
+    fn open_block_chooser_on_hit(&mut self) {
+        let Some(hit) = self.server_search_results.get(self.server_search_index) else {
+            return;
+        };
+        if hit.entry.msg.is_none() {
+            self.server_search_status =
+                Some("Not in the local store; press f to fetch it first".to_string());
+            return;
+        }
+        let from = hit.entry.from.clone();
+        match BlockChooser::for_sender(&from, &self.own_addresses()) {
+            Ok(chooser) => {
+                self.overlay = Overlay::BlockSender(BlockChooser {
+                    from_search: true,
+                    ..chooser
+                })
+            }
+            Err(why) => self.server_search_status = Some(why),
+        }
+    }
+
     /// Every configured account's own address, which the daemon refuses to
     /// block (`mp_core::blocklist`).
     fn own_addresses(&self) -> Vec<String> {
@@ -2989,13 +3017,30 @@ impl App {
             KeyCode::Char('k' | 'a') | KeyCode::Up | KeyCode::BackTab => chooser.select(0),
             KeyCode::Enter => {
                 let entry = chooser.entry().to_string();
-                self.close_overlay();
+                let from_search = chooser.from_search;
+                self.close_block_chooser(from_search);
                 self.block_sender(&entry);
+                if from_search {
+                    self.server_search_status = self.status_message.clone();
+                }
             }
-            KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                let from_search = chooser.from_search;
+                self.close_block_chooser(from_search);
+            }
             _ => {}
         }
         None
+    }
+
+    /// Close the chooser, back to the server-search results it was opened
+    /// from, else to the mail view.
+    fn close_block_chooser(&mut self, from_search: bool) {
+        if from_search {
+            self.overlay = Overlay::Search;
+        } else {
+            self.close_overlay();
+        }
     }
 
     /// `sender.block` on `entry`, the existing Inbox mail moved too, and the

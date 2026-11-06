@@ -105,6 +105,7 @@
       { "key": "cF", "action": "Forward as attachment (.eml)" },
       { "key": "te", "action": "Export message as .eml" },
       { "key": "a", "action": "Archive" },
+      { "key": "B", "action": "Block the sender of a hit in the store" },
       { "key": "b", "action": "Open HTML in browser" },
       { "key": "o", "action": "Open attachment" },
       { "key": "O", "action": "Save attachment to disk" },

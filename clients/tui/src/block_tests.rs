@@ -19,7 +19,7 @@ use mp_protocol::EventEnvelope;
 
 use crate::app::{
     Action, App, BgResult, BlockChooser, EmailEntry, KeyAction, MailboxInfo, MailboxKind,
-    MessageRef, Overlay, StatusLevel,
+    MessageRef, Overlay, SearchOverlayFocus, StatusLevel,
 };
 
 const INSTANCE: &str = "block-tests";
@@ -465,6 +465,93 @@ fn b_on_a_draft_or_an_addressless_sender_says_why() {
         assert_eq!(app.status_message.as_deref(), Some(why));
         assert!(calls(&daemon).is_empty());
     }
+}
+
+/// A server-search hit under the cursor, from `from`, in the local store as
+/// row `row` or, with `None`, only on the server.
+fn hit(row: Option<i64>, from: &str) -> crate::app::SearchResultEntry {
+    let fetched = mp_core::parse::FetchedEmail {
+        from: from.into(),
+        to: "me@example.com".into(),
+        cc: None,
+        reply_to: None,
+        bcc: None,
+        subject: "Hit".into(),
+        date: "Mon, 01 Jan 2024 12:00:00 +0000".into(),
+        body_text: String::new(),
+        html_body: None,
+        has_attachments: false,
+        server_has_attachments: None,
+        message_id: Some("<hit@example.com>".into()),
+        attachments: Vec::new(),
+        flags: Default::default(),
+        calendar_ics: None,
+        event: None,
+    };
+    crate::app::SearchResultEntry {
+        entry: EmailEntry {
+            msg: row.map(MessageRef::new),
+            ..received(0, from)
+        },
+        fetched,
+        source_label: "INBOX".into(),
+        seq: None,
+    }
+}
+
+/// `B` in the server-search results opens the chooser on a hit in the local
+/// store, as the desktop's `B` on a search hit does; Enter blocks, and both
+/// Enter and Esc return to the results, whose status line says what the
+/// block came to. A server-only hit is refused on that status line.
+#[test]
+fn b_in_the_search_results_blocks_a_hit_in_the_store() {
+    let (mut app, daemon) = app(vec![], &[]);
+    app.server_search_results = vec![
+        hit(Some(7), "Offers <offers@shop.example>"),
+        hit(None, "Deals <deals@shop.example>"),
+    ];
+    app.server_search_index = 0;
+    app.server_search_focus = SearchOverlayFocus::List;
+    app.overlay = Overlay::Search;
+
+    press(&mut app, 'B');
+    assert_eq!(chooser(&app).entry(), "offers@shop.example");
+    key(&mut app, KeyCode::Esc);
+    assert!(
+        matches!(app.overlay, Overlay::Search),
+        "Esc returns to the results"
+    );
+    assert!(calls(&daemon).is_empty());
+
+    press(&mut app, 'B');
+    press(&mut app, 'd');
+    key(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(app.overlay, Overlay::Search),
+        "Enter returns to the results"
+    );
+    assert_eq!(
+        calls(&daemon),
+        [(
+            "sender.block".to_string(),
+            json!({"address": "@shop.example"})
+        )]
+    );
+    assert_eq!(
+        app.server_search_status.as_deref(),
+        Some(
+            format!("Blocked @shop.example; 2 messages moved to Junk (work 2); {SKIPPED}").as_str()
+        )
+    );
+
+    press(&mut app, 'j');
+    press(&mut app, 'B');
+    assert!(matches!(app.overlay, Overlay::Search));
+    assert_eq!(
+        app.server_search_status.as_deref(),
+        Some("Not in the local store; press f to fetch it first")
+    );
+    assert_eq!(calls(&daemon).len(), 1, "a server-only hit blocks nothing");
 }
 
 /// `sb` lists the daemon's entries; `u` unblocks the one under the cursor
