@@ -2793,9 +2793,12 @@ Give the worktree a real `node_modules` folder whose entries are links into the 
 
 `message.thread` rows have no To, Cc or draft status, so a client that shows them for an expanded member fills a message member from the `message.get` its preview already sends, and a draft member from its draft file; `message.thread`'s plain answer stays unchanged (PERSO-146).
 
-## A desktop draft-member preview re-reads when the conversation list lands
+## A desktop draft preview re-reads on the file's content version, never on a list reload
 
-The draft member's preview has to re-read whenever the conversation list lands (`messages.loadedGen`), or an approve never reaches its toolbar, which keeps the old status (PERSO-146).
+A draft preview (the Drafts reader and a conversation's draft member alike) re-reads when a `draft.changed` naming the draft carries a content `version` it has not seen.
+Keying it on the list reload counter (`messages.loadedGen`) remounted it into its skeleton and reloaded its HTML frame on every sync tick, account state change or other draft's save, which read as the window blinking (PERSO-272).
+Counting events alone is not enough either: when a push lands, the mirror describes the unchanged file again (`set_mirror`, `recommit_path`) and emits a second `draft.changed`.
+An approve or a back to draft rewrites the file, so its new version still reaches the member's toolbar (PERSO-146).
 
 ## A desktop picker holds its cursor in state, not in DOM focus
 
