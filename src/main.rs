@@ -1,6 +1,5 @@
 use mailypoppins::config::*;
 use mailypoppins::config_cmd::*;
-use mailypoppins::parse::*;
 use mailypoppins::selector::Namespace;
 use mailypoppins::types::*;
 
@@ -2958,16 +2957,12 @@ async fn routed_server_search(
     let account = account_config.name.as_str();
 
     let mut connection = daemon_connection().await;
-    // What a hit's mailbox label resolves to for its selector; an account
-    // with no store yet has no sidebar to resolve against, and its hits are
-    // listed without one.
-    let rows = if json {
-        daemon_mailboxes(&mut connection, account)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // What a hit's mailbox label resolves to for its selector, which both
+    // `--json` and the text listing carry; an account with no store yet has
+    // no sidebar to resolve against, and its hits are listed without one.
+    let rows = daemon_mailboxes(&mut connection, account)
+        .await
+        .unwrap_or_default();
     // A client that follows its own operation has to be a subscriber first:
     // the hits and the finish reach bootstrapped connections only.
     daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
@@ -3002,6 +2997,14 @@ async fn routed_server_search(
     };
 
     let hits = settled.arrange(hits);
+    // The hit names the mailbox by its sidebar label; the selector wants the
+    // store's id, which every folder the sidebar lists has since #0141.
+    let mailbox_key = |hit: &mp_protocol::listing::ServerSearchHit| {
+        select_mailboxes(account, rows.clone(), Some(&hit.mailbox))
+            .ok()
+            .and_then(|hit| hit.into_iter().next())
+            .map(|row| row.slug)
+    };
     let lines = mailypoppins::read_cmd::server_search_lines(&settled, &hits, json);
     for line in &lines.before {
         eprintln!("{} {line}", "\u{26a0}".yellow());
@@ -3014,16 +3017,9 @@ async fn routed_server_search(
             settled.truncated,
             hits.iter()
                 .map(|hit| {
-                    // The hit names the mailbox by its sidebar label; the
-                    // selector wants the store's id, which every folder the
-                    // sidebar lists has since #0141.
-                    let key = select_mailboxes(account, rows.clone(), Some(&hit.mailbox))
-                        .ok()
-                        .and_then(|hit| hit.into_iter().next())
-                        .map(|row| row.slug);
                     mailypoppins::read_cmd::ListedMessage::from_server_hit(
                         account,
-                        key.as_deref(),
+                        mailbox_key(hit).as_deref(),
                         hit,
                         full,
                     )
@@ -3037,11 +3033,16 @@ async fn routed_server_search(
             mailypoppins::read_cmd::no_server_results(&settled).yellow()
         );
     } else {
-        let emails: Vec<FetchedEmail> = hits
-            .iter()
-            .map(mailypoppins::read_cmd::fetched_from_hit)
-            .collect();
-        display_fetched_emails_with_note(&emails, full, settled.local_store_note().as_deref());
+        let hits: Vec<_> = hits.iter().map(|hit| (hit, mailbox_key(hit))).collect();
+        print!(
+            "{}",
+            mailypoppins::read_cmd::render_server_hits(
+                account,
+                &hits,
+                full,
+                settled.local_store_note().as_deref(),
+            )
+        );
     }
     if !json {
         if let Some(trailer) = &lines.trailer {

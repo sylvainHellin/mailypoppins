@@ -131,6 +131,7 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- `mp search` without `--json` prints each hit's selector in its header as a `Selector:` line, the one `--json` reports and `mp show` takes, including for a hit only the server holds.
 - Desktop: the window no longer blinks when drafts sync with the server; a shown draft, in Drafts or inside a conversation, re-reads only when its file's content changes and keeps its preview up meanwhile, and `draft.changed` carries that content `version` (PERSO-272).
 - TUI: the focused row of a modal form or chooser (event form, RSVP, scope chooser, cancel or delete, calendars, reminders) stays legible on a light terminal in the terminal theme.
 - TUI event card: `j`/Down stops when the last line reaches the bottom of the card, a card that fits does not scroll, and `k` responds at once after pressing past the end (PERSO-270).

@@ -555,12 +555,7 @@ impl ListedMessage {
         full: bool,
     ) -> ListedMessage {
         let message_id = hit.message_id.clone().unwrap_or_default();
-        let selector = hit.selector.clone().or_else(|| {
-            mailbox.filter(|_| !message_id.is_empty()).map(|mailbox| {
-                Selector::new(account, mailbox, crate::selector::message_key(&message_id))
-                    .to_string()
-            })
-        });
+        let selector = server_hit_selector(account, mailbox, hit);
         let (body, preview) = if full {
             (Some(hit.body_text.clone()), None)
         } else {
@@ -589,6 +584,24 @@ impl ListedMessage {
             preview,
         }
     }
+}
+
+/// The selector of a server search hit found in `mailbox`, the store's id for
+/// the mailbox the hit came from: the daemon's when the hit resolved to a
+/// stored row, else the one a fetch of it would land under (PERSO-155), and
+/// none for a hit with no `Message-ID` or from a mailbox the store lacks.
+///
+/// The one `--json` reports and the text listing prints.
+pub fn server_hit_selector(
+    account: &str,
+    mailbox: Option<&str>,
+    hit: &mp_protocol::listing::ServerSearchHit,
+) -> Option<String> {
+    hit.selector.clone().or_else(|| {
+        let message_id = hit.message_id.as_deref().filter(|id| !id.is_empty())?;
+        let mailbox = mailbox?;
+        Some(Selector::new(account, mailbox, crate::selector::message_key(message_id)).to_string())
+    })
 }
 
 /// The selector of a row the daemon listed: its own spelling, which names the
@@ -733,6 +746,28 @@ pub fn fetched_from_hit(hit: &mp_protocol::listing::ServerSearchHit) -> crate::p
         calendar_ics: None,
         event: None,
     }
+}
+
+/// `mp search` without `--local` or `--json`: the hits listed with their
+/// headers, each with the selector [`server_hit_selector`] builds from its
+/// `mailbox`, the store's id for the mailbox it came from, so a hit can be
+/// handed to `mp show` as it is.
+pub fn render_server_hits(
+    account: &str,
+    hits: &[(&mp_protocol::listing::ServerSearchHit, Option<String>)],
+    full: bool,
+    note: Option<&str>,
+) -> String {
+    let emails: Vec<(crate::parse::FetchedEmail, Option<String>)> = hits
+        .iter()
+        .map(|(hit, mailbox)| {
+            (
+                fetched_from_hit(hit),
+                server_hit_selector(account, mailbox.as_deref(), hit),
+            )
+        })
+        .collect();
+    crate::parse::render_fetched_emails(&emails, full, note)
 }
 
 /// The line a server search with no hits prints, carrying the coverage caveat
@@ -1251,6 +1286,95 @@ mod tests {
         assert_eq!(printed.date, "Fri, 7 Aug 2026 10:00:00 +0000");
         assert_eq!(printed.body_text.len(), 400);
         assert!(printed.flags.seen);
+    }
+
+    /// The header block of the one hit `text` lists: from the rule above it to
+    /// the blank line before the body preview.
+    fn hit_header(text: &str) -> Vec<&str> {
+        text.lines()
+            .skip_while(|line| !line.starts_with('\u{2500}'))
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// A hit of the LOC Day search, found in the `Sent` folder.
+    fn sent_hit(message_id: &str) -> mp_protocol::listing::ServerSearchHit {
+        let mut hit = server_hit(
+            "LOC Day: vierter LinkedIn-Post zu den Industrievortr\u{e4}gen",
+            "Thu, 5 Nov 2026 09:00:00 +0100",
+            "Hallo zusammen,\n\nanbei der vierte Post.",
+        );
+        hit.account = "tum".into();
+        hit.mailbox = "Sent".into();
+        hit.message_id = Some(message_id.into());
+        hit.from = "<sylvain.hellin@tum.de>".into();
+        hit.to = "<team@example.com>".into();
+        hit
+    }
+
+    /// `mp search` without `--json` prints each hit's selector in its header
+    /// block, as the `Selector:` line `mp show` prints, so a hit can be handed
+    /// to `mp show` without rerunning the search with `--json`; a hit the
+    /// store holds prints the daemon's selector, the one `--json` reports.
+    #[test]
+    fn a_server_hit_prints_its_selector_in_the_header() {
+        colored::control::set_override(false);
+        let message_id = "<loc-day-post-4@tum.de>";
+        let selector =
+            Selector::new("tum", "sent", crate::selector::message_key(message_id)).to_string();
+        let mut hit = sent_hit(message_id);
+        hit.row_id = Some(42);
+        hit.selector = Some(selector.clone());
+
+        let text = render_server_hits("tum", &[(&hit, Some("sent".into()))], false, None);
+        let header = hit_header(&text);
+        assert!(
+            header
+                .iter()
+                .any(|line| line.starts_with("Subject: LOC Day")),
+            "the listing printed the hit: {text}"
+        );
+        let wanted = format!("Selector: {selector}");
+        assert!(
+            header.contains(&wanted.as_str()),
+            "the hit's header carries `{wanted}`, the line `mp show` prints: {header:#?}"
+        );
+        let json = ListedMessage::from_server_hit("tum", Some("sent"), &hit, false);
+        assert_eq!(json.selector.as_deref(), Some(selector.as_str()));
+    }
+
+    /// A hit only the server holds carries no selector from the daemon: the
+    /// listing prints the one built from the store's id for its mailbox, as
+    /// `--json` reports it, and nothing when the mailbox has no store id.
+    #[test]
+    fn a_server_only_hit_prints_the_selector_built_for_it() {
+        colored::control::set_override(false);
+        let hit = sent_hit("<loc-day-post-4@tum.de>");
+        assert_eq!(hit.selector, None);
+
+        let text = render_server_hits("tum", &[(&hit, Some("sent".into()))], false, None);
+        let json = ListedMessage::from_server_hit("tum", Some("sent"), &hit, false);
+        assert_eq!(
+            json.selector.as_deref(),
+            Some("mp://tum/sent/loc-day-post-4@tum.de")
+        );
+        let wanted = format!("Selector: {}", json.selector.unwrap());
+        assert!(
+            hit_header(&text).contains(&wanted.as_str()),
+            "the server-only hit's header carries `{wanted}`: {text}"
+        );
+
+        let unresolved = render_server_hits("tum", &[(&hit, None)], false, None);
+        assert!(
+            !hit_header(&unresolved)
+                .iter()
+                .any(|line| line.starts_with("Selector:")),
+            "a hit from a mailbox the store lacks prints no selector: {unresolved}"
+        );
+        assert!(hit_header(&unresolved)
+            .iter()
+            .any(|line| line.starts_with("Subject: LOC Day")));
     }
 
     fn settle(

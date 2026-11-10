@@ -2345,58 +2345,69 @@ pub fn fetched_emails_count(count: usize, note: Option<&str>) -> String {
     }
 }
 
-/// Print a server search's hits, with `note` repeated in the header, which is
-/// on stdout and so survives a caller that drops stderr.
-pub fn display_fetched_emails_with_note(
-    emails: &[FetchedEmail],
+/// The text listing of a server search's hits, with `note` repeated in the
+/// header, which goes to stdout and so survives a caller that drops stderr.
+///
+/// Each hit comes with the selector to print in its header, as the
+/// `Selector:` line `mp show` prints, or none when no selector could be built
+/// for it.
+pub fn render_fetched_emails(
+    emails: &[(FetchedEmail, Option<String>)],
     full_body: bool,
     note: Option<&str>,
-) {
+) -> String {
     if emails.is_empty() {
-        println!("No emails found matching the criteria.");
-        return;
+        return "No emails found matching the criteria.\n".to_string();
     }
 
-    println!(
+    let mut out = String::new();
+    let mut line = |text: String| {
+        out.push_str(&text);
+        out.push('\n');
+    };
+    line(format!(
         "\n{} {}\n",
         "Fetched Emails".bold().cyan(),
         fetched_emails_count(emails.len(), note)
-    );
+    ));
 
-    for (i, email) in emails.iter().enumerate() {
-        println!("{}", "─".repeat(60));
-        println!("{}: {}", "From".bold().green(), email.from);
-        println!("{}: {}", "To".bold().blue(), email.to);
+    for (i, (email, selector)) in emails.iter().enumerate() {
+        line("─".repeat(60));
+        line(format!("{}: {}", "From".bold().green(), email.from));
+        line(format!("{}: {}", "To".bold().blue(), email.to));
         if let Some(ref cc) = email.cc {
-            println!("{}: {}", "Cc".bold().blue(), cc);
+            line(format!("{}: {}", "Cc".bold().blue(), cc));
         }
-        println!("{}: {}", "Subject".bold().yellow(), email.subject);
+        line(format!("{}: {}", "Subject".bold().yellow(), email.subject));
         let date_display = if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&email.date) {
             dt.format("%Y-%m-%d").to_string()
         } else {
             email.date.clone()
         };
-        println!("{}: {}", "Date".bold().magenta(), date_display);
+        line(format!("{}: {}", "Date".bold().magenta(), date_display));
+        if let Some(selector) = selector {
+            line(format!("{}: {}", "Selector".bold(), selector));
+        }
         if email.has_attachments {
-            println!("{}", "[has attachments]".yellow());
+            line("[has attachments]".yellow().to_string());
         }
 
-        println!();
+        line(String::new());
         if full_body {
-            println!("{}", email.body_text);
+            line(email.body_text.clone());
         } else {
-            let preview: String = email.body_text.chars().take(300).collect();
-            println!("{}", preview);
+            line(email.body_text.chars().take(300).collect());
             if email.body_text.len() > 300 {
-                println!("{}", "...".dimmed());
+                line("...".dimmed().to_string());
             }
         }
 
         if i < emails.len() - 1 {
-            println!();
+            line(String::new());
         }
     }
-    println!("{}", "─".repeat(60));
+    line("─".repeat(60));
+    out
 }
 
 // ---------------------------------------------------------------------------
