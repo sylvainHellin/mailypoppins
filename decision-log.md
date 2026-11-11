@@ -507,3 +507,10 @@ Why: blocking `@tum.de` from a Sent message would move every colleague's mail to
 Rejected: a warning only (one Enter away from the damage); a guard in the clients only (the CLI would stay open).
 Source: review of the block-senders-ui branch, 2026-11-06, settled by Jean-Claude under Sylvain's PERSO-261 request.
 Status: accepted
+
+## 2026-11-11 - No Lume VM is kept on disk between whole-desktop checks
+
+Why: the base, golden and work VMs held about 30 GB of the Mac's disk for checks that ran once (PERSO-271), while the webview specs cover almost every change.
+Rejected: keeping the golden VM only (the three share most of their blocks, so it frees little); compressing the golden VM onto the home server drive (a restore that saves little over a fresh pull and setup).
+Source: chat, Mac disk cleanup, 2026-11-11.
+Status: accepted

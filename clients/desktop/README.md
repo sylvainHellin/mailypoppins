@@ -116,6 +116,8 @@ The plugin has no commands and no permissions, so [src-tauri/capabilities/defaul
 What the specs cannot see runs in a Lume macOS 26 VM driven by Cua Driver, on the Mac only (Apple Virtualization.framework).
 Lume (`~/.local/bin/lume`, installed with `--no-background-service`) keeps the VMs under `~/.lume`, where APFS clones make a copy cost only its changes; its image cache is off (`lume config caching`), so a pull writes straight into the VM and nothing duplicates the 23 GB image, and a new base VM downloads it again.
 
+No VM is kept between checks since 2026-11-11, to save about 30 GB of disk: a check starts by pulling the image and building the three VMs below, and ends with `lume delete` on each.
+
 | VM | State |
 | --- | --- |
 | `mp-tahoe-base` | `ghcr.io/trycua/macos-tahoe-cua:latest` as pulled, user and password `lume` |
