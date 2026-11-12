@@ -557,6 +557,27 @@ mod tests {
         fn mailbox_of(&self, id: &str) -> Vec<String> {
             mailbox_of(&self.store().0, id)
         }
+
+        /// Whether the listing keeps `name` as missing.
+        fn missing(&self, name: &str) -> bool {
+            listing::load(&self.store().0, "tum")
+                .unwrap()
+                .iter()
+                .any(|f| f.name == name && f.missing)
+        }
+
+        /// Today's answer to a folder gone and one come: the old one kept as
+        /// missing with its rows, the new one empty.
+        fn assert_no_rename(&self, new: &str) {
+            assert!(self.refresh(), "the listing changed");
+            assert_eq!(self.mailbox_of("one"), vec!["Projects"]);
+            assert_eq!(self.mailbox_of("two"), vec!["Projects"]);
+            assert!(self.missing("Projects"));
+            let (store, _) = self.store();
+            assert!(crate::ingest::load_mailbox_cursor(&store, "tum", new)
+                .unwrap()
+                .is_none());
+        }
     }
 
     /// A server folder holding `messages` as `(uid, id)`.
@@ -615,5 +636,15 @@ mod tests {
         let counts = crate::store::read::mailbox_read_counts(&store, "tum").unwrap();
         assert_eq!(counts.get("Projekte").map(|c| c.total), Some(2));
         assert!(!counts.contains_key("Projects"));
+    }
+
+    /// PERSO-185: a gained folder under another UIDVALIDITY is a new folder
+    /// as far as the UIDs can tell, even holding the same messages, so the
+    /// listing behaves as it did before renames were detected.
+    #[test]
+    fn a_new_uidvalidity_is_no_rename() {
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![served("Projekte", 8, 3, &[(1, "one"), (2, "two")])]);
+        fixture.assert_no_rename("Projekte");
     }
 }
