@@ -1518,6 +1518,150 @@ fn two_accounts_are_two_inventories() {
     );
 }
 
+/// Write `document` at `path` and date it `secs_ago` seconds back, so a test
+/// decides which of two files is the newer one.
+fn write_dated(path: &std::path::Path, document: &str, secs_ago: u64) {
+    fs::write(path, document).expect("write draft");
+    let modified = std::time::SystemTime::now() - Duration::from_secs(secs_ago);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(modified))
+        .expect("date the draft");
+}
+
+/// Two drafts of one account carrying the same `id:` (PERSO-222): the
+/// snapshot holds one row per id, so the watcher announces the one
+/// `draft.list` and the index keep (the newer file, ties to the smaller path)
+/// and resolves the id to that file, rather than letting whichever settled
+/// last overwrite the row while `draft.approve` resolves to the other.
+#[test]
+fn two_drafts_sharing_an_id_announce_the_one_the_index_keeps() {
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let older = dir.join("a-older.md");
+    let newer = dir.join("b-newer.md");
+    write_dated(
+        &newer,
+        &draft_document("d-twin", "robin@example.com", "Neuer", "draft", "Body."),
+        60,
+    );
+    write_dated(
+        &older,
+        &draft_document("d-twin", "sam@example.com", "Aelter", "draft", "Body."),
+        600,
+    );
+
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let (events, _) = settle(&mut watcher, Instant::now(), unit_config().debounce);
+    assert_eq!(
+        events.len(),
+        1,
+        "one id is one row, so one announcement: {events:?}"
+    );
+    assert_eq!(changed(&events[0]).path, newer);
+    assert_eq!(changed(&events[0]).subject, "Neuer");
+    assert_eq!(
+        watcher.resolve("alpha", "d-twin"),
+        Some(newer.clone()),
+        "`draft.approve` acts on the file the snapshot shows"
+    );
+    let (rows, collisions, _) = mailypoppins::store::drafts::index_dir(&dir);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].path, newer,
+        "the watcher keeps the file `draft.list` keeps"
+    );
+    assert_eq!(collisions.len(), 1);
+}
+
+/// The shadowed twin is still on disk, so removing the announced one hands
+/// the id over to it rather than dropping the row a client holds; only the
+/// last file carrying the id removes it.
+#[test]
+fn removing_the_announced_twin_announces_the_other_and_the_last_one_removes_the_id() {
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let older = dir.join("a-older.md");
+    let newer = dir.join("b-newer.md");
+    write_dated(
+        &older,
+        &draft_document("d-twin", "sam@example.com", "Aelter", "draft", "Body."),
+        600,
+    );
+    write_dated(
+        &newer,
+        &draft_document("d-twin", "robin@example.com", "Neuer", "draft", "Body."),
+        60,
+    );
+
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let debounce = unit_config().debounce;
+    let (_, t1) = settle(&mut watcher, Instant::now(), debounce);
+
+    fs::remove_file(&newer).expect("delete the announced twin");
+    let (events, t2) = settle(&mut watcher, t1 + debounce, debounce);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        changed(&events[0]).path,
+        older,
+        "the row now describes the twin that is left, not nothing"
+    );
+    assert_eq!(changed(&events[0]).subject, "Aelter");
+    assert_eq!(watcher.resolve("alpha", "d-twin"), Some(older.clone()));
+
+    fs::remove_file(&older).expect("delete the last twin");
+    let (events, _) = settle(&mut watcher, t2 + debounce, debounce);
+    assert_eq!(
+        events,
+        vec![WatchEvent::DraftRemoved {
+            account: "alpha".to_string(),
+            id: "d-twin".to_string(),
+        }]
+    );
+    assert_eq!(watcher.resolve("alpha", "d-twin"), None);
+}
+
+/// A save to the shadowed twin makes it the newer file, which is the one the
+/// index keeps from then on; the announcement follows it.
+#[test]
+fn saving_the_shadowed_twin_makes_it_the_announced_one() {
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let older = dir.join("b-older.md");
+    let newer = dir.join("a-newer.md");
+    write_dated(
+        &older,
+        &draft_document("d-twin", "sam@example.com", "Aelter", "draft", "Body."),
+        600,
+    );
+    write_dated(
+        &newer,
+        &draft_document("d-twin", "robin@example.com", "Neuer", "draft", "Body."),
+        60,
+    );
+
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let debounce = unit_config().debounce;
+    let (_, t1) = settle(&mut watcher, Instant::now(), debounce);
+
+    write_dated(
+        &older,
+        &draft_document("d-twin", "sam@example.com", "Gespeichert", "draft", "Body."),
+        0,
+    );
+    let (events, _) = settle(&mut watcher, t1 + debounce, debounce);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(changed(&events[0]).path, older);
+    assert_eq!(changed(&events[0]).subject, "Gespeichert");
+    assert_eq!(watcher.resolve("alpha", "d-twin"), Some(older.clone()));
+    let (rows, _, _) = mailypoppins::store::drafts::index_dir(&dir);
+    assert_eq!(
+        rows[0].path, older,
+        "the watcher keeps the file `draft.list` keeps"
+    );
+}
+
 #[test]
 fn one_polls_events_are_ordered_by_root_then_by_file_name() {
     let root = TempDir::new().expect("tempdir");

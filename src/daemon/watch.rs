@@ -28,6 +28,18 @@
 //! [`WatchEvent::DraftRemoved`] only if it had settled as present before: a
 //! client that was never told about the row must not be told to drop it.
 //!
+//! # Two files, one id
+//!
+//! A snapshot holds one row per `(account, id)`, so two drafts of one account
+//! carrying the same `id:` cannot both be announced (PERSO-222). The watcher
+//! announces the one the drafts index keeps
+//! ([`crate::store::drafts::index_dir`]: the newer file by whole seconds,
+//! ties to the smaller path), which is also the one [`DraftWatcher::resolve`]
+//! hands `draft.approve`. A shadowed twin is announced when it becomes the
+//! kept one, by a save or by its twin's removal, and the id is removed only
+//! when no file carries it any more; `draft.list` reports the pair as a
+//! collision.
+//!
 //! # What it never does
 //!
 //! It never opens a draft for writing. Not to mint an `id:`, not to normalise,
@@ -41,7 +53,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use log::debug;
+use log::{debug, warn};
 use mp_protocol::events::{Diagnostic, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED};
 use mp_protocol::state::{DraftServer, DraftSyncState};
 use serde_json::json;
@@ -369,10 +381,50 @@ struct Observation {
 struct FileState {
     /// The observation that last settled; `None` means settled absent.
     settled: Option<Observation>,
-    /// The id or name it was announced under, `None` until it settles present.
+    /// The id or name it settled under, `None` until it settles present. A
+    /// draft whose twin is kept instead carries its id here and is not what
+    /// the snapshot shows ([`RootState::shown`]).
     announced: Option<String>,
     /// The observation it is moving towards, and when it was last seen moving.
     pending: Option<(Option<Observation>, Instant)>,
+}
+
+/// What the watcher holds about one root.
+#[derive(Debug, Default)]
+struct RootState {
+    /// Every watched file, keyed by path: iterating it yields a poll's events
+    /// ordered by file name.
+    files: BTreeMap<PathBuf, FileState>,
+    /// For a drafts root, the file each announced id was last described from,
+    /// which is the row the snapshot holds: of two files carrying one id, the
+    /// one the index keeps.
+    shown: BTreeMap<String, PathBuf>,
+}
+
+impl RootState {
+    /// The file the drafts index keeps among those settled under `id`: the
+    /// newer by whole seconds, ties to the smaller path
+    /// ([`crate::store::drafts::index_dir`]'s rule).
+    fn kept(&self, id: &str) -> Option<&PathBuf> {
+        self.files
+            .iter()
+            .filter_map(|(path, state)| {
+                let settled = state.settled?;
+                (state.announced.as_deref() == Some(id)).then_some((settled, path))
+            })
+            .max_by_key(|(settled, path)| {
+                (whole_seconds(settled.modified), std::cmp::Reverse(*path))
+            })
+            .map(|(_, path)| path)
+    }
+}
+
+/// `modified` as the drafts index folds it.
+fn whole_seconds(modified: SystemTime) -> u64 {
+    modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
 }
 
 /// The poll, its debounce, and the inventory of what it has announced.
@@ -380,9 +432,9 @@ struct FileState {
 pub struct DraftWatcher {
     roots: Vec<Root>,
     config: WatchConfig,
-    /// One map per root, in root order, each keyed by path: iterating them
-    /// yields a poll's events ordered by root and then by file name.
-    files: Vec<BTreeMap<PathBuf, FileState>>,
+    /// One state per root, in root order: iterating them yields a poll's
+    /// events ordered by root and then by file name.
+    states: Vec<RootState>,
     /// Each account's drafts mirror, as its runtime last handed it over
     /// (#0143); an account absent here has not been read yet, and its drafts
     /// carry no `server` member.
@@ -393,11 +445,11 @@ impl DraftWatcher {
     /// A watcher that has announced nothing yet.
     pub fn new(roots: WatchRoots, config: WatchConfig) -> DraftWatcher {
         let roots = roots.walk();
-        let files = roots.iter().map(|_| BTreeMap::new()).collect();
+        let states = roots.iter().map(|_| RootState::default()).collect();
         DraftWatcher {
             roots,
             config,
-            files,
+            states,
             mirror: BTreeMap::new(),
         }
     }
@@ -411,17 +463,17 @@ impl DraftWatcher {
     /// about the ones that stay (a `config.reload` adds and removes accounts).
     pub fn set_roots(&mut self, roots: WatchRoots) {
         let roots = roots.walk();
-        let mut files: Vec<BTreeMap<PathBuf, FileState>> = Vec::with_capacity(roots.len());
+        let mut states: Vec<RootState> = Vec::with_capacity(roots.len());
         for root in &roots {
             let previous = self
                 .roots
                 .iter()
                 .position(|old| old == root)
-                .map(|at| std::mem::take(&mut self.files[at]));
-            files.push(previous.unwrap_or_default());
+                .map(|at| std::mem::take(&mut self.states[at]));
+            states.push(previous.unwrap_or_default());
         }
         self.roots = roots;
-        self.files = files;
+        self.states = states;
     }
 
     /// Look once, at the time the caller says it is.
@@ -436,7 +488,13 @@ impl DraftWatcher {
         let mut conflicts_moved: Vec<(usize, PathBuf)> = Vec::new();
         for (index, root) in self.roots.iter().enumerate() {
             let seen = scan(&root.dir);
-            let states = &mut self.files[index];
+            let root_state = &mut self.states[index];
+            let states = &mut root_state.files;
+            // A drafts root's settled events, in file-name order, each with
+            // the id it is about and, for a present file, its path: what one
+            // id's twins settled into, before [`RootState::kept`] says which
+            // of them the snapshot shows.
+            let mut settled: Vec<(String, Option<PathBuf>, WatchEvent)> = Vec::new();
             // The union of what is on disk and what the watcher is tracking:
             // a file that vanished has a state and no observation.
             let paths: Vec<PathBuf> = seen
@@ -491,15 +549,27 @@ impl DraftWatcher {
                                     (root.account.clone(), state.announced.clone())
                                 {
                                     if old != name {
-                                        events.push(WatchEvent::DraftRemoved { account, id: old });
+                                        settled.push((
+                                            old.clone(),
+                                            None,
+                                            WatchEvent::DraftRemoved { account, id: old },
+                                        ));
                                     }
                                 }
-                                state.announced = Some(name);
-                                events.push(event);
+                                state.announced = Some(name.clone());
+                                if root.account.is_some() {
+                                    settled.push((name, Some(path.clone()), event));
+                                } else {
+                                    events.push(event);
+                                }
                             }
                             None => match (root.account.clone(), state.announced.take()) {
                                 (Some(account), Some(id)) => {
-                                    events.push(WatchEvent::DraftRemoved { account, id });
+                                    settled.push((
+                                        id.clone(),
+                                        None,
+                                        WatchEvent::DraftRemoved { account, id },
+                                    ));
                                 }
                                 (None, Some(name)) => {
                                     events.push(WatchEvent::SignatureRemoved { name });
@@ -516,6 +586,53 @@ impl DraftWatcher {
             states.retain(|_, state| {
                 state.settled.is_some() || state.pending.is_some() || state.announced.is_some()
             });
+            // One outcome per id this poll touched, at the place its first
+            // event stood: the kept file's description when the snapshot is to
+            // show something new, a removal when no file carries the id any
+            // more, and nothing when a shadowed twin moved and stayed shadowed.
+            let mut decided: BTreeSet<String> = BTreeSet::new();
+            for (id, _, _) in &settled {
+                if !decided.insert(id.clone()) {
+                    continue;
+                }
+                let Some(account) = root.account.clone() else {
+                    continue;
+                };
+                let Some(kept) = root_state.kept(id).cloned() else {
+                    if root_state.shown.remove(id).is_some() {
+                        events.push(WatchEvent::DraftRemoved {
+                            account,
+                            id: id.clone(),
+                        });
+                    }
+                    continue;
+                };
+                let fresh = settled.iter().find_map(|(_, path, event)| {
+                    (path.as_ref() == Some(&kept)).then(|| event.clone())
+                });
+                let event = match fresh {
+                    Some(event) => Some(event),
+                    None if root_state.shown.get(id) != Some(&kept) => {
+                        Some(describe(root, &kept, self.mirror.get(&account)))
+                    }
+                    None => None,
+                };
+                let twins = root_state
+                    .files
+                    .values()
+                    .filter(|state| {
+                        state.settled.is_some() && state.announced.as_deref() == Some(id)
+                    })
+                    .count();
+                if twins > 1 {
+                    warn!(
+                        "[drafts] {twins} drafts of {account} carry the id {id}; announcing {}",
+                        kept.display()
+                    );
+                }
+                root_state.shown.insert(id.clone(), kept);
+                events.extend(event);
+            }
         }
         for (index, copy) in conflicts_moved {
             if let Some(original) = original_of_conflict(&copy) {
@@ -560,7 +677,8 @@ impl DraftWatcher {
             .map(|(index, _)| index)
             .collect();
         for index in indices {
-            let paths: Vec<PathBuf> = self.files[index]
+            let paths: Vec<PathBuf> = self.states[index]
+                .files
                 .iter()
                 .filter(|(_, state)| {
                     state.settled.is_some()
@@ -594,7 +712,7 @@ impl DraftWatcher {
     /// still, without a removal: its settled observation is forgotten, so the
     /// poll reads it as moved, and the name it was announced under stays.
     fn recommit_path(&mut self, index: usize, path: &Path) {
-        if let Some(state) = self.files[index].get_mut(path) {
+        if let Some(state) = self.states[index].files.get_mut(path) {
             if state.settled.is_some() {
                 state.settled = None;
                 state.pending = None;
@@ -607,19 +725,13 @@ impl DraftWatcher {
     /// The lookup `draft.approve` uses: the settled inventory, not the drafts
     /// index, which lives in a store behind an engine lock. A draft the watcher
     /// has only glimpsed resolves to nothing, because the inventory is what the
-    /// daemon has announced.
+    /// daemon has announced; of two files carrying the id, the one announced.
     pub fn resolve(&self, account: &str, id: &str) -> Option<PathBuf> {
-        for (index, root) in self.roots.iter().enumerate() {
-            if root.account.as_deref() != Some(account) {
-                continue;
-            }
-            for (path, state) in &self.files[index] {
-                if state.announced.as_deref() == Some(id) && state.settled.is_some() {
-                    return Some(path.clone());
-                }
-            }
-        }
-        None
+        self.roots
+            .iter()
+            .zip(&self.states)
+            .filter(|(root, _)| root.account.as_deref() == Some(account))
+            .find_map(|(_, state)| state.shown.get(id).cloned())
     }
 }
 
