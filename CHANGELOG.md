@@ -131,6 +131,10 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- `mp send` no longer reports a delivered mail as failed when a sync tick lands inside its SMTP session (PERSO-280).
+- `mp outbox discard` refuses a row that an invite or RSVP send is still submitting, instead of deleting it and turning a delivered mail into a reported error (PERSO-280).
+- `mp daemon restart` under an installed systemd unit or launchd agent brings the service back: after the socket stop it asks the manager to restart the service (`systemctl --user restart`, `launchctl kickstart -k`) instead of starting it, which systemd ignored while it still counted the old daemon active (PERSO-109).
+- TUI search overlay: `b`, `e`, `r`, `R`, `w`, `cF`, `o` and `B` show their outcome (No HTML version available, Opened in browser, Open failed, Returned from the read-only copy, draft ready, No attachments, block result, Compose cancelled) on the overlay's own line instead of the hidden status line (PERSO-216).
 - `mp search` without `--json` prints each hit's selector in its header as a `Selector:` line, the one `--json` reports and `mp show` takes, including for a hit only the server holds.
 - Desktop: the window no longer blinks when drafts sync with the server; a shown draft, in Drafts or inside a conversation, re-reads only when its file's content changes and keeps its preview up meanwhile, and `draft.changed` carries that content `version` (PERSO-272).
 - TUI: the focused row of a modal form or chooser (event form, RSVP, scope chooser, cancel or delete, calendars, reminders) stays legible on a light terminal in the terminal theme.
