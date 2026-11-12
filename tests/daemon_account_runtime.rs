@@ -187,6 +187,8 @@
 //! rather than letting `config::account_dir` read the environment
 //! (`tests/engine_lock_ingest.rs` takes the same route, for the same reason).
 
+#[path = "support/gate.rs"]
+mod gate;
 #[path = "support/readiness.rs"]
 mod readiness;
 
@@ -507,13 +509,59 @@ async fn a_quiet_drain_adds_nothing_to_the_status_text() {
     assert_eq!(outcome.error, None);
 }
 
+/// The [`gate::Gate`] the tick bodies below are held at (PERSO-222): a pass
+/// waits for a permit, an `open` before any arrival is kept rather than lost,
+/// and `open(n)` lets exactly `n` passes through, which is the count a
+/// `Notify` cannot carry.
+#[tokio::test]
+async fn a_gate_lets_through_exactly_the_permits_it_was_opened_with() {
+    let gate = Arc::new(gate::Gate::new());
+    let passes = Arc::new(AtomicUsize::new(0));
+    let spawn_pass = || {
+        let (gate, passes) = (Arc::clone(&gate), Arc::clone(&passes));
+        tokio::spawn(async move {
+            gate.pass().await;
+            passes.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+
+    let held: Vec<_> = (0..3).map(|_| spawn_pass()).collect();
+    within("three arrivals", gate.arrived(3)).await;
+    assert_eq!(gate.arrivals(), 3);
+    assert_eq!(passes.load(Ordering::SeqCst), 0, "no permit, no pass");
+
+    gate.open(2);
+    within("two passes", async {
+        while passes.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(passes.load(Ordering::SeqCst), 2, "two permits, two passes");
+
+    gate.open(2);
+    within("the third pass", async {
+        for pass in held {
+            pass.await.expect("a pass");
+        }
+    })
+    .await;
+    within("a pass on a permit opened before it arrived", spawn_pass())
+        .await
+        .expect("a pass");
+    assert_eq!(passes.load(Ordering::SeqCst), 4);
+    assert_eq!(gate.arrivals(), 4);
+}
+
 #[tokio::test]
 async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
     let (_root, dir) = account_dir();
     let log = Arc::new(Log::default());
-    let gate = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(gate::Gate::new());
     let bodies = Arc::new(AtomicUsize::new(0));
-    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
     let body: BodyHook = {
         let log = Arc::clone(&log);
@@ -523,13 +571,11 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
             let log = Arc::clone(&log);
             let gate = Arc::clone(&gate);
             let bodies = Arc::clone(&bodies);
-            let entered = entered_tx.clone();
             async move {
                 log.push("body", ctx.phase);
                 bodies.fetch_add(1, Ordering::SeqCst);
-                let _ = entered.send(());
                 // Held open until the test has proved the second tick joined.
-                gate.notified().await;
+                gate.pass().await;
                 Ok(())
             }
             .boxed()
@@ -552,10 +598,7 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
         futures::future::join(runtime.tick(TickKind::Quick), async {
             // The first tick is inside its body; only now can a second one join
             // it. No sleep: the body itself says when it got there.
-            entered_rx
-                .recv()
-                .await
-                .expect("the body reports it started");
+            gate.arrived(1).await;
 
             let joiner = runtime.tick(TickKind::Full);
             futures::pin_mut!(joiner);
@@ -576,7 +619,7 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
                 tokio::task::yield_now().await;
             }
 
-            gate.notify_one();
+            gate.open(1);
             joiner.await
         })
         .await
@@ -601,14 +644,12 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
     assert_eq!(second.status, first.status, "and the same status text");
     assert_eq!(second.error, first.error, "and the same result");
 
-    // The join is scoped to the run, not cached: the next tick starts a body.
-    // The gate needs a fresh permit for it: a `notify_one` delivered to an
-    // already registered waiter wakes that waiter and stores nothing, so the
-    // call that released the first body left the gate empty. This one has no
-    // waiter to wake, so it stores the permit the third body consumes.
-    gate.notify_one();
+    // The join is scoped to the run, not cached: the next tick starts a body,
+    // which passes on the one permit opened for it.
+    gate.open(1);
     let third = within("a tick after the join", runtime.tick(TickKind::Quick)).await;
     assert!(!third.joined);
+    assert_eq!(gate.arrivals(), 2, "the joiner never reached a body");
     assert_eq!(
         bodies.load(Ordering::SeqCst),
         2,

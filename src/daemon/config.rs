@@ -873,8 +873,14 @@ pub(crate) fn blocked_by_failure(runtimes: &RuntimeTable, account: &str, reason:
     }
 }
 
+/// The gate the daemon tests hold a tick body at (PERSO-222).
+#[cfg(test)]
+#[path = "../../tests/support/gate.rs"]
+mod gate;
+
 #[cfg(test)]
 mod tests {
+    use super::gate;
     use super::*;
 
     fn parse(text: &str) -> GlobalConfig {
@@ -1236,25 +1242,22 @@ mod tests {
     async fn a_reload_mid_tick_leaves_the_replacement_ready() {
         use crate::daemon::runtime::account::{AccountRuntime, DrainHook, TickHooks, TickKind};
         use futures::future::FutureExt;
-        use tokio::sync::Notify;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = crate::config::AccountConfig {
             name: "alpha".to_string(),
             ..Default::default()
         };
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
+        let gate = Arc::new(gate::Gate::new());
         let quiet: DrainHook = Arc::new(|_ctx| async { String::new() }.boxed());
-        let (on_entry, gate) = (Arc::clone(&entered), Arc::clone(&release));
+        let held = Arc::clone(&gate);
         let hooks = TickHooks {
             outbox: Arc::clone(&quiet),
             mutations: quiet,
             body: Arc::new(move |_ctx| {
-                let (on_entry, gate) = (Arc::clone(&on_entry), Arc::clone(&gate));
+                let gate = Arc::clone(&held);
                 async move {
-                    on_entry.notify_one();
-                    gate.notified().await;
+                    gate.pass().await;
                     Ok(())
                 }
                 .boxed()
@@ -1274,13 +1277,13 @@ mod tests {
             let outcome = ticking.tick(TickKind::Quick).await;
             (outcome, ticking)
         });
-        entered.notified().await;
+        gate.arrived(1).await;
 
         let stopper = Arc::clone(&runtimes);
         let stop = tokio::spawn(async move { stop_account(&stopper, "alpha").await });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(!stop.is_finished(), "the stop waits for the tick in flight");
-        release.notify_one();
+        gate.open(1);
         stop.await.expect("the stop task");
 
         // `start_account`'s own step, against the same lock file.

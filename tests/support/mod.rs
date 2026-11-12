@@ -34,6 +34,9 @@
 //! [`events`] reads `state.event` notifications past the daemon's own startup
 //! events; daemon suites that do not declare `mod support;` include either
 //! file by path.
+//! [`gate`] holds hooked futures (a tick body, a drain) until a test opens
+//! it for a counted number of passes (PERSO-222); the runtime suite and the
+//! library's unit tests include it by path.
 
 #![allow(dead_code)]
 
@@ -42,6 +45,7 @@ pub mod calendar_fixture;
 pub mod draft_fixture;
 pub mod events;
 pub mod fake_imap;
+pub mod gate;
 pub mod mutation_fixture;
 pub mod parity;
 pub mod read_fixture;
