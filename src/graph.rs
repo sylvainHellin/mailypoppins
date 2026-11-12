@@ -5630,6 +5630,39 @@ mod tests {
         assert_eq!(LastVerb::of_send(false, true), LastVerb::Forward);
     }
 
+    /// PERSO-237: the Sent Items copy of a Graph send lands on the row the
+    /// outbox stored for it during the send, so the sync reports no insert
+    /// and the contacts index takes no second count of its recipients.
+    #[test]
+    fn the_synced_copy_of_a_graph_send_is_no_fresh_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let raw = b"From: me@example.com\r\nTo: Zed <zed@example.com>\r\nSubject: Hi\r\n\
+                    Date: Wed, 21 Oct 2026 20:12:00 +0000\r\nMessage-ID: <sent@x>\r\n\r\nbody\r\n";
+        crate::outbox::ingest_sent_copy(&store, &blobs, "acct", "sent", raw, "<sent@x>", None)
+            .unwrap();
+
+        let mut result = SyncResult::default();
+        let sent = sync_target(MailboxRole::Sent, "Sent Items");
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &sent,
+            &[received("<sent@x>", "2026-10-21T20:12:00Z")],
+            None,
+            &quiet(&store),
+            &mut result,
+        );
+        assert!(result.fresh_observations.is_empty(), "{result:?}");
+        let rows: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
     /// The store half (PERSO-171): a sync row whose listing carries 0x1081=102
     /// lands answered, a held row a later enumeration names as replied turns
     /// answered, and an entry with no verb (the delta's) clears nothing.
