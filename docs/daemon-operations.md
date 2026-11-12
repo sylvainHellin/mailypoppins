@@ -889,9 +889,12 @@ A `systemctl` that runs and fails is exit 1 with the file left on disk: the file
 An install over a file whose content differs is refused rather than overwritten, because a user may have edited it; `--force` replaces it and reports a write.
 An identical file is not rewritten at all, but the enable runs again, because a user who disabled the unit by hand expects `install-service` to put it back.
 
-An install over a daemon already answering on the socket hands that daemon over to the service (PERSO-219), because a service started beside it cannot bind the socket it holds and crash-loops until it stops.
+An install over a daemon already answering on the socket and running outside the service hands that daemon over to the service (PERSO-219), because a service started beside it cannot bind the socket it holds and crash-loops until it stops.
 When the service manager is run and the service is one `mp daemon start` would use (see below), the install registers the service without starting it (`systemctl --user daemon-reload`, then `systemctl --user enable mailypoppins.service`; nothing on macOS, where `bootstrap` is the start), prints `  the running daemon (pid N) is handed over to the service`, and then does what `mp daemon restart` does: the socket stop, `✓ daemon stopped`, and the manager's restart (`systemctl --user restart`, or `launchctl kickstart -k` / `bootstrap`), `✓ daemon started (pid M)` with the command under it.
-The restart rather than a start covers a re-install over the service's own daemon, which the manager may still count running for a moment after the stop.
+The daemon is the service's own when the manager names a main process for the service (`systemctl --user show -p MainPID --value mailypoppins.service`, or the top-level `pid` of `launchctl print gui/<uid>/dev.mailypoppins.daemon`) and that pid is the one the socket's `daemon.status` reports.
+A re-install over the service's own daemon with the file unchanged registers the service as above and stops nothing, printing `  the service's own daemon (pid N) is running and is left as it is`.
+With the file rewritten by `--force`, the same daemon is restarted the way a handover runs, under `  the service's own daemon (pid N) is restarted to run the new file`, so the new definition is the one that runs; the restart rather than a start is what covers it, since the manager may still count the service running for a moment after the stop.
+A manager that cannot name a main process counts as a daemon outside the service, whose handover is `mp daemon restart`'s and safe for the service's own as well.
 A registration that fails is exit 1 with the running daemon left alone; a service whose daemon never answers is exit 4, as for `restart`.
 Under the dry-run hook, with no service manager on `PATH`, or with no user manager reachable, nothing is stopped and the install runs as above.
 

@@ -180,6 +180,15 @@ enum Mode {
 /// the running one holds, so the unit would crash-loop until that one
 /// stopped. A registration that fails exits 1 with the running daemon left
 /// alone.
+///
+/// The handover is for a daemon running outside the service. The daemon is
+/// the service's own when the manager names a main process for the service
+/// ([`service_main_pid`]) and that pid is the one the socket's daemon reports;
+/// such a daemon is left running when the file was already the one this
+/// version installs, and restarted through the manager when the file was
+/// rewritten, so the new definition is the one that runs. A manager that
+/// cannot say counts as a daemon outside the service, whose handover is
+/// `mp daemon restart`'s and therefore safe for the service's own as well.
 pub async fn install(force: bool, check: bool) -> Result<i32> {
     let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
     let path = service_path(target);
@@ -190,10 +199,11 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
 
     let desired = render(target)?;
     let existing = fs::read_to_string(&path).ok();
-    let header = match existing {
-        Some(current) if current == desired => {
-            format!("{} {} is already installed", tick(), path.display())
-        }
+    let (header, written) = match existing {
+        Some(current) if current == desired => (
+            format!("{} {} is already installed", tick(), path.display()),
+            false,
+        ),
         Some(_) if !force => bail!(
             "{} differs from the service this version installs; re-run with --force to replace it",
             path.display()
@@ -201,7 +211,7 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
         _ => {
             write_service(target, &path, &desired)?;
             info!("[service] wrote {}", path.display());
-            format!("{} wrote {}", tick(), path.display())
+            (format!("{} wrote {}", tick(), path.display()), true)
         }
     };
 
@@ -210,7 +220,11 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
     if mode == Mode::Run {
         if let Some(pid) = super::lifecycle::running_pid().await {
             if let StartRoute::Supervised(plan) = start_route(StartKind::Restart)? {
-                return hand_over(target, header, &pid, plan).await;
+                let running = Running {
+                    own: service_main_pid(target).is_some_and(|main| main.to_string() == pid),
+                    pid,
+                };
+                return hand_over(target, header, running, written, plan).await;
             }
         }
     }
@@ -227,12 +241,22 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Register the service without starting it, then stop the running daemon
-/// over its socket and start the service through `plan`.
+/// The daemon answering on the socket when `install-service` runs.
+struct Running {
+    /// Its pid, as `daemon.status` reports it.
+    pid: String,
+    /// Whether it is the service's main process.
+    own: bool,
+}
+
+/// Register the service without starting it, then, unless the running daemon
+/// is the service's own and the file is unchanged, stop it over its socket
+/// and start the service through `plan`.
 async fn hand_over(
     target: Target,
     header: String,
-    pid: &str,
+    running: Running,
+    written: bool,
     plan: SupervisedStart,
 ) -> Result<i32> {
     let commands = register_commands(target);
@@ -241,8 +265,20 @@ async fn hand_over(
     let outcome = run_all(&commands, ManagerOutput::Terminal);
     print_lines(&lines);
     outcome?;
-    info!("[service] handing the running daemon (pid {pid}) over to the service");
-    println!("  the running daemon (pid {pid}) is handed over to the service");
+    let Running { pid, own } = running;
+    let what = match (own, written) {
+        (true, false) => {
+            info!("[service] the service's own daemon (pid {pid}) is running; left as it is");
+            println!("  the service's own daemon (pid {pid}) is running and is left as it is");
+            return Ok(EXIT_OK);
+        }
+        (true, true) => {
+            format!("the service's own daemon (pid {pid}) is restarted to run the new file")
+        }
+        (false, _) => format!("the running daemon (pid {pid}) is handed over to the service"),
+    };
+    info!("[service] {what}");
+    println!("  {what}");
     super::lifecycle::hand_over(StartRoute::Supervised(plan)).await
 }
 
@@ -907,6 +943,45 @@ fn manager_kind(target: Target) -> &'static str {
     }
 }
 
+/// The pid of the process the service manager runs as the service, or `None`
+/// when it runs none or cannot say: systemd's `MainPID`, which is `0` for an
+/// inactive unit, or the top-level `pid` launchd prints for a running agent.
+fn service_main_pid(target: Target) -> Option<u32> {
+    let label = format!("{}/{LAUNCHD_LABEL}", gui_domain());
+    let (program, args) = match target {
+        Target::Linux => (
+            "systemctl",
+            vec!["--user", "show", "-p", "MainPID", "--value", UNIT_NAME],
+        ),
+        Target::Darwin => ("launchctl", vec!["print", label.as_str()]),
+    };
+    let out = Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    main_pid_in(target, &String::from_utf8_lossy(&out.stdout))
+}
+
+/// The main pid in what [`service_main_pid`]'s command printed.
+///
+/// `launchctl print` nests blocks one tab deeper per level, and the agent's
+/// own `pid` is at the first level, so a deeper `pid` line is not it.
+fn main_pid_in(target: Target, printed: &str) -> Option<u32> {
+    let value = match target {
+        Target::Linux => printed.trim(),
+        Target::Darwin => printed
+            .lines()
+            .find_map(|line| line.strip_prefix("\tpid = "))?
+            .trim(),
+    };
+    value.parse().ok().filter(|pid| *pid != 0)
+}
+
 /// Whether launchd has the agent loaded in this user's GUI domain.
 fn launchd_loaded() -> bool {
     Command::new("launchctl")
@@ -1283,6 +1358,33 @@ mod tests {
             "  systemctl is not on PATH; run the lines above to enable the service"
         );
         assert!(note(Mode::Run, "systemctl", "enable").is_none());
+    }
+
+    /// The main pid reads out of `systemctl show` and `launchctl print`, with
+    /// systemd's `0` and launchd's missing or nested `pid` read as none.
+    #[test]
+    fn the_main_pid_reads_out_of_each_managers_answer() {
+        assert_eq!(main_pid_in(Target::Linux, "4242\n"), Some(4242));
+        assert_eq!(main_pid_in(Target::Linux, "0\n"), None);
+        assert_eq!(main_pid_in(Target::Linux, ""), None);
+
+        let running = "gui/501/dev.mailypoppins.daemon = {\n\
+                       \tactive count = 1\n\
+                       \tstate = running\n\
+                       \tprogram = /opt/homebrew/bin/mp\n\
+                       \tpid = 4242\n\
+                       \tendpoints = {\n\
+                       \t\tpid = 7\n\
+                       \t}\n\
+                       }\n";
+        assert_eq!(main_pid_in(Target::Darwin, running), Some(4242));
+        let stopped = "gui/501/dev.mailypoppins.daemon = {\n\
+                       \tstate = not running\n\
+                       \tendpoints = {\n\
+                       \t\tpid = 7\n\
+                       \t}\n\
+                       }\n";
+        assert_eq!(main_pid_in(Target::Darwin, stopped), None);
     }
 
     /// A captured command that fails says in its error what it printed, on

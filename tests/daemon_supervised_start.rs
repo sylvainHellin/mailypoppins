@@ -144,7 +144,8 @@ impl Sandbox {
     /// daemon exited, as systemd does once it has processed the `SIGCHLD`.
     /// `stop` and `restart` signal the main process and wait for the unit to
     /// go inactive; `enable --now` starts it as `start` does, and `is-active`
-    /// answers from the same state.
+    /// and `show -p MainPID --value` answer from the same state, the latter
+    /// with `0` for an inactive unit as systemd does.
     fn stateful_systemctl(&self, latency: Duration) {
         let state = self.dir("bin").join("unit.mainpid");
         let state = state.display();
@@ -170,6 +171,7 @@ impl Sandbox {
              \x20 restart) do_stop; do_start ;;\n\
              \x20 enable) if [ \"$3\" = --now ]; then do_start; fi ;;\n\
              \x20 is-active) if [ -s \"$state\" ]; then echo active; else echo inactive; exit 3; fi ;;\n\
+             \x20 show) if [ -s \"$state\" ]; then cat \"$state\"; else echo 0; fi ;;\n\
              esac\n\
              exit 0\n"
         ));
@@ -239,6 +241,15 @@ impl Sandbox {
             .output()
             .expect("run mp daemon install-service");
         ok(&install, "install-service");
+    }
+
+    /// [`Sandbox::systemctl_calls`] without the `show` probes, which change
+    /// nothing: what systemd was asked to do.
+    fn systemctl_actions(&self) -> Vec<String> {
+        self.systemctl_calls()
+            .into_iter()
+            .filter(|call| !call.starts_with("--user show "))
+            .collect()
     }
 
     fn systemctl_calls(&self) -> Vec<String> {
@@ -496,9 +507,10 @@ fn a_failing_on_demand_service_start_falls_back_to_a_detached_daemon() {
 /// `mp daemon install-service` over a daemon already running hands it over to
 /// the unit: it stops the daemon over its socket and has systemd start the
 /// unit, instead of enabling a unit whose daemon cannot bind the socket the
-/// running one holds (PERSO-219). A second install over the unit's own daemon
-/// hands over the same way, and the manager's restart brings the unit back
-/// although systemd still counts it active for a moment after the stop.
+/// running one holds (PERSO-219). A second install, over the unit's own
+/// daemon with the unit file unchanged, leaves that daemon running and says
+/// so: the handover is for a daemon outside the service, which the install
+/// tells apart by the unit's main pid.
 #[test]
 fn install_over_a_running_daemon_hands_it_over_to_the_unit() {
     let sandbox = Sandbox::new();
@@ -508,6 +520,7 @@ fn install_over_a_running_daemon_hands_it_over_to_the_unit() {
         .join("systemd")
         .join("user")
         .join(UNIT_NAME);
+    let show = format!("--user show -p MainPID --value {UNIT_NAME}");
     let reload = "--user daemon-reload".to_string();
     let enable = format!("--user enable {UNIT_NAME}");
     let restart = format!("--user restart {UNIT_NAME}");
@@ -545,30 +558,117 @@ fn install_over_a_running_daemon_hands_it_over_to_the_unit() {
         ]
     );
     assert_eq!(
-        sandbox.systemctl_calls(),
+        sandbox.systemctl_actions(),
         [reload.clone(), enable.clone(), restart.clone()]
     );
 
     let again = sandbox.mp(&["daemon", "install-service"]);
     let lines = ok(&again, "install-service again");
-    assert!(wait_gone(served), "the unit's old daemon {served} exited");
-    let second = sandbox.recorded_pid();
-    assert_eq!(
-        sandbox.unit_main_pid(),
-        Some(second),
-        "the unit is active again, with the new daemon"
-    );
     assert_eq!(
         lines,
         [
             format!("\u{2713} {} is already installed", unit.display()),
             format!("  systemctl {reload}"),
             format!("  systemctl {enable}"),
-            format!("  the running daemon (pid {served}) is handed over to the service"),
+            format!("  the service's own daemon (pid {served}) is running and is left as it is"),
+        ]
+    );
+    assert_eq!(
+        sandbox.recorded_pid(),
+        served,
+        "the daemon was not replaced"
+    );
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(served),
+        "and the unit still runs it"
+    );
+    assert_eq!(
+        sandbox.systemctl_actions()[3..],
+        [reload, enable],
+        "the re-install re-enables the unit and restarts nothing"
+    );
+    assert_eq!(
+        sandbox
+            .systemctl_calls()
+            .iter()
+            .filter(|call| **call == show)
+            .count(),
+        2,
+        "each install asked systemd for the unit's main pid"
+    );
+
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(served), "the stopped daemon {served} exited");
+}
+
+/// `mp daemon install-service --force` over the unit's own running daemon with
+/// a unit file that differs rewrites the file, reloads systemd before anything
+/// starts, and restarts the unit, so the daemon that runs afterwards is the
+/// new definition's.
+#[test]
+fn a_forced_install_over_the_units_own_daemon_restarts_it_with_the_new_file() {
+    let sandbox = Sandbox::new();
+    sandbox.stateful_systemctl(Duration::from_secs(1));
+    sandbox.install_unit(&sandbox.dir("data"));
+    let unit = sandbox
+        .dir("xdg")
+        .join("systemd")
+        .join("user")
+        .join(UNIT_NAME);
+
+    ok(
+        &sandbox.mp(&["daemon", "start", "--timeout-secs", "15"]),
+        "start",
+    );
+    let served = sandbox.recorded_pid();
+    assert_eq!(sandbox.unit_main_pid(), Some(served), "the unit runs it");
+    let edited = format!(
+        "{}# a hand edit\n",
+        fs::read_to_string(&unit).expect("read the unit")
+    );
+    fs::write(&unit, edited).expect("edit the unit");
+
+    let install = sandbox.mp(&["daemon", "install-service", "--force"]);
+    let lines = ok(&install, "install-service --force");
+    assert!(
+        wait_gone(served),
+        "the old definition's daemon {served} exited"
+    );
+    let second = sandbox.recorded_pid();
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(second),
+        "the unit runs the new one"
+    );
+    assert!(
+        !fs::read_to_string(&unit)
+            .expect("read the unit")
+            .contains("# a hand edit"),
+        "the file was rewritten"
+    );
+    assert_eq!(
+        lines,
+        [
+            format!("\u{2713} wrote {}", unit.display()),
+            "  systemctl --user daemon-reload".to_string(),
+            format!("  systemctl --user enable {UNIT_NAME}"),
+            format!("  the service's own daemon (pid {served}) is restarted to run the new file"),
             "\u{2713} daemon stopped".to_string(),
             format!("\u{2713} daemon started (pid {second})"),
-            format!("  systemctl {restart}"),
+            format!("  systemctl --user restart {UNIT_NAME}"),
         ]
+    );
+    assert_eq!(
+        sandbox.systemctl_calls(),
+        [
+            format!("--user start {UNIT_NAME}"),
+            format!("--user show -p MainPID --value {UNIT_NAME}"),
+            "--user daemon-reload".to_string(),
+            format!("--user enable {UNIT_NAME}"),
+            format!("--user restart {UNIT_NAME}"),
+        ],
+        "systemd reads the new file before the restart"
     );
 
     ok(&sandbox.mp(&["daemon", "stop"]), "stop");
