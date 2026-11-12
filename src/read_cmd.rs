@@ -154,15 +154,18 @@ pub fn fetched_attachments(email: &crate::parse::FetchedEmail) -> Vec<ShownAttac
         .collect()
 }
 
-/// The `part` indexes `mp open` opens: the real attachments, or the inline
-/// images when the message has none, so a mail whose one photo is inline (an
-/// iPhone picture) still opens it and a signed PDF does not open its logos.
-pub fn parts_to_open(attachments: &[ShownAttachment]) -> Vec<usize> {
-    let real: Vec<usize> = (0..attachments.len())
-        .filter(|&part| !attachments[part].inline)
+/// The `part` indexes `mp open` opens out of a `message.attachments`
+/// listing: the real attachments, or the inline images when the message has
+/// none, so a mail whose one photo is inline (an iPhone picture) still opens
+/// it and a signed PDF does not open its logos. The listing's order is kept.
+pub fn parts_to_open(listing: &[MessageAttachment]) -> Vec<u32> {
+    let real: Vec<u32> = listing
+        .iter()
+        .filter(|entry| !entry.inline)
+        .map(|entry| entry.part)
         .collect();
     if real.is_empty() {
-        (0..attachments.len()).collect()
+        listing.iter().map(|entry| entry.part).collect()
     } else {
         real
     }
@@ -1051,7 +1054,10 @@ mod tests {
             vec![(1, "Rechnung.pdf", false), (0, "image001.png", true)],
             "message.attachments lists the reading order with the stored index"
         );
-        assert_eq!(parts_to_open(&shown.attachments), vec![1]);
+        assert_eq!(
+            parts_to_open(&attachment_listing(&shown.attachments)),
+            vec![1]
+        );
     }
 
     /// A mail whose one photo is inline (an iPhone picture) lists it under
@@ -1063,8 +1069,19 @@ mod tests {
             size: 3,
             inline,
         };
-        assert_eq!(parts_to_open(&[only(true), only(true)]), vec![0, 1]);
-        assert_eq!(parts_to_open(&[only(true), only(false)]), vec![1]);
+        // `mp open` reads a `message.attachments` listing, in reading order,
+        // and opens by the `part` each entry carries (PERSO-222).
+        let listed = |part: u32, inline: bool| MessageAttachment {
+            part,
+            name: "IMG_1234.jpeg".into(),
+            size: 3,
+            inline,
+        };
+        assert_eq!(
+            parts_to_open(&[listed(0, true), listed(1, true)]),
+            vec![0, 1]
+        );
+        assert_eq!(parts_to_open(&[listed(1, false), listed(0, true)]), vec![1]);
         assert!(parts_to_open(&[]).is_empty());
         let shown = ShownMessage {
             selector: "mp://acct/inbox/x".into(),

@@ -3490,13 +3490,12 @@ async fn routed_sweep(account: &str) -> Result<()> {
     Ok(())
 }
 
-/// The message `mp open`, `mp save` and `mp export` were pointed at.
+/// The message `mp export` was pointed at.
 ///
 /// One `message.get` with no body: it resolves the selector, so the client
-/// learns the canonical selector its refusals and its materialisation calls are
-/// phrased in, and the attachment list whose length is how many parts there are
-/// to ask for.
-async fn routed_attachment_target(
+/// learns the canonical selector its refusals and its export call are phrased
+/// in.
+async fn routed_message_target(
     connection: &mut mp_client::Connection,
     account: &AccountConfig,
     selector: &str,
@@ -3504,6 +3503,44 @@ async fn routed_attachment_target(
 ) -> Result<mailypoppins::read_cmd::ShownMessage> {
     let result = message_get_or_fetch(connection, account, selector, mailbox, false).await?;
     serde_json::from_value(result).context("reading the daemon's message.get answer")
+}
+
+/// The parts of the message `mp open` and `mp save` were pointed at.
+///
+/// One `message.attachments` (PERSO-222), the call the TUI's and the desktop
+/// app's attachment keys make: it resolves the selector, so the client learns
+/// the canonical selector its refusals and its materialisation calls are
+/// phrased in, and lists the parts in reading order, each with the `part` that
+/// materialises it. A selector the store lacks is fetched first
+/// ([`fetch_on_miss`]), as `mp show`'s is.
+async fn routed_attachments(
+    connection: &mut mp_client::Connection,
+    account_config: &AccountConfig,
+    selector: &str,
+    mailbox: Option<&str>,
+) -> Result<mp_protocol::attachment::MessageAttachments> {
+    let account = account_config.name.as_str();
+    let result = fetch_on_miss(
+        account_config,
+        selector,
+        mailbox,
+        StandIn::Allowed,
+        async |selector: &str, mailbox: Option<&str>| {
+            let mut params = serde_json::json!({"account": account, "selector": selector});
+            if let Some(mailbox) = mailbox {
+                params["mailbox"] = serde_json::json!(mailbox);
+            }
+            daemon_try_call(
+                connection,
+                mp_protocol::attachment::METHOD_MESSAGE_ATTACHMENTS,
+                params,
+            )
+            .await
+            .map_err(|e| refusal(account, e))
+        },
+    )
+    .await?;
+    serde_json::from_value(result).context("reading the daemon's message.attachments answer")
 }
 
 /// One materialised attachment: the file the daemon wrote, and the name it was
@@ -3517,7 +3554,7 @@ async fn routed_materialise(
     connection: &mut mp_client::Connection,
     account: &str,
     selector: &str,
-    part: usize,
+    part: u32,
 ) -> Result<(String, PathBuf, String)> {
     let result = daemon_try_call(
         connection,
@@ -6661,7 +6698,7 @@ async fn main() -> Result<()> {
         Some(Commands::Open { selector, mailbox }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
             let mut connection = daemon_connection().await;
-            let message = routed_attachment_target(
+            let message = routed_attachments(
                 &mut connection,
                 &account_config,
                 &selector,
@@ -6706,7 +6743,7 @@ async fn main() -> Result<()> {
             let dest = mailypoppins::daemon::client::absolutise(&spelled);
 
             let mut connection = daemon_connection().await;
-            let message = routed_attachment_target(
+            let message = routed_attachments(
                 &mut connection,
                 &account_config,
                 &selector,
@@ -6725,15 +6762,16 @@ async fn main() -> Result<()> {
             // applied here, where the names become paths. Within this call
             // only: saving the same message twice writes the same two names
             // rather than growing a copy per run. The body's inline images
-            // are saved too, after the real attachments (PERSO-165): a
-            // pasted screenshot or a phone photo is sent as one.
+            // are saved too, after the real attachments, which is the order
+            // the listing comes in (PERSO-165): a pasted screenshot or a
+            // phone photo is sent as one.
             let mut written: Vec<String> = Vec::new();
-            for part in mailypoppins::read_cmd::parts_in_reading_order(&message.attachments) {
+            for entry in &message.attachments {
                 let (handle, path, name) = routed_materialise(
                     &mut connection,
                     &account_config.name,
                     &message.selector,
-                    part,
+                    entry.part,
                 )
                 .await?;
                 let name = mailypoppins::daemon::client::unique_name(name, &written);
@@ -6766,7 +6804,7 @@ async fn main() -> Result<()> {
             let dest = mailypoppins::daemon::client::absolutise(&spelled);
 
             let mut connection = daemon_connection().await;
-            let message = routed_attachment_target(
+            let message = routed_message_target(
                 &mut connection,
                 &account_config,
                 &selector,

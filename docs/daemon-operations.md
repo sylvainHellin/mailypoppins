@@ -111,8 +111,8 @@ The table is what routes and through what:
 | `mp move <selector>... <mailbox> [--mailbox]` | `message.move` with `destination` | PERSO-235 |
 | `mp delete <selector>... [--mailbox] [--force]` | `message.delete`, or `draft.discard` for a drafts selector | P4-U8 |
 | `mp delete --sent` | `draft.discard` with `sent: true` | P4-U8 |
-| `mp open <selector> [--mailbox]` | `message.get`, then `message.materialise_attachment` per part, opened in the client | P4-U8 |
-| `mp save <selector> [-o dir] [--mailbox]` | `message.get`, then `message.materialise_attachment` and `message.release_handle` per part, written in the client | P4-U8 |
+| `mp open <selector> [--mailbox]` | `message.attachments`, then `message.materialise_attachment` per part, opened in the client | P4-U8, PERSO-222 |
+| `mp save <selector> [-o dir] [--mailbox]` | `message.attachments`, then `message.materialise_attachment` and `message.release_handle` per part, written in the client | P4-U8, PERSO-222 |
 | `mp sync [-n] [--mailbox ...] [--dry-run] [--all-accounts]` | one `sync.quick` per account, in configuration order | P4-U10 |
 | `mp list-mailboxes` | `mailbox.list_server` | P4-U10 |
 | `mp watch [--mailbox] [--timeout N]` | `sync.watch`, with the wait and the timeout in the client | P4-U10 |
