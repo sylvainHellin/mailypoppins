@@ -1344,7 +1344,21 @@ impl App {
     ///
     /// Its hits leave the focus where it is, since the user did not ask for
     /// this run: a rollback lands while they may be typing in the form.
+    ///
+    /// Nothing either while a search is queued and not started yet: the last
+    /// search is the one `start_search` ran, so a rerun queued behind a search
+    /// the user just submitted would run the older search after it, show its
+    /// hits instead and take the submitted one's focus move. The queued
+    /// search starts after the rollback and in the order `S` picked, so it
+    /// already holds what a rerun would bring.
     pub(crate) fn rerun_last_search(&mut self) {
+        if self
+            .pending_actions
+            .iter()
+            .any(|action| matches!(action, Action::ServerSearch { .. }))
+        {
+            return;
+        }
         let Some(last) = self.server_search_last.clone() else {
             return;
         };

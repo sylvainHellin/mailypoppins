@@ -2055,6 +2055,107 @@ mod tests {
         where_typing(&app, "the settle");
     }
 
+    /// A rollback that lands in the pass of the main loop where the user
+    /// submitted a new search, before that search started (PERSO-286), queues
+    /// no run of the older one: the submitted search runs alone, after the
+    /// rollback, so its hits already hold what the rollback put back, it moves
+    /// the focus into its results as a submitted search does, and it is the
+    /// one the overlay shows. Whether the rollback arrives as a
+    /// `mutations.rolled_back`, as the daemon's tick or as a pass this client
+    /// awaited.
+    #[test]
+    fn a_rollback_never_queues_the_older_search_after_a_submitted_one() {
+        use crate::app::{SearchField, SearchOverlayFocus};
+        use crossterm::event::{KeyCode, KeyEvent};
+        let _data = DataDir::new();
+
+        let submitted = || {
+            let mut app = app_showing_a_search("from:carol");
+            app.search_form.scope.0 = crate::app::SearchScope::CurrentAccount;
+            app.server_search_focus = SearchOverlayFocus::Field(SearchField::Keywords);
+            for c in "ledger".chars() {
+                app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+            }
+            app.handle_key(KeyEvent::from(KeyCode::Enter));
+            let queued = queued_searches(&app);
+            assert_eq!(queued.len(), 1, "the submit queues its search");
+            assert!(queued[0].0.contains("ledger"), "{queued:?}");
+            app.events.watermark("instance", 10);
+            (app, queued)
+        };
+        let event = |kind: &str, payload: serde_json::Value| mp_protocol::EventEnvelope {
+            instance_id: "instance".to_string(),
+            revision: 11,
+            kind: kind.to_string(),
+            payload,
+        };
+        let finished = serde_json::json!({
+            "state": "succeeded",
+            "result": {"outcome": tick("alice", 1), "new_inbox_mail": []},
+        });
+        let land = |app: &mut App, trigger: &str| match trigger {
+            "mutations.rolled_back" => {
+                app.apply_event(&event(
+                    mp_protocol::events::KIND_MUTATIONS_ROLLED_BACK,
+                    serde_json::json!({"account": "alice", "failed": 1}),
+                ));
+            }
+            "the daemon's tick" => {
+                app.apply_event(&event(
+                    mp_protocol::events::KIND_SYNC_COMPLETED,
+                    serde_json::to_value(tick("alice", 1)).expect("a tick serialises"),
+                ));
+            }
+            "an awaited pass" => {
+                let awaited = crate::events::Awaited::Quick {
+                    account_index: 0,
+                    account: "alice".to_string(),
+                };
+                handle_bg_result(app, crate::commands::settled(&awaited, &finished));
+            }
+            other => unreachable!("no trigger {other}"),
+        };
+
+        for trigger in [
+            "mutations.rolled_back",
+            "the daemon's tick",
+            "an awaited pass",
+        ] {
+            let (mut app, queued) = submitted();
+            land(&mut app, trigger);
+            assert_eq!(queued_searches(&app), queued, "after {trigger}");
+
+            let Some(crate::app::Action::ServerSearch {
+                query,
+                targets,
+                local_mailbox,
+            }) = std::mem::take(&mut app.pending_actions)
+                .into_iter()
+                .find(|action| matches!(action, crate::app::Action::ServerSearch { .. }))
+            else {
+                panic!("the submitted search is queued after {trigger}");
+            };
+            crate::commands::start_search(
+                &mut app,
+                &SearchDoor,
+                &query,
+                targets.as_deref(),
+                local_mailbox.as_deref(),
+            );
+            assert_eq!(
+                app.server_search_focus,
+                SearchOverlayFocus::List,
+                "the submitted search takes the focus after {trigger}"
+            );
+            let shown = app.server_search_last.as_ref().expect("a search ran");
+            assert_eq!(
+                mp_core::search::to_query_string(&shown.query),
+                queued[0].0,
+                "the overlay shows the submitted search after {trigger}"
+            );
+        }
+    }
+
     /// A tick that rolled nothing back runs no search: nothing it did put a
     /// dropped hit back, and a search per tick would hit the server each
     /// time.
