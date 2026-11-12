@@ -2625,6 +2625,38 @@ fn a_routed_outbox_retry_rearms_and_drains_the_parked_row() {
     );
 }
 
+/// PERSO-237: a retried row reaches the contacts index as the retry delivers
+/// it, as a live send does, rather than at the next sync or rebuild. The
+/// retry drains the account's whole outbox, so every row it finished is
+/// counted, once each: what a rebuild of the store then counts.
+///
+/// Routed side only (fake transport).
+#[test]
+fn a_routed_outbox_retry_counts_the_recipient_it_delivered_to() {
+    let slice = Slice::with_fake_transport();
+    let rebuilt = slice.routed(&["contacts", "rebuild", "-A", fixture::ACCOUNT]);
+    assert_eq!(rebuilt.status.code(), Some(0), "{}", stderr(&rebuilt));
+    let cache = fixture::account_dir(slice.root(), fixture::ACCOUNT).join("contacts-cache.json");
+    let sent_to = || {
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&cache).expect("the cache")).unwrap();
+        index["contacts"][fixture::TO]["sent_to"]
+            .as_u64()
+            .unwrap_or_default()
+    };
+    let before = sent_to();
+
+    let id = fixture::FAILED_ROW.to_string();
+    let out = slice.routed(&["outbox", "retry", &id]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let counted = sent_to();
+    assert!(counted > before, "counted as the retry delivered it");
+    let again = slice.routed(&["contacts", "rebuild", "-A", fixture::ACCOUNT]);
+    assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
+    assert_eq!(sent_to(), counted, "what a rebuild counts, once each");
+}
+
 /// A row the resume sends was built from a draft that is still `approved`,
 /// because its live send never succeeded: the resume retires that file, or
 /// `mp send-approved` would send the message a second time (#0063 review).

@@ -1673,6 +1673,59 @@ async fn a_routed_rsvp_submits_the_reply_to_the_organizer() {
     );
 }
 
+/// PERSO-237: an RSVP is a send, so the organizer it went to is counted in the
+/// contacts index as it goes out, and every client is told, as for any other
+/// send, rather than only after the next rebuild.
+#[tokio::test]
+async fn a_routed_rsvp_counts_the_organizer_as_sent_to() {
+    let slice = Slice::with_fake_transport();
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({})).await;
+    let mut conn = slice.connect().await;
+    let sent_to = |result: &Value| {
+        result["contacts"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["address"] == fixture::ORGANIZER))
+            .and_then(|row| row["sent_to"].as_u64())
+    };
+    let search = json!({"account": fixture::ACCOUNT, "query": "chair", "limit": 20});
+    let before = call(&mut conn, "contact.search", search.clone()).await;
+    assert_eq!(
+        sent_to(&before),
+        Some(0),
+        "only ever received from: {before}"
+    );
+
+    let status = run_operation(
+        &mut conn,
+        "calendar.rsvp",
+        json!({
+            "account": fixture::ACCOUNT,
+            "selector": fixture::selector(fixture::ACCOUNT, fixture::INVITATION),
+            "mailbox": fixture::MAILBOX,
+            "response": "accept",
+        }),
+    )
+    .await;
+    assert_eq!(succeeded(&status)["delivered"], true);
+
+    let after = call(&mut conn, "contact.search", search).await;
+    assert_eq!(sent_to(&after), Some(1), "the reply went to them: {after}");
+    let start = Instant::now();
+    let mut changed = None;
+    while start.elapsed() < SETTLE_DEADLINE {
+        let Some(notification) = within("state.event", watcher.next_notification()).await else {
+            break;
+        };
+        if notification.params["kind"] == "contact.changed" {
+            changed = Some(notification.params["payload"].clone());
+            break;
+        }
+    }
+    let changed = changed.expect("another client was told the index changed");
+    assert_eq!(changed["account"], fixture::ACCOUNT, "{changed}");
+}
+
 /// An RSVP cancelled before its submission is dropped: the transport sees
 /// nothing and no outbox row is left behind.
 #[tokio::test]

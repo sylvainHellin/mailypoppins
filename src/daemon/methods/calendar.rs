@@ -1971,33 +1971,38 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
         // Cancelled at the commit point: nothing went out, and the registry
         // has already settled the operation.
         Ok(None) => {}
-        Ok(Some(outcome)) => match shape {
-            ReplyShape::Rsvp => handle.succeed(json!({
-                "account": name,
-                "selector": selector,
-                "response": response,
-                "subject": outcome.subject,
-                "organizer": outcome.organizer,
-                "message_id": outcome.message_id.unwrap_or_default(),
-                "delivered": outcome.send_result.any_succeeded(),
-            })),
-            ReplyShape::Event { event } => {
-                handle.announce(calendar_changed(&name));
-                settle(
-                    &handle,
-                    EventRespondResult {
-                        account: name,
-                        event,
-                        response,
-                        comment,
-                        send_response: true,
-                        via: "imip".into(),
-                        delivered: outcome.send_result.any_succeeded(),
-                        proposed_time: None,
-                    },
-                );
+        Ok(Some(outcome)) => {
+            if let Some(contacts) = outcome.contacts {
+                handle.announce(super::contact::contact_changed(&name, contacts));
             }
-        },
+            match shape {
+                ReplyShape::Rsvp => handle.succeed(json!({
+                    "account": name,
+                    "selector": selector,
+                    "response": response,
+                    "subject": outcome.subject,
+                    "organizer": outcome.organizer,
+                    "message_id": outcome.message_id.unwrap_or_default(),
+                    "delivered": outcome.send_result.any_succeeded(),
+                })),
+                ReplyShape::Event { event } => {
+                    handle.announce(calendar_changed(&name));
+                    settle(
+                        &handle,
+                        EventRespondResult {
+                            account: name,
+                            event,
+                            response,
+                            comment,
+                            send_response: true,
+                            via: "imip".into(),
+                            delivered: outcome.send_result.any_succeeded(),
+                            proposed_time: None,
+                        },
+                    );
+                }
+            }
+        }
         Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
     }
 }

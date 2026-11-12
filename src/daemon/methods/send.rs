@@ -927,13 +927,21 @@ async fn perform(
             }
             let lock = account_lock(&account.name);
             let _held = lock.lock().await;
+            let name = account.name.clone();
             let done = off_thread("the outbox retry", move || async move {
-                retry_row(&account, row_id).await
+                let outcome = retry_row(&account, row_id).await?;
+                // What the retry delivered is counted now, as a live send's
+                // recipients are (PERSO-237).
+                let contacts = crate::contacts::hooks::bump_owed_sends(&account);
+                Ok((outcome, contacts))
             })
             .await
             .and_then(|inner| inner);
             match done {
-                Ok(outcome) => handle.succeed(value_or_fail("send.outbox_retry", &outcome)),
+                Ok((outcome, contacts)) => {
+                    announce_contacts(&handle, &name, contacts);
+                    handle.succeed(value_or_fail("send.outbox_retry", &outcome))
+                }
                 Err(e) => handle.fail(DomainError::invalid_params(format!("{e:#}"))),
             }
         }

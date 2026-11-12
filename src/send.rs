@@ -2649,6 +2649,10 @@ pub struct RsvpOutcome {
     pub organizer: String,
     /// The Outlook-convention subject used (`Accepted: <summary>` etc.).
     pub subject: String,
+    /// How many contacts the account's index holds after the reply went out
+    /// and its organizer was counted, `None` when no index was written; the
+    /// daemon announces a written one as `contact.changed` (PERSO-237).
+    pub contacts: Option<usize>,
 }
 
 /// An attendee's RSVP reply to a received invite (#0029), built and not yet
@@ -2736,7 +2740,15 @@ impl PreparedRsvp {
             subject,
         } = self;
         let report = send_durably(&built, account_config, smtp_config).await?;
+        // A reply is a send like any other: the organizer is counted now,
+        // not at the next sync's merge (PERSO-237).
+        let contacts = report
+            .send_result
+            .any_succeeded()
+            .then(|| crate::contacts::hooks::bump_owed_sends(account_config))
+            .flatten();
         Ok(RsvpOutcome {
+            contacts,
             outbox_state: report.state,
             send_result: report.send_result,
             raw_message: built.raw,
