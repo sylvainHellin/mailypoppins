@@ -134,6 +134,8 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- Contact counts stay exact across sends: a send is counted once when its Sent copy is stored, Bcc included, and an RSVP, an event response and an outbox retry count their recipients at once (PERSO-237).
+- Two drafts in one account that share an id show as one row, the newer file; deleting it brings the other back instead of removing the row (PERSO-222).
 - Opening a message whose body retention evicted shows the body again instead of an empty reader: it is rebuilt from the stored raw message or HTML, or fetched from the server in the background (at most two at a time per account) while the reader says so; `mp show` waits for it, and offline the reader says the body is not available (PERSO-205).
 - A message moved, archived, deleted or blocked into Junk by another client or by the daemon leaves every open list and search result at once, without waiting for the next sync, and a search hit comes back when its move is rolled back (PERSO-286).
 - `mp validate` and the send preview no longer report a relative attachment that sits beside the draft as missing: validate, preview, the drafts mirror, send and the TUI's `o` resolve an entry through one function, and `mp send` refuses a draft with an empty attachment entry (PERSO-215).
