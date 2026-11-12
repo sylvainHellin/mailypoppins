@@ -70,7 +70,8 @@ pub struct ListedFolder {
 }
 
 /// A folder the server renamed: listed before as `from`, now as `to`, with
-/// the same Graph folder id.
+/// the same Graph folder id, or on IMAP the same UIDVALIDITY and messages
+/// ([`super::rename`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rename {
     pub from: String,
@@ -139,8 +140,35 @@ pub struct Recorded {
 /// and the rename is answered so the caller can move the folder's messages
 /// with it ([`super::discover::refresh`]).
 pub fn replace(store: &Store, account: &str, fresh: &[ListedFolder]) -> Result<Recorded> {
+    replace_with(store, account, fresh, &[])
+}
+
+/// [`replace`], also taking `confirmed` as renames: the IMAP renames the
+/// server proved ([`super::rename::confirm`]). One whose old name the store
+/// does not hold as present, or whose new name it already holds, is dropped.
+pub fn replace_with(
+    store: &Store,
+    account: &str,
+    fresh: &[ListedFolder],
+    confirmed: &[Rename],
+) -> Result<Recorded> {
     let previous = load(store, account)?;
-    let renames = renames(&previous, fresh);
+    let mut renames = renames(&previous, fresh);
+    renames.extend(
+        confirmed
+            .iter()
+            .filter(|r| {
+                previous.iter().any(|p| p.name == r.from && !p.missing)
+                    && !previous.iter().any(|p| p.name == r.to)
+                    && !fresh.iter().any(|f| f.name == r.from)
+                    && fresh.iter().any(|f| f.name == r.to)
+                    && !renames
+                        .iter()
+                        .any(|known| known.from == r.from || known.to == r.to)
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
     let tx = store.immediate_transaction()?;
     for rename in &renames {
         tx.execute(

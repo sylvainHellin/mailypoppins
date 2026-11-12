@@ -107,27 +107,76 @@ pub async fn server_listing(account: &AccountConfig) -> Result<Vec<ListedFolder>
 /// to re-seed the sidebar. Creates the store if the account has none, so it
 /// is for a caller that is about to sync anyway.
 ///
-/// A folder the server renamed ([`listing::Rename`], Graph only) takes its
+/// A folder the server renamed ([`listing::Rename`]: on Graph by its folder
+/// id, on IMAP by its UIDVALIDITY and messages, [`super::rename`]) takes its
 /// rows, its sync cursor and its delta token to the key the new name gives
 /// it ([`follow_rename`]), so the next pass carries on where the old name
 /// left off instead of downloading the folder again beside its stale rows.
 pub async fn refresh(account: &AccountConfig) -> Result<bool> {
+    if account.auth_method != AuthMethod::Graph {
+        return refresh_imap(account, &ImapConfig::load(account)?).await;
+    }
     let fresh = server_listing(account).await?;
+    record_listing(account, &fresh, &[])
+}
+
+/// [`refresh`] over IMAP: list, ask the server about the folders the listing
+/// lost and gained when it did both, and record.
+async fn refresh_imap(account: &AccountConfig, imap: &ImapConfig) -> Result<bool> {
+    let fresh = imap_listing(imap).await?;
+    let renamed = imap_renames(account, imap, &fresh).await;
+    record_listing(account, &fresh, &renamed)
+}
+
+/// The IMAP renames the server proves between the stored listing and
+/// `fresh` (PERSO-185); none, logged, when the store cannot be read.
+async fn imap_renames(
+    account: &AccountConfig,
+    imap: &ImapConfig,
+    fresh: &[ListedFolder],
+) -> Vec<listing::Rename> {
+    let plan = match Store::open_account(&account.name)
+        .and_then(|store| super::rename::plan(&store, account, fresh))
+    {
+        Ok(plan) => plan,
+        Err(e) => {
+            log::warn!(
+                "[catalogue] {}: reading the store for renamed folders failed: {e:#}",
+                account.name
+            );
+            return Vec::new();
+        }
+    };
+    if plan.is_empty() {
+        return Vec::new();
+    }
+    let probed = crate::imap_client::folder_identities(imap, &plan.gained, &plan.samples()).await;
+    super::rename::confirm_probed(&account.name, &plan, probed)
+}
+
+/// Record `fresh` in `account`'s store with the renames `renamed`.
+fn record_listing(
+    account: &AccountConfig,
+    fresh: &[ListedFolder],
+    renamed: &[listing::Rename],
+) -> Result<bool> {
     let store = Store::open_account(&account.name)?;
     let blobs = crate::store::BlobStore::for_account(&account.name);
-    record(&store, &blobs, account, &fresh)
+    record(&store, &blobs, account, fresh, renamed)
 }
 
 /// [`refresh`] once the server has answered: record `fresh` and follow its
-/// renames.
+/// renames, the Graph ones the listing shows and the IMAP ones `renamed`
+/// carries.
 fn record(
     store: &Store,
     blobs: &crate::store::BlobStore,
     account: &AccountConfig,
     fresh: &[ListedFolder],
+    renamed: &[listing::Rename],
 ) -> Result<bool> {
     let before = Catalogue::from_store(store, account);
-    let recorded = listing::replace(store, &account.name, fresh)?;
+    let recorded = listing::replace_with(store, &account.name, fresh, renamed)?;
     if !recorded.renames.is_empty() {
         let after = Catalogue::from_store(store, account);
         for rename in &recorded.renames {
@@ -187,8 +236,9 @@ fn follow_rename(
 }
 
 /// Re-key every row of mailbox `from` to `to`: the messages, the sync cursor
-/// (and with it the delta token, which stays valid since the folder id did not
-/// change), the mailbox record and the ingest failures. A message `to`
+/// (which stays valid: a Graph folder kept its id and with it the delta
+/// token, an IMAP folder its UIDVALIDITY and UIDs), the mailbox record and the
+/// ingest failures. A message `to`
 /// already holds stays there and its old copy is deleted. Answers how many
 /// messages moved.
 fn rekey(
@@ -352,6 +402,7 @@ mod tests {
             &blobs,
             &account,
             &[folder("Inbox", "AAA"), folder("Projects", "BBB")],
+            &[],
         )
         .unwrap();
         ingest("Projects", "one", 1);
@@ -372,7 +423,8 @@ mod tests {
             &store,
             &blobs,
             &account,
-            &[folder("Inbox", "AAA"), folder("Projekte", "BBB")]
+            &[folder("Inbox", "AAA"), folder("Projekte", "BBB")],
+            &[],
         )
         .unwrap());
         assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
@@ -402,8 +454,166 @@ mod tests {
             &blobs,
             &pinned,
             &[folder("Inbox", "AAA"), folder("Archiv 2026", "BBB")],
+            &[],
         )
         .unwrap();
         assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
+    }
+
+    /// An IMAP account whose store holds `Projects` with the messages `one`
+    /// (UID 1) and `two` (UID 2) under UIDVALIDITY 7, its server on the fake
+    /// IMAP server, and the data dir pointed at a tempdir for this thread.
+    struct ImapRename {
+        _data: crate::config::test_env::TestDataDir,
+        server: crate::imap_client::fake_imap::RejectingImapServer,
+        account: AccountConfig,
+        imap: ImapConfig,
+    }
+
+    impl ImapRename {
+        fn new(listed: &[&str]) -> ImapRename {
+            use crate::imap_client::fake_imap::{LoginPolicy, RejectingImapServer};
+
+            let data = crate::config::test_env::TestDataDir::new();
+            let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+            let account = AccountConfig {
+                name: "tum".to_string(),
+                ..Default::default()
+            };
+            let imap = ImapConfig {
+                host: "127.0.0.1".into(),
+                port: server.port(),
+                username: "tum@example.com".into(),
+                password: "right".into(),
+                accept_invalid_certs: true,
+                fetch_concurrency: 4,
+                body_fetch_deadline_secs: 30,
+            };
+            let fixture = ImapRename {
+                _data: data,
+                server,
+                account,
+                imap,
+            };
+            let (store, blobs) = fixture.store();
+            let listing: Vec<ListedFolder> = listed
+                .iter()
+                .map(|name| ListedFolder::named(name))
+                .collect();
+            record(&store, &blobs, &fixture.account, &listing, &[]).unwrap();
+            fixture.fill("Projects", &[("one", 1), ("two", 2)], 7);
+            fixture
+        }
+
+        fn store(&self) -> (Store, crate::store::BlobStore) {
+            (
+                Store::open_account("tum").unwrap(),
+                crate::store::BlobStore::for_account("tum"),
+            )
+        }
+
+        /// Store `messages` under `mailbox` with a cursor at `uidvalidity`.
+        fn fill(&self, mailbox: &str, messages: &[(&str, i64)], uidvalidity: i64) {
+            let (store, blobs) = self.store();
+            for (id, uid) in messages {
+                crate::ingest::ingest_message(
+                    &store,
+                    &blobs,
+                    &crate::ingest::IngestInput {
+                        account: "tum",
+                        mailbox,
+                        uid: *uid,
+                        email: &email(id),
+                        raw: None,
+                    },
+                )
+                .unwrap();
+            }
+            crate::ingest::record_mailbox_cursor(
+                &store,
+                "tum",
+                mailbox,
+                &crate::ingest::MailboxCursor {
+                    uidvalidity: Some(uidvalidity),
+                    last_uid: messages.iter().map(|(_, uid)| *uid).max(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        /// The server lists `INBOX` and `folders`.
+        fn serve(&self, folders: Vec<crate::imap_client::fake_imap::FakeFolder>) {
+            let mut all = vec![crate::imap_client::fake_imap::FakeFolder::empty("INBOX")];
+            all.extend(folders);
+            self.server.set_folders(all);
+        }
+
+        fn refresh(&self) -> bool {
+            futures::executor::block_on(refresh_imap(&self.account, &self.imap)).unwrap()
+        }
+
+        /// The mailboxes holding the message `id`.
+        fn mailbox_of(&self, id: &str) -> Vec<String> {
+            mailbox_of(&self.store().0, id)
+        }
+    }
+
+    /// A server folder holding `messages` as `(uid, id)`.
+    fn served(
+        name: &str,
+        uidvalidity: u32,
+        uidnext: u32,
+        messages: &[(u32, &str)],
+    ) -> crate::imap_client::fake_imap::FakeFolder {
+        crate::imap_client::fake_imap::FakeFolder {
+            name: name.to_string(),
+            uidvalidity,
+            uidnext,
+            messages: messages
+                .iter()
+                .map(|(uid, id)| (*uid, format!("<{id}@example.com>")))
+                .collect(),
+        }
+    }
+
+    /// PERSO-185: an IMAP folder the server renamed, keeping its UIDVALIDITY
+    /// and so its UIDs, takes its rows, its cursor and its listing row to the
+    /// new name, and the sidebar every client reads lists it once, under the
+    /// new name, with its counts.
+    #[test]
+    fn an_imap_folder_renamed_with_its_uidvalidity_takes_its_rows_and_cursor_along() {
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![served("Projekte", 7, 3, &[(1, "one"), (2, "two")])]);
+
+        assert!(fixture.refresh(), "the listing changed");
+        assert_eq!(fixture.mailbox_of("one"), vec!["Projekte"]);
+        assert_eq!(fixture.mailbox_of("two"), vec!["Projekte"]);
+        let (store, _) = fixture.store();
+        let cursor = crate::ingest::load_mailbox_cursor(&store, "tum", "Projekte")
+            .unwrap()
+            .expect("the cursor moved");
+        assert_eq!(cursor.uidvalidity, Some(7));
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "tum", "Projects")
+                .unwrap()
+                .is_none()
+        );
+        let listed = listing::load(&store, "tum").unwrap();
+        assert!(
+            !listed.iter().any(|f| f.name == "Projects"),
+            "no missing leftover: {listed:?}"
+        );
+
+        let catalogue = Catalogue::from_store(&store, &fixture.account);
+        let slugs: Vec<String> = super::super::sidebar(&fixture.account, &catalogue)
+            .into_iter()
+            .map(|row| row.slug)
+            .collect();
+        assert!(slugs.contains(&"Projekte".to_string()), "{slugs:?}");
+        assert!(!slugs.contains(&"Projects".to_string()), "{slugs:?}");
+        let counts = crate::store::read::mailbox_read_counts(&store, "tum").unwrap();
+        assert_eq!(counts.get("Projekte").map(|c| c.total), Some(2));
+        assert!(!counts.contains_key("Projects"));
     }
 }

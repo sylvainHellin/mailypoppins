@@ -43,6 +43,7 @@
 
 pub mod discover;
 pub mod listing;
+pub mod rename;
 mod utf7;
 
 use std::collections::HashSet;
