@@ -35,18 +35,28 @@
 //! once per move. `mp show` is a one-shot command with nothing else to do,
 //! so it asks with `wait_for_body` and the answer waits for the fetch.
 //!
+//! # Two downloads at a time per account
+//!
+//! Holding `j` over evicted rows opens one after the other, each a fetch of
+//! its own, and each download is a fresh IMAP login or Graph client. Graph
+//! throttles a mailbox above about four concurrent requests with a 429, and a
+//! throttled fetch would then be remembered as unavailable. So at most
+//! [`PER_ACCOUNT`] downloads of one account run at once and the others wait
+//! their turn, their rows answering `body_pending` meanwhile like any fetch
+//! in progress.
+//!
 //! When neither source answers (offline, a server error, a message the server
 //! no longer has) the body stays `null` and `body_unavailable` carries the
 //! sentence a reader shows in its place.
 //!
 //! [`ServerCopies`]: super::super::server_copies::ServerCopies
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::config::AccountConfig;
 use crate::secrets::SecretsBackendKind;
@@ -64,6 +74,11 @@ pub const REMEMBERED_FOR: Duration = Duration::from_secs(60);
 /// How many fetches are remembered at most: the rows a user opened in the
 /// last minute, a body each.
 const CAPACITY: usize = 32;
+
+/// How many server downloads of one account's bodies run at once: below the
+/// four concurrent requests Graph serves a mailbox before it throttles, with
+/// room for the sync and the other server reads beside them.
+const PER_ACCOUNT: usize = 2;
 
 /// The sentence a reader shows while the body is on its way from the server.
 pub const BODY_PENDING: &str =
@@ -113,6 +128,8 @@ pub struct BodyFetches {
     announce: Announce,
     remember: Duration,
     entries: Mutex<VecDeque<Entry>>,
+    /// The [`PER_ACCOUNT`] download slots of each account, by name.
+    slots: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
 
 impl BodyFetches {
@@ -130,7 +147,21 @@ impl BodyFetches {
             announce,
             remember,
             entries: Mutex::new(VecDeque::new()),
+            slots: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The download slots of `account`, made on its first fetch.
+    fn slots(&self, account: &str) -> Arc<Semaphore> {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(
+            slots
+                .entry(account.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(PER_ACCOUNT))),
+        )
     }
 
     /// The cell of `row`'s fetch, and whether it was made by this call, with
@@ -177,8 +208,9 @@ impl BodyFetches {
         }
     }
 
-    /// Run `row`'s fetch into `outcome`, or wait for the one already running,
-    /// and announce its end when this call was the one that ran it.
+    /// Run `row`'s fetch into `outcome` once one of its account's download
+    /// slots is free, or wait for the one already running or waiting, and
+    /// announce its end when this call was the one that ran it.
     async fn run(
         &self,
         outcome: &Arc<OnceCell<Outcome>>,
@@ -190,7 +222,12 @@ impl BodyFetches {
         let settled = outcome
             .get_or_init(|| {
                 ran = true;
-                from_server(&self.copies, account, secrets, row)
+                let slots = self.slots(&account.name);
+                async move {
+                    // The semaphore is never closed, so a slot always comes.
+                    let _slot = slots.acquire_owned().await;
+                    from_server(&self.copies, account, secrets, row).await
+                }
             })
             .await
             .clone();
@@ -358,29 +395,57 @@ The body the retention sweep evicts.\r\n";
         accounts: Vec<AccountConfig>,
         row_id: i64,
         body_hash: String,
+        /// Every row of the fixture, [`Self::row_id`] first.
+        row_ids: Vec<i64>,
     }
 
     fn evicted(with_raw: bool) -> Evicted {
+        evicted_all(&[RAW], with_raw)
+    }
+
+    /// The message numbered `n`, a body and a `Message-ID` of its own.
+    fn numbered(n: usize) -> Vec<u8> {
+        format!(
+            "From: Alice <alice@example.com>\r\n\
+             To: me@example.com\r\n\
+             Subject: Evicted {n}\r\n\
+             Date: Wed, 12 Nov 2025 09:00:00 +0100\r\n\
+             Message-ID: <evicted-{n}@example.com>\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             \r\n\
+             The body number {n} the retention sweep evicts.\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// [`evicted`] with a row for each of `raws`, under uids from 7 up.
+    fn evicted_all(raws: &[&[u8]], with_raw: bool) -> Evicted {
         let root = tempfile::tempdir().expect("tempdir");
         let data = crate::config::test_env::DataDirOverride::set(root.path());
         crate::config::create_private_dir_all(crate::config::account_dir("tum")).expect("dir");
         let store = Store::open_account("tum").expect("the store");
         let blobs = BlobStore::new(crate::config::blobs_dir("tum"));
-        let mut email = crate::parse::parse_rfc822_to_fetched_email(RAW).expect("parses");
-        email.flags.seen = true;
-        let outcome = ingest_message(
-            &store,
-            &blobs,
-            &IngestInput {
-                account: "tum",
-                mailbox: "inbox",
-                uid: 7,
-                email: &email,
-                raw: with_raw.then_some(RAW),
-            },
-        )
-        .expect("ingests");
-        let body_hash = crate::store::read::find_by_id(&store, outcome.row_id)
+        let mut row_ids = Vec::new();
+        for (uid, raw) in (7..).zip(raws) {
+            let mut email = crate::parse::parse_rfc822_to_fetched_email(raw).expect("parses");
+            email.flags.seen = true;
+            let outcome = ingest_message(
+                &store,
+                &blobs,
+                &IngestInput {
+                    account: "tum",
+                    mailbox: "inbox",
+                    uid,
+                    email: &email,
+                    raw: with_raw.then_some(*raw),
+                },
+            )
+            .expect("ingests");
+            row_ids.push(outcome.row_id);
+        }
+        let row_id = row_ids[0];
+        let body_hash = crate::store::read::find_by_id(&store, row_id)
             .expect("reads")
             .expect("the row")
             .body_blob
@@ -405,8 +470,9 @@ The body the retention sweep evicts.\r\n";
                 name: "tum".to_string(),
                 ..Default::default()
             }],
-            row_id: outcome.row_id,
+            row_id,
             body_hash,
+            row_ids,
         }
     }
 
@@ -466,11 +532,16 @@ The body the retention sweep evicts.\r\n";
 
         /// [`Self::get`] with the parameters of `extra` added.
         async fn get_with(&self, daemon: &Daemon, extra: Value) -> Value {
+            self.get_row(daemon, self.row_id, extra).await
+        }
+
+        /// `message.get` of `row_id`, with the parameters of `extra`.
+        async fn get_row(&self, daemon: &Daemon, row_id: i64, extra: Value) -> Value {
             let leg = BodyLeg {
                 secrets: Default::default(),
                 fetches: &daemon.fetches,
             };
-            let mut params = json!({"account": "tum", "row_id": self.row_id});
+            let mut params = json!({"account": "tum", "row_id": row_id});
             for (key, value) in extra.as_object().expect("an object") {
                 params[key] = value.clone();
             }
@@ -507,6 +578,54 @@ The body the retention sweep evicts.\r\n";
     }
 
     const BODY: &str = "The body the retention sweep evicts.\r\n";
+
+    /// A server that holds every download until the test releases it,
+    /// answering the [`numbered`] message the request asks for and counting
+    /// the downloads started and the most in flight at once.
+    struct Holding {
+        release: Arc<tokio::sync::Semaphore>,
+        started: Arc<AtomicUsize>,
+        most: Arc<AtomicUsize>,
+    }
+
+    fn holding() -> (Fetcher, Holding) {
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let server = Holding {
+            release: Arc::clone(&release),
+            started: Arc::clone(&started),
+            most: Arc::clone(&most),
+        };
+        let fetcher: Fetcher = Arc::new(move |request| {
+            let (release, started) = (Arc::clone(&release), Arc::clone(&started));
+            let (most, in_flight) = (Arc::clone(&most), Arc::clone(&in_flight));
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                release.acquire().await.expect("open").forget();
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                let n = (0..)
+                    .find(|n| request.message_id.contains(&format!("evicted-{n}@")))
+                    .expect("a numbered message");
+                Ok(numbered(n))
+            })
+        });
+        (fetcher, server)
+    }
+
+    /// Until `done` holds, polled while the daemon's tasks run.
+    async fn until(what: &str, done: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    }
 
     /// Opening a message whose body the sweep evicted shows its body: the
     /// row's raw message is never evicted, so the body is read back from it
@@ -572,6 +691,50 @@ The body the retention sweep evicts.\r\n";
         assert!(shown.get("body_pending").is_none(), "{shown}");
         assert_eq!(downloads.load(Ordering::SeqCst), 1);
         assert_eq!(fx.stored(), (true, 1), "the body is stored again");
+    }
+
+    /// Holding `j` over evicted rows opens one after the other, and each
+    /// asks the server for its body; a mailbox serves at most two of those
+    /// downloads at once (Graph throttles above about four concurrent
+    /// requests, and a throttled fetch is remembered as unavailable), the
+    /// others wait their turn while their readers are told the body is on
+    /// its way, and every body arrives once the server answers.
+    #[tokio::test]
+    async fn at_most_two_bodies_are_fetched_at_once_per_account() {
+        let raws: Vec<Vec<u8>> = (0..5).map(numbered).collect();
+        let raws: Vec<&[u8]> = raws.iter().map(Vec::as_slice).collect();
+        let fx = evicted_all(&raws, false);
+        let (fetcher, server) = holding();
+        let daemon = Daemon::over(fetcher);
+
+        for &row_id in &fx.row_ids {
+            let shown = fx.get_row(&daemon, row_id, json!({})).await;
+            assert_eq!(shown["body_pending"], json!(BODY_PENDING), "{shown}");
+        }
+        until("two downloads started", || {
+            server.started.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+        // Time for any further download to start, were it allowed to.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(server.started.load(Ordering::SeqCst), 2, "two at a time");
+        for &row_id in &fx.row_ids {
+            let shown = fx.get_row(&daemon, row_id, json!({})).await;
+            assert_eq!(shown["body_pending"], json!(BODY_PENDING), "{shown}");
+        }
+
+        server.release.add_permits(fx.row_ids.len());
+        until("every fetch announced its end", || {
+            daemon.announced().len() == fx.row_ids.len()
+        })
+        .await;
+        assert_eq!(server.started.load(Ordering::SeqCst), 5);
+        assert_eq!(server.most.load(Ordering::SeqCst), 2, "never more than two");
+        for (n, &row_id) in fx.row_ids.iter().enumerate() {
+            let shown = fx.get_row(&daemon, row_id, json!({})).await;
+            let body = format!("The body number {n} the retention sweep evicts.\r\n");
+            assert_eq!(shown["body"], json!(body), "{shown}");
+        }
     }
 
     /// Offline, the body stays `null` and the reader is told why in a
