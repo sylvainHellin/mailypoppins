@@ -134,6 +134,7 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- When the daemon refuses a client for a version or capability mismatch, the desktop app's restart screen, `mp` and the TUI name the daemon's version and protocol, this build's, and what is missing, instead of "Daemon version unknown", and say to update the client when the client is the older side (PERSO-277).
 - Contact counts stay exact across sends: a send is counted once when its Sent copy is stored, Bcc included, and an RSVP, an event response and an outbox retry count their recipients at once (PERSO-237).
 - Two drafts in one account that share an id show as one row, the newer file; deleting it brings the other back instead of removing the row (PERSO-222).
 - Opening a message whose body retention evicted shows the body again instead of an empty reader: it is rebuilt from the stored raw message or HTML, or fetched from the server in the background (at most two at a time per account) while the reader says so; `mp show` waits for it, and offline the reader says the body is not available (PERSO-205).
