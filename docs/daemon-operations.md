@@ -60,7 +60,8 @@ Under an installed login service it is the service manager that brings the daemo
 
 A normal `mp` run that needs the daemon and finds nothing listening starts one itself.
 It goes through the same routine `mp daemon start` uses, so the start lock that makes two racing clients produce one daemon, the sweep of a socket a crash left behind, the `current_exe()` spawn into its own session with its stdio in the daemon log, and the early failure on a child that died are all the same code.
-The daemon it produces is detached, so it outlives the client that wanted it, which is the whole point.
+The daemon it produces outlives the client that wanted it, which is the whole point.
+Where this `mp`'s login service is installed, the start is the service manager's, exactly as `mp daemon start`'s is (see "Starting under the login service"), and its notes and the command it ran go to the log only; a daemon the client spawned beside the service would hold the socket and leave the service crash-looping against it (PERSO-219).
 
 The bound on the whole sequence is 5 s: the readiness wait first, then a connect retry that backs off from 25 ms to 400 ms until the same deadline.
 One budget rather than two, so the worst case a user waits for a daemon that never binds is that number and not some multiple of it.
@@ -917,7 +918,7 @@ A service that starts but whose daemon never answers is exit 4 with the same poi
 `mp daemon stop` stays the socket's under a service, because the socket stop honours `--grace-secs` and names what it cut short.
 The daemon exits 0 on it, which a `Restart=on-failure` unit records as a clean stop and a `KeepAlive {SuccessfulExit: false}` agent leaves stopped, so the service ends stopped rather than failed and its enablement is untouched: it starts again at the next boot or login.
 `restart` is that stop followed by the service manager's restart rather than the manager's restart alone, so `--grace-secs` keeps meaning what it means for `stop` and the stop still names what it cut short.
-On-demand auto-start by an ordinary `mp` run still spawns a detached daemon whatever is installed.
+On-demand auto-start by an ordinary `mp` run, the TUI's reconnect included, takes the same route as `start`, printing nothing into the command's output, so a TUI left open across a `mp daemon stop` brings the service back rather than a detached daemon beside it (PERSO-219).
 
 `tests/daemon_supervised_start.rs` pins the Linux half with `MAILYPOPPINS_DAEMON_SERVICE_OS=linux`, a dry-run install into a sandbox `XDG_CONFIG_HOME` and a fake `systemctl` on `PATH` that records its argv and runs `mp daemon run` in the background on `start` and `restart`.
 A second, stateful fake keeps the unit active until two seconds after its daemon exited and ignores a `start` of an active unit, as systemd does, which is what reproduces the PERSO-109 restart.

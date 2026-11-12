@@ -1,5 +1,5 @@
 //! `mp daemon start` and `mp daemon restart` under an installed login service
-//! (PERSO-109).
+//! (PERSO-109), and a client's on-demand start under one (PERSO-219).
 //!
 //! With the systemd unit for this data directory installed, both commands ask
 //! systemd for the daemon instead of spawning a detached one, which would
@@ -86,7 +86,24 @@ impl Sandbox {
     /// An `mp` that sees the systemd half, the sandbox unit directory and the
     /// fake `systemctl` and nothing else on `PATH`.
     fn mp(&self, args: &[&str]) -> Output {
-        Command::new(MP)
+        self.command(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run mp {args:?}: {e}"))
+    }
+
+    /// [`Sandbox::mp`] for a command that needs a daemon, with on-demand
+    /// starting on and a budget a cold daemon meets on a loaded host.
+    fn mp_on_demand(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .env_remove("MAILYPOPPINS_DAEMON_AUTOSTART")
+            .env("MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS", "15000")
+            .output()
+            .unwrap_or_else(|e| panic!("run mp {args:?}: {e}"))
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(MP);
+        command
             .args(args)
             .env("HOME", self.dir("home"))
             .env("MAILYPOPPINS_DATA_DIR", self.dir("data"))
@@ -96,9 +113,8 @@ impl Sandbox {
             .env("XDG_RUNTIME_DIR", self.dir("run"))
             .env("MAILYPOPPINS_DAEMON_SERVICE_OS", "linux")
             .env_remove("MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN")
-            .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
-            .output()
-            .unwrap_or_else(|e| panic!("run mp {args:?}: {e}"))
+            .env_remove("MAILYPOPPINS_DAEMON_FAIL_START");
+        command
     }
 
     /// A fake `systemctl` that appends its argv to `bin/systemctl.log` and, on
@@ -382,6 +398,53 @@ fn start_and_restart_go_through_the_installed_unit() {
         [start_call, restart_call],
         "stop goes through the socket, not systemctl"
     );
+}
+
+/// A command that needs a daemon and finds none starts it through the
+/// installed unit, as `mp daemon start` does, and spawns no detached daemon
+/// that the unit would then crash-loop against (PERSO-219); the start prints
+/// nothing into the command's own output.
+#[test]
+fn an_on_demand_start_goes_through_the_installed_unit() {
+    let sandbox = Sandbox::new();
+    sandbox.fake_systemctl();
+    sandbox.install_unit(&sandbox.dir("data"));
+
+    let out = sandbox.mp_on_demand(&["account", "list", "--daemon"]);
+    assert_eq!(
+        ok(&out, "account list"),
+        ["No accounts configured"],
+        "the command's answer and nothing of the start's"
+    );
+    assert_eq!(
+        sandbox.systemctl_calls(),
+        [format!("--user start {UNIT_NAME}")],
+        "the daemon is the unit's: systemctl was asked for it"
+    );
+
+    let pid = sandbox.recorded_pid();
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(pid), "the stopped daemon {pid} exited");
+}
+
+/// A `systemctl --user start` that fails during an on-demand start falls
+/// back to a detached daemon, so the command is still served.
+#[test]
+fn a_failing_on_demand_service_start_falls_back_to_a_detached_daemon() {
+    let sandbox = Sandbox::new();
+    sandbox.failing_systemctl();
+    sandbox.install_unit(&sandbox.dir("data"));
+
+    let out = sandbox.mp_on_demand(&["account", "list", "--daemon"]);
+    assert_eq!(ok(&out, "account list"), ["No accounts configured"]);
+    assert_eq!(
+        sandbox.systemctl_calls(),
+        [format!("--user start {UNIT_NAME}")]
+    );
+
+    let pid = sandbox.recorded_pid();
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(pid), "the stopped daemon {pid} exited");
 }
 
 /// `mp daemon restart` under the unit brings the unit back active with the

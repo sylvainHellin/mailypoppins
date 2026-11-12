@@ -414,11 +414,14 @@ async fn connect(socket: &Path, required: &[&str]) -> Result<(Connection, String
 
 /// Start a daemon on demand, through the same routine `mp daemon start` uses.
 ///
-/// Sharing it is the point: that routine already takes the start lock so two
-/// clients racing produce one daemon, sweeps a socket a crash left behind,
-/// spawns `std::env::current_exe()` in its own session with its stdio in the
-/// daemon log, and fails early when the child dies instead of waiting out the
-/// bound. A second implementation here would be a second set of those bugs.
+/// Sharing it is the point: that routine asks the service manager when this
+/// `mp`'s login service is installed, so the daemon is the service's and the
+/// service does not crash-loop against one this client spawned (PERSO-219),
+/// and otherwise takes the start lock so two clients racing produce one
+/// daemon, sweeps a socket a crash left behind, spawns
+/// `std::env::current_exe()` in its own session with its stdio in the daemon
+/// log, and fails early when the child dies instead of waiting out the bound.
+/// A second implementation here would be a second set of those bugs.
 async fn autostart(budget: Duration) -> Result<()> {
     info!(
         "[client] no daemon at the socket; starting one on demand (bound {} ms)",

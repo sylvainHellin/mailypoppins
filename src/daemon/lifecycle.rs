@@ -634,22 +634,32 @@ fn spawn_diagnostic_sweep(state: Arc<DaemonState>) {
 // start
 // ---------------------------------------------------------------------------
 
-/// Detached start: spawn `mp daemon run`, wait for a real `daemon.status`.
+/// On-demand start: bring a daemon up the way `mp daemon start` does, and
+/// print nothing.
 ///
 /// Public because on-demand auto-start ([`super::client::client_session`])
-/// uses this exact routine rather than a second one: the start lock that makes
-/// two racing starters produce one daemon, the stale-socket sweep, the
-/// `current_exe()` spawn into its own session, and the early exit on a child
-/// that died are all decisions this function already took correctly.
+/// uses this exact routine rather than a second one. Where this `mp`'s login
+/// service is installed, the start is the service manager's ([`start_via`]),
+/// so the daemon is the service's own and the service does not crash-loop
+/// against a detached one holding the socket (PERSO-219). Anywhere else it is
+/// the detached start: the start lock that makes two racing starters produce
+/// one daemon, the stale-socket sweep, the `current_exe()` spawn into its own
+/// session, and the early exit on a child that died.
 ///
 /// `timeout` is the answer window, and a daemon that has bound its socket gets
 /// up to [`STARTUP_CEILING`]; on-demand start passes its budget and no notice,
 /// since it may not print into another command's output.
 pub async fn start(timeout: Duration) -> Result<i32> {
-    start_noting(timeout, Notice::Quiet).await
+    start_via(
+        super::service::start_route(super::service::StartKind::Start)?,
+        timeout,
+        Notice::Quiet,
+    )
+    .await
 }
 
-/// [`start`], saying on stderr when it waits past the window if `notice` asks.
+/// The detached start, saying on stderr when it waits past the window if
+/// `notice` asks.
 async fn start_noting(timeout: Duration, notice: Notice) -> Result<i32> {
     let socket = socket_path();
     match probe(&socket, RPC_TIMEOUT).await {
@@ -1123,7 +1133,7 @@ async fn restart(grace_secs: Option<u64>, timeout: Duration) -> Result<i32> {
     if code != EXIT_OK {
         return Ok(code);
     }
-    start_via(route, timeout).await
+    start_via(route, timeout, Notice::Stderr).await
 }
 
 /// `mp daemon start`: [`start`], and one line saying what it found or did.
@@ -1143,11 +1153,14 @@ async fn start_command(timeout: Duration) -> Result<i32> {
     start_via(
         super::service::start_route(super::service::StartKind::Start)?,
         timeout,
+        Notice::Stderr,
     )
     .await
 }
 
-/// Bring a daemon up the way `route` says, and print the start's line.
+/// Bring a daemon up the way `route` says, and print the start's line unless
+/// `notice` is [`Notice::Quiet`], which an on-demand start inside another
+/// command passes: its notes and the command it ran then go to the log only.
 ///
 /// A supervised start runs the service manager's command, does not take the
 /// start lock (the `mp daemon run` the manager spawns takes it itself), and
@@ -1158,10 +1171,14 @@ async fn start_command(timeout: Duration) -> Result<i32> {
 /// exit with nothing running: a restart has already stopped the daemon by
 /// then. A service command that succeeded but whose daemon never answers is
 /// still exit 4, since a second, detached daemon would race the service's.
-async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Result<i32> {
+async fn start_via(
+    route: super::service::StartRoute,
+    timeout: Duration,
+    notice: Notice,
+) -> Result<i32> {
     use super::service::StartRoute;
     match route {
-        StartRoute::Detached { note } => start_detached(note, timeout).await,
+        StartRoute::Detached { note } => start_detached(note, timeout, notice).await,
         StartRoute::Supervised(plan) => {
             info!(
                 "[daemon] start: through the service manager {:?}",
@@ -1171,10 +1188,11 @@ async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Resu
                 return start_detached(
                     Some(format!("{e:#}, so this daemon starts outside the service")),
                     timeout,
+                    notice,
                 )
                 .await;
             }
-            let unanswered = match wait_ready(timeout, None, Notice::Stderr).await? {
+            let unanswered = match wait_ready(timeout, None, notice).await? {
                 Readiness::Answered => None,
                 Readiness::Silent => Some(format!(
                     "the service started and its daemon is listening, \
@@ -1191,24 +1209,28 @@ async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Resu
                 report_start_failure(&format!("{what}; see `{}`", plan.status_hint()));
                 return Ok(EXIT_UNAVAILABLE);
             }
-            print_started();
-            for line in plan.lines() {
-                println!("{line}");
+            if notice == Notice::Stderr {
+                print_started();
+                for line in plan.lines() {
+                    println!("{line}");
+                }
             }
             Ok(EXIT_OK)
         }
     }
 }
 
-/// A detached [`start`], after the `note:` saying why the service was passed
-/// over, and the start's line.
-async fn start_detached(note: Option<String>, timeout: Duration) -> Result<i32> {
+/// A detached start, after the `note:` saying why the service was passed
+/// over, and the start's line; both only on [`Notice::Stderr`].
+async fn start_detached(note: Option<String>, timeout: Duration, notice: Notice) -> Result<i32> {
     if let Some(note) = note {
         info!("[daemon] start: {note}");
-        eprintln!("note: {note}");
+        if notice == Notice::Stderr {
+            eprintln!("note: {note}");
+        }
     }
-    let code = start_noting(timeout, Notice::Stderr).await?;
-    if code == EXIT_OK {
+    let code = start_noting(timeout, notice).await?;
+    if code == EXIT_OK && notice == Notice::Stderr {
         print_started();
     }
     Ok(code)

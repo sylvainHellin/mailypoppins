@@ -66,8 +66,8 @@
 //!
 //! ## Starting through the service (PERSO-109)
 //!
-//! [`start_route`] is what `mp daemon start` and `mp daemon restart` ask
-//! before they bring a daemon up. When the installed file bakes this run's
+//! [`start_route`] is what `mp daemon start`, `mp daemon restart` and a
+//! client's on-demand start (PERSO-219) ask before they bring a daemon up. When the installed file bakes this run's
 //! data directory and runs this executable, its manager is on `PATH`, and on
 //! Linux a systemd user manager is reachable (`$XDG_RUNTIME_DIR/systemd/private`
 //! is a socket), the answer is the manager's start command (`systemctl --user
