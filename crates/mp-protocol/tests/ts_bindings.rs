@@ -17,8 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mp_protocol::{
-    account, calendar, contact, diagnostic, draft, events, listing, operation, reminder, rendition,
-    send, sender, signature, state,
+    account, attachment, calendar, contact, diagnostic, draft, events, listing, operation,
+    reminder, rendition, send, sender, signature, state,
 };
 use ts_rs::{Config, TS};
 
@@ -53,6 +53,8 @@ fn export_into(dir: &Path) -> usize {
         account::TokenState,
         account::AccountCredential,
         account::AccountCredentials,
+        attachment::MessageAttachment,
+        attachment::MessageAttachments,
         calendar::EventAttendee,
         calendar::EventFrontmatter,
         calendar::AgendaEvent,

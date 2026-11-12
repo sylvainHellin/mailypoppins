@@ -11,6 +11,7 @@
 //! document's protocol changelog.
 
 pub mod account;
+pub mod attachment;
 pub mod calendar;
 pub mod contact;
 pub mod diagnostic;

@@ -419,6 +419,35 @@ pub(super) async fn get_hit(
     Ok(result)
 }
 
+/// `message.attachments` of a server-search hit, `{account, hit: {message_id,
+/// mailbox}}` (PERSO-222): the held row's listing, or the parts of the
+/// server's copy ([`crate::read_cmd::fetched_attachments`]), whose indexes are
+/// the `part` `message.materialise_attachment`'s `hit` address takes, under
+/// the selector [`get_hit`] answers for the same hit.
+pub(super) async fn attachments_hit(
+    params: &Value,
+    accounts: &[AccountConfig],
+    server: ServerLeg<'_>,
+) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?.clone();
+    let hit = hit_address(&account, params)?.ok_or_else(|| invalid_params("hit is required"))?;
+    match hit_message(&account, &hit, server).await? {
+        HitMessage::Held(row) => {
+            super::message::attachments(&as_row_params(params, &row), accounts)
+        }
+        HitMessage::Server { mailbox, email } => super::message::attachment_answer(
+            &name,
+            crate::read_cmd::fetched_selector(
+                &name,
+                &mailbox,
+                email.message_id.as_deref().unwrap_or_default(),
+            ),
+            &crate::read_cmd::fetched_attachments(&email),
+        ),
+    }
+}
+
 /// `message.materialise_attachment` and `message.materialise_markdown` of a
 /// server-search hit: the held row's file, or one cut from the server's copy,
 /// an attachment by its `part` in [`get_hit`]'s list and the read-only view

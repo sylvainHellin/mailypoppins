@@ -97,7 +97,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `state.*` for bootstrap and state diagnostics.
 - `account.*` for listing, selection metadata, sync health, and account operations. This build serves `account.list` and `account.credentials`.
 - `mailbox.*` for listings, counts, and mailbox metadata.
-- `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation. This build serves five mutations: `message.archive`, `message.delete`, `message.move`, `message.set_flag` and `message.set_read`, and two invitation reads, `message.ics` and `message.invite`.
+- `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation. This build serves five mutations: `message.archive`, `message.delete`, `message.move`, `message.set_flag` and `message.set_read`, two invitation reads, `message.ics` and `message.invite`, and the attachment listing, `message.attachments`.
 - `draft.*` for creation, parsing status, validation, recipient editing, reply, reply-all, forward, approval, discard, and attachment changes. This build serves the eleven methods of the draft slice and the mutation slice.
 - `send.*` for immediate send, approved batches, invitations, outbox recovery, and the undo-send hold's countdown and cancellation. This build serves the eight methods of the send slice: `send.approved`, `send.cancel_hold`, `send.draft`, `send.hold_status`, `send.invite`, `send.outbox_discard`, `send.outbox_list` and `send.outbox_retry`, whose result types are `mp_protocol::send`.
 - `sync.*` for quick sync, full sync, progress, and errors.
@@ -121,7 +121,7 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.list`, `calendar.view`, `event.get`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `sender.list`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.attachments`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.list`, `calendar.view`, `event.get`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `sender.list`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, `sender.block`, `sender.unblock`, the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft`, `calendar.set_visibility`, `calendar.dismiss_reminder`, `calendar.snooze_reminder` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.freebusy`, `calendar.rebuild`, `calendar.rsvp`, `event.cancel`, `event.create`, `event.delete`, `event.respond`, `event.update`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
@@ -576,6 +576,29 @@ The daemon opens the secrets backend at startup once a configuration loaded; a d
 
 `moved_to.selector` names the Message-ID as the store holds it, which is the "now" line `mp archive` and `mp move` print.
 
+### The attachment listing
+
+| method | kind | params | result |
+|---|---|---|---|
+| `message.attachments` | query | `{account, row_id\|id\|selector, mailbox?}` or `{account, hit: {message_id, mailbox}}` | `{account, selector, attachments: [{part, name, size, inline}]}` |
+
+`message.attachments` lists the parts of one received message, each with the `part` `message.materialise_attachment` takes (PERSO-222).
+It is how a client learns what to materialise: it lists the parts, shows them, and materialises the ones the user picked by the `part` each entry carries.
+The types are `mp_protocol::attachment::{MessageAttachments, MessageAttachment}`, and the fixtures `message.attachments.{request,response}.json`.
+
+**The list is in reading order**: the real attachments, then the images the HTML body shows by `cid:` URL (`inline: true`, PERSO-165), each group in the message's stored order.
+That is the order `mp show`, the TUI picker and the desktop list show, so a client renders the answer as it comes rather than sorting it again.
+`part` is the index in stored order, which is why it travels on every entry instead of being the entry's position: an inline logo stored first is the last entry and still `part: 0`.
+`size` is the part's length in bytes, which is the `bytes` its handle reports, and `name` the file name the sender gave it, sanitised only when the handle turns it into a path.
+
+The address is `message.get`'s, with the same refusals: exactly one of `row_id`, `id` and `selector`, `mailbox` narrowing a selector, or a server-search hit's `hit: {message_id, mailbox}`.
+`selector` is the canonical selector `message.get` answers for the same message, so a CLI that resolved a typed selector phrases its next calls and its messages in it.
+A hit the store holds is that row's listing; any other is read from the server's copy through the recent copies `message.get` shares, its `selector` the one a fetch would land it under, and a failure there is `-32603` with `{account}`.
+A message with no attachment is an empty list rather than a refusal, because saying "no attachments" is the client's.
+
+A *query*: it writes nothing, mints no handle and moves no revision, and it is `durable`, as every read is.
+It is a method of its own rather than a reason to keep reading `message.get`'s `attachments`, which are part of the record `mp show` prints and stay there in stored order, for a reader displaying the message.
+
 ### Materialised handles
 
 A client cannot read an account's blob store, so the daemon writes the bytes it asks for into its own runtime directory and hands back a path with an explicit lifetime.
@@ -602,8 +625,8 @@ A client holding a selector cannot build `"<mailbox>/<uid>"` out of a `message.g
 The daemon never renames a part: two parts sent under one name come back as two handles carrying that one name, in two directories, and the `_1` rule that turns them into two files belongs where the names become paths, which is the client (`mp save` applies it within one call, so saving the same message twice writes the same two names rather than growing a copy per run).
 There is no `mime` on the wire: the store keeps no content type for a part, and deriving one from the extension is a guess a client can make for itself.
 
-**`part` is a dense zero-based index into the message's user-facing attachment list**, the order `mp save` and the TUI show, with the iMIP sidecar excluded.
-It is the index of the row a client is looking at; addressing by the store's raw `ordinal` would leak the hidden sidecar's position into a list it is deliberately absent from.
+**`part` is a dense zero-based index into the message's user-facing attachment list in stored order**, with the iMIP sidecar excluded, and `message.attachments` hands it out on every entry ([above](#the-attachment-listing)).
+Addressing by the store's raw `ordinal` would leak the hidden sidecar's position into a list it is deliberately absent from.
 
 **`message.materialise_html` writes the browser rendition, not the raw markup**: the charset and the `Content-Security-Policy` meta tag the TUI's `b` binding injects before it hands a `file://` URL to a browser (#0037), with `cid:` references inlined as `data:` URIs.
 A sender who wrote no markup is `-32602`, not a daemon failure.
@@ -629,7 +652,7 @@ That server leg is why it is a method of its own in the code (`methods::message_
 It also takes a server-search hit with no row, `hit: {message_id, mailbox}`, the address `message.fetch` takes and instead of `row_id`, `id` or `selector`: a hit the store has since caught up with is that row's export, and any other is the server leg above, named off the bytes' own `Subject:` and `Date:`; nothing is ingested, so the hit stays a hit.
 
 All four address a message as `message.get` does: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
-`message.materialise_attachment` and `message.materialise_markdown` take `message.get`'s `hit` address too (PERSO-155): a held hit is its row's file, and any other is cut from the server's copy, a part by its index in `message.get`'s list of that hit and the view rendered as a stored row's is, read-only, named `message.md` when the subject slugs to nothing; nothing is pinned, since no blob was read.
+`message.materialise_attachment` and `message.materialise_markdown` take `message.get`'s `hit` address too (PERSO-155): a held hit is its row's file, and any other is cut from the server's copy, a part by the `part` `message.attachments` lists for that hit and the view rendered as a stored row's is, read-only, named `message.md` when the subject slugs to nothing; nothing is pinned, since no blob was read.
 `row_id` is documented here because this is the method whose call site holds one, and the other two accept it because the whole family resolves an address through one helper; widening them was additive and free (P5-U10c).
 The TUI holds a `MessageRef`, which is the synthetic row key and nothing else (#0050), and making it spell `"<mailbox>/<uid>"` would make it carry a second identity for every listed row.
 A message with no stored body renders with an empty body rather than refusing, because `render_markdown` degrades the way `mp show` does.
@@ -1898,3 +1921,6 @@ One behaviour moved: a `message.search` that names no order answers newest first
 PERSO-261 added the `sender.*` family, three methods, and one lifecycle kind, all additively; no field was renamed, none was dropped, and no command's output moved.
 `sender.block` and `sender.unblock` are commands and `sender.list` a query, with the shapes of [the family's section](#the-sender-family) and the types of `mp_protocol::sender`; `sender.blocklist_changed` `{entries}` is the lifecycle kind.
 The fixtures are `crates/mp-protocol/fixtures/sender.{block,unblock,list}.{request,response}.json` and `notification.sender_blocklist_changed.json`, and the capability list grew by the three names.
+
+PERSO-222 added `message.attachments`, one query, additively; no field was renamed, none was dropped, and `message.get`'s `attachments` keep their stored order.
+`message.attachments` `{account, row_id|id|selector, mailbox?}` or `{account, hit}` -> `{account, selector, attachments: [{part, name, size, inline}]}` lists a message's parts in reading order with the `part` `message.materialise_attachment` takes on each ([The attachment listing](#the-attachment-listing)); the types are `mp_protocol::attachment::{MessageAttachments, MessageAttachment}`, the fixtures `crates/mp-protocol/fixtures/message.attachments.{request,response}.json`, and the capability list grew by its name.

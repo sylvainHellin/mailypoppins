@@ -562,6 +562,7 @@ mod tests {
                 "mailbox.list".to_string(),
                 "mailbox.list_server".to_string(),
                 "message.archive".to_string(),
+                "message.attachments".to_string(),
                 "message.delete".to_string(),
                 "message.fetch".to_string(),
                 "message.get".to_string(),

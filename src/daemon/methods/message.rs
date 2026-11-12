@@ -13,6 +13,10 @@
 //! the record `mp show --json` prints ([`crate::read_cmd::ShownMessage`]), so the
 //! client renders either answer from the payload alone.
 //!
+//! `message.attachments`: the parts of one message in reading order, each with
+//! the `part` `message.materialise_attachment` takes (PERSO-222), addressed as
+//! `message.get` is, a server-search hit included.
+//!
 //! `message.search`: the ranked hits of the local index, with the params of
 //! `mp search --local`'s flags. `body_query` is the wire name of `--body`,
 //! because `body` is already the "send me the bodies" switch (`--full`).
@@ -105,15 +109,27 @@ pub const MESSAGE_HTML_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
     1,
 )];
 
-/// One of the five, selected by its own [`MethodSpec`].
+/// The attachment listing (PERSO-222), declared on its own for the reason
+/// [`MESSAGE_THREAD_METHOD_SPECS`] is.
 ///
-/// One type for five methods because they share their one dependency and
-/// differ only in which of the five bodies below they run; the dispatcher
-/// registers five instances, so each still declares itself separately.
+/// A query and durable, like `message.get`, whose address forms it takes:
+/// it reads the store, or for a server-search hit the server's copy, and
+/// writes nothing, so it mints no handle and moves no revision.
+pub const MESSAGE_ATTACHMENTS_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    mp_protocol::attachment::METHOD_MESSAGE_ATTACHMENTS,
+    MethodKind::Query,
+    1,
+)];
+
+/// One of the six, selected by its own [`MethodSpec`].
+///
+/// One type for six methods because they share their one dependency and
+/// differ only in which of the six bodies below they run; the dispatcher
+/// registers six instances, so each still declares itself separately.
 pub struct MessageReadMethod {
     /// Which of [`MESSAGE_READ_METHOD_SPECS`],
-    /// [`MESSAGE_THREAD_METHOD_SPECS`] or [`MESSAGE_HTML_METHOD_SPECS`] this
-    /// instance serves.
+    /// [`MESSAGE_THREAD_METHOD_SPECS`], [`MESSAGE_HTML_METHOD_SPECS`] or
+    /// [`MESSAGE_ATTACHMENTS_METHOD_SPECS`] this instance serves.
     pub spec: MethodSpec,
     /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
@@ -144,10 +160,11 @@ impl Method for MessageReadMethod {
         // [`list_off_thread`] moves its `list` projection to the blocking pool.
         Box::pin(async move {
             let accounts = self.config.accounts();
-            // `message.get` is the one read of this family with a server leg:
-            // a server-search hit with no row is read from the server's copy,
-            // and a row whose body the retention sweep evicted gets it back
-            // from there when no blob of its own holds it (PERSO-205).
+            // `message.get` and `message.attachments` are the reads of this
+            // family with a server leg: a server-search hit with no row is
+            // read from the server's copy, and a row whose body the retention
+            // sweep evicted gets it back from there when no blob of its own
+            // holds it (PERSO-205).
             let secrets = self.config.snapshot().config.secrets_backend;
             let server = super::message_eml::ServerLeg {
                 secrets,
@@ -162,6 +179,14 @@ impl Method for MessageReadMethod {
                     super::message_eml::get_hit(&params, &accounts, server, body).await
                 }
                 "message.get" => get(&params, &accounts, body).await,
+                mp_protocol::attachment::METHOD_MESSAGE_ATTACHMENTS
+                    if super::message_eml::addresses_hit(&params) =>
+                {
+                    super::message_eml::attachments_hit(&params, &accounts, server).await
+                }
+                mp_protocol::attachment::METHOD_MESSAGE_ATTACHMENTS => {
+                    attachments(&params, &accounts)
+                }
                 "message.list" => list_off_thread(&params, &accounts).await,
                 "message.thread" => thread(&params, &accounts),
                 mp_protocol::rendition::METHOD_MESSAGE_HTML => html(&params, &accounts),
@@ -172,7 +197,7 @@ impl Method for MessageReadMethod {
     }
 }
 
-/// Register the five read methods on `dispatcher`.
+/// Register the six read methods on `dispatcher`.
 ///
 /// The end of a body fetch is published through `canonical` as
 /// `message.body_fetched`, a lifecycle event every client receives
@@ -197,6 +222,7 @@ pub fn register_reads(
         .into_iter()
         .chain(MESSAGE_THREAD_METHOD_SPECS)
         .chain(MESSAGE_HTML_METHOD_SPECS)
+        .chain(MESSAGE_ATTACHMENTS_METHOD_SPECS)
     {
         dispatcher.register(Arc::new(MessageReadMethod {
             spec,
@@ -1171,6 +1197,48 @@ pub(super) async fn get(
         }
     }
     Ok(result)
+}
+
+/// The `result` of `message.attachments` for a stored row: its parts in
+/// reading order, each with the `part` that materialises it
+/// ([`crate::read_cmd::attachment_listing`], PERSO-222).
+///
+/// The address is [`address`]'s, so the refusals are `message.get`'s, and the
+/// selector is the one `message.get` answers for the same row. A message with
+/// no part is an empty list: saying so is the client's.
+pub(super) fn attachments(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    super::account::ready_account(accounts, &name)?;
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let row = address(params, &store, &name)?;
+    let parts = crate::read_cmd::stored_attachments(&store, row.id).map_err(|e| {
+        internal(format!(
+            "reading the attachments of {name}:{}/{}: {e:#}",
+            row.mailbox, row.uid
+        ))
+    })?;
+    attachment_answer(
+        &name,
+        Selector::for_message(&name, &row).to_string(),
+        &parts,
+    )
+}
+
+/// The `message.attachments` answer over `parts`, a message's parts in stored
+/// order.
+pub(super) fn attachment_answer(
+    account: &str,
+    selector: String,
+    parts: &[crate::read_cmd::ShownAttachment],
+) -> Result<Value, RpcError> {
+    let listing = mp_protocol::attachment::MessageAttachments {
+        account: account.to_string(),
+        selector,
+        attachments: crate::read_cmd::attachment_listing(parts),
+    };
+    serde_json::to_value(&listing)
+        .map_err(|e| internal(format!("serialising the attachments of {account}: {e}")))
 }
 
 /// The row `id`, `row_id` or `selector` names: exactly one of them, always.

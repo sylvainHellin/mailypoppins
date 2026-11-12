@@ -87,6 +87,8 @@ export type { HoldListing } from "./HoldListing";
 export type { HoldStatus } from "./HoldStatus";
 export type { InlineHtmlRefusal } from "./InlineHtmlRefusal";
 export type { MailboxRow } from "./MailboxRow";
+export type { MessageAttachment } from "./MessageAttachment";
+export type { MessageAttachments } from "./MessageAttachments";
 export type { MessageFlags } from "./MessageFlags";
 export type { MessageHtml } from "./MessageHtml";
 export type { MessageHtmlParams } from "./MessageHtmlParams";

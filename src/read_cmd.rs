@@ -11,6 +11,7 @@
 
 use anyhow::Result;
 use colored::*;
+use mp_protocol::attachment::MessageAttachment;
 use serde::{Deserialize, Serialize};
 
 use crate::selector::Selector;
@@ -101,6 +102,58 @@ pub fn parts_in_reading_order(attachments: &[ShownAttachment]) -> Vec<usize> {
     real.into_iter().chain(inline).collect()
 }
 
+/// The `message.attachments` listing of a message's parts, given in stored
+/// order (PERSO-222): [`parts_in_reading_order`], each entry carrying the
+/// stored index `message.materialise_attachment` takes as its `part`.
+pub fn attachment_listing(attachments: &[ShownAttachment]) -> Vec<MessageAttachment> {
+    parts_in_reading_order(attachments)
+        .into_iter()
+        .map(|part| {
+            let attachment = &attachments[part];
+            MessageAttachment {
+                part: u32::try_from(part).expect("a message holds fewer than 2^32 parts"),
+                name: attachment.name.clone(),
+                size: attachment.size,
+                inline: attachment.inline,
+            }
+        })
+        .collect()
+}
+
+/// The stored parts of the message row `message_row`, in stored order, which
+/// is the order their `part` indexes count.
+pub fn stored_attachments(store: &Store, message_row: i64) -> Result<Vec<ShownAttachment>> {
+    Ok(read::attachments_for(store, message_row)?
+        .into_iter()
+        .map(|att| ShownAttachment {
+            name: att.name,
+            size: att.size,
+            inline: att.inline,
+        })
+        .collect())
+}
+
+/// The parts of a message parsed from a server's copy, in the message's own
+/// order, each marked inline by the rule ingest marks a stored part with, so
+/// a hit's `part` is the index a stored copy of it would carry.
+pub fn fetched_attachments(email: &crate::parse::FetchedEmail) -> Vec<ShownAttachment> {
+    let html_lower = email.html_body.as_deref().map(str::to_ascii_lowercase);
+    email
+        .attachments
+        .iter()
+        .map(|att| ShownAttachment {
+            name: att.filename.clone(),
+            size: att.content.len() as u64,
+            inline: crate::parse::is_inline_image(
+                html_lower.as_deref(),
+                att.content_id.as_deref(),
+                &att.filename,
+                &att.content,
+            ),
+        })
+        .collect()
+}
+
 /// The `part` indexes `mp open` opens: the real attachments, or the inline
 /// images when the message has none, so a mail whose one photo is inline (an
 /// iPhone picture) still opens it and a signed PDF does not open its logos.
@@ -147,33 +200,23 @@ fn flag_tokens(flags: crate::types::MessageFlags) -> Vec<String> {
 /// key): the record a stored row of `mailbox` would print, under the selector
 /// a fetch of it would land as.
 ///
-/// The attachments are the parsed message's parts in their own order, which
-/// is the `part` `message.materialise_attachment`'s `hit` address takes, each
-/// marked inline by the rule ingest marks a stored part with.
+/// The selector of a server-search hit with no row: the one a fetch of it
+/// into the mailbox keyed `mailbox` would land it under.
+pub fn fetched_selector(account: &str, mailbox: &str, message_id: &str) -> String {
+    Selector::new(account, mailbox, crate::selector::message_key(message_id)).to_string()
+}
+
+/// The attachments are [`fetched_attachments`], whose order is the `part`
+/// `message.materialise_attachment`'s `hit` address takes.
 pub fn shown_fetched(
     account: &str,
     mailbox: &str,
     email: &crate::parse::FetchedEmail,
 ) -> ShownMessage {
     let message_id = email.message_id.clone().unwrap_or_default();
-    let html_lower = email.html_body.as_deref().map(str::to_ascii_lowercase);
-    let attachments = email
-        .attachments
-        .iter()
-        .map(|att| ShownAttachment {
-            name: att.filename.clone(),
-            size: att.content.len() as u64,
-            inline: crate::parse::is_inline_image(
-                html_lower.as_deref(),
-                att.content_id.as_deref(),
-                &att.filename,
-                &att.content,
-            ),
-        })
-        .collect();
+    let attachments = fetched_attachments(email);
     ShownMessage {
-        selector: Selector::new(account, mailbox, crate::selector::message_key(&message_id))
-            .to_string(),
+        selector: fetched_selector(account, mailbox, &message_id),
         account: account.to_string(),
         mailbox: mailbox.to_string(),
         message_id,
@@ -211,18 +254,10 @@ pub fn shown_message(
     account: &str,
     row: &MessageRow,
 ) -> ShownMessage {
-    let attachments = read::attachments_for(store, row.id)
-        .unwrap_or_else(|e| {
-            log::warn!("[show] attachments of message {}: {e:#}", row.id);
-            Vec::new()
-        })
-        .into_iter()
-        .map(|att| ShownAttachment {
-            name: att.name,
-            size: att.size,
-            inline: att.inline,
-        })
-        .collect();
+    let attachments = stored_attachments(store, row.id).unwrap_or_else(|e| {
+        log::warn!("[show] attachments of message {}: {e:#}", row.id);
+        Vec::new()
+    });
     ShownMessage {
         selector: Selector::for_message(account, row).to_string(),
         account: account.to_string(),
@@ -1008,6 +1043,14 @@ mod tests {
             "{text}"
         );
         assert_eq!(parts_in_reading_order(&shown.attachments), vec![1, 0]);
+        assert_eq!(
+            attachment_listing(&shown.attachments)
+                .iter()
+                .map(|a| (a.part, a.name.as_str(), a.inline))
+                .collect::<Vec<_>>(),
+            vec![(1, "Rechnung.pdf", false), (0, "image001.png", true)],
+            "message.attachments lists the reading order with the stored index"
+        );
         assert_eq!(parts_to_open(&shown.attachments), vec![1]);
     }
 

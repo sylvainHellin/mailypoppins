@@ -1,0 +1,9 @@
+{
+  "id": 53,
+  "jsonrpc": "2.0",
+  "method": "message.attachments",
+  "params": {
+    "account": "work",
+    "row_id": 3141
+  }
+}

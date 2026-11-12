@@ -1,0 +1,22 @@
+{
+  "id": 53,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "work",
+    "attachments": [
+      {
+        "inline": false,
+        "name": "Rechnung.pdf",
+        "part": 1,
+        "size": 48213
+      },
+      {
+        "inline": true,
+        "name": "image001.png",
+        "part": 0,
+        "size": 6120
+      }
+    ],
+    "selector": "mp://work/inbox/rechnung-2026-07@example.com"
+  }
+}
