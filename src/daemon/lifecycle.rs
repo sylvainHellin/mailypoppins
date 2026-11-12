@@ -928,8 +928,13 @@ fn print_stop_outcome(outcome: &StopOutcome) {
 /// anything is stopped, so a restart under systemd or launchd brings the
 /// service back instead of leaving it dead beside a detached daemon
 /// (PERSO-109).
+///
+/// Under a service that start is the manager's restart, not its start: the
+/// stop returns once the old process has exited, a zombie included, which can
+/// be before the manager has processed the exit, and a start sent while the
+/// manager still counts the service running is a no-op that leaves it dead.
 async fn restart(grace_secs: Option<u64>) -> Result<i32> {
-    let route = super::service::start_route()?;
+    let route = super::service::start_route(super::service::StartKind::Restart)?;
     // The stop returns once the old process has exited, so the new daemon
     // does not race the old one's cleanup for the socket it just created.
     let code = stop(Duration::from_secs(10), grace_secs).await?;
@@ -953,7 +958,11 @@ async fn start_command(timeout: Duration) -> Result<i32> {
         );
         return Ok(EXIT_OK);
     }
-    start_via(super::service::start_route()?, timeout).await
+    start_via(
+        super::service::start_route(super::service::StartKind::Start)?,
+        timeout,
+    )
+    .await
 }
 
 /// Bring a daemon up the way `route` says, and print the start's line.

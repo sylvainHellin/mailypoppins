@@ -72,7 +72,11 @@
 //! Linux a systemd user manager is reachable (`$XDG_RUNTIME_DIR/systemd/private`
 //! is a socket), the answer is the manager's start command (`systemctl --user
 //! start`, or `launchctl kickstart` / `bootstrap`), so the daemon is the
-//! service's own process instead of a detached one beside a dead unit.
+//! service's own process instead of a detached one beside a dead unit. A
+//! restart asks for the manager's restart instead (`systemctl --user restart`,
+//! `launchctl kickstart -k`), because the manager may still count the service
+//! running for a moment after the socket stop's daemon exited, and a start in
+//! that moment is a no-op that leaves the service dead once it notices.
 //! Anything else is the detached start, with a note when a service was there
 //! and passed over. The decision is [`decide_start`], a pure function of what
 //! the probe found, and the only command the probe runs is `launchctl print`,
@@ -569,6 +573,21 @@ fn on_path(name: &str) -> bool {
 // Starting through the service manager (PERSO-109)
 // ---------------------------------------------------------------------------
 
+/// Which command brings the daemon up: `mp daemon start`'s or the start half
+/// of `mp daemon restart`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartKind {
+    /// Nothing answers on the socket, and the service manager is asked to
+    /// start the service, which it does not do to a service it counts running.
+    Start,
+    /// The daemon was just stopped over its socket. Its process has exited,
+    /// but the manager may not have processed that exit yet and still count
+    /// the service running, so a start would be a no-op and the service would
+    /// then end dead (PERSO-109). The manager's restart stops what it counts
+    /// running, which waits for that exit, and starts the service in one job.
+    Restart,
+}
+
 /// How `mp daemon start` and `mp daemon restart` bring a daemon up.
 #[derive(Debug)]
 pub(crate) enum StartRoute {
@@ -637,7 +656,7 @@ enum Installed {
 /// this executable is installed, and then only `launchctl print` on macOS:
 /// every other machine, a build host and a test run included, decides from
 /// the file system alone.
-pub(crate) fn start_route() -> Result<StartRoute> {
+pub(crate) fn start_route(kind: StartKind) -> Result<StartRoute> {
     let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
     let path = service_path(target);
     let installed = match fs::read_to_string(&path) {
@@ -662,6 +681,7 @@ pub(crate) fn start_route() -> Result<StartRoute> {
     Ok(decide_start(
         target,
         &path,
+        kind,
         installed,
         manager_on_path,
         unreachable,
@@ -701,6 +721,7 @@ fn user_manager_unreachable(runtime_dir: Option<&OsStr>) -> Option<String> {
 fn decide_start(
     target: Target,
     path: &Path,
+    kind: StartKind,
     installed: Installed,
     manager_on_path: bool,
     unreachable: Option<String>,
@@ -729,7 +750,7 @@ fn decide_start(
         },
         Installed::This => StartRoute::Supervised(SupervisedStart {
             target,
-            commands: start_commands(target, path, loaded),
+            commands: start_commands(target, path, kind, loaded),
         }),
     }
 }
@@ -737,17 +758,35 @@ fn decide_start(
 /// `systemctl --user start`; on macOS `kickstart` for a loaded agent and
 /// `bootstrap` for one launchd does not know, since `kickstart` refuses a
 /// label that is not loaded and `bootstrap` one that is.
-fn start_commands(target: Target, path: &Path, loaded: bool) -> Vec<Invocation> {
-    match target {
-        Target::Linux => vec![Invocation::new(
+///
+/// A [`StartKind::Restart`] is `systemctl --user restart` and `kickstart -k`
+/// instead: both stop the instance the manager still counts running, which
+/// for a daemon that already exited only waits for the manager to notice, and
+/// then start the service, where a plain start would see it running and do
+/// nothing. An agent launchd has not loaded runs nothing it could count, so
+/// `bootstrap` serves both.
+fn start_commands(target: Target, path: &Path, kind: StartKind, loaded: bool) -> Vec<Invocation> {
+    let label = format!("{}/{LAUNCHD_LABEL}", gui_domain());
+    match (target, kind) {
+        (Target::Linux, StartKind::Start) => vec![Invocation::new(
             "systemctl",
             &strings(&["--user", "start", UNIT_NAME]),
         )],
-        Target::Darwin if loaded => vec![Invocation::new(
-            "launchctl",
-            &strings(&["kickstart", &format!("{}/{LAUNCHD_LABEL}", gui_domain())]),
+        (Target::Linux, StartKind::Restart) => vec![Invocation::new(
+            "systemctl",
+            &strings(&["--user", "restart", UNIT_NAME]),
         )],
-        Target::Darwin => vec![Invocation::new(
+        (Target::Darwin, StartKind::Start) if loaded => {
+            vec![Invocation::new(
+                "launchctl",
+                &strings(&["kickstart", &label]),
+            )]
+        }
+        (Target::Darwin, StartKind::Restart) if loaded => vec![Invocation::new(
+            "launchctl",
+            &strings(&["kickstart", "-k", &label]),
+        )],
+        (Target::Darwin, _) => vec![Invocation::new(
             "launchctl",
             &strings(&["bootstrap", &gui_domain(), &path.display().to_string()]),
         )],
@@ -1164,9 +1203,18 @@ mod tests {
         for target in [Target::Linux, Target::Darwin] {
             for installed in [Installed::Absent, Installed::Foreign] {
                 for (on_path, loaded) in [(false, false), (true, false), (true, true)] {
-                    let route =
-                        decide_start(target, path, installed.clone(), on_path, None, loaded);
-                    assert_eq!(route_note(&route), None, "{target:?} {installed:?}");
+                    for kind in [StartKind::Start, StartKind::Restart] {
+                        let route = decide_start(
+                            target,
+                            path,
+                            kind,
+                            installed.clone(),
+                            on_path,
+                            None,
+                            loaded,
+                        );
+                        assert_eq!(route_note(&route), None, "{target:?} {installed:?}");
+                    }
                 }
             }
         }
@@ -1179,6 +1227,7 @@ mod tests {
         let route = decide_start(
             Target::Linux,
             Path::new("/s"),
+            StartKind::Start,
             Installed::OtherExe("/opt/old/mp".into()),
             true,
             None,
@@ -1196,7 +1245,15 @@ mod tests {
     #[test]
     fn this_service_without_its_manager_falls_back_with_a_note() {
         for (target, program) in [(Target::Linux, "systemctl"), (Target::Darwin, "launchctl")] {
-            let route = decide_start(target, Path::new("/s"), Installed::This, false, None, false);
+            let route = decide_start(
+                target,
+                Path::new("/s"),
+                StartKind::Start,
+                Installed::This,
+                false,
+                None,
+                false,
+            );
             let note = route_note(&route).expect("a note");
             assert!(note.contains(program), "{note}");
         }
@@ -1211,6 +1268,7 @@ mod tests {
         let route = decide_start(
             Target::Linux,
             Path::new("/s"),
+            StartKind::Restart,
             Installed::This,
             true,
             Some(reason.clone()),
@@ -1264,25 +1322,76 @@ mod tests {
     /// launchd has the agent loaded.
     #[test]
     fn this_service_starts_through_its_manager() {
+        let start = |target, path, loaded| {
+            let route = decide_start(
+                target,
+                path,
+                StartKind::Start,
+                Installed::This,
+                true,
+                None,
+                loaded,
+            );
+            route_lines(&route)
+        };
         let unit = Path::new("/home/u/.config/systemd/user/mailypoppins.service");
-        let route = decide_start(Target::Linux, unit, Installed::This, true, None, false);
         assert_eq!(
-            route_lines(&route),
+            start(Target::Linux, unit, false),
             [format!("  systemctl --user start {UNIT_NAME}")]
         );
 
         let plist = Path::new("/Users/u/Library/LaunchAgents/dev.mailypoppins.daemon.plist");
-        let loaded = decide_start(Target::Darwin, plist, Installed::This, true, None, true);
         assert_eq!(
-            route_lines(&loaded),
+            start(Target::Darwin, plist, true),
             [format!(
                 "  launchctl kickstart {}/{LAUNCHD_LABEL}",
                 gui_domain()
             )]
         );
-        let unloaded = decide_start(Target::Darwin, plist, Installed::This, true, None, false);
         assert_eq!(
-            route_lines(&unloaded),
+            start(Target::Darwin, plist, false),
+            [format!(
+                "  launchctl bootstrap {} {}",
+                gui_domain(),
+                plist.display()
+            )]
+        );
+    }
+
+    /// The start half of a restart is the manager's own restart, which stops
+    /// the instance it may still count running after the socket stop and then
+    /// starts the service (PERSO-109); an agent launchd has not loaded is
+    /// bootstrapped as for a start.
+    #[test]
+    fn this_service_restarts_through_its_managers_restart() {
+        let restart = |target, path, loaded| {
+            let route = decide_start(
+                target,
+                path,
+                StartKind::Restart,
+                Installed::This,
+                true,
+                None,
+                loaded,
+            );
+            route_lines(&route)
+        };
+        let unit = Path::new("/home/u/.config/systemd/user/mailypoppins.service");
+        assert_eq!(
+            restart(Target::Linux, unit, false),
+            [format!("  systemctl --user restart {UNIT_NAME}")]
+        );
+
+        let plist = Path::new("/Users/u/Library/LaunchAgents/dev.mailypoppins.daemon.plist");
+        assert_eq!(
+            restart(Target::Darwin, plist, true),
+            [format!(
+                "  launchctl kickstart -k {}/{LAUNCHD_LABEL}",
+                gui_domain()
+            )]
+        );
+        assert_eq!(
+            restart(Target::Darwin, plist, false),
             [format!(
                 "  launchctl bootstrap {} {}",
                 gui_domain(),

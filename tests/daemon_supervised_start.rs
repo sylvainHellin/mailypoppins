@@ -2,17 +2,20 @@
 //! (PERSO-109).
 //!
 //! With the systemd unit for this data directory installed, both commands ask
-//! `systemctl --user start mailypoppins.service` for the daemon instead of
-//! spawning a detached one, which would leave the unit dead beside a daemon
-//! systemd does not own; `mp daemon stop` stays the socket's, which the unit
-//! records as a clean stop.
+//! systemd for the daemon instead of spawning a detached one, which would
+//! leave the unit dead beside a daemon systemd does not own: `start` with
+//! `systemctl --user start mailypoppins.service`, and `restart`, after its
+//! socket stop, with `systemctl --user restart mailypoppins.service`, since
+//! systemd may still count the unit active then. `mp daemon stop` stays the
+//! socket's, which the unit records as a clean stop.
 //!
 //! No real service manager is reached. `MAILYPOPPINS_DAEMON_SERVICE_OS=linux`
 //! selects the systemd half on any host, the unit is written by
 //! `mp daemon install-service` under the dry-run hook into a sandbox
 //! `XDG_CONFIG_HOME`, and the child's `PATH` is a sandbox directory holding a
-//! fake `systemctl` that records its argv and, on `start`, does what systemd
-//! would: runs `mp daemon run` in the background with the unit's environment.
+//! fake `systemctl` that records its argv and, on `start` and `restart`, does
+//! what systemd would: runs `mp daemon run` in the background with the unit's
+//! environment.
 //! `XDG_RUNTIME_DIR` is a sandbox directory whose `systemd/private` is a bound
 //! Unix socket, which is all the probe for a reachable user manager reads.
 
@@ -78,14 +81,59 @@ impl Sandbox {
     }
 
     /// A fake `systemctl` that appends its argv to `bin/systemctl.log` and, on
-    /// `start`, runs `mp daemon run` detached, as a `Type=simple` unit would.
+    /// `start` and `restart`, runs `mp daemon run` detached, as a `Type=simple`
+    /// unit would; it keeps no state, so the unit always reads inactive.
     fn fake_systemctl(&self) {
         self.write_systemctl(&format!(
-            "if [ \"$2\" = start ]; then\n\
+            "if [ \"$2\" = start ] || [ \"$2\" = restart ]; then\n\
              \x20 '{MP}' daemon run </dev/null >/dev/null 2>&1 &\n\
              fi\n\
              exit 0\n"
         ));
+    }
+
+    /// A fake `systemctl` that keeps the unit's state as systemd does: the
+    /// unit is active while `bin/unit.mainpid` names its main process, a
+    /// `start` of an active unit is a no-op, and the manager, which is the
+    /// daemon's parent, marks the unit inactive only `latency` after the
+    /// daemon exited, as systemd does once it has processed the `SIGCHLD`.
+    /// `stop` and `restart` signal the main process and wait for the unit to
+    /// go inactive; `is-active` answers from the same state.
+    fn stateful_systemctl(&self, latency: Duration) {
+        let state = self.dir("bin").join("unit.mainpid");
+        let state = state.display();
+        let latency = latency.as_secs_f64();
+        self.write_systemctl(&format!(
+            "PATH=/usr/bin:/bin\n\
+             state='{state}'\n\
+             do_start() {{\n\
+             \x20 [ -s \"$state\" ] && return 0\n\
+             \x20 ( '{MP}' daemon run </dev/null >/dev/null 2>&1 &\n\
+             \x20   echo $! > \"$state\"; wait $!; sleep {latency}; rm -f \"$state\" ) \
+                  </dev/null >/dev/null 2>&1 &\n\
+             \x20 while [ ! -s \"$state\" ]; do sleep 0.05; done\n\
+             }}\n\
+             do_stop() {{\n\
+             \x20 [ -s \"$state\" ] || return 0\n\
+             \x20 kill -TERM \"$(cat \"$state\")\" 2>/dev/null\n\
+             \x20 while [ -e \"$state\" ]; do sleep 0.05; done\n\
+             }}\n\
+             case \"$2\" in\n\
+             \x20 start) do_start ;;\n\
+             \x20 stop) do_stop ;;\n\
+             \x20 restart) do_stop; do_start ;;\n\
+             \x20 is-active) if [ -s \"$state\" ]; then echo active; else echo inactive; exit 3; fi ;;\n\
+             esac\n\
+             exit 0\n"
+        ));
+    }
+
+    /// The main pid the stateful fake `systemctl` holds the unit active with,
+    /// or `None` when the unit is inactive.
+    fn unit_main_pid(&self) -> Option<i32> {
+        fs::read_to_string(self.dir("bin").join("unit.mainpid"))
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
     }
 
     /// A fake `systemctl` that records its argv and fails every call, as one
@@ -170,8 +218,9 @@ fn wait_gone(pid: i32) -> bool {
     true
 }
 
-/// `start` and `restart` go through `systemctl --user start` when this data
-/// directory's unit is installed, and `stop` does not touch `systemctl`.
+/// `start` goes through `systemctl --user start` and `restart` through
+/// `systemctl --user restart` when this data directory's unit is installed,
+/// and `stop` does not touch `systemctl`.
 #[test]
 fn start_and_restart_go_through_the_installed_unit() {
     let sandbox = Sandbox::new();
@@ -184,6 +233,7 @@ fn start_and_restart_go_through_the_installed_unit() {
 
     let via = format!("  systemctl --user start {UNIT_NAME}");
     let start_call = format!("--user start {UNIT_NAME}");
+    let restart_call = format!("--user restart {UNIT_NAME}");
 
     let start = sandbox.mp(&["daemon", "start", "--timeout-secs", "15"]);
     let lines = ok(&start, "start");
@@ -207,12 +257,12 @@ fn start_and_restart_go_through_the_installed_unit() {
         [
             "\u{2713} daemon stopped".to_string(),
             format!("\u{2713} daemon started (pid {second})"),
-            via,
+            format!("  systemctl --user restart {UNIT_NAME}"),
         ]
     );
     assert_eq!(
         sandbox.systemctl_calls(),
-        [start_call.clone(), start_call.clone()]
+        [start_call.clone(), restart_call.clone()]
     );
 
     let stop = sandbox.mp(&["daemon", "stop"]);
@@ -220,9 +270,52 @@ fn start_and_restart_go_through_the_installed_unit() {
     assert!(wait_gone(second), "the stopped daemon {second} exited");
     assert_eq!(
         sandbox.systemctl_calls(),
-        [start_call.clone(), start_call],
+        [start_call, restart_call],
         "stop goes through the socket, not systemctl"
     );
+}
+
+/// `mp daemon restart` under the unit brings the unit back active with the
+/// new daemon as its main process, even though systemd still counts the unit
+/// active for a moment after the old daemon exited (PERSO-109, checks 2 and 3
+/// of 2026-11-12): a `systemctl --user start` sent in that moment is a no-op,
+/// and the restart then fails with exit 4 and leaves the unit dead.
+#[test]
+fn restart_brings_the_unit_back_although_systemd_still_counts_it_active() {
+    let sandbox = Sandbox::new();
+    sandbox.stateful_systemctl(Duration::from_secs(2));
+    sandbox.install_unit(&sandbox.dir("data"));
+
+    ok(
+        &sandbox.mp(&["daemon", "start", "--timeout-secs", "15"]),
+        "start",
+    );
+    let first = sandbox.recorded_pid();
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(first),
+        "the unit runs the daemon"
+    );
+
+    let restart = sandbox.mp(&["daemon", "restart"]);
+    let lines = ok(&restart, "restart");
+    let second = sandbox.recorded_pid();
+    assert_ne!(second, first, "restart replaces the process");
+    assert_eq!(
+        lines[..2],
+        [
+            "\u{2713} daemon stopped".to_string(),
+            format!("\u{2713} daemon started (pid {second})"),
+        ]
+    );
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(second),
+        "the unit is active with the new daemon as its main process"
+    );
+
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(second), "the stopped daemon {second} exited");
 }
 
 /// Another data directory's unit is not this `mp`'s: the start is detached
@@ -279,9 +372,9 @@ fn no_reachable_user_manager_leaves_the_start_detached_with_a_note() {
     assert!(wait_gone(pid), "the stopped daemon {pid} exited");
 }
 
-/// A `systemctl --user start` that fails after `restart` has stopped the
-/// daemon is a note and a detached start, never a restart that ends with no
-/// daemon running.
+/// A `systemctl --user start` that fails is a note and a detached start, and
+/// so is a `systemctl --user restart` that fails after `restart` has stopped
+/// the daemon, never a restart that ends with no daemon running.
 #[test]
 fn a_failing_service_start_falls_back_to_a_detached_daemon() {
     let sandbox = Sandbox::new();
@@ -314,6 +407,18 @@ fn a_failing_service_start_falls_back_to_a_detached_daemon() {
             "\u{2713} daemon stopped".to_string(),
             format!("\u{2713} daemon started (pid {second})"),
         ]
+    );
+    let stderr = String::from_utf8_lossy(&restart.stderr);
+    assert!(
+        stderr.contains("note: ")
+            && stderr.contains(&format!(
+                "`systemctl --user restart {UNIT_NAME}` exited with 5"
+            )),
+        "{stderr}"
+    );
+    assert_eq!(
+        sandbox.systemctl_calls(),
+        [start_call, format!("--user restart {UNIT_NAME}")]
     );
 
     ok(&sandbox.mp(&["daemon", "stop"]), "stop");

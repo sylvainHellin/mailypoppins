@@ -334,12 +334,13 @@ which is the most confusing state this architecture can be in.
 cargo install --path . && mp daemon restart
 ```
 
-`mp daemon restart` prints the stop's line and nothing about the start, so
-`mp daemon status` is what confirms the replacement is up; its instance id is a
-new one. A login-installed service is restarted through the manager that owns the
-process instead: `systemctl --user restart mailypoppins.service` on Linux, and
-on macOS the launchd equivalent, which is untested here with the rest of the
-launchd half.
+`mp daemon restart` prints the stop's line and then `✓ daemon started (pid N)`;
+`mp daemon status` confirms the replacement, whose instance id is a new one.
+Under a login-installed service for this data directory and this `mp`, the
+restart stops the daemon over its socket and then asks the manager that owns the
+process to restart the service: `systemctl --user restart mailypoppins.service`
+on Linux, `launchctl kickstart -k` on macOS, which is untested here with the
+rest of the launchd half.
 
 ### Local install from source
 

@@ -50,7 +50,7 @@ With nothing running it exits 0, and it sweeps a stale socket on the way out, be
 `mp daemon restart` stops whatever runs, waits for the old pid to disappear (up to 10 s), and then starts this executable's daemon.
 The wait is not decoration: a new daemon binding before the old one's cleanup runs would have its own socket unlinked by its predecessor.
 It takes `stop`'s `--grace-secs <N>` for its stop, and prints the stop's line followed by the start's `✓ daemon started (pid N)`, so a successful restart reads as one.
-Its start is `mp daemon start`'s, so under an installed login service it is the service manager that brings the daemon back.
+Under an installed login service it is the service manager that brings the daemon back, through its restart rather than its start ("Starting under the login service" below).
 
 ## On-demand start, and the no-daemon list
 
@@ -886,6 +886,10 @@ A detached daemon started beside a systemd unit is one systemd does not own: the
 | Linux | `start` says it is already running | `systemctl --user start mailypoppins.service` | the same | detached start with a `note:` |
 | macOS | the same | `launchctl kickstart gui/<uid>/dev.mailypoppins.daemon` | `launchctl bootstrap gui/<uid> <plist>` | does not arise: `launchctl` always reaches launchd |
 
+`restart` runs the same table after its socket stop, with `systemctl --user restart mailypoppins.service` in place of the `start` and `launchctl kickstart -k` in place of the `kickstart`.
+The stop returns once the old daemon has exited, a zombie included, which can be before the manager has processed that exit: systemd still counts the unit active then, and a `systemctl --user start` sent in that moment is a no-op, after which the clean exit leaves a `Restart=on-failure` unit dead and the restart fails with exit 4 (PERSO-109).
+The manager's restart stops what it counts running, which for a daemon already gone only waits for the manager to notice the exit, and then starts the service in the same job.
+
 The file is this `mp`'s when the `MAILYPOPPINS_DATA_DIR` it bakes is this run's data directory and the executable it runs is this one, symlinks followed, both read back out of the file the way `install-service` escaped them.
 Another data directory's service is passed over in silence, which is what keeps a test run with a temporary data directory off the user's real unit.
 A service for this data directory that runs another executable is passed over with a `note:` line on stderr naming that executable, because `restart` promises this executable's daemon and a development build restarted from `target/` would otherwise come back as the installed one.
@@ -894,16 +898,17 @@ On Linux a `systemctl` binary proves no user manager is behind it (WSL without s
 Deciding reads the file system only; the one command run before the start itself is `launchctl print` on macOS, to choose between `kickstart` and `bootstrap`.
 
 The service-manager start does not take the start lock, because the `mp daemon run` it spawns takes it itself, and then waits for the socket exactly as a detached start does.
-It prints `✓ daemon started (pid N)` followed by the command it ran, indented: `  systemctl --user start mailypoppins.service`.
+It prints `✓ daemon started (pid N)` followed by the command it ran, indented: `  systemctl --user start mailypoppins.service` (`restart` for a restart).
 A service command that fails (or cannot be run) is a `note:` on stderr naming the command, its exit status and `systemctl --user status mailypoppins.service` (or `launchctl print …`), followed by a detached start, so a `restart` that has already stopped the daemon never ends with none running; the exit code is then the detached start's.
 A service that starts but whose daemon never answers is exit 4 with the same pointer, and no detached daemon is started, since it would race the service's own once that answers.
 
 `mp daemon stop` stays the socket's under a service, because the socket stop honours `--grace-secs` and names what it cut short.
 The daemon exits 0 on it, which a `Restart=on-failure` unit records as a clean stop and a `KeepAlive {SuccessfulExit: false}` agent leaves stopped, so the service ends stopped rather than failed and its enablement is untouched: it starts again at the next boot or login.
-`restart` is that stop followed by the service-manager start rather than `systemctl --user restart`, so `--grace-secs` keeps meaning what it means for `stop`.
+`restart` is that stop followed by the service manager's restart rather than the manager's restart alone, so `--grace-secs` keeps meaning what it means for `stop` and the stop still names what it cut short.
 On-demand auto-start by an ordinary `mp` run still spawns a detached daemon whatever is installed.
 
-`tests/daemon_supervised_start.rs` pins the Linux half with `MAILYPOPPINS_DAEMON_SERVICE_OS=linux`, a dry-run install into a sandbox `XDG_CONFIG_HOME` and a fake `systemctl` on `PATH` that records its argv and runs `mp daemon run` in the background on `start`.
+`tests/daemon_supervised_start.rs` pins the Linux half with `MAILYPOPPINS_DAEMON_SERVICE_OS=linux`, a dry-run install into a sandbox `XDG_CONFIG_HOME` and a fake `systemctl` on `PATH` that records its argv and runs `mp daemon run` in the background on `start` and `restart`.
+A second, stateful fake keeps the unit active until two seconds after its daemon exited and ignores a `start` of an active unit, as systemd does, which is what reproduces the PERSO-109 restart.
 A live check against systemd and launchd is owner action on the home server and the Mac.
 
 ### The macOS half is not smoke-tested here
