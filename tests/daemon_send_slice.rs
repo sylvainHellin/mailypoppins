@@ -2400,6 +2400,38 @@ fn a_pristine_copy_refuses_while_an_engine_holds_a_store() {
     fixture::Pristine::take(tmp.path());
 }
 
+/// A pristine copy waits for an engine lock that is being released instead of
+/// refusing at once (PERSO-222).
+///
+/// `flock` belongs to the open file description, and a child forked while a
+/// lock's fd is open shares that description until its `exec` closes it. Other
+/// tests of this binary spawn daemons and oracles all the time, so the lock of
+/// a daemon just stopped, or of a holder just dropped, can outlive its owner
+/// for a moment; `take` refused in that moment in 4 of 50 runs of the binary
+/// after a test of its own dropped its holder. The release
+/// here comes from a thread a beat later, which is the same moment made
+/// deterministic.
+#[test]
+fn a_pristine_copy_waits_for_an_engine_lock_being_released() {
+    let tmp = TempDir::new().expect("a temporary send-slice root");
+    fixture::seed(tmp.path());
+    let lock = tmp
+        .path()
+        .join("accounts")
+        .join(fixture::ACCOUNT)
+        .join("store.lock");
+    let held = mailypoppins::engine_lock::EngineLock::try_acquire_at(&lock, fixture::ACCOUNT)
+        .expect("the lock file opens")
+        .expect("nothing else holds a fresh root's lock");
+
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(held);
+    });
+    fixture::Pristine::take(tmp.path());
+    release.join().expect("the releasing thread ends");
+}
+
 // ---------------------------------------------------------------------------
 // 10. Determinism, and what proves routing
 // ---------------------------------------------------------------------------

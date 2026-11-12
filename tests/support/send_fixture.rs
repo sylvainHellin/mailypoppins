@@ -696,6 +696,12 @@ pub fn draft_status(root: &Path, account: &str, file: &str) -> String {
 /// which is what SQLite recovers from. The test files stop it before the copy
 /// and start it again around each mutating comparison, and `take` refuses
 /// while any account's engine lock is held.
+///
+/// It waits [`LOCK_RELEASE_GRACE`] before it refuses, because a lock whose
+/// owner is gone can still be held for a moment: `flock` belongs to the open
+/// file description, and a child forked while the fd is open (this test
+/// binary spawns daemons and oracles from every thread, a daemon spawns its
+/// hooks) shares that description until its `exec` closes it.
 pub struct Pristine {
     root: PathBuf,
     files: std::collections::BTreeMap<PathBuf, Saved>,
@@ -705,6 +711,14 @@ struct Saved {
     bytes: Vec<u8>,
     modified: std::time::SystemTime,
 }
+
+/// How long [`Pristine::take`] waits for an engine lock to come free before it
+/// refuses: a fork-to-exec window is microseconds idle and can stretch to tens
+/// of milliseconds on a loaded machine, while a live daemon never lets go.
+const LOCK_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often [`Pristine::take`] probes a held engine lock again.
+const LOCK_RELEASE_TICK: std::time::Duration = std::time::Duration::from_millis(10);
 
 impl Pristine {
     /// Take a copy of `root`'s `accounts/` tree, which no engine may hold.
@@ -717,10 +731,8 @@ impl Pristine {
                     .and_then(Path::file_name)
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let free = mailypoppins::engine_lock::EngineLock::try_acquire_at(&path, &account)
-                    .unwrap_or_else(|e| panic!("probe {}: {e:#}", path.display()));
                 assert!(
-                    free.is_some(),
+                    lock_comes_free(&path, &account),
                     "the engine lock of {account} is held: stop the daemon before \
                      Pristine::take, whose copy of a store in use would be torn"
                 );
@@ -764,6 +776,23 @@ impl Pristine {
             file.set_times(times)
                 .unwrap_or_else(|e| panic!("restore the mtime of {}: {e}", path.display()));
         }
+    }
+}
+
+/// Whether the engine lock at `path` is free, or comes free within
+/// [`LOCK_RELEASE_GRACE`]; the probe releases it again at once.
+fn lock_comes_free(path: &Path, account: &str) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        let free = mailypoppins::engine_lock::EngineLock::try_acquire_at(path, account)
+            .unwrap_or_else(|e| panic!("probe {}: {e:#}", path.display()));
+        if free.is_some() {
+            return true;
+        }
+        if start.elapsed() >= LOCK_RELEASE_GRACE {
+            return false;
+        }
+        std::thread::sleep(LOCK_RELEASE_TICK);
     }
 }
 
