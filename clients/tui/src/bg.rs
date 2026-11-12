@@ -1592,6 +1592,7 @@ mod tests {
             imap: true,
             smtp: true,
             calendar_scope_missing: false,
+            login_rejected: false,
         };
         handle_bg_result(
             &mut app,

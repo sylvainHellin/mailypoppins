@@ -380,6 +380,7 @@ mod tests {
             imap: true,
             smtp: false,
             calendar_scope_missing: false,
+            login_rejected: false,
         });
         let unknown = account("perso", "me@perso.example");
         let mut graph = account("graph", "me@graph.example");

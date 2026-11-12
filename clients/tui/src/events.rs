@@ -349,7 +349,10 @@ impl App {
                 // as a line of JSON: the kind promises one, and a daemon that
                 // sent something else is one this client does not understand.
                 match serde_json::from_value::<HealthCheck>(event.payload.clone()) {
-                    Ok(check) => land_check(self, &check),
+                    Ok(check) => {
+                        land_check(self, &check);
+                        self.on_account_check(&check.name);
+                    }
                     Err(e) => log::warn!("[events] a check_changed payload is not a check: {e}"),
                 }
                 Applied::Ignored

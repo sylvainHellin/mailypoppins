@@ -80,13 +80,13 @@ const SIDEBAR_MIN_MAILBOX_ROWS: u16 = 3;
 /// Height of the mailbox sidebar, and of the headers pane sized from it.
 ///
 /// The sidebar wants a row per mailbox plus its borders, `spare` blank rows
-/// and the sync-failure block, but it is capped at a third of `available` so
+/// and the alert block (a rejected login or a failed sync), but it is capped at a third of `available` so
 /// that an account with many folders does not squeeze the email list below it
 /// to a handful of rows. The sidebar scrolls to keep the open mailbox on
 /// screen (#0141), so the cap hides nothing for good; the floor keeps a few
 /// mailbox rows above the failure block on a short terminal.
 fn sidebar_height(app: &App, available: u16, spare: u16) -> u16 {
-    let fixed = 2 + sidebar::sync_health_rows(app);
+    let fixed = 2 + sidebar::alert_rows(app);
     let wanted = app.mailboxes.len() as u16 + spare + fixed;
     let cap = (available / 3).max(fixed + SIDEBAR_MIN_MAILBOX_ROWS);
     wanted.min(cap)

@@ -8,35 +8,60 @@ use super::super::app::{App, Focus, StatusLevel};
 use super::super::theme;
 use super::util::{display_width, pane_border_style, take_width, truncate};
 
-/// The persistent sync-failure lines for the account the sidebar is showing
-/// (#0071), or `None` when its last sync worked or none has run yet.
-///
-/// This is the surface that does not depend on winning the status-line race:
-/// it is rendered from the account's own [`mp_core::sync_health::SyncHealth`]
-/// every frame, so it stays up while other accounts sync successfully and
-/// disappears only when *this* account syncs cleanly.
-pub(super) fn sync_failure_lines(app: &App) -> Option<(String, String)> {
-    app.accounts
-        .get(app.active_account)
-        .and_then(|acct| acct.sync_health.failure_lines())
+/// What the sidebar says under the mailboxes about the account it is showing:
+/// a headline, the reason under it, and the rows the reason may wrap onto.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Alert {
+    headline: String,
+    reason: String,
+    rows: usize,
 }
 
-/// Rows the reason gets under the headline. Two, because the sidebar is about
-/// forty columns wide and the errors worth acting on are longer than that:
-/// `IMAP login failed: no response: ... Some("no such user")` is cut exactly
-/// where it stops being generic on one line.
+/// The persistent alert for the account the sidebar is showing, or `None`
+/// when there is nothing wrong with it.
+///
+/// A login the server rejected (PERSO-296) comes first, with the sentence
+/// the daemon's health check and the desktop app use, because it names the
+/// way out; the failed sync it causes would only repeat the server's
+/// refusal. Otherwise the last sync's failure (#0071), until a sync works.
+///
+/// This is the surface that does not depend on winning the status-line race:
+/// it is rendered from the account's own state every frame, so it stays up
+/// while other accounts sync successfully and disappears only when *this*
+/// account's login is accepted or its sync works.
+pub(super) fn account_alert(app: &App) -> Option<Alert> {
+    let acct = app.accounts.get(app.active_account)?;
+    if app.login_rejected(app.active_account) {
+        return Some(Alert {
+            headline: "\u{26a0} login rejected".to_string(),
+            reason: mp_client::format::login_rejected_detail(&acct.account_config.name),
+            rows: LOGIN_REASON_ROWS,
+        });
+    }
+    let (headline, reason) = acct.sync_health.failure_lines()?;
+    Some(Alert {
+        headline,
+        reason,
+        rows: REASON_ROWS,
+    })
+}
+
+/// Rows a sync failure's reason gets under the headline. Two, because the
+/// sidebar is about forty columns wide and the errors worth acting on are
+/// longer than that: `IMAP login failed: no response: ... Some("no such
+/// user")` is cut exactly where it stops being generic on one line.
 const REASON_ROWS: usize = 2;
 
-/// Sidebar rows the health block needs. The layout in [`super`] sizes the
+/// Rows a rejected login's sentence gets: three, so the command at its end
+/// is not cut off a sidebar about thirty columns wide.
+const LOGIN_REASON_ROWS: usize = 3;
+
+/// Sidebar rows the alert block needs. The layout in [`super`] sizes the
 /// sidebar from the mailbox count, so the block has to be paid for there or it
 /// is clipped away. Fixed rather than measured, so the layout never disagrees
 /// with the wrap about how tall the block is.
-pub(super) fn sync_health_rows(app: &App) -> u16 {
-    if sync_failure_lines(app).is_some() {
-        1 + REASON_ROWS as u16
-    } else {
-        0
-    }
+pub(super) fn alert_rows(app: &App) -> u16 {
+    account_alert(app).map_or(0, |alert| 1 + alert.rows as u16)
 }
 
 /// Hard-wrap `text` on word boundaries into exactly `rows` lines of at most
@@ -134,7 +159,7 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     // A sidebar taller than its pane scrolls (#0141): an account whose server
     // lists more folders than the terminal has rows keeps the highlighted
     // mailbox, or the open one, on screen rather than below the border.
-    let rows = (inner.height as usize).saturating_sub(sync_health_rows(app) as usize);
+    let rows = (inner.height as usize).saturating_sub(alert_rows(app) as usize);
     let anchor = if app.focus == Focus::Sidebar {
         app.sidebar_index
     } else {
@@ -177,15 +202,15 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(Span::styled(label, style)));
     }
 
-    if let Some((headline, reason)) = sync_failure_lines(app) {
+    if let Some(alert) = account_alert(app) {
         let width = inner.width.saturating_sub(1) as usize;
         lines.push(Line::from(Span::styled(
-            format!(" {}", truncate(&headline, width)),
+            format!(" {}", truncate(&alert.headline, width)),
             Style::default()
                 .fg(theme::active().error)
                 .add_modifier(Modifier::BOLD),
         )));
-        for row in wrap_to(&reason, width, REASON_ROWS) {
+        for row in wrap_to(&alert.reason, width, alert.rows) {
             lines.push(Line::from(Span::styled(
                 format!(" {row}"),
                 Style::default().fg(theme::active().error),
@@ -423,11 +448,7 @@ mod tests {
             "and its reason, wrapped rather than cut at the preamble:\n{frame}"
         );
         assert!(frame.contains("user"), "including its tail:\n{frame}");
-        assert_eq!(
-            sync_health_rows(&app),
-            3,
-            "the block is paid for in the layout"
-        );
+        assert_eq!(alert_rows(&app), 3, "the block is paid for in the layout");
     }
 
     /// A healthy account, and an account that has not synced yet, add nothing.
@@ -440,8 +461,8 @@ mod tests {
             },
         ] {
             let app = app_with(vec![account("tum", health)], 0);
-            assert_eq!(sync_failure_lines(&app), None);
-            assert_eq!(sync_health_rows(&app), 0);
+            assert_eq!(account_alert(&app), None);
+            assert_eq!(alert_rows(&app), 0);
             assert!(!render(&app, 40, 6).contains("sync failed"));
         }
     }
@@ -461,9 +482,9 @@ mod tests {
             ),
         ];
         let mut app = app_with(accounts, 0);
-        assert!(sync_failure_lines(&app).is_some());
+        assert!(account_alert(&app).is_some());
         app.active_account = 1;
-        assert_eq!(sync_failure_lines(&app), None);
+        assert_eq!(account_alert(&app), None);
         assert!(app.accounts[0].sync_health.is_failed());
     }
 }

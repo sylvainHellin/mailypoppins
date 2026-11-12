@@ -189,6 +189,21 @@ impl App {
             .filter(|check| check.status != mp_protocol::diagnostic::CheckStatus::Ok)
             .map(|check| (check.name.clone(), (check.status, check.detail.clone())))
             .collect();
+        // A refused login (PERSO-296) moves its account's check, whose event
+        // this snapshot stands in for: an account the snapshot reports not ok
+        // reads `account.credentials` again, and so does one held as rejected,
+        // whose check may have cleared while away (a restarted daemon has
+        // forgotten the refusal). An `App` with no session yet reads nothing,
+        // and the account's background open asks for them anyway.
+        let moved: Vec<usize> = (0..self.accounts.len())
+            .filter(|&index| {
+                let name = format!("account:{}", self.accounts[index].account_config.name);
+                self.login_rejected(index) || self.held_checks.contains_key(&name)
+            })
+            .collect();
+        for index in moved {
+            self.refresh_credentials(index);
+        }
         // The reminders that fired before this client started or while it
         // was away (PERSO-255) are the daemon's to list, as no event brings
         // them back.

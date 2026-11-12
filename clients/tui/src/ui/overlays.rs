@@ -681,8 +681,9 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
 }
 
 /// The account picker (`ga`, #0147), in the attachment picker's shape: one
-/// line per account in config order with its digit, the name, `current` on
-/// the active account and a dot when a background account has new mail.
+/// line per account in config order with its digit, the name, `login
+/// rejected` or `sync failed` when it has that problem, `current` on the
+/// active account and a dot when a background account has new mail.
 pub(super) fn render_account_picker(
     picker: &AccountPicker,
     accounts: &[AccountState],
@@ -729,8 +730,10 @@ pub(super) fn render_account_picker(
     const CURRENT_TAG: &str = "  current";
     const UNSEEN_TAG: &str = "  \u{25cf}";
     // The account's last sync failed (`SyncHealth::Failed`, #0071), the
-    // desktop picker's warning mark.
+    // desktop picker's warning mark, or, the cause known, the server rejected
+    // its login (PERSO-296), whose sentence the sidebar carries.
     const SYNC_FAILED_TAG: &str = "  sync failed";
+    const LOGIN_REJECTED_TAG: &str = "  login rejected";
     // The digit column: `1` to `9`, blank past the ninth account.
     const DIGIT_W: usize = 3;
     let inner_width = inner.width as usize;
@@ -746,13 +749,15 @@ pub(super) fn render_account_picker(
             };
             let current = i == active;
             let runtime = runtime_tag(acct);
-            let sync_failed = acct.sync_health.is_failed();
+            let warning = if acct.credentials.is_some_and(|c| c.login_rejected) {
+                Some(LOGIN_REJECTED_TAG)
+            } else if acct.sync_health.is_failed() {
+                Some(SYNC_FAILED_TAG)
+            } else {
+                None
+            };
             let tags = runtime.map_or(0, str::len)
-                + if sync_failed {
-                    SYNC_FAILED_TAG.len()
-                } else {
-                    0
-                }
+                + warning.map_or(0, str::len)
                 + if current { CURRENT_TAG.len() } else { 0 }
                 + if acct.has_unseen {
                     UNSEEN_TAG.chars().count()
@@ -780,9 +785,9 @@ pub(super) fn render_account_picker(
                     Style::default().fg(theme::active().text_muted),
                 ));
             }
-            if sync_failed {
+            if let Some(tag) = warning {
                 spans.push(Span::styled(
-                    SYNC_FAILED_TAG,
+                    tag,
                     Style::default().fg(theme::active().warning),
                 ));
             }
