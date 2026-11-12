@@ -880,6 +880,7 @@ mod gate;
 
 #[cfg(test)]
 mod tests {
+    use super::super::server::RuntimeHealth;
     use super::gate;
     use super::*;
 
@@ -1046,16 +1047,17 @@ mod tests {
         runtimes.insert_failure("zz-startup-swapped", "the swap's own start".to_string());
         assert!(!start_configured(&store, &runtimes, &canonical, "zz-startup-swapped").await);
         assert_eq!(
-            runtimes.blocked_reason("zz-startup-swapped").as_deref(),
-            Some("the swap's own start")
+            runtimes.health_of("zz-startup-swapped"),
+            RuntimeHealth::Failed("the swap's own start".to_string())
         );
 
         // Still configured and unstarted: started, which for an account with
         // no local store is the `blocked` entry that says so.
         assert!(start_configured(&store, &runtimes, &canonical, "zz-startup-kept").await);
-        assert!(runtimes
-            .blocked_reason("zz-startup-kept")
-            .is_some_and(|reason| reason.contains("no local store")));
+        assert!(matches!(
+            runtimes.health_of("zz-startup-kept"),
+            RuntimeHealth::Failed(reason) if reason.contains("no local store")
+        ));
     }
 
     /// A swap that restarts an account while its first sync runs: the first
@@ -1120,9 +1122,10 @@ mod tests {
             runtimes.get(account).is_none(),
             "no runtime beside the first sync"
         );
-        assert!(runtimes
-            .blocked_reason(account)
-            .is_some_and(|reason| reason.contains("running its first sync")));
+        assert!(matches!(
+            runtimes.health_of(account),
+            RuntimeHealth::Failed(reason) if reason.contains("running its first sync")
+        ));
 
         // The first sync ends: its mark goes, and it is the one caller that
         // finds the pending start to replace.

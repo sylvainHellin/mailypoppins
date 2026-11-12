@@ -229,21 +229,6 @@ impl RuntimeTable {
         }
     }
 
-    /// Why `account` is not serving, whether its runtime came up blocked or
-    /// never came up at all. `None` for an account that is ready or still
-    /// opening. `daemon.status` carries only the state; the reason travels on
-    /// the `account.state_changed` event and is kept here for the diagnostics
-    /// that will ask for it.
-    pub fn blocked_reason(&self, account: &str) -> Option<String> {
-        match lock(&self.entries).get(account)? {
-            RuntimeEntry::Live(runtime) => match runtime.readiness() {
-                Readiness::Blocked { reason } => Some(reason),
-                Readiness::Opening | Readiness::Ready => None,
-            },
-            RuntimeEntry::Failed(reason) => Some(reason.clone()),
-        }
-    }
-
     /// Mark `account`'s first sync as in flight; `false` when one already is,
     /// so the caller does not run a second.
     pub fn begin_first_sync(&self, account: &str) -> bool {
