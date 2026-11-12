@@ -10,8 +10,9 @@
 //! A folder the server stops listing is not deleted: it is marked `missing`,
 //! its rows stay in the store, and it is neither synced nor shown until the
 //! server lists it again (pitfall 9). A Graph folder that comes back under
-//! another name with the same id is a rename ([`Rename`]): its row moves to
-//! the new name instead. The table is additive, a cache like the rest of the
+//! another name with the same id is a rename ([`Rename`]), and so is an IMAP
+//! folder the server proved renamed ([`super::rename`], [`replace_with`]):
+//! its row moves to the new name instead. The table is additive, a cache like the rest of the
 //! store: a rebuild loses it and the next tick lists again.
 
 use anyhow::{Context, Result};
