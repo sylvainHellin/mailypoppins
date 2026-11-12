@@ -1577,3 +1577,81 @@ fn flag(params: &Value, name: &str) -> Result<bool, RpcError> {
 fn to_value<T: serde::Serialize>(what: &str, value: &T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|e| internal(format!("serialising {what}: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `w` on a search hit the store does not hold is `draft.forward` with
+    /// the hit as its source, inline: the draft carries the message's
+    /// attachment, as a forward from the mail list does (PERSO-217).
+    #[tokio::test]
+    async fn the_inline_forward_of_a_server_only_hit_carries_its_attachment() {
+        const RAW: &[u8] = b"From: Alice <alice@example.com>\r\n\
+To: me@example.com\r\n\
+Subject: Report\r\n\
+Date: Wed, 12 Nov 2025 09:00:00 +0100\r\n\
+Message-ID: <report@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"outer\"\r\n\
+\r\n\
+--outer\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+The report is attached.\r\n\
+--outer\r\n\
+Content-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+JVBERi0xLjQK\r\n\
+--outer--\r\n";
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let _data = crate::config::test_env::DataDirOverride::set(data.path());
+        let account = AccountConfig {
+            name: "tum".to_string(),
+            ..Default::default()
+        };
+        // A ready account with no row for the hit, which is a server-only hit.
+        let store_file = crate::config::store_path(&account.name);
+        std::fs::create_dir_all(store_file.parent().expect("a parent")).expect("account dir");
+        drop(Store::open(&store_file).expect("the store"));
+        let accounts = vec![account];
+
+        let (fetcher, _) = crate::daemon::server_copies::tests::counting(RAW);
+        let copies = crate::daemon::server_copies::ServerCopies::new(fetcher);
+        let server = super::super::message_eml::ServerLeg {
+            secrets: Default::default(),
+            copies: &copies,
+        };
+        let params = json!({
+            "account": "tum",
+            "source": {"hit": {"message_id": "<report@example.com>", "mailbox": "inbox"}},
+            "headers": {"to": "bob@example.com", "cc": "", "bcc": "", "subject": "FW: Report"},
+        });
+
+        let created = forward_hit_inline(&params, &accounts, &EmailSettings::default(), server)
+            .await
+            .expect("the forward of a server-only hit is written");
+
+        let path = Path::new(created["path"].as_str().expect("path"));
+        let draft = crate::draft::parse_email_draft(path).expect("the draft parses");
+        let attachments = draft.frontmatter.attachments.unwrap_or_default();
+        let names: Vec<String> = attachments
+            .iter()
+            .map(|a| {
+                Path::new(a)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["report.pdf"], "the forward carries the attachment");
+        assert_eq!(
+            std::fs::read(&attachments[0]).expect("the carried part"),
+            b"%PDF-1.4\n"
+        );
+    }
+}
