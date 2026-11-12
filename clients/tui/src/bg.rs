@@ -116,6 +116,11 @@ fn apply_contacts_rebuild(
 /// A drain outside a tick rolled `failed` of `account_index`'s queued
 /// mutations back (#0133): the warning a tick's rollback suffix earns, and the
 /// refresh a tick owes, so the rows it put back reappear.
+///
+/// The open search overlay of that account runs its search again
+/// (PERSO-286): the move's `state.remove` dropped the hit it named, and the
+/// rollback put the message back where the hit listed it. A closed overlay
+/// opens on a blank form, so it has nothing to run again.
 pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
     let prefix = match app.accounts.get(account_index) {
         Some(acct) if app.accounts.len() > 1 => format!("{}: ", acct.account_config.name),
@@ -129,6 +134,9 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
         StatusLevel::Warning,
     );
     refresh_after_server_sync(app, account_index);
+    if account_index == app.active_account && matches!(app.overlay, super::app::Overlay::Search) {
+        app.rerun_last_search();
+    }
 }
 
 /// The overlay footer a settled `message.search_server` paints: the count of
@@ -1800,5 +1808,71 @@ mod tests {
             .collect();
         assert_eq!(subjects, ["kept", "elsewhere", "server"]);
         assert_eq!(app.server_search_index, 1, "still on the same hit");
+    }
+
+    /// The overlay showing `query`'s results over the active account `alice`.
+    fn app_showing_a_search(query: &str) -> App {
+        let mut app = app_with_warm_caches();
+        app.accounts = vec![background_account("alice"), background_account("bob")];
+        app.active_account = 0;
+        app.overlay = crate::app::Overlay::Search;
+        app.server_search_last = Some(crate::app::LastSearch {
+            query: mp_core::search::parse(query).expect("the query parses"),
+            targets: None,
+            local_mailbox: Some("inbox".into()),
+        });
+        app
+    }
+
+    /// The searches a test's app queued, as the query strings they run.
+    fn queued_searches(app: &App) -> Vec<(String, Option<String>)> {
+        app.pending_actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::app::Action::ServerSearch {
+                    query,
+                    local_mailbox,
+                    ..
+                } => Some((
+                    mp_core::search::to_query_string(query),
+                    local_mailbox.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A rollback of the account the overlay searched runs its search again
+    /// (PERSO-286): the `state.remove` the move published dropped a hit, and
+    /// the rolled-back move put the message back where the hit listed it.
+    #[test]
+    fn a_rollback_runs_the_open_search_again() {
+        let _data = DataDir::new();
+        let mut app = app_showing_a_search("from:carol");
+        let generation = app.server_search_generation;
+
+        land_rollback(&mut app, 0, 1);
+
+        assert_eq!(
+            queued_searches(&app),
+            [("from:\"carol\"".to_string(), Some("inbox".to_string()))]
+        );
+        assert_ne!(app.server_search_generation, generation, "a new search");
+    }
+
+    /// A rollback of another account, or with the overlay closed, runs no
+    /// search: the overlay's hits are the active account's, and a closed
+    /// overlay opens on a blank form.
+    #[test]
+    fn a_rollback_elsewhere_runs_no_search() {
+        let _data = DataDir::new();
+        let mut app = app_showing_a_search("from:carol");
+        land_rollback(&mut app, 1, 1);
+        assert!(queued_searches(&app).is_empty(), "bob's rollback");
+
+        let mut app = app_showing_a_search("from:carol");
+        app.overlay = crate::app::Overlay::None;
+        land_rollback(&mut app, 0, 1);
+        assert!(queued_searches(&app).is_empty(), "the overlay is closed");
     }
 }

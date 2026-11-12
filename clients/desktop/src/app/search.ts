@@ -158,14 +158,27 @@ function echoedOrder(order: unknown): SearchOrder {
  * it, or the server leg alone when it ran alone, over the same scope.
  */
 export function orderSearch(s: AppState, order: SearchOrder): AppState {
-  const next: AppState = { ...s, searchOrder: order };
+  return rerunSearch({ ...s, searchOrder: order });
+}
+
+/**
+ * The shown search run again in the current order, over the same scope: the
+ * local pass, chained to the server leg when one followed it, or the server
+ * leg alone when it ran alone. A rollback runs it again (PERSO-286): the
+ * move's `state.remove` dropped the hit it named, and the rollback put the
+ * message back where the hit listed it. The TUI's `rerun_last_search`.
+ */
+export function rerunSearch(s: AppState): AppState {
   const search = s.search;
-  if (!search) return next;
+  if (!search) return s;
   const run = { account: search.account, mailbox: search.mailbox, form: search.form };
-  if (search.mode === "server" && !search.hits.some((h) => h.origin === "local")) {
-    return startSearch(next, "server", search.query, run);
+  // A local pass that listed hits echoed its order, so a server search whose
+  // local hits a `state.remove` all dropped still reruns from the store.
+  const ranAlone = search.echoed.local === null && !search.hits.some((h) => h.origin === "local");
+  if (search.mode === "server" && ranAlone) {
+    return startSearch(s, "server", search.query, run);
   }
-  return startSearch(next, "local", search.query, { ...run, chain: search.mode === "server" || search.chain });
+  return startSearch(s, "local", search.query, { ...run, chain: search.mode === "server" || search.chain });
 }
 
 /** The order a server search applies: a mail server gives no score, so relevance is answered newest first. `SearchOrder::on_server`. */

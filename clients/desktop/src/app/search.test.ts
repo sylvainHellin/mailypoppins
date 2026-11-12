@@ -311,4 +311,33 @@ describe("a hit whose message left its mailbox (PERSO-286)", () => {
     s = run(s, removed("message:work/inbox/41", revision), removed("message:home/inbox/42", revision + 1));
     expect(s.search?.hits.map((h) => h.message_id)).toEqual(["<kept@x>", "<elsewhere@x>"]);
   });
+
+  it("comes back by the search running again when the move that dropped it rolls back", () => {
+    let s = run(booted(), { type: "search_local", query: "ledger" });
+    s = run(s, { type: "search_local_loaded", seq: s.search!.seq, hits: [hit(1001, "<moved@x>", 41)], order: "newest" });
+    const revision = fixtures.bootstrap.revision + 1;
+    s = run(s, removed("message:work/inbox/41", revision));
+    const before = s.search!;
+    const rolledBack = (account: string, at: number): Action => ({
+      type: "gui_event",
+      event: {
+        type: "event",
+        event: { instance_id: fixtures.bootstrap.instance_id, revision: at, kind: "mutations.rolled_back", payload: { account, failed: 1 } },
+      },
+    });
+    const elsewhere = run(s, rolledBack("home", revision + 1));
+    expect(elsewhere.search).toMatchObject({ seq: before.seq, status: "done" });
+    const again = run(s, rolledBack("work", revision + 1));
+    expect(again.search).toMatchObject({ query: "ledger", account: "work", mode: "local", status: "searching", seq: before.seq + 1 });
+    expect(again.search?.restore).toEqual(before.restore);
+
+    // The server leg that followed the local pass runs the pass again, though
+    // the remove took its one local hit.
+    let leg = run(booted(), { type: "search_local", query: "ledger" });
+    leg = run(leg, { type: "search_local_loaded", seq: leg.search!.seq, hits: [hit(1001, "<moved@x>", 41)], order: "newest" });
+    leg = run(leg, { type: "search_server", query: "ledger" }, removed("message:work/inbox/41", revision));
+    expect(leg.search).toMatchObject({ mode: "server", hits: [] });
+    leg = run(leg, rolledBack("work", revision + 1));
+    expect(leg.search).toMatchObject({ mode: "local", chain: true, status: "searching" });
+  });
 });

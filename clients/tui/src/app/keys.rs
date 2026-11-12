@@ -1333,6 +1333,14 @@ impl App {
             .position(|order| *order == self.search_order)
             .unwrap_or_default();
         self.search_order = SearchOrder::ALL[(at + 1) % SearchOrder::ALL.len()];
+        self.rerun_last_search();
+    }
+
+    /// The last search the overlay ran, run again as it was submitted: by
+    /// `S` in the next order, and by a rollback that put back a message whose
+    /// hit a `state.remove` had dropped (PERSO-286). Nothing when the overlay
+    /// has run none since it opened.
+    pub(crate) fn rerun_last_search(&mut self) {
         let Some(last) = self.server_search_last.clone() else {
             return;
         };

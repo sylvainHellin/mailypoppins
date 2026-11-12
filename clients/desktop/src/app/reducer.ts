@@ -42,6 +42,7 @@ import {
   localRerouted,
   openServerSearch,
   orderSearch,
+  rerunSearch,
   runForm,
   serverHitSignal,
   serverStarted,
@@ -1535,9 +1536,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
         (st, account) => staleListIf(staleMailboxes(st, account), (a) => a === account),
         removeAccount,
       );
+    // The rows the drain put back reappear in the list, and the shown search
+    // of that account runs again, so a hit a move's `state.remove` dropped
+    // comes back with its message (PERSO-286).
     case "mutations.rolled_back": {
       const p = payload as MutationsRolledBackPayload;
-      return staleListIf(staleMailboxes(rolledBack(s, p), p.account), (a) => a === p.account);
+      const next = staleListIf(staleMailboxes(rolledBack(s, p), p.account), (a) => a === p.account);
+      return next.search?.account === p.account ? rerunSearch(next) : next;
     }
     case "send.hold_started":
     case "send.hold_tick":
