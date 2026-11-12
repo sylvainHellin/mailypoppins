@@ -141,8 +141,11 @@ pub struct Committed {
 /// was stale is missing from it, and stamping it current would leave them
 /// missing for good (PERSO-237): the refused rebuild, which walked their rows
 /// and holds what the window logged, is absorbed into it first
-/// ([`absorb`]). A kept cache that was current took every merge, and only
-/// the logged observations that never reached it are folded in.
+/// ([`absorb`]). Once that is written, the kept cache counts at least what
+/// the walk counted, so a merge arriving late for a row the walk saw is
+/// dropped, as after a written rebuild ([`window::committed`]). A kept cache
+/// that was current took every merge, and only the logged observations that
+/// never reached it are folded in.
 pub fn commit_rebuild_at(
     root: &Path,
     account: &AccountConfig,
@@ -177,6 +180,11 @@ pub fn commit_rebuild_at(
                 }
                 if stamp || fold {
                     save_cache(root, &kept)?;
+                }
+                if stamp {
+                    // The kept cache now holds every count the walk made, so
+                    // an observation it numbered below the mark is counted.
+                    window::committed(root, mark);
                 }
                 kept
             }

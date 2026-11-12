@@ -216,8 +216,9 @@ fn take_open(root: &Path) -> Option<Vec<Logged>> {
     logged
 }
 
-/// The rebuild whose window was marked `mark` wrote its index: from now on
-/// an observation numbered below `mark` is one its walk counted.
+/// The rebuild whose window was marked `mark` wrote its index, or the stale
+/// cache the guard kept absorbed it: from now on an observation numbered
+/// below `mark` is one its walk counted.
 pub fn committed(root: &Path, mark: u64) {
     accounts()
         .entry(root.to_path_buf())

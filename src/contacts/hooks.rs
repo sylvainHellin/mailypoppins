@@ -750,6 +750,42 @@ mod tests {
         assert_eq!(cached.contacts["bea@example.com"].sent_cc, 1, "the Bcc one");
     }
 
+    /// PERSO-237: a stale cache the guard keeps absorbs the refused rebuild,
+    /// whose walk counted the Sent copy the outbox had just stored, so the
+    /// observation the outbox owes for that copy is one the kept cache
+    /// already holds: the next sync's merge must not count it again.
+    #[test]
+    fn a_send_the_kept_cache_absorbed_is_not_counted_again() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+        let mut stale = load_cache(&f.account_root).unwrap().unwrap();
+        for i in 0..20 {
+            let address = format!("c{i}@example.com");
+            let mut contact = stale.contacts["zoe@example.com"].clone();
+            contact.address = address.clone();
+            stale.contacts.insert(address, contact);
+        }
+        stale.extractor_version = 0;
+        save_cache(&f.account_root, &stale).unwrap();
+
+        finish_send(&account, "<absorbed@x>", ZED, None, None, false);
+        let (index, window) = walk(&account);
+        let committed =
+            crate::contacts::commit_rebuild_at(&f.account_root, &account, index, window, true)
+                .unwrap();
+        assert!(matches!(
+            committed.saved,
+            crate::contacts::CacheSave::RefusedShrunk { .. }
+        ));
+        assert_eq!(sent_to_zed(&f.account_root), 1, "absorbed from the walk");
+        bump_after_sync(&account, &[]);
+
+        let rebuilt = build_index_for_account(&account).unwrap();
+        assert_eq!(rebuilt.contacts["zed@example.com"].sent_to, 1);
+        assert_eq!(sent_to_zed(&f.account_root), 1, "counted once");
+    }
+
     /// The Sent copy carries no `Bcc:`, so no walk counts a Bcc recipient:
     /// a rebuild that commits between the copy being stored and the send's
     /// bump drops the To part of the bump, which it counted, and keeps the
