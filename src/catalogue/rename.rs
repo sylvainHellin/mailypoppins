@@ -76,29 +76,56 @@ impl Plan {
 
 /// What the server can be asked about `fresh` against the store's listing of
 /// `account`.
+///
+/// A gained folder is one the store never listed, selectable, under a key no
+/// folder held before. A lost folder is one the previous listing had, whose
+/// key no folder of `fresh` takes over and whose cursor recorded a
+/// UIDVALIDITY. A role folder keyed by its role (inbox, archive, sent) keeps
+/// its key, and with it its rows, whatever the server calls it, so it is
+/// never either.
 pub fn plan(store: &Store, account: &AccountConfig, fresh: &[ListedFolder]) -> Result<Plan> {
     let previous = listing::load(store, &account.name)?;
+    let before = Catalogue::resolve(account, &previous);
+    let after = Catalogue::resolve(account, fresh);
+    let keys = |catalogue: &Catalogue| -> HashSet<String> {
+        catalogue
+            .folders
+            .iter()
+            .filter(|f| f.listed_as.is_some() && !f.missing)
+            .map(|f| f.key.clone())
+            .collect()
+    };
+    let (keys_before, keys_after) = (keys(&before), keys(&after));
+    let listed_as = |catalogue: &Catalogue, name: &str| -> Option<super::Folder> {
+        catalogue
+            .folders
+            .iter()
+            .find(|f| f.listed_as.as_deref() == Some(name))
+            .cloned()
+    };
     let gained: Vec<String> = fresh
         .iter()
         .filter(|f| !previous.iter().any(|p| p.name == f.name))
+        .filter(|f| {
+            listed_as(&after, &f.name)
+                .is_some_and(|folder| folder.selectable() && !keys_before.contains(&folder.key))
+        })
         .map(|f| f.name.clone())
         .collect();
     if gained.is_empty() {
         return Ok(Plan::default());
     }
-    let before = Catalogue::resolve(account, &previous);
     let mut lost = Vec::new();
     for gone in previous
         .iter()
         .filter(|p| !p.missing && !fresh.iter().any(|f| f.name == p.name))
     {
-        let Some(folder) = before
-            .folders
-            .iter()
-            .find(|f| f.listed_as.as_deref() == Some(gone.name.as_str()))
-        else {
+        let Some(folder) = listed_as(&before, &gone.name) else {
             continue;
         };
+        if keys_after.contains(&folder.key) {
+            continue;
+        }
         let Some(cursor) = crate::ingest::load_mailbox_cursor(store, &account.name, &folder.key)?
         else {
             continue;
@@ -179,5 +206,117 @@ pub fn confirm_probed(
             );
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::MailboxCursor;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        (dir, store)
+    }
+
+    fn account() -> AccountConfig {
+        AccountConfig {
+            name: "tum".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn cursor(store: &Store, key: &str, uidvalidity: i64) {
+        crate::ingest::record_mailbox_cursor(
+            store,
+            "tum",
+            key,
+            &MailboxCursor {
+                uidvalidity: Some(uidvalidity),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// PERSO-185: only a listing that both loses a folder with a cursor and
+    /// gains a folder whose key is new asks the server anything. A role
+    /// folder renamed keeps its role key, and with it its rows, so it is no
+    /// candidate either.
+    #[test]
+    fn a_listing_that_loses_or_gains_nothing_asks_the_server_nothing() {
+        let (_dir, store) = store();
+        let account = account();
+        let named = ListedFolder::named;
+        let sent = |name: &str| ListedFolder::named(name).with_attributes(&["\\Sent"]);
+        listing::replace(
+            &store,
+            "tum",
+            &[
+                named("INBOX"),
+                sent("Sent"),
+                named("Projects"),
+                named("Spesen"),
+            ],
+        )
+        .unwrap();
+        cursor(&store, "sent", 3);
+        cursor(&store, "Projects", 7);
+
+        let unchanged = [
+            named("INBOX"),
+            sent("Sent"),
+            named("Projects"),
+            named("Spesen"),
+        ];
+        assert!(plan(&store, &account, &unchanged).unwrap().is_empty());
+        let only_gained = [
+            named("INBOX"),
+            sent("Sent"),
+            named("Projects"),
+            named("Spesen"),
+            named("New"),
+        ];
+        assert!(plan(&store, &account, &only_gained).unwrap().is_empty());
+        let only_lost = [named("INBOX"), sent("Sent"), named("Spesen")];
+        assert!(plan(&store, &account, &only_lost).unwrap().is_empty());
+        let role_renamed = [
+            named("INBOX"),
+            sent("Sent Messages"),
+            named("Projects"),
+            named("Spesen"),
+        ];
+        assert!(
+            plan(&store, &account, &role_renamed).unwrap().is_empty(),
+            "the sent folder keeps its key"
+        );
+        let never_synced = [
+            named("INBOX"),
+            sent("Sent"),
+            named("Projects"),
+            named("Reisen"),
+        ];
+        assert!(
+            plan(&store, &account, &never_synced).unwrap().is_empty(),
+            "Spesen has no cursor to compare"
+        );
+
+        let renamed = [
+            named("INBOX"),
+            sent("Sent"),
+            named("Projekte"),
+            named("Spesen"),
+        ];
+        let asked = plan(&store, &account, &renamed).unwrap();
+        assert_eq!(asked.gained, vec!["Projekte"]);
+        assert_eq!(
+            asked
+                .lost
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Projects"]
+        );
     }
 }
