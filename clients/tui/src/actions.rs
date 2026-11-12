@@ -403,7 +403,8 @@ pub fn html_rendition(app: &mut App, html: &str, stem: &str) -> Option<PathBuf> 
 /// the editor exits, which is what makes the rendition scratch: it unlinks the
 /// directory, where the pre-daemon flow unlinked the file.
 ///
-/// A refusal is the one sentence this has always printed. `-32602` for a row
+/// A refusal is the one sentence this has always printed, on the status line
+/// or, for `e` on a hit, on the search overlay's own (PERSO-216). `-32602` for a row
 /// nothing resolves to is the only case a user can meet - a message the store
 /// no longer holds - and a transport failure is indistinguishable from it at
 /// this seam, which is the reason `draft_path`'s two lines became one.
@@ -414,7 +415,7 @@ pub fn readonly_view_for_row(app: &mut App, row_id: i64) -> Option<commands::Ren
         Ok(rendition) => Some(rendition),
         Err(e) => {
             log::warn!("[actions] no read-only view for row {row_id}: {e}");
-            app.set_status_level(
+            app.set_visible_status(
                 "Open failed: that message is no longer in the store".to_string(),
                 StatusLevel::Error,
             );
@@ -521,7 +522,8 @@ fn discard_readonly_view(app: &mut App, rendition: &commands::Rendition) {
     commands::release_rendition(&daemon_door(app), &rendition.handle);
 }
 
-/// Discard the read-only view and say how the editor session ended (#0075);
+/// Discard the read-only view and say how the editor session ended (#0075),
+/// on the search overlay's own line when `e` was pressed there (PERSO-216);
 /// answers whether the editor returned cleanly.
 pub fn finish_readonly_view(
     app: &mut App,
@@ -531,13 +533,14 @@ pub fn finish_readonly_view(
     discard_readonly_view(app, rendition);
     match result {
         Ok(()) => {
-            app.set_status(
+            app.set_visible_status(
                 "Returned from the read-only copy (edits do not reach the message)".to_string(),
+                StatusLevel::Info,
             );
             true
         }
         Err(e) => {
-            app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+            app.set_visible_status(format!("Open failed: {e}"), StatusLevel::Error);
             false
         }
     }
@@ -598,7 +601,8 @@ fn cursor_message(app: &mut App, what: &str) -> Option<MessageRef> {
 /// draft existed.
 ///
 /// Answers whether the editor returned cleanly; a draft that could not be
-/// built opened no editor and answers `false`.
+/// built opened no editor and answers `false`. Either outcome is said on the
+/// search overlay's own line when the draft came from a hit (PERSO-216).
 fn write_draft_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -612,7 +616,7 @@ fn write_draft_and_edit(
     let (path, selector) = match built {
         Ok(pair) => pair,
         Err(e) => {
-            app.set_status_level(format!("{what} failed: {e}"), StatusLevel::Error);
+            app.set_visible_status(format!("{what} failed: {e}"), StatusLevel::Error);
             return Ok(false);
         }
     };
@@ -652,7 +656,7 @@ fn write_fetched_reply_and_edit(
     let (path, selector) = match built {
         Ok(pair) => pair,
         Err(e) => {
-            app.set_status_level(format!("{what} failed: {e}"), StatusLevel::Error);
+            app.set_visible_status(format!("{what} failed: {e}"), StatusLevel::Error);
             return Ok(());
         }
     };
@@ -666,8 +670,9 @@ fn write_fetched_reply_and_edit(
 }
 
 /// Hand a freshly written draft to `$EDITOR` and put `ready` on the status
-/// line, with the list and the sidebar caught up afterwards; answers whether
-/// the editor returned cleanly.
+/// line, or on the search overlay's own for a draft from a hit (PERSO-216),
+/// with the list and the sidebar caught up afterwards; answers whether the
+/// editor returned cleanly.
 ///
 /// The recount and the reload on the way out are what shows the subject and
 /// the recipients the user just typed: the editor session is a write this
@@ -689,8 +694,8 @@ fn edit_new_draft(
     resume_terminal(terminal)?;
     let clean = result.is_ok();
     match result {
-        Ok(()) => app.set_status(ready),
-        Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
+        Ok(()) => app.set_visible_status(ready, StatusLevel::Info),
+        Err(e) => app.set_visible_status(format!("Edit failed: {e}"), StatusLevel::Error),
     }
     app.recount_all_mailboxes();
     app.reload_current_mailbox();
@@ -961,16 +966,19 @@ pub(super) fn handle_action(
             }
         }
 
+        // The search overlay's `o` on a hit with one attachment lands here
+        // with the overlay still open, so the outcome goes to the line it
+        // paints (PERSO-216).
         Action::OpenAttachment(path) => match mp_core::parse::open_file_with_system(&path) {
             Ok(()) => {
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.display().to_string());
-                app.set_status(format!("Opened: {name}"));
+                app.set_visible_status(format!("Opened: {name}"), StatusLevel::Info);
             }
             Err(e) => {
-                app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+                app.set_visible_status(format!("Open failed: {e}"), StatusLevel::Error);
             }
         },
 
@@ -1285,7 +1293,7 @@ pub fn cancel_compose_wizard(app: &mut App) {
     if from_search {
         app.overlay = Overlay::Search;
     }
-    app.set_status("Compose cancelled".to_string());
+    app.set_visible_status("Compose cancelled".to_string(), StatusLevel::Info);
 }
 
 /// The signature names a compose wizard offers and the one it preselects, as
@@ -1724,8 +1732,11 @@ fn submit_compose_wizard(
         return Ok(());
     }
     // A forward from the search overlay, of a stored hit or a server-only
-    // one, returns to the overlay as its reply does (PERSO-155).
+    // one, returns to the overlay as its reply does (PERSO-155), and is back
+    // on it before the draft is written so that what the write and the
+    // editor say lands on the overlay's line (PERSO-216).
     if let ComposeMode::SearchForward(forward) = &wizard.mode {
+        app.overlay = Overlay::Search;
         write_draft_and_edit(
             app,
             terminal,
@@ -1736,7 +1747,6 @@ fn submit_compose_wizard(
             Some(&edit),
             "Forward",
         )?;
-        app.overlay = Overlay::Search;
         return Ok(());
     }
 

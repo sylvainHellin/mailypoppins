@@ -1434,6 +1434,70 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         );
     }
 
+    /// The search overlay's `e` on a stored hit says how the read-only view
+    /// went on the overlay's own line, a row the store no longer holds and
+    /// the editor's return alike, as the list's `e` says it on the status
+    /// line (PERSO-216).
+    #[test]
+    fn the_search_overlays_e_on_a_hit_says_how_it_went_on_the_overlays_line() {
+        use crate::tui::app::{Action, Overlay, SearchOverlayFocus, SearchResultEntry};
+        let fx = Fixture::new();
+        let email = fixture_email("Quarterly Report");
+        let row = fx.ingest(&email);
+        let mut app = app_on_row(&fx, &row);
+        app.server_search_results = vec![SearchResultEntry {
+            entry: app.emails[0].clone(),
+            fetched: email,
+            source_label: "Inbox".to_string(),
+            seq: None,
+        }];
+        app.server_search_index = 0;
+        app.overlay = Overlay::Search;
+        app.server_search_focus = SearchOverlayFocus::List;
+
+        press(&mut app, "e");
+        let queued: Vec<String> = app
+            .pending_actions
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect();
+        assert_eq!(queued, [format!("{:?}", Action::SearchResultOpen)]);
+
+        // What `SearchResultOpen` runs for a hit that resolved to a row; the
+        // handler itself needs a crossterm terminal no test builds.
+        assert_eq!(readonly_view_for_row(&mut app, row.id + 999), None);
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("Open failed: that message is no longer in the store"),
+            "the refusal went to the status line the overlay hides: {:?}",
+            app.status_message
+        );
+
+        let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
+        assert!(finish_readonly_view(&mut app, &rendition, Ok(())));
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("Returned from the read-only copy (edits do not reach the message)"),
+            "the return went to the status line the overlay hides: {:?}",
+            app.status_message
+        );
+
+        let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
+        assert!(!finish_readonly_view(
+            &mut app,
+            &rendition,
+            Err(anyhow::anyhow!("editor exited with 1")),
+        ));
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("Open failed: editor exited with 1")
+        );
+        assert!(
+            matches!(app.overlay, Overlay::Search),
+            "the overlay stays open over the results"
+        );
+    }
+
     /// `te` (PERSO-174): the message's own raw bytes, materialised as
     /// `<date>_<subject>.eml`, go into the directory picker `ts` opens, so the
     /// copy is the one a saved part takes; on a draft it says why not.

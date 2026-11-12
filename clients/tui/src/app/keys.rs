@@ -3020,9 +3020,6 @@ impl App {
                 let from_search = chooser.from_search;
                 self.close_block_chooser(from_search);
                 self.block_sender(&entry);
-                if from_search {
-                    self.server_search_status = self.status_message.clone();
-                }
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 let from_search = chooser.from_search;
@@ -3044,7 +3041,8 @@ impl App {
     }
 
     /// `sender.block` on `entry`, the existing Inbox mail moved too, and the
-    /// answer on the status line.
+    /// answer on the status line, or on the search overlay's own when the
+    /// chooser was opened on a hit (PERSO-216).
     fn block_sender(&mut self, entry: &str) {
         let blocked = self
             .daemon_call(
@@ -3062,11 +3060,11 @@ impl App {
                 } else {
                     StatusLevel::Warning
                 };
-                self.set_status_level(block_summary(&blocked), level);
+                self.set_visible_status(block_summary(&blocked), level);
                 self.land_block_moves(&blocked.moved);
             }
             Err(e) => {
-                self.set_status_level(format!("Cannot block {entry}: {e}"), StatusLevel::Error)
+                self.set_visible_status(format!("Cannot block {entry}: {e}"), StatusLevel::Error)
             }
         }
     }
@@ -3270,7 +3268,8 @@ impl App {
     ) {
         let crate::app::AttachmentFiles { files, inline_from } = files;
         match files.len() {
-            0 => self.set_status("No attachments".to_string()),
+            // The search overlay's `o` and `O` land here with it open.
+            0 => self.set_visible_status("No attachments".to_string(), StatusLevel::Info),
             1 if mode == AttachmentPickerMode::Open => {
                 self.push_action(Action::OpenAttachment(files.into_iter().next().unwrap()));
             }

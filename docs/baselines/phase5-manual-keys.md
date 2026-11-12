@@ -71,4 +71,4 @@ The mutations went through the daemon and nothing else: `a` moved a row between 
 Two keys reached a refusal the daemon worded (`b` and `f`), and both refusals are the ones the parity matrix predicts for a fixture with no HTML part and no server.
 
 One thing this walk left for a follow-up: `b` on a hit whose message carries no HTML logged the refusal and put nothing on the overlay's status line, where the same key outside the overlay says so on screen (`a_message_without_html_says_so_instead_of_opening_an_empty_page`).
-PERSO-216 fixed it: the overlay's `b` now says every outcome on the overlay's own line (`the_search_overlays_b_on_a_hit_without_html_says_so_on_the_overlays_line`).
+PERSO-216 fixed it: the overlay's `b` now says every outcome on the overlay's own line (`the_search_overlays_b_on_a_hit_without_html_says_so_on_the_overlays_line`), and so do `e`, `r`, `R`, `w`, `cF` and `o`, whose lines had gone to the same hidden status line (`the_search_overlays_e_on_a_hit_says_how_it_went_on_the_overlays_line`).
