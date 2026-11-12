@@ -234,6 +234,14 @@ pub const KIND_CALENDAR_REMINDER: &str = "calendar.reminder";
 /// The payload is [`crate::reminder::CalendarRemindersChanged`].
 pub const KIND_CALENDAR_REMINDERS_CHANGED: &str = "calendar.reminders_changed";
 
+/// The `kind` the end of a body fetch travels as (PERSO-205), with a payload
+/// of `{account, row_id}`: a `message.get` that answered `body_pending` for
+/// that row asked the server for its evicted body, and the fetch is over,
+/// stored or failed. A client showing the row reads `message.get` again,
+/// which now answers at once with the body or with `body_unavailable`.
+/// Lifecycle: no snapshot carries a fetch.
+pub const KIND_MESSAGE_BODY_FETCHED: &str = "message.body_fetched";
+
 /// The `kind` one progress report of an operation travels as, with a payload
 /// carrying its `operation_id`.
 pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";

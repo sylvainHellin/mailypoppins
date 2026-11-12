@@ -260,6 +260,7 @@ A two-strike rule protects a store that briefly spikes: the first over-cap sweep
 When it does evict, victims are taken age-horizon-first (attachments then bodies past their horizon), then attachment blobs oldest-first, then body blobs oldest-first, stopping the moment the store is back under the cap; a blob's age is its freshest referencing message, so a shared blob survives while any message still inside its horizon references it.
 The sweep and a concurrent ingest cannot interleave mid-statement: both go through the store's single-writer WAL connection discipline, so a `mp store gc` run during a sync only ever sees committed blobs.
 `message.get` brings an evicted body back on open (PERSO-205, `src/daemon/methods/message_body.rs`): from the raw message an IMAP row keeps or the HTML a Graph row keeps, neither of which the sweep evicts, else from the server for that one message, and stores it again when it hashes to the row's own `body_blob`.
+The server leg runs on a task of its own and never holds the answer: `message.get` says `body_pending` at once, `message.body_fetched` tells the clients when the fetch is over, and the outcome is remembered for a minute, so a cursor moving offline asks the server once per message; only `mp show` waits for the body (`wait_for_body`).
 A plain `mp sync` still skips a UID it already has a row for, so only the messages a user opens come back and a store held at its cap does not download again what it evicted.
 `mp store gc` still refuses to reclaim more than half a store at once without `--force`.
 

@@ -50,10 +50,10 @@ use mp_protocol::events::{
     AccountStateChanged, Arrival, MutationsRolledBack, SyncCompleted, KIND_ACCOUNT_STATE_CHANGED,
     KIND_CALENDAR_CHANGED, KIND_CALENDAR_REMINDER, KIND_CALENDAR_REMINDERS_CHANGED,
     KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
-    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
-    KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
-    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED,
-    KIND_SYNC_COMPLETED,
+    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MESSAGE_BODY_FETCHED, KIND_MUTATIONS_ROLLED_BACK,
+    KIND_OPERATION_FINISHED, KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED,
+    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
+    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -440,6 +440,17 @@ impl App {
                 self.reload_reminders();
                 Applied::Ignored
             }
+            // The daemon's fetch of an evicted body is over (PERSO-205): a
+            // preview showing its "being fetched" line reads the row again.
+            KIND_MESSAGE_BODY_FETCHED => {
+                if let (Some(account), Some(row_id)) = (
+                    event.payload["account"].as_str(),
+                    event.payload["row_id"].as_i64(),
+                ) {
+                    self.on_body_fetched(account, row_id);
+                }
+                Applied::Ignored
+            }
             _ => match MessageRowDelta::decode(event) {
                 Some(delta) => {
                     super::bg::apply_row_delta(self, &delta);
@@ -800,6 +811,18 @@ impl App {
         self.accounts
             .iter()
             .position(|state| state.account_config.name == account)
+    }
+
+    /// The daemon's fetch of the evicted body of `row_id` of `account` is
+    /// over, stored or failed (PERSO-205): the preview memo lets go of that
+    /// row's "being fetched" line, so the next frame's `message.get` shows
+    /// the body or the reason it could not be had. A preview on another row
+    /// keeps what it shows.
+    pub fn on_body_fetched(&mut self, account: &str, row_id: i64) {
+        if account == self.account_config.name {
+            self.preview_body
+                .forget_message(self.active_account, row_id);
+        }
     }
 }
 

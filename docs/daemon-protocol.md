@@ -441,8 +441,12 @@ Which *account* a selector names stays a client-side decision, because `Selector
 An unknown uid, a malformed id, a mailbox the account does not have and a selector that resolves to nothing are all `-32602`, in the resolution's own words, so a routed `mp show` reports what the pre-daemon one reported.
 
 `body` defaults to `true` and its absence is not its nullity: with `body: false` the key is gone from the result, and with the default it is present and `null` when the row has no text body.
-A row whose body blob the retention sweep evicted gets it back first (PERSO-205): from the raw message or the HTML the row keeps, else from the server's copy of that one message through the same recent copies, stored again when it hashes to the row's `body_blob`.
-When neither answers, `body` is `null` and `body_unavailable` carries the sentence a reader shows in its place; the key is absent from every other record.
+A row whose body blob the retention sweep evicted gets it back first (PERSO-205): from the raw message or the HTML the row keeps, at once, else from the server's copy of that one message through the same recent copies, stored again when it hashes to the row's `body_blob`.
+The server leg does not hold the answer, since the daemon answers a connection's requests one at a time and a reader's other calls would wait behind it: `body` is `null` and `body_pending` carries the sentence a reader shows meanwhile, while a task of the daemon's own asks the server.
+When that fetch is over, stored or failed, the daemon publishes `message.body_fetched` `{account, row_id}`, a lifecycle event, and a client showing the row reads `message.get` again.
+The outcome is remembered for a minute, so that re-read, and any selection of the row in that time, is answered at once without asking the server again.
+`wait_for_body: true` (default `false`) makes the answer wait for the fetch instead, which `mp show` sends because a one-shot command has nothing else to show.
+When neither source answers, `body` is `null` and `body_unavailable` carries the sentence a reader shows in its place; both keys are absent from every other record.
 `mp show` prints that sentence, or its "no text body" line for a `null` without one, so collapsing the two would make a message with no text indistinguishable from a body that could not be had.
 
 `message.search` takes `{"account": str, "query": str}` plus `mailbox`, `limit`, `order`, `body`, and the field filters `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after`, `before`, and returns:
@@ -1441,6 +1445,8 @@ It is a lifecycle event and reduces into no snapshot: signatures are global rath
 `sender.blocklist_changed` says that the blocked senders changed, with a payload of `{entries}`, the whole sorted list (`mp_protocol::sender::BlockedSenders`), published by a `sender.block` that added an entry and a `sender.unblock` that removed one. It is a lifecycle event, and a client showing the list replaces it with the payload.
 
 `calendar.reminder` says that a reminder fell due, with a `CalendarReminder` as its payload ([The calendar reminders](#the-calendar-reminders)); `calendar.reminders_changed` `{account}` (`CalendarRemindersChanged`) says that one was dismissed, snoozed or left the list, and a client showing reminders reads `calendar.reminders` again. Both are lifecycle events.
+
+`message.body_fetched` `{account, row_id}` says that the daemon's fetch of a row's evicted body is over, stored or failed (PERSO-205): a client showing that row's `body_pending` sentence reads `message.get` again. It is a lifecycle event, since no snapshot carries a fetch.
 
 `message.server_hit` carries one hit of a live `message.search_server`, with a payload of `{operation_id, hit}`.
 It is a lifecycle event: a hit is a fact about a moment in one search, two hits never merge, and no snapshot brings one back, exactly as an `operation.progress` report does not.

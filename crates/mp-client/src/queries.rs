@@ -367,20 +367,34 @@ pub struct MessagePreview {
     /// The daemon's sentence for a body the store had lost and could not get
     /// back from the server (PERSO-205), present only with a `None` body.
     pub body_unavailable: Option<String>,
+    /// The daemon's sentence for a body the store had lost and the server is
+    /// sending again (PERSO-205), present only with a `None` body: a reader
+    /// shows it until `message.body_fetched` names the row, then reads again.
+    pub body_pending: Option<String>,
     pub to: Option<String>,
     pub cc: Option<String>,
 }
 
 impl MessagePreview {
     /// What a reader shows where the body goes: the body, or the daemon's
-    /// sentence for one it could not get back, in parentheses so it does not
-    /// read as the sender's text; `None` for a message with no text body.
+    /// sentence for one it could not get back or is still fetching, in
+    /// parentheses so it does not read as the sender's text; `None` for a
+    /// message with no text body.
     pub fn reading_text(&self) -> Option<String> {
         self.body.clone().or_else(|| {
             self.body_unavailable
                 .as_deref()
+                .or(self.body_pending.as_deref())
                 .map(|why| format!("({why})"))
         })
+    }
+
+    /// Whether what [`Self::reading_text`] shows is the daemon's word on a
+    /// body it does not have (still fetching it, or could not get it back)
+    /// rather than the message's own text: a reader shows it and keeps no
+    /// copy, so the next read asks again.
+    pub fn is_transient(&self) -> bool {
+        self.body.is_none() && (self.body_unavailable.is_some() || self.body_pending.is_some())
     }
 }
 
@@ -393,6 +407,7 @@ pub fn message_preview(q: &dyn Queries, account: &str, row_id: i64) -> Result<Me
     Ok(MessagePreview {
         body: text("body"),
         body_unavailable: text("body_unavailable"),
+        body_pending: text("body_pending"),
         to: text("to"),
         cc: text("cc"),
     })
@@ -1070,6 +1085,13 @@ mod tests {
                 .expect("an answer")
                 .as_deref(),
             Some("(not available locally)")
+        );
+        let fetching = Canned::new(json!({"body": null, "body_pending": "being fetched"}));
+        assert_eq!(
+            message_body(&fetching, "work", 1)
+                .expect("an answer")
+                .as_deref(),
+            Some("(being fetched)")
         );
         let empty = Canned::new(json!({"body": null}));
         assert_eq!(message_body(&empty, "work", 1).expect("an answer"), None);

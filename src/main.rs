@@ -2634,10 +2634,17 @@ async fn message_get_or_fetch(
             if let Some(mailbox) = mailbox {
                 params["mailbox"] = serde_json::json!(mailbox);
             }
-            if !body {
+            // A one-shot command has nothing else to show while a body the
+            // retention sweep evicted comes back from the server, so the
+            // answer waits for it (PERSO-205), under a server query's budget.
+            let budget = if body {
+                params["wait_for_body"] = serde_json::json!(true);
+                DAEMON_SERVER_TIMEOUT
+            } else {
                 params["body"] = serde_json::json!(false);
-            }
-            daemon_try_call(connection, "message.get", params)
+                DAEMON_TIMEOUT
+            };
+            daemon_try_call_within(connection, "message.get", params, budget)
                 .await
                 .map_err(|e| refusal(account, e))
         },

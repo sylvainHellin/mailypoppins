@@ -46,8 +46,9 @@ pub struct ShownMessage {
     pub invite: bool,
     pub attachments: Vec<ShownAttachment>,
     /// The plain-text body. `null` when there is none to show: a message with
-    /// no text, or a body the store lost and `message.get` could not get back,
-    /// which [`Self::body_unavailable`] then names.
+    /// no text, a body the store lost and `message.get` could not get back,
+    /// which [`Self::body_unavailable`] then names, or one it is still
+    /// fetching, which [`Self::body_pending`] names.
     ///
     /// `#[serde(default)]` because `message.get` omits the key entirely for a
     /// caller that asked for no body, which is not the same answer as `null`.
@@ -59,6 +60,12 @@ pub struct ShownMessage {
     /// absent from a daemon older than the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_unavailable: Option<String>,
+    /// Present when `body` is `null` because the store had lost it and the
+    /// daemon is fetching it from the server (PERSO-205): the sentence a
+    /// reader shows until `message.body_fetched` tells it to read again.
+    /// Written only then, like [`Self::body_unavailable`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_pending: Option<String>,
 }
 
 /// One attachment of a shown message.
@@ -182,6 +189,7 @@ pub fn shown_fetched(
             .filter(|body| !body.is_empty())
             .map(mp_core::body::for_reading),
         body_unavailable: None,
+        body_pending: None,
     }
 }
 
@@ -232,6 +240,7 @@ pub fn shown_message(
             .filter(|body| !body.is_empty())
             .map(|body| mp_core::body::for_reading(&body)),
         body_unavailable: None,
+        body_pending: None,
     }
 }
 
@@ -308,9 +317,15 @@ pub fn render_show(message: &ShownMessage) -> String {
         // A body nobody can produce is a sentence, not an error, because the
         // row is still real and everything above this line is still true.
         // The daemon names why when it had lost the body and could not get
-        // it back (PERSO-205); otherwise the message has no text to show.
+        // it back, or says it is still fetching it (PERSO-205, never for
+        // `mp show`, which waits for it); otherwise the message has no text
+        // to show.
         None => line(
-            match message.body_unavailable.as_deref() {
+            match message
+                .body_unavailable
+                .as_deref()
+                .or(message.body_pending.as_deref())
+            {
                 Some(why) => format!("({why})"),
                 None => "(no text body)".to_string(),
             }
@@ -1023,6 +1038,7 @@ mod tests {
             attachments: vec![only(true)],
             body: None,
             body_unavailable: None,
+            body_pending: None,
         };
         colored::control::set_override(false);
         let text = render_show(&shown);

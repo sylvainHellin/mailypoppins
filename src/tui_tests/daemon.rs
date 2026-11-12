@@ -64,6 +64,35 @@ impl TestDaemon {
     /// given, for a test that needs more of an account than its name (its
     /// `default_from`, which decides a conversation member's `own`).
     pub(super) fn with_accounts(accounts: Vec<AccountConfig>) -> TestDaemon {
+        TestDaemon::serving(
+            accounts,
+            crate::daemon::methods::message_eml::server_fetcher(),
+        )
+    }
+
+    /// A daemon over the ambient data root, configured with `accounts` by
+    /// name, whose server leg is `fetcher`: a server that holds a download
+    /// or fails it, for a test of what a client does meanwhile.
+    pub(super) fn with_fetcher(
+        accounts: &[&str],
+        fetcher: crate::daemon::server_copies::Fetcher,
+    ) -> TestDaemon {
+        TestDaemon::serving(
+            accounts
+                .iter()
+                .map(|name| AccountConfig {
+                    name: (*name).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            fetcher,
+        )
+    }
+
+    fn serving(
+        accounts: Vec<AccountConfig>,
+        fetcher: crate::daemon::server_copies::Fetcher,
+    ) -> TestDaemon {
         let root = crate::config::mailypoppins_data_dir();
         let config = Arc::new(ConfigStore::new(
             root.join("config.toml"),
@@ -74,7 +103,7 @@ impl TestDaemon {
             },
             false,
         ));
-        let state = DaemonState::new(
+        let state = DaemonState::with_fetcher(
             InstanceMeta {
                 app_version: "0.0.0-p5u6".to_string(),
                 protocol_min: mp_protocol::PROTOCOL_MIN,
@@ -86,6 +115,7 @@ impl TestDaemon {
                 config_dir: root.clone(),
             },
             config,
+            fetcher,
         );
         let runtime = new_runtime(&root);
         TestDaemon {

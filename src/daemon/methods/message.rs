@@ -66,7 +66,8 @@ use super::super::handles::{
 };
 use super::super::operations::{OperationHandle, OperationRegistry};
 use super::super::server_copies::ServerCopies;
-use super::super::state::ConnectionId;
+use super::super::state::events::Event;
+use super::super::state::{CanonicalState, ConnectionId};
 use super::{internal, invalid_params, only_params, string_param};
 
 /// The three read methods, in method-name order.
@@ -119,6 +120,9 @@ pub struct MessageReadMethod {
     /// The server copies downloaded lately, which a hit's `message.get`
     /// shares with the reads that follow it.
     pub copies: Arc<ServerCopies>,
+    /// The server fetches of evicted bodies, running or remembered
+    /// (PERSO-205), which every instance shares.
+    pub bodies: Arc<super::message_body::BodyFetches>,
 }
 
 impl Method for MessageReadMethod {
@@ -144,15 +148,20 @@ impl Method for MessageReadMethod {
             // a server-search hit with no row is read from the server's copy,
             // and a row whose body the retention sweep evicted gets it back
             // from there when no blob of its own holds it (PERSO-205).
+            let secrets = self.config.snapshot().config.secrets_backend;
             let server = super::message_eml::ServerLeg {
-                secrets: self.config.snapshot().config.secrets_backend,
+                secrets,
                 copies: &self.copies,
+            };
+            let body = super::message_body::BodyLeg {
+                secrets,
+                fetches: &self.bodies,
             };
             let result = match self.spec.name {
                 "message.get" if super::message_eml::addresses_hit(&params) => {
-                    super::message_eml::get_hit(&params, &accounts, server).await
+                    super::message_eml::get_hit(&params, &accounts, server, body).await
                 }
-                "message.get" => get(&params, &accounts, server).await,
+                "message.get" => get(&params, &accounts, body).await,
                 "message.list" => list_off_thread(&params, &accounts).await,
                 "message.thread" => thread(&params, &accounts),
                 mp_protocol::rendition::METHOD_MESSAGE_HTML => html(&params, &accounts),
@@ -164,11 +173,26 @@ impl Method for MessageReadMethod {
 }
 
 /// Register the five read methods on `dispatcher`.
+///
+/// The end of a body fetch is published through `canonical` as
+/// `message.body_fetched`, a lifecycle event every client receives
+/// (PERSO-205).
 pub fn register_reads(
     dispatcher: &mut Dispatcher,
     config: Arc<super::super::config::ConfigStore>,
     copies: Arc<ServerCopies>,
+    canonical: Arc<CanonicalState>,
 ) {
+    let announce: super::message_body::Announce = Arc::new(move |account, row_id| {
+        canonical.publish(Event::Lifecycle {
+            kind: mp_protocol::events::KIND_MESSAGE_BODY_FETCHED,
+            payload: json!({"account": account, "row_id": row_id}),
+        });
+    });
+    let bodies = Arc::new(super::message_body::BodyFetches::new(
+        Arc::clone(&copies),
+        announce,
+    ));
     for spec in MESSAGE_READ_METHOD_SPECS
         .into_iter()
         .chain(MESSAGE_THREAD_METHOD_SPECS)
@@ -178,6 +202,7 @@ pub fn register_reads(
             spec,
             config: Arc::clone(&config),
             copies: Arc::clone(&copies),
+            bodies: Arc::clone(&bodies),
         }));
     }
 }
@@ -1091,17 +1116,22 @@ fn envelopes(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
 /// for exactly that `null`.
 ///
 /// A row whose body blob the retention sweep evicted gets its body back here
-/// ([`super::message_body`], PERSO-205), from a blob of its own or from the
-/// server; when neither answers, `body` stays `null` and `body_unavailable`
-/// says why, so a reader can tell a lost body from a message with no text.
+/// ([`super::message_body`], PERSO-205), from a blob of its own at once or
+/// from the server. The server leg does not hold the answer: `body` is
+/// `null` and `body_pending` says the body is on its way until
+/// `message.body_fetched` announces the end, unless `wait_for_body` asked
+/// the answer to wait for it. When neither source answers, `body` stays
+/// `null` and `body_unavailable` says why, so a reader can tell a lost body
+/// from a message with no text.
 pub(super) async fn get(
     params: &Value,
     accounts: &[AccountConfig],
-    server: super::message_eml::ServerLeg<'_>,
+    leg: super::message_body::BodyLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?;
     let wants_body = flag_param(params, "body", true)?;
+    let wait = flag_param(params, "wait_for_body", false)?;
 
     // The store is read and closed before any await: the server leg is
     // seconds of network, and the connection is not `Sync`.
@@ -1115,13 +1145,17 @@ pub(super) async fn get(
         (row, shown, missing)
     };
     if missing {
-        match super::message_body::recover(account, &row, server).await {
-            Ok(body) => {
+        use super::message_body::Recovered;
+        match super::message_body::recover(account, &row, leg, wait).await {
+            Recovered::Body(body) => {
                 shown.body = Some(body)
                     .filter(|body| !body.is_empty())
                     .map(|body| mp_core::body::for_reading(&body));
             }
-            Err(why) => shown.body_unavailable = Some(why),
+            Recovered::Pending => {
+                shown.body_pending = Some(super::message_body::BODY_PENDING.to_string());
+            }
+            Recovered::Unavailable(why) => shown.body_unavailable = Some(why),
         }
     }
 

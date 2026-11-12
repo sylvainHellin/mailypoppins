@@ -800,6 +800,17 @@ impl PreviewBody {
     pub(crate) fn recipients(&self, key: &Option<BodyKey>) -> Option<&MemberRecipients> {
         self.recipients.as_ref().filter(|_| &self.key == key)
     }
+
+    /// Let go of the body when it is the one of the store row `row_id` of
+    /// the account at `account_index`, so the next frame reads it again; any
+    /// other body stays.
+    pub(crate) fn forget_message(&mut self, account_index: usize, row_id: i64) {
+        if let Some((index, EntryKey::Msg(msg), _)) = &self.key {
+            if *index == account_index && msg.row_id() == row_id {
+                self.key = None;
+            }
+        }
+    }
 }
 
 /// One-slot memo of the parsed invite behind the preview pane (#0038 scope

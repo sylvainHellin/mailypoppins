@@ -123,7 +123,12 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     dispatcher.register(Arc::new(mailbox::MailboxListServer {
         config: Arc::clone(&config),
     }));
-    message::register_reads(dispatcher, Arc::clone(&config), Arc::clone(&copies));
+    message::register_reads(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&copies),
+        Arc::clone(&canonical),
+    );
     message::register_stream(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     message::register_invites(dispatcher, Arc::clone(&config));
     message::register_mutations(

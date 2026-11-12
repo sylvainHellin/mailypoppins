@@ -486,12 +486,17 @@ fn display_fields_follow_the_file_builds_rules() {
 
 /// An app parked on one store-backed mailbox, as `App::new` would leave it.
 fn app_on_inbox() -> App {
+    app_on_inbox_of(TestDaemon::new(&["alice"]))
+}
+
+/// [`app_on_inbox`], served by `daemon`.
+fn app_on_inbox_of(daemon: TestDaemon) -> App {
     let mut app = App::default_for_tests();
     app.account_config.name = "alice".to_string();
     // The preview reads through the daemon since P5-U4 and through nothing
     // else since P5-U10e, so the fixture holds a session where it used to
     // lean on the store-backed fallback the `App` no longer has.
-    app.session = Some(TestDaemon::new(&["alice"]).session());
+    app.session = Some(daemon.session());
     app.mailboxes = vec![mb("Inbox", "inbox", MailboxKind::Inbox)];
     app.mailbox_counts = vec![0];
     app.email_cache = vec![None];
@@ -504,9 +509,9 @@ fn app_on_inbox() -> App {
 /// The list load itself reads no blob at all, which is the cold-start
 /// criterion: every body blob can be missing and the mailbox still lists,
 /// counts and displays. Only a body actually asked for degrades, one
-/// message wide: with no raw message to read it back from and no server to
-/// ask, the preview shows the daemon's sentence saying so, never an empty
-/// body (PERSO-205).
+/// message wide: with no raw message to read it back from, the preview
+/// shows the daemon's sentence saying the body is not here (on its way from
+/// the server, then not sent again), never an empty body (PERSO-205).
 #[test]
 fn the_list_loads_with_every_body_blob_missing() {
     let data = DataDir::new();
@@ -537,6 +542,150 @@ fn the_list_loads_with_every_body_blob_missing() {
         text.starts_with("(The body of this message is not available locally"),
         "only the preview degrades, and says so: {text}"
     );
+}
+
+/// The server's copy of the `m1` fixture message, as a server hands it over.
+const M1_RAW: &[u8] = b"From: Sender m1 <s@example.com>\r\n\
+To: me@example.com\r\n\
+Subject: m1\r\n\
+Date: Mon, 01 Jan 2024 09:00:00 +0000\r\n\
+Message-ID: <m1@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+body of m1\r\n";
+
+/// A server whose downloads wait at `gate` until the test lets one go,
+/// counting them.
+fn held_server(
+    gate: &std::sync::Arc<tokio::sync::Semaphore>,
+) -> (
+    crate::daemon::server_copies::Fetcher,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&calls);
+    let gate = std::sync::Arc::clone(gate);
+    let fetcher: crate::daemon::server_copies::Fetcher = std::sync::Arc::new(move |_request| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = std::sync::Arc::clone(&gate);
+        Box::pin(async move {
+            let _let_go = gate.acquire().await;
+            Ok(M1_RAW.to_vec())
+        })
+    });
+    (fetcher, calls)
+}
+
+/// Opening a message whose evicted body only the server holds never holds
+/// the frame on the network (PERSO-205): the preview is filled at once with
+/// the line saying the body is on its way, while the server sits on the
+/// download.
+#[test]
+fn an_evicted_body_the_server_holds_does_not_hold_the_preview() {
+    let _data = DataDir::new();
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("m1", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
+    std::fs::remove_dir_all(BlobStore::for_account("alice").root()).unwrap();
+
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let (fetcher, downloads) = held_server(&gate);
+    let mut app = app_on_inbox_of(TestDaemon::with_fetcher(&["alice"], fetcher));
+    // The server lets the download go two seconds in, so a preview that
+    // waits for it takes that long.
+    let release = {
+        let gate = std::sync::Arc::clone(&gate);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            gate.add_permits(1);
+        })
+    };
+
+    let started = std::time::Instant::now();
+    app.refresh_preview_body();
+    let waited = started.elapsed();
+    assert!(
+        waited < std::time::Duration::from_secs(1),
+        "the frame waited {waited:?} for the server"
+    );
+    let text = app.preview_body.text().to_string();
+    assert!(text.contains("being fetched"), "{text}");
+    release.join().unwrap();
+
+    // The daemon's `message.body_fetched` lets the memo go, and the next
+    // frame shows the body the server sent.
+    let row_id = app
+        .selected_email()
+        .and_then(|e| e.msg)
+        .expect("a message row")
+        .row_id();
+    let text = settled_preview(&mut app, row_id, |text| !text.contains("being fetched"));
+    assert_eq!(text.trim_end(), "body of m1");
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// The preview once the daemon's fetch of `row_id` is over: what the frames
+/// after each `message.body_fetched` would show, read until `done` says so.
+fn settled_preview(app: &mut App, row_id: i64, done: impl Fn(&str) -> bool) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        app.on_body_fetched("alice", row_id);
+        app.refresh_preview_body();
+        let text = app.preview_body.text().to_string();
+        if done(&text) || std::time::Instant::now() > deadline {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Offline, a fetch that failed is remembered: moving the cursor back and
+/// forth over evicted messages shows the reason at once and asks the server
+/// once per message, not once per move (PERSO-205).
+#[test]
+fn an_offline_preview_asks_the_server_once_per_message() {
+    let _data = DataDir::new();
+    for i in 1..=2 {
+        ingest_fixture(
+            "inbox",
+            i,
+            &fixture_email(&format!("m{i}"), "Mon, 01 Jan 2024 09:00:00 +0000", false),
+        );
+    }
+    std::fs::remove_dir_all(BlobStore::for_account("alice").root()).unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&calls);
+    let offline: crate::daemon::server_copies::Fetcher = std::sync::Arc::new(move |_request| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(mp_protocol::RpcError {
+                code: -32603,
+                message: "network is unreachable".to_string(),
+                data: None,
+            })
+        })
+    });
+    let mut app = app_on_inbox_of(TestDaemon::with_fetcher(&["alice"], offline));
+
+    for index in [0, 1] {
+        app.list_index = index;
+        app.refresh_preview_body();
+        let row_id = app.selected_email().and_then(|e| e.msg).unwrap().row_id();
+        let text = settled_preview(&mut app, row_id, |text| text.contains("did not send"));
+        assert!(text.contains("network is unreachable"), "{text}");
+    }
+    for _ in 0..3 {
+        for index in [0, 1] {
+            app.list_index = index;
+            app.refresh_preview_body();
+            let text = app.preview_body.text();
+            assert!(text.contains("network is unreachable"), "{text}");
+        }
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 /// The preview loads the body of the message the cursor is on, and follows

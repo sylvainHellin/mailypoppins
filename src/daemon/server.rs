@@ -369,6 +369,17 @@ pub struct DaemonState {
 impl DaemonState {
     /// Assemble the state and register the domain methods on it.
     pub fn new(meta: InstanceMeta, config: Arc<ConfigStore>) -> Self {
+        Self::with_fetcher(meta, config, super::methods::message_eml::server_fetcher())
+    }
+
+    /// [`Self::new`], downloading a server's copy of a message through
+    /// `fetcher`: the server leg in the daemon, a fake one that holds or fails
+    /// in a test.
+    pub fn with_fetcher(
+        meta: InstanceMeta,
+        config: Arc<ConfigStore>,
+        fetcher: super::server_copies::Fetcher,
+    ) -> Self {
         let configured = config.accounts();
         // Seeded from the configuration alone: no store is opened and no
         // runtime started here, so every account is `opening` with zeroed
@@ -410,9 +421,7 @@ impl DaemonState {
         // a promise this daemon changed its mind about.
         let handles = Arc::new(super::handles::HandleTable::from_env());
         let holds = Arc::new(super::hold::HoldScheduler::new());
-        let copies = Arc::new(super::server_copies::ServerCopies::new(
-            super::methods::message_eml::server_fetcher(),
-        ));
+        let copies = Arc::new(super::server_copies::ServerCopies::new(fetcher));
         // Built here because it needs the instance metadata, the configuration
         // and the runtime table, and held by the canonical state so a bootstrap
         // can project the checks that are not `ok`. The state holds it back

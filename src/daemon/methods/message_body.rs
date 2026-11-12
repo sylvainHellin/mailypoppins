@@ -18,47 +18,267 @@
 //! fetched, never its mailbox, so a store held at its cap does not download
 //! again everything it evicted, the churn #0060 rejected a sync-side refill for.
 //!
+//! # The server leg does not hold the answer
+//!
+//! A reader asks for the body of the message under its cursor, and the daemon
+//! answers one connection's requests one at a time, so a `message.get` that
+//! waited seconds for a server held every other call of that client behind
+//! it: the TUI's frame, which reads the preview before it draws, froze for up
+//! to the client's 30-second budget. So the second source runs on a task of
+//! its own ([`BodyFetches`]) and `message.get` answers at once with a `null`
+//! body and `body_pending`, the sentence a reader shows meanwhile. When the
+//! fetch is over, stored or failed, the daemon publishes
+//! `message.body_fetched` `{account, row_id}` and a client showing the row
+//! reads it again. Its outcome is remembered for [`REMEMBERED_FOR`], so that
+//! re-read is answered at once, and so is every selection of the row in that
+//! time: moving the cursor back and forth offline asks the server once, not
+//! once per move. `mp show` is a one-shot command with nothing else to do,
+//! so it asks with `wait_for_body` and the answer waits for the fetch.
+//!
 //! When neither source answers (offline, a server error, a message the server
 //! no longer has) the body stays `null` and `body_unavailable` carries the
 //! sentence a reader shows in its place.
 //!
 //! [`ServerCopies`]: super::super::server_copies::ServerCopies
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
 use log::{info, warn};
+use tokio::sync::OnceCell;
 
 use crate::config::AccountConfig;
+use crate::secrets::SecretsBackendKind;
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
 
+use super::super::server_copies::ServerCopies;
 use super::message_eml::ServerLeg;
 
-/// The body of `row`, whose body blob is gone, or the sentence a reader
-/// shows when it could not be had.
+/// How long the outcome of a server fetch is answered without asking the
+/// server again: long enough that a cursor moving back and forth offline asks
+/// once, short enough that a network that came back is tried again soon.
+pub const REMEMBERED_FOR: Duration = Duration::from_secs(60);
+
+/// How many fetches are remembered at most: the rows a user opened in the
+/// last minute, a body each.
+const CAPACITY: usize = 32;
+
+/// The sentence a reader shows while the body is on its way from the server.
+pub const BODY_PENDING: &str =
+    "The body of this message is not available locally and is being fetched from the server";
+
+/// What tells the clients a fetch is over: `message.body_fetched` through the
+/// canonical state in the daemon, a counter in a test.
+pub type Announce = Arc<dyn Fn(&str, i64) + Send + Sync>;
+
+/// What `message.get` answers for a row whose body blob is gone.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Recovered {
+    /// The body, from a blob of the row's own or from the server.
+    Body(String),
+    /// Asked of the server; `message.body_fetched` says when it is over.
+    Pending,
+    /// The sentence a reader shows in place of a body that could not be had.
+    Unavailable(String),
+}
+
+impl From<Result<String, String>> for Recovered {
+    fn from(outcome: Result<String, String>) -> Self {
+        match outcome {
+            Ok(body) => Recovered::Body(body),
+            Err(why) => Recovered::Unavailable(why),
+        }
+    }
+}
+
+/// What a server fetch settles to: the body, or why there is none.
+type Outcome = Result<String, String>;
+
+/// One row's fetch: running while its cell is empty, remembered once filled.
+struct Entry {
+    account: String,
+    row_id: i64,
+    message_id: String,
+    started: Instant,
+    settled: Option<Instant>,
+    outcome: Arc<OnceCell<Outcome>>,
+}
+
+/// The server fetches of evicted bodies this daemon is running or ran in
+/// the last [`REMEMBERED_FOR`], by account, row and `Message-ID`.
+pub struct BodyFetches {
+    copies: Arc<ServerCopies>,
+    announce: Announce,
+    remember: Duration,
+    entries: Mutex<VecDeque<Entry>>,
+}
+
+impl BodyFetches {
+    /// The daemon's table, downloading through `copies` and telling the
+    /// clients through `announce`.
+    pub fn new(copies: Arc<ServerCopies>, announce: Announce) -> Self {
+        Self::remembering(REMEMBERED_FOR, copies, announce)
+    }
+
+    /// A table that remembers an outcome for `remember`, for the tests that
+    /// exercise the expiry.
+    pub fn remembering(remember: Duration, copies: Arc<ServerCopies>, announce: Announce) -> Self {
+        Self {
+            copies,
+            announce,
+            remember,
+            entries: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// The cell of `row`'s fetch, and whether it was made by this call, with
+    /// every expired entry dropped and the oldest one past [`CAPACITY`]
+    /// evicted.
+    ///
+    /// A fetch still running after ten times [`REMEMBERED_FOR`] is dropped
+    /// too, so a task that never settled cannot leave its row pending.
+    fn cell(&self, account: &str, row: &MessageRow) -> (Arc<OnceCell<Outcome>>, bool) {
+        let mut entries = self.lock();
+        let remember = self.remember;
+        entries.retain(|entry| match entry.settled {
+            Some(at) => at.elapsed() < remember,
+            None => entry.started.elapsed() < remember * 10,
+        });
+        if let Some(entry) = entries.iter().find(|entry| {
+            entry.account == account && entry.row_id == row.id && entry.message_id == row.message_id
+        }) {
+            return (Arc::clone(&entry.outcome), false);
+        }
+        while entries.len() >= CAPACITY {
+            entries.pop_front();
+        }
+        let outcome = Arc::new(OnceCell::new());
+        entries.push_back(Entry {
+            account: account.to_string(),
+            row_id: row.id,
+            message_id: row.message_id.clone(),
+            started: Instant::now(),
+            settled: None,
+            outcome: Arc::clone(&outcome),
+        });
+        (outcome, true)
+    }
+
+    /// Start the remembered time of the fetch behind `outcome`.
+    fn settle(&self, outcome: &Arc<OnceCell<Outcome>>) {
+        if let Some(entry) = self
+            .lock()
+            .iter_mut()
+            .find(|entry| Arc::ptr_eq(&entry.outcome, outcome))
+        {
+            entry.settled.get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// Run `row`'s fetch into `outcome`, or wait for the one already running,
+    /// and announce its end when this call was the one that ran it.
+    async fn run(
+        &self,
+        outcome: &Arc<OnceCell<Outcome>>,
+        account: &AccountConfig,
+        secrets: SecretsBackendKind,
+        row: &MessageRow,
+    ) -> Outcome {
+        let mut ran = false;
+        let settled = outcome
+            .get_or_init(|| {
+                ran = true;
+                from_server(&self.copies, account, secrets, row)
+            })
+            .await
+            .clone();
+        self.settle(outcome);
+        if ran {
+            (self.announce)(&account.name, row.id);
+        }
+        settled
+    }
+
+    /// The entries, whatever a panicking holder left: they are a cache, and
+    /// a lost one costs a download, never a wrong answer.
+    fn lock(&self) -> MutexGuard<'_, VecDeque<Entry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// What a body recovery needs beside the account: the backend its
+/// credentials are in, and the daemon's fetches.
+#[derive(Clone, Copy)]
+pub(super) struct BodyLeg<'a> {
+    pub(super) secrets: SecretsBackendKind,
+    pub(super) fetches: &'a Arc<BodyFetches>,
+}
+
+/// The body of `row`, whose body blob is gone: read back from a blob of its
+/// own at once, else from the server, waited for when `wait` and otherwise
+/// [`Recovered::Pending`] while a task of its own asks.
 pub(super) async fn recover(
     account: &AccountConfig,
     row: &MessageRow,
-    server: ServerLeg<'_>,
-) -> Result<String, String> {
+    leg: BodyLeg<'_>,
+    wait: bool,
+) -> Recovered {
     let name = account.name.as_str();
-    // The store is read and closed before the await, as every server leg does.
-    let local = {
-        let store = open(name)?;
-        let blobs = BlobStore::new(crate::config::blobs_dir(name));
-        read::rederive_body(&store, &blobs, row.id)
-    };
-    let body = match local {
-        Some(body) => body,
-        None => {
-            let raw = server
-                .download(account, &row.message_id, &row.mailbox)
-                .await
-                .map_err(|e| unavailable(&e.message))?;
-            crate::parse::parse_rfc822_to_fetched_email(&raw)
-                .map(|email| email.body_text)
-                .ok_or_else(|| unavailable("the server's copy does not parse as a message"))?
+    let local = match open(name) {
+        Ok(store) => {
+            let blobs = BlobStore::new(crate::config::blobs_dir(name));
+            read::rederive_body(&store, &blobs, row.id)
         }
+        Err(why) => return Recovered::Unavailable(why),
     };
-    keep(name, row, &body);
+    if let Some(body) = local {
+        keep(name, row, &body);
+        return Recovered::Body(body);
+    }
+    let (outcome, fresh) = leg.fetches.cell(name, row);
+    if let Some(settled) = outcome.get() {
+        return settled.clone().into();
+    }
+    if wait {
+        return leg
+            .fetches
+            .run(&outcome, account, leg.secrets, row)
+            .await
+            .into();
+    }
+    if fresh {
+        let fetches = Arc::clone(leg.fetches);
+        let (account, row, secrets) = (account.clone(), row.clone(), leg.secrets);
+        // The outcome is in the cell for the re-read the announcement asks
+        // for; the task has no one to hand it to.
+        tokio::spawn(async move {
+            let _remembered = fetches.run(&outcome, &account, secrets, &row).await;
+        });
+    }
+    Recovered::Pending
+}
+
+/// The body of `row` as the server sends it again, stored when it is the one
+/// the row records, or the sentence a reader shows when it could not be had.
+async fn from_server(
+    copies: &ServerCopies,
+    account: &AccountConfig,
+    secrets: SecretsBackendKind,
+    row: &MessageRow,
+) -> Outcome {
+    let server = ServerLeg { secrets, copies };
+    let raw = server
+        .download(account, &row.message_id, &row.mailbox)
+        .await
+        .map_err(|e| unavailable(&e.message))?;
+    let body = crate::parse::parse_rfc822_to_fetched_email(&raw)
+        .map(|email| email.body_text)
+        .ok_or_else(|| unavailable("the server's copy does not parse as a message"))?;
+    keep(&account.name, row, &body);
     Ok(body)
 }
 
@@ -106,13 +326,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use std::sync::Mutex;
+    use std::time::Duration;
+
     use crate::daemon::server_copies::{Fetcher, ServerCopies};
     use crate::ingest::{ingest_message, IngestInput};
     use crate::store::blobs::BlobHash;
     use crate::store::sweep::{sweep, SweepOptions};
     use crate::store::{BlobStore, Store};
 
-    use super::super::message_eml::ServerLeg;
+    use super::{Announce, BodyFetches, BodyLeg, BODY_PENDING, REMEMBERED_FOR};
 
     /// A plain-text message as a server hands it over.
     const RAW: &[u8] = b"From: Alice <alice@example.com>\r\n\
@@ -187,15 +410,71 @@ The body the retention sweep evicts.\r\n";
         }
     }
 
-    impl Evicted {
-        /// `message.get` of the row, its body asked for, over `copies`.
-        async fn get(&self, copies: &ServerCopies) -> Value {
-            let server = ServerLeg {
-                secrets: Default::default(),
-                copies,
+    /// The daemon's side of a test: the recent copies over `fetcher`, the
+    /// body fetches over them, and every `message.body_fetched` they
+    /// announced, by row.
+    struct Daemon {
+        fetches: Arc<BodyFetches>,
+        announced: Arc<Mutex<Vec<(String, i64)>>>,
+        settled: Arc<tokio::sync::Notify>,
+    }
+
+    impl Daemon {
+        fn over(fetcher: Fetcher) -> Daemon {
+            Daemon::remembering(REMEMBERED_FOR, fetcher)
+        }
+
+        fn remembering(remember: Duration, fetcher: Fetcher) -> Daemon {
+            let announced = Arc::new(Mutex::new(Vec::new()));
+            let settled = Arc::new(tokio::sync::Notify::new());
+            let announce: Announce = {
+                let announced = Arc::clone(&announced);
+                let settled = Arc::clone(&settled);
+                Arc::new(move |account: &str, row_id| {
+                    announced
+                        .lock()
+                        .expect("the announcements")
+                        .push((account.to_string(), row_id));
+                    settled.notify_one();
+                })
             };
-            let params = json!({"account": "tum", "row_id": self.row_id});
-            super::super::message::get(&params, &self.accounts, server)
+            let copies = Arc::new(ServerCopies::new(fetcher));
+            Daemon {
+                fetches: Arc::new(BodyFetches::remembering(remember, copies, announce)),
+                announced,
+                settled,
+            }
+        }
+
+        fn announced(&self) -> Vec<(String, i64)> {
+            self.announced.lock().expect("the announcements").clone()
+        }
+
+        /// Until the fetch running in the background announced its end.
+        async fn settled(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.settled.notified())
+                .await
+                .expect("the fetch announced its end");
+        }
+    }
+
+    impl Evicted {
+        /// `message.get` of the row, its body asked for, through `daemon`.
+        async fn get(&self, daemon: &Daemon) -> Value {
+            self.get_with(daemon, json!({})).await
+        }
+
+        /// [`Self::get`] with the parameters of `extra` added.
+        async fn get_with(&self, daemon: &Daemon, extra: Value) -> Value {
+            let leg = BodyLeg {
+                secrets: Default::default(),
+                fetches: &daemon.fetches,
+            };
+            let mut params = json!({"account": "tum", "row_id": self.row_id});
+            for (key, value) in extra.as_object().expect("an object") {
+                params[key] = value.clone();
+            }
+            super::super::message::get(&params, &self.accounts, leg)
                 .await
                 .expect("message.get answers")
         }
@@ -238,52 +517,97 @@ The body the retention sweep evicts.\r\n";
     async fn an_evicted_body_is_back_when_the_message_is_opened() {
         let fx = evicted(true);
         let (fetcher, downloads) = offline();
-        let copies = ServerCopies::new(fetcher);
+        let daemon = Daemon::over(fetcher);
 
-        let shown = fx.get(&copies).await;
+        let shown = fx.get(&daemon).await;
         assert_eq!(shown["body"], json!(BODY), "{shown}");
         assert!(shown.get("body_unavailable").is_none(), "{shown}");
+        assert!(shown.get("body_pending").is_none(), "{shown}");
         assert_eq!(shown["flags"], json!(["read"]), "{shown}");
         assert_eq!(fx.stored(), (true, 1), "the body is stored again");
-        assert_eq!(fx.get(&copies).await["body"], json!(BODY));
+        assert_eq!(fx.get(&daemon).await["body"], json!(BODY));
         assert_eq!(downloads.load(Ordering::SeqCst), 0, "no server leg");
+        assert!(daemon.announced().is_empty(), "nothing to announce");
     }
 
     /// A row with no blob to read its body back from (a Graph message sent as
-    /// plain text keeps no HTML) asks the server for that one message, once:
-    /// the body is stored again, so the second open downloads nothing.
+    /// plain text keeps no HTML) asks the server for that one message, once,
+    /// without holding the answer: `message.get` says the body is on its way,
+    /// `message.body_fetched` says when it is stored, and the next open reads
+    /// it from the store.
     #[tokio::test]
     async fn a_body_no_blob_holds_is_fetched_from_the_server_once() {
         let fx = evicted(false);
         let (fetcher, downloads) = crate::daemon::server_copies::tests::counting(RAW);
-        let copies = ServerCopies::new(fetcher);
+        let daemon = Daemon::over(fetcher);
 
-        assert_eq!(fx.get(&copies).await["body"], json!(BODY));
+        let shown = fx.get(&daemon).await;
+        assert!(shown["body"].is_null(), "{shown}");
+        assert_eq!(shown["body_pending"], json!(BODY_PENDING), "{shown}");
+        assert!(shown.get("body_unavailable").is_none(), "{shown}");
+        daemon.settled().await;
+        assert_eq!(daemon.announced(), vec![("tum".to_string(), fx.row_id)]);
         assert_eq!(fx.stored(), (true, 1), "the body is stored again");
-        // A fresh table, so a second download could not be the cached copy.
+
+        let shown = fx.get(&daemon).await;
+        assert_eq!(shown["body"], json!(BODY), "{shown}");
+        assert!(shown.get("body_pending").is_none(), "{shown}");
+        // A fresh daemon, so a second download could not be a remembered one.
         let (fetcher, again) = crate::daemon::server_copies::tests::counting(RAW);
-        assert_eq!(
-            fx.get(&ServerCopies::new(fetcher)).await["body"],
-            json!(BODY)
-        );
+        assert_eq!(fx.get(&Daemon::over(fetcher)).await["body"], json!(BODY));
         assert_eq!(downloads.load(Ordering::SeqCst), 1);
         assert_eq!(again.load(Ordering::SeqCst), 0);
     }
 
+    /// `wait_for_body`, which `mp show` sends, answers the body the server
+    /// sent once it is in, with nothing pending.
+    #[tokio::test]
+    async fn waiting_for_the_body_answers_it() {
+        let fx = evicted(false);
+        let (fetcher, downloads) = crate::daemon::server_copies::tests::counting(RAW);
+        let daemon = Daemon::over(fetcher);
+
+        let shown = fx.get_with(&daemon, json!({"wait_for_body": true})).await;
+        assert_eq!(shown["body"], json!(BODY), "{shown}");
+        assert!(shown.get("body_pending").is_none(), "{shown}");
+        assert_eq!(downloads.load(Ordering::SeqCst), 1);
+        assert_eq!(fx.stored(), (true, 1), "the body is stored again");
+    }
+
     /// Offline, the body stays `null` and the reader is told why in a
-    /// sentence of its own, never handed an empty body; nothing is stored.
+    /// sentence of its own once the fetch is over, never handed an empty
+    /// body; nothing is stored. The failure is remembered, so opening the row
+    /// again answers the sentence at once and asks the server nothing, until
+    /// the remembered time is up.
     #[tokio::test]
     async fn an_unreachable_server_answers_a_sentence_and_no_body() {
         let fx = evicted(false);
         let (fetcher, downloads) = offline();
-        let copies = ServerCopies::new(fetcher);
+        let daemon = Daemon::over(fetcher);
 
-        let shown = fx.get(&copies).await;
-        assert!(shown["body"].is_null(), "{shown}");
-        let why = shown["body_unavailable"].as_str().expect("a reason");
-        assert!(why.contains("not available locally"), "{why}");
-        assert!(why.contains("network is unreachable"), "{why}");
-        assert_eq!(downloads.load(Ordering::SeqCst), 1);
+        assert!(fx.get(&daemon).await.get("body_pending").is_some());
+        daemon.settled().await;
+        for _ in 0..3 {
+            let shown = fx.get(&daemon).await;
+            assert!(shown["body"].is_null(), "{shown}");
+            assert!(shown.get("body_pending").is_none(), "{shown}");
+            let why = shown["body_unavailable"].as_str().expect("a reason");
+            assert!(why.contains("not available locally"), "{why}");
+            assert!(why.contains("network is unreachable"), "{why}");
+        }
+        let waited = fx.get_with(&daemon, json!({"wait_for_body": true})).await;
+        assert!(waited["body_unavailable"].is_string(), "{waited}");
+        assert_eq!(downloads.load(Ordering::SeqCst), 1, "asked once");
+        assert_eq!(daemon.announced().len(), 1);
         assert_eq!(fx.stored(), (false, 0), "nothing is stored");
+
+        // Past the remembered time the server is asked again.
+        let (fetcher, again) = offline();
+        let forgetful = Daemon::remembering(Duration::ZERO, fetcher);
+        assert!(fx.get(&forgetful).await.get("body_pending").is_some());
+        forgetful.settled().await;
+        assert!(fx.get(&forgetful).await.get("body_pending").is_some());
+        forgetful.settled().await;
+        assert_eq!(again.load(Ordering::SeqCst), 2);
     }
 }

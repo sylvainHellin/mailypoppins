@@ -392,6 +392,7 @@ pub(super) async fn get_hit(
     params: &Value,
     accounts: &[AccountConfig],
     server: ServerLeg<'_>,
+    body: super::message_body::BodyLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
@@ -403,7 +404,7 @@ pub(super) async fn get_hit(
     let hit = hit_address(&account, params)?.ok_or_else(|| invalid_params("hit is required"))?;
     let (mailbox, email) = match hit_message(&account, &hit, server).await? {
         HitMessage::Held(row) => {
-            return super::message::get(&as_row_params(params, &row), accounts, server).await
+            return super::message::get(&as_row_params(params, &row), accounts, body).await
         }
         HitMessage::Server { mailbox, email } => (mailbox, email),
     };
@@ -627,10 +628,18 @@ JVBERi0xLjQK\r\n\
         let accounts = vec![account];
 
         let (fetcher, downloads) = crate::daemon::server_copies::tests::counting(RAW);
-        let copies = ServerCopies::new(fetcher);
+        let copies = Arc::new(ServerCopies::new(fetcher));
         let server = ServerLeg {
             secrets: Default::default(),
             copies: &copies,
+        };
+        let fetches = Arc::new(super::super::message_body::BodyFetches::new(
+            Arc::clone(&copies),
+            Arc::new(|_, _| {}),
+        ));
+        let body = super::super::message_body::BodyLeg {
+            secrets: Default::default(),
+            fetches: &fetches,
         };
         let handles = HandleTable::new(std::time::Duration::from_secs(60));
         let hit = serde_json::json!({"message_id": "<loc-day@example.com>", "mailbox": "sent"});
@@ -642,7 +651,7 @@ JVBERi0xLjQK\r\n\
             params
         };
 
-        let shown = get_hit(&params(serde_json::json!({})), &accounts, server)
+        let shown = get_hit(&params(serde_json::json!({})), &accounts, server, body)
             .await
             .expect("the hit's record");
         let parts = shown["attachments"].as_array().expect("attachments").len();
