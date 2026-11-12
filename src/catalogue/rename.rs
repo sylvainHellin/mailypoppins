@@ -346,4 +346,42 @@ mod tests {
             vec!["Projects"]
         );
     }
+
+    /// PERSO-185: a probe that failed proves no rename, so the listing is
+    /// recorded as it was before renames were detected, the lost folder kept
+    /// as missing.
+    #[test]
+    fn a_failed_rename_probe_records_the_listing_as_before() {
+        let (_dir, store) = store();
+        let plan = Plan {
+            lost: vec![Lost {
+                name: "Projects".to_string(),
+                uidvalidity: 7,
+                last_uid: Some(1),
+                sample: vec![(1, "one@example.com".to_string())],
+            }],
+            gained: vec!["Projekte".to_string()],
+        };
+        let proof = FolderIdentity {
+            name: "Projekte".to_string(),
+            uidvalidity: Some(7),
+            uidnext: Some(2),
+            message_ids: vec![(1, "one@example.com".to_string())],
+        };
+        assert_eq!(
+            confirm_probed("tum", &plan, Ok(vec![proof])),
+            vec![Rename {
+                from: "Projects".to_string(),
+                to: "Projekte".to_string()
+            }]
+        );
+        let renamed = confirm_probed("tum", &plan, Err(anyhow::anyhow!("connection reset")));
+        assert!(renamed.is_empty());
+
+        listing::replace(&store, "tum", &[ListedFolder::named("Projects")]).unwrap();
+        listing::replace_with(&store, "tum", &[ListedFolder::named("Projekte")], &renamed).unwrap();
+        let listed = listing::load(&store, "tum").unwrap();
+        assert!(listed.iter().any(|f| f.name == "Projects" && f.missing));
+        assert!(listed.iter().any(|f| f.name == "Projekte" && !f.missing));
+    }
 }
