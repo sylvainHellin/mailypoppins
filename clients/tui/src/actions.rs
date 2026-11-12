@@ -321,9 +321,10 @@ pub fn cursor_eml_file(app: &mut App) -> Option<PathBuf> {
     }
 }
 
-/// The browser rendition of a stored row, or `None` with the status line
-/// saying why: a message whose sender wrote no markup has none, which is not
-/// an error.
+/// The browser rendition of a stored row, or `None` with the line the user
+/// sees saying why: a message whose sender wrote no markup has none, which is
+/// not an error. That line is the status line, or the server-search overlay's
+/// own when `b` was pressed on a hit there (PERSO-216).
 ///
 /// Daemon-routed since P5-U6: `message.materialise_html` writes the very same
 /// rendition, charset meta, CSP tag and inlined `cid:` images included, which
@@ -335,7 +336,7 @@ pub fn html_rendition_for_row(app: &mut App, row_id: i64) -> Option<PathBuf> {
         Ok(path) => Some(path),
         Err(e) => {
             log::warn!("[actions] no browser rendition for row {row_id}: {e}");
-            app.set_status("No HTML version available".to_string());
+            app.set_visible_status("No HTML version available".to_string(), StatusLevel::Info);
             None
         }
     }
@@ -381,7 +382,7 @@ pub fn html_rendition(app: &mut App, html: &str, stem: &str) -> Option<PathBuf> 
     match html_temp_file(html, stem) {
         Ok(path) => Some(path),
         Err(e) => {
-            app.set_status_level(format!("Open failed: {e:#}"), StatusLevel::Error);
+            app.set_visible_status(format!("Open failed: {e:#}"), StatusLevel::Error);
             None
         }
     }
@@ -2078,14 +2079,19 @@ fn handle_search_result_action(
             // A hit that resolved reads its markup out of `message_blobs`, the
             // same as the list flow; one that did not has the html part of the
             // fetch the overlay is rendering, and that is what the browser
-            // gets rather than a decline.
+            // gets rather than a decline. Every outcome is said on the
+            // overlay's own line, since the overlay hides the status line
+            // (PERSO-216).
             let index = app.server_search_index;
             let path = match hit.entry.msg {
                 Some(msg) => html_rendition_for_row(app, msg.row_id()),
                 None => match hit.fetched.html_body.clone() {
                     Some(html) => html_rendition(app, &html, &format!("search-{index}")),
                     None => {
-                        app.set_status("No HTML version available".to_string());
+                        app.set_visible_status(
+                            "No HTML version available".to_string(),
+                            StatusLevel::Info,
+                        );
                         None
                     }
                 },
@@ -2094,8 +2100,10 @@ fn handle_search_result_action(
                 return Ok(());
             };
             match mp_core::parse::open_file_with_system(&path) {
-                Ok(()) => app.set_status("Opened in browser".to_string()),
-                Err(e) => app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error),
+                Ok(()) => {
+                    app.set_visible_status("Opened in browser".to_string(), StatusLevel::Info)
+                }
+                Err(e) => app.set_visible_status(format!("Open failed: {e}"), StatusLevel::Error),
             }
         }
 

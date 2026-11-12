@@ -1394,6 +1394,46 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         );
     }
 
+    /// The search overlay's `b` on a hit whose message has no markup says so
+    /// on the overlay's own line, the only one the overlay paints, as the
+    /// list's `b` says it on the status line (PERSO-216).
+    #[test]
+    fn the_search_overlays_b_on_a_hit_without_html_says_so_on_the_overlays_line() {
+        use crate::tui::app::{Action, Overlay, SearchOverlayFocus, SearchResultEntry};
+        let fx = Fixture::new();
+        let mut email = fixture_email("Plain");
+        email.html_body = None;
+        let row = fx.ingest(&email);
+        let mut app = app_on_row(&fx, &row);
+        app.server_search_results = vec![SearchResultEntry {
+            entry: app.emails[0].clone(),
+            fetched: email,
+            source_label: "Inbox".to_string(),
+            seq: None,
+        }];
+        app.server_search_index = 0;
+        app.overlay = Overlay::Search;
+        app.server_search_focus = SearchOverlayFocus::List;
+
+        press(&mut app, "b");
+        let queued: Vec<String> = app
+            .pending_actions
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect();
+        assert_eq!(queued, [format!("{:?}", Action::SearchResultOpenInBrowser)]);
+
+        // What `SearchResultOpenInBrowser` runs for a hit that resolved to a
+        // row; the handler itself needs a crossterm terminal no test builds.
+        assert_eq!(html_rendition_for_row(&mut app, row.id), None);
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("No HTML version available"),
+            "the refusal went to the status line the overlay hides: {:?}",
+            app.status_message
+        );
+    }
+
     /// `te` (PERSO-174): the message's own raw bytes, materialised as
     /// `<date>_<subject>.eml`, go into the directory picker `ts` opens, so the
     /// copy is the one a saved part takes; on a draft it says why not.

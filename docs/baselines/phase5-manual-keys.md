@@ -70,5 +70,5 @@ A key's effect is then readable off the screen rather than inferred, which is th
 The mutations went through the daemon and nothing else: `a` moved a row between mailboxes and both sidebar counts followed, `r`, `R` and `w` wrote their drafts through `draft.reply` and `draft.forward` and the Drafts count followed, and `o` was answered out of `runtime/handles/` rather than out of a per-row materialisation directory in the client's temp tree.
 Two keys reached a refusal the daemon worded (`b` and `f`), and both refusals are the ones the parity matrix predicts for a fixture with no HTML part and no server.
 
-One thing worth a follow-up, recorded rather than fixed here: `b` on a hit whose message carries no HTML logs the refusal and puts nothing on the overlay's status line, where the same key outside the overlay says so on screen (`a_message_without_html_says_so_instead_of_opening_an_empty_page`).
-On a headless host the difference is invisible; on a real one it is a key that looks like it did nothing.
+One thing this walk left for a follow-up: `b` on a hit whose message carries no HTML logged the refusal and put nothing on the overlay's status line, where the same key outside the overlay says so on screen (`a_message_without_html_says_so_instead_of_opening_an_empty_page`).
+PERSO-216 fixed it: the overlay's `b` now says every outcome on the overlay's own line (`the_search_overlays_b_on_a_hit_without_html_says_so_on_the_overlays_line`).

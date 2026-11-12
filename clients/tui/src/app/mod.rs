@@ -1216,6 +1216,21 @@ impl App {
         self.status_ticks = 12;
     }
 
+    /// Say `msg` on the line the user is looking at (PERSO-216).
+    ///
+    /// The server-search overlay clears the screen beneath it and paints only
+    /// its own line, so with the overlay open the message goes there; it still
+    /// lands in the activity log, as a status line does. Anywhere else it is
+    /// the status line.
+    pub fn set_visible_status(&mut self, msg: String, level: StatusLevel) {
+        if matches!(self.overlay, Overlay::Search) {
+            self.push_status(msg.clone(), level);
+            self.server_search_status = Some(msg);
+        } else {
+            self.set_status_level(msg, level);
+        }
+    }
+
     pub fn tick_status(&mut self) {
         if self.bg_count > 0 {
             return;
