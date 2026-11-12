@@ -31,6 +31,7 @@ pub mod freebusy;
 pub mod hook;
 pub mod mailbox;
 pub mod message;
+pub mod message_body;
 pub mod message_eml;
 pub mod message_server;
 pub mod reminder;

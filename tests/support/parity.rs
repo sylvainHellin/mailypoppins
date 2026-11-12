@@ -590,13 +590,33 @@ pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
     let args = without_sort_relevance(args);
     let args = args.as_slice();
-    graph_without_smtp_warning(piped_since_0144(
+    without_retired_body_sentence(graph_without_smtp_warning(piped_since_0144(
         args,
         oracle_command(tmp)
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
-    ))
+    )))
+}
+
+/// The oracle's stdout with `mp show`'s line for a message with no text body
+/// as today's binary prints it.
+///
+/// The pre-daemon binary printed one sentence for a body it could not read,
+/// which told the user to re-ingest an evicted body; since PERSO-205 the
+/// daemon brings an evicted body back when the message is opened and names
+/// why when it cannot, so a `null` body with no reason is a message with no
+/// text, printed `(no text body)`. This takes that deliberate change out of a
+/// parity row the way [`graph_without_smtp_warning`] does.
+pub fn without_retired_body_sentence(mut out: Output) -> Output {
+    const ORACLE: &str = "(no stored body: retention evicted it, or it was never ingested; \
+                          re-ingesting this message restores it -- on-demand re-fetch is #0085)";
+    const TODAY: &str = "(no text body)";
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if stdout.contains(ORACLE) {
+        out.stdout = stdout.replace(ORACLE, TODAY).into_bytes();
+    }
+    out
 }
 
 /// `args` without a `--sort relevance`, as the oracle takes them.

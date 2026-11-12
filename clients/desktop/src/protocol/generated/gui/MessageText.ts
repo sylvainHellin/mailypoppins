@@ -5,6 +5,7 @@
  */
 export type MessageText = { account: string, row_id: number,
 /**
- * `None` when the store holds no readable body.
+ * The text the reader shows: the body, or the daemon's sentence for one
+ * it could not get back; `None` when the message has no text body.
  */
 body: string | null, };

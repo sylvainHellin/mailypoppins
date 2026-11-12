@@ -504,7 +504,9 @@ fn app_on_inbox() -> App {
 /// The list load itself reads no blob at all, which is the cold-start
 /// criterion: every body blob can be missing and the mailbox still lists,
 /// counts and displays. Only a body actually asked for degrades, one
-/// message wide.
+/// message wide: with no raw message to read it back from and no server to
+/// ask, the preview shows the daemon's sentence saying so, never an empty
+/// body (PERSO-205).
 #[test]
 fn the_list_loads_with_every_body_blob_missing() {
     let data = DataDir::new();
@@ -530,7 +532,11 @@ fn the_list_loads_with_every_body_blob_missing() {
 
     let mut app = app_on_inbox();
     app.refresh_preview_body();
-    assert_eq!(app.preview_body.text(), "", "only the preview degrades");
+    let text = app.preview_body.text();
+    assert!(
+        text.starts_with("(The body of this message is not available locally"),
+        "only the preview degrades, and says so: {text}"
+    );
 }
 
 /// The preview loads the body of the message the cursor is on, and follows

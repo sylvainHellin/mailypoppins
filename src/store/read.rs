@@ -1429,6 +1429,37 @@ pub fn load_raw(store: &Store, blobs: &BlobStore, message_row: i64) -> Option<Ve
     read_blob(blobs, message_row, hash.as_deref()?)
 }
 
+/// Whether the row's body blob is gone: no hash recorded, or a hash whose file
+/// cannot be read, which is what the retention sweep leaves behind.
+///
+/// The question [`load_body`] cannot answer, since it reads both a gone body
+/// and a body sent empty as `Some("")`.
+pub fn body_is_missing(blobs: &BlobStore, row: &MessageRow) -> bool {
+    row.body_blob
+        .as_deref()
+        .and_then(|hash| read_blob(blobs, row.id, hash))
+        .is_none()
+}
+
+/// The plain-text body of one message re-derived from the blobs the
+/// retention sweep never evicts (PERSO-205), or `None` when the row holds
+/// neither readable.
+///
+/// An IMAP row keeps its raw message, parsed here as the sync parses it; a
+/// Graph row with an HTML body keeps that HTML, flattened as the Graph
+/// download flattens it. Either way the text is the one ingest stored, so it
+/// hashes to the row's own `body_blob`.
+pub fn rederive_body(store: &Store, blobs: &BlobStore, message_row: i64) -> Option<String> {
+    load_raw(store, blobs, message_row)
+        .and_then(|raw| crate::parse::parse_rfc822_to_fetched_email(&raw))
+        .map(|email| email.body_text)
+        .or_else(|| {
+            let hash = blob_hash_of_kind(store, message_row, "html")?;
+            let html = read_blob(blobs, message_row, &hash)?;
+            Some(crate::parse::html_to_plain(&String::from_utf8_lossy(&html)))
+        })
+}
+
 /// Read one body blob as text, degrading to the empty string.
 ///
 /// A blob that cannot be read is reported as an empty body and logged, not

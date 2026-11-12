@@ -1735,12 +1735,12 @@ impl App {
                     .unwrap_or_else(|| self.active_server_mailbox()),
             ));
             let preview = self.message_preview(msg).unwrap_or_default();
+            let text = preview.reading_text().unwrap_or_default();
             let recipients = MemberRecipients {
                 to: first_recipient_name(preview.to.as_deref().unwrap_or_default()),
                 cc: preview.cc,
             };
-            self.preview_body
-                .fill_member(key, preview.body.unwrap_or_default(), Some(recipients));
+            self.preview_body.fill_member(key, text, Some(recipients));
             return;
         }
         let text = match &key {

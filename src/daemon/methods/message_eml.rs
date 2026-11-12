@@ -118,7 +118,7 @@ pub(super) struct ServerLeg<'a> {
 impl ServerLeg<'_> {
     /// The server's copy of `message_id` in the mailbox keyed `mailbox`,
     /// downloaded once for the reads of the next couple of minutes.
-    async fn download(
+    pub(super) async fn download(
         &self,
         account: &AccountConfig,
         message_id: &str,
@@ -403,7 +403,7 @@ pub(super) async fn get_hit(
     let hit = hit_address(&account, params)?.ok_or_else(|| invalid_params("hit is required"))?;
     let (mailbox, email) = match hit_message(&account, &hit, server).await? {
         HitMessage::Held(row) => {
-            return super::message::get(&as_row_params(params, &row), accounts)
+            return super::message::get(&as_row_params(params, &row), accounts, server).await
         }
         HitMessage::Server { mailbox, email } => (mailbox, email),
     };

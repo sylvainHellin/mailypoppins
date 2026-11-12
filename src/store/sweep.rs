@@ -80,8 +80,9 @@ pub const RETENTION_OVER_CAP_MARKER: &str = "retention_over_cap";
 
 /// A sweep that would evict more than this fraction of the store's current blob
 /// bytes is refused without `--force`, a fat-finger guard against a tiny cap
-/// accidentally reaping a working set that on-open re-fetch cannot yet restore
-/// (#0085). Expressed as a numerator/denominator to stay in integer maths.
+/// accidentally reaping a working set, which comes back only one opened
+/// message at a time (PERSO-205). Expressed as a numerator/denominator to stay
+/// in integer maths.
 pub const EVICT_GUARD_NUM: u64 = 1;
 pub const EVICT_GUARD_DEN: u64 = 2;
 
@@ -270,7 +271,7 @@ pub fn sweep_pinned(
     let would_evict: u64 = plan.iter().map(|e| e.size).sum();
 
     // Fat-finger guard: refuse to reap more than the guard fraction of current
-    // bytes without --force (#0060 supervisor addition, pending #0085).
+    // bytes without --force (#0060 supervisor addition).
     if would_evict * EVICT_GUARD_DEN > before * EVICT_GUARD_NUM && !opts.force {
         return Ok(SweepOutcome {
             cap_bytes: cap,
@@ -777,7 +778,7 @@ mod tests {
 
     #[test]
     fn an_evicted_body_re_materialises_on_re_acquire() {
-        // The interim re-fetch path (#0060 acceptance / #0085): the sweep
+        // The re-materialise path (#0060 acceptance, PERSO-205): the sweep
         // reclaims the file and its row, the message row and message_blobs
         // reference survive, and re-writing + re-acquiring the same bytes (what
         // a same-UID re-ingest does) restores the blob and its refcount.

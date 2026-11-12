@@ -349,13 +349,13 @@ pub fn totals_by_slug(rows: &[MailboxRow]) -> HashMap<&str, u64> {
 // One message
 // ---------------------------------------------------------------------------
 
-/// The stored plain-text body of one row, through `message.get`.
+/// The text a reader shows for one row, through `message.get`.
 ///
 /// Addressed by `row_id`, the `id` the listing carried, so a client holding a
 /// listed row needs no second identity for it. `None` when the row has no
-/// stored body.
+/// text body ([`MessagePreview::reading_text`]).
 pub fn message_body(q: &dyn Queries, account: &str, row_id: i64) -> Result<Option<String>> {
-    Ok(message_preview(q, account, row_id)?.body)
+    Ok(message_preview(q, account, row_id)?.reading_text())
 }
 
 /// What a preview of one row reads off its `message.get` record: the body,
@@ -364,8 +364,24 @@ pub fn message_body(q: &dyn Queries, account: &str, row_id: i64) -> Result<Optio
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MessagePreview {
     pub body: Option<String>,
+    /// The daemon's sentence for a body the store had lost and could not get
+    /// back from the server (PERSO-205), present only with a `None` body.
+    pub body_unavailable: Option<String>,
     pub to: Option<String>,
     pub cc: Option<String>,
+}
+
+impl MessagePreview {
+    /// What a reader shows where the body goes: the body, or the daemon's
+    /// sentence for one it could not get back, in parentheses so it does not
+    /// read as the sender's text; `None` for a message with no text body.
+    pub fn reading_text(&self) -> Option<String> {
+        self.body.clone().or_else(|| {
+            self.body_unavailable
+                .as_deref()
+                .map(|why| format!("({why})"))
+        })
+    }
 }
 
 /// One row's body and recipients through the one `message.get` that
@@ -376,6 +392,7 @@ pub fn message_preview(q: &dyn Queries, account: &str, row_id: i64) -> Result<Me
     let text = |key: &str| answer[key].as_str().map(str::to_string);
     Ok(MessagePreview {
         body: text("body"),
+        body_unavailable: text("body_unavailable"),
         to: text("to"),
         cc: text("cc"),
     })
@@ -1041,6 +1058,28 @@ mod tests {
         );
         let none = Canned::new(json!({"ics": null}));
         assert_eq!(message_ics(&none, "work", 1).expect("no bytes"), None);
+    }
+
+    /// A body the daemon could not get back reads as its sentence, in
+    /// parentheses, and a message with no text body as nothing (PERSO-205).
+    #[test]
+    fn a_body_the_daemon_could_not_get_back_reads_as_its_sentence() {
+        let lost = Canned::new(json!({"body": null, "body_unavailable": "not available locally"}));
+        assert_eq!(
+            message_body(&lost, "work", 1)
+                .expect("an answer")
+                .as_deref(),
+            Some("(not available locally)")
+        );
+        let empty = Canned::new(json!({"body": null}));
+        assert_eq!(message_body(&empty, "work", 1).expect("an answer"), None);
+        let held = Canned::new(json!({"body": "hello"}));
+        assert_eq!(
+            message_body(&held, "work", 1)
+                .expect("an answer")
+                .as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]

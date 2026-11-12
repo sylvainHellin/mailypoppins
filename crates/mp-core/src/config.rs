@@ -707,15 +707,13 @@ pub struct SignatureEntry {
 //
 // The local store is a cache in front of the server, so evicting a body or an
 // attachment is not deletion: the envelope row stays and the bytes can be
-// re-materialised by re-ingesting the same message. That is what makes
-// retention a safe, user-facing knob.
+// re-materialised. That is what makes retention a safe, user-facing knob.
 //
 // This is the parsing and defaults surface. The eviction sweep that acts on
 // these values lives in `crate::store::sweep` (#0060): it runs after every sync
-// and via `mp store gc`. The one half still owed is on-demand re-fetch of an
-// evicted body when a message is opened (#0085); until it ships, recovery of an
-// evicted body is a targeted re-ingest, and the sweep guards against reclaiming
-// more than half a store at once without `--force`.
+// and via `mp store gc`. An evicted body comes back when its message is opened
+// (PERSO-205, the daemon's `message.get`), and the sweep still guards against
+// reclaiming more than half a store at once without `--force`.
 
 /// Default metadata horizon: keep every envelope row, forever, so the message
 /// list and search always render the full history. Envelopes are cheap.

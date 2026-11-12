@@ -222,7 +222,8 @@ pub enum MessageList {
 pub struct MessageText {
     pub account: String,
     pub row_id: i64,
-    /// `None` when the store holds no readable body.
+    /// The text the reader shows: the body, or the daemon's sentence for one
+    /// it could not get back; `None` when the message has no text body.
     pub body: Option<String>,
 }
 

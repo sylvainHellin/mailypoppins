@@ -739,8 +739,8 @@ enum StoreAction {
     /// The first over-cap run only warns and records a marker; run it again to
     /// evict. `--dry-run` prints what would go without touching anything. A run
     /// that would reclaim more than half the store's blob bytes is refused
-    /// without `--force` (a fat-finger guard while on-demand re-fetch, #0085,
-    /// does not yet exist).
+    /// without `--force`. An evicted body comes back when its message is
+    /// opened.
     Gc {
         /// Print what would be evicted and stop; change nothing.
         #[arg(long)]
@@ -3975,8 +3975,7 @@ fn report_sweep_outcome(
         SweepDecision::RefusedTooMuch { would_evict_bytes } => {
             println!(
                 "{} {}: pruning would reclaim {} ({} > half of {at}); refusing. \
-                 Re-run `mp store gc --force` to proceed \
-                 (on-demand re-fetch of an evicted body is not built yet, #0085).",
+                 Re-run `mp store gc --force` to proceed.",
                 "\u{26a0}".yellow(),
                 account,
                 human_bytes(*would_evict_bytes),

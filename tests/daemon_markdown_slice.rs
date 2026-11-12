@@ -505,12 +505,12 @@ async fn the_account_refusals_are_the_read_family_s() {
     );
 }
 
-/// A message with no stored body still renders: `render_markdown` degrades to
+/// A message with no text body still renders: `render_markdown` degrades to
 /// an empty body rather than failing, and the method may not turn that into a
 /// refusal.
 ///
 /// The fixture's `alpha inbox/4` is the row with no readable body, which is
-/// the same row `mp show` prints its "no stored body" sentence for.
+/// the same row `mp show` prints its "no text body" line for.
 ///
 /// **Fails at HEAD**: `-32601`.
 #[tokio::test]

@@ -462,6 +462,67 @@ fn ingest_guarded(
     Ok(outcome)
 }
 
+/// Put back the body blob the retention sweep evicted from `row_id`, given
+/// the body re-derived or downloaded again (PERSO-205); `true` when it was
+/// stored.
+///
+/// Stored only when `body` hashes to the row's own `body_blob`, so the store
+/// returns to the state ingest left it in and invents nothing: a body that
+/// reads differently (a parser that changed since, a server copy rendered
+/// another way) is shown to the reader and not kept. Nothing else on the row
+/// moves, neither its flags nor its thread nor its FTS entry, which the sweep
+/// never touched; a full re-ingest would rewrite the flags from a copy that
+/// may predate a local change the server has not acknowledged yet.
+///
+/// The sweep deleted the `blobs` row with the file and kept every
+/// `message_blobs` reference, so the row comes back with one reference per
+/// `message_blobs` row naming the hash (a twin in another mailbox shares it),
+/// which is the count a later re-ingest releases from. A `blobs` row still
+/// there, a file lost some other way, keeps its count. The restored body
+/// counts against the store's cap like any blob and a later sweep may evict
+/// it again.
+pub fn restore_body(store: &Store, blobs: &BlobStore, row_id: i64, body: &str) -> Result<bool> {
+    let hash = BlobHash::of(body.as_bytes());
+    let recorded: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT body_blob FROM messages WHERE id = ?1",
+            [row_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading the body hash")?
+        .flatten();
+    if recorded.as_deref() != Some(hash.as_str()) {
+        return Ok(false);
+    }
+    // The file first, as ingest writes it: a file with no row is an orphan a
+    // rebuild reclaims, a row with no file a hole the read path degrades.
+    blobs.write(body.as_bytes())?;
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the body restore transaction")?;
+    let references: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM message_blobs WHERE hash = ?1",
+            [hash.as_str()],
+            |row| row.get(0),
+        )
+        .context("counting the body's references")?;
+    if references > 0 {
+        tx.execute(
+            "INSERT INTO blobs (hash, size, refcount) VALUES (?1, ?2, ?3)
+             ON CONFLICT (hash) DO NOTHING",
+            rusqlite::params![hash.as_str(), body.len() as i64, references],
+        )
+        .context("recording the restored body blob")?;
+    }
+    tx.commit()
+        .context("committing the body restore transaction")?;
+    Ok(true)
+}
+
 /// Write the attachment blob files of one message and return their references,
 /// ordinals from 0: the iMIP sidecar first, then every attachment in order.
 /// Shared by [`ingest_message`] and [`attach_missing_attachments`], so a

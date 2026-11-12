@@ -45,15 +45,20 @@ pub struct ShownMessage {
     pub flags: Vec<String>,
     pub invite: bool,
     pub attachments: Vec<ShownAttachment>,
-    /// The stored plain-text body. `null` when the store has no readable body
-    /// for the row: an evicted blob, or a message ingested without one. A
-    /// reader can tell that from an empty body, which is a message that was
-    /// sent empty.
+    /// The plain-text body. `null` when there is none to show: a message with
+    /// no text, or a body the store lost and `message.get` could not get back,
+    /// which [`Self::body_unavailable`] then names.
     ///
     /// `#[serde(default)]` because `message.get` omits the key entirely for a
     /// caller that asked for no body, which is not the same answer as `null`.
     #[serde(default)]
     pub body: Option<String>,
+    /// Why `body` is `null` when the store had lost it and the daemon could
+    /// not get it back (PERSO-205): the sentence a reader shows in its place.
+    /// Written only then, so every other record is unchanged, and read as
+    /// absent from a daemon older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_unavailable: Option<String>,
 }
 
 /// One attachment of a shown message.
@@ -176,6 +181,7 @@ pub fn shown_fetched(
         body: Some(email.body_text.as_str())
             .filter(|body| !body.is_empty())
             .map(mp_core::body::for_reading),
+        body_unavailable: None,
     }
 }
 
@@ -225,6 +231,7 @@ pub fn shown_message(
         body: read::load_body(store, blobs, row.id)
             .filter(|body| !body.is_empty())
             .map(|body| mp_core::body::for_reading(&body)),
+        body_unavailable: None,
     }
 }
 
@@ -298,18 +305,17 @@ pub fn render_show(message: &ShownMessage) -> String {
     line("\u{2500}".repeat(RULE));
     match message.body.as_deref() {
         Some(body) => line(body.trim_end().to_string()),
-        // The degrade the acceptance criteria ask for: a body the store cannot
-        // produce is a sentence, not an error, because the row is still real
-        // and everything above this line is still true.
+        // A body nobody can produce is a sentence, not an error, because the
+        // row is still real and everything above this line is still true.
+        // The daemon names why when it had lost the body and could not get
+        // it back (PERSO-205); otherwise the message has no text to show.
         None => line(
-            // Be honest about recovery: a plain `mp sync` skips a UID it already
-            // holds a row for, so it does NOT re-download an evicted body.
-            // On-demand re-fetch on open is #0085; until it ships, a targeted
-            // re-ingest of this message is the recovery.
-            "(no stored body: retention evicted it, or it was never ingested; \
-             re-ingesting this message restores it -- on-demand re-fetch is #0085)"
-                .dimmed()
-                .to_string(),
+            match message.body_unavailable.as_deref() {
+                Some(why) => format!("({why})"),
+                None => "(no text body)".to_string(),
+            }
+            .dimmed()
+            .to_string(),
         ),
     }
     out
@@ -1016,6 +1022,7 @@ mod tests {
             invite: false,
             attachments: vec![only(true)],
             body: None,
+            body_unavailable: None,
         };
         colored::control::set_override(false);
         let text = render_show(&shown);
@@ -1122,7 +1129,7 @@ mod tests {
     }
 
     /// PERSO-291: a stored body of nothing but blank lines reads as an empty
-    /// body, not as the evicted one the "no stored body" sentence names.
+    /// body, not as the missing one the "no text body" sentence names.
     #[test]
     fn a_body_of_only_blank_lines_shows_as_empty_and_not_as_evicted() {
         colored::control::set_override(false);
@@ -1132,7 +1139,7 @@ mod tests {
         let shown = shown_message(&fx.store, &fx.blobs, "acct", &row);
         assert_eq!(shown.body.as_deref(), Some(""));
         let text = render_show(&shown);
-        assert!(!text.contains("no stored body"), "{text}");
+        assert!(!text.contains("no text body"), "{text}");
         assert!(
             text.ends_with(&format!("{}\n\n", "\u{2500}".repeat(RULE))),
             "{text:?}"
@@ -1171,7 +1178,9 @@ mod tests {
     }
 
     /// An evicted body degrades to a sentence rather than an error, and says so
-    /// in JSON with `null` instead of an empty string.
+    /// in JSON with `null` instead of an empty string: the store alone says
+    /// there is no text, and the reason the daemon adds when it could not get
+    /// the body back (PERSO-205) is printed in its place.
     #[test]
     fn an_evicted_body_degrades_to_a_message() {
         colored::control::set_override(false);
@@ -1181,14 +1190,23 @@ mod tests {
         // do not.
         std::fs::remove_dir_all(fx.blobs.root()).unwrap();
 
-        let shown = shown_message(&fx.store, &fx.blobs, "acct", &row);
+        let mut shown = shown_message(&fx.store, &fx.blobs, "acct", &row);
         assert_eq!(shown.body, None);
         let text = render_show(&shown);
         assert!(
             text.contains("Subject: evicted"),
             "the envelope is still readable"
         );
-        assert!(text.contains("no stored body"));
+        assert!(text.ends_with("(no text body)\n"), "{text}");
+
+        shown.body_unavailable = Some("the body is not available locally".to_string());
+        let text = render_show(&shown);
+        assert!(
+            text.ends_with("(the body is not available locally)\n"),
+            "{text}"
+        );
+        let json = serde_json::to_value(&shown).unwrap();
+        assert!(json["body"].is_null(), "{json}");
     }
 
     /// The listing follows the store's own order (newest first), carries the

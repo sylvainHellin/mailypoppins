@@ -434,14 +434,16 @@ A message is addressed by exactly one of `id`, `row_id` and `selector`; naming n
 A `row_id` no message has is `-32602` like every other address that names nothing.
 A server-search hit with no row is a fourth address, `hit: {message_id, mailbox}`, the one `message.fetch` and `message.materialise_eml` take and never beside the other three (PERSO-155).
 A hit the store has caught up with is that row's record; any other is read from the server's copy, downloaded as `message.materialise_eml` downloads it and parsed as a sync parses it, and answers the record a stored row of that mailbox would print, under the selector a fetch would land it as, with the parsed parts in the order `message.materialise_attachment` takes them.
-Nothing is ingested, so the hit stays a hit; this is the one read of the family with a server leg, and its failure is `-32603` with `{account}`.
+Nothing is ingested, so the hit stays a hit; its failure is `-32603` with `{account}`.
 The daemon keeps the last few server copies it downloaded for two minutes, by account, mailbox and `Message-ID` (`src/daemon/server_copies.rs`), so a hit's record, each of its parts, its view, its `.eml` and its forward share one download; a configuration swap that removes or changes the account drops its copies.
 `selector` is the grammar `mp show` takes from a user (`<message-id>`, `<mailbox>/<message-id>`, `mp://<account>/<mailbox>/<message-id>`, and either form that names its mailbox followed by `/<uid>` for one of two copies sharing a `Message-ID` there, PERSO-239), resolved daemon-side the way `resolve_received_arg` resolves it, with the optional `mailbox` narrowing it exactly as `mp show --mailbox` does: the resolution needs the store the client no longer has.
 Which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
 An unknown uid, a malformed id, a mailbox the account does not have and a selector that resolves to nothing are all `-32602`, in the resolution's own words, so a routed `mp show` reports what the pre-daemon one reported.
 
-`body` defaults to `true` and its absence is not its nullity: with `body: false` the key is gone from the result, and with the default it is present and `null` when the store holds no readable body for the row.
-`mp show` prints its "no stored body" sentence for exactly that `null`, so collapsing the two would make a bodyless answer indistinguishable from an evicted blob.
+`body` defaults to `true` and its absence is not its nullity: with `body: false` the key is gone from the result, and with the default it is present and `null` when the row has no text body.
+A row whose body blob the retention sweep evicted gets it back first (PERSO-205): from the raw message or the HTML the row keeps, else from the server's copy of that one message through the same recent copies, stored again when it hashes to the row's `body_blob`.
+When neither answers, `body` is `null` and `body_unavailable` carries the sentence a reader shows in its place; the key is absent from every other record.
+`mp show` prints that sentence, or its "no text body" line for a `null` without one, so collapsing the two would make a message with no text indistinguishable from a body that could not be had.
 
 `message.search` takes `{"account": str, "query": str}` plus `mailbox`, `limit`, `order`, `body`, and the field filters `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after`, `before`, and returns:
 

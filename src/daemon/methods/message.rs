@@ -140,17 +140,19 @@ impl Method for MessageReadMethod {
         // [`list_off_thread`] moves its `list` projection to the blocking pool.
         Box::pin(async move {
             let accounts = self.config.accounts();
+            // `message.get` is the one read of this family with a server leg:
+            // a server-search hit with no row is read from the server's copy,
+            // and a row whose body the retention sweep evicted gets it back
+            // from there when no blob of its own holds it (PERSO-205).
+            let server = super::message_eml::ServerLeg {
+                secrets: self.config.snapshot().config.secrets_backend,
+                copies: &self.copies,
+            };
             let result = match self.spec.name {
-                // A server-search hit with no row is read from the server's
-                // copy, the one read of this family with a server leg.
                 "message.get" if super::message_eml::addresses_hit(&params) => {
-                    let server = super::message_eml::ServerLeg {
-                        secrets: self.config.snapshot().config.secrets_backend,
-                        copies: &self.copies,
-                    };
                     super::message_eml::get_hit(&params, &accounts, server).await
                 }
-                "message.get" => get(&params, &accounts),
+                "message.get" => get(&params, &accounts, server).await,
                 "message.list" => list_off_thread(&params, &accounts).await,
                 "message.thread" => thread(&params, &accounts),
                 mp_protocol::rendition::METHOD_MESSAGE_HTML => html(&params, &accounts),
@@ -1085,19 +1087,43 @@ fn envelopes(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
 ///
 /// `body` defaults to `true` and its absence is not its nullity: with
 /// `body: false` the key is gone, and with the default it is present and `null`
-/// when the store holds no readable body for the row. `mp show` prints its "no
-/// stored body" sentence for exactly that `null`, so collapsing the two would
-/// make a bodyless answer indistinguishable from an evicted blob.
-pub fn get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+/// when the row has no text body. `mp show` prints its "no text body" line
+/// for exactly that `null`.
+///
+/// A row whose body blob the retention sweep evicted gets its body back here
+/// ([`super::message_body`], PERSO-205), from a blob of its own or from the
+/// server; when neither answers, `body` stays `null` and `body_unavailable`
+/// says why, so a reader can tell a lost body from a message with no text.
+pub(super) async fn get(
+    params: &Value,
+    accounts: &[AccountConfig],
+    server: super::message_eml::ServerLeg<'_>,
+) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
-    super::account::ready_account(accounts, &name)?;
+    let account = super::account::ready_account(accounts, &name)?;
     let wants_body = flag_param(params, "body", true)?;
 
-    let store = Store::open(crate::config::store_path(&name))
-        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
-    let row = address(params, &store, &name)?;
-    let blobs = BlobStore::new(crate::config::blobs_dir(&name));
-    let shown = crate::read_cmd::shown_message(&store, &blobs, &name, &row);
+    // The store is read and closed before any await: the server leg is
+    // seconds of network, and the connection is not `Sync`.
+    let (row, mut shown, missing) = {
+        let store = Store::open(crate::config::store_path(&name))
+            .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+        let row = address(params, &store, &name)?;
+        let blobs = BlobStore::new(crate::config::blobs_dir(&name));
+        let shown = crate::read_cmd::shown_message(&store, &blobs, &name, &row);
+        let missing = wants_body && read::body_is_missing(&blobs, &row);
+        (row, shown, missing)
+    };
+    if missing {
+        match super::message_body::recover(account, &row, server).await {
+            Ok(body) => {
+                shown.body = Some(body)
+                    .filter(|body| !body.is_empty())
+                    .map(|body| mp_core::body::for_reading(&body));
+            }
+            Err(why) => shown.body_unavailable = Some(why),
+        }
+    }
 
     let mut result = serde_json::to_value(&shown).map_err(|e| {
         internal(format!(
@@ -2289,7 +2315,7 @@ pub(super) fn materialise(
 /// the pre-daemon `$EDITOR` view were both built from: YAML frontmatter folded
 /// out of the `messages` row, then the stored plain text. It cannot fail - a
 /// message with no readable body renders with an empty one, exactly as
-/// `mp show` prints its "no stored body" sentence for the same row - so a
+/// `mp show` prints its "no text body" line for the same row - so a
 /// bodyless message is a rendition and not a refusal.
 ///
 /// The pinned blob is the row's own `body_blob`, so a retention sweep running

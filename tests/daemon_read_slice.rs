@@ -51,10 +51,10 @@
 //!
 //! **`body` defaults to `true` and its absence is not its nullity.** With
 //! `body: false` the key is absent from the result; with the default it is
-//! present and is `null` when the store holds no readable body for the row.
-//! `mp show` prints its "no stored body" sentence for exactly that `null`, so
-//! collapsing the two would make a bodyless answer indistinguishable from an
-//! evicted blob. The asymmetry with `message.search` below (which defaults to
+//! present and is `null` when the row has no text body.
+//! `mp show` prints its "no text body" line for exactly that `null`, so
+//! collapsing the two would make a bodyless answer indistinguishable from a
+//! message whose record was asked for without one. The asymmetry with `message.search` below (which defaults to
 //! `false`) is deliberate: `mp show` always prints a body and `mp search`
 //! prints one only under `--full`.
 //!
@@ -550,7 +550,7 @@ async fn message_get_tells_an_unasked_body_from_an_unreadable_one() {
     );
 
     // The row with nothing to read: `null`, which is the sentinel `mp show`
-    // turns into its "no stored body" sentence.
+    // turns into its "no text body" line.
     let empty = call(
         &mut conn,
         "message.get",

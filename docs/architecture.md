@@ -254,12 +254,14 @@ Blob files are written before the transaction that references them, never inside
 
 ### Retention sweep
 
-`src/store/sweep.rs` is the one code path that deletes user data (#0060), and it deletes only from the cache: blob *files* and their `blobs` refcount rows, never a `messages` row, so the listing stays complete and an evicted body is re-materialised by a re-ingest of the same message.
+`src/store/sweep.rs` is the one code path that deletes user data (#0060), and it deletes only from the cache: blob *files* and their `blobs` refcount rows, never a `messages` row, so the listing stays complete and an evicted body comes back when its message is opened.
 It runs after every `mp sync` and on demand via `mp store gc`, honouring the resolved `RetentionPolicy` (`max_disk_bytes`, default 10 GB, and the body/attachment age horizons).
 A two-strike rule protects a store that briefly spikes: the first over-cap sweep only warns and persists a store-level marker in `meta`, the next over-cap sweep evicts, and dropping back under the cap clears the marker.
 When it does evict, victims are taken age-horizon-first (attachments then bodies past their horizon), then attachment blobs oldest-first, then body blobs oldest-first, stopping the moment the store is back under the cap; a blob's age is its freshest referencing message, so a shared blob survives while any message still inside its horizon references it.
 The sweep and a concurrent ingest cannot interleave mid-statement: both go through the store's single-writer WAL connection discipline, so a `mp store gc` run during a sync only ever sees committed blobs.
-One half is deferred to #0085: on-open re-fetch of an evicted body does not exist yet (a plain `mp sync` skips a UID it already has a row for), so until it ships recovery is a targeted re-ingest, and `mp store gc` refuses to reclaim more than half a store at once without `--force`.
+`message.get` brings an evicted body back on open (PERSO-205, `src/daemon/methods/message_body.rs`): from the raw message an IMAP row keeps or the HTML a Graph row keeps, neither of which the sweep evicts, else from the server for that one message, and stores it again when it hashes to the row's own `body_blob`.
+A plain `mp sync` still skips a UID it already has a row for, so only the messages a user opens come back and a store held at its cap does not download again what it evicted.
+`mp store gc` still refuses to reclaim more than half a store at once without `--force`.
 
 `sweep_pinned` is the same sweep with a set of blob hashes held back from the eviction plan, and the daemon fills it from the handles a client has materialised and not yet released (`ANO-6`, [daemon-protocol.md](daemon-protocol.md#materialised-handles)).
 A pin changes who may be a victim and nothing else: the store's size, the two-strike marker and the half-store guard are all computed as before, over the plan the pin left, so `--force` still overrules the guard and never the pin.

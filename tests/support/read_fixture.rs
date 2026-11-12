@@ -32,7 +32,7 @@
 //! | a calendar invitation | `alpha inbox/2` |
 //! | HTML-only mail, read as flattened text | `alpha inbox/3` |
 //! | no `Message-ID:` and no usable `Date:` | `alpha inbox/4` |
-//! | no stored body (the `mp show` degrade) | `alpha inbox/4` |
+//! | no text body (the `mp show` degrade) | `alpha inbox/4` |
 //! | a second mailbox | `alpha sent/1` |
 //! | a third mailbox whose id sorts before the others | `alpha Team/Reports/1` |
 //! | a second account | `beta inbox/1` |
@@ -214,7 +214,7 @@ fn seed_alpha(root: &Path) {
 
     // No `Message-ID:`, no usable `Date:` and no body: three degrades in one
     // row. Ingest synthesises the id, `date_sort` is the empty string, and
-    // `mp show` prints the "no stored body" sentence rather than an error.
+    // `mp show` prints the "no text body" line rather than an error.
     let undated = email(
         "undated@example.com",
         "sylvain@example.com",
