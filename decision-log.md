@@ -221,13 +221,12 @@ Rejected: keeping the extra-folder prompt for familiarity.
 Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
 Status: accepted
 
-## 2026-10-22 - A renamed Graph folder keeps its rows, and IMAP rename detection waits for a check of the live servers
+## 2026-10-22 - A renamed folder keeps its rows: Graph by folder id, IMAP only when the server keeps UIDVALIDITY
 
-Why: Graph's folder id survives a rename, so the listing stores it and a new name with a known id moves the folder's rows, cursor and delta token to the new key; a pinned old name is left alone and logged. IMAP has no folder id; its detection by UIDVALIDITY and Message-ID overlap is planned in `.agents/plans/mailbox-discovery.md` and needs a rename on TUM and Proton first to learn whether each keeps UIDVALIDITY.
-Rejected: building the IMAP half on an assumption about the servers.
-Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Why: Graph's folder id survives a rename, so the listing stores it and a new name with a known id moves the folder's rows, cursor and delta token to the new key; a pinned old name is left alone and logged. IMAP has no folder id, so a folder gained in the listing that lost a synced one is its rename only when it carries the lost folder's UIDVALIDITY, a UIDNEXT above the highest UID already fetched, and the stored Message-IDs at the sampled UIDs (none differing, at least half still there). The rename probe of 2026-11-13 showed Proton Bridge 3.27.1 keeps UIDVALIDITY across `RENAME`, while both OVH accounts (Zimbra) raise it by 2 and keep the UIDs; TUM Exchange was not probed, its login being refused that day. On OVH a renamed folder therefore still syncs from scratch and the old one stays missing with its rows (PERSO-185).
+Rejected: building the IMAP half on an assumption about the servers; pairing folders on Message-ID overlap alone when UIDVALIDITY changed, which two folders holding copies of the same mail would satisfy.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22, the live probe and the PERSO-185 reviews of 2026-11-13; Sylvain may veto any of them.
 Status: accepted
-
 
 ## 2026-10-23 - The dark theme's warning colour is #FF7212
 
