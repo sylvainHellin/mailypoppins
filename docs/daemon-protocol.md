@@ -967,7 +967,7 @@ An `address` that is neither a full address nor `@domain` is `-32602` with the s
 After every tick that ran a body, each ready account with a server judges the Inbox rows that arrived since its last scan and moves the ones from a blocked sender to Junk the same way ([architecture.md](architecture.md#watchers)); a message the user moved back to the Inbox after it was judged stays there.
 `sender.unblock` only removes the entry: nothing moves back.
 Both writers publish `sender.blocklist_changed` `{entries}` when the list changed, and the mailbox counts of every account whose mail moved.
-As for a `message.move`, no row event names the moved messages: the client that blocked reads its listings of the accounts in `moved` again on the answer.
+As for a `message.move`, each moved message is announced as a `state.remove` of its Inbox row and the Junk listing as a `state.invalidate` with scope `{"query": "list"}` (PERSO-286), so every client, the one that blocked included, drops the rows from what it holds without reloading on the answer.
 
 ### The server search leg
 
@@ -1445,8 +1445,10 @@ It is a lifecycle event: a hit is a fact about a moment in one search, two hits 
 
 `state.invalidate` says that a cached query went stale, with a payload of `{resource, scope}`: `resource` is what to re-read, as the `family:path` a method's `affected` list uses, and `scope` is the identity of the query whose answer is now wrong.
 Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbox:<account>/<slug>` and `outbox:<account>`, because that is what makes them coalescible: a hundred count changes for one mailbox are one thing to re-read.
+A mailbox's listing travels as `{"query": "list"}` over `mailbox:<account>/<slug>`: `message.move`, `message.archive`, `sender.block` and the blocked-senders runner publish it for the mailbox their rows went into, since a client cannot add a row it was never sent (PERSO-286).
 
 `state.remove` says that a resource is gone, with a payload of `{resource}`.
+A row that left its mailbox through `message.move`, `message.archive`, `message.delete`, `sender.block` or the blocked-senders runner travels as `state.remove` of `message:<account>/<mailbox>/<uid>`, named by the mailbox and the uid it had there, so every client drops it from a held listing and from its search hits whichever client or daemon task moved it (PERSO-286); a settled op the server refused announces nothing, since its rollback put the row back.
 A removal is a fact about a moment and is never merged with anything, in either direction, including another removal of the same resource.
 
 `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` are the four kinds of the undo-send hold, described below.

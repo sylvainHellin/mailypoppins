@@ -168,12 +168,15 @@ impl SenderMethod {
                     continue;
                 };
                 match senders::move_existing(&store, account, std::slice::from_ref(&entry)) {
-                    Ok(senders::Moved::Rows { mailbox, count }) if count > 0 => {
-                        moved.push(BlockMoved {
-                            account: name,
-                            mailbox,
-                            count: count as u64,
-                        });
+                    Ok(senders::Moved::Rows { mailbox, departed }) if !departed.is_empty() => {
+                        moved.push((
+                            BlockMoved {
+                                account: name,
+                                mailbox,
+                                count: departed.len() as u64,
+                            },
+                            departed,
+                        ));
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -189,10 +192,16 @@ impl SenderMethod {
         })
         .await?;
 
-        for row in &moved {
+        for (row, departed) in &moved {
             if let Some(runtime) = self.runtimes.get(&row.account) {
                 runtime.request_drain();
             }
+            super::super::runtime::publish::publish_departures(
+                &self.canonical,
+                &row.account,
+                departed,
+                Some(&row.mailbox),
+            );
             let account = self
                 .config
                 .accounts()
@@ -207,6 +216,7 @@ impl SenderMethod {
         if edit.changed {
             self.canonical.publish(blocklist_changed(&edit.entries));
         }
+        let moved: Vec<BlockMoved> = moved.into_iter().map(|(row, _)| row).collect();
         let mut affected = vec![ResourceId::new(BLOCKLIST_RESOURCE)];
         affected.extend(
             moved

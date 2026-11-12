@@ -7,8 +7,9 @@
 //! when it starts. The scan, the judged mark and the moves are
 //! [`crate::daemon::senders`]; this module is the wake-up, and what follows a
 //! scan that moved something: a drain request, so the server half runs soon
-//! rather than at the next tick, and the mailbox counts, so every client
-//! re-reads the Inbox and the Junk folder.
+//! rather than at the next tick, the removal of each moved row and the Junk
+//! listing's invalidate, so every client drops the rows (PERSO-286), and the
+//! mailbox counts, so every client re-reads the sidebar.
 //!
 //! # What gets a runner
 //!
@@ -93,8 +94,8 @@ async fn run(
     );
 }
 
-/// Scan once, and when something moved ask for a drain and publish the
-/// counts that moved.
+/// Scan once, and when something moved ask for a drain and publish the rows
+/// that left the Inbox and the counts that moved.
 pub async fn scan_once(
     runtime: &AccountRuntime,
     canonical: &Arc<CanonicalState>,
@@ -114,10 +115,11 @@ pub async fn scan_once(
         Ok(Err(e)) => return warn!("[senders] scanning {account}: {e:#}"),
         Err(e) => return warn!("[senders] the scan task of {account} {e}"),
     };
-    if outcome.moved == 0 {
+    if outcome.moved.is_empty() {
         debug!("[senders] {account}: nothing to move");
         return;
     }
     runtime.request_drain();
+    super::publish::publish_departures(canonical, &account, &outcome.moved, Some(&outcome.junk));
     super::publish::publish_changed_counts(canonical, cfg).await;
 }

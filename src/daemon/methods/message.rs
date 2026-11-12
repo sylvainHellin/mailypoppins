@@ -1908,13 +1908,15 @@ async fn mutate_with<E: OpExecutor>(
     // refetches the UID.
     let (queued, result) = match kind {
         Kind::Archive | Kind::Move => {
-            let destination = destination.expect("an archive and a move both name a mailbox");
-            let dest_server = catalogue.server_for_key(&destination);
+            let destination = destination
+                .as_deref()
+                .expect("an archive and a move both name a mailbox");
+            let dest_server = catalogue.server_for_key(destination);
             let queued = crate::mutations::queue_move(
                 &store,
                 &name,
                 &rows,
-                &destination,
+                destination,
                 &source_server,
                 &dest_server,
                 runner,
@@ -1928,7 +1930,7 @@ async fn mutate_with<E: OpExecutor>(
                     "mailbox": destination,
                     // The Message-ID as the store holds it, which is what the
                     // pre-daemon "now" line printed.
-                    "selector": Selector::new(&name, &destination, &row.message_id).to_string(),
+                    "selector": Selector::new(&name, destination, &row.message_id).to_string(),
                 },
             });
             (queued, result)
@@ -1984,7 +1986,7 @@ async fn mutate_with<E: OpExecutor>(
         }
     };
 
-    let Some(queued) = queued.first() else {
+    let Some(first) = queued.first() else {
         return Err(gone());
     };
     if let Some((mut backend, scope)) = settler {
@@ -2005,7 +2007,7 @@ async fn mutate_with<E: OpExecutor>(
             .paused_while(&turn_held)
             .unless_login_refused(&login_refused);
         let settled =
-            pending_ops::run_and_settle(&store, &blobs, &scope, queued.op_id, &mut backend, older)
+            pending_ops::run_and_settle(&store, &blobs, &scope, first.op_id, &mut backend, older)
                 .await;
         drop(scope);
         // A drain that ran while this op was on the server held back the ops
@@ -2018,6 +2020,16 @@ async fn mutate_with<E: OpExecutor>(
         }
         settled.map_err(|e| refused(canonical, &name, &e))?;
     }
+    // Announced once the row is where the call leaves it: after the commit
+    // for a queued op, after the server took a settled one, and never for a
+    // settle the server refused, whose rollback put the row back (PERSO-286).
+    let departed: Vec<_> = queued.into_iter().filter_map(|q| q.departed).collect();
+    super::super::runtime::publish::publish_departures(
+        canonical,
+        &name,
+        &departed,
+        destination.as_deref(),
+    );
     Ok((result, resource))
 }
 
@@ -3951,6 +3963,53 @@ mod tests {
             let row = read::find_by_id(&daemon.fx.store, id).unwrap().unwrap();
             assert_eq!(row.mailbox, "inbox");
             assert!(!row.is_flagged());
+        }
+
+        /// A settled archive announces the row's removal from the Inbox and
+        /// the archive listing's invalidate once the server took it, and a
+        /// refused one, whose rollback put the row back, announces nothing
+        /// (PERSO-286).
+        #[tokio::test]
+        async fn a_settled_move_announces_the_row_only_once_it_landed() {
+            use crate::daemon::state::events::Event;
+            use crate::daemon::state::ConnectionId;
+            let daemon = seeded();
+            let conn = ConnectionId(1);
+            let mut events = daemon.canonical.subscribe(conn);
+            daemon.canonical.bootstrap(conn);
+            let log = Arc::default();
+            let refusing = FakeServer {
+                refusal: Some("NO refused"),
+                ..FakeServer::new("caller", &log, &daemon.fx.store)
+            };
+            daemon
+                .call(Kind::Archive, by_row(daemon.id), |_| Ok(refusing))
+                .await
+                .unwrap_err();
+            assert_eq!(events.drain_lifecycle(), []);
+
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+            daemon
+                .call(Kind::Archive, by_row(daemon.id), |_| Ok(server))
+                .await
+                .unwrap();
+            let published: Vec<Event> = events
+                .drain_lifecycle()
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect();
+            assert_eq!(
+                published,
+                [
+                    Event::Remove {
+                        resource: ResourceId::new("message:alice/inbox/1"),
+                    },
+                    Event::Invalidate {
+                        resource: ResourceId::new("mailbox:alice/archive"),
+                        scope: json!({"query": "list"}),
+                    },
+                ]
+            );
         }
 
         /// PERSO-241 through the daemon: the TUI stars a message

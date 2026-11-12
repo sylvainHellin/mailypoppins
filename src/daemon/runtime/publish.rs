@@ -23,6 +23,7 @@ use crate::daemon::dispatch::ResourceId;
 use crate::daemon::server::commit_tick;
 use crate::daemon::state::events::Event;
 use crate::daemon::state::{CanonicalState, Change};
+use crate::store::write::MutatedRow;
 
 use super::account::{AccountRuntime, TickKind, TickOutcome};
 
@@ -112,6 +113,42 @@ pub async fn publish_changed_counts(canonical: &Arc<CanonicalState>, account: &A
         });
     }
     commit_changed_counts(canonical, name, fresh, &touched);
+}
+
+/// The scope of a mailbox's listing, the `message.list` answer a client holds
+/// for it, as a `state.invalidate` names it when rows joined the mailbox
+/// (PERSO-286); `{"query": "counts"}` is the sidebar's.
+pub fn listing_scope() -> serde_json::Value {
+    serde_json::json!({"query": "list"})
+}
+
+/// Announce rows of `account` that left their mailboxes (PERSO-286): one
+/// `state.remove` of `message:<account>/<mailbox>/<uid>` per row, by the
+/// mailbox and the uid it had there, which is what a client's held listing
+/// and search hits know it by; then, when they went into `destination`, one
+/// `state.invalidate` of that mailbox's listing, since a client cannot add a
+/// row it was never sent.
+///
+/// A move, an archive, a delete, a block and the blocked-senders runner all
+/// end here, so a client drops the row whichever client or daemon task moved
+/// it, where before it only heard the counts.
+pub fn publish_departures(
+    canonical: &CanonicalState,
+    account: &str,
+    departed: &[MutatedRow],
+    destination: Option<&str>,
+) {
+    for row in departed {
+        canonical.publish(Event::Remove {
+            resource: ResourceId::new(format!("message:{account}/{}/{}", row.mailbox, row.uid)),
+        });
+    }
+    if let Some(destination) = destination.filter(|_| !departed.is_empty()) {
+        canonical.publish(Event::Invalidate {
+            resource: ResourceId::new(format!("mailbox:{account}/{destination}")),
+            scope: listing_scope(),
+        });
+    }
 }
 
 /// The counts the sidebar shows per slug: each row's ([`SidebarRow::counts`])

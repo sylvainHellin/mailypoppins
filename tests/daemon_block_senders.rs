@@ -258,6 +258,156 @@ async fn next_blocklist_event(conn: &mut Connection) -> Value {
     }
 }
 
+/// The row events `conn` hears until every one of `expected` arrived, each as
+/// `remove <resource>` for a `state.remove` of a message or `invalidate
+/// <resource> <scope>` for a `state.invalidate` of a mailbox outside the
+/// counts scope; the test fails after [`ROW_EVENTS_WINDOW`] naming what did
+/// arrive (PERSO-286).
+async fn wait_for_row_events(conn: &mut Connection, expected: &[String]) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + ROW_EVENTS_WINDOW;
+    let mut seen: Vec<String> = Vec::new();
+    while !expected.iter().all(|line| seen.contains(line)) {
+        let notification = match tokio::time::timeout_at(deadline, conn.next_notification()).await {
+            Ok(Some(notification)) => notification,
+            Ok(None) => panic!("the daemon closed the connection; heard {seen:?}"),
+            Err(_) => panic!("expected {expected:?} within {ROW_EVENTS_WINDOW:?}, heard {seen:?}"),
+        };
+        let event: mp_protocol::EventEnvelope =
+            serde_json::from_value(notification.params.clone()).unwrap();
+        let resource = event.payload["resource"].as_str().unwrap_or_default();
+        match event.kind.as_str() {
+            "state.remove" if resource.starts_with("message:") => {
+                seen.push(format!("remove {resource}"));
+            }
+            "state.invalidate"
+                if resource.starts_with("mailbox:")
+                    && event.payload["scope"]["query"] != "counts" =>
+            {
+                seen.push(format!("invalidate {resource} {}", event.payload["scope"]));
+            }
+            _ => {}
+        }
+    }
+    seen
+}
+
+/// How long [`wait_for_row_events`] waits for the events it expects.
+const ROW_EVENTS_WINDOW: Duration = Duration::from_secs(8);
+
+/// The `message:` removal of `account`'s row `uid` in `mailbox`.
+fn removed(account: &str, mailbox: &str, uid: i64) -> String {
+    format!("remove message:{account}/{mailbox}/{uid}")
+}
+
+/// The listing invalidate of `account`'s `mailbox`.
+fn listing_stale(account: &str, mailbox: &str) -> String {
+    format!("invalidate mailbox:{account}/{mailbox} {{\"query\":\"list\"}}")
+}
+
+/// A block publishes the removal of every Inbox row it moved, by the uid the
+/// row had there, and the Junk listing they joined goes stale, so every
+/// client drops the rows without a reload (PERSO-286). The uids are not the
+/// row ids, so a removal naming the row id would not pass.
+#[tokio::test]
+async fn blocking_publishes_the_removal_of_each_moved_row() {
+    let slice = Slice::start(|root| {
+        ingest(root, ALPHA, 41, "spam1@x", "spam@x.com");
+        ingest(root, ALPHA, 42, "friend@x", "friend@ok.example");
+        ingest(root, ALPHA, 43, "spam2@x", "Spam <SPAM@x.com>");
+    });
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({}))
+        .await
+        .unwrap();
+    let mut conn = slice.connect().await;
+    let blocked = call(&mut conn, "sender.block", json!({"address": "spam@x.com"}))
+        .await
+        .unwrap();
+    assert_eq!(blocked["moved"][0]["count"], 2, "{blocked}");
+
+    let seen = wait_for_row_events(
+        &mut watcher,
+        &[
+            removed(ALPHA, "inbox", 41),
+            removed(ALPHA, "inbox", 43),
+            listing_stale(ALPHA, "Junk"),
+        ],
+    )
+    .await;
+    assert!(
+        !seen.contains(&removed(ALPHA, "inbox", 42)),
+        "the friend's row stayed: {seen:?}"
+    );
+}
+
+/// `message.move` publishes the removal of the row from the mailbox it left
+/// and the destination's listing invalidate, so a client that did not make
+/// the move drops it too (PERSO-286).
+#[tokio::test]
+async fn a_move_publishes_the_removal_of_the_row_it_moved() {
+    let slice = Slice::start(|root| {
+        ingest(root, ALPHA, 41, "first@x", "friend@ok.example");
+        ingest(root, ALPHA, 42, "second@x", "friend@ok.example");
+    });
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({}))
+        .await
+        .unwrap();
+    let mut conn = slice.connect().await;
+    let row = slice.row_id(ALPHA, "second@x");
+    assert_ne!(row, 42, "the uid and the row id differ");
+    call(
+        &mut conn,
+        "message.move",
+        json!({"account": ALPHA, "row_id": row, "destination": "Junk", "settle": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(slice.mailbox_of(ALPHA, "second@x"), "Junk");
+
+    wait_for_row_events(
+        &mut watcher,
+        &[removed(ALPHA, "inbox", 42), listing_stale(ALPHA, "Junk")],
+    )
+    .await;
+}
+
+/// Mail the runner moves after a tick is published the same way: its Inbox
+/// row is removed and the Junk listing goes stale (PERSO-286).
+#[tokio::test]
+async fn the_runner_publishes_the_removal_of_the_rows_it_moved() {
+    let slice = Slice::start(|_| {});
+    slice.wait_armed(ALPHA);
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({}))
+        .await
+        .unwrap();
+    let mut conn = slice.connect().await;
+    call(
+        &mut conn,
+        "sender.block",
+        json!({"address": "@bulk.example"}),
+    )
+    .await
+    .unwrap();
+    ingest(slice.root(), ALPHA, 1, "pad@x", "friend@ok.example");
+    ingest(
+        slice.root(),
+        ALPHA,
+        51,
+        "late@x",
+        "News <news@bulk.example>",
+    );
+    slice.tick(&mut conn, ALPHA).await;
+    slice.wait_in(ALPHA, "late@x", "Junk");
+
+    wait_for_row_events(
+        &mut watcher,
+        &[removed(ALPHA, "inbox", 51), listing_stale(ALPHA, "Junk")],
+    )
+    .await;
+}
+
 /// Blocking an address and then a domain moves the Inbox mail each names to
 /// Junk, in any case, through the durable queue; an account without a Junk
 /// folder keeps its mail and is named in the answer; every bootstrapped

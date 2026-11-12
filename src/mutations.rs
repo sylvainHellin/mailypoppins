@@ -35,12 +35,16 @@ use crate::store::{BlobStore, Store};
 /// queued for [`Runner::Caller`], hands to
 /// [`crate::pending_ops::run_and_settle`]; a caller that queues for
 /// [`Runner::Drain`] ignores it and lets the next drain retire it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Queued {
     /// The `messages.id` the mutation changed.
     pub row_id: i64,
     /// The `pending_ops` row the change owes the server.
     pub op_id: i64,
+    /// The row as it stood in the mailbox a move or a delete took it out of,
+    /// which is how the daemon names its removal to a client (PERSO-286);
+    /// `None` for a flag change, which leaves the row where it was.
+    pub departed: Option<write::MutatedRow>,
 }
 
 /// How a queued op names its message: the Message-ID, and the server copy the
@@ -162,7 +166,11 @@ pub fn queue_move(
             graph_copy,
         };
         match pending_ops::apply_move(store, account, row_id, dest_mailbox, op, runner) {
-            Ok(Some((_previous, op_id))) => moved.push(Queued { row_id, op_id }),
+            Ok(Some((previous, op_id))) => moved.push(Queued {
+                row_id,
+                op_id,
+                departed: Some(previous),
+            }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to move"),
             Err(e) => log::warn!("[store] queuing a move for message {row_id} failed: {e:#}"),
         }
@@ -196,7 +204,11 @@ pub fn queue_delete(
             graph_copy,
         };
         match pending_ops::apply_delete(store, blobs, account, row_id, op, runner) {
-            Ok(Some((_previous, op_id))) => deleted.push(Queued { row_id, op_id }),
+            Ok(Some((previous, op_id))) => deleted.push(Queued {
+                row_id,
+                op_id,
+                departed: Some(previous),
+            }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to delete"),
             Err(e) => log::warn!("[store] queuing a delete for message {row_id} failed: {e:#}"),
         }
@@ -232,7 +244,11 @@ pub fn queue_read_flag(
             graph_copy,
         };
         match pending_ops::apply_set_read(store, account, row_id, read, op, runner) {
-            Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
+            Ok(Some(op_id)) => out.push(Queued {
+                row_id,
+                op_id,
+                departed: None,
+            }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to flag"),
             Err(e) => log::warn!("[store] queuing a read flag for message {row_id} failed: {e:#}"),
         }
@@ -266,7 +282,11 @@ pub fn queue_flag(
             copy,
         };
         match pending_ops::apply_set_flagged(store, account, row_id, flagged, op, runner) {
-            Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
+            Ok(Some(op_id)) => out.push(Queued {
+                row_id,
+                op_id,
+                departed: None,
+            }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to flag"),
             Err(e) => log::warn!("[store] queuing a flag for message {row_id} failed: {e:#}"),
         }

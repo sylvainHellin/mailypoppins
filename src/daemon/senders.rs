@@ -53,6 +53,7 @@ use mp_core::blocklist::normalize;
 use crate::catalogue::{Catalogue, FolderRole};
 use crate::config::AccountConfig;
 use crate::store::schema::{get_meta, set_meta};
+use crate::store::write::MutatedRow;
 use crate::store::Store;
 
 /// The file name of the list under the data directory.
@@ -231,8 +232,12 @@ pub fn no_junk_reason(account: &str) -> String {
 /// What a move over one account did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Moved {
-    /// `count` rows moved to the Junk folder under store key `mailbox`.
-    Rows { mailbox: String, count: usize },
+    /// Rows moved to the Junk folder under store key `mailbox`, each as it
+    /// stood in the Inbox, which is how its removal is announced (PERSO-286).
+    Rows {
+        mailbox: String,
+        departed: Vec<MutatedRow>,
+    },
     /// Rows matched and the account has no Junk folder, so none moved.
     NoJunk { matched: usize },
 }
@@ -267,8 +272,10 @@ pub struct Scanned {
     pub armed: bool,
     /// Rows judged.
     pub judged: usize,
-    /// Rows moved to Junk.
-    pub moved: usize,
+    /// Rows moved to Junk, each as it stood in the Inbox.
+    pub moved: Vec<MutatedRow>,
+    /// The store key of the Junk folder they moved to, empty when none did.
+    pub junk: String,
     /// Rows from a blocked sender left in the Inbox, because the user moved
     /// them back after an earlier move.
     pub kept: usize,
@@ -344,7 +351,10 @@ pub fn scan(store: &Store, account: &AccountConfig, list: &Path) -> Result<Scann
         owed.push((row.id, row.message_id.clone()));
     }
     match move_rows(store, account, &catalogue, &inbox, &owed)? {
-        Moved::Rows { count, .. } => outcome.moved = count,
+        Moved::Rows { mailbox, departed } => {
+            outcome.moved = departed;
+            outcome.junk = mailbox;
+        }
         Moved::NoJunk { matched } => outcome.no_junk = matched,
     }
 
@@ -408,7 +418,7 @@ fn move_rows(
     if rows.is_empty() {
         return Ok(Moved::Rows {
             mailbox: junk_key(catalogue).unwrap_or_default(),
-            count: 0,
+            departed: Vec::new(),
         });
     }
     let Some(junk) = junk_key(catalogue) else {
@@ -458,7 +468,7 @@ fn move_rows(
     );
     Ok(Moved::Rows {
         mailbox: junk,
-        count: queued.len(),
+        departed: queued.into_iter().filter_map(|q| q.departed).collect(),
     })
 }
 
@@ -579,6 +589,23 @@ mod tests {
 
     fn list(entries: &[&str]) -> Vec<String> {
         entries.iter().map(|e| e.to_string()).collect()
+    }
+
+    /// The Message-IDs a move to Junk took out of the Inbox, each checked to
+    /// be named as it stood there.
+    fn moved_to_junk(moved: Moved) -> Vec<String> {
+        let Moved::Rows { mailbox, departed } = moved else {
+            panic!("expected rows moved to Junk, got {moved:?}");
+        };
+        assert_eq!(mailbox, "Junk");
+        departed
+            .into_iter()
+            .map(|row| {
+                assert_eq!(row.mailbox, "inbox", "{row:?}");
+                assert!(row.uid > 0, "the Inbox uid, not a placeholder: {row:?}");
+                row.message_id
+            })
+            .collect()
     }
 
     #[test]
@@ -717,11 +744,8 @@ mod tests {
         );
         assert!(from_of(&alice).contains("bob@blocked.example"));
         assert_eq!(
-            move_existing(&fx.store, &account(), &entries).unwrap(),
-            Moved::Rows {
-                mailbox: "Junk".to_string(),
-                count: 1
-            }
+            moved_to_junk(move_existing(&fx.store, &account(), &entries).unwrap()),
+            std::slice::from_ref(&spam)
         );
         assert_eq!(fx.mailbox_of(&alice), "inbox");
         assert_eq!(fx.mailbox_of(&comma), "inbox");
@@ -864,11 +888,8 @@ mod tests {
             "alice@ok.example"
         );
         assert_eq!(
-            move_existing(&fx.store, &account(), &entries).unwrap(),
-            Moved::Rows {
-                mailbox: "Junk".to_string(),
-                count: cases.len() + 1
-            }
+            moved_to_junk(move_existing(&fx.store, &account(), &entries).unwrap()).len(),
+            cases.len() + 1
         );
     }
 
@@ -909,7 +930,13 @@ mod tests {
         let spam = fx.ingest(2, "Spam <x@SPAM.example>");
         let ham = fx.ingest(3, "friend@ham.example");
         let outcome = fx.scan(&entries).unwrap();
-        assert_eq!((outcome.judged, outcome.moved), (2, 1));
+        assert_eq!((outcome.judged, outcome.moved.len()), (2, 1));
+        assert_eq!(outcome.junk, "Junk");
+        assert_eq!(
+            (outcome.moved[0].mailbox.as_str(), outcome.moved[0].uid),
+            ("inbox", 2),
+            "a moved row is named as it stood in the Inbox"
+        );
         assert_eq!(fx.mailbox_of(&spam), "Junk");
         assert_eq!(fx.mailbox_of(&ham), "inbox");
 
@@ -927,7 +954,7 @@ mod tests {
             )
             .unwrap();
         let outcome = fx.scan(&entries).unwrap();
-        assert_eq!((outcome.moved, outcome.kept), (0, 1));
+        assert_eq!((outcome.moved.len(), outcome.kept), (0, 1));
         assert_eq!(fx.mailbox_of(&spam), "inbox");
     }
 
@@ -939,7 +966,7 @@ mod tests {
         fx.scan(&entries).unwrap();
         let spam = fx.ingest(2, "x@spam.example");
         let outcome = fx.scan(&entries).unwrap();
-        assert_eq!((outcome.moved, outcome.no_junk), (0, 1));
+        assert_eq!((outcome.moved.len(), outcome.no_junk), (0, 1));
         assert_eq!(fx.mailbox_of(&spam), "inbox");
         assert_eq!(
             move_existing(&fx.store, &account(), &entries).unwrap(),
@@ -954,13 +981,7 @@ mod tests {
         let b = fx.ingest(2, "B <b@spam.example>");
         let c = fx.ingest(3, "c@ham.example");
         let moved = move_existing(&fx.store, &account(), &list(&["@spam.example"])).unwrap();
-        assert_eq!(
-            moved,
-            Moved::Rows {
-                mailbox: "Junk".to_string(),
-                count: 2
-            }
-        );
+        assert_eq!(moved_to_junk(moved), [a.clone(), b.clone()]);
         assert_eq!(
             [fx.mailbox_of(&a), fx.mailbox_of(&b), fx.mailbox_of(&c)],
             ["Junk", "Junk", "inbox"]
