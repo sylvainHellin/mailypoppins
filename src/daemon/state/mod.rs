@@ -513,13 +513,27 @@ impl CanonicalState {
     ///
     /// Serialized against every other commit and against the capture, so a
     /// snapshot never shows half of a change.
+    ///
+    /// A `Change::SyncCompleted` notes its verdict in the `last_sync` ledger
+    /// only for an account the state still has: a first pass with no runtime,
+    /// or a tick that outlasted the retire bound, can finish after the reload
+    /// that removed its account, and its entry would otherwise outlive the
+    /// account [`CanonicalState::reseed`] dropped it with (PERSO-220). The
+    /// gate keeps a reseed out between the check and the insert, so the two
+    /// locks are taken one after the other rather than nested.
     pub fn apply(&self, change: Change) -> Revision {
         let _gate = self.gate.enter();
         if let Change::SyncCompleted(outcome) = &change {
-            lock(&self.last_sync).insert(
-                outcome.account.clone(),
-                (chrono::Local::now(), outcome.error.clone()),
-            );
+            let configured = lock(&self.inner)
+                .accounts
+                .iter()
+                .any(|view| view.name == outcome.account);
+            if configured {
+                lock(&self.last_sync).insert(
+                    outcome.account.clone(),
+                    (chrono::Local::now(), outcome.error.clone()),
+                );
+            }
         }
         let mut inner = lock(&self.inner);
         inner.revision += 1;
@@ -1358,6 +1372,38 @@ mod tests {
             state.last_sync("alpha"),
             None,
             "the pass before the removal is not this account's last one"
+        );
+        let json = state.bootstrap(ConnectionId(1)).0.to_json();
+        assert_eq!(
+            json["sync_health"].get("alpha"),
+            None,
+            "and no bootstrap reports it: {}",
+            json["sync_health"]
+        );
+    }
+
+    /// A sync that finishes after the reload removed its account, a first
+    /// pass with no runtime or a tick that outlasted the retire bound, notes
+    /// nothing in the `last_sync` ledger: the removed account stays without a
+    /// last pass, so one added back later does not report it (PERSO-220).
+    #[test]
+    fn a_sync_completed_for_a_removed_account_notes_no_last_sync() {
+        let state = state();
+        state.reseed(Vec::new());
+
+        state.apply(Change::SyncCompleted(
+            crate::daemon::sync_outcome::from_sync_result(
+                "alpha",
+                &crate::sync::SyncResult::default(),
+                0,
+                None,
+            ),
+        ));
+
+        assert_eq!(
+            state.last_sync("alpha"),
+            None,
+            "a pass that ended after the removal is not recorded"
         );
         let json = state.bootstrap(ConnectionId(1)).0.to_json();
         assert_eq!(
