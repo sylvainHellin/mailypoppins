@@ -131,7 +131,8 @@ impl fmt::Debug for ImapStream {
 ///
 /// A `NO` the server meant about the password is a [`LoginRejected`]
 /// ([`login_gate::is_rejection`]); every other failure, a `BAD`, a lost
-/// connection, a temporary `NO`, stays a plain error that the pool retries.
+/// connection, a `NO` with any other response code, stays a plain error that
+/// the pool retries.
 async fn authenticate_client(
     client: async_imap::Client<ImapStream>,
     imap_config: &ImapConfig,
@@ -288,9 +289,9 @@ mod tests {
     use super::*;
     use async_imap::error::Error;
 
-    /// Only a `NO` about the password is a [`LoginRejected`]; a temporary
-    /// `NO`, a `BAD` and a lost connection stay the plain errors the pool
-    /// retries, with the text they always had.
+    /// Only a `NO` about the password is a [`LoginRejected`]; a `NO` with
+    /// another code, a `BAD` and a lost connection stay the plain errors the
+    /// pool retries, with the text they always had.
     #[test]
     fn only_a_no_about_the_password_is_a_rejected_login() {
         let refused = login_error(Error::No(
@@ -304,6 +305,9 @@ mod tests {
         );
         for passing in [
             Error::No("code: None, info: Some(\"[UNAVAILABLE] down\")".into()),
+            Error::No(
+                "code: Some(Alert), info: Some(\"Too many simultaneous connections.\")".into(),
+            ),
             Error::Bad("code: None, info: Some(\"LOGIN disabled\")".into()),
             Error::ConnectionLost,
         ] {

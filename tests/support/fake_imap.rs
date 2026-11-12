@@ -11,7 +11,8 @@
 //! What it answers a LOGIN with is its [`LoginPolicy`], which a test switches
 //! while the server runs: by default the TUM server's tagged
 //! `NO [AUTHENTICATIONFAILED] LOGIN failed.`, or the temporary
-//! `NO [UNAVAILABLE]` of RFC 5530, or `OK`. It counts every LOGIN. A login it
+//! `NO [UNAVAILABLE]` of RFC 5530, or Gmail's `NO [ALERT]` over its
+//! connection limit, or `OK`. It counts every LOGIN. A login it
 //! accepts gets an empty `INBOX` and nothing else: enough of a session for a
 //! daemon tick to list, select, search and IDLE, so a test can let the
 //! daemon in and then refuse it, the password changing while it runs.
@@ -40,6 +41,9 @@ pub const LOGIN_FAILED: &str = "NO [AUTHENTICATIONFAILED] LOGIN failed.";
 /// The answer of a server down for maintenance, RFC 5530's example.
 pub const LOGIN_UNAVAILABLE: &str = "NO [UNAVAILABLE] User's backend down for maintenance";
 
+/// Gmail's answer to a correct password over its connection limit.
+pub const LOGIN_ALERT: &str = "NO [ALERT] Too many simultaneous connections. (Failure)";
+
 /// What the server answers a LOGIN with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginPolicy {
@@ -47,6 +51,8 @@ pub enum LoginPolicy {
     Reject,
     /// [`LOGIN_UNAVAILABLE`], a passing state of the server.
     Unavailable,
+    /// [`LOGIN_ALERT`], a passing state of the account.
+    Alert,
     /// `OK`, and a session with an empty `INBOX`.
     Accept,
 }
@@ -56,6 +62,7 @@ impl LoginPolicy {
         match value {
             1 => LoginPolicy::Unavailable,
             2 => LoginPolicy::Accept,
+            3 => LoginPolicy::Alert,
             _ => LoginPolicy::Reject,
         }
     }
@@ -65,6 +72,7 @@ impl LoginPolicy {
             LoginPolicy::Reject => 0,
             LoginPolicy::Unavailable => 1,
             LoginPolicy::Accept => 2,
+            LoginPolicy::Alert => 3,
         }
     }
 }
@@ -220,6 +228,7 @@ async fn serve(
                 match LoginPolicy::from_u8(shared.policy.load(Ordering::SeqCst)) {
                     LoginPolicy::Reject => format!("{tag} {LOGIN_FAILED}\r\n"),
                     LoginPolicy::Unavailable => format!("{tag} {LOGIN_UNAVAILABLE}\r\n"),
+                    LoginPolicy::Alert => format!("{tag} {LOGIN_ALERT}\r\n"),
                     LoginPolicy::Accept => {
                         logged_in = true;
                         format!("{tag} OK LOGIN completed\r\n")

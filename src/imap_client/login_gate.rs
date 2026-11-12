@@ -25,8 +25,9 @@
 //! so it is asked at once. `config.probe` dials past the gate
 //! ([`super::dial_imap_session`]): a probe is the user asking the server.
 //!
-//! What counts as a refusal is [`is_rejection`]: a `NO` to LOGIN, unless its
-//! response code is one RFC 5530 makes temporary.
+//! What counts as a refusal is [`is_rejection`]: a `NO` to LOGIN with no
+//! response code, or with one of the RFC 5530 codes about the credential;
+//! a `NO` with any other code is retried as before and never recorded.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -40,23 +41,47 @@ use crate::config::{ImapConfig, ImapLogin};
 /// How long a refused login stays refused before the server is asked again.
 pub const REFUSAL_HOLD: Duration = Duration::from_secs(60 * 60);
 
-/// The RFC 5530 response codes that make a `NO` to LOGIN a passing state of
-/// the server rather than an answer about the password: it is down for
-/// maintenance, the account is in use elsewhere, a connection limit was hit,
-/// or the server failed. A login refused with one of these is retried as any
-/// failed connection is.
-const TEMPORARY_CODES: [&str; 4] = ["[UNAVAILABLE]", "[INUSE]", "[LIMIT]", "[SERVERBUG]"];
+/// The RFC 5530 response codes that make a `NO` to LOGIN an answer about the
+/// credential: the password or the user is wrong, the user may not act as
+/// the one named, or the password expired.
+const CREDENTIAL_CODES: [&str; 3] = ["AUTHENTICATIONFAILED", "AUTHORIZATIONFAILED", "EXPIRED"];
 
 /// Whether a `NO` to LOGIN, as async-imap renders it, refuses the password.
 ///
-/// The imap-proto parser in the tree does not know the RFC 5530 codes, so
-/// they reach this point as the start of the answer's text
-/// (`code: None, info: Some("[UNAVAILABLE] ...")`) and are matched there,
-/// ignoring case as IMAP atoms do. A bare `NO`, `[AUTHENTICATIONFAILED]`,
-/// `[AUTHORIZATIONFAILED]` and `[EXPIRED]` all refuse.
+/// async-imap renders the answer as `code: {code:?}, info: {info:?}`. A code
+/// imap-proto parses is the `Some(..)` of the first half (`ALERT`, which
+/// Gmail sends to a correct password over its connection and bandwidth
+/// limits, renders as `code: Some(Alert), info: Some("Too many ...")`); it
+/// does not know RFC 5530's, which stay at the start of the text
+/// (`code: None, info: Some("[AUTHENTICATIONFAILED] ...")`).
+///
+/// A `NO` without a code (Exchange's `NO LOGIN failed.`) refuses, and so
+/// does one whose code is `AUTHENTICATIONFAILED`, `AUTHORIZATIONFAILED` or
+/// `EXPIRED`, ignoring case as IMAP atoms do. Any other code, the temporary
+/// ones (`UNAVAILABLE`, `INUSE`, `LIMIT`, `SERVERBUG`), `ALERT`,
+/// `CONTACTADMIN` or one nobody registered, says nothing certain about the
+/// password: the login is retried as any failed connection is, and nothing
+/// is recorded.
 pub(super) fn is_rejection(answer: &str) -> bool {
-    let answer = answer.to_ascii_uppercase();
-    !TEMPORARY_CODES.iter().any(|code| answer.contains(code))
+    let Some(rest) = answer.strip_prefix("code: None, info: ") else {
+        // A code imap-proto parsed, or an answer of an unknown shape: no
+        // certain answer about the password.
+        return false;
+    };
+    let Some(text) = rest
+        .strip_prefix("Some(\"")
+        .and_then(|text| text.strip_suffix("\")"))
+    else {
+        // `info: None`: a bare `NO`.
+        return rest == "None";
+    };
+    let Some(code) = text.strip_prefix('[') else {
+        return true;
+    };
+    let code = code.split([']', ' ']).next().unwrap_or_default();
+    CREDENTIAL_CODES
+        .iter()
+        .any(|credential| code.eq_ignore_ascii_case(credential))
 }
 
 /// A LOGIN the server refused, either just now or within the hold.
@@ -263,27 +288,50 @@ mod tests {
         format!("code: None, info: Some({info:?})")
     }
 
-    /// A bare `NO` and the RFC 5530 codes about the credential refuse the
-    /// password; the four codes about the server's state do not, whatever
-    /// their case.
+    /// `NO [ALERT] ...`: imap-proto parses `ALERT`, so it is the code and the
+    /// text is what follows it.
+    fn alert(info: &str) -> String {
+        format!("code: Some(Alert), info: Some({info:?})")
+    }
+
+    /// A `NO` without a response code, Exchange's `NO LOGIN failed.`, and the
+    /// three RFC 5530 codes about the credential refuse the password,
+    /// whatever their case.
     #[test]
-    fn a_no_refuses_the_password_unless_its_code_says_the_server_is_unwell() {
+    fn a_no_without_a_code_or_with_a_credential_code_refuses_the_password() {
         for refusal in [
-            "LOGIN failed.",
-            "[AUTHENTICATIONFAILED] LOGIN failed.",
-            "[AUTHORIZATIONFAILED] No such authorization-ID",
-            "[EXPIRED] That password isn't valid any more",
+            no("LOGIN failed."),
+            "code: None, info: None".to_string(),
+            no("[AUTHENTICATIONFAILED] Invalid credentials (Failure)"),
+            no("[AUTHORIZATIONFAILED] No such authorization-ID"),
+            no("[EXPIRED] That password isn't valid any more"),
+            no("[authenticationFailed] LOGIN failed."),
+            no("[EXPIRED]"),
         ] {
-            assert!(is_rejection(&no(refusal)), "{refusal}");
+            assert!(is_rejection(&refusal), "{refusal}");
         }
+    }
+
+    /// Any other response code, one imap-proto parses (`ALERT`, which Gmail
+    /// sends to a correct password over its connection and bandwidth limits)
+    /// or one it leaves at the start of the text (RFC 5530's temporary codes,
+    /// `CONTACTADMIN`, a code nobody registered), is no answer about the
+    /// password, so it is not recorded.
+    #[test]
+    fn a_no_with_any_other_code_does_not_refuse_the_password() {
         for passing in [
-            "[UNAVAILABLE] User's backend down for maintenance",
-            "[INUSE] Mailbox in use",
-            "[LIMIT] Too many connections",
-            "[SERVERBUG] Internal error",
-            "[unavailable] try again later",
+            alert("Too many simultaneous connections. (Failure)"),
+            alert("Account exceeded command or bandwidth limits. (Failure)"),
+            no("[UNAVAILABLE] User's backend down for maintenance"),
+            no("[INUSE] Mailbox in use"),
+            no("[LIMIT] Too many connections"),
+            no("[SERVERBUG] Internal error"),
+            no("[CONTACTADMIN] Ask your administrator"),
+            no("[unavailable] try again later"),
+            no("[X-SOMETHING-NEW] LOGIN failed."),
+            no("[AUTHENTICATIONFAILED-ISH] LOGIN failed."),
         ] {
-            assert!(!is_rejection(&no(passing)), "{passing}");
+            assert!(!is_rejection(&passing), "{passing}");
         }
     }
 

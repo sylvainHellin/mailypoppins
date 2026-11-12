@@ -468,42 +468,59 @@ mod tests {
         assert_eq!(server.logins(), 2, "a changed password is asked again");
     }
 
-    /// A `NO [UNAVAILABLE]` to LOGIN is the server down for maintenance, not
-    /// an answer about the password (RFC 5530): it is retried with backoff as
-    /// a refused connection is, and nothing is held against the password.
+    /// A `NO [UNAVAILABLE]` to LOGIN is the server down for maintenance, and
+    /// Gmail's `NO [ALERT] Too many simultaneous connections.` the account
+    /// over its connection limit, not answers about the password (RFC 5530):
+    /// each is retried with backoff as a refused connection is, and nothing
+    /// is held against the password.
     #[test]
-    fn a_login_the_server_is_unavailable_for_is_retried_as_before() {
-        use super::super::fake_imap::{LoginPolicy, RejectingImapServer, LOGIN_UNAVAILABLE};
-
-        let server = RejectingImapServer::start_with(LoginPolicy::Unavailable);
-        let unavailable = ImapConfig {
-            password: "right".into(),
-            accept_invalid_certs: true,
-            ..config(server.port())
+    fn a_login_the_server_answers_with_another_code_is_retried_as_before() {
+        use super::super::fake_imap::{
+            LoginPolicy, RejectingImapServer, LOGIN_ALERT, LOGIN_UNAVAILABLE,
         };
 
-        let err = match futures::executor::block_on(checkout(&unavailable)) {
-            Ok(_) => panic!("the fake server is down for maintenance"),
-            Err(e) => e,
-        };
-        assert!(
-            err.to_string().contains("[UNAVAILABLE]"),
-            "the server's answer ({LOGIN_UNAVAILABLE}) is what surfaces: {err}"
-        );
-        assert!(super::super::login_rejected(&err).is_none(), "{err}");
-        assert_eq!(
-            server.logins(),
-            1 + CONNECT_BACKOFF.len(),
-            "every backoff attempt logged in"
-        );
+        for (policy, answer, shown) in [
+            (
+                LoginPolicy::Unavailable,
+                LOGIN_UNAVAILABLE,
+                "User's backend down for maintenance",
+            ),
+            (
+                LoginPolicy::Alert,
+                LOGIN_ALERT,
+                "Too many simultaneous connections.",
+            ),
+        ] {
+            let server = RejectingImapServer::start_with(policy);
+            let passing = ImapConfig {
+                password: "right".into(),
+                accept_invalid_certs: true,
+                ..config(server.port())
+            };
 
-        server.set_policy(LoginPolicy::Accept);
-        assert!(futures::executor::block_on(checkout(&unavailable)).is_ok());
-        assert_eq!(
-            server.logins(),
-            2 + CONNECT_BACKOFF.len(),
-            "the next checkout asked again, and got in"
-        );
+            let err = match futures::executor::block_on(checkout(&passing)) {
+                Ok(_) => panic!("the fake server lets no login in"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains(shown),
+                "the server's answer ({answer}) is what surfaces: {err}"
+            );
+            assert!(super::super::login_rejected(&err).is_none(), "{err}");
+            assert_eq!(
+                server.logins(),
+                1 + CONNECT_BACKOFF.len(),
+                "every backoff attempt logged in ({answer})"
+            );
+
+            server.set_policy(LoginPolicy::Accept);
+            assert!(futures::executor::block_on(checkout(&passing)).is_ok());
+            assert_eq!(
+                server.logins(),
+                2 + CONNECT_BACKOFF.len(),
+                "the next checkout asked again, and got in ({answer})"
+            );
+        }
     }
 
     /// Two sessions are interchangeable when they are the same user on the same
