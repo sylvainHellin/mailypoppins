@@ -128,8 +128,8 @@ pub async fn scan_once(
 /// account while its store was opening to Junk ([`senders::move_owed`]); the
 /// store is open by now, so its integrity check has run. A move that fails
 /// stays owed for the account's next start. A move asks `runtime` for a
-/// drain and publishes the counts, as the block call does for an open
-/// account.
+/// drain and publishes the rows that left the Inbox and the counts, as the
+/// block call does for an open account (PERSO-286).
 pub async fn move_owed(
     runtime: Option<&AccountRuntime>,
     canonical: &Arc<CanonicalState>,
@@ -142,7 +142,7 @@ pub async fn move_owed(
         if senders::owed(&list, &move_cfg.name)?.is_empty() {
             return Ok(senders::Moved::Rows {
                 mailbox: String::new(),
-                count: 0,
+                departed: Vec::new(),
             });
         }
         let Some(store) = crate::store::open_store(&move_cfg.name) else {
@@ -151,9 +151,10 @@ pub async fn move_owed(
         senders::move_owed(&store, &move_cfg, &list)
     })
     .await;
-    match moved {
-        Ok(Ok(senders::Moved::Rows { count, .. })) if count > 0 => {
-            info!("[senders] {account}: moved {count} message(s) from senders blocked while its store was opening to Junk");
+    let (junk, departed) = match moved {
+        Ok(Ok(senders::Moved::Rows { mailbox, departed })) if !departed.is_empty() => {
+            info!("[senders] {account}: moved {} message(s) from senders blocked while its store was opening to Junk", departed.len());
+            (mailbox, departed)
         }
         Ok(Ok(senders::Moved::Rows { .. })) => {
             return debug!("[senders] {account}: nothing owed to move");
@@ -163,9 +164,10 @@ pub async fn move_owed(
         }
         Ok(Err(e)) => return warn!("[senders] moving the mail owed to {account}: {e:#}"),
         Err(e) => return warn!("[senders] the owed move of {account} {e}"),
-    }
+    };
     if let Some(runtime) = runtime {
         runtime.request_drain();
     }
+    super::publish::publish_departures(canonical, &account, &departed, Some(&junk));
     super::publish::publish_changed_counts(canonical, cfg).await;
 }

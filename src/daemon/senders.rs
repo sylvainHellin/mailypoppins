@@ -319,7 +319,7 @@ pub fn move_owed(store: &Store, account: &AccountConfig, list: &Path) -> Result<
     let Some(entries) = owed.accounts.get(&account.name) else {
         return Ok(Moved::Rows {
             mailbox: String::new(),
-            count: 0,
+            departed: Vec::new(),
         });
     };
     let blocked = load(list)?;
@@ -1152,11 +1152,8 @@ mod tests {
             .execute_batch("ALTER TABLE messages_away RENAME TO messages")
             .unwrap();
         assert_eq!(
-            move_owed(&fx.store, &account(), &list).unwrap(),
-            Moved::Rows {
-                mailbox: "Junk".to_string(),
-                count: 1
-            }
+            moved_to_junk(move_owed(&fx.store, &account(), &list).unwrap()),
+            std::slice::from_ref(&spam)
         );
         assert_eq!(fx.mailbox_of(&spam), "Junk");
         assert!(owed(&list, ACCOUNT).unwrap().is_empty());
