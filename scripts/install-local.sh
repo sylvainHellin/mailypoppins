@@ -26,20 +26,24 @@
 #   whole job, and it runs once, after both installs.
 #
 # - A loaded agent is restarted through launchd explicitly. `mp daemon
-#   restart` is `stop` then a start through launchd (`kickstart`, or
-#   `bootstrap` for an agent launchd does not know) only when the plist bakes
-#   this data directory and runs this very `mp` (docs/daemon-operations.md,
-#   "Starting under the login service"); a plist that still runs another
-#   binary (the version warning below) is passed over and the daemon starts
-#   detached, outside launchd, while the agent's `KeepAlive {SuccessfulExit:
-#   false}` keeps its own process stopped until the next login. So when the agent is
+#   restart` stops the daemon over its socket and then asks launchd to
+#   restart the agent (`kickstart -k` for a loaded agent, `bootstrap` for one
+#   launchd does not know, PERSO-109) only when the plist bakes this data
+#   directory and runs this very `mp` (docs/daemon-operations.md, "Starting
+#   under the login service"); a plist that still runs another binary (the
+#   version warning below) is passed over and the daemon starts detached,
+#   outside launchd, while the agent's `KeepAlive {SuccessfulExit: false}`
+#   keeps its own process stopped until the next login. So when the agent is
 #   loaded this script runs `mp daemon stop` then `launchctl kickstart`
 #   whatever the plist runs, the sequence the live launchd check took
 #   (#0129, now PERSO-206, "after `mp daemon stop` plus `launchctl kickstart` the
 #   daemon runs as launchd's child"); otherwise `mp daemon restart`, which
-#   bootstraps a matching agent itself. Not `kickstart -k`: a daemon a client
-#   started on demand may hold the socket while the agent's own process is
-#   down, and a second launchd spawn then crash-loops (PERSO-219).
+#   bootstraps a matching agent itself. The crash loop of PERSO-219 comes from
+#   a `kickstart -k` with no socket stop before it: a daemon a client started
+#   on demand may hold the socket while the agent's own process is down, `-k`
+#   kills only launchd's own process, and the spawn that replaces it
+#   crash-loops on the held socket. After the socket stop nothing holds the
+#   socket, which is why `mp daemon restart` can send `-k`.
 #
 # - The app is quit before the swap and relaunched after the daemon restart.
 #   Quit first, so no process runs out of the bundle being replaced, and so it

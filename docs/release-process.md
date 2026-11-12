@@ -359,9 +359,14 @@ scripts/install-local.sh --dry-run   # print what it would run
 
 The daemon is not stopped before the install, for the reason above. When the
 launchd agent is loaded, the restart is `mp daemon stop` then `launchctl
-kickstart gui/<uid>/dev.mailypoppins.daemon`, because `mp daemon restart`
-would start the replacement outside launchd, and the agent's `KeepAlive
-{SuccessfulExit: false}` leaves a stopped daemon stopped. The script refuses a
+kickstart gui/<uid>/dev.mailypoppins.daemon`, whatever binary the agent's plist
+runs. `mp daemon restart` sends its `launchctl kickstart -k` after the socket
+stop only for a plist that bakes this data directory and this `mp`; under any
+other plist it would start the replacement outside launchd, and the agent's
+`KeepAlive {SuccessfulExit: false}` leaves a stopped daemon stopped. The
+`kickstart -k` to avoid is one with no socket stop before it: an on-demand
+daemon may hold the socket while the agent's own process is down, and the spawn
+`-k` starts then crash-loops on it (PERSO-219). The script refuses a
 tree with uncommitted changes (`--allow-dirty` overrides) and an app installed
 by the Homebrew cask; the reasoning behind each step is in its header comment.
 
