@@ -2416,6 +2416,46 @@ fn note_opening(account: &str) {
     eprintln!("{account} is still opening its store, waiting");
 }
 
+/// Wait until the daemon has opened the store of every configured account,
+/// for a read over every account at once (PERSO-109).
+///
+/// `calendar.list`, `calendar.view` and `calendar.reminders` with no account
+/// leave out an account still opening rather than refusing the whole read, so
+/// the wait [`daemon_try_call_within`] does for one named account never
+/// starts, and a command run right after a daemon start would print a
+/// calendar without that account. `account.list` is asked every
+/// [`mp_client::OPENING_POLL`] until no account is `opening`, saying which one
+/// it waits for once after [`mp_client::OPENING_NOTICE_AFTER`]; past
+/// [`mp_client::OPENING_WAIT`] the read goes ahead with the accounts that are
+/// open.
+async fn await_every_store_open(connection: &mut mp_client::Connection) {
+    let began = std::time::Instant::now();
+    let mut told = false;
+    loop {
+        let Ok(listed) = daemon_try_call(connection, "account.list", serde_json::json!({})).await
+        else {
+            return;
+        };
+        let opening = listed["accounts"]
+            .as_array()
+            .and_then(|accounts| accounts.iter().find(|a| a["state"] == "opening"))
+            .and_then(|account| account["name"].as_str())
+            .map(str::to_string);
+        let Some(account) = opening else {
+            return;
+        };
+        let waited = began.elapsed();
+        if waited >= mp_client::OPENING_WAIT {
+            return;
+        }
+        if !told && waited >= mp_client::OPENING_NOTICE_AFTER {
+            note_opening(&account);
+            told = true;
+        }
+        tokio::time::sleep(mp_client::OPENING_POLL).await;
+    }
+}
+
 /// The exit-4 diagnostic for a call that got no answer at all, as opposed to a
 /// refusal: `ClientError::Timeout` renders as "<method> went unanswered for
 /// Ns", the sentence this path has always printed, and anything else is the
@@ -4631,6 +4671,9 @@ fn calendar_infos(answer: &serde_json::Value) -> Result<Vec<mp_protocol::calenda
 /// `mp calendar list`.
 async fn routed_calendar_list(account: Option<&str>, json: bool) -> Result<()> {
     let mut connection = daemon_connection().await;
+    if account.is_none() {
+        await_every_store_open(&mut connection).await;
+    }
     let answer = calendar_list(&mut connection, account).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&answer)?);
@@ -4685,6 +4728,9 @@ async fn routed_calendar_view(request: ViewRequest, json: bool) -> Result<()> {
         request.hidden,
     );
     let mut connection = daemon_connection().await;
+    if request.accounts.is_empty() {
+        await_every_store_open(&mut connection).await;
+    }
     let answer = daemon_try_call(
         &mut connection,
         "calendar.view",
@@ -4780,7 +4826,10 @@ async fn routed_calendar_reminders(account: Option<&str>, json: bool) -> Result<
     let mut connection = daemon_connection().await;
     let params = match account {
         Some(account) => serde_json::json!({"accounts": [account]}),
-        None => serde_json::json!({}),
+        None => {
+            await_every_store_open(&mut connection).await;
+            serde_json::json!({})
+        }
     };
     let answer = daemon_try_call(&mut connection, "calendar.reminders", params)
         .await

@@ -1163,6 +1163,7 @@ A mailbox without a Teams licence answers that list empty and Graph drops a requ
 An account with a backend lists its server calendars in the server's order, as the last sync stored them, so an account that never synced lists none.
 Every account holding an invitation mail lists one more, the virtual invitation calendar `{id: "imip", name: "Invitations", backend: "none"}`, so its events can be hidden like a server calendar's.
 Without `account` it answers every account with a store, in configuration order; a named account is refused as `message.list` refuses one.
+An account whose store the daemon is still opening is left out of an answer without `account`, as `calendar.view` and `calendar.reminders` without `accounts` leave it out, rather than failing the read of the others (PERSO-109): a client reads the calendar again at the account's `account.state_changed` to `ready`, and `mp calendar list`, `view` and `reminders` without `-A` wait first until `account.list` reports no account `opening`.
 
 `calendar.set_visibility` `{account, calendar, visible}` -> `{account, calendar, visible}` is a command: it shows or hides one calendar of `calendar.list`, `imip` included, affects `calendar:<account>/<id>` and publishes `calendar.changed`.
 The preference is local, kept apart from the cache, and survives `calendar.rebuild` and a store rebuild; a calendar `calendar.list` does not name is `-32602`.

@@ -539,3 +539,52 @@ async fn blocking_a_sender_while_an_account_opens_moves_its_inbox_mail_once_read
         tokio::time::sleep(TICK).await;
     }
 }
+
+/// `mp calendar list`, `view` and `reminders` read every account at once, and
+/// the daemon leaves an account still opening its store out of such a read;
+/// the CLI waits for it, saying so once, rather than printing a calendar
+/// without it (PERSO-109).
+#[tokio::test]
+async fn mp_calendar_waits_for_an_opening_account() {
+    let (sandbox, _daemon, gate) = held().await;
+    let spawn = |args: &[&str]| {
+        Command::new(MP)
+            .args(args)
+            .env("HOME", sandbox.root.path().join("home"))
+            .env("MAILYPOPPINS_DATA_DIR", sandbox.data_dir())
+            .env("MAILYPOPPINS_CONFIG_DIR", sandbox.config_dir())
+            .env("MAILYPOPPINS_DAEMON_AUTOSTART", "0")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn mp calendar")
+    };
+    let mut children: Vec<(&str, std::process::Child)> = ["list", "view", "reminders"]
+        .into_iter()
+        .map(|sub| (sub, spawn(&["calendar", sub])))
+        .collect();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for (name, child) in &mut children {
+        let exited = child.try_wait().expect("poll the child");
+        assert!(
+            exited.is_none(),
+            "mp calendar {name} answered while {LARGE} was still opening: {exited:?}"
+        );
+    }
+    fs::remove_file(&gate).expect("release the hold");
+    for (name, child) in children {
+        let output = child.wait_with_output().expect("mp calendar");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "mp calendar {name} failed: {stderr} {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            stderr.contains(&format!("{LARGE} is still opening its store, waiting")),
+            "mp calendar {name} says what it waits for: {stderr}"
+        );
+    }
+}
