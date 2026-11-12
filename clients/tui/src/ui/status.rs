@@ -45,9 +45,31 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Empty frame when there is nothing contextual to show, so the pane
-    // height stays stable.
+    // The profile the TUI runs on (PERSO-176), in every context, so the demo
+    // profile cannot pass for the real mailbox while a dialog is open either.
+    let profile = app.profile.as_ref().map(|name| {
+        let text = format!("profile {name} ");
+        let width = display_width(&text) + 1;
+        let spans = [
+            Span::styled(
+                text,
+                Style::default()
+                    .fg(theme::active().warning)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default().bg(bg)),
+        ];
+        (spans, width)
+    });
+
+    // Only the profile, or an empty frame, when there is nothing contextual
+    // to show, so the pane height stays stable.
     let Some(ctx) = app.key_context() else {
+        if let Some((spans, _)) = profile {
+            let bar = Paragraph::new(Line::from(spans.to_vec())).style(Style::default().bg(bg));
+            frame.render_widget(bar, inner);
+        }
         return;
     };
 
@@ -131,6 +153,10 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled("  ", Style::default().bg(bg)));
+    if let Some((profile_spans, width)) = profile {
+        used += width;
+        spans.extend(profile_spans);
+    }
     // The waiting calendar reminders (PERSO-255), from every view: the count
     // and the key that opens them, ahead of the hints it may crowd out, so it
     // stays short and lets the clock glyph say what the count is.
@@ -262,6 +288,28 @@ mod tests {
             panic!("the event card is open");
         };
         card
+    }
+
+    /// The hint bar names the profile the TUI runs on (PERSO-176), in every
+    /// context, an overlay with no hints of its own included, and says
+    /// nothing on the default profile.
+    #[test]
+    fn the_hint_bar_names_the_active_profile() {
+        let mut app = gf::calendar_fixture();
+        assert!(!hint_row(&mut app).contains("profile"), "default profile");
+
+        app.profile = Some("demo".to_string());
+        let row = hint_row(&mut app);
+        assert!(row.contains("profile demo"), "{row}");
+
+        app.overlay = Overlay::Confirm(crate::app::ConfirmDialog {
+            title: "Archive 2 emails?".to_string(),
+            detail: "2 selected emails".to_string(),
+            action: crate::app::ConfirmAction::Archive,
+        });
+        assert_eq!(app.key_context(), None, "a dialog has no hints");
+        let row = hint_row(&mut app);
+        assert!(row.contains("profile demo"), "no hints: {row}");
     }
 
     /// The event card reports its own context (PERSO-270), so the hint bar

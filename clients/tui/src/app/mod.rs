@@ -49,6 +49,10 @@ pub struct App {
     /// `state.bootstrap`: a `calendar.reminder` naming it as its
     /// `presenter_connection` is this TUI's to notify.
     pub connection: Option<u64>,
+    /// The profile this TUI runs on, `None` for the default one (PERSO-176):
+    /// the hint bar names it, so the demo profile cannot pass for the real
+    /// mailbox.
+    pub profile: Option<String>,
     pub running: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -397,6 +401,7 @@ impl App {
             calendar_view: CalendarView::default(),
             reminders: Vec::new(),
             connection: None,
+            profile: mp_core::profile::active(),
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -486,6 +491,7 @@ impl App {
             calendar_view: CalendarView::default(),
             reminders: Vec::new(),
             connection: None,
+            profile: None,
             running: true,
             terminal_width: 0,
             terminal_height: 0,

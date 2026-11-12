@@ -940,6 +940,7 @@ No profile, an empty `MAILYPOPPINS_PROFILE` or the name `default` are the paths 
 The resolvers read only `MAILYPOPPINS_PROFILE`; `mp` turns `--profile` into it in a synchronous `main`, before the tokio runtime and the logger exist, so every process it spawns inherits the profile.
 `--profile` wins over the variable, a name is 1 to 12 ASCII letters, digits, `-` or `_` (the macOS socket path limit), and a profile beside `MAILYPOPPINS_CONFIG_DIR` or `MAILYPOPPINS_DATA_DIR` is refused with exit 2 naming both.
 The legacy `~/.config/email` move is skipped on a profile, since that directory is the default profile's.
+The TUI's hint bar carries a `profile <name>` badge in every context (`App::profile`), so the demo profile cannot pass for the real mailbox.
 Nothing walks the config or data root recursively, so `profiles/` is never read as the default profile's files.
 
 `retention` is parsed and validated in config but not enforced yet: the blob store grows without bound until #0060 lands.
