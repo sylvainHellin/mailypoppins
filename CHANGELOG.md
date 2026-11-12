@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- `mp config set-password --stdin` reads the password from a pipe (first line, newline removed, nothing else trimmed), so a script or a password manager can set it; it is refused on a terminal or for an empty line (PERSO-281).
 - The activity log filters by level in the TUI and the desktop app: `l` cycles all, warnings and errors, errors, and the overlay names the level shown; the TUI overlay's footer still fits an 80-column terminal (PERSO-218).
 - Blocked senders: `mp block <address|@domain>` moves a sender's mail from every account's Inbox to its Junk folder, and mail arriving from them later follows after each sync; `mp unblock` and `mp blocked` manage the list, kept by the daemon for all accounts (PERSO-261).
 - A sender is read mailbox by mailbox, never from an address a display name, a comment or an encoded name carries, so a block tests every address of a From while a reply, Copy sender and the list row take the first `Name <address>`; IMAP address headers holding an encoded name are stored from their raw form (older mail is corrected in the background), ordinary headers exactly as before, a quoted address like `"john.doe"@example.com` stays whole, and reply-all no longer cuts a recipient inside a comment or after a stray quote mark (PERSO-261).
@@ -132,6 +133,9 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- A message moved, archived, deleted or blocked into Junk by another client or by the daemon leaves every open list and search result at once, without waiting for the next sync, and a search hit comes back when its move is rolled back (PERSO-286).
+- `mp validate` and the send preview no longer report a relative attachment that sits beside the draft as missing: validate, preview, the drafts mirror, send and the TUI's `o` resolve an entry through one function, and `mp send` refuses a draft with an empty attachment entry (PERSO-215).
+- An account removed by a config reload and added back no longer shows its old last sync (PERSO-220).
 - The daemon no longer retries an IMAP login the server refused: the same password waits an hour, or until `mp config set-password` or a sync you start, a refused tick ends as failed, `mp daemon health` says "login rejected by the server", and a move, flag or draft push queued meanwhile stays queued instead of being rolled back (PERSO-296).
 - Server search with umlauts or other non-ASCII text sends the value as a UTF-8 literal under `CHARSET UTF-8` (RFC 3501), and a server that cannot search UTF-8 is reported as such (PERSO-214).
 - A mail whose body opens with hundreds of blank lines no longer reads as empty: every view (`mp show`, search output, TUI preview, desktop reader, Markdown view) and every reply or forward quote drops a body's leading and trailing blank lines and collapses runs of more than two to one; the stored message is unchanged (PERSO-291).
