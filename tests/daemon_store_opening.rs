@@ -411,6 +411,12 @@ async fn a_held_store_open_holds_up_its_account_and_nothing_else() {
 /// removing the returned gate.
 async fn held() -> (Sandbox, Proc, PathBuf) {
     let sandbox = Sandbox::new();
+    let (daemon, gate) = held_in(&sandbox).await;
+    (sandbox, daemon, gate)
+}
+
+/// [`held`] on a sandbox a daemon already served.
+async fn held_in(sandbox: &Sandbox) -> (Proc, PathBuf) {
     let gate = sandbox.hold_dir().join(format!("{LARGE}.hold"));
     fs::write(&gate, b"").expect("arm the hold");
     let daemon = sandbox.spawn_daemon();
@@ -425,7 +431,7 @@ async fn held() -> (Sandbox, Proc, PathBuf) {
         Some("opening"),
         "{answer}"
     );
-    (sandbox, daemon, gate)
+    (daemon, gate)
 }
 
 /// Assert `answer` is the `-32006` `opening` refusal of `large`.
@@ -538,6 +544,99 @@ async fn blocking_a_sender_while_an_account_opens_moves_its_inbox_mail_once_read
         );
         tokio::time::sleep(TICK).await;
     }
+}
+
+/// The mailbox `large`'s message sits in, read from its store.
+fn large_mailbox(sandbox: &Sandbox) -> String {
+    Store::open(sandbox.account_dir(LARGE).join("store.sqlite3"))
+        .expect("store")
+        .conn()
+        .query_row(
+            "SELECT mailbox FROM messages WHERE message_id = ?1",
+            [format!("<{LARGE}@example.com>")],
+            |row| row.get(0),
+        )
+        .expect("the large account's message")
+}
+
+/// Block `someone@example.com`, the sender of `large`'s message, while
+/// `large` is opening, and check the answer owes it the move.
+async fn block_while_opening(conn: &mut Connection) {
+    let blocked = call(
+        conn,
+        "sender.block",
+        json!({"address": "someone@example.com"}),
+    )
+    .await
+    .expect("sender.block answers while an account opens");
+    assert!(
+        blocked["skipped"]
+            .as_array()
+            .expect("skipped")
+            .iter()
+            .any(|row| row["account"] == LARGE),
+        "the opening account is owed the move: {blocked}"
+    );
+}
+
+/// The Inbox move a block owed an account still opening its store survives a
+/// daemon that stops before the account turned ready: the next start moves
+/// the mail, which the runner's scan never would, since it judges only mail
+/// that arrives later (PERSO-109).
+#[tokio::test]
+async fn a_block_owed_to_an_opening_account_survives_a_daemon_restart() {
+    let (sandbox, daemon, gate) = held().await;
+    let mut conn = connected(&sandbox).await;
+    block_while_opening(&mut conn).await;
+    drop(conn);
+    drop(daemon);
+    fs::remove_file(&gate).expect("release the hold");
+    assert_eq!(large_mailbox(&sandbox), "inbox", "nothing moved yet");
+
+    // The next daemon holds the open too, so the test hears its ready event:
+    // `daemon.status` reads the runtime table, filled before the owed move
+    // runs and the state is committed.
+    let (_daemon, gate) = held_in(&sandbox).await;
+    let mut events = connected(&sandbox).await;
+    call(&mut events, "state.bootstrap", json!({}))
+        .await
+        .expect("state.bootstrap");
+    fs::remove_file(&gate).expect("release the hold");
+    until_ready(&mut events).await;
+    assert_eq!(
+        large_mailbox(&sandbox),
+        "Junk",
+        "the next start moved the mail the block owed the account"
+    );
+}
+
+/// A sender unblocked while the move its block owed an opening account is
+/// still pending keeps its mail in the Inbox once the account is ready
+/// (PERSO-109).
+#[tokio::test]
+async fn an_unblock_while_the_account_opens_cancels_the_owed_move() {
+    let (sandbox, _daemon, gate) = held().await;
+    let mut conn = connected(&sandbox).await;
+    block_while_opening(&mut conn).await;
+    call(
+        &mut conn,
+        "sender.unblock",
+        json!({"address": "someone@example.com"}),
+    )
+    .await
+    .expect("sender.unblock answers while an account opens");
+
+    let mut events = connected(&sandbox).await;
+    call(&mut events, "state.bootstrap", json!({}))
+        .await
+        .expect("state.bootstrap");
+    fs::remove_file(&gate).expect("release the hold");
+    until_ready(&mut events).await;
+    assert_eq!(
+        large_mailbox(&sandbox),
+        "inbox",
+        "the mail of a sender unblocked meanwhile stays in the Inbox"
+    );
 }
 
 /// `mp calendar list`, `view` and `reminders` read every account at once, and

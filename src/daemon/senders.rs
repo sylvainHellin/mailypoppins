@@ -38,9 +38,22 @@
 //! the store, and a rebuilt store starts over: the scan arms once the
 //! rebuilt Inbox has synced, marking everything already there as judged.
 //!
-//! Every read-modify-write of the list and every scan or move holds one lock
-//! ([`LOCK`]), so a block call and a runner's scan never move one row twice.
+//! # Owed moves
+//!
+//! A block that comes while the daemon is still opening an account's store
+//! cannot move that account's Inbox mail, and the scan never will, since it
+//! judges only mail that arrives later. The move is owed to the account
+//! instead ([`owe`]), in `<data_dir>/blocked-senders-owed.json` beside the
+//! list, written before the block answers, so a daemon that stops before the
+//! account turned ready still owes it at its next start. Every start runs
+//! what it owes ([`move_owed`]) and settles an entry only once its move ran;
+//! an unblock settles the sender's entries in every account (PERSO-109).
+//!
+//! Every read-modify-write of the list or the owed moves and every scan or
+//! move holds one lock ([`LOCK`]), so a block call and a runner's scan never
+//! move one row twice, and an unblock never races an owed move.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -58,6 +71,9 @@ use crate::store::Store;
 
 /// The file name of the list under the data directory.
 pub const LIST_FILE: &str = "blocked-senders.json";
+
+/// The file name of the owed moves, beside the list.
+pub const OWED_FILE: &str = "blocked-senders-owed.json";
 
 /// How many moved Message-IDs a store remembers.
 pub const MOVED_MEMORY: usize = 1024;
@@ -110,6 +126,15 @@ pub fn load(path: &Path) -> Result<Vec<String>> {
 
 /// Write the list atomically, private to the user.
 fn save(path: &Path, entries: &[String]) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(&ListFile {
+        entries: entries.to_vec(),
+    })
+    .context("serialising the blocked senders")?;
+    write_private(path, &bytes)
+}
+
+/// Replace `path` with `bytes` atomically, private to the user.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -119,10 +144,6 @@ fn save(path: &Path, entries: &[String]) -> Result<()> {
     crate::config::create_private_dir_all(parent)
         .with_context(|| format!("creating {}", parent.display()))?;
     let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(&ListFile {
-        entries: entries.to_vec(),
-    })
-    .context("serialising the blocked senders")?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -130,7 +151,7 @@ fn save(path: &Path, entries: &[String]) -> Result<()> {
         .mode(0o600)
         .open(&tmp)
         .with_context(|| format!("opening {}", tmp.display()))?;
-    file.write_all(&bytes)
+    file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
@@ -188,8 +209,8 @@ pub fn block(path: &Path, entry: &str) -> Result<Edit> {
     })
 }
 
-/// Remove `entry`, already [`normalize`]d, from the list at `path`. Nothing
-/// moves back.
+/// Remove `entry`, already [`normalize`]d, from the list at `path`, and the
+/// moves owed for it from every account ([`owe`]). Nothing moves back.
 pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
     let _turn = locked();
     let mut entries = load(path)?;
@@ -199,11 +220,106 @@ pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
     if changed {
         save(path, &entries)?;
     }
+    let owed_path = owed_path(path);
+    let mut owed = load_owed(&owed_path)?;
+    let mut settled = false;
+    owed.accounts.retain(|_, owed| {
+        let before = owed.len();
+        owed.retain(|known| known != entry);
+        settled |= owed.len() != before;
+        !owed.is_empty()
+    });
+    if settled {
+        save_owed(&owed_path, &owed)?;
+    }
     Ok(Edit {
         entry: entry.to_string(),
         changed,
         entries,
     })
+}
+
+/// The owed moves beside the list at `list`.
+fn owed_path(list: &Path) -> PathBuf {
+    list.with_file_name(OWED_FILE)
+}
+
+/// The owed moves: per account, the entries whose Inbox mail it is owed the
+/// move of, in the order they were blocked.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OwedFile {
+    #[serde(default)]
+    accounts: BTreeMap<String, Vec<String>>,
+}
+
+/// The owed moves at `path`; an absent file owes nothing, and one that does
+/// not parse is an error, so a broken file settles nothing behind the user's
+/// back.
+fn load_owed(path: &Path) -> Result<OwedFile> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not an owed-moves file", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(OwedFile::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+fn save_owed(path: &Path, owed: &OwedFile) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(owed).context("serialising the owed moves")?;
+    write_private(path, &bytes)
+}
+
+/// Owe `account` the move of `entry`'s mail in its Inbox to Junk, in the file
+/// beside the list at `list`: the block of a sender while the daemon is still
+/// opening the account's store (PERSO-109). Written when this returns.
+pub fn owe(list: &Path, account: &str, entry: &str) -> Result<()> {
+    let _turn = locked();
+    let path = owed_path(list);
+    let mut owed = load_owed(&path)?;
+    let entries = owed.accounts.entry(account.to_string()).or_default();
+    if entries.iter().any(|known| known == entry) {
+        return Ok(());
+    }
+    entries.push(entry.to_string());
+    save_owed(&path, &owed)
+}
+
+/// The entries whose Inbox move `account` is owed, beside the list at `list`.
+pub fn owed(list: &Path, account: &str) -> Result<Vec<String>> {
+    let _turn = locked();
+    Ok(load_owed(&owed_path(list))?
+        .accounts
+        .remove(account)
+        .unwrap_or_default())
+}
+
+/// Run the Inbox moves `account` is owed ([`owe`]) for the entries the list
+/// at `list` still holds, and settle them once the move ran; an owed entry
+/// the list no longer holds is settled unmoved. A move that fails settles
+/// nothing, so the next start runs it again.
+///
+/// An account with no Junk folder settles too: the move ran and keeps the
+/// mail in the Inbox, as a block of an open account does.
+pub fn move_owed(store: &Store, account: &AccountConfig, list: &Path) -> Result<Moved> {
+    let _turn = locked();
+    let path = owed_path(list);
+    let mut owed = load_owed(&path)?;
+    let Some(entries) = owed.accounts.get(&account.name) else {
+        return Ok(Moved::Rows {
+            mailbox: String::new(),
+            count: 0,
+        });
+    };
+    let blocked = load(list)?;
+    let entries: Vec<String> = entries
+        .iter()
+        .filter(|entry| blocked.contains(entry))
+        .cloned()
+        .collect();
+    let moved = move_matching(store, account, &entries)?;
+    owed.accounts.remove(&account.name);
+    save_owed(&path, &owed)?;
+    Ok(moved)
 }
 
 /// The store key of `account`'s Junk folder, or `None` when its catalogue
@@ -258,6 +374,11 @@ pub enum Moved {
 /// since the user just asked for it.
 pub fn move_existing(store: &Store, account: &AccountConfig, entries: &[String]) -> Result<Moved> {
     let _turn = locked();
+    move_matching(store, account, entries)
+}
+
+/// [`move_existing`] for a caller that holds [`LOCK`].
+fn move_matching(store: &Store, account: &AccountConfig, entries: &[String]) -> Result<Moved> {
     let catalogue = Catalogue::from_store(store, account);
     let inbox = inbox_key(&catalogue);
     let rows: Vec<(i64, String)> = inbox_rows(store, &account.name, &inbox, false)?
@@ -981,6 +1102,53 @@ mod tests {
             move_existing(&fx.store, &account(), &entries).unwrap(),
             Moved::NoJunk { matched: 1 }
         );
+    }
+
+    /// A move owed to an account is kept in the file beside the list until
+    /// it ran: a failed one stays for the next start, a successful one is
+    /// settled, and an unblock settles the sender's.
+    #[test]
+    fn an_owed_move_is_kept_until_it_ran_and_an_unblock_cancels_it() {
+        let fx = Fixture::new(true);
+        let list = fx.dir.path().join(LIST_FILE);
+        let spam = fx.ingest(1, "x@spam.example");
+        for entry in ["x@spam.example", "@other.example"] {
+            block(&list, entry).unwrap();
+            owe(&list, ACCOUNT, entry).unwrap();
+        }
+        owe(&list, "beta", "x@spam.example").unwrap();
+        assert_eq!(
+            owed(&list, ACCOUNT).unwrap(),
+            ["x@spam.example", "@other.example"]
+        );
+
+        // An unblock settles the sender's debt in every account.
+        unblock(&list, "@other.example").unwrap();
+        assert_eq!(owed(&list, ACCOUNT).unwrap(), ["x@spam.example"]);
+
+        // A move that fails keeps its debt.
+        fx.store
+            .conn()
+            .execute_batch("ALTER TABLE messages RENAME TO messages_away")
+            .unwrap();
+        assert!(move_owed(&fx.store, &account(), &list).is_err());
+        assert_eq!(owed(&list, ACCOUNT).unwrap(), ["x@spam.example"]);
+
+        // The next one moves the mail and settles it, and only this account's.
+        fx.store
+            .conn()
+            .execute_batch("ALTER TABLE messages_away RENAME TO messages")
+            .unwrap();
+        assert_eq!(
+            move_owed(&fx.store, &account(), &list).unwrap(),
+            Moved::Rows {
+                mailbox: "Junk".to_string(),
+                count: 1
+            }
+        );
+        assert_eq!(fx.mailbox_of(&spam), "Junk");
+        assert!(owed(&list, ACCOUNT).unwrap().is_empty());
+        assert_eq!(owed(&list, "beta").unwrap(), ["x@spam.example"]);
     }
 
     #[test]

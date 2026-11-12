@@ -610,7 +610,8 @@ async fn stop_account(runtimes: &Arc<RuntimeTable>, account: &str) {
 /// came up completes the account's seed from the store
 /// ([`super::runtime::publish::reseed_from_store`]), so a client that reacts
 /// to the event finds the account served and its hierarchy whole. A
-/// `sender.block` that came while the store was opening moves the account's
+/// `sender.block` that came while the store was opening, in this daemon or
+/// one that stopped before the account turned ready, moves the account's
 /// Inbox mail from that sender to Junk here, before the state is committed
 /// ([`super::runtime::sender_runner::move_owed`]).
 pub async fn start_account(
@@ -621,12 +622,12 @@ pub async fn start_account(
 ) {
     let account = cfg.name.clone();
     let change = start_runtime(runtimes, canonical, cfg.clone(), account_runtimes).await;
-    let owed = super::opening::end(&account);
+    super::opening::end(&account);
     let runtime = runtimes.get(&account);
     if change.is_some() && runtime.is_some() {
         super::runtime::publish::reseed_from_store(canonical, &cfg).await;
     }
-    super::runtime::sender_runner::move_owed(runtime.as_deref(), canonical, &cfg, owed).await;
+    super::runtime::sender_runner::move_owed(runtime.as_deref(), canonical, &cfg).await;
     if let Some(change) = change {
         canonical.apply(change);
     }

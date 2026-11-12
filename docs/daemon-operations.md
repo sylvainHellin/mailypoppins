@@ -439,6 +439,7 @@ What it runs, and why only once, is [Mail hooks](#mail-hooks) below.
 Every ready runtime of an account with a server, IMAP or Graph, also runs a blocked-senders runner (`src/daemon/runtime/sender_runner.rs`, PERSO-261), bound to the runtime the same way and woken by the same ticks as the hook runner.
 Each scan judges the Inbox rows that arrived since the last one against the block list in `<data_dir>/blocked-senders.json` (`mp block`, `mp unblock`, `mp blocked`) and moves a match to the account's Junk folder through the mutation queue, then asks for a drain and publishes the counts that moved.
 The first scan after the Inbox has synced arms on the store and judges nothing, so mail already there never moves on its own; `mp block` moves that mail itself unless given `--keep-existing`.
+For an account whose store the daemon is still opening, that move is owed in `<data_dir>/blocked-senders-owed.json` and runs at the account's start, the next daemon's when this one stops first; a failed move stays in the file for the start after, and `mp unblock` drops the sender's (PERSO-109).
 An account whose catalogue resolves no Junk folder (the server marks none `\Junk`, none carries a junk name, and `[accounts.mailboxes] junk` names none) keeps the mail, with a warning in the log, and `mp block` names it.
 
 ### The engine lock

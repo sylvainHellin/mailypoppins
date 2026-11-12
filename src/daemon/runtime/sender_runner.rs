@@ -124,27 +124,31 @@ pub async fn scan_once(
     super::publish::publish_changed_counts(canonical, cfg).await;
 }
 
-/// Move the mail in `cfg`'s Inbox from the senders `owed` names to Junk, the
-/// move each `sender.block` owed the account while its store was opening
-/// ([`crate::daemon::opening::owe_block_move`]); the store is open by now,
-/// so its integrity check has run. A move asks `runtime` for a drain and
-/// publishes the counts, as the block call does for an open account.
+/// Move the mail in `cfg`'s Inbox from the senders a `sender.block` owed the
+/// account while its store was opening to Junk ([`senders::move_owed`]); the
+/// store is open by now, so its integrity check has run. A move that fails
+/// stays owed for the account's next start. A move asks `runtime` for a
+/// drain and publishes the counts, as the block call does for an open
+/// account.
 pub async fn move_owed(
     runtime: Option<&AccountRuntime>,
     canonical: &Arc<CanonicalState>,
     cfg: &AccountConfig,
-    owed: Vec<String>,
 ) {
-    if owed.is_empty() {
-        return;
-    }
     let account = cfg.name.clone();
     let move_cfg = cfg.clone();
     let moved = tokio::task::spawn_blocking(move || {
+        let list = senders::list_path();
+        if senders::owed(&list, &move_cfg.name)?.is_empty() {
+            return Ok(senders::Moved::Rows {
+                mailbox: String::new(),
+                count: 0,
+            });
+        }
         let Some(store) = crate::store::open_store(&move_cfg.name) else {
-            anyhow::bail!("its store did not open");
+            anyhow::bail!("its store did not open; the move stays owed");
         };
-        senders::move_existing(&store, &move_cfg, &owed)
+        senders::move_owed(&store, &move_cfg, &list)
     })
     .await;
     match moved {

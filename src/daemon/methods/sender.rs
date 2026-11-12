@@ -14,9 +14,10 @@
 //! server and no Junk folder is named in `skipped` and never fails the call;
 //! a local-only account has no mail arriving and is left out. An account whose
 //! store the daemon is still opening is named in `skipped` too, and its Inbox
-//! mail from the sender moves once the store is open
-//! ([`crate::daemon::opening::owe_block_move`]). `sender.unblock` removes the
-//! entry and moves nothing back.
+//! mail from the sender moves once the store is open, a move owed in a file
+//! written before the call answers ([`crate::daemon::senders::owe`]), so a
+//! daemon that stops first runs it at its next start. `sender.unblock`
+//! removes the entry and the moves owed for it, and moves nothing back.
 //!
 //! An entry that is neither a full address nor `@domain` is `-32602` with the
 //! sentence [`mp_core::blocklist::normalize`] refuses it with, and so is a
@@ -147,7 +148,8 @@ impl SenderMethod {
             .cloned()
             .collect();
         let (edit, moved, skipped) = blocking(move || {
-            let edit = senders::block(&senders::list_path(), &entry)
+            let list = senders::list_path();
+            let edit = senders::block(&list, &entry)
                 .map_err(|e| DomainError::from(internal(format!("{e:#}"))))?;
             let mut moved = Vec::new();
             let mut skipped = Vec::new();
@@ -155,11 +157,22 @@ impl SenderMethod {
                 let name = account.name.clone();
                 // An account whose store the daemon is still opening is not
                 // opened a second time here (PERSO-109): its Inbox move is
-                // owed to it and runs once the store is open, and the answer
-                // says so. With `move_existing` off nothing is owed, and its
-                // Junk folder is not known without the store.
-                if move_existing && super::super::opening::owe_block_move(&name, &entry) {
-                    let reason = senders::opening_reason(&name);
+                // owed to it on disk before the call answers and runs at its
+                // start, and the answer says so. With `move_existing` off
+                // nothing is owed, and its Junk folder is not known without
+                // the store.
+                let owed = move_existing
+                    .then(|| {
+                        super::super::opening::while_opening(&name, || {
+                            senders::owe(&list, &name, &entry)
+                        })
+                    })
+                    .flatten();
+                if let Some(owed) = owed {
+                    let reason = match owed {
+                        Ok(()) => senders::opening_reason(&name),
+                        Err(e) => format!("{name}'s Inbox could not be moved: {e:#}"),
+                    };
                     warn!("[senders] blocking {entry}: {reason}");
                     skipped.push(BlockSkipped {
                         account: name,
