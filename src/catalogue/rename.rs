@@ -166,8 +166,10 @@ fn sample(store: &Store, account: &str, key: &str) -> Result<Vec<(u32, String)>>
 }
 
 /// The renames `seen` proves: a gained folder and a lost one sharing a
-/// UIDVALIDITY no other lost or gained folder has, whose sampled UIDs carry
-/// the Message-IDs the store holds at them ([`same_messages`]).
+/// UIDVALIDITY no other lost or gained folder has, whose UIDNEXT is above the
+/// highest UID the lost one's last fetch saw (a folder never hands out a UID
+/// twice), and whose sampled UIDs carry the Message-IDs the store holds at
+/// them ([`same_messages`]).
 pub fn confirm(plan: &Plan, seen: &[FolderIdentity]) -> Vec<Rename> {
     let mut renames = Vec::new();
     for gained in seen {
@@ -182,6 +184,11 @@ pub fn confirm(plan: &Plan, seen: &[FolderIdentity]) -> Vec<Rename> {
         let (Some(lost), None, 1) = (lost.next(), lost.next(), twins) else {
             continue;
         };
+        if let (Some(top), Some(next)) = (lost.last_uid, gained.uidnext) {
+            if next <= top {
+                continue;
+            }
+        }
         if !same_messages(&lost.sample, &gained.message_ids) {
             continue;
         }

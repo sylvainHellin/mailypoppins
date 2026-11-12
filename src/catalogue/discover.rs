@@ -680,4 +680,14 @@ mod tests {
         ]);
         fixture.assert_no_rename("Projekte");
     }
+
+    /// PERSO-185: a folder never hands out a UID twice, so a gained folder
+    /// whose UIDNEXT is at or below the highest UID the lost one's last fetch
+    /// saw is another folder, whatever its messages say.
+    #[test]
+    fn a_uidnext_at_or_below_the_stored_top_is_no_rename() {
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![served("Projekte", 7, 2, &[(1, "one"), (2, "two")])]);
+        fixture.assert_no_rename("Projekte");
+    }
 }
