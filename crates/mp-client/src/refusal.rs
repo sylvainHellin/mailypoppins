@@ -8,11 +8,16 @@
 //! the same versions in the same sentence. A daemon of 0.12.0 or older sends
 //! no `version`, and no `daemon` at all in `capability_missing`; the sentence
 //! then says so rather than printing "unknown".
+//!
+//! The way out depends on which side is older. A daemon whose lowest
+//! protocol is above this build's highest is the newer one, and restarting
+//! it from this build would put it back on the older build, so the sentence
+//! says to update this client; otherwise it says to restart the daemon.
 
 use mp_protocol::{ErrorCode, RpcError, PROTOCOL_MAX, PROTOCOL_MIN};
 use serde_json::Value;
 
-use crate::ClientError;
+use crate::{ClientError, ClientKind};
 
 /// Why the builds do not fit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,9 +85,53 @@ impl VersionRefusal {
         })
     }
 
+    /// Whether this client is the older side: the daemon's lowest protocol
+    /// is above the highest this build speaks. A missing capability always
+    /// means an older daemon, and a daemon that names no range keeps the
+    /// restart advice, since nothing says this client is the older side.
+    pub fn client_is_older(&self) -> bool {
+        matches!(self.reason, RefusalReason::Protocol)
+            && self
+                .daemon_protocol
+                .is_some_and(|(min, _)| min > PROTOCOL_MAX)
+    }
+
+    /// [`describe`](Self::describe) followed by the way out a client of
+    /// `kind` offers: update this client when it is the older side, else
+    /// restart the daemon on this build.
+    pub fn sentence(&self, client_version: &str, kind: ClientKind) -> String {
+        format!("{}; {}", self.describe(client_version), self.way_out(kind))
+    }
+
+    /// What the user of a client of `kind` does about the refusal.
+    fn way_out(&self, kind: ClientKind) -> String {
+        let matching = |what: &str| match &self.daemon_version {
+            Some(version) => format!("the matching {what} (mailypoppins {version})"),
+            None => format!("the {what} of the daemon's version"),
+        };
+        match (kind, self.client_is_older()) {
+            (ClientKind::Cli | ClientKind::Tui, true) => format!(
+                "install {} and run it again, since restarting the daemon from this build \
+                 would put it back on this older one",
+                matching("mp")
+            ),
+            (ClientKind::Cli | ClientKind::Tui, false) => {
+                "restart it on this build with `mp daemon restart`".to_string()
+            }
+            (ClientKind::Gui, true) => format!(
+                "update this app to {}, since restarting the daemon from it would put the \
+                 daemon back on this older build",
+                matching("version")
+            ),
+            (ClientKind::Gui, false) => {
+                "restart the daemon to run the matching version".to_string()
+            }
+        }
+    }
+
     /// One sentence naming the daemon's version and protocol, this client's
     /// (`client_version`, and the range this build speaks), and what does not
-    /// fit; the caller appends the way out its client offers.
+    /// fit; [`sentence`](Self::sentence) appends the way out.
     pub fn describe(&self, client_version: &str) -> String {
         let daemon = match (&self.daemon_version, self.daemon_protocol) {
             (Some(version), Some(range)) => {
@@ -179,6 +228,67 @@ mod tests {
         })
         .expect("a version refusal without data");
         assert!(bare.describe("0.12.0").contains("lacks capabilities"));
+    }
+
+    /// A daemon whose lowest protocol is above this build's highest is the
+    /// newer side, and restarting it from this build would put it back on the
+    /// older one: the way out is to update this client. A daemon below this
+    /// build's range, one that does not name its range, and one that lacks a
+    /// capability are the older side, which a restart replaces.
+    #[test]
+    fn the_way_out_updates_whichever_side_is_older() {
+        let newer = VersionRefusal::from_rpc(&rpc(
+            ErrorCode::ProtocolIncompatible,
+            json!({"daemon": {"version": "9.0.0", "min": PROTOCOL_MAX + 1, "max": PROTOCOL_MAX + 1}}),
+        ))
+        .expect("a version refusal");
+        assert!(newer.client_is_older());
+        let cli = newer.sentence("0.12.0", ClientKind::Cli);
+        assert!(cli.starts_with(&newer.describe("0.12.0")), "{cli}");
+        assert!(
+            cli.ends_with(
+                "; install the matching mp (mailypoppins 9.0.0) and run it again, since restarting \
+                 the daemon from this build would put it back on this older one"
+            ),
+            "{cli}"
+        );
+        assert_eq!(cli, newer.sentence("0.12.0", ClientKind::Tui));
+        let gui = newer.sentence("0.12.0", ClientKind::Gui);
+        assert!(
+            gui.ends_with(
+                "; update this app to the matching version (mailypoppins 9.0.0), since restarting \
+                 the daemon from it would put the daemon back on this older build"
+            ),
+            "{gui}"
+        );
+
+        let older = VersionRefusal::from_rpc(&rpc(
+            ErrorCode::ProtocolIncompatible,
+            json!({"daemon": {"version": "0.0.1", "min": 0, "max": PROTOCOL_MIN - 1}}),
+        ))
+        .expect("a version refusal");
+        let unranged = VersionRefusal::from_rpc(&rpc(ErrorCode::ProtocolIncompatible, json!({})))
+            .expect("a version refusal without a range");
+        let lacking = VersionRefusal::from_rpc(&rpc(
+            ErrorCode::CapabilityMissing,
+            json!({"missing": ["a.b"], "daemon": {"version": "9.0.0", "min": PROTOCOL_MAX + 1, "max": PROTOCOL_MAX + 1}}),
+        ))
+        .expect("a version refusal");
+        for refusal in [older, unranged, lacking] {
+            assert!(!refusal.client_is_older(), "{refusal:?}");
+            assert!(
+                refusal
+                    .sentence("0.12.0", ClientKind::Cli)
+                    .ends_with("; restart it on this build with `mp daemon restart`"),
+                "{refusal:?}"
+            );
+            assert!(
+                refusal
+                    .sentence("0.12.0", ClientKind::Gui)
+                    .ends_with("; restart the daemon to run the matching version"),
+                "{refusal:?}"
+            );
+        }
     }
 
     #[test]

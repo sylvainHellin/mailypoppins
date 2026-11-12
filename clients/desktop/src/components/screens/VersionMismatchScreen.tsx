@@ -19,13 +19,16 @@ function range(min: number, max: number): string {
  * another version than the `mp` the app starts. The refusal's own daemon
  * version comes first, since the last handshake may be an older daemon's;
  * a daemon of 0.12.0 or older refuses without naming its version (PERSO-277),
- * which the row says instead of "unknown".
+ * which the row says instead of "unknown". A daemon whose lowest protocol is
+ * above this app's highest is the newer side: restarting it from this app
+ * would put it back on the older `mp`, so the screen says to update the app.
  */
 export function VersionMismatchScreen({ error, version, onRestart }: VersionMismatchProps) {
   const daemon =
     error.daemon_version ?? version?.daemon?.daemon_version ?? "not reported: an older daemon than this app";
   const ours = version ? range(version.protocol_min, version.protocol_max) : null;
   const theirs = error.daemon_protocol ? range(error.daemon_protocol.min, error.daemon_protocol.max) : null;
+  const appIsOlder = !!error.daemon_protocol && !!version && error.daemon_protocol.min > version.protocol_max;
   return (
     <ScreenFrame
       title="The daemon runs an incompatible version"
@@ -41,10 +44,17 @@ export function VersionMismatchScreen({ error, version, onRestart }: VersionMism
         {theirs && <PathRow label="Daemon protocol" value={theirs} />}
         <PathRow label="Log" value={error.log} />
       </dl>
-      <p className="text-sm text-muted-foreground">
-        Restart the daemon to run the version this app expects: it runs the <code>mp</code> this app ships with or
-        finds on the PATH, and other clients lose their connection for a moment.
-      </p>
+      {appIsOlder ? (
+        <p className="text-sm text-muted-foreground">
+          Update this app to the version the daemon runs: restarting the daemon from this app would put it back on
+          the older <code>mp</code> this app ships with or finds on the PATH.
+        </p>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Restart the daemon to run the version this app expects: it runs the <code>mp</code> this app ships with or
+          finds on the PATH, and other clients lose their connection for a moment.
+        </p>
+      )}
       <div>
         <Button onClick={onRestart}>Restart daemon…</Button>
       </div>

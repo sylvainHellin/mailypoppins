@@ -377,14 +377,12 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
 }
 
 /// Why a handshake refused for a missing capability or a disjoint protocol
-/// range cannot be answered by starting a daemon, naming both versions
-/// (PERSO-277), or `None` for any other failure.
+/// range cannot be answered by starting a daemon, naming both versions and
+/// the way out: `mp daemon restart` for an older daemon, a newer `mp` when
+/// this build is the older side (PERSO-277), or `None` for any other failure.
 fn too_old(error: &ClientError) -> Option<String> {
     let refusal = VersionRefusal::from_error(error)?;
-    Some(format!(
-        "{}; restart it on this build with `mp daemon restart`",
-        refusal.describe(env!("CARGO_PKG_VERSION"))
-    ))
+    Some(refusal.sentence(env!("CARGO_PKG_VERSION"), ClientKind::Cli))
 }
 
 /// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
@@ -555,6 +553,20 @@ mod tests {
         let why = too_old(&disjoint).expect("a disjoint protocol range is final");
         assert!(why.contains("mailypoppins 9.0.0"), "{why}");
         assert!(why.contains("protocol 2"), "{why}");
+        // The daemon is the newer side: restarting it from this build would
+        // put it back on the older one, so the way out is a newer mp.
+        assert!(
+            why.contains("install the matching mp (mailypoppins 9.0.0)"),
+            "{why}"
+        );
+        assert!(!why.contains("mp daemon restart"), "{why}");
+
+        let below = ClientError::Rpc(mp_protocol::RpcError {
+            code: ErrorCode::ProtocolIncompatible.code(),
+            message: "no protocol version is supported by both sides".to_string(),
+            data: Some(serde_json::json!({"daemon": {"version": "0.0.1", "min": 0, "max": 0}})),
+        });
+        let why = too_old(&below).expect("a disjoint protocol range is final");
         assert!(why.contains("mp daemon restart"), "{why}");
 
         assert!(too_old(&ClientError::NotRunning).is_none());

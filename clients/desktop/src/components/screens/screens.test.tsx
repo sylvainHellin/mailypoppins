@@ -72,6 +72,21 @@ describe("the connection screens", () => {
     expect(screen.getByText(/Restart the daemon to run the version this app expects/)).toBeInTheDocument();
   });
 
+  it("tells the user to update the app when the daemon is the newer side (PERSO-277)", async () => {
+    const why =
+      "the running daemon is mailypoppins 9.0.0 (protocol 2) and shares no protocol version with this client (mailypoppins 0.12.0, protocol 1); update this app to the matching version (mailypoppins 9.0.0), since restarting the daemon from it would put the daemon back on this older build";
+    renderApp(1400, () => {
+      mock.connection = {
+        state: "failed",
+        error: { ...unavailable, kind: "version_mismatch", why, daemon_version: "9.0.0", daemon_protocol: { min: 2, max: 2 } },
+      };
+    });
+    expect(await screen.findByRole("heading", { name: /incompatible version/ })).toBeInTheDocument();
+    expect(await screen.findByText("0.1.0")).toBeInTheDocument();
+    expect(screen.getByText(/Update this app to the version the daemon runs/)).toBeInTheDocument();
+    expect(screen.queryByText(/Restart the daemon to run the version this app expects/)).toBeNull();
+  });
+
   it("says a daemon that does not report its version is older, never unknown (PERSO-277)", async () => {
     renderApp(1400, () => {
       mock.connection = {

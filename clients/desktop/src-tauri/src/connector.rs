@@ -405,7 +405,8 @@ async fn handshake() -> Result<(Connection, InitializeResult), ClientError> {
 /// listening", which is the one failure answered by starting a daemon.
 ///
 /// A version refusal is told in the sentence `mp` and the TUI print, naming
-/// the daemon's version and protocol from the refusal itself (PERSO-277).
+/// the daemon's version and protocol from the refusal itself, and ends on
+/// updating this app when the daemon is the newer side (PERSO-277).
 fn classify(e: &ClientError) -> Option<ConnectError> {
     match e {
         ClientError::NotRunning => None,
@@ -414,10 +415,7 @@ fn classify(e: &ClientError) -> Option<ConnectError> {
                 let ours = client_info(APP_VERSION.get()).app_version;
                 let mut failure = error(
                     ConnectFailure::VersionMismatch,
-                    format!(
-                        "{}; restart the daemon to run the matching version",
-                        refusal.describe(&ours)
-                    ),
+                    refusal.sentence(&ours, ClientKind::Gui),
                 );
                 failure.daemon_version = refusal.daemon_version;
                 failure.daemon_protocol = refusal
