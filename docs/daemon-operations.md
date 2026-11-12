@@ -882,6 +882,10 @@ What the commands print, and what they exit:
 | uninstall with nothing installed | `✓ no service installed`, and nothing is run | 0 |
 | `--check`, installed | `✓ service installed at <path>` | 0 |
 | `--check`, absent | `✗ no service installed` | 1 |
+| any of them on a profile | `✗ the login service is the default profile's; …` on stderr, nothing written or run | 1 |
+
+The login service is the default profile's (PERSO-176): its unit name and file are the same on every profile, so `install-service`, its `--check` and `uninstall-service` refuse to run on one rather than replace or remove the default profile's unit.
+A profile's daemon starts on demand, and the start below passes the service over for it in silence, since the unit bakes the default profile's data directory.
 
 The service-manager lines follow the first line, indented, whether they were run or not.
 A `systemctl` that is not on `PATH` is not a failure of the write - that is a container, a minimal image, or a session that is not systemd's - so the unit is written, the lines are printed to run by hand, and the command exits 0.

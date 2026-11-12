@@ -190,6 +190,7 @@ enum Mode {
 /// cannot say counts as a daemon outside the service, whose handover is
 /// `mp daemon restart`'s and therefore safe for the service's own as well.
 pub async fn install(force: bool, check: bool) -> Result<i32> {
+    refuse_on_a_profile()?;
     let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
     let path = service_path(target);
 
@@ -308,6 +309,7 @@ fn report_check(path: &Path) -> i32 {
 
 /// Disable the service, remove the file, and tell the session manager.
 pub fn uninstall() -> Result<i32> {
+    refuse_on_a_profile()?;
     let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
     let path = service_path(target);
 
@@ -342,6 +344,22 @@ pub fn uninstall() -> Result<i32> {
     outcome?;
     info!("[service] removed {}", path.display());
     Ok(EXIT_OK)
+}
+
+/// The login service is the default profile's (PERSO-176): its unit name and
+/// file are the same on every profile, so an install or an uninstall on a
+/// profile would replace or remove the default profile's. A profile's daemon
+/// starts on demand instead, and [`start_route`] already passes the service
+/// over for it, since the unit bakes the default profile's data directory.
+fn refuse_on_a_profile() -> Result<()> {
+    if let Some(profile) = mp_core::profile::active() {
+        bail!(
+            "the login service is the default profile's; profile {profile}'s daemon starts \
+             when a command or a window needs it, so run this without --profile or \
+             MAILYPOPPINS_PROFILE"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

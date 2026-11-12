@@ -702,6 +702,55 @@ fn uninstall_removes_the_unit_and_prints_the_disable_lines() {
     assert!(!unit.exists(), "the unit is gone from {}", unit.display());
 }
 
+/// The login service is the default profile's (PERSO-176): on a profile,
+/// `install-service`, its `--check` and `uninstall-service` are refused, the
+/// default profile's unit is left as it is, and no service manager is run.
+#[test]
+fn the_service_commands_are_refused_under_a_profile() {
+    let sandbox = Sandbox::new();
+    assert_eq!(code(&sandbox.install(&[])), 0);
+    let unit = sandbox.unit_path();
+    let before = written(&unit);
+    sandbox.fake_systemctl(0);
+
+    for args in [
+        &["daemon", "install-service"][..],
+        &["daemon", "install-service", "--check"][..],
+        &["daemon", "install-service", "--force"][..],
+        &["daemon", "uninstall-service"][..],
+    ] {
+        let out = sandbox
+            .mp()
+            .env_remove(DRY_RUN_ENV)
+            .env_remove("MAILYPOPPINS_DATA_DIR")
+            .env_remove("MAILYPOPPINS_CONFIG_DIR")
+            .args(["--profile", "demo"])
+            .args(args)
+            .output()
+            .expect("run mp daemon");
+        assert_eq!(code(&out), 1, "{args:?} is refused");
+        let stderr = stderr_text(&out);
+        assert!(
+            stderr.contains("the login service is the default profile's"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("demo"),
+            "{args:?} names the profile: {stderr}"
+        );
+    }
+    assert_eq!(
+        written(&unit),
+        before,
+        "the default profile's unit is untouched"
+    );
+    assert_eq!(
+        sandbox.systemctl_calls(),
+        Vec::<String>::new(),
+        "nothing ran"
+    );
+}
+
 /// An uninstall with nothing installed is a `✓` and a no-op.
 ///
 /// Not an error: the user asked for a machine with no login service, and that
