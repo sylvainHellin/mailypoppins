@@ -260,7 +260,10 @@ describe("the password dialog", () => {
   });
 
   it("says whether each password and token is stored, and reads it again once a password is stored", async () => {
-    const { user, view } = await openSettings();
+    // With no account check up, nothing but Settings reads them (PERSO-296).
+    resetMock();
+    mock.bootstrap.snapshot.diagnostics = [];
+    const { user, view } = await openSettingsKeeping();
     const work = card(view, "work");
     const field = (c: HTMLElement, label: string) => within(c).getByText(label).nextElementSibling;
     await waitFor(() => expect(field(work, "SMTP password")).toHaveTextContent("not set"));

@@ -109,6 +109,28 @@ describe("the account picker", () => {
     await waitFor(() => expect(row(/^home, /)).not.toHaveAccessibleName(/last sync failed/));
   });
 
+  it("names a rejected login rather than the failed sync it causes, and follows the account's check", async () => {
+    const { user } = renderApp(1400, () => {
+      const work = mock.bootstrap.snapshot.accounts.find((a) => a.name === "work");
+      if (work) work.sync_health = { state: "failed", reason: "no response: LOGIN failed.", at: "2026-07-02T09:20:11+02:00" };
+      mock.loginRejected = ["work"];
+      // No other account check, so the recovery is the last one up.
+      mock.bootstrap.snapshot.diagnostics = [];
+    });
+    await shellReady();
+    const detail = "the server rejected the password; set it with mp config set-password -A work imap";
+    act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail }));
+    await user.keyboard("ga");
+    await picker();
+    await waitFor(() => expect(row(/^work, /)).toHaveAccessibleName(/^work, login rejected, /));
+    expect(row(/^work, /).querySelector('[data-slot="sync-failed"]')).toHaveAttribute("title", "Login rejected");
+    expect(row(/^home, /)).not.toHaveAccessibleName(/login rejected/);
+
+    mock.loginRejected = [];
+    act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "ok", detail: "serving" }));
+    await waitFor(() => expect(row(/^work, /)).toHaveAccessibleName(/^work, last sync failed, /));
+  });
+
   it("with one account ga and the palette open nothing", async () => {
     const { user } = renderApp(1400, () => {
       mock.accounts = mock.accounts.filter((a) => a.name === "work");

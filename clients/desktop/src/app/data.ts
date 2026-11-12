@@ -12,6 +12,7 @@ import { refusalsWanted } from "@/app/rsvp";
 import { viewerZone, viewRange } from "@/app/calendar";
 import { CONTACT_LIMIT } from "@/app/contacts";
 import { signaturesWanted } from "@/app/signatures";
+import { credentialsWanted } from "@/app/health";
 import { EMPTY_SEARCH_FORM } from "@/app/search";
 
 /** Subscribe once, read the connection and version, and route menu items. */
@@ -206,13 +207,14 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     );
   }, [hasBootstrap, configWanted, config, dispatch]);
 
-  // Whether each account's passwords and token are stored, while the
-  // Settings view shows: stale with the configuration, after a stored
-  // password and after a sign-in.
-  const credentialsWanted = state.view === "settings";
+  // Whether each account's passwords and token are stored and whether the
+  // server rejected a login, while the Settings view shows or an account's
+  // check is up: stale with the configuration, after a stored password,
+  // after a sign-in and with each account check (PERSO-296).
+  const credentialsRead = credentialsWanted(state);
   const credentials = state.credentials;
   useEffect(() => {
-    if (!hasBootstrap || !credentialsWanted || !isStale(credentials)) return;
+    if (!hasBootstrap || !credentialsRead || !isStale(credentials)) return;
     const gen = credentials.gen;
     run(`credentials@${gen}`, () =>
       cmd
@@ -220,7 +222,7 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .then((answer) => dispatch({ type: "credentials_loaded", gen, credentials: answer }))
         .catch((e: unknown) => dispatch({ type: "credentials_failed", gen, error: asGuiError(e) })),
     );
-  }, [hasBootstrap, credentialsWanted, credentials, dispatch]);
+  }, [hasBootstrap, credentialsRead, credentials, dispatch]);
 
   // The signature listing the Signatures dialog or the new-draft wizard
   // shows, and only while one of them is open: a listing that went stale

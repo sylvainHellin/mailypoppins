@@ -50,6 +50,40 @@ describe("the health banner", () => {
     await waitFor(() => expect(line(seeded.name)).toHaveTextContent("Account home: blocked: a second engine took the lock"));
   });
 
+  // PERSO-296: the daemon holds a password its IMAP server rejected, and says
+  // so in the account's check, with the sentence mp daemon health prints.
+  const REJECTED = "the server rejected the password; set it with mp config set-password -A work imap";
+
+  it("offers the IMAP password dialog on an account whose login the server rejected", async () => {
+    const { user } = renderApp(undefined, () => {
+      mock.bootstrap.snapshot.diagnostics = [];
+      mock.loginRejected = ["work"];
+    });
+    await shellReady();
+    act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail: REJECTED }));
+    const shown = await waitFor(() => {
+      const el = line("account:work");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(shown).toHaveTextContent(`Account work: ${REJECTED}`);
+    await user.click(await within(shown).findByRole("button", { name: "Set IMAP password for work" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set IMAP password" });
+    expect(within(dialog).getByRole("form", { name: "IMAP password for work" })).toBeInTheDocument();
+  });
+
+  it("offers no password on an account check about something else", async () => {
+    renderApp();
+    await shellReady();
+    const shown = await waitFor(() => {
+      const el = line(seeded.name);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "account_credentials")).toBe(true));
+    expect(within(shown).queryByRole("button", { name: /^Set IMAP password/ })).toBeNull();
+  });
+
   it("shows a failing check in the destructive colour, and gives config_loaded to the config.toml banner when it shows", async () => {
     renderApp(undefined, () => void (mock.bootstrap.snapshot.diagnostics = []));
     await shellReady();

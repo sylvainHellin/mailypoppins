@@ -137,7 +137,7 @@ import {
 } from "@/app/state";
 import { viewPanes } from "@/app/views";
 import { logActivity, logEvent, withNotice } from "@/app/activity";
-import { checkLevel, checkLine, isHealthCheck, keptDismissals, knownCheck, withCheck } from "@/app/health";
+import { checkAccount, checkLevel, checkLine, isHealthCheck, keptDismissals, knownCheck, loginMayHaveMoved, withCheck } from "@/app/health";
 import {
   closeOutbox,
   isOutboxOperation,
@@ -1307,6 +1307,10 @@ function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
     // that opens finds them without waiting for a flip that may never come.
     health: bootstrap.snapshot.diagnostics,
     healthDismissed: keptDismissals(s.healthDismissed, bootstrap.snapshot.diagnostics),
+    // A rejected login (PERSO-296) may have come with an account check this
+    // window did not hold, or gone while away: a restarted daemon has
+    // forgotten it.
+    credentials: loginMayHaveMoved(s, bootstrap.snapshot.diagnostics) ? markStale(s.credentials) : s.credentials,
     mailboxes,
     accounts: s.accounts.data
       ? markStale({ ...s.accounts, data: s.accounts.data.filter((a) => names.includes(a.name)) })
@@ -1543,7 +1547,10 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "diagnostic.check_changed": {
       if (!isHealthCheck(payload)) return s;
       const health = withCheck(s.health, payload);
-      return { ...s, health, healthDismissed: keptDismissals(s.healthDismissed, health) };
+      const next = { ...s, health, healthDismissed: keptDismissals(s.healthDismissed, health) };
+      // An account's check moves with a login the server rejected or took
+      // again (PERSO-296), which `account.credentials` answers.
+      return checkAccount(payload.name) === null ? next : { ...next, credentials: markStale(s.credentials) };
     }
     case "config.changed":
       return configChanged(

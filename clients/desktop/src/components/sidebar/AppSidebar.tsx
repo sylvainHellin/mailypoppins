@@ -10,11 +10,14 @@ import { accountExpanded, accountNames, type AppState, type View } from "@/app/s
 import type { AccountState, SyncHealthState } from "@/protocol/types";
 import { outboxSummary, type OutboxSummary } from "@/app/outbox";
 import { installUpdate, updateEntryLabel } from "@/app/updates";
+import { loginRejected } from "@/app/health";
 
 export type AccountView = {
   name: string;
   runtime: AccountState;
   health: SyncHealthState;
+  /** The server rejected the account's IMAP login (PERSO-296), as `account.credentials` last said. */
+  loginRejected: boolean;
   outbox: OutboxSummary;
   mailboxes: SidebarMailbox[] | null;
   /** The inbox's unread count, the account's new mail; null before its mailboxes are known. */
@@ -39,6 +42,7 @@ export function sidebarModel(s: AppState): AccountView[] {
       name,
       runtime: info?.runtime_state ?? snap?.state ?? "opening",
       health: info?.sync_health ?? snap?.sync_health.state ?? "unknown",
+      loginRejected: loginRejected(s, name),
       // The listing once this window read it, which moves on every
       // invalidation; `list_accounts` only moves on a bootstrap.
       outbox: outboxSummary(s, name),

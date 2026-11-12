@@ -53,6 +53,49 @@ export function checkLabel(name: string): string {
   }
 }
 
+/** The account an `account:<name>` check is about, null for any other check. */
+export function checkAccount(name: string): string | null {
+  return name.startsWith("account:") ? name.slice("account:".length) : null;
+}
+
+/**
+ * Whether the server rejected `account`'s IMAP login (PERSO-296), as
+ * `account.credentials` last answered: the daemon holds that password and
+ * says so in the account's check, whose line then offers the IMAP password
+ * dialog, and the account picker names it.
+ */
+export function loginRejected(s: Pick<AppState, "credentials">, account: string): boolean {
+  return s.credentials.data?.accounts.some((c) => c.account === account && c.login_rejected) ?? false;
+}
+
+/**
+ * Whether `account.credentials` is read: while the Settings view shows them,
+ * while an account's check is up, since it may be a rejected login
+ * (PERSO-296), and while they say a login is rejected, so the check's
+ * recovery, which leaves no account check up, still reads them again. Each
+ * change of an account's check marks them stale.
+ */
+export function credentialsWanted(s: Pick<AppState, "view" | "health" | "credentials">): boolean {
+  return (
+    s.view === "settings" ||
+    s.health.some((c) => checkAccount(c.name) !== null) ||
+    (s.credentials.data?.accounts.some((c) => c.login_rejected) ?? false)
+  );
+}
+
+/**
+ * Whether a bootstrap whose checks are `health` may have moved a rejected
+ * login (PERSO-296): it carries an account check this window does not hold
+ * as it is, or the credentials say a login is rejected, which a check that
+ * cleared while away, or a restarted daemon, no longer holds.
+ */
+export function loginMayHaveMoved(s: Pick<AppState, "health" | "credentials">, health: readonly HealthCheck[]): boolean {
+  return (
+    health.some((c) => checkAccount(c.name) !== null && !knownCheck(s.health, c)) ||
+    (s.credentials.data?.accounts.some((c) => c.login_rejected) ?? false)
+  );
+}
+
 /**
  * The checks after one changed: a check that is not ok replaces its entry,
  * or joins the end; an ok one leaves.

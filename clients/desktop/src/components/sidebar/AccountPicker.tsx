@@ -1,7 +1,7 @@
 // The account picker `ga` opens (ticket 0147), the TUI's `Overlay::Account`: every
 // account in config order, the selected one current, each with its inbox's
 // unread count, its runtime state while it does not serve, and a warning mark
-// when its last sync failed. A plain list with digits and no filter field, so `j` and `k`
+// when the server rejected its login (PERSO-296) or else its last sync failed. A plain list with digits and no filter field, so `j` and `k`
 // move rather than type.
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -95,10 +95,12 @@ export function AccountPicker({ open, onOpenChange }: AccountPickerProps) {
             const isCurrent = a.name === current;
             const digit = i < 9 ? i + 1 : null;
             const unread = a.inboxUnread ?? 0;
-            const failed = a.health === "failed";
+            // A rejected login is the cause of the failed sync it brings, so
+            // it is the one named.
+            const warning = a.loginRejected ? "login rejected" : a.health === "failed" ? "last sync failed" : null;
             const label = [
               a.name,
-              failed ? "last sync failed" : null,
+              warning,
               isCurrent ? "current" : null,
               a.runtime !== "ready" ? a.runtime : null,
               `${unread} unread in the inbox`,
@@ -125,7 +127,7 @@ export function AccountPicker({ open, onOpenChange }: AccountPickerProps) {
                   </Kbd>
                   <span className="min-w-0 flex-1 truncate text-left">{a.name}</span>
                   {a.runtime !== "ready" ? <span className="text-muted-foreground">{a.runtime}</span> : null}
-                  {failed ? <FailedMark /> : null}
+                  {warning ? <WarningMark label={warning} /> : null}
                   {unread > 0 ? (
                     <span aria-hidden="true" className="shrink-0 font-semibold tabular-nums">
                       {unread}
@@ -142,11 +144,15 @@ export function AccountPicker({ open, onOpenChange }: AccountPickerProps) {
   );
 }
 
-/** The sidebar's failed-sync icon, in the warning colour, its words in the row's label. */
-function FailedMark() {
-  const { icon: Icon, label, className } = HEALTH.failed;
+/**
+ * The sidebar's failed-sync icon, in the warning colour, titled with the
+ * warning it stands for; its words are in the row's label too.
+ */
+function WarningMark({ label }: { label: string }) {
+  const { icon: Icon, className } = HEALTH.failed;
+  const title = label.charAt(0).toUpperCase() + label.slice(1);
   return (
-    <span data-slot="sync-failed" title={label} className={`inline-flex shrink-0 items-center ${className}`}>
+    <span data-slot="sync-failed" title={title} className={`inline-flex shrink-0 items-center ${className}`}>
       <Icon aria-hidden="true" className="size-4" />
     </span>
   );

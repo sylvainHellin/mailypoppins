@@ -1,8 +1,8 @@
 import { useCallback } from "react";
-import { CircleAlert, CloudOff, RefreshCw, Power, SquarePen, X } from "lucide-react";
+import { CircleAlert, CloudOff, KeyRound, RefreshCw, Power, SquarePen, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { bannerFor, type AppState } from "@/app/state";
-import { checkLabel, shownChecks } from "@/app/health";
+import { checkAccount, checkLabel, loginRejected, shownChecks } from "@/app/health";
 import { openConfig } from "@/app/interop";
 import type { HealthCheck } from "@/protocol/types";
 import { queueDepth, queueText } from "@/app/outbox";
@@ -33,11 +33,13 @@ function NoticeLine({ text }: { text: string }) {
 /**
  * One health check that is not ok, a line under the connection banner: the
  * icon carries the level, the text stays calm, and `config_loaded` offers the
- * file, which is where a warning about it is fixed. Dismissing hides it until
- * the check's detail changes: a blocked account is a normal state of a
- * machine running a second engine, and a line that cannot go is a nag.
+ * file, which is where a warning about it is fixed. An account whose login
+ * the server rejected (`passwordFor`, PERSO-296) offers the IMAP password
+ * dialog, the in-app way to the command its detail names. Dismissing hides
+ * it until the check's detail changes: a blocked account is a normal state
+ * of a machine running a second engine, and a line that cannot go is a nag.
  */
-function HealthLine({ check }: { check: HealthCheck }) {
+function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: string | null }) {
   const dispatch = useDispatch();
   return (
     <div
@@ -55,6 +57,17 @@ function HealthLine({ check }: { check: HealthCheck }) {
           Open config.toml
         </Button>
       ) : null}
+      {passwordFor !== null ? (
+        <Button
+          size="xs"
+          variant="outline"
+          aria-label={`Set IMAP password for ${passwordFor}`}
+          onClick={() => dispatch({ type: "open_password", account: passwordFor, kind: "imap" })}
+        >
+          <KeyRound aria-hidden="true" />
+          Set IMAP password
+        </Button>
+      ) : null}
       <Button
         size="icon-xs"
         variant="ghost"
@@ -65,6 +78,12 @@ function HealthLine({ check }: { check: HealthCheck }) {
       </Button>
     </div>
   );
+}
+
+/** The account of an `account:<name>` check whose login the server rejected, or null. */
+function rejectedAccount(state: AppState, check: HealthCheck): string | null {
+  const account = checkAccount(check.name);
+  return account !== null && loginRejected(state, account) ? account : null;
 }
 
 /**
@@ -96,7 +115,7 @@ export function StatusRegion({ state }: { state: AppState }) {
         </div>
       ) : null}
       {shownChecks(state).map((check) => (
-        <HealthLine key={check.name} check={check} />
+        <HealthLine key={check.name} check={check} passwordFor={rejectedAccount(state, check)} />
       ))}
       {notice ? <NoticeLine text={notice} /> : null}
       {/* Mounted at 0, visually hidden and empty, so the first depth is announced. */}
