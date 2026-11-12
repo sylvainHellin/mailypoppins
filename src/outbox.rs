@@ -1250,6 +1250,11 @@ pub const SENT_ROLE: &str = "sent";
 /// The ingest runs *before* the release, so the raw blob's refcount passes from
 /// the outbox reference to the message's own reference without ever touching
 /// zero (a zero would unlink the file, see [`BlobStore::release`]).
+///
+/// It is also where a send reaches the contacts index, whichever path
+/// finished it (PERSO-237): the copy it inserted and the envelope's Bcc
+/// recipients are owed to the index ([`crate::contacts::window::owe`]),
+/// which the caller's bump or the next sync's merge takes.
 fn finish_done(
     store: &Store,
     blobs: &BlobStore,
@@ -1257,26 +1262,32 @@ fn finish_done(
     uid: Option<i64>,
     now: i64,
 ) -> Result<()> {
+    let contacts = crate::config::account_dir(&row.account);
     match blobs.read(&row.raw_blob) {
-        Ok(raw) => {
-            if let Err(e) = ingest_sent_copy(
-                store,
-                blobs,
-                &row.account,
-                SENT_ROLE,
-                &raw,
-                &row.message_id,
-                uid,
-            ) {
-                // A local copy that failed to materialise is a display
-                // problem, not a delivery problem: the message is on the
-                // server and the next Sent sync brings it in.
-                warn!(
-                    "[outbox] row {} was sent but could not be ingested locally: {e:#}",
-                    row.id
-                );
-            }
-        }
+        Ok(raw) => match ingest_sent_copy(
+            store,
+            blobs,
+            &row.account,
+            SENT_ROLE,
+            &raw,
+            &row.message_id,
+            uid,
+        ) {
+            Ok(inserted) => crate::contacts::window::owe(
+                &contacts,
+                inserted
+                    .map(crate::contacts::window::Owed::Stored)
+                    .into_iter()
+                    .collect(),
+            ),
+            // A local copy that failed to materialise is a display
+            // problem, not a delivery problem: the message is on the
+            // server and the next Sent sync brings it in.
+            Err(e) => warn!(
+                "[outbox] row {} was sent but could not be ingested locally: {e:#}",
+                row.id
+            ),
+        },
         Err(e) => warn!(
             "[outbox] row {} was sent but its raw blob is unreadable ({e:#}); \
              the local Sent copy waits for the next sync",
@@ -1300,7 +1311,33 @@ fn finish_done(
     .context("marking the outbox row done")?;
     blobs.release(&tx, &row.raw_blob)?;
     tx.commit().context("committing the outbox completion")?;
+    crate::contacts::window::owe(&contacts, blind_recipients(row));
     Ok(())
+}
+
+/// The Bcc recipients of a finished row, one observation each: the Sent copy
+/// carries no `Bcc:` header, so the envelope is the one record of them.
+fn blind_recipients(row: &OutboxRow) -> Vec<crate::contacts::window::Owed> {
+    let Some(envelope) = &row.envelope else {
+        return Vec::new();
+    };
+    let date = chrono::Utc::now().to_rfc3339();
+    envelope
+        .recipients
+        .iter()
+        .filter(|(_, role)| *role == crate::send::RecipientRole::Bcc)
+        .map(|(address, _)| {
+            crate::contacts::window::Owed::Unstored(crate::sync::FreshObservation {
+                sequence: 0,
+                role: crate::types::MailboxRole::Sent,
+                from: String::new(),
+                to: String::new(),
+                cc: None,
+                bcc: Some(address.clone()),
+                date: date.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Drop a terminal row and its blob reference.
@@ -1934,9 +1971,10 @@ async fn append_once<M: SentMailbox>(
 /// Graph path uses, [`crate::ingest::graph_uid`]), which the next real sync
 /// rebinds to the server UID through the `message_id` index.
 ///
-/// Once the copy is committed it is numbered for the contacts index, when the
-/// send that made it claimed it ([`crate::contacts::window::sent_copy_stored`],
-/// PERSO-234).
+/// Answers the contacts observation of the row when this inserted it,
+/// numbered once it is committed, as a sync's insert is (PERSO-234), and
+/// `None` when the row was already there: a sync that got to the server's
+/// copy first inserted it, and counted it.
 pub fn ingest_sent_copy(
     store: &Store,
     blobs: &BlobStore,
@@ -1945,13 +1983,13 @@ pub fn ingest_sent_copy(
     raw: &[u8],
     message_id: &str,
     uid: Option<i64>,
-) -> Result<()> {
+) -> Result<Option<crate::sync::FreshObservation>> {
     let Some(mut email) = crate::parse::parse_rfc822_to_fetched_email(raw) else {
         warn!("[outbox] the sent copy of {message_id} did not parse; not ingesting it");
-        return Ok(());
+        return Ok(None);
     };
     email.flags = email.flags.with_seen(true);
-    crate::ingest::ingest_message(
+    let outcome = crate::ingest::ingest_message(
         store,
         blobs,
         &crate::ingest::IngestInput {
@@ -1962,8 +2000,9 @@ pub fn ingest_sent_copy(
             raw: Some(raw),
         },
     )?;
-    crate::contacts::window::sent_copy_stored(account, message_id);
-    Ok(())
+    Ok(outcome.inserted.then(|| {
+        crate::sync::FreshObservation::of(&crate::types::MailboxRole::from(mailbox_role), &email)
+    }))
 }
 
 #[cfg(test)]

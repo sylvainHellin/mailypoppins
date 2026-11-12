@@ -40,16 +40,16 @@
 //! numbered just after. Losing a correspondent is the bug this guards
 //! against; a counter one too high in that instant is not.
 //!
-//! A send is observed the same way. The outbox stores the Sent copy itself
-//! ([`crate::outbox::ingest_sent_copy`]) before the send returns, and a send
-//! that will bump the index claims the copy first ([`SentCopyClaim`]), so the
-//! copy is numbered the moment it is stored ([`sent_copy_stored`]) and the
-//! To and Cc part of its bump is judged like a sync's. The copy carries no
-//! `Bcc:`, so no walk counts a Bcc recipient: the Bcc part of a bump is
-//! numbered at the bump and always merged and logged. So is the whole of a
-//! send whose copy was not stored (the local ingest failed, or the copy waits
-//! for an APPEND): no walk has seen a row for it. The sync that later stores
-//! that row observes it once more, as it did before the window existed.
+//! A send is observed the same way, by the outbox rather than by whoever
+//! started it (PERSO-237): every send that finishes, live, retried, resumed
+//! or an RSVP, finishes in the outbox, which stores its Sent copy
+//! ([`crate::outbox::ingest_sent_copy`]). A copy it inserted is numbered right
+//! after its commit, like a sync's row, and is owed to the index ([`owe`])
+//! until the next merge takes it ([`take_owed`]). A copy it did not insert is
+//! a row a sync inserted or will insert, and that sync counts it, once. The
+//! copy carries no `Bcc:`, so no walk counts a Bcc recipient: the outbox owes
+//! each one unnumbered ([`Owed::Unstored`]), and the merge numbers it, so it
+//! is always merged and logged.
 //!
 //! The state is this process's alone, which is enough: the daemon is the
 //! cache's only writer, and an observation never outlives the process that
@@ -67,9 +67,9 @@ use crate::sync::FreshObservation;
 /// so a hand-built observation numbered 0 predates every window.
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// The next observation number, drawn by [`FreshObservation::of`] and
-/// [`sent_copy_stored`] the moment the row observed has been committed, and
-/// by the bump of a send whose Sent copy was not stored.
+/// The next observation number, drawn by [`FreshObservation::of`] the moment
+/// the row observed has been committed, and by the merge of an
+/// [`Owed::Unstored`] observation.
 pub fn next_sequence() -> u64 {
     SEQUENCE.fetch_add(1, Ordering::SeqCst)
 }
@@ -96,9 +96,9 @@ struct State {
     accounts: Mutex<HashMap<PathBuf, Account>>,
     /// Signalled when a window closes, for a rebuild waiting to open one.
     closed: Condvar,
-    /// The Sent copies claimed by the sends in flight, by account name and
-    /// Message-ID, with the number each was given once stored.
-    sent_copies: Mutex<HashMap<(String, String), Option<u64>>>,
+    /// What the sends the outbox finished owe each account's index, by
+    /// account directory, until a merge takes it.
+    owed: Mutex<HashMap<PathBuf, Vec<Owed>>>,
 }
 
 fn state() -> &'static State {
@@ -106,63 +106,49 @@ fn state() -> &'static State {
     STATE.get_or_init(|| State {
         accounts: Mutex::new(HashMap::new()),
         closed: Condvar::new(),
-        sent_copies: Mutex::new(HashMap::new()),
+        owed: Mutex::new(HashMap::new()),
     })
 }
 
-fn sent_copies() -> MutexGuard<'static, HashMap<(String, String), Option<u64>>> {
+fn owed() -> MutexGuard<'static, HashMap<PathBuf, Vec<Owed>>> {
     state()
-        .sent_copies
+        .owed
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// A send's claim on the Sent copy the outbox stores for it, taken before the
-/// send and held to its contacts bump: it answers the number the copy was
-/// given when it was stored, which is what lets the bump be judged like a
-/// sync's observation of the same row. Dropping it forgets the claim, so a
-/// copy the outbox stores later, for a send nobody bumps, is never recorded.
-#[derive(Debug)]
-pub struct SentCopyClaim {
-    key: (String, String),
+/// What a send the outbox finished owes the contacts index (PERSO-237).
+#[derive(Debug, Clone)]
+pub enum Owed {
+    /// The From, To and Cc of the Sent copy the outbox inserted, numbered
+    /// right after its commit: judged like a sync's observation of a row.
+    Stored(FreshObservation),
+    /// A Bcc recipient, whom no row holds, so no walk counts: the merge
+    /// numbers it when it takes it, so it is always merged and logged.
+    Unstored(FreshObservation),
 }
 
-impl SentCopyClaim {
-    /// Claim the Sent copy of `message_id` in the account `account`.
-    pub fn claim(account: &str, message_id: &str) -> SentCopyClaim {
-        let key = (account.to_string(), message_id.to_string());
-        sent_copies().insert(key.clone(), None);
-        SentCopyClaim { key }
+/// Owe the index of the account directory `root` what a finished send
+/// observed.
+pub fn owe(root: &Path, observations: Vec<Owed>) {
+    if observations.is_empty() {
+        return;
     }
-
-    /// The number the copy was given when the outbox stored it, `None` when
-    /// it has not been stored.
-    pub fn stored(&self) -> Option<u64> {
-        sent_copies().get(&self.key).copied().flatten()
-    }
+    owed()
+        .entry(root.to_path_buf())
+        .or_default()
+        .extend(observations);
 }
 
-impl Drop for SentCopyClaim {
-    fn drop(&mut self) {
-        sent_copies().remove(&self.key);
-    }
+/// Whether anything is owed to the index under `root`.
+pub fn owes(root: &Path) -> bool {
+    owed().get(root).is_some_and(|list| !list.is_empty())
 }
 
-/// The outbox committed the Sent copy of `message_id` to the store: number it
-/// now, after the commit, when a send has claimed it. The first number
-/// stands.
-pub fn sent_copy_stored(account: &str, message_id: &str) {
-    let key = (account.to_string(), message_id.to_string());
-    if let Some(number) = sent_copies().get_mut(&key) {
-        number.get_or_insert_with(next_sequence);
-    }
-}
-
-/// Whether a claim on the Sent copy of `message_id` is recorded, for the
-/// tests that check a stored copy nobody claimed leaves nothing behind.
-#[cfg(test)]
-pub fn sent_copy_claimed(account: &str, message_id: &str) -> bool {
-    sent_copies().contains_key(&(account.to_string(), message_id.to_string()))
+/// Everything owed to the index under `root`, leaving nothing owed. Called
+/// by a merge, under the cache lock.
+pub fn take_owed(root: &Path) -> Vec<Owed> {
+    owed().remove(root).unwrap_or_default()
 }
 
 fn accounts() -> MutexGuard<'static, HashMap<PathBuf, Account>> {

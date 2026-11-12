@@ -1192,12 +1192,9 @@ async fn send_invite(
     if !commit_point("send.invite", token).await {
         return Ok(None);
     }
-    // Held to the contacts bump, so the Sent copy the outbox stores during
-    // the send is numbered as it is stored (PERSO-234).
-    let sent_copy = crate::contacts::window::SentCopyClaim::claim(&account.name, &built.message_id);
     let report = crate::send::send_durably(&built, account, &smtp).await?;
     let contacts = if report.send_result.any_succeeded() {
-        crate::contacts::hooks::bump_after_send(account, &draft, sent_copy.stored())
+        crate::contacts::hooks::bump_owed_sends(account)
     } else {
         None
     };
