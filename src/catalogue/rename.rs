@@ -166,7 +166,8 @@ fn sample(store: &Store, account: &str, key: &str) -> Result<Vec<(u32, String)>>
 }
 
 /// The renames `seen` proves: a gained folder and a lost one sharing a
-/// UIDVALIDITY.
+/// UIDVALIDITY, whose sampled UIDs carry the Message-IDs the store holds at
+/// them ([`same_messages`]).
 pub fn confirm(plan: &Plan, seen: &[FolderIdentity]) -> Vec<Rename> {
     let mut renames = Vec::new();
     let mut taken: HashSet<&str> = HashSet::new();
@@ -181,6 +182,9 @@ pub fn confirm(plan: &Plan, seen: &[FolderIdentity]) -> Vec<Rename> {
         else {
             continue;
         };
+        if !same_messages(&lost.sample, &gained.message_ids) {
+            continue;
+        }
         taken.insert(&lost.name);
         renames.push(Rename {
             from: lost.name.clone(),
@@ -188,6 +192,23 @@ pub fn confirm(plan: &Plan, seen: &[FolderIdentity]) -> Vec<Rename> {
         });
     }
     renames
+}
+
+/// Whether the server's Message-IDs at the sampled UIDs are the stored ones:
+/// not one differs, and at least half of the sample is still there to
+/// compare. A UID the server answers without a Message-ID neither counts for
+/// nor against.
+fn same_messages(sample: &[(u32, String)], served: &[(u32, String)]) -> bool {
+    let mut compared = 0;
+    for (uid, stored) in sample {
+        if let Some((_, id)) = served.iter().find(|(served, _)| served == uid) {
+            if id != stored {
+                return false;
+            }
+            compared += 1;
+        }
+    }
+    compared > 0 && compared * 2 >= sample.len()
 }
 
 /// [`confirm`] over what the probe answered; a probe that failed proves

@@ -647,4 +647,18 @@ mod tests {
         fixture.serve(vec![served("Projekte", 8, 3, &[(1, "one"), (2, "two")])]);
         fixture.assert_no_rename("Projekte");
     }
+
+    /// PERSO-185: a gained folder under the same UIDVALIDITY whose UID 1 is
+    /// another message is not the lost folder, however many other UIDs
+    /// agree; nor is one that holds none of the sampled UIDs.
+    #[test]
+    fn a_uid_carrying_another_message_id_is_no_rename() {
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![served("Projekte", 7, 3, &[(1, "other"), (2, "two")])]);
+        fixture.assert_no_rename("Projekte");
+
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![served("Projekte", 7, 3, &[])]);
+        fixture.assert_no_rename("Projekte");
+    }
 }
