@@ -1601,7 +1601,7 @@ pub fn start_search(
     } else {
         "Searching server...".to_string()
     });
-    if local_count > 0 {
+    if local_count > 0 && app.server_search_moves_focus {
         app.server_search_focus = SearchOverlayFocus::List;
     }
 

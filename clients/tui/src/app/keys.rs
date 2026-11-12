@@ -1314,6 +1314,7 @@ impl App {
 
         self.server_search_scope_label = scope_label;
         self.server_search_generation = self.server_search_generation.wrapping_add(1);
+        self.server_search_moves_focus = true;
         self.push_action(Action::ServerSearch {
             query,
             targets,
@@ -1340,11 +1341,15 @@ impl App {
     /// `S` in the next order, and by a rollback that put back a message whose
     /// hit a `state.remove` had dropped (PERSO-286). Nothing when the overlay
     /// has run none since it opened.
+    ///
+    /// Its hits leave the focus where it is, since the user did not ask for
+    /// this run: a rollback lands while they may be typing in the form.
     pub(crate) fn rerun_last_search(&mut self) {
         let Some(last) = self.server_search_last.clone() else {
             return;
         };
         self.server_search_generation = self.server_search_generation.wrapping_add(1);
+        self.server_search_moves_focus = false;
         self.push_action(Action::ServerSearch {
             query: last.query,
             targets: last.targets,

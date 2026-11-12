@@ -479,7 +479,7 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                     );
                     app.server_search_status =
                         Some(server_search_footer(count, order.as_deref(), &settled));
-                    if count > 0 {
+                    if count > 0 && app.server_search_moves_focus {
                         app.server_search_focus = SearchOverlayFocus::List;
                     }
                 }
@@ -795,7 +795,7 @@ pub(super) fn apply_server_hit(app: &mut App, payload: &serde_json::Value) {
         "{count} result{}; searching server...",
         if count == 1 { "" } else { "s" }
     ));
-    if app.server_search_focus != SearchOverlayFocus::List {
+    if app.server_search_moves_focus {
         app.server_search_focus = SearchOverlayFocus::List;
     }
 }
@@ -1977,6 +1977,82 @@ mod tests {
             [carol.clone(), carol.clone(), carol],
             "the daemon's tick, a quick pass and a full pass"
         );
+    }
+
+    /// The daemon the overlay's search runs against: the local pass lists one
+    /// hit, and the server leg starts operation `op-1`.
+    struct SearchDoor;
+
+    impl crate::queries::Queries for SearchDoor {
+        fn call(&self, method: &str, _: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+            match method {
+                "message.search" => {
+                    let mut hit =
+                        serde_json::to_value(mp_protocol::listing::MessageListRow::default())?;
+                    hit["mailbox"] = serde_json::json!("inbox");
+                    Ok(serde_json::json!({"hits": [hit], "order": "newest"}))
+                }
+                "message.search_server" => Ok(serde_json::json!({"operation_id": "op-1"})),
+                other => Err(anyhow::anyhow!("unexpected {other}")),
+            }
+        }
+    }
+
+    /// A rollback's run of the open search again (PERSO-286) leaves the user
+    /// where they are typing: the local pass, the server's streamed hit and
+    /// its settle land in the list without taking the focus from the form
+    /// field, and the text typed there stays.
+    #[test]
+    fn a_rollbacks_rerun_leaves_the_focus_and_the_typed_text_in_the_form() {
+        use crate::app::{SearchField, SearchOverlayFocus};
+        use crossterm::event::{KeyCode, KeyEvent};
+        let _data = DataDir::new();
+        let mut app = app_showing_a_search("from:carol");
+        let typing = SearchOverlayFocus::Field(SearchField::Keywords);
+        app.server_search_focus = typing;
+        for c in "ledg".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let where_typing = |app: &App, after: &str| {
+            assert_eq!(app.server_search_focus, typing, "the focus after {after}");
+            assert_eq!(app.search_form.keywords, "ledg", "the text after {after}");
+        };
+
+        land_rollback(&mut app, 0, 1);
+        let Some(crate::app::Action::ServerSearch {
+            query,
+            targets,
+            local_mailbox,
+        }) = std::mem::take(&mut app.pending_actions)
+            .into_iter()
+            .find(|action| matches!(action, crate::app::Action::ServerSearch { .. }))
+        else {
+            panic!("the rollback queues the search");
+        };
+        crate::commands::start_search(
+            &mut app,
+            &SearchDoor,
+            &query,
+            targets.as_deref(),
+            local_mailbox.as_deref(),
+        );
+        assert_eq!(app.server_search_results.len(), 1, "the local pass landed");
+        where_typing(&app, "the local pass");
+
+        apply_server_hit(&mut app, &hit_event(Some(0), "server", ""));
+        assert_eq!(app.server_search_results.len(), 2, "the server hit landed");
+        where_typing(&app, "a streamed hit");
+
+        let generation = app.server_search_generation;
+        handle_bg_result(
+            &mut app,
+            BgResult::ServerSearch {
+                generation,
+                result: Ok(serde_json::json!({"hits": 1, "unreachable": []})),
+            },
+        );
+        assert!(!app.server_search_loading, "the search settled");
+        where_typing(&app, "the settle");
     }
 
     /// A tick that rolled nothing back runs no search: nothing it did put a

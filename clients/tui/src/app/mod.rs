@@ -253,6 +253,10 @@ pub struct App {
     /// The search the overlay last ran, which `S` runs again in the next
     /// order; `None` until one ran.
     pub server_search_last: Option<LastSearch>,
+    /// Whether the running search's hits take the focus into the results
+    /// list: those of a search the form submitted do, those of a search run
+    /// again (`S`, a rollback) leave it where the user is (PERSO-286).
+    pub server_search_moves_focus: bool,
 
     // Config (loaded once at startup)
     pub global_config: mp_core::config::GlobalConfig,
@@ -460,6 +464,7 @@ impl App {
             server_search_local_order: None,
             server_search_server_order: None,
             server_search_last: None,
+            server_search_moves_focus: true,
             global_config,
             session: None,
             events: super::events::EventState::default(),
@@ -548,6 +553,7 @@ impl App {
             server_search_local_order: None,
             server_search_server_order: None,
             server_search_last: None,
+            server_search_moves_focus: true,
             global_config: mp_core::config::GlobalConfig::default(),
             session: None,
             events: super::events::EventState::default(),
