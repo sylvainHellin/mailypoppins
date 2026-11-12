@@ -459,6 +459,61 @@ fn a_queued_push_drains_and_a_refused_one_parks_failed() {
     assert_eq!(folder.live().len(), 1);
 }
 
+/// The account's login, as the login gate answers it while it holds a
+/// refusal: every op fails before the drafts folder is reached.
+struct RefusedLogin;
+
+impl OpExecutor for RefusedLogin {
+    async fn execute(&mut self, _op: &ServerOp) -> anyhow::Result<()> {
+        Err(crate::imap_client::LoginRejected::new("no response: LOGIN failed.".into()).into())
+    }
+
+    async fn execute_draft(&mut self, _store: &Store, op: &ServerOp) -> anyhow::Result<()> {
+        self.execute(op).await
+    }
+}
+
+/// PERSO-296: a push held behind a refused login spends no attempt, so it is
+/// neither parked nor announced as failed however long the refusal lasts,
+/// and lands on the first drain after a login succeeds.
+#[test]
+fn a_push_held_behind_a_refused_login_stays_queued_until_the_login_succeeds() {
+    let fx = Fixture::new();
+    fx.write("a", "d1", "", "eins");
+    push::enqueue_owed(&fx.store, &fx.account).unwrap();
+    let blobs = BlobStore::for_account("tum");
+    let mut now = crate::outbox::unix_now();
+    for _ in 0..pending_ops::MAX_ATTEMPTS * 2 {
+        let result = block_on(pending_ops::drain(
+            &fx.store,
+            &blobs,
+            "tum",
+            &mut RefusedLogin,
+            now,
+        ))
+        .unwrap();
+        assert_eq!((result.failed, result.still_open), (0, 1));
+        now += 100_000;
+    }
+    let queued = pending_ops::queued_ops(&fx.store, "tum").unwrap();
+    assert_eq!(queued.len(), 1, "the push left the queue");
+    assert_eq!(queued[0].attempts, 0);
+    assert!(pending_ops::failed_ops(&fx.store, "tum")
+        .unwrap()
+        .is_empty());
+
+    let mut folder = FakeFolder::default();
+    let mut exec = FakeExecutor {
+        folder: &mut folder,
+        account: fx.account.clone(),
+        email: EmailSettings::default(),
+    };
+    let result = block_on(pending_ops::drain(&fx.store, &blobs, "tum", &mut exec, now)).unwrap();
+    assert_eq!(result.completed, 1);
+    assert!(fx.row("d1").is_some());
+    assert_eq!(folder.live().len(), 1);
+}
+
 /// A draft saved while the server is out of reach reaches it once the server
 /// is back, with no edit: a push parked `failed` holds the owed-push scan back
 /// only for a cool-down, then one fresh push is queued. A draft has one

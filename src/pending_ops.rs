@@ -952,7 +952,10 @@ pub struct DrainResult {
 /// One row at a time, oldest first. A row whose backoff has not elapsed is
 /// counted and left. A successful op retires the row; a failure bumps its
 /// attempt count and, once the budget is spent, rolls the local state back and
-/// parks the row as `failed`.
+/// parks the row as `failed`. A refused login
+/// ([`crate::imap_client::LoginRejected`]) is no failure of the op: the row
+/// is counted as still open with no attempt spent, for as long as the login
+/// is refused (PERSO-296).
 ///
 /// The drain **does not re-apply the local write**: that happened once, in the
 /// transaction that enqueued the row. This is the guard against a duplicate
@@ -1060,6 +1063,15 @@ pub(crate) async fn drain<E: OpExecutor>(
                     warn!("[pending_ops] could not retire op {}: {e:#}", row.id);
                 }
                 result.completed += 1;
+            }
+            Err(e) if crate::imap_client::login_rejected(&e).is_some() => {
+                // The server refused the login, not the op (PERSO-296): the
+                // op was never asked about, and the gate holds the refusal
+                // for up to an hour, longer than the budget lasts. The row
+                // stays owed with no attempt spent and runs once a login
+                // succeeds; health names the refused login meanwhile.
+                still_owed(&mut owed, &row);
+                result.still_open += 1;
             }
             Err(e) => {
                 let err = format!("{e:#}");
@@ -2385,6 +2397,71 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("refused"));
+    }
+
+    /// PERSO-296: an op whose login the server refused spends no attempt.
+    /// While the login gate holds a refusal every pass fails at the login,
+    /// with the server never asked about the op, and the hold is an hour
+    /// while the budget ran out in about ten minutes, rolling the star back
+    /// unasked. The row stays queued with the star in place however many
+    /// passes the refusal lasts, and lands on the first pass after it.
+    #[tokio::test]
+    async fn an_op_held_behind_a_refused_login_stays_queued_until_the_login_succeeds() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let base = unix_now();
+        for tick in 0..MAX_ATTEMPTS * 2 {
+            let refused = crate::imap_client::LoginRejected::new("no response: refused".into());
+            let mut exec = FakeExecutor::scripted(vec![Err(refused.into())]);
+            let r = drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
+            assert_eq!(exec.seen.len(), 1, "each pass asks again");
+            assert_eq!((r.completed, r.failed, r.still_open), (0, 0, 1));
+        }
+        let row = row_by_id(&fx.store, star).unwrap().unwrap();
+        assert_eq!(
+            row.state, STATE_QUEUED,
+            "parked while the login was refused"
+        );
+        assert_eq!(row.attempts, 0, "a refused login is no attempt at the op");
+        assert!(failed_ops(&fx.store, "alice").unwrap().is_empty());
+        assert!(
+            read::find_by_id(&fx.store, id)
+                .unwrap()
+                .unwrap()
+                .is_flagged(),
+            "the star was rolled back while the login was refused"
+        );
+
+        let mut exec = FakeExecutor::always_ok();
+        let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, base + 1)
+            .await
+            .unwrap();
+        assert_eq!(r.completed, 1, "the op lands once the login succeeds");
+        assert_eq!(exec.seen, vec![star_op("INBOX")]);
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        assert!(read::find_by_id(&fx.store, id)
+            .unwrap()
+            .unwrap()
+            .is_flagged());
     }
 
     /// A move that keeps failing while the source mailbox still syncs: the sync
