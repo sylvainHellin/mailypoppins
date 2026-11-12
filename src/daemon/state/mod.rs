@@ -583,10 +583,15 @@ impl CanonicalState {
     /// client applies: the `state.remove` of a departed account and the
     /// `account.state_changed` of a new one are published around it, and
     /// `config.changed` closes the swap.
+    ///
+    /// A removed account's entry in the `last_sync` ledger goes with it, so an
+    /// account added back later reports no pass until it has made one
+    /// (PERSO-220).
     pub fn reseed(&self, accounts: Vec<AccountSeed>) {
         let _gate = self.gate.enter();
-        let mut inner = lock(&self.inner);
         let names: Vec<String> = accounts.iter().map(|seed| seed.name.clone()).collect();
+        lock(&self.last_sync).retain(|name, _| names.contains(name));
+        let mut inner = lock(&self.inner);
         inner.accounts.retain(|view| names.contains(&view.name));
         inner.mailboxes.retain(|name, _| names.contains(name));
         inner.drafts.retain(|name, _| names.contains(name));
@@ -1322,6 +1327,44 @@ mod tests {
             listed[1]["total"],
             serde_json::json!(0),
             "a mailbox the reload added has no counts until its account reports some"
+        );
+    }
+
+    /// An account a `config.reload` removed and a later one added back has
+    /// not synced yet: its old last pass is gone from `sync_health` and from
+    /// what `diagnostic.health` reads, rather than reported as current
+    /// (PERSO-220).
+    #[test]
+    fn an_account_removed_and_added_back_has_no_last_sync() {
+        let state = state();
+        state.apply(Change::SyncCompleted(
+            crate::daemon::sync_outcome::from_sync_result(
+                "alpha",
+                &crate::sync::SyncResult::default(),
+                0,
+                Some("connection refused".to_string()),
+            ),
+        ));
+        assert!(state.last_sync("alpha").is_some());
+
+        let seed = AccountSeed {
+            name: "alpha".to_string(),
+            mailboxes: Vec::new(),
+        };
+        state.reseed(Vec::new());
+        state.reseed(vec![seed]);
+
+        assert_eq!(
+            state.last_sync("alpha"),
+            None,
+            "the pass before the removal is not this account's last one"
+        );
+        let json = state.bootstrap(ConnectionId(1)).0.to_json();
+        assert_eq!(
+            json["sync_health"].get("alpha"),
+            None,
+            "and no bootstrap reports it: {}",
+            json["sync_health"]
         );
     }
 
