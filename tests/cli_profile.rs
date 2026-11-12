@@ -15,6 +15,7 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
+use mailypoppins::daemon::lifecycle::IDLE_EXIT_ENV;
 use support::parity::{pgrep_line_for, AUTOSTART_ENV, AUTOSTART_TIMEOUT_ENV, DAEMON_ENV_HOOKS, MP};
 
 /// A run of `mp` whose default roots live under `home`.
@@ -123,6 +124,76 @@ fn mp_with_an_invalid_profile_exits_2() {
     );
 }
 
+/// The pid in the runtime files under `data`.
+fn daemon_pid(data: &Path) -> u32 {
+    std::fs::read_to_string(data.join("runtime").join("daemon.pid"))
+        .expect("the pid file")
+        .trim()
+        .parse()
+        .expect("a pid")
+}
+
+/// The idle grace the two lifetime rows run at, in place of the minute.
+const IDLE_MS: &str = "300";
+
+/// A profile's daemon started on demand stops once its last client has been
+/// gone for the idle grace (decision log: it stops once its last window
+/// closes), through the orderly shutdown, so its socket is removed.
+#[test]
+fn a_profile_daemon_stops_after_its_last_client_leaves() {
+    let home = TempDir::new().unwrap();
+    let out = run(mp_in(home.path())
+        .env(AUTOSTART_TIMEOUT_ENV, "8000")
+        .env(IDLE_EXIT_ENV, IDLE_MS)
+        .args(["--profile", "demo", "account", "list", "--daemon"]));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let data = data_base(home.path()).join("profiles").join("demo");
+    let pid = daemon_pid(&data);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while pgrep_line_for(pid).is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the profile's daemon {pid} still runs with no client"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        !socket_under(&data).exists(),
+        "the orderly shutdown removed the socket"
+    );
+}
+
+/// The default profile's daemon is the long-lived one, and outlives its
+/// clients as it always has.
+#[test]
+fn a_default_daemon_keeps_running_after_its_last_client_leaves() {
+    let home = TempDir::new().unwrap();
+    let out = run(mp_in(home.path())
+        .env(AUTOSTART_TIMEOUT_ENV, "8000")
+        .env(IDLE_EXIT_ENV, IDLE_MS)
+        .args(["account", "list", "--daemon"]));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let data = data_base(home.path());
+    let pid = daemon_pid(&data);
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(
+        UnixStream::connect(socket_under(&data)).is_ok(),
+        "the default daemon still listens five idle graces later"
+    );
+
+    let out = run(mp_in(home.path())
+        .env(AUTOSTART_ENV, "0")
+        .args(["daemon", "stop"]));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while pgrep_line_for(pid).is_some() {
+        assert!(std::time::Instant::now() < deadline, "{pid} still runs");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 /// Two profiles, two daemons, each on its own socket, while the default
 /// profile has none: the acceptance's "the default daemon keeps running
 /// untouched beside it" from the other side.
@@ -145,12 +216,7 @@ fn two_profiles_run_two_daemons_at_once() {
             UnixStream::connect(socket_under(&data)).is_ok(),
             "{profile}'s daemon listens under its own data dir"
         );
-        let pid: u32 = std::fs::read_to_string(data.join("runtime").join("daemon.pid"))
-            .expect("the pid file")
-            .trim()
-            .parse()
-            .expect("a pid");
-        pids.push(pid);
+        pids.push(daemon_pid(&data));
     }
     assert_ne!(pids[0], pids[1], "two daemons, not one");
     assert!(

@@ -606,6 +606,13 @@ fn publish_contacts(canonical: &CanonicalState, account: &str, outcome: &TickOut
     }
 }
 
+/// How many connections this process has accepted, which a daemon on a
+/// profile watches to tell a client that came and went from no client at all
+/// (PERSO-176).
+pub fn connections_accepted() -> u64 {
+    NEXT_CONNECTION_ID.load(Ordering::Relaxed) - 1
+}
+
 /// Accept connections until `shutdown` fires, then return.
 ///
 /// `shutdown` fires at the end of the eight-step sequence [`super::shutdown`]

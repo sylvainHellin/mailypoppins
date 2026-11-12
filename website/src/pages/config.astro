@@ -258,7 +258,8 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
         A profile name is 1 to 12 letters, digits, <code>-</code> or <code>_</code>. A profile
         together with <code>MAILYPOPPINS_CONFIG_DIR</code> or
         <code>MAILYPOPPINS_DATA_DIR</code> is refused, since the two would disagree on where
-        the files are.
+        the files are. The login service is the default profile's: a profile's daemon starts
+        when a command or a window needs it and stops a minute after the last one closes.
       </p>
 
       <!-- [mailboxes] -->

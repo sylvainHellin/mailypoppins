@@ -96,6 +96,16 @@ use super::shutdown::DEFAULT_GRACE_SECS;
 /// report. Pinned by `tests/daemon_lifecycle.rs`; no flag exposes it.
 pub const FAIL_START_ENV: &str = "MAILYPOPPINS_DAEMON_FAIL_START";
 
+/// Test-only hook: how long, in milliseconds, a daemon on a profile waits
+/// with no client before it stops ([`IDLE_EXIT_AFTER`] when unset). Pinned by
+/// `tests/cli_profile.rs`; no flag exposes it.
+pub const IDLE_EXIT_ENV: &str = "MAILYPOPPINS_DAEMON_IDLE_EXIT_MS";
+
+/// How long a daemon on a profile waits after its last client left before it
+/// stops (PERSO-176): long enough for a chain of commands or a TUI restart to
+/// find it still there, short enough that a demo leaves nothing running.
+pub const IDLE_EXIT_AFTER: Duration = Duration::from_secs(60);
+
 /// Test-only hook: flip every configured account to `ready` this many
 /// milliseconds after the **first** `state.bootstrap`, so an `opening`
 /// snapshot converges by event without waiting for a runtime to come up.
@@ -450,6 +460,14 @@ async fn run(foreground_logs: bool) -> Result<()> {
     );
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(Arc::clone(&state), shutdown.clone())?;
+    if let Some(after) = idle_exit_after() {
+        echo(&format!(
+            "on profile {}: stopping {} ms after the last client leaves",
+            mp_core::profile::active().unwrap_or_default(),
+            after.as_millis()
+        ));
+        spawn_idle_exit(Arc::clone(&state), shutdown.clone(), after);
+    }
 
     let result = serve(listener, Arc::clone(&state), shutdown).await;
     cleanup(&state.meta);
@@ -547,6 +565,54 @@ fn spawn_signal_watch(state: Arc<DaemonState>, shutdown: watch::Sender<bool>) ->
         super::shutdown::request(&state, &shutdown, None, false);
     });
     Ok(())
+}
+
+/// How long this daemon waits with no client before it stops: never on the
+/// default profile, whose daemon is the long-lived one the login service
+/// runs, and [`IDLE_EXIT_AFTER`] (or [`IDLE_EXIT_ENV`]) on a profile, whose
+/// daemon starts on demand and stops once its last window closes (PERSO-176).
+/// An unparseable or zero hook means the default, as with the other hooks.
+fn idle_exit_after() -> Option<Duration> {
+    mp_core::profile::active()?;
+    let hook = std::env::var(IDLE_EXIT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0);
+    Some(hook.map_or(IDLE_EXIT_AFTER, Duration::from_millis))
+}
+
+/// Stop the daemon through the orderly shutdown once it has had no client for
+/// `after`, counting from the moment the last one left.
+///
+/// It polls rather than hooking the disconnect: the count of accepted
+/// connections moving tells a command that came and went between two polls
+/// from no client at all, and a daemon nobody ever connected to waits, since
+/// no window has closed yet.
+fn spawn_idle_exit(state: Arc<DaemonState>, shutdown: watch::Sender<bool>, after: Duration) {
+    let poll = (after / 4).clamp(Duration::from_millis(10), Duration::from_secs(1));
+    tokio::spawn(async move {
+        let mut seen = super::server::connections_accepted();
+        let mut idle_since: Option<Instant> = None;
+        loop {
+            tokio::time::sleep(poll).await;
+            let accepted = super::server::connections_accepted();
+            let busy = accepted != seen || state.canonical.subscriber_count() > 0;
+            seen = accepted;
+            if accepted == 0 || busy {
+                idle_since = None;
+                continue;
+            }
+            let since = *idle_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= after {
+                info!(
+                    "[daemon] no client for {} ms on a profile, shutting down",
+                    after.as_millis()
+                );
+                super::shutdown::request(&state, &shutdown, None, false);
+                return;
+            }
+        }
+    });
 }
 
 /// Start one account runtime per configured account, off the startup path

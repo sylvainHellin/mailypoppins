@@ -236,6 +236,7 @@ Its message carries the socket path, the daemon log path and the `mp daemon run`
 
 Everything the daemon needs on disk lives in one directory below the data root, so pointing `MAILYPOPPINS_DATA_DIR` at a tempdir moves a whole daemon instance with it.
 A profile (`mp --profile demo`, PERSO-176) moves the data root to `<data_dir>/profiles/demo`, so its daemon has its own socket and start lock and runs beside the default profile's.
+A profile's daemon is not the long-lived one: once a client has come and gone, it stops through the orderly shutdown after a minute with no client connected, so a chain of commands or a TUI restart still finds it and a demo leaves nothing running; the default profile's daemon never stops on its own.
 
 ```
 <data_dir>/runtime/                    dir mode 0700
@@ -690,7 +691,7 @@ A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the g
 
 ## Test-only environment hooks
 
-Twenty environment variables exist for the contract tests and for the migration.
+Twenty-one environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
@@ -782,6 +783,11 @@ Unset, unparseable or zero means the default, as with the watcher's two hooks: a
 It exists because a test of "an expired handle is no longer releasable" would otherwise cost ten minutes; `tests/daemon_handles.rs` runs its sandboxes at 60000 ms and its one expiry case at 400 ms.
 The lifetime is read once, at startup, so a handle cannot be minted under one lifetime and released under another; its name is `mailypoppins::daemon::handles::HANDLE_TTL_ENV`.
 
+`MAILYPOPPINS_DAEMON_IDLE_EXIT_MS=<n>` sets how long a daemon on a profile waits with no client before it stops, which defaults to 60000 ms (a minute, PERSO-176).
+Unset, unparseable or zero means the default, and the default profile's daemon never stops on its own, hook or not.
+It exists because a test of "a profile's daemon stops after its last client leaves" would otherwise cost a minute; `tests/cli_profile.rs` runs it at 300 ms.
+It is read once, at startup; its name is `mailypoppins::daemon::lifecycle::IDLE_EXIT_ENV`.
+
 `MAILYPOPPINS_DAEMON_ROWS_CHUNK_BYTES=<n>` sets the byte budget of one `message.list_stream` chunk, which defaults to 1048576 (1 MiB).
 Unset, unparseable or zero means the default, as with the hooks above.
 It exists because a test that streams several chunks would otherwise seed thousands of rows per mebibyte; `tests/daemon_list_stream.rs` runs at 16384 and 1024 bytes.
@@ -823,8 +829,8 @@ The run that landed the file, its ceilings and the leak it found are in [baselin
 
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
-`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the sixteen environment hooks of its `DAEMON_ENV_HOOKS` list so an exported variable cannot change an outcome, and returns once the daemon answers `daemon.status` with no account still `opening` its store.
-Four of the twenty above are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
+`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the seventeen environment hooks of its `DAEMON_ENV_HOOKS` list so an exported variable cannot change an outcome, and returns once the daemon answers `daemon.status` with no account still `opening` its store.
+Four of the twenty-one above are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
 The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than three times.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.
