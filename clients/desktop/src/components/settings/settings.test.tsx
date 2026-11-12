@@ -281,7 +281,7 @@ describe("the password dialog", () => {
   });
 
   it("asks for a new sign-in when the token lacks the calendar scope", () => {
-    const graph = { account: "home", auth_method: "graph", smtp_password: null, imap_password: null, token: "valid" as const };
+    const graph = { account: "home", auth_method: "graph", smtp_password: null, imap_password: null, token: "valid" as const, login_rejected: false };
     expect(calendarScopeLine({ ...graph, missing_scopes: ["Calendars.ReadWrite"] })).toBe("needs a new sign-in to grant calendar access");
     expect(calendarScopeLine({ ...graph, missing_scopes: [] })).toBeNull();
     expect(calendarScopeLine(undefined)).toBeNull();

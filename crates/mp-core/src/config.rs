@@ -1483,34 +1483,57 @@ impl ImapConfig {
             }
         }
 
-        // Username falls back to SMTP username if empty
-        let username = if account.imap.username.is_empty() {
-            account.smtp.username.clone()
-        } else {
-            account.imap.username.clone()
-        };
-
         // The IMAP password, falling back to the SMTP one.
         let imap_key = format!("imap-password-{}", account.name);
         let smtp_key = format!("smtp-password-{}", account.name);
         let password = get_secret(&imap_key).or_else(|_| get_secret(&smtp_key))?;
 
-        // Host falls back to SMTP host if empty
-        let host = if account.imap.host.is_empty() {
-            account.smtp.host.clone()
-        } else {
-            account.imap.host.clone()
-        };
-
+        let ImapLogin {
+            host,
+            port,
+            username,
+        } = ImapLogin::of(account);
         Ok(Self {
             host,
-            port: account.imap.port,
+            port,
             username,
             password,
             accept_invalid_certs: account.imap.accept_invalid_certs,
             fetch_concurrency: account.imap.fetch_concurrency.clamp(1, 8),
             body_fetch_deadline_secs: account.imap.body_fetch_deadline_secs.min(600),
         })
+    }
+
+    /// The server and user this configuration logs in as.
+    pub fn login(&self) -> ImapLogin {
+        ImapLogin {
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+        }
+    }
+}
+
+/// The server and user an account's IMAP login goes to, without the password:
+/// what the daemon's list of refused logins is looked up by from a place that
+/// reads no secret, the health check and `account.credentials` (PERSO-296).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ImapLogin {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+}
+
+impl ImapLogin {
+    /// The login [`ImapConfig::load`] makes for `account`: the username and
+    /// the host each fall back to the SMTP one when the IMAP one is empty.
+    pub fn of(account: &AccountConfig) -> Self {
+        let pick = |imap: &str, smtp: &str| if imap.is_empty() { smtp } else { imap }.to_string();
+        Self {
+            host: pick(&account.imap.host, &account.smtp.host),
+            port: account.imap.port,
+            username: pick(&account.imap.username, &account.smtp.username),
+        }
     }
 }
 

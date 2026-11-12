@@ -38,4 +38,11 @@ token: TokenState | null,
  * Empty for every account whose calendar is not Graph's, and for one
  * with no readable token, whose `token` already says it needs a sign-in.
  */
-missing_scopes: Array<string>, };
+missing_scopes: Array<string>,
+/**
+ * Whether the server refused the account's IMAP login within the last
+ * hour, so the daemon is not asking it again until a password is set or
+ * a sync is started (PERSO-296). `false` for any account but a password
+ * one, and when absent, so an older daemon's answer still parses.
+ */
+login_rejected: boolean, };

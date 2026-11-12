@@ -34,12 +34,15 @@
 //! and [`ProbeParams`]'s `Debug` prints [`REDACTED`] for it.
 //!
 //! A server that refuses is an answer, `{ok: false, error}`, not a refusal of
-//! the call: the wizard prints it and asks again. A query, because it writes
+//! the call: the wizard prints it and asks again. An IMAP probe dials past
+//! the daemon's list of refused logins and leaves it as it was
+//! ([`crate::imap_client::login_gate`], PERSO-296): the user is asking the
+//! server, so the server answers, whatever it answered the daemon earlier. A query, because it writes
 //! nothing here or on the server, as `mailbox.list_server` is one.
 
 use serde_json::{json, Value};
 
-use crate::config::{AccountConfig, AuthMethod, GraphConfig, ImapConfig, SmtpConfig};
+use crate::config::{AccountConfig, AuthMethod, GraphConfig, ImapConfig, ImapLogin, SmtpConfig};
 
 use super::super::dispatch::DomainError;
 use super::config::{candidate_account, REDACTED};
@@ -175,7 +178,7 @@ pub async fn probe(params: ProbeParams) -> Value {
             }
             Check::Imap => {
                 let imap = imap_config(account, secret(&params));
-                let mut session = crate::imap_client::open_imap_session(&imap).await?;
+                let mut session = crate::imap_client::dial_imap_session(&imap).await?;
                 session.logout().await.ok();
                 Ok(json!({"ok": true}))
             }
@@ -191,8 +194,10 @@ pub async fn probe(params: ProbeParams) -> Value {
             }
             Check::Mailboxes => {
                 let imap = imap_config(account, secret(&params));
-                let names = crate::imap_client::list_mailboxes(&imap).await?;
-                Ok(json!({"ok": true, "mailboxes": names}))
+                let mut session = crate::imap_client::dial_imap_session(&imap).await?;
+                let names = crate::imap_client::list_mailboxes_on(&mut session).await;
+                session.logout().await.ok();
+                Ok(json!({"ok": true, "mailboxes": names?}))
             }
         }
     }
@@ -237,17 +242,15 @@ fn smtp_config(account: &AccountConfig, password: String) -> SmtpConfig {
 /// The IMAP settings of the candidate, an empty host or username falling back
 /// to the SMTP one as `ImapConfig::load` does.
 fn imap_config(account: &AccountConfig, password: String) -> ImapConfig {
-    let or_smtp = |imap: &str, smtp: &str| {
-        if imap.is_empty() {
-            smtp.to_string()
-        } else {
-            imap.to_string()
-        }
-    };
+    let ImapLogin {
+        host,
+        port,
+        username,
+    } = ImapLogin::of(account);
     ImapConfig {
-        host: or_smtp(&account.imap.host, &account.smtp.host),
-        port: account.imap.port,
-        username: or_smtp(&account.imap.username, &account.smtp.username),
+        host,
+        port,
+        username,
         password,
         accept_invalid_certs: account.imap.accept_invalid_certs,
         fetch_concurrency: 1,
@@ -386,5 +389,57 @@ mod tests {
         .expect_err("refused for a graph candidate too")
         .to_string();
         assert!(refused.contains("configured account"), "{refused}");
+    }
+
+    /// A probe is the user asking the server (PERSO-296): it dials while the
+    /// daemon's list holds a refusal of the same login and password, and it
+    /// leaves the list as it found it.
+    #[test]
+    fn a_probe_asks_the_server_about_a_login_the_list_refuses() {
+        use crate::imap_client::fake_imap::RejectingImapServer;
+        use crate::imap_client::open_imap_session;
+        use futures::executor::block_on;
+
+        let server = RejectingImapServer::start();
+        let account = json!({
+            "name": "work",
+            "default_from": "me@example.com",
+            "imap": {
+                "host": "127.0.0.1",
+                "port": server.port(),
+                "username": "me@example.com",
+                "accept_invalid_certs": true,
+            },
+        });
+        let params = |check: &str| {
+            ProbeParams::from_params(
+                &json!({"account": account, "check": check, "password": "wrong"}),
+                &[],
+            )
+            .expect("valid")
+        };
+        let imap = imap_config(&params("imap").account, "wrong".into());
+        assert!(block_on(open_imap_session(&imap)).is_err());
+        assert!(block_on(open_imap_session(&imap)).is_err());
+        assert_eq!(server.logins(), 1, "the daemon's second login was held");
+
+        let answer = block_on(probe(params("imap")));
+        assert_eq!(answer["ok"], json!(false), "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("LOGIN failed.")),
+            "{answer}"
+        );
+        assert_eq!(server.logins(), 2, "the imap probe dialled");
+        assert_eq!(block_on(probe(params("mailboxes")))["ok"], json!(false));
+        assert_eq!(server.logins(), 3, "and so did the mailboxes probe");
+
+        assert!(block_on(open_imap_session(&imap)).is_err());
+        assert_eq!(
+            server.logins(),
+            3,
+            "the daemon's list still holds the refusal"
+        );
     }
 }

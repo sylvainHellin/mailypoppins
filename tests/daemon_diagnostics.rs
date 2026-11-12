@@ -1104,6 +1104,311 @@ fn an_account_whose_runtime_never_came_up_is_a_failure() {
     daemon.stop();
 }
 
+/// An account whose password the server refuses is not `serving`: its store
+/// is open, but no mail moves until the user sets a password the server takes,
+/// so its check says the login is rejected and names the command that fixes
+/// it, the way the calendar's re-login prompt does (PERSO-296).
+#[test]
+fn an_account_whose_login_the_server_rejects_says_so() {
+    use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+    use support::fake_imap::RejectingImapServer;
+
+    let server = RejectingImapServer::start();
+    let config = format!(
+        "[[accounts]]\nname = \"{ALPHA}\"\ndefault_from = \"alpha@example.com\"\n\n\
+         [accounts.imap]\nhost = \"127.0.0.1\"\nport = {}\n\
+         username = \"alpha@example.com\"\naccept_invalid_certs = true\n",
+        server.port()
+    );
+    let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
+    seed(tmp.path(), &config);
+    // A host with no readable machine ID cannot hold a secret, which is a
+    // reason to skip the row rather than fail it (`sync_fixture::seed_secrets`).
+    let Ok(secrets) = EncryptedFileBackend::open(tmp.path().join("secrets.enc")) else {
+        return;
+    };
+    secrets
+        .set(
+            &format!("imap-password-{ALPHA}"),
+            "a-password-the-server-refuses",
+        )
+        .expect("the sandbox's secrets file takes the password");
+    let daemon = DaemonFixture::start_with(tmp.path(), None, &[]);
+    wait_settled(tmp.path());
+
+    // The scheduler's startup sync, ten seconds in, is the one every daemon
+    // start runs; the watcher has been refused by then already.
+    let deadline = Instant::now() + DEADLINE;
+    let (health, entry) = loop {
+        let health = block_on(async {
+            let mut conn = client(tmp.path()).await;
+            call(&mut conn, "diagnostic.health", json!({})).await
+        });
+        let entry = health["accounts"]
+            .as_array()
+            .and_then(|accounts| accounts.iter().find(|a| a["name"] == json!(ALPHA)))
+            .cloned()
+            .unwrap_or_else(|| panic!("alpha is listed: {health}"));
+        if !entry["last_sync"]["finished_at"].is_null() {
+            break (health, entry);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the startup sync did not finish within {DEADLINE:?}: {health}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert!(
+        server.logins() > 0,
+        "the daemon reached the server's login, so the refusal is the server's"
+    );
+
+    let alpha = check(&health, &format!("account:{ALPHA}"));
+    assert_ne!(
+        text(&alpha, "status"),
+        "ok",
+        "an account the server will not let in is not serving: {alpha}"
+    );
+    let detail = text(&alpha, "detail");
+    assert!(
+        detail.contains("rejected") && detail.contains("mp config set-password"),
+        "the check says the login is rejected and how to set the password: {alpha}"
+    );
+    assert_eq!(
+        entry["last_sync"]["outcome"],
+        json!("failed"),
+        "and a sync the server would not let in did not succeed: {entry}"
+    );
+
+    // And it stops asking. The watcher and the startup tick may each have
+    // dialled before either recorded the refusal, and nothing dials after.
+    let settled = server.logins();
+    assert!(
+        settled <= 2,
+        "one login per path that raced the first refusal, no retries: {settled}"
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        server.logins(),
+        settled,
+        "no path asks the server again with the password it refused"
+    );
+    daemon.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Refused logins (PERSO-296)
+// ---------------------------------------------------------------------------
+
+/// A daemon serving one account, alpha, whose IMAP server is the fake,
+/// started with the password `password` in the sandbox's secrets file.
+///
+/// `None` when the host cannot hold a secret (no readable machine ID), which
+/// is a reason to skip the row rather than fail it.
+fn refused_login_daemon(
+    server: &support::fake_imap::RejectingImapServer,
+    password: &str,
+) -> Option<(TempDir, DaemonFixture)> {
+    use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+
+    let config = format!(
+        "[[accounts]]\nname = \"{ALPHA}\"\ndefault_from = \"alpha@example.com\"\n\n\
+         [accounts.imap]\nhost = \"127.0.0.1\"\nport = {}\n\
+         username = \"alpha@example.com\"\naccept_invalid_certs = true\n",
+        server.port()
+    );
+    let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
+    seed(tmp.path(), &config);
+    let secrets = EncryptedFileBackend::open(tmp.path().join("secrets.enc")).ok()?;
+    secrets
+        .set(&format!("imap-password-{ALPHA}"), password)
+        .expect("the sandbox's secrets file takes the password");
+    let daemon = DaemonFixture::start_with(tmp.path(), None, &[]);
+    wait_settled(tmp.path());
+    Some((tmp, daemon))
+}
+
+/// Wait for alpha's first tick to land, and answer its outcome.
+fn first_sync_outcome(root: &Path) -> Value {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let health = block_on(async {
+            let mut conn = client(root).await;
+            call(&mut conn, "diagnostic.health", json!({})).await
+        });
+        let entry = health["accounts"]
+            .as_array()
+            .and_then(|accounts| accounts.iter().find(|a| a["name"] == json!(ALPHA)))
+            .cloned()
+            .unwrap_or_else(|| panic!("alpha is listed: {health}"));
+        if !entry["last_sync"]["finished_at"].is_null() {
+            return entry["last_sync"]["outcome"].clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the startup sync did not finish within {DEADLINE:?}: {health}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Start `method` and answer its terminal `operation.status` object, settled
+/// either way.
+async fn settle(conn: &mut Connection, method: &str, params: Value) -> Value {
+    let started = call(conn, method, params).await;
+    let id = started["operation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{method} answers with an operation_id: {started}"))
+        .to_string();
+    let start = Instant::now();
+    loop {
+        let status = call(conn, "operation.status", json!({"operation_id": &id})).await;
+        if matches!(
+            status["state"].as_str(),
+            Some("succeeded" | "failed" | "cancelled")
+        ) {
+            return status;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "{method} did not settle within {DEADLINE:?}: {status}"
+        );
+        tokio::time::sleep(TICK).await;
+    }
+}
+
+/// The account check of alpha, as a health report has it now.
+fn alpha_check(root: &Path) -> Value {
+    let health = block_on(async {
+        let mut conn = client(root).await;
+        call(&mut conn, "diagnostic.health", json!({})).await
+    });
+    check(&health, &format!("account:{ALPHA}"))
+}
+
+/// The case PERSO-296 was reported for: the password changed while the
+/// daemon ran. The runtime has listed the server, so its quick ticks skip
+/// the listing, and the only logins left are the per-mailbox fetches, which
+/// were logged and skipped one by one: the tick recorded `ok` and the health
+/// check said `serving`. The quick tick now ends on the refusal, as its
+/// error, and the check says the login is rejected.
+#[test]
+fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
+    use support::fake_imap::{LoginPolicy, RejectingImapServer};
+
+    let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+    let Some((tmp, daemon)) = refused_login_daemon(&server, "the-password-of-yesterday") else {
+        return;
+    };
+    assert_eq!(
+        first_sync_outcome(tmp.path()),
+        json!("ok"),
+        "the startup tick lists the server and syncs while the password is good"
+    );
+    assert_eq!(text(&alpha_check(tmp.path()), "status"), "ok");
+
+    // The password changes on the server's side, which drops the sessions
+    // logged in with the old one.
+    server.set_policy(LoginPolicy::Reject);
+    server.drop_sessions();
+    let before = server.logins();
+
+    // A pooled session the server dropped fails its mailbox rather than its
+    // login, so the first quick ticks may still find one; within a few, a
+    // tick has to log in again.
+    let failed = block_on(async {
+        let mut conn = client(tmp.path()).await;
+        for _ in 0..10 {
+            let status = settle(&mut conn, "sync.quick", json!({"account": ALPHA})).await;
+            if status["state"] == json!("failed") {
+                return status;
+            }
+        }
+        panic!("no quick tick failed on the refused login");
+    });
+    let error = failed.to_string();
+    assert!(
+        error.contains("LOGIN failed."),
+        "the tick's error is the server's refusal: {failed}"
+    );
+    let alpha = alpha_check(tmp.path());
+    assert_eq!(text(&alpha, "status"), "warn", "{alpha}");
+    assert_eq!(
+        text(&alpha, "detail"),
+        format!("login rejected by the server (mp config set-password imap -A {ALPHA})")
+    );
+    let credentials = block_on(async {
+        let mut conn = client(tmp.path()).await;
+        call(&mut conn, "account.credentials", json!({"account": ALPHA})).await
+    });
+    assert_eq!(
+        credentials["accounts"][0]["login_rejected"],
+        json!(true),
+        "{credentials}"
+    );
+
+    let settled = server.logins();
+    assert!(
+        settled > before,
+        "the refusal is the server's answer to a login after the change"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(server.logins(), settled, "and nothing asks again");
+    daemon.stop();
+}
+
+/// The two ways the user asks the server again before the hour is out: a
+/// password stored through `config.set_password`, even the very password the
+/// server refused (the account may have been fixed on the server's side),
+/// and a sync the user starts. Each leads to one login; the paths the daemon
+/// runs on its own, here `mailbox.list_server`, stay held in between.
+#[test]
+fn a_stored_password_and_a_started_sync_each_ask_the_server_once() {
+    use support::fake_imap::RejectingImapServer;
+
+    const PASSWORD: &str = "a-password-the-server-refuses";
+    let server = RejectingImapServer::start();
+    let Some((tmp, daemon)) = refused_login_daemon(&server, PASSWORD) else {
+        return;
+    };
+    assert_eq!(first_sync_outcome(tmp.path()), json!("failed"));
+
+    block_on(async {
+        let mut conn = client(tmp.path()).await;
+        let list = json!({"account": ALPHA});
+        let refused = server.logins();
+        assert!(refused > 0, "the daemon reached the server's login");
+        call_err(&mut conn, "mailbox.list_server", list.clone()).await;
+        assert_eq!(server.logins(), refused, "a held login does not dial");
+
+        call(
+            &mut conn,
+            "config.set_password",
+            json!({"account": ALPHA, "kind": "imap", "value": PASSWORD}),
+        )
+        .await;
+        call_err(&mut conn, "mailbox.list_server", list.clone()).await;
+        assert_eq!(
+            server.logins(),
+            refused + 1,
+            "the stored password is asked once"
+        );
+        call_err(&mut conn, "mailbox.list_server", list.clone()).await;
+        assert_eq!(server.logins(), refused + 1, "and held again once refused");
+
+        let status = settle(&mut conn, "sync.quick", json!({"account": ALPHA})).await;
+        assert_eq!(status["state"], json!("failed"), "{status}");
+        assert_eq!(
+            server.logins(),
+            refused + 2,
+            "the started sync asked once, and its tick stopped at the refusal"
+        );
+        call_err(&mut conn, "mailbox.list_server", list).await;
+        assert_eq!(server.logins(), refused + 2, "and held again once refused");
+    });
+    daemon.stop();
+}
+
 /// `diagnostic.health` takes no parameters, and says so rather than ignoring
 /// one.
 #[test]

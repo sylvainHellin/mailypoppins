@@ -26,6 +26,10 @@
 //! [`calendar_fixture`] is two accounts, one served by the calendar fake and
 //! one without a calendar backend, and an invitation mail on each, for the
 //! server calendar (PERSO-200).
+//! [`fake_imap`] is a STARTTLS IMAP server whose answer to LOGIN a test
+//! switches (refused, temporarily unavailable, or accepted into an empty
+//! `INBOX`), for the rejected-login rows (PERSO-296); the library's unit
+//! tests include it by path.
 //! [`readiness`] waits for a spawned daemon to answer `daemon.status`, and
 //! [`events`] reads `state.event` notifications past the daemon's own startup
 //! events; daemon suites that do not declare `mod support;` include either
@@ -37,6 +41,7 @@ pub mod admin_fixture;
 pub mod calendar_fixture;
 pub mod draft_fixture;
 pub mod events;
+pub mod fake_imap;
 pub mod mutation_fixture;
 pub mod parity;
 pub mod read_fixture;

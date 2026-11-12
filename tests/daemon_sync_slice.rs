@@ -163,10 +163,12 @@
 //!
 //! # What this fixture cannot reach
 //!
-//! `rg -l 'fake_imap|FakeImap|MockImap|imap_server' tests src crates` finds
-//! nothing, so **this repository has no fake IMAP server** and this file does
-//! not invent one. What that puts out of reach, and where it is pinned
-//! instead:
+//! This file's fixture points its accounts at no server. The repository's one
+//! fake IMAP server, `tests/support/fake_imap.rs` (PERSO-296), serves an
+//! empty `INBOX` behind a switchable login policy: enough for the
+//! rejected-login rows of `tests/daemon_diagnostics.rs`, and not for a sync
+//! that ingests, since it holds no messages. What that puts out of reach,
+//! and where it is pinned instead:
 //!
 //! - A sync that ingests. The operation is still pinned at the wire: an id is
 //!   issued, `operation.status` answers about it by method and scope, and it
@@ -186,7 +188,8 @@
 //!   emitted by a run. They are pinned as the client wordings that produce
 //!   them, which is where P4-U10 has to put them anyway.
 //!
-//! A fake IMAP backend would unlock all of it and is recorded as a follow-up.
+//! A fake IMAP server that holds mail would unlock all of it and is recorded
+//! as a follow-up.
 //!
 //! # The legacy suites, twinned
 //!

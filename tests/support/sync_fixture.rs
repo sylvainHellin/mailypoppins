@@ -39,20 +39,20 @@
 //! `sync.completed` no test asked for once a slow setup outlasts the startup
 //! delay.
 //!
-//! # No fake IMAP server, and what that costs
+//! # No IMAP server, and what that costs
 //!
-//! `rg -l 'fake_imap|FakeImap|MockImap|imap_server' tests src crates` finds
-//! nothing: this repository has never had an in-process IMAP server, and the
-//! nearest thing to one is `tests/engine_lock_ingest_cli.rs`'s sentinel
-//! `TcpListener`, which exists to prove that *no* connection was made.
+//! This fixture points its accounts at no server. The repository's one fake
+//! IMAP server, [`super::fake_imap`] (PERSO-296), serves an empty `INBOX`
+//! behind a switchable login policy, which is enough for the rejected-login
+//! rows and not for a sync that ingests: it holds no messages.
 //!
 //! So the successful half of the slice - a sync that ingests, a mailbox list
 //! that comes back from a server, an IDLE that fires - is pinned at the wire
 //! level as far as a fixture with no server can reach it, and no further:
 //! the operation id is issued, `operation.status` answers about it, and the
-//! operation settles `failed` carrying the refusal. Building the fake server
-//! that would unlock the rest is a follow-up, recorded in the test file's
-//! header rather than invented here.
+//! operation settles `failed` carrying the refusal. Growing the fake server
+//! into one that holds mail would unlock the rest, a follow-up recorded in
+//! the test file's header.
 //!
 //! # The engine lock
 //!

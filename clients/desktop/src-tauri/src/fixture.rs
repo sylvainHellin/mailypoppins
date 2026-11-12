@@ -3995,6 +3995,7 @@ impl Fixture {
                             "imap_password": password.then(|| stored(name, "imap")),
                             "token": (auth == "graph").then_some("valid"),
                             "missing_scopes": [],
+                            "login_rejected": false,
                         })
                     })
                     .collect();

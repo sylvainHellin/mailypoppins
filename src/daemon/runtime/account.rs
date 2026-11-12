@@ -1178,7 +1178,11 @@ fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatchCell)
                 // whatever it did: the Drafts folder is read on its own, so a
                 // failed sync of the mail folders does not hold it back, and
                 // a failed reconcile is logged rather than failing the tick.
-                if cfg.auth_method != crate::config::AuthMethod::Graph {
+                // A refused login is the exception, since the reconcile needs
+                // the same login.
+                if cfg.auth_method != crate::config::AuthMethod::Graph
+                    && !login_was_refused(&synced)
+                {
                     if let Err(e) = crate::draft_mirror::reconcile_account(&cfg).await {
                         warn!(
                             "[drafts] reconciling the drafts of {} failed: {e:#}",
@@ -1275,19 +1279,22 @@ fn tick_limit(kind: TickKind) -> usize {
 ///
 /// A failed listing is logged and the tick syncs what the stored listing
 /// holds: the folders the account had a tick ago, or its configured
-/// mailboxes when it was never listed. It is never the tick's error, since
-/// the mail it can reach is still worth fetching.
-async fn refresh_catalogue(cfg: &AccountConfig, kind: TickKind, listed: &AtomicBool) {
+/// mailboxes when it was never listed, since the mail it can reach is still
+/// worth fetching. A login the server refused is the one failure that is the
+/// tick's error (PERSO-296): no folder can be fetched without that login.
+async fn refresh_catalogue(cfg: &AccountConfig, kind: TickKind, listed: &AtomicBool) -> Result<()> {
     if kind == TickKind::Quick && listed.load(Ordering::SeqCst) {
-        return;
+        return Ok(());
     }
     match crate::catalogue::discover::refresh(cfg).await {
         Ok(_) => listed.store(true, Ordering::SeqCst),
+        Err(e) if crate::imap_client::login_rejected(&e).is_some() => return Err(e),
         Err(e) => warn!(
             "[catalogue] listing the folders of {} failed; this tick syncs the ones it knew: {e:#}",
             cfg.name
         ),
     }
+    Ok(())
 }
 
 /// Read the server's counts of the `status-only` folders after a tick, which
@@ -1309,15 +1316,25 @@ async fn sync_once(
     listed: &AtomicBool,
     observations: &ObservationSink,
 ) -> Result<SyncResult> {
-    refresh_catalogue(cfg, ctx.kind, listed).await;
+    refresh_catalogue(cfg, ctx.kind, listed).await?;
     let targets = crate::catalogue::Catalogue::load(cfg).targets();
     let result = if cfg.auth_method == crate::config::AuthMethod::Graph {
         sync_once_graph(cfg, ctx, &targets, observations).await
     } else {
         sync_once_imap(cfg, ctx, &targets, observations).await
     };
-    refresh_status_counts(cfg).await;
+    if !login_was_refused(&result) {
+        refresh_status_counts(cfg).await;
+    }
     result
+}
+
+/// Whether a pass ended on a login the server refused, after which nothing
+/// else of the tick can reach the server either (PERSO-296).
+fn login_was_refused<T>(result: &Result<T>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|e| crate::imap_client::login_rejected(e).is_some())
 }
 
 /// The IMAP body of a tick: the engine over the account's targets.

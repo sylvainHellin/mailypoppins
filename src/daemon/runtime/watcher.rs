@@ -205,6 +205,10 @@ async fn watch(
 ) {
     info!("[watcher] watching {} over {}", cfg.name, source.label());
     let mut failures: u32 = 0;
+    // The refused login last logged (PERSO-296). A refusal on the list fails
+    // every round at once without dialling, so the loop stays as it is, and
+    // the warning is written once per refusal rather than once per round.
+    let mut logged_refusal: Option<u64> = None;
 
     loop {
         let round = tokio::select! {
@@ -226,10 +230,19 @@ async fn watch(
             Err(e) => {
                 source.failed();
                 failures = failures.saturating_add(1);
-                warn!(
-                    "[watcher] watching {} failed ({failures} in a row): {e:#}",
-                    cfg.name
-                );
+                let refusal = crate::imap_client::login_rejected(&e).and_then(|r| r.entry());
+                if refusal.is_some() && refusal == logged_refusal {
+                    debug!(
+                        "[watcher] watching {} failed ({failures} in a row): {e:#}",
+                        cfg.name
+                    );
+                } else {
+                    logged_refusal = refusal.or(logged_refusal);
+                    warn!(
+                        "[watcher] watching {} failed ({failures} in a row): {e:#}",
+                        cfg.name
+                    );
+                }
                 Some(backoff(failures))
             }
         };

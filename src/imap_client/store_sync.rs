@@ -97,6 +97,17 @@ impl SyncBackend for ImapBackend<'_> {
         use futures::stream::StreamExt;
         let concurrency = self.config.fetch_concurrency.clamp(1, 8);
         let config = self.config;
+        // One checkout before the fan-out (PERSO-296), so the mailboxes do not
+        // each log in at once with a password the server is about to refuse:
+        // the first refusal is on the list before any other mailbox asks. On a
+        // live pool it borrows an idle session and hands it straight back for
+        // the first mailbox; on a cold one its login is the first mailbox's.
+        // A failure here is every mailbox's, since each would have met it.
+        if !targets.is_empty() {
+            if let Err(e) = pool::checkout(config).await {
+                return targets.iter().map(|_| Err(copy_of(&e))).collect();
+            }
+        }
         let body_budget = self.body_budget;
         let stop = self.stop.as_ref();
         futures::stream::iter(
@@ -129,6 +140,15 @@ impl SyncBackend for ImapBackend<'_> {
         .buffered(concurrency)
         .collect()
         .await
+    }
+}
+
+/// `error` again, for the next mailbox it fails: a refused login keeps its
+/// type, which is what ends the pass, and any other failure its text.
+fn copy_of(error: &anyhow::Error) -> anyhow::Error {
+    match super::login_rejected(error) {
+        Some(rejected) => rejected.clone().into(),
+        None => anyhow!("{error:#}"),
     }
 }
 
@@ -210,8 +230,11 @@ pub async fn sync_mailboxes(
 // list_mailboxes
 // ---------------------------------------------------------------------------
 
-pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
-    Ok(list_mailboxes_detailed(imap_config)
+/// The names `LIST "" "*"` returns, on a session of the caller's: what
+/// `config.probe` lists on the session it dialled past the list of refused
+/// logins.
+pub(crate) async fn list_mailboxes_on(session: &mut super::ImapSession) -> Result<Vec<String>> {
+    Ok(list_detailed_on(session)
         .await?
         .into_iter()
         .map(|mailbox| mailbox.name)
@@ -237,31 +260,29 @@ pub struct ServerMailbox {
 /// Everything `LIST "" "*"` returns, with the attributes and the delimiter the
 /// name-only [`list_mailboxes`] drops.
 pub async fn list_mailboxes_detailed(imap_config: &ImapConfig) -> Result<Vec<ServerMailbox>> {
+    let mut pooled = pool::checkout(imap_config).await?;
+    let listed = list_detailed_on(pooled.session()).await;
+    pooled.check(listed)
+}
+
+/// [`list_mailboxes_detailed`] on a session already open.
+async fn list_detailed_on(session: &mut super::ImapSession) -> Result<Vec<ServerMailbox>> {
     use futures::TryStreamExt;
 
-    let mut pooled = pool::checkout(imap_config).await?;
-    let session = pooled.session();
-
-    let listed = async {
-        let listed: Vec<ServerMailbox> = session
-            .list(None, Some("*"))
-            .await
-            .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| anyhow!("Failed to collect mailboxes: {}", e))?
-            .iter()
-            .map(|m| ServerMailbox {
-                name: m.name().to_string(),
-                delimiter: m.delimiter().map(str::to_string),
-                attributes: m.attributes().iter().map(attribute_token).collect(),
-            })
-            .collect();
-        Ok(listed)
-    }
-    .await;
-
-    pooled.check(listed)
+    Ok(session
+        .list(None, Some("*"))
+        .await
+        .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect mailboxes: {}", e))?
+        .iter()
+        .map(|m| ServerMailbox {
+            name: m.name().to_string(),
+            delimiter: m.delimiter().map(str::to_string),
+            attributes: m.attributes().iter().map(attribute_token).collect(),
+        })
+        .collect())
 }
 
 /// One `LIST` attribute as the `\Name` token RFC 3501 and RFC 6154 spell it.

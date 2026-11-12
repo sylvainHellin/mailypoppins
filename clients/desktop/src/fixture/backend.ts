@@ -2307,6 +2307,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
             imap_password: password ? stored("imap") : null,
             token: auth === "graph" ? ("valid" as const) : null,
             missing_scopes: [],
+            login_rejected: false,
           };
         }),
       } satisfies AccountCredentials;

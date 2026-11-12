@@ -207,6 +207,11 @@ impl Method for SyncPass {
         Box::pin(async move {
             let snapshot = self.config.snapshot();
             let request = pass_request(self.spec.name, &params, &snapshot)?;
+            // A sync the user started asks the server even about a login it
+            // refused within the hour (PERSO-296): the user may have fixed the
+            // account on the server's side, and one login per request is
+            // nowhere near a lockout. The TUI starts one at every launch.
+            crate::imap_client::login_gate::forget(&crate::config::ImapLogin::of(&request.account));
             let (id, handle) = self.operations.start(
                 ConnectionId(ctx.connection_id),
                 self.spec.cancel_scope,

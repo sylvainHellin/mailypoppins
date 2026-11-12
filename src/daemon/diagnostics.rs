@@ -419,7 +419,7 @@ impl Diagnostics {
             log_writable(),
         ];
         for account in accounts.iter() {
-            checks.push(self.account_check(&account.name));
+            checks.push(self.account_check(account));
             if crate::calendar_backend::uses_graph_calendar(account) {
                 checks.push(calendar_check(
                     &account.name,
@@ -490,7 +490,8 @@ impl Diagnostics {
     /// The detail does not repeat the account: the check's name carries it,
     /// and every client shows the two together (`account:home: blocked: ...`
     /// in the TUI, `Account home: blocked: ...` on the desktop).
-    fn account_check(&self, account: &str) -> Check {
+    fn account_check(&self, config: &crate::config::AccountConfig) -> Check {
+        let account = config.name.as_str();
         let health = self.runtimes.health_of(account);
         let opening_for = {
             let mut opening_since = lock(&self.opening_since);
@@ -502,7 +503,11 @@ impl Diagnostics {
                 std::time::Duration::ZERO
             }
         };
-        account_check(account, health, opening_for)
+        let check = account_check(account, health, opening_for);
+        if check.status == Status::Ok && login_refused(config) {
+            return refused_login_check(account);
+        }
+        check
     }
 
     /// Pretend `account` has been opening since `ago` before now.
@@ -597,6 +602,26 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
             Check::new(name, Status::Fail, format!("no runtime at all: {reason}"))
         }
     }
+}
+
+/// Whether the server refused `account`'s IMAP login within the hold
+/// (PERSO-296), looked up by server and user so that nothing here reads the
+/// password. Never for an account that does not log in over IMAP.
+pub(crate) fn login_refused(account: &crate::config::AccountConfig) -> bool {
+    account.auth_method == crate::config::AuthMethod::Password
+        && !account.is_local_only()
+        && crate::imap_client::login_gate::is_refused(&crate::config::ImapLogin::of(account))
+}
+
+/// The check of an account whose login the server refused: a runtime that
+/// serves the store and moves no mail until a password the server takes is
+/// set, with the command that sets it.
+fn refused_login_check(account: &str) -> Check {
+    Check::new(
+        format!("account:{account}"),
+        Status::Warn,
+        format!("login rejected by the server (mp config set-password imap -A {account})"),
+    )
 }
 
 /// A Graph calendar account's sign-in, as the check `calendar:<name>`.

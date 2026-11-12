@@ -321,7 +321,9 @@ fn borrowed(key: String, idle: Idle) -> PooledSession {
 /// a link that just came back, a Bridge mid-restart, a server shedding load.
 ///
 /// The last error is what surfaces, because it is the one that describes the
-/// state the client is actually in.
+/// state the client is actually in. A login the server refused is not
+/// retried (PERSO-296): it is an answer about the password, and asking again
+/// with the same one only counts towards a lockout.
 async fn connect_with_backoff(config: &ImapConfig) -> Result<(ImapSession, ServerCaps)> {
     let mut attempt = 0usize;
     loop {
@@ -348,6 +350,9 @@ async fn connect_with_backoff(config: &ImapConfig) -> Result<(ImapSession, Serve
                 return Ok((session, caps));
             }
             Err(e) => {
+                if super::login_rejected(&e).is_some() {
+                    return Err(e);
+                }
                 let Some(pause) = CONNECT_BACKOFF.get(attempt).copied() else {
                     return Err(e);
                 };
@@ -410,6 +415,94 @@ mod tests {
         assert!(
             err.to_string().contains("Failed to connect"),
             "the surfaced error is the last real one, not a retry wrapper: {err}"
+        );
+    }
+
+    /// A login the server refuses is an answer about the password, not a blip
+    /// (PERSO-296): asking again with the same password cannot succeed, and a
+    /// provider may lock the account over it. So the daemon logs in once,
+    /// and none of its own paths asks again with that password: not the
+    /// checkout's quick retries, not the next sync's or drafts reconcile's
+    /// checkout, not the IDLE watcher's own session. A new password is a new
+    /// question and is asked.
+    #[test]
+    fn a_rejected_login_is_not_tried_again_until_the_password_changes() {
+        use super::super::fake_imap::{RejectingImapServer, LOGIN_FAILED};
+
+        let server = RejectingImapServer::start();
+        let rejected = ImapConfig {
+            password: "wrong".into(),
+            accept_invalid_certs: true,
+            ..config(server.port())
+        };
+
+        let err = match futures::executor::block_on(checkout(&rejected)) {
+            Ok(_) => panic!("the fake server accepts no login"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("LOGIN failed."),
+            "the server's refusal ({LOGIN_FAILED}) is what surfaces: {err}"
+        );
+        assert_eq!(
+            server.logins(),
+            1,
+            "a refused login is not retried like a refused connection"
+        );
+
+        // The next sync or drafts reconcile checks out again, and the watcher
+        // opens a session of its own.
+        assert!(futures::executor::block_on(checkout(&rejected)).is_err());
+        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
+        assert_eq!(
+            server.logins(),
+            1,
+            "no path logs in again with the password the server refused"
+        );
+
+        let changed = ImapConfig {
+            password: "changed".into(),
+            ..rejected.clone()
+        };
+        assert!(futures::executor::block_on(checkout(&changed)).is_err());
+        assert_eq!(server.logins(), 2, "a changed password is asked again");
+    }
+
+    /// A `NO [UNAVAILABLE]` to LOGIN is the server down for maintenance, not
+    /// an answer about the password (RFC 5530): it is retried with backoff as
+    /// a refused connection is, and nothing is held against the password.
+    #[test]
+    fn a_login_the_server_is_unavailable_for_is_retried_as_before() {
+        use super::super::fake_imap::{LoginPolicy, RejectingImapServer, LOGIN_UNAVAILABLE};
+
+        let server = RejectingImapServer::start_with(LoginPolicy::Unavailable);
+        let unavailable = ImapConfig {
+            password: "right".into(),
+            accept_invalid_certs: true,
+            ..config(server.port())
+        };
+
+        let err = match futures::executor::block_on(checkout(&unavailable)) {
+            Ok(_) => panic!("the fake server is down for maintenance"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("[UNAVAILABLE]"),
+            "the server's answer ({LOGIN_UNAVAILABLE}) is what surfaces: {err}"
+        );
+        assert!(super::super::login_rejected(&err).is_none(), "{err}");
+        assert_eq!(
+            server.logins(),
+            1 + CONNECT_BACKOFF.len(),
+            "every backoff attempt logged in"
+        );
+
+        server.set_policy(LoginPolicy::Accept);
+        assert!(futures::executor::block_on(checkout(&unavailable)).is_ok());
+        assert_eq!(
+            server.logins(),
+            2 + CONNECT_BACKOFF.len(),
+            "the next checkout asked again, and got in"
         );
     }
 

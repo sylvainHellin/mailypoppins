@@ -1,5 +1,10 @@
 mod batch;
+/// The login-refusing IMAP server the daemon suites use too (PERSO-296).
+#[cfg(test)]
+#[path = "../../tests/support/fake_imap.rs"]
+pub(crate) mod fake_imap;
 mod fetch;
+pub mod login_gate;
 mod ops;
 pub mod pool;
 pub mod search;
@@ -12,6 +17,7 @@ pub use fetch::{
     fetch_new_raw_on_session, fetch_raw_by_message_id, fetch_uids_on_session,
     search_stubs_on_session, vanished_uids,
 };
+pub use login_gate::{login_rejected, LoginRejected};
 pub use ops::{
     add_flag_on_server, delete_email_on_server, mark_read_on_server, mark_unread_on_server,
     move_email_on_server, remove_flag_on_server,
@@ -21,9 +27,9 @@ pub use search::{
     bracketed_message_id, normalize_message_id, retain_exact_message_id, FetchCriteria,
 };
 pub use sent::ImapSentMailbox;
+pub(crate) use store_sync::list_mailboxes_on;
 pub use store_sync::{
-    list_mailboxes, list_mailboxes_detailed, status_counts, sync_mailboxes, ImapBackend,
-    ServerMailbox,
+    list_mailboxes_detailed, status_counts, sync_mailboxes, ImapBackend, ServerMailbox,
 };
 // The sync types moved to `crate::sync` with the engine (#0059); re-exported
 // here so the call sites that name them through this module keep compiling.
@@ -122,6 +128,10 @@ impl fmt::Debug for ImapStream {
 // ---------------------------------------------------------------------------
 
 /// Log an IMAP client in with the account's password.
+///
+/// A `NO` the server meant about the password is a [`LoginRejected`]
+/// ([`login_gate::is_rejection`]); every other failure, a `BAD`, a lost
+/// connection, a temporary `NO`, stays a plain error that the pool retries.
 async fn authenticate_client(
     client: async_imap::Client<ImapStream>,
     imap_config: &ImapConfig,
@@ -129,7 +139,17 @@ async fn authenticate_client(
     client
         .login(&imap_config.username, &imap_config.password)
         .await
-        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))
+        .map_err(|(e, _client)| login_error(e))
+}
+
+/// The error a failed LOGIN surfaces as.
+fn login_error(error: async_imap::error::Error) -> anyhow::Error {
+    match &error {
+        async_imap::error::Error::No(answer) if login_gate::is_rejection(answer) => {
+            LoginRejected::new(error.to_string()).into()
+        }
+        _ => anyhow!("IMAP login failed: {error}"),
+    }
 }
 
 /// How long the TCP connect of a new IMAP session may take before it is given
@@ -147,7 +167,35 @@ async fn authenticate_client(
 /// a slow link on a good day must not lose its connection to it.
 const CONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// Open an authenticated session, unless the server refused this login with
+/// this password within the hold ([`login_gate`], PERSO-296).
+///
+/// Every login the daemon makes goes through here: the pool, the IDLE
+/// watcher, the Sent mailbox and the one-off sessions of the message methods.
+/// A refusal on the list fails at once with the same [`LoginRejected`],
+/// without dialling; a refusal the server sends is recorded there, and a
+/// login that succeeds clears whatever the list held about its server and
+/// user.
 pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
+    if let Some(refused) = login_gate::refused(imap_config) {
+        return Err(refused.into());
+    }
+    match dial_imap_session(imap_config).await {
+        Ok(session) => {
+            login_gate::accepted(imap_config);
+            Ok(session)
+        }
+        Err(e) => match login_rejected(&e) {
+            Some(rejected) => Err(login_gate::record(imap_config, rejected).into()),
+            None => Err(e),
+        },
+    }
+}
+
+/// Connect, upgrade to TLS and log in, without consulting the list of refused
+/// logins and without adding to it: what `config.probe` takes, since a probe
+/// is the user asking the server, and what [`open_imap_session`] wraps.
+pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
     use crate::timing::TimingSpan;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -232,5 +280,36 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
         let session = authenticate_client(client, imap_config).await?;
         span.mark("login");
         Ok(session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_imap::error::Error;
+
+    /// Only a `NO` about the password is a [`LoginRejected`]; a temporary
+    /// `NO`, a `BAD` and a lost connection stay the plain errors the pool
+    /// retries, with the text they always had.
+    #[test]
+    fn only_a_no_about_the_password_is_a_rejected_login() {
+        let refused = login_error(Error::No(
+            "code: None, info: Some(\"[AUTHENTICATIONFAILED] LOGIN failed.\")".into(),
+        ));
+        assert!(login_rejected(&refused).is_some());
+        assert_eq!(
+            refused.to_string(),
+            "IMAP login failed: no response: code: None, \
+             info: Some(\"[AUTHENTICATIONFAILED] LOGIN failed.\")"
+        );
+        for passing in [
+            Error::No("code: None, info: Some(\"[UNAVAILABLE] down\")".into()),
+            Error::Bad("code: None, info: Some(\"LOGIN disabled\")".into()),
+            Error::ConnectionLost,
+        ] {
+            let error = login_error(passing);
+            assert!(login_rejected(&error).is_none(), "{error}");
+            assert!(error.to_string().starts_with("IMAP login failed: "));
+        }
     }
 }

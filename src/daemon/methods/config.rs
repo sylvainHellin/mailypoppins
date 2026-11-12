@@ -327,17 +327,17 @@ fn validate(family: &ConfigFamily, params: &Value) -> Result<Value, DomainError>
 async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainError> {
     let params = SetPasswordParams::from_params(params)?;
     let snapshot = family.store.snapshot();
-    if !snapshot
+    let Some(account) = snapshot
         .accounts
         .iter()
-        .any(|account| account.name == params.account())
-    {
+        .find(|account| account.name == params.account())
+    else {
         return Err(DomainError::new(
             ErrorCode::AccountUnknown,
             format!("no account named {} is configured", params.account()),
             Some(json!({"account": params.account()})),
         ));
-    }
+    };
 
     let key = params.kind().secret_key(params.account());
     let backend = snapshot.config.secrets_backend;
@@ -371,6 +371,11 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         params.kind().as_str(),
         params.account()
     );
+    // A stored password is the user's answer to a refused login (PERSO-296),
+    // so the server is asked again at once, even with the password it
+    // refused: the user may have fixed the account on the server's side. The
+    // SMTP password counts too, since the IMAP login falls back to it.
+    crate::imap_client::login_gate::forget(&crate::config::ImapLogin::of(account));
 
     Ok(command(
         family,

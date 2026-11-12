@@ -2410,23 +2410,23 @@ async fn account_credentials_reports_presence_and_never_a_value() {
         json!({"accounts": [
             {"account": "alpha", "auth_method": "password",
              "smtp_password": false, "imap_password": false, "token": null,
-             "missing_scopes": []},
+             "missing_scopes": [], "login_rejected": false},
             {"account": "exchange", "auth_method": "graph",
              "smtp_password": null, "imap_password": null, "token": "not_cached",
-             "missing_scopes": []},
+             "missing_scopes": [], "login_rejected": false},
             {"account": "teams", "auth_method": "graph",
              "smtp_password": null, "imap_password": null, "token": "invalid",
-             "missing_scopes": []},
+             "missing_scopes": [], "login_rejected": false},
             // The retired `oauth2` mode holds no credential anything reads.
             {"account": "office", "auth_method": "oauth2",
              "smtp_password": null, "imap_password": null, "token": null,
-             "missing_scopes": []},
+             "missing_scopes": [], "login_rejected": false},
             {"account": "outlook", "auth_method": "graph",
              "smtp_password": null, "imap_password": null, "token": "valid",
-             "missing_scopes": ["Calendars.ReadWrite"]},
+             "missing_scopes": ["Calendars.ReadWrite"], "login_rejected": false},
             {"account": "nocal", "auth_method": "graph",
              "smtp_password": null, "imap_password": null, "token": "valid",
-             "missing_scopes": []},
+             "missing_scopes": [], "login_rejected": false},
         ]}),
     );
 
@@ -2473,7 +2473,7 @@ async fn account_credentials_reports_presence_and_never_a_value() {
         json!({"accounts": [
             {"account": "alpha", "auth_method": "password",
              "smtp_password": true, "imap_password": false, "token": null,
-             "missing_scopes": []},
+             "missing_scopes": [], "login_rejected": false},
         ]}),
         "the account named, and only that one"
     );

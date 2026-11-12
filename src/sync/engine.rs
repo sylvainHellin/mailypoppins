@@ -347,6 +347,17 @@ pub async fn run_sync(
         }
         let fetched: MailboxFetch = match fetched {
             Ok(v) => v,
+            // A login the server refused ends the pass as its error
+            // (PERSO-296): every later mailbox needs the same login, and a
+            // pass that logged and skipped each one ended `ok` while no mail
+            // could move. What earlier targets ingested stays.
+            Err(e) if crate::imap_client::login_rejected(&e).is_some() => {
+                warn!(
+                    "[sync] {account}: the server refused the login at '{}'; ending the pass",
+                    target.server_name
+                );
+                return Err(e);
+            }
             Err(e) => {
                 warn!(
                     "Failed to sync mailbox '{}': {}. Continuing with next.",
@@ -1678,6 +1689,46 @@ mod tests {
             fx.rows("archive"),
             vec![55],
             "and the failed target is left untouched"
+        );
+    }
+
+    /// A login the server refused is not one mailbox's failure but the pass's
+    /// (PERSO-296): the pass ends at it with its error, rather than logging it
+    /// per mailbox and recording a pass that moved nothing as `ok`, and no
+    /// later target is ingested.
+    #[test]
+    fn a_refused_login_ends_the_pass_as_its_error() {
+        use crate::imap_client::{login_rejected, LoginRejected};
+
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script(
+            "INBOX",
+            vec![Err(
+                LoginRejected::new("no response: LOGIN failed.".into()).into()
+            )],
+        );
+        backend.script("Archive", vec![Ok(fetch(vec![(55, raw("two"))]))]);
+        let run = SyncRun {
+            store: &fx.store,
+            blobs: &fx.blobs,
+            account: "acct",
+            targets: &targets,
+            limit: usize::MAX,
+            dry_run: false,
+            stop: None,
+            observations: &ObservationSink::default(),
+        };
+        let mut span = TimingSpan::new("test");
+        let err = match futures::executor::block_on(run_sync(&mut backend, &run, &mut span)) {
+            Ok(result) => panic!("a refused login is the pass's error, not {result:?}"),
+            Err(e) => e,
+        };
+        assert!(login_rejected(&err).is_some(), "{err:#}");
+        assert!(
+            fx.rows("archive").is_empty(),
+            "the pass stopped at the refusal"
         );
     }
 

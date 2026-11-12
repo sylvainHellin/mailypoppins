@@ -52,6 +52,12 @@ pub struct AccountCredential {
     /// with no readable token, whose `token` already says it needs a sign-in.
     #[serde(default)]
     pub missing_scopes: Vec<String>,
+    /// Whether the server refused the account's IMAP login within the last
+    /// hour, so the daemon is not asking it again until a password is set or
+    /// a sync is started (PERSO-296). `false` for any account but a password
+    /// one, and when absent, so an older daemon's answer still parses.
+    #[serde(default)]
+    pub login_rejected: bool,
 }
 
 /// The `result` of `account.credentials`: every configured account in the

@@ -441,6 +441,7 @@ mod tests {
             imap_password: None,
             token: Some(mp_protocol::account::TokenState::Valid),
             missing_scopes: vec!["Calendars.ReadWrite".to_string()],
+            login_rejected: false,
         };
         assert_eq!(
             missing_scope_line("work", Some(&credential)).as_deref(),
