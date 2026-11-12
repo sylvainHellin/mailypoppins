@@ -41,7 +41,7 @@ use log::warn;
 use rusqlite::{OptionalExtension, Transaction};
 
 use crate::store::blobs::BlobHash;
-use crate::store::{BlobStore, Store};
+use crate::store::{BlobStore, Store, Unreferenced};
 use crate::types::MessageFlags;
 
 /// Where a row was before a mutation moved or removed it.
@@ -119,6 +119,7 @@ pub fn restore_row(store: &Store, previous: &MutatedRow) -> Result<()> {
 /// `message_blobs` goes with the row through `ON DELETE CASCADE`, but the
 /// refcounts are decremented explicitly, exactly as ingest does when it
 /// re-points a reference: the cascade removes the list, never the count.
+/// The blob files the row held alone are removed once the delete commits.
 pub fn delete_row(store: &Store, blobs: &BlobStore, id: i64) -> Result<Option<MutatedRow>> {
     let Some(previous) = row_coordinates(store, id)? else {
         return Ok(None);
@@ -127,22 +128,24 @@ pub fn delete_row(store: &Store, blobs: &BlobStore, id: i64) -> Result<Option<Mu
         .conn()
         .unchecked_transaction()
         .context("opening a delete transaction")?;
-    delete_row_in(&tx, blobs, id)?;
+    let unreferenced = delete_row_in(&tx, blobs, id)?;
     tx.commit().context("committing a delete transaction")?;
+    unreferenced.remove();
     Ok(Some(previous))
 }
 
 /// [`delete_row`] inside the caller's transaction, which commits it with
-/// whatever else it writes.
-pub fn delete_row_in(tx: &Transaction<'_>, blobs: &BlobStore, id: i64) -> Result<()> {
+/// whatever else it writes and then removes the blob files it answers.
+pub fn delete_row_in(tx: &Transaction<'_>, blobs: &BlobStore, id: i64) -> Result<Unreferenced> {
     let hashes = blob_refs(tx, id)?;
     super::fts::unindex(tx, id).context("removing the FTS entry")?;
     tx.execute("DELETE FROM messages WHERE id = ?1", [id])
         .context("deleting the message row")?;
+    let mut unreferenced = Unreferenced::default();
     for hash in hashes {
-        blobs.release(tx, &hash)?;
+        unreferenced.absorb(blobs.release(tx, &hash)?);
     }
-    Ok(())
+    Ok(unreferenced)
 }
 
 /// Delete the row a `(account, mailbox, uid)` triple names, if it is there.

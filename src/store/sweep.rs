@@ -37,9 +37,11 @@
 //! ## Transaction discipline
 //!
 //! The plan is computed from a read, then each victim is unlinked-then-deleted
-//! in its own statement, mirroring [`BlobStore::release`]'s survivable order (a
-//! file gone before its row is a hole the read path already degrades and the
-//! next sweep re-reaps; a row gone before its file leaks disk). SQLite
+//! in its own statement (a file gone before its row is a hole the read path
+//! already degrades and the next sweep re-reaps; a row gone before its file
+//! leaks disk). Eviction keeps the `messages` row, so a hole is its point;
+//! [`BlobStore::release`], which drops a reference inside a transaction that
+//! may still roll back, leaves the file for after the commit instead. SQLite
 //! serialises writers under WAL with the store's busy timeout, so a sweep and a
 //! concurrent ingest transaction cannot interleave mid-statement: the sweep
 //! only ever sees committed blobs, and never evicts a blob an in-flight ingest

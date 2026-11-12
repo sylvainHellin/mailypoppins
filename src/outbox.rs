@@ -1309,8 +1309,9 @@ fn finish_done(
         rusqlite::params![row.id, uid, now, note],
     )
     .context("marking the outbox row done")?;
-    blobs.release(&tx, &row.raw_blob)?;
+    let unreferenced = blobs.release(&tx, &row.raw_blob)?;
     tx.commit().context("committing the outbox completion")?;
+    unreferenced.remove();
     crate::contacts::window::owe(&contacts, blind_recipients(row));
     Ok(())
 }
@@ -1368,9 +1369,10 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
         .context("opening the outbox discard transaction")?;
     tx.execute("DELETE FROM outbox WHERE id = ?1", [id])
         .context("deleting the outbox row")?;
+    let mut unreferenced = crate::store::Unreferenced::default();
     if row.state != OutboxState::Done {
         // A `done` row already released its reference.
-        blobs.release(&tx, &row.raw_blob)?;
+        unreferenced = blobs.release(&tx, &row.raw_blob)?;
         if graph {
             tx.execute(
                 &format!(
@@ -1389,6 +1391,7 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
         }
     }
     tx.commit().context("committing the outbox discard")?;
+    unreferenced.remove();
     Ok(())
 }
 

@@ -417,12 +417,14 @@ pub fn apply_delete(
     crate::store::fts::unindex(&tx, id).context("removing the FTS entry")?;
     tx.execute("DELETE FROM messages WHERE id = ?1", [id])
         .context("deleting the message row")?;
+    let mut unreferenced = crate::store::Unreferenced::default();
     for hash in &hashes {
-        blobs.release(&tx, hash)?;
+        unreferenced.absorb(blobs.release(&tx, hash)?);
     }
     let op_id = insert(&tx, account, Some(id), &op, &Rollback::None, state)?;
     crate::sync::departures::record(store, account, &op);
     tx.commit().context("committing the delete and its op")?;
+    unreferenced.remove();
     info!("[pending_ops] queued a delete for row {id} as op {op_id}");
     Ok(Some((previous, op_id)))
 }
@@ -1263,22 +1265,29 @@ fn refuse(
          ({err})",
         row.id, row.kind
     );
+    // The blob files the undone ops left without a reference go once the
+    // refusal commits; an undo that failed rolled its savepoint back and
+    // answers none.
+    let mut unreferenced = crate::store::Unreferenced::default();
+    let mut kept =
+        |undone: Result<crate::store::Unreferenced>| undone.map(|files| unreferenced.absorb(files));
     for op in later.iter().rev() {
-        let note = noted(&why, undo(&mut tx, blobs, op), op);
+        let note = noted(&why, kept(undo(&mut tx, blobs, op)), op);
         park(&tx, op, &note, false)?;
     }
     match how {
         Refusal::Park => {
-            let note = noted(err, undo(&mut tx, blobs, &row), &row);
+            let note = noted(err, kept(undo(&mut tx, blobs, &row)), &row);
             park(&tx, &row, &note, true)?;
         }
         Refusal::Discard => {
-            undo(&mut tx, blobs, &row)?;
+            kept(undo(&mut tx, blobs, &row))?;
             tx.execute("DELETE FROM pending_ops WHERE id = ?1", [id])
                 .context("discarding a refused op")?;
         }
     }
     tx.commit().context("committing the refusal")?;
+    unreferenced.remove();
     Ok(later)
 }
 
@@ -1316,11 +1325,19 @@ fn later_on_message(conn: &Connection, row: &PendingOp) -> Result<Vec<PendingOp>
 }
 
 /// Undo `row`'s local half under a savepoint of `tx`, so a rollback that
-/// fails part way leaves nothing of itself behind.
-fn undo(tx: &mut rusqlite::Transaction<'_>, blobs: &BlobStore, row: &PendingOp) -> Result<()> {
+/// fails part way leaves nothing of itself behind. Answers the blob files it
+/// left without a reference, to remove once `tx` commits.
+fn undo(
+    tx: &mut rusqlite::Transaction<'_>,
+    blobs: &BlobStore,
+    row: &PendingOp,
+) -> Result<crate::store::Unreferenced> {
     let savepoint = tx.savepoint().context("opening a rollback savepoint")?;
-    apply_rollback(&savepoint, blobs, row)?;
-    savepoint.commit().context("releasing a rollback savepoint")
+    let unreferenced = apply_rollback(&savepoint, blobs, row)?;
+    savepoint
+        .commit()
+        .context("releasing a rollback savepoint")?;
+    Ok(unreferenced)
 }
 
 /// `err`, with the rollback's own failure appended when it had one.
@@ -1910,16 +1927,23 @@ fn bump_attempt(store: &Store, id: i64, err: &str) -> Result<()> {
     Ok(())
 }
 
-/// Undo a mutation's local half, inside the caller's transaction.
-fn apply_rollback(conn: &Connection, blobs: &BlobStore, row: &PendingOp) -> Result<()> {
+/// Undo a mutation's local half, inside the caller's transaction, answering
+/// the blob files it left without a reference for the caller to remove once
+/// that transaction commits.
+fn apply_rollback(
+    conn: &Connection,
+    blobs: &BlobStore,
+    row: &PendingOp,
+) -> Result<crate::store::Unreferenced> {
+    let mut unreferenced = crate::store::Unreferenced::default();
     match &row.rollback {
-        Rollback::Move(previous) => roll_move_back(conn, blobs, previous)?,
+        Rollback::Move(previous) => unreferenced = roll_move_back(conn, blobs, previous)?,
         Rollback::Flags { id, flags } => roll_flag_back(conn, row, *id, flags)?,
         // A delete cannot be restored: the row is gone and the message is still
         // on the server, so convergence is the next sync refetching the UID.
         Rollback::None => {}
     }
-    Ok(())
+    Ok(unreferenced)
 }
 
 /// The one flag a read or star toggle changes.
@@ -2033,8 +2057,13 @@ fn rewrite_rollback(conn: &Connection, row: &PendingOp, rollback: &Rollback) -> 
 /// message, so the placeholder is the duplicate and goes.
 ///
 /// Runs inside the caller's transaction ([`refuse`]), under a savepoint of
-/// its own.
-fn roll_move_back(tx: &Connection, blobs: &BlobStore, previous: &MutatedRow) -> Result<()> {
+/// its own, and answers the blob files a dropped placeholder held alone.
+fn roll_move_back(
+    tx: &Connection,
+    blobs: &BlobStore,
+    previous: &MutatedRow,
+) -> Result<crate::store::Unreferenced> {
+    let mut unreferenced = crate::store::Unreferenced::default();
     let holder: Option<i64> = tx
         .query_row(
             "SELECT other.id FROM messages AS other
@@ -2061,7 +2090,7 @@ fn roll_move_back(tx: &Connection, blobs: &BlobStore, previous: &MutatedRow) -> 
             tx.execute("DELETE FROM messages WHERE id = ?1", [previous.id])
                 .context("deleting the moved placeholder row")?;
             for hash in &hashes {
-                blobs.release(tx, hash)?;
+                unreferenced.absorb(blobs.release(tx, hash)?);
             }
             info!(
                 "[pending_ops] row {} was refetched as row {holder} while its move was queued; \
@@ -2070,7 +2099,7 @@ fn roll_move_back(tx: &Connection, blobs: &BlobStore, previous: &MutatedRow) -> 
             );
         }
     }
-    Ok(())
+    Ok(unreferenced)
 }
 
 // ---------------------------------------------------------------------------

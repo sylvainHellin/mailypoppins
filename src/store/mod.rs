@@ -75,7 +75,7 @@ use rusqlite::Connection;
 
 use crate::timing::TimingSpan;
 
-pub use blobs::{BlobHash, BlobStore};
+pub use blobs::{BlobHash, BlobStore, Unreferenced};
 pub use schema::SCHEMA_VERSION;
 
 /// Busy timeout applied to every store connection, in milliseconds. WAL lets

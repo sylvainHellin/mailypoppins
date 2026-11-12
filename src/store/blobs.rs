@@ -11,7 +11,9 @@
 //! Refcounts live in the per-account `store.sqlite3` (`blobs` table), not on
 //! disk, so a reference can be taken in the *same transaction* as the
 //! `messages` / `outbox` row that holds the hash. See
-//! [`BlobStore::acquire`] for that contract.
+//! [`BlobStore::acquire`] for that contract, and [`BlobStore::release`] with
+//! [`Unreferenced`] for its mirror: a file goes only after the transaction
+//! that dropped its last reference has committed.
 //!
 //! Like the rest of `src/store/`, this module knows nothing about IMAP, MIME
 //! or Markdown: it moves bytes and counts references.
@@ -227,18 +229,16 @@ impl BlobStore {
         refcount(conn, hash)
     }
 
-    /// Drop one reference on `hash` and unlink the file when the last one goes.
+    /// Drop one reference on `hash`, deleting its `blobs` row when the last
+    /// one goes, and answer the file that reference left without one.
     ///
-    /// Returns the refcount after the decrement; `0` means the row was deleted
-    /// and the file unlinked. Releasing an unknown hash is a no-op that logs,
-    /// not an error, so a double release cannot poison a caller's transaction.
-    ///
-    /// The unlink is *not* transactional: it happens as soon as the count hits
-    /// zero, so a caller that rolls back after releasing leaves a row pointing
-    /// at a missing blob. That is the survivable direction (the read path
-    /// treats a missing blob as evicted and re-fetches from the server), but
-    /// release belongs in a transaction the caller intends to commit.
-    pub fn release(&self, conn: &Connection, hash: &BlobHash) -> Result<i64> {
+    /// The file stays on disk: a transaction that fails after the release
+    /// rolls the row and the refcount back, and they must still find their
+    /// bytes. The caller commits, then calls [`Unreferenced::remove`]; a crash
+    /// in between leaves an unreferenced file, never a row pointing at a
+    /// missing one. Releasing an unknown hash is a no-op that logs, not an
+    /// error, so a double release cannot poison a caller's transaction.
+    pub fn release(&self, conn: &Connection, hash: &BlobHash) -> Result<Unreferenced> {
         let updated = conn
             .execute(
                 "UPDATE blobs SET refcount = refcount - 1 WHERE hash = ?1 AND refcount > 0",
@@ -247,26 +247,50 @@ impl BlobStore {
             .with_context(|| format!("releasing blob {hash}"))?;
         if updated == 0 {
             warn!("[store] release of unreferenced blob {hash} ignored");
-            return Ok(0);
+            return Ok(Unreferenced::default());
         }
-
-        let remaining = refcount(conn, hash)?;
-        if remaining > 0 {
-            return Ok(remaining);
+        if refcount(conn, hash)? > 0 {
+            return Ok(Unreferenced::default());
         }
-
         conn.execute("DELETE FROM blobs WHERE hash = ?1", [hash.as_str()])
             .with_context(|| format!("deleting blob row {hash}"))?;
-        let path = self.path_for(hash);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(anyhow::Error::from(e))
-                    .with_context(|| format!("unlinking blob {}", path.display()))
+        Ok(Unreferenced(vec![self.path_for(hash)]))
+    }
+}
+
+/// The blob files a transaction's releases left without a reference, to
+/// remove once that transaction has committed (PERSO-185).
+///
+/// Dropping one unremoved only leaves the files on disk, unreferenced: the
+/// direction a failure may go, where removing them before the commit would
+/// leave a rolled-back row pointing at a missing body.
+#[must_use = "remove the files once the transaction that released them has committed"]
+#[derive(Debug, Default)]
+pub struct Unreferenced(Vec<PathBuf>);
+
+impl Unreferenced {
+    /// Take on the files `other` holds, released in the same transaction.
+    pub fn absorb(&mut self, other: Unreferenced) {
+        self.0.extend(other.0);
+    }
+
+    /// The files held, for a caller that checks them.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.0
+    }
+
+    /// Remove the files, to be called once the transaction that released
+    /// them has committed. A file that is already gone is fine; one that
+    /// cannot be removed is logged and left, since the commit it follows has
+    /// already happened.
+    pub fn remove(self) {
+        for path in self.0 {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn!("[store] could not remove blob {}: {e}", path.display()),
             }
         }
-        Ok(0)
     }
 }
 
@@ -454,14 +478,18 @@ mod tests {
         assert_eq!(blobs.acquire(conn, &hash, bytes.len() as u64).unwrap(), 2);
         assert_eq!(size(conn, &hash).unwrap(), Some(bytes.len() as u64));
 
-        assert_eq!(blobs.release(conn, &hash).unwrap(), 1);
+        assert!(blobs.release(conn, &hash).unwrap().paths().is_empty());
+        assert_eq!(refcount(conn, &hash).unwrap(), 1);
         assert!(
             blobs.contains(&hash),
             "a blob with references left must survive"
         );
 
-        assert_eq!(blobs.release(conn, &hash).unwrap(), 0);
-        assert!(!blobs.contains(&hash), "the last release must unlink");
+        let unreferenced = blobs.release(conn, &hash).unwrap();
+        assert_eq!(unreferenced.paths(), [blobs.path_for(&hash)]);
+        assert!(blobs.contains(&hash), "the release itself unlinks nothing");
+        unreferenced.remove();
+        assert!(!blobs.contains(&hash), "the last release's file is removed");
         assert_eq!(refcount(conn, &hash).unwrap(), 0);
         assert_eq!(
             size(conn, &hash).unwrap(),
@@ -475,11 +503,30 @@ mod tests {
         let (_dir, blobs, store) = fixture();
         let hash = blobs.write(b"orphan").unwrap();
 
-        assert_eq!(blobs.release(store.conn(), &hash).unwrap(), 0);
+        let unreferenced = blobs.release(store.conn(), &hash).unwrap();
+        assert!(unreferenced.paths().is_empty());
+        unreferenced.remove();
         assert!(
             blobs.contains(&hash),
             "releasing a blob nobody acquired must not unlink it"
         );
+    }
+
+    /// PERSO-185: a release that rolls back keeps the file its restored
+    /// reference reads.
+    #[test]
+    fn release_rolls_back_with_its_file_on_disk() {
+        let (_dir, blobs, store) = fixture();
+        let hash = blobs.write(b"body").unwrap();
+        blobs.acquire(store.conn(), &hash, 4).unwrap();
+
+        let tx = store.conn().unchecked_transaction().unwrap();
+        let unreferenced = blobs.release(&tx, &hash).unwrap();
+        assert_eq!(unreferenced.paths().len(), 1);
+        tx.rollback().unwrap();
+
+        assert_eq!(refcount(store.conn(), &hash).unwrap(), 1);
+        assert_eq!(blobs.read(&hash).unwrap(), b"body");
     }
 
     #[test]
@@ -520,8 +567,12 @@ mod tests {
         let hash = blobs.write(b"bytes").unwrap();
         blobs.acquire(store.conn(), &hash, 5).unwrap();
 
-        assert_eq!(blobs.release(store.conn(), &hash).unwrap(), 0);
-        assert_eq!(blobs.release(store.conn(), &hash).unwrap(), 0);
+        assert_eq!(blobs.release(store.conn(), &hash).unwrap().paths().len(), 1);
+        assert!(blobs
+            .release(store.conn(), &hash)
+            .unwrap()
+            .paths()
+            .is_empty());
         assert_eq!(refcount(store.conn(), &hash).unwrap(), 0);
     }
 }

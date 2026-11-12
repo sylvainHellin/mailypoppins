@@ -171,7 +171,9 @@ fn record_listing(
 ///
 /// The listing and the rows a rename moves are written in one transaction:
 /// a failure while the rows move leaves the old name listed as present with
-/// its rows and cursor, so the next listing finds the rename again.
+/// its rows and cursor, so the next listing finds the rename again. The
+/// bodies of the copies a rename drops go only once that transaction has
+/// committed, so a row the failure restores still opens.
 fn record(
     store: &Store,
     blobs: &crate::store::BlobStore,
@@ -186,13 +188,22 @@ fn record(
     let recorded = listing::replace_in(&tx, &account.name, fresh, renamed, &|rename| {
         keeps_role_keys(&before, &resolved, rename)
     })?;
+    let mut unreferenced = crate::store::Unreferenced::default();
     if !recorded.renames.is_empty() {
         let after = Catalogue::resolve(account, &listing::load_from(&tx, &account.name)?);
         for rename in &recorded.renames {
-            follow_rename(&tx, blobs, &account.name, &before, &after, rename)?;
+            unreferenced.absorb(follow_rename(
+                &tx,
+                blobs,
+                &account.name,
+                &before,
+                &after,
+                rename,
+            )?);
         }
     }
     tx.commit().context("committing the folder list")?;
+    unreferenced.remove();
     Ok(recorded.changed)
 }
 
@@ -227,6 +238,9 @@ fn keeps_role_keys(before: &Catalogue, after: &Catalogue, rename: &listing::Rena
 /// role), when config pins the old name (the pin still names it, and moving
 /// its rows away would leave the pin empty; the log says to edit the config),
 /// or when the new name would shadow a role or the local Drafts.
+///
+/// Answers the blob files of the copies it dropped, for the caller to remove
+/// once `tx` has committed.
 fn follow_rename(
     tx: &rusqlite::Transaction<'_>,
     blobs: &crate::store::BlobStore,
@@ -234,7 +248,7 @@ fn follow_rename(
     before: &Catalogue,
     after: &Catalogue,
     rename: &listing::Rename,
-) -> Result<()> {
+) -> Result<crate::store::Unreferenced> {
     let listed_as = |catalogue: &'_ Catalogue, name: &str| -> Option<super::Folder> {
         catalogue
             .folders
@@ -246,7 +260,7 @@ fn follow_rename(
         listed_as(before, &rename.from),
         listed_as(after, &rename.to),
     ) else {
-        return Ok(());
+        return Ok(Default::default());
     };
     if old.pin.is_some() {
         log::warn!(
@@ -255,33 +269,34 @@ fn follow_rename(
             rename.from,
             rename.to
         );
-        return Ok(());
+        return Ok(Default::default());
     }
     if old.key == new.key || (!new.keyed_by_role() && super::shadows_reserved_key(&new.key)) {
-        return Ok(());
+        return Ok(Default::default());
     }
-    let moved = rekey(tx, blobs, account, &old.key, &new.key)?;
+    let (moved, unreferenced) = rekey(tx, blobs, account, &old.key, &new.key)?;
     log::info!(
         "[catalogue] {account}: '{}' was renamed '{}' on the server; {moved} row(s) follow it",
         rename.from,
         rename.to
     );
-    Ok(())
+    Ok(unreferenced)
 }
 
 /// Re-key every row of mailbox `from` to `to`: the messages, the sync cursor
 /// (which stays valid: a Graph folder kept its id and with it the delta
 /// token, an IMAP folder its UIDVALIDITY and UIDs), the mailbox record and the
 /// ingest failures. A message `to` already holds stays there and its old
-/// copy is deleted. Answers how many messages moved. Written in `tx`, which
-/// the caller commits with the listing row the rename renamed.
+/// copy is deleted. Answers how many messages moved and the blob files the
+/// deleted copies held alone. Written in `tx`, which the caller commits with
+/// the listing row the rename renamed before it removes those files.
 fn rekey(
     tx: &rusqlite::Transaction<'_>,
     blobs: &crate::store::BlobStore,
     account: &str,
     from: &str,
     to: &str,
-) -> Result<usize> {
+) -> Result<(usize, crate::store::Unreferenced)> {
     use anyhow::Context;
     let moved = tx
         .execute(
@@ -314,11 +329,14 @@ fn rekey(
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         ids
     };
+    let mut unreferenced = crate::store::Unreferenced::default();
     for id in leftovers {
-        crate::store::write::delete_row_in(tx, blobs, id)
-            .context("dropping a copy the new name already holds")?;
+        unreferenced.absorb(
+            crate::store::write::delete_row_in(tx, blobs, id)
+                .context("dropping a copy the new name already holds")?,
+        );
     }
-    Ok(moved)
+    Ok((moved, unreferenced))
 }
 
 /// Read the server's counts of every `status-only` folder and record them.
@@ -554,6 +572,91 @@ mod tests {
             .unwrap()
             .expect("the cursor moved");
         assert_eq!(cursor.deltalink.as_deref(), Some("token"));
+    }
+
+    /// PERSO-185: a copy a rename drops, its body held by no other row,
+    /// keeps its body on disk when a later step of the same listing fails:
+    /// the rollback restores the row, so the file goes only once the listing
+    /// that dropped its last reference has committed.
+    #[test]
+    fn a_rename_that_fails_after_dropping_a_copy_keeps_the_copys_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let account = AccountConfig {
+            name: "work".to_string(),
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Projects", "BBB")],
+            &[],
+        )
+        .unwrap();
+        let ingest = |mailbox: &str, id: &str, uid: i64, body: &str| {
+            crate::ingest::ingest_message(
+                &store,
+                &blobs,
+                &crate::ingest::IngestInput {
+                    account: "work",
+                    mailbox,
+                    uid,
+                    email: &FetchedEmail {
+                        body_text: body.to_string(),
+                        ..email(id)
+                    },
+                    raw: None,
+                },
+            )
+            .unwrap()
+            .row_id
+        };
+        // Both UIDs of `Projects` are taken under `Projekte`, so both rows
+        // are copies the rename drops, each with a body of its own.
+        let dropped = [
+            (ingest("Projects", "one", 1, "only one"), "only one"),
+            (ingest("Projects", "two", 2, "only two"), "only two"),
+        ];
+        ingest("Projekte", "three", 1, "body");
+        ingest("Projekte", "four", 2, "body");
+        let file = |body: &str| blobs.path_for(&crate::store::BlobHash::of(body.as_bytes()));
+        assert!(dropped.iter().all(|(_, body)| file(body).is_file()));
+
+        // Whichever copy goes second fails to, after the first one went.
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER refuse_second_drop BEFORE DELETE ON messages
+                 WHEN (SELECT COUNT(*) FROM messages WHERE mailbox = 'Projects') < 2
+                 BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+            )
+            .unwrap();
+        let renamed = [folder("Inbox", "AAA"), folder("Projekte", "BBB")];
+        assert!(record(&store, &blobs, &account, &renamed, &[]).is_err());
+        for (id, body) in dropped {
+            assert!(file(body).is_file(), "the restored copy's body is on disk");
+            assert_eq!(
+                crate::store::read::load_body(&store, &blobs, id).as_deref(),
+                Some(body),
+                "the restored copy still opens"
+            );
+        }
+
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER refuse_second_drop")
+            .unwrap();
+        assert!(record(&store, &blobs, &account, &renamed, &[]).unwrap());
+        assert!(mailbox_of(&store, "one").is_empty(), "the copy is dropped");
+        for (_, body) in dropped {
+            assert!(
+                !file(body).is_file(),
+                "its body goes once the listing commits"
+            );
+        }
     }
 
     /// PERSO-185: a Graph folder keyed by its role whose rename takes the

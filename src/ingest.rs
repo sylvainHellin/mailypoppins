@@ -443,7 +443,7 @@ fn ingest_guarded(
         .conn()
         .unchecked_transaction()
         .context("opening ingest transaction")?;
-    let outcome = ingest_in_tx(
+    let (outcome, unreferenced) = ingest_in_tx(
         &tx,
         blobs,
         input,
@@ -457,6 +457,7 @@ fn ingest_guarded(
         &Gates { rebind, departed },
     )?;
     tx.commit().context("committing ingest transaction")?;
+    unreferenced.remove();
     span.mark("committed");
 
     Ok(outcome)
@@ -583,7 +584,8 @@ struct Gates<'a, 'b> {
 }
 
 /// The database half of [`ingest_message`], so the transaction boundary stays
-/// visible in one place.
+/// visible in one place. Answers, beside the outcome, the blob files the
+/// replaced version held alone, for the caller to remove once `tx` commits.
 fn ingest_in_tx(
     tx: &Transaction<'_>,
     blobs: &BlobStore,
@@ -592,7 +594,7 @@ fn ingest_in_tx(
     threading: &Threading<'_>,
     refs: &[BlobRef],
     gates: &Gates<'_, '_>,
-) -> Result<IngestOutcome> {
+) -> Result<(IngestOutcome, crate::store::Unreferenced)> {
     let Gates { rebind, departed } = *gates;
     let email = input.email;
     let Threading {
@@ -782,7 +784,9 @@ fn ingest_in_tx(
 
     // 5. Re-point blob references. Acquire first, release second: a hash that
     //    both versions share must never pass through refcount zero, because
-    //    `release` unlinks the file the moment it does.
+    //    `release` then deletes its `blobs` row and hands its file over for
+    //    removal after the commit. The files the old version held alone go
+    //    only once this transaction has committed.
     let previous = load_blob_refs(tx, row_id)?;
     for r in refs {
         blobs.acquire(tx, &r.hash, r.size)?;
@@ -792,21 +796,25 @@ fn ingest_in_tx(
     for r in refs {
         insert_blob_ref(tx, row_id, r)?;
     }
+    let mut unreferenced = crate::store::Unreferenced::default();
     for hash in previous {
-        blobs.release(tx, &hash)?;
+        unreferenced.absorb(blobs.release(tx, &hash)?);
     }
 
     // 6. Index the new content, in the word and the trigram index.
     crate::store::fts::index(tx, row_id, &email.subject, &email.from, &email.body_text)
         .context("inserting the FTS row")?;
 
-    Ok(IngestOutcome {
-        row_id,
-        message_id: message_id.to_string(),
-        thread_id,
-        inserted: existing.is_none(),
-        uid_rebound,
-    })
+    Ok((
+        IngestOutcome {
+            row_id,
+            message_id: message_id.to_string(),
+            thread_id,
+            inserted: existing.is_none(),
+            uid_rebound,
+        },
+        unreferenced,
+    ))
 }
 
 /// The row the `message_id` index offers for this UID to rebind onto, or
