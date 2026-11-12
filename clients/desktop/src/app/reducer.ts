@@ -1481,8 +1481,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const p = payload as SyncCompletedPayload;
       const health = p.error === null ? "ok" : "failed";
       if (p.error !== null && p.error !== undefined) s = syncTickFailed(s, p.account);
-      const next = staleMailboxes(patchAccount(staleInvitations(s, p.account), p.account, { sync_health: health }), p.account);
-      return staleListIf(next, (a) => a === p.account);
+      const next = staleListIf(
+        staleMailboxes(patchAccount(staleInvitations(s, p.account), p.account, { sync_health: health }), p.account),
+        (a) => a === p.account,
+      );
+      // A tick whose drains rolled a move back runs the shown search again,
+      // as a `mutations.rolled_back` does (PERSO-286).
+      return p.failed_mutations > 0 && next.search?.account === p.account ? rerunSearch(next) : next;
     }
     case "draft.changed":
     case "draft.invalid": {

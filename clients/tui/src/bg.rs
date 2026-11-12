@@ -115,12 +115,8 @@ fn apply_contacts_rebuild(
 
 /// A drain outside a tick rolled `failed` of `account_index`'s queued
 /// mutations back (#0133): the warning a tick's rollback suffix earns, and the
-/// refresh a tick owes, so the rows it put back reappear.
-///
-/// The open search overlay of that account runs its search again
-/// (PERSO-286): the move's `state.remove` dropped the hit it named, and the
-/// rollback put the message back where the hit listed it. A closed overlay
-/// opens on a blank form, so it has nothing to run again.
+/// refresh a tick owes, so the rows it put back reappear, the open search's
+/// hits among them.
 pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
     let prefix = match app.accounts.get(account_index) {
         Some(acct) if app.accounts.len() > 1 => format!("{}: ", acct.account_config.name),
@@ -134,6 +130,15 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
         StatusLevel::Warning,
     );
     refresh_after_server_sync(app, account_index);
+    rerun_search_after_rollback(app, account_index);
+}
+
+/// Mutations of `account_index` were rolled back, by a drain outside a tick
+/// or by a tick's own: the open search overlay of that account runs its
+/// search again (PERSO-286), since the move's `state.remove` dropped the hit
+/// it named and the rollback put the message back where the hit listed it. A
+/// closed overlay opens on a blank form, so it has nothing to run again.
+fn rerun_search_after_rollback(app: &mut App, account_index: usize) {
     if account_index == app.active_account && matches!(app.overlay, super::app::Overlay::Search) {
         app.rerun_last_search();
     }
@@ -352,11 +357,13 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             account_index,
             result,
             new_inbox_mail,
-        } => land_sync(app, account_index, result, new_inbox_mail),
+            rolled_back,
+        } => land_sync(app, account_index, result, new_inbox_mail, rolled_back),
 
         BgResult::Sync {
             account_index,
             result,
+            rolled_back,
         } => {
             record_sync_health(
                 app,
@@ -378,6 +385,9 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                     let name = account_label(app, account_index);
                     app.set_status_level(format!("Sync failed{name}: {e}"), StatusLevel::Error)
                 }
+            }
+            if rolled_back > 0 {
+                rerun_search_after_rollback(app, account_index);
             }
         }
 
@@ -558,6 +568,10 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
 /// account's mark (#0071) and the wording (#0068) may not depend on which of
 /// the two brought it.
 ///
+/// A pass whose drains rolled mutations back (`rolled_back`, its
+/// `failed_mutations`) runs the open search again as a drain outside a tick
+/// does ([`land_rollback`]).
+///
 /// `bg_count` is deliberately not touched here: the caller that started
 /// background work is the caller that counts it down.
 pub(super) fn land_sync(
@@ -565,6 +579,7 @@ pub(super) fn land_sync(
     account_index: usize,
     result: Result<String, String>,
     new_inbox_mail: Vec<mp_core::notify::NewMailMeta>,
+    rolled_back: u64,
 ) {
     record_sync_health(
         app,
@@ -599,6 +614,9 @@ pub(super) fn land_sync(
             let name = account_label(app, account_index);
             app.set_status_level(format!("Fetch failed{name}: {e}"), StatusLevel::Error)
         }
+    }
+    if rolled_back > 0 {
+        rerun_search_after_rollback(app, account_index);
     }
 }
 
@@ -1439,6 +1457,7 @@ mod tests {
                 account_index: 0,
                 result: Err("IMAP login failed: no such user".to_string()),
                 new_inbox_mail: Vec::new(),
+                rolled_back: 0,
             },
         );
         handle_bg_result(
@@ -1447,6 +1466,7 @@ mod tests {
                 account_index: 1,
                 result: Ok("Synced: 8 new, 0 existing".to_string()),
                 new_inbox_mail: Vec::new(),
+                rolled_back: 0,
             },
         );
 
@@ -1483,6 +1503,7 @@ mod tests {
                 account_index: 0,
                 result: Err("IMAP login failed".to_string()),
                 new_inbox_mail: Vec::new(),
+                rolled_back: 0,
             },
         );
         assert!(app.accounts[0].sync_health.is_failed());
@@ -1492,6 +1513,7 @@ mod tests {
             BgResult::Sync {
                 account_index: 0,
                 result: Ok("Synced: 3 new, 0 existing".to_string()),
+                rolled_back: 0,
             },
         );
         assert!(!app.accounts[0].sync_health.is_failed());
@@ -1514,6 +1536,7 @@ mod tests {
                     account_index: 0,
                     result: Err("IMAP login failed".to_string()),
                     new_inbox_mail: Vec::new(),
+                    rolled_back: 0,
                 },
             );
         }
@@ -1875,5 +1898,96 @@ mod tests {
         app.overlay = crate::app::Overlay::None;
         land_rollback(&mut app, 0, 1);
         assert!(queued_searches(&app).is_empty(), "the overlay is closed");
+    }
+
+    /// A tick of `account` whose mutation drains rolled `failed` back, as
+    /// its `sync.completed` carries it.
+    fn tick(account: &str, failed: u64) -> mp_protocol::events::SyncCompleted {
+        mp_protocol::events::SyncCompleted {
+            account: account.to_string(),
+            severity: if failed > 0 {
+                mp_protocol::events::Severity::Warning
+            } else {
+                mp_protocol::events::Severity::Ok
+            },
+            saved: 0,
+            skipped: 0,
+            flags_updated: 0,
+            pruned: 0,
+            prunes_deferred: 0,
+            uid_rebound: 0,
+            uidvalidity_resets: 0,
+            bodies_truncated: 0,
+            non_converging: Vec::new(),
+            failed_mutations: failed,
+            error: None,
+            new_inbox_mail: Vec::new(),
+        }
+    }
+
+    /// The ways a tick of `alice` that rolled `failed` mutations back reaches
+    /// the overlay of [`app_showing_a_search`]: the daemon's own tick as its
+    /// `sync.completed` event, and a quick and a full pass this client asked
+    /// for as their `operation.finished`. Each returns the searches it queued.
+    fn searches_after_a_tick(failed: u64) -> Vec<Vec<(String, Option<String>)>> {
+        let outcome = tick("alice", failed);
+        let mut runs = Vec::new();
+
+        let mut app = app_showing_a_search("from:carol");
+        app.events.watermark("instance", 10);
+        app.apply_event(&mp_protocol::EventEnvelope {
+            instance_id: "instance".to_string(),
+            revision: 11,
+            kind: mp_protocol::events::KIND_SYNC_COMPLETED.to_string(),
+            payload: serde_json::to_value(&outcome).expect("a tick serialises"),
+        });
+        runs.push(queued_searches(&app));
+
+        let finished = serde_json::json!({
+            "state": "succeeded",
+            "result": {"outcome": outcome, "new_inbox_mail": []},
+        });
+        for awaited in [
+            crate::events::Awaited::Quick {
+                account_index: 0,
+                account: "alice".to_string(),
+            },
+            crate::events::Awaited::Full {
+                account_index: 0,
+                account: "alice".to_string(),
+            },
+        ] {
+            let mut app = app_showing_a_search("from:carol");
+            handle_bg_result(&mut app, crate::commands::settled(&awaited, &finished));
+            runs.push(queued_searches(&app));
+        }
+        runs
+    }
+
+    /// A tick whose drains rolled a mutation back runs the open search again
+    /// as a `mutations.rolled_back` does (PERSO-286), whichever way the tick
+    /// reaches the TUI: the rollback put back the message whose hit the
+    /// move's `state.remove` dropped.
+    #[test]
+    fn a_tick_that_rolled_a_mutation_back_runs_the_open_search_again() {
+        let _data = DataDir::new();
+        let carol = vec![("from:\"carol\"".to_string(), Some("inbox".to_string()))];
+        assert_eq!(
+            searches_after_a_tick(1),
+            [carol.clone(), carol.clone(), carol],
+            "the daemon's tick, a quick pass and a full pass"
+        );
+    }
+
+    /// A tick that rolled nothing back runs no search: nothing it did put a
+    /// dropped hit back, and a search per tick would hit the server each
+    /// time.
+    #[test]
+    fn a_tick_that_rolled_nothing_back_runs_no_search() {
+        let _data = DataDir::new();
+        assert_eq!(
+            searches_after_a_tick(0),
+            [Vec::new(), Vec::new(), Vec::new()]
+        );
     }
 }

@@ -484,11 +484,13 @@ pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
                 account_index: *account_index,
                 result: Ok(sync_status_line(account, &settled)),
                 new_inbox_mail: new_inbox_mail(&settled),
+                rolled_back: rolled_back(&settled),
             },
             Err(e) => BgResult::Fetch {
                 account_index: *account_index,
                 result: Err(e),
                 new_inbox_mail: Vec::new(),
+                rolled_back: 0,
             },
         },
         Awaited::Full {
@@ -496,6 +498,7 @@ pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
             account,
         } => BgResult::Sync {
             account_index: *account_index,
+            rolled_back: result.as_ref().map_or(0, rolled_back),
             result: result.map(|settled| sync_status_line(account, &settled)),
         },
         Awaited::Send { account_index } => BgResult::Send {
@@ -1021,6 +1024,15 @@ fn sync_status_line(account: &str, settled: &Value) -> String {
             String::new()
         }
     }
+}
+
+/// The queued mutations a pass's drains rolled back, its outcome's
+/// `failed_mutations`; zero for a pass that left the ingest to another engine
+/// and carries no outcome.
+fn rolled_back(settled: &Value) -> u64 {
+    settled["outcome"]["failed_mutations"]
+        .as_u64()
+        .unwrap_or_default()
 }
 
 /// The inbox arrivals a pass reported, for the desktop notification (#0009).

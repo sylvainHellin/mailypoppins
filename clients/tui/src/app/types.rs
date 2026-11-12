@@ -1172,10 +1172,15 @@ pub enum BgResult {
         /// ingested. Drives the opt-in desktop notification (#0009); empty
         /// on failure or when nothing new arrived.
         new_inbox_mail: Vec<mp_core::notify::NewMailMeta>,
+        /// The queued mutations the pass's drains rolled back, its
+        /// `failed_mutations`; zero on failure.
+        rolled_back: u64,
     },
     Sync {
         account_index: usize,
         result: Result<String, String>,
+        /// As [`BgResult::Fetch`]'s.
+        rolled_back: u64,
     },
     Send {
         account_index: usize,

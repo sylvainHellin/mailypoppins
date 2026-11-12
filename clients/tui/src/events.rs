@@ -499,7 +499,13 @@ impl App {
             Some(error) => Err(error.clone()),
             None => Ok(mp_client::format::sync_status_line(&outcome)),
         };
-        super::bg::land_sync(self, index, result, arrivals_as_meta(&arrivals));
+        super::bg::land_sync(
+            self,
+            index,
+            result,
+            arrivals_as_meta(&arrivals),
+            outcome.failed_mutations,
+        );
         Applied::NewMail(notified)
     }
 

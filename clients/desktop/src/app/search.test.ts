@@ -340,4 +340,27 @@ describe("a hit whose message left its mailbox (PERSO-286)", () => {
     leg = run(leg, rolledBack("work", revision + 1));
     expect(leg.search).toMatchObject({ mode: "local", chain: true, status: "searching" });
   });
+
+  it("comes back by the search running again when a tick rolled the move back", () => {
+    let s = run(booted(), { type: "search_local", query: "ledger" });
+    s = run(s, { type: "search_local_loaded", seq: s.search!.seq, hits: [hit(1001, "<moved@x>", 41)], order: "newest" });
+    const revision = fixtures.bootstrap.revision + 1;
+    s = run(s, removed("message:work/inbox/41", revision));
+    const before = s.search!;
+    const tick = (account: string, failed: number): Action => ({
+      type: "gui_event",
+      event: {
+        type: "event",
+        event: {
+          instance_id: fixtures.bootstrap.instance_id,
+          revision: revision + 1,
+          kind: "sync.completed",
+          payload: { account, severity: failed > 0 ? "warning" : "ok", error: null, saved: 0, failed_mutations: failed, new_inbox_mail: [] },
+        },
+      },
+    });
+    expect(run(s, tick("home", 1)).search).toMatchObject({ seq: before.seq, status: "done" });
+    expect(run(s, tick("work", 0)).search).toMatchObject({ seq: before.seq, status: "done" });
+    expect(run(s, tick("work", 1)).search).toMatchObject({ query: "ledger", account: "work", status: "searching", seq: before.seq + 1 });
+  });
 });
