@@ -44,7 +44,9 @@
 //! This fixture points its accounts at no server. The repository's one fake
 //! IMAP server, [`super::fake_imap`] (PERSO-296), serves an empty `INBOX`
 //! behind a switchable login policy, which is enough for the rejected-login
-//! rows and not for a sync that ingests: it holds no messages.
+//! rows and not for a sync that ingests. The folders a test sets on it
+//! answer only the Message-ID of a UID, for the rename probe (PERSO-185):
+//! its `SEARCH` finds nothing and it serves no message to fetch.
 //!
 //! So the successful half of the slice - a sync that ingests, a mailbox list
 //! that comes back from a server, an IDLE that fires - is pinned at the wire
