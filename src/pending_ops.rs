@@ -1668,12 +1668,11 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
             .filter(|_| older.login_refused.is_some_and(|refused| refused()));
         if let Some(queued) = held {
             anyhow::bail!(
-                "an earlier change to this message (op {}, {}) is still queued: login rejected \
-                 by the server (mp config set-password imap -A {}); nothing was changed, try \
-                 again once the password is set",
+                "an earlier change to this message (op {}, {}) is still queued: {}; nothing \
+                 was changed, try again once the password is set",
                 queued.id,
                 queued.kind,
-                row.account
+                mp_client::format::login_rejected_detail(&row.account)
             );
         }
         if let Some(refused) = ahead.iter().find(|op| op.attempts > 0) {

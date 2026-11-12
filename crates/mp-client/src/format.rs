@@ -491,6 +491,18 @@ pub fn oauth2_stored_line(account: &str) -> String {
     format!("\u{2713} OAuth2 token acquired and cached for account '{account}'")
 }
 
+/// What every surface says about an account whose IMAP login the server
+/// refused (PERSO-296): the daemon's `account:<name>` health check detail,
+/// which `mp daemon health` prints and the desktop app's health line shows,
+/// the settle error of a change held behind the refusal, and the TUI's
+/// sidebar and account picker. Lower-case and without a full stop, since
+/// each caller puts it after the account's name or inside a longer line.
+pub fn login_rejected_detail(account: &str) -> String {
+    format!(
+        "the server rejected the password; set it with mp config set-password -A {account} imap"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The server calendar (PERSO-200)
 // ---------------------------------------------------------------------------
@@ -844,6 +856,7 @@ mod reminder_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::login_rejected_detail;
     use super::refused_rebuild_line;
     use super::{online_meeting_line, series_line, time_span};
     use mp_protocol::calendar::{CalendarEvent, CalendarEventTime};
@@ -862,6 +875,17 @@ mod tests {
             "show_as": "busy"
         }))
         .unwrap()
+    }
+
+    /// The sentence every surface shows for a login the server refused
+    /// (PERSO-296) says so and names the command that sets the password, with
+    /// the account in it so it can be pasted as it is.
+    #[test]
+    fn a_rejected_login_names_the_command_that_sets_the_password() {
+        assert_eq!(
+            login_rejected_detail("tum"),
+            "the server rejected the password; set it with mp config set-password -A tum imap"
+        );
     }
 
     #[test]

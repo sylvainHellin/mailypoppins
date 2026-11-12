@@ -615,12 +615,13 @@ pub(crate) fn login_refused(account: &crate::config::AccountConfig) -> bool {
 
 /// The check of an account whose login the server refused: a runtime that
 /// serves the store and moves no mail until a password the server takes is
-/// set, with the command that sets it.
+/// set, with the command that sets it, in the sentence every client shows
+/// ([`mp_client::format::login_rejected_detail`]).
 fn refused_login_check(account: &str) -> Check {
     Check::new(
         format!("account:{account}"),
         Status::Warn,
-        format!("login rejected by the server (mp config set-password imap -A {account})"),
+        mp_client::format::login_rejected_detail(account),
     )
 }
 

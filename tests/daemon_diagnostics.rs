@@ -1335,7 +1335,8 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
     assert_eq!(text(&alpha, "status"), "warn", "{alpha}");
     assert_eq!(
         text(&alpha, "detail"),
-        format!("login rejected by the server (mp config set-password imap -A {ALPHA})")
+        mp_client::format::login_rejected_detail(ALPHA),
+        "in the sentence the TUI and the desktop app show"
     );
     let credentials = block_on(async {
         let mut conn = client(tmp.path()).await;

@@ -4348,10 +4348,10 @@ mod tests {
 
             assert!(started.elapsed() < Duration::from_secs(2));
             assert!(
-                err.message.contains(
-                    "is still queued: login rejected by the server \
-                     (mp config set-password imap -A alice); nothing was changed"
-                ),
+                err.message.contains(&format!(
+                    "is still queued: {}; nothing was changed",
+                    mp_client::format::login_rejected_detail("alice")
+                )),
                 "{}",
                 err.message
             );
