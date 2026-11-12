@@ -2076,12 +2076,20 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     validate_field(draft.frontmatter.cc.as_ref(), "cc")?;
     validate_field(draft.frontmatter.bcc.as_ref(), "bcc")?;
 
-    // Check attachments exist. A folder entry is valid as long as it holds at
-    // least one file, which `send` expands into individual attachments.
+    // Check attachments exist where the send path will look for them: a
+    // relative entry beside the draft file (ATT-03), not in the cwd of
+    // whichever process validates (PERSO-215). A folder entry is valid as
+    // long as it holds at least one file, which `send` expands into
+    // individual attachments.
     if let Some(attachments) = &draft.frontmatter.attachments {
+        let dir = match draft.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        let home = dirs::home_dir();
         for attachment in attachments {
-            let expanded = shellexpand::tilde(attachment);
-            let path = Path::new(expanded.as_ref());
+            let resolved = resolve_attachment_entry(attachment, dir, home.as_deref());
+            let path = resolved.as_path();
             if path.is_dir() {
                 let has_file = fs::read_dir(path)
                     .ok()

@@ -1168,6 +1168,47 @@ async fn draft_validate_refuses_only_what_it_cannot_address() {
     );
 }
 
+/// A relative `attachments:` entry is checked where the send path looks for
+/// it, beside the draft file (ATT-03), not against the daemon's cwd: a file
+/// sitting next to the draft draws no warning in `mp validate` or in the
+/// send preview, and a missing one still does (PERSO-215).
+#[tokio::test]
+async fn validate_and_preview_find_a_relative_attachment_beside_the_draft() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    let dir = slice.drafts_dir(fixture::ACCOUNT);
+    fs::write(dir.join("report.pdf"), b"%PDF-1.4").expect("write the attachment");
+    let id = "a0000000000000f4";
+    let document = fixture::document(id, "robin@example.com", "Bericht", "draft", "Body.\n")
+        .replacen(
+            "date: ",
+            "attachments:\n  - report.pdf\n  - missing.pdf\ndate: ",
+            1,
+        );
+    fs::write(dir.join("bericht.md"), document).expect("write the draft");
+    let wanted = vec!["Attachment not found: missing.pdf".to_string()];
+
+    let validation: DraftValidation = call_typed(
+        &mut conn,
+        "draft.validate",
+        json!({"account": fixture::ACCOUNT, "id": id}),
+    )
+    .await;
+    assert_eq!(
+        validation.reports[0].warnings, wanted,
+        "mp validate warns only about the entry missing beside the draft"
+    );
+
+    let preview: DraftPreview = call_typed(
+        &mut conn,
+        "draft.preview",
+        json!({"account": fixture::ACCOUNT, "id": id}),
+    )
+    .await;
+    assert_eq!(preview.warnings, wanted, "and so does the send preview");
+}
+
 // ---------------------------------------------------------------------------
 // 5. `draft.path`, the resolver
 // ---------------------------------------------------------------------------
