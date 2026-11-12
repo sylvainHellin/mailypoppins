@@ -685,17 +685,38 @@ fn imap_quote(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// `s` as the body of an IMAP quoted string, refused when it carries a CR, an
-/// LF or a NUL: RFC 3501 allows none of them in a quoted string, and a CRLF
-/// would end the `SEARCH` line and start a command of the value's choosing.
-fn imap_quote_checked(s: &str) -> Result<String, RenderError> {
+/// `s` as an IMAP string argument (RFC 3501 section 4.3): quoted when it is
+/// ASCII, else a literal of its UTF-8 byte count (`{n}`, CRLF, the bytes),
+/// because a quoted string carries 7-bit text only, and `utf8` is set so the
+/// search names `CHARSET UTF-8` (section 6.4.4, PERSO-214).
+///
+/// Refused when it carries a CR, an LF or a NUL: a quoted string allows none
+/// of them, a literal no NUL, and a CRLF would end the `SEARCH` line and start
+/// a command of the value's choosing. The refusal is also what keeps the CRLF
+/// after a literal's `{n}` the only one a render carries, which is where the
+/// sender waits for the server's continuation.
+fn imap_string(s: &str, utf8: &mut bool) -> Result<String, RenderError> {
     if s.contains(['\r', '\n', '\0']) {
         return Err(RenderError(format!(
             "a search value cannot contain a line break or a NUL on IMAP: {:?}",
             s
         )));
     }
-    Ok(imap_quote(s))
+    if s.is_ascii() {
+        return Ok(format!("\"{}\"", imap_quote(s)));
+    }
+    *utf8 = true;
+    Ok(format!("{{{}}}\r\n{}", s.len(), s))
+}
+
+/// The `CHARSET` a search names before its keys: UTF-8 once a value went as
+/// a UTF-8 literal, and none otherwise, which RFC 3501 reads as US-ASCII.
+fn imap_charset(utf8: bool) -> &'static str {
+    if utf8 {
+        "CHARSET UTF-8 "
+    } else {
+        ""
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,7 +726,10 @@ fn imap_quote_checked(s: &str) -> Result<String, RenderError> {
 /// The result of lowering a [`Query`] to an RFC 3501 `SEARCH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImapRender {
-    /// The `SEARCH` criteria string; `ALL` when nothing narrows it.
+    /// The `SEARCH` criteria string; `ALL` when nothing narrows it. A
+    /// non-ASCII value is a literal, `{n}` CRLF and its UTF-8 bytes, under a
+    /// leading `CHARSET UTF-8`, so the string goes to the server through a
+    /// sender that waits for the continuation at each CRLF.
     pub search: String,
     /// True when the query asked for `has:attachment`, which plain IMAP has no
     /// key for. The caller runs `search` server-side, then keeps only the
@@ -731,14 +755,15 @@ impl ImapRender {
 /// One term as an RFC 3501 search key. `HasAttachment` never reaches here (it
 /// is stripped before rendering); it is an error inside an `OR` group because
 /// a post-filter cannot resolve half of an alternation.
-fn imap_term(term: &Term) -> Result<String, RenderError> {
+/// `utf8` is set when a value went as a UTF-8 literal ([`imap_string`]).
+fn imap_term(term: &Term, utf8: &mut bool) -> Result<String, RenderError> {
     Ok(match term {
-        Term::From(s) => format!("FROM \"{}\"", imap_quote_checked(s)?),
-        Term::To(s) => format!("TO \"{}\"", imap_quote_checked(s)?),
-        Term::Cc(s) => format!("CC \"{}\"", imap_quote_checked(s)?),
-        Term::Subject(s) => format!("SUBJECT \"{}\"", imap_quote_checked(s)?),
-        Term::Body(s) => format!("BODY \"{}\"", imap_quote_checked(s)?),
-        Term::Text(s) => format!("TEXT \"{}\"", imap_quote_checked(s)?),
+        Term::From(s) => format!("FROM {}", imap_string(s, utf8)?),
+        Term::To(s) => format!("TO {}", imap_string(s, utf8)?),
+        Term::Cc(s) => format!("CC {}", imap_string(s, utf8)?),
+        Term::Subject(s) => format!("SUBJECT {}", imap_string(s, utf8)?),
+        Term::Body(s) => format!("BODY {}", imap_string(s, utf8)?),
+        Term::Text(s) => format!("TEXT {}", imap_string(s, utf8)?),
         Term::Before(d) => format!(
             "BEFORE {}",
             parse_date_to_imap(d).ok_or_else(|| RenderError(format!("bad date {d}")))?
@@ -774,11 +799,12 @@ fn imap_or(terms: &[String]) -> String {
 pub fn to_imap(q: &Query) -> Result<ImapRender, RenderError> {
     let mut parts: Vec<String> = Vec::new();
     let mut attachment_postfilter = false;
+    let mut utf8 = false;
 
     if let Some(ref mid) = q.message_id {
         parts.push(format!(
-            "HEADER \"Message-ID\" \"{}\"",
-            imap_quote_checked(&crate::imap_query::bracketed_message_id(mid))?
+            "HEADER \"Message-ID\" {}",
+            imap_string(&crate::imap_query::bracketed_message_id(mid), &mut utf8)?
         ));
     }
 
@@ -787,10 +813,10 @@ pub fn to_imap(q: &Query) -> Result<ImapRender, RenderError> {
             Clause::Single(Term::HasAttachment) => {
                 attachment_postfilter = true;
             }
-            Clause::Single(t) => parts.push(imap_term(t)?),
+            Clause::Single(t) => parts.push(imap_term(t, &mut utf8)?),
             Clause::Or(terms) => {
                 let rendered: Result<Vec<String>, RenderError> =
-                    terms.iter().map(imap_term).collect();
+                    terms.iter().map(|t| imap_term(t, &mut utf8)).collect();
                 parts.push(imap_or(&rendered?));
             }
         }
@@ -799,7 +825,7 @@ pub fn to_imap(q: &Query) -> Result<ImapRender, RenderError> {
     let search = if parts.is_empty() {
         "ALL".to_string()
     } else {
-        parts.join(" ")
+        format!("{}{}", imap_charset(utf8), parts.join(" "))
     };
     Ok(ImapRender {
         search,
@@ -862,12 +888,12 @@ pub fn to_gmail(q: &Query) -> String {
 }
 
 /// The full `X-GM-RAW "..."` IMAP search command for a Gmail query, refused
-/// when a value carries a line break or a NUL (the same rule as `to_imap`).
+/// when a value carries a line break or a NUL, and a UTF-8 literal under
+/// `CHARSET UTF-8` when it is not ASCII (the same rules as `to_imap`).
 pub fn to_gmail_search_command(q: &Query) -> Result<String, RenderError> {
-    Ok(format!(
-        "X-GM-RAW \"{}\"",
-        imap_quote_checked(&to_gmail(q))?
-    ))
+    let mut utf8 = false;
+    let raw = imap_string(&to_gmail(q), &mut utf8)?;
+    Ok(format!("{}X-GM-RAW {raw}", imap_charset(utf8)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1587,6 +1613,18 @@ mod tests {
         assert_eq!(r2.search, "HEADER \"Message-ID\" \"<abc@x>\"");
     }
 
+    /// PERSO-214: a quoted string carries 7-bit text only (RFC 3501), so a
+    /// non-ASCII value goes as a literal of its UTF-8 byte count, and the
+    /// search names `CHARSET UTF-8`; an ASCII value stays quoted.
+    #[test]
+    fn imap_sends_a_non_ascii_value_as_a_utf8_literal() {
+        let r = to_imap(&q("from:alice subject:Grüße (café OR tea)")).unwrap();
+        assert_eq!(
+            r.search,
+            "CHARSET UTF-8 FROM \"alice\" SUBJECT {7}\r\nGrüße OR TEXT {5}\r\ncafé TEXT \"tea\""
+        );
+    }
+
     #[test]
     fn imap_filename_and_or_attachment_error() {
         assert!(to_imap(&q("filename:pdf")).is_err());
@@ -1616,6 +1654,10 @@ mod tests {
         assert_eq!(
             to_gmail_search_command(&q("has:attachment")).unwrap(),
             "X-GM-RAW \"has:attachment\""
+        );
+        assert_eq!(
+            to_gmail_search_command(&q("subject:Grüße")).unwrap(),
+            "CHARSET UTF-8 X-GM-RAW {15}\r\nsubject:Grüße"
         );
     }
 

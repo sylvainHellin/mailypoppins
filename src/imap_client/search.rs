@@ -4,6 +4,119 @@
 // every `use super::*` inside this module keep naming the same functions.
 pub use mp_core::imap_query::{bracketed_message_id, normalize_message_id, parse_date_to_imap};
 
+use std::collections::HashSet;
+use std::fmt;
+
+use anyhow::{anyhow, Result};
+use async_imap::imap_proto::{MailboxDatum, RequestId, Response, ResponseCode, Status};
+use futures::io::{AsyncRead, AsyncWrite};
+
+/// `UID SEARCH <search>` for a rendered search (`crate::search::to_imap`,
+/// `to_gmail_search_command`), which may carry UTF-8 literals (PERSO-214).
+///
+/// A literal is `{n}` CRLF and then its bytes, and RFC 3501 has the client
+/// send the bytes only once the server has answered the line before with a
+/// `+` continuation; `async_imap`'s own `uid_search` writes the whole string
+/// at once. So each CRLF of the render, which only a literal can carry since
+/// the render refuses one in a value, is a wait for that continuation.
+///
+/// A server without UTF-8 search answers the first line with `NO
+/// [BADCHARSET]` instead (section 6.4.4), and the literal is never sent.
+/// Untagged answers other than `SEARCH` are dropped: the search runs on a
+/// session of its own that reads none of them.
+pub(crate) async fn uid_search_with_literals<T>(
+    session: &mut async_imap::Session<T>,
+    search: &str,
+) -> Result<HashSet<u32>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let mut lines = search.split("\r\n");
+    let first = lines.next().unwrap_or_default();
+    let tag = session.run_command(format!("UID SEARCH {first}")).await?;
+    let mut uids = HashSet::new();
+    for line in lines {
+        if !next_answer(session, &tag, &mut uids).await? {
+            return Err(anyhow!(
+                "the server ended the search before it took its whole text"
+            ));
+        }
+        session.run_command_untagged(line).await?;
+    }
+    if next_answer(session, &tag, &mut uids).await? {
+        return Err(anyhow!(
+            "the server asked for more search text than the search carries"
+        ));
+    }
+    Ok(uids)
+}
+
+/// Read up to the search's continuation (`true`) or its tagged `OK`
+/// (`false`), gathering the UIDs of every `SEARCH` answer on the way; a tagged
+/// `NO` or `BAD` is the error [`search_refusal`] words.
+async fn next_answer<T>(
+    session: &mut async_imap::Session<T>,
+    tag: &RequestId,
+    uids: &mut HashSet<u32>,
+) -> Result<bool>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    loop {
+        let Some(response) = session.read_response().await? else {
+            return Err(anyhow!("the connection closed during the search"));
+        };
+        match response.parsed() {
+            Response::Continue { .. } => return Ok(true),
+            Response::MailboxData(MailboxDatum::Search(found)) => uids.extend(found),
+            Response::Done {
+                tag: done,
+                status,
+                code,
+                information,
+            } if done == tag => {
+                return match status {
+                    Status::Ok => Ok(false),
+                    _ => Err(search_refusal(
+                        status,
+                        code.as_ref(),
+                        information.as_deref(),
+                    )),
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The error for a search the server refused: a `BADCHARSET` names the
+/// charsets the server does search in, since the fix is not on the server's
+/// side; anything else carries the server's own words.
+fn search_refusal(
+    status: &Status,
+    code: Option<&ResponseCode<'_>>,
+    information: Option<&str>,
+) -> anyhow::Error {
+    if let Some(ResponseCode::BadCharset(charsets)) = code {
+        let charsets = match charsets {
+            Some(names) if !names.is_empty() => names.join(", "),
+            _ => "US-ASCII".to_string(),
+        };
+        return anyhow!(
+            "the server cannot search for non-ASCII text, only in {charsets} (BADCHARSET); search locally instead"
+        );
+    }
+    let status = match status {
+        Status::Bad => "BAD",
+        Status::Bye => "BYE",
+        _ => "NO",
+    };
+    anyhow!(
+        "the server answered {status}: {}",
+        information.unwrap_or("no reason given")
+    )
+}
+
 /// Structured search criteria for IMAP queries.
 #[derive(Default)]
 pub struct FetchCriteria {

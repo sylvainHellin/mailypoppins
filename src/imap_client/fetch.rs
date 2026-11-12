@@ -55,21 +55,23 @@ fn flags_of(msg: &async_imap::types::Fetch) -> MessageFlags {
 /// downloading anything, then fetches the survivors whole with
 /// [`fetch_uids_on_session`] ([`crate::server_search`]). `INTERNALDATE` would
 /// be cheaper still but is the arrival time, not the `Date` the hits sort by.
-pub async fn search_stubs_on_session(
-    session: &mut ImapSession,
+pub async fn search_stubs_on_session<T>(
+    session: &mut async_imap::Session<T>,
     imap_search: &str,
     message_id: Option<&str>,
     mailbox: &str,
     limit: usize,
     order: crate::server_search::SearchOrder,
-) -> Result<MailboxStubs<u32>> {
+) -> Result<MailboxStubs<u32>>
+where
+    T: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
     session
         .select(mailbox)
         .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
 
-    let uids = session
-        .uid_search(imap_search)
+    let uids = super::search::uid_search_with_literals(session, imap_search)
         .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
@@ -1538,5 +1540,152 @@ mod tests {
         assert_eq!(ceiling(None, &[1, 2, 9]), 9);
         assert_eq!(ceiling(None, &[]), 0);
         assert_eq!(ceiling(Some(0), &[1, 2, 9]), 0);
+    }
+
+    /// An IMAP server played from a script, since the repository has no
+    /// in-process one: each read that finds the current reply used up hands
+    /// out the next, and records what the client wrote since the previous
+    /// one, so a test sees which bytes went out before which answer came back.
+    #[derive(Debug)]
+    struct ScriptedServer {
+        replies: std::collections::VecDeque<&'static str>,
+        reply: Vec<u8>,
+        written: Vec<u8>,
+        turns: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl futures::io::AsyncRead for ScriptedServer {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if self.reply.is_empty() {
+                let sent = String::from_utf8_lossy(&std::mem::take(&mut self.written)).into_owned();
+                self.turns.lock().unwrap().push(sent);
+                let Some(next) = self.replies.pop_front() else {
+                    return std::task::Poll::Ready(Ok(0));
+                };
+                self.reply = next.as_bytes().to_vec();
+            }
+            let n = self.reply.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.reply[..n]);
+            self.reply.drain(..n);
+            std::task::Poll::Ready(Ok(n))
+        }
+    }
+
+    impl futures::io::AsyncWrite for ScriptedServer {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.written.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The search pass of `mp search <query> --server` on a plain IMAP server,
+    /// against `replies` (the first answers the `LOGIN`): its result, and
+    /// what the client wrote before each read, the `LOGIN` turn dropped.
+    async fn server_search(
+        query: &str,
+        replies: &[&'static str],
+    ) -> (Result<MailboxStubs<u32>>, Vec<String>) {
+        let turns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = ScriptedServer {
+            replies: replies.iter().copied().collect(),
+            reply: Vec::new(),
+            written: Vec::new(),
+            turns: turns.clone(),
+        };
+        let mut session = async_imap::Client::new(server)
+            .login("user", "secret")
+            .await
+            .map_err(|e| e.0)
+            .unwrap();
+        let search = crate::search::to_imap(&crate::search::parse(query).unwrap())
+            .unwrap()
+            .search;
+        let result = search_stubs_on_session(
+            &mut session,
+            &search,
+            None,
+            "INBOX",
+            10,
+            crate::server_search::SearchOrder::Newest,
+        )
+        .await;
+        let turns = turns.lock().unwrap().split_off(1);
+        (result, turns)
+    }
+
+    /// PERSO-214: RFC 3501 allows only 7-bit text in a quoted string, so a
+    /// non-ASCII search value goes as a literal under `CHARSET UTF-8`, and
+    /// the literal's bytes wait for the server's continuation.
+    #[tokio::test]
+    async fn a_non_ascii_search_value_is_a_utf8_literal_sent_after_the_continuation() {
+        let (result, turns) = server_search(
+            "Grüße",
+            &[
+                "A0001 OK logged in\r\n",
+                "* 0 EXISTS\r\nA0002 OK [READ-WRITE] selected\r\n",
+                "+ go ahead\r\n",
+                "* SEARCH\r\nA0003 OK search done\r\n",
+            ],
+        )
+        .await;
+        assert_eq!(
+            turns,
+            vec![
+                "A0002 SELECT \"INBOX\"\r\n".to_string(),
+                "A0003 UID SEARCH CHARSET UTF-8 TEXT {7}\r\n".to_string(),
+                "Grüße\r\n".to_string(),
+            ]
+        );
+        assert!(result.unwrap().stubs.is_empty());
+    }
+
+    /// A server without UTF-8 search answers `NO [BADCHARSET]` (RFC 3501
+    /// section 6.4.4) instead of the continuation: the literal is never sent,
+    /// and the error says the server cannot search for that text.
+    #[tokio::test]
+    async fn a_server_without_utf8_search_refuses_with_badcharset_before_the_literal() {
+        let (result, turns) = server_search(
+            "Grüße",
+            &[
+                "A0001 OK logged in\r\n",
+                "* 0 EXISTS\r\nA0002 OK [READ-WRITE] selected\r\n",
+                "A0003 NO [BADCHARSET (US-ASCII)] unsupported charset\r\n",
+            ],
+        )
+        .await;
+        assert_eq!(
+            turns,
+            vec![
+                "A0002 SELECT \"INBOX\"\r\n".to_string(),
+                "A0003 UID SEARCH CHARSET UTF-8 TEXT {7}\r\n".to_string(),
+            ]
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("cannot search for non-ASCII text") && error.contains("US-ASCII"),
+            "{error}"
+        );
     }
 }
