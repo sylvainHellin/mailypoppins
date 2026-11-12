@@ -778,6 +778,18 @@ enum Notice {
     Quiet,
 }
 
+impl Notice {
+    /// Where a supervised start's service-manager commands print: on the
+    /// terminal for `mp daemon start` and `restart`, and nowhere for an
+    /// on-demand start, whose failure note carries what the manager said.
+    fn manager_output(self) -> super::service::ManagerOutput {
+        match self {
+            Self::Stderr => super::service::ManagerOutput::Terminal,
+            Self::Quiet => super::service::ManagerOutput::Captured,
+        }
+    }
+}
+
 /// What one readiness probe found at a socket.
 #[derive(Debug)]
 enum Probe {
@@ -1189,7 +1201,8 @@ async fn start_command(timeout: Duration) -> Result<i32> {
 
 /// Bring a daemon up the way `route` says, and print the start's line unless
 /// `notice` is [`Notice::Quiet`], which an on-demand start inside another
-/// command passes: its notes and the command it ran then go to the log only.
+/// command passes: its notes, the command it ran and what that command printed
+/// then go to the log only, the last inside the note of a command that failed.
 ///
 /// A supervised start runs the service manager's command, does not take the
 /// start lock (the `mp daemon run` the manager spawns takes it itself), and
@@ -1213,7 +1226,7 @@ async fn start_via(
                 "[daemon] start: through the service manager {:?}",
                 plan.lines()
             );
-            if let Err(e) = plan.run() {
+            if let Err(e) = plan.run(notice.manager_output()) {
                 return start_detached(
                     Some(format!("{e:#}, so this daemon starts outside the service")),
                     timeout,

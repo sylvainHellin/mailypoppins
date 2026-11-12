@@ -45,6 +45,14 @@ const UNIT_NAME: &str = "mailypoppins.service";
 /// passed while a daemon holds the socket without answering yet.
 const STILL_OPENING: &str = "daemon is up and not answering yet, waiting";
 
+/// What the failing fake `systemctl` prints on stderr, as systemd's own does
+/// for a unit that hit its start limit.
+const FAILED_JOB: &str = "Job for mailypoppins.service failed: start request repeated too quickly";
+
+/// What the failing fake `systemctl` prints on stdout, which systemd's own
+/// does not, so that a leak there shows too.
+const FAILED_STDOUT: &str = "fake systemctl: the job failed";
+
 struct Sandbox {
     root: TempDir,
 }
@@ -182,9 +190,26 @@ impl Sandbox {
     }
 
     /// A fake `systemctl` that records its argv and fails every call, as one
-    /// with no user manager behind it does.
+    /// whose unit hit its start limit does, saying so on stderr as systemd
+    /// does ([`FAILED_JOB`]) and on stdout ([`FAILED_STDOUT`]), so a test sees
+    /// which of the client's streams the manager's output reached.
     fn failing_systemctl(&self) {
-        self.write_systemctl("exit 5\n");
+        self.write_systemctl(&format!(
+            "echo '{FAILED_JOB}' >&2\n\
+             echo '{FAILED_STDOUT}'\n\
+             exit 5\n"
+        ));
+    }
+
+    /// Everything the sandbox's log files hold, the client's and the
+    /// daemon's, which share the data directory's log directory.
+    fn logs(&self) -> String {
+        let Ok(entries) = fs::read_dir(self.dir("data").join("logs")) else {
+            return String::new();
+        };
+        entries
+            .filter_map(|entry| fs::read_to_string(entry.ok()?.path()).ok())
+            .collect()
     }
 
     fn write_systemctl(&self, body: &str) {
@@ -430,7 +455,10 @@ fn an_on_demand_start_goes_through_the_installed_unit() {
 }
 
 /// A `systemctl --user start` that fails during an on-demand start falls
-/// back to a detached daemon, so the command is still served.
+/// back to a detached daemon, so the command is still served, and what the
+/// manager printed reaches neither of the command's streams: it goes into the
+/// note the client logs, since a TUI reconnecting in raw mode or a script
+/// reading the command's output must not get it.
 #[test]
 fn a_failing_on_demand_service_start_falls_back_to_a_detached_daemon() {
     let sandbox = Sandbox::new();
@@ -438,10 +466,26 @@ fn a_failing_on_demand_service_start_falls_back_to_a_detached_daemon() {
     sandbox.install_unit(&sandbox.dir("data"));
 
     let out = sandbox.mp_on_demand(&["account", "list", "--daemon"]);
+    // The sandbox has no config file, so the command's own warnings about
+    // that are on stderr; nothing of the start may be.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains(FAILED_JOB) && !stderr.contains("systemctl"),
+        "nothing of the failed start reaches the command's stderr:\n{stderr}"
+    );
     assert_eq!(ok(&out, "account list"), ["No accounts configured"]);
     assert_eq!(
         sandbox.systemctl_calls(),
         [format!("--user start {UNIT_NAME}")]
+    );
+    let logs = sandbox.logs();
+    assert!(
+        logs.lines().any(|line| line.contains(&format!(
+            "`systemctl --user start {UNIT_NAME}` exited with 5"
+        )) && line.contains(FAILED_JOB)
+            && line.contains(FAILED_STDOUT)
+            && line.contains("so this daemon starts outside the service")),
+        "the logged note carries what the manager said:\n{logs}"
     );
 
     let pid = sandbox.recorded_pid();
@@ -669,10 +713,18 @@ fn a_failing_service_start_falls_back_to_a_detached_daemon() {
     let start = sandbox.mp(&["daemon", "start", "--timeout-secs", "15"]);
     let lines = ok(&start, "start");
     let first = sandbox.recorded_pid();
-    assert_eq!(lines, [format!("\u{2713} daemon started (pid {first})")]);
+    assert_eq!(
+        lines,
+        [
+            FAILED_STDOUT.to_string(),
+            format!("\u{2713} daemon started (pid {first})")
+        ],
+        "the manager's own output shows, as the command ran it"
+    );
     let stderr = String::from_utf8_lossy(&start.stderr);
     assert!(
-        stderr.contains("note: ")
+        stderr.contains(FAILED_JOB)
+            && stderr.contains("note: ")
             && stderr.contains(&format!(
                 "`systemctl --user start {UNIT_NAME}` exited with 5"
             )),
@@ -689,12 +741,14 @@ fn a_failing_service_start_falls_back_to_a_detached_daemon() {
         lines,
         [
             "\u{2713} daemon stopped".to_string(),
+            FAILED_STDOUT.to_string(),
             format!("\u{2713} daemon started (pid {second})"),
         ]
     );
     let stderr = String::from_utf8_lossy(&restart.stderr);
     assert!(
-        stderr.contains("note: ")
+        stderr.contains(FAILED_JOB)
+            && stderr.contains("note: ")
             && stderr.contains(&format!(
                 "`systemctl --user restart {UNIT_NAME}` exited with 5"
             )),

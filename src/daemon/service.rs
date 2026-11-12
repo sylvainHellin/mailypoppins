@@ -219,7 +219,7 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
     lines.extend(note(mode, commands[0].program, "enable"));
 
     let outcome = match mode {
-        Mode::Run => run_all(&commands),
+        Mode::Run => run_all(&commands, ManagerOutput::Terminal),
         _ => Ok(()),
     };
     print_lines(&lines);
@@ -238,7 +238,7 @@ async fn hand_over(
     let commands = register_commands(target);
     let mut lines = vec![header];
     lines.extend(commands.iter().map(Invocation::line));
-    let outcome = run_all(&commands);
+    let outcome = run_all(&commands, ManagerOutput::Terminal);
     print_lines(&lines);
     outcome?;
     info!("[service] handing the running daemon (pid {pid}) over to the service");
@@ -289,11 +289,11 @@ pub fn uninstall() -> Result<i32> {
     // rather than before them.
     let outcome = (|| -> Result<()> {
         if mode == Mode::Run {
-            run_all(&commands[..1])?;
+            run_all(&commands[..1], ManagerOutput::Terminal)?;
         }
         remove_service(&path)?;
         if mode == Mode::Run {
-            run_all(&commands[1..])?;
+            run_all(&commands[1..], ManagerOutput::Terminal)?;
         }
         Ok(())
     })();
@@ -587,25 +587,66 @@ fn note(mode: Mode, program: &str, verb: &str) -> Option<String> {
     }
 }
 
-fn run_all(commands: &[Invocation]) -> Result<()> {
+/// Where a service-manager command's own input and output go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagerOutput {
+    /// The terminal's, inherited: `install-service`, `mp daemon start` and
+    /// `restart` show what the manager says, a failure's reason included.
+    Terminal,
+    /// None: stdin is null and stdout and stderr are captured, so an
+    /// on-demand start inside another command prints nothing into that
+    /// command's output or onto a TUI's raw-mode screen, and a failure's
+    /// error carries what the manager said instead.
+    Captured,
+}
+
+fn run_all(commands: &[Invocation], output: ManagerOutput) -> Result<()> {
     for command in commands {
-        run_one(command)?;
+        run_one(command, output)?;
     }
     Ok(())
 }
 
-fn run_one(command: &Invocation) -> Result<()> {
-    let status = Command::new(command.program)
-        .args(&command.args)
-        .status()
-        .with_context(|| format!("running `{}`", command.display()))?;
+fn run_one(command: &Invocation, output: ManagerOutput) -> Result<()> {
+    let mut process = Command::new(command.program);
+    process.args(&command.args);
+    let (status, said) = match output {
+        ManagerOutput::Terminal => (process.status(), String::new()),
+        ManagerOutput::Captured => match process.stdin(std::process::Stdio::null()).output() {
+            Ok(out) => (Ok(out.status), captured_text(&out.stderr, &out.stdout)),
+            Err(e) => (Err(e), String::new()),
+        },
+    };
+    let status = status.with_context(|| format!("running `{}`", command.display()))?;
     if !status.success() {
+        let said = if said.is_empty() {
+            said
+        } else {
+            format!(": {said}")
+        };
         match status.code() {
-            Some(code) => bail!("`{}` exited with {code}", command.display()),
-            None => bail!("`{}` was killed by a signal", command.display()),
+            Some(code) => bail!("`{}` exited with {code}{said}", command.display()),
+            None => bail!("`{}` was killed by a signal{said}", command.display()),
         }
     }
     Ok(())
+}
+
+/// What a captured command printed, stderr first, as one line: the error it
+/// goes into is a single log line.
+fn captured_text(stderr: &[u8], stdout: &[u8]) -> String {
+    [stderr, stdout]
+        .iter()
+        .flat_map(|stream| {
+            String::from_utf8_lossy(stream)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Whether `name` resolves to an executable on this process's `PATH`.
@@ -660,9 +701,10 @@ pub(crate) struct SupervisedStart {
 }
 
 impl SupervisedStart {
-    /// Run the commands in order, stopping at the first that fails.
-    pub(crate) fn run(&self) -> Result<()> {
-        run_all(&self.commands).with_context(|| {
+    /// Run the commands in order, stopping at the first that fails, with
+    /// their output where `output` says.
+    pub(crate) fn run(&self, output: ManagerOutput) -> Result<()> {
+        run_all(&self.commands, output).with_context(|| {
             format!(
                 "starting the daemon through {} (see `{}`)",
                 service_name(self.target),
@@ -1241,6 +1283,32 @@ mod tests {
             "  systemctl is not on PATH; run the lines above to enable the service"
         );
         assert!(note(Mode::Run, "systemctl", "enable").is_none());
+    }
+
+    /// A captured command that fails says in its error what it printed, on
+    /// stderr and on stdout, and one that succeeds says nothing anywhere.
+    #[test]
+    fn a_captured_command_puts_what_it_printed_into_its_error() {
+        let failing = Invocation::new(
+            "sh",
+            &strings(&["-c", "echo 'Job failed.' >&2; echo out; echo; exit 3"]),
+        );
+        let error = run_one(&failing, ManagerOutput::Captured)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.ends_with("exited with 3: Job failed.; out"),
+            "{error}"
+        );
+
+        let silent = Invocation::new("sh", &strings(&["-c", "exit 3"]));
+        let error = run_one(&silent, ManagerOutput::Captured)
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with("exited with 3"), "{error}");
+
+        let fine = Invocation::new("sh", &strings(&["-c", "echo chatty >&2"]));
+        run_one(&fine, ManagerOutput::Captured).expect("a command that succeeds");
     }
 
     /// `PATH` is what decides whether a manager is reachable, and an empty
