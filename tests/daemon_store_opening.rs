@@ -599,6 +599,55 @@ async fn blocking_a_sender_while_an_account_opens_moves_its_inbox_mail_once_read
     }
 }
 
+/// The Inbox move a block owed an opening account announces each row it took
+/// out of the Inbox, by the uid the row had there, and the Junk listing they
+/// joined, as a block on an open account does, so a client holding either
+/// listing drops or reads the rows without a reload; the start publishes both
+/// before the account's ready event (PERSO-109, PERSO-286).
+#[tokio::test]
+async fn the_owed_move_announces_the_rows_it_took_out_of_the_inbox() {
+    let (sandbox, _daemon, gate) = held().await;
+    let mut conn = connected(&sandbox).await;
+    block_while_opening(&mut conn).await;
+
+    let mut events = connected(&sandbox).await;
+    call(&mut events, "state.bootstrap", json!({}))
+        .await
+        .expect("state.bootstrap");
+    fs::remove_file(&gate).expect("release the hold");
+    let mut heard = Vec::new();
+    loop {
+        let notification = within("the ready event", events.next_notification())
+            .await
+            .expect("the daemon keeps the connection open");
+        let params = &notification.params;
+        let payload = &params["payload"];
+        let resource = payload["resource"].as_str().unwrap_or_default();
+        match params["kind"].as_str().unwrap_or_default() {
+            "account.state_changed" if payload["account"] == LARGE => {
+                assert_eq!(payload["state"], "ready", "{params}");
+                break;
+            }
+            "state.remove" if resource.starts_with("message:") => {
+                heard.push(format!("remove {resource}"));
+            }
+            "state.invalidate" if payload["scope"]["query"] == "list" => {
+                heard.push(format!("invalidate {resource}"));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(large_mailbox(&sandbox), "Junk", "the owed move ran");
+    assert_eq!(
+        heard,
+        [
+            format!("remove message:{LARGE}/inbox/1"),
+            format!("invalidate mailbox:{LARGE}/Junk"),
+        ],
+        "the owed move announced its row and the Junk listing before the ready event"
+    );
+}
+
 /// The mailbox `large`'s message sits in, read from its store.
 fn large_mailbox(sandbox: &Sandbox) -> String {
     Store::open(sandbox.account_dir(LARGE).join("store.sqlite3"))
