@@ -1431,7 +1431,10 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
             let mut wire = to_json(&name, &hit.row, &twins);
             wire["mailbox"] = json!(hit.row.mailbox);
             if wants_body {
-                wire["body"] = json!(read::load_body(&store, &blobs, hit.row.id));
+                // The body as every surface reads it (PERSO-291): the
+                // search overlay's preview and `mp search --local --full`.
+                wire["body"] = json!(read::load_body(&store, &blobs, hit.row.id)
+                    .map(|body| mp_core::body::for_reading(&body)));
             }
             wire
         })

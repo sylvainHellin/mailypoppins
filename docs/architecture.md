@@ -52,7 +52,7 @@ What follows is the shape that design gives the tree.
 
 ### The shared crate
 
-`crates/mp-core` owns what a client and the engine both need and neither owns: configuration and the data-directory layout, secrets and the OAuth2 token cache, signature files and `app_state`, RFC822 parsing, the shared types, iCalendar parsing and building, the search grammar, the `mp://` selector grammar, the draft file format, the contact index, the iMIP reply fold, desktop notifications, `TimingSpan` and `SyncHealth`.
+`crates/mp-core` owns what a client and the engine both need and neither owns: configuration and the data-directory layout, secrets and the OAuth2 token cache, signature files and `app_state`, RFC822 parsing, the reading form of a body (`body::for_reading`, PERSO-291), the shared types, iCalendar parsing and building, the search grammar, the `mp://` selector grammar, the draft file format, the contact index, the iMIP reply fold, desktop notifications, `TimingSpan` and `SyncHealth`.
 It reaches no store, no IMAP session, no outbox and no sending transport, which is the whole of its definition; P5-U10a (#0126) moved it out of the root package so that `clients/tui` has somewhere to depend on, and P5-U10b finished the closure.
 
 Every module it holds is re-exported from `src/lib.rs` under the path it had inside the root package, so `crate::config::…` and `mailypoppins::parse::…` resolve unchanged everywhere: the CLI, the daemon, the TUI and the integration tests.

@@ -173,7 +173,9 @@ pub fn shown_fetched(
         flags: flag_tokens(email.flags),
         invite: email.event.is_some(),
         attachments,
-        body: Some(email.body_text.clone()).filter(|body| !body.is_empty()),
+        body: Some(email.body_text.as_str())
+            .filter(|body| !body.is_empty())
+            .map(mp_core::body::for_reading),
     }
 }
 
@@ -184,6 +186,11 @@ pub fn shown_fetched(
 /// row that no longer exists answers `None`. Both arrive here as `None` in the
 /// record, because from a reader's side they are the same fact -- the store
 /// cannot show you this body -- and neither is worth a backtrace.
+///
+/// A body the store holds is read through [`mp_core::body::for_reading`]
+/// (PERSO-291), which is what `message.get` serves the TUI and the desktop
+/// as well as `mp show`. The emptiness test comes first, so a body of
+/// nothing but blank lines reads as an empty body and not as an evicted one.
 pub fn shown_message(
     store: &Store,
     blobs: &BlobStore,
@@ -215,7 +222,9 @@ pub fn shown_message(
         flags: flag_names(row),
         invite: row.is_invite,
         attachments,
-        body: read::load_body(store, blobs, row.id).filter(|body| !body.is_empty()),
+        body: read::load_body(store, blobs, row.id)
+            .filter(|body| !body.is_empty())
+            .map(|body| mp_core::body::for_reading(&body)),
     }
 }
 
@@ -1034,6 +1043,100 @@ mod tests {
         assert!(text.contains("Subject: hello"));
         assert!(text.contains("Selector: mp://acct/inbox/hello@example.com"));
         assert!(text.ends_with("the body\nsecond line\n"));
+    }
+
+    /// PERSO-291: a Thunderbird plain-text mail (`format=flowed`,
+    /// quoted-printable) whose body opens with hundreds of blank lines read as
+    /// empty, the text sitting off-screen below them. `mp show` prints the
+    /// body the TUI and the desktop read from the store, without its leading
+    /// and trailing whitespace-only lines and with a run of blank lines inside
+    /// it collapsed to one; the stored raw message keeps every line.
+    #[test]
+    fn a_body_opening_with_hundreds_of_blank_lines_shows_its_text_first() {
+        colored::control::set_override(false);
+        let fx = fixture();
+        let raw = format!(
+            "From: Sender <sender@example.com>\r\n\
+             To: b@example.com\r\n\
+             Subject: blank lines first\r\n\
+             Date: Wed, 11 Nov 2026 11:36:23 +0100\r\n\
+             Message-ID: <blank-lines@example.com>\r\n\
+             User-Agent: Mozilla Thunderbird\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: text/plain; charset=UTF-8; format=flowed\r\n\
+             Content-Transfer-Encoding: quoted-printable\r\n\
+             \r\n\
+             {leading}=20\r\n\
+             Dear Mr Example.\r\n\
+             \r\n\
+             thank you f=C3=BCr the invitation. I cannot=20\r\n\
+             attend.\r\n\
+             \r\n\
+             \r\n\
+             \r\n\
+             \r\n\
+             Please send me a registration number=\r\n\
+             ,=20\r\n\
+             so my donation reaches you.\r\n\
+             {trailing}",
+            leading = "\r\n".repeat(314),
+            trailing = "\r\n".repeat(14),
+        );
+        let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+        let row = ingest_message(
+            &fx.store,
+            &fx.blobs,
+            &IngestInput {
+                account: "acct",
+                mailbox: "inbox",
+                uid: 7,
+                email: &email,
+                raw: Some(raw.as_bytes()),
+            },
+        )
+        .unwrap()
+        .row_id;
+        let row = read::find_by_id(&fx.store, row).unwrap().unwrap();
+
+        let text = render_show(&shown_message(&fx.store, &fx.blobs, "acct", &row));
+        let (_, body) = text
+            .split_once(&format!("{}\n", "\u{2500}".repeat(RULE)))
+            .expect("the rule above the body");
+        // The line ending is not what this pins: the stored body keeps the
+        // mail's CRLF, which a terminal shows as it shows LF.
+        assert_eq!(
+            body.replace("\r\n", "\n"),
+            "Dear Mr Example.\n\
+             \n\
+             thank you f\u{fc}r the invitation. I cannot \n\
+             attend.\n\
+             \n\
+             Please send me a registration number, \n\
+             so my donation reaches you.\n"
+        );
+        assert_eq!(
+            read::load_raw(&fx.store, &fx.blobs, row.id).as_deref(),
+            Some(raw.as_bytes()),
+            "the stored raw message stays untouched"
+        );
+    }
+
+    /// PERSO-291: a stored body of nothing but blank lines reads as an empty
+    /// body, not as the evicted one the "no stored body" sentence names.
+    #[test]
+    fn a_body_of_only_blank_lines_shows_as_empty_and_not_as_evicted() {
+        colored::control::set_override(false);
+        let fx = fixture();
+        let row = ingest(&fx, "inbox", 5, &email("blank", "\r\n \r\n\r\n\t\r\n"));
+
+        let shown = shown_message(&fx.store, &fx.blobs, "acct", &row);
+        assert_eq!(shown.body.as_deref(), Some(""));
+        let text = render_show(&shown);
+        assert!(!text.contains("no stored body"), "{text}");
+        assert!(
+            text.ends_with(&format!("{}\n\n", "\u{2500}".repeat(RULE))),
+            "{text:?}"
+        );
     }
 
     /// A body whose first line is `---` is why this is not

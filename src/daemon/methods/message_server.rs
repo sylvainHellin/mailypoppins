@@ -1142,6 +1142,11 @@ fn admission(
 /// overlay can act on, and one that does not says so with `null` rather than
 /// with an empty string, because "not in the store" is the fact every
 /// row-dependent key of the overlay branches on.
+///
+/// `body_text` is the body as a reader sees it
+/// ([`mp_core::body::for_reading`], PERSO-291): every client renders a hit
+/// out of it, and the 300-character preview of `mp search` and a reply to a
+/// server-only hit are cut from it.
 fn to_hit(
     store: Option<&Store>,
     account: &str,
@@ -1193,7 +1198,7 @@ fn to_hit(
         },
         has_attachments: email.has_attachments,
         is_invite: email.event.is_some(),
-        body_text: email.body_text.clone(),
+        body_text: mp_core::body::for_reading(&email.body_text),
         html_body: email.html_body.clone(),
     }
 }
@@ -1450,6 +1455,26 @@ mod tests {
             calendar_ics: None,
             event: None,
         }
+    }
+
+    /// PERSO-291: a hit carries its body as a reader sees it, so every
+    /// client's preview pane and the 300-character preview of `mp search`
+    /// open on the text rather than on the blank lines above it.
+    #[test]
+    fn a_hit_carries_its_body_without_the_blank_lines_above_it() {
+        let mut fetched = email("<blank@x>");
+        fetched.body_text = format!(
+            "{} \r\nDear Sir,\r\n\r\n\r\n\r\nthanks.\r\n\r\n",
+            "\r\n".repeat(314)
+        );
+        let hit = to_hit(None, "acct", "Inbox", &fetched);
+        assert_eq!(hit.body_text, "Dear Sir,\r\n\r\nthanks.\r\n");
+
+        let listed = crate::read_cmd::ListedMessage::from_server_hit("acct", None, &hit, false);
+        assert_eq!(
+            listed.preview.as_deref(),
+            Some("Dear Sir,\r\n\r\nthanks.\r\n")
+        );
     }
 
     /// A Graph hit `message.fetch` lands joins its stored parent at ingest and

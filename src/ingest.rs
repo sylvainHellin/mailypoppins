@@ -4194,4 +4194,23 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
             SNIPPET_CHARS
         );
     }
+
+    /// PERSO-291: the list preview of a body that opens with hundreds of
+    /// blank lines (one holding the space of a quoted-printable `=20`) is its
+    /// text, since collapsing every whitespace run already drops what
+    /// `mp_core::body::for_reading` drops, so the snippet stored at ingest
+    /// needs no second cleaning.
+    #[test]
+    fn the_snippet_of_a_body_opening_with_blank_lines_is_its_text() {
+        let body = format!(
+            "{} \r\nDear Sir,\r\n\r\n\r\n\r\nthanks.\r\n{}",
+            "\r\n".repeat(314),
+            "\r\n".repeat(14)
+        );
+        assert_eq!(snippet_for(&body), "Dear Sir, thanks.");
+        assert_eq!(
+            snippet_for(&body),
+            snippet_for(&mp_core::body::for_reading(&body))
+        );
+    }
 }

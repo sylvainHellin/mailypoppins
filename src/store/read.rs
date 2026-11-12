@@ -1550,9 +1550,11 @@ pub fn render_fetched_markdown(email: &crate::parse::FetchedEmail, mailbox: &str
     view_markdown(&frontmatter, &email.body_text)
 }
 
-/// The read-only view's text: the frontmatter fenced, a blank line, the body,
-/// and a final newline.
+/// The read-only view's text: the frontmatter fenced, a blank line, the body
+/// as a reader sees it ([`mp_core::body::for_reading`], PERSO-291), and a
+/// final newline.
 fn view_markdown(frontmatter: &ViewFrontmatter, body: &str) -> String {
+    let body = mp_core::body::for_reading(body);
     // A struct of owned strings and bools has no serialization failure mode;
     // `dump::to_ndjson` leans on the same fact.
     let yaml = serde_yaml::to_string(frontmatter).expect("the view frontmatter serializes");
@@ -2789,5 +2791,26 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         assert_eq!(parsed.attachments, None);
         assert_eq!(parsed.read, Some(false));
         assert_eq!(body, "\nbody of Bare\n");
+    }
+
+    /// PERSO-291: the read-only view, of a row and of a server-search hit,
+    /// shows the body as a reader sees it, and the stored body keeps every
+    /// blank line it was sent with.
+    #[test]
+    fn the_rendition_drops_the_blank_lines_above_and_below_the_text() {
+        let fx = fixture();
+        let mut e = email("Blank", "Mon, 01 Jan 2024 09:00:00 +0000");
+        e.body_text = format!("{} \nDear Sir,\n\n\n\nthanks.\n\n\n", "\n".repeat(314));
+        let id = ingest(&fx, "inbox", 1, &e);
+        let row = find_by_id(&fx.store, id).unwrap().unwrap();
+
+        for rendered in [
+            render_markdown(&fx.store, &fx.blobs, &row),
+            render_fetched_markdown(&e, "inbox"),
+        ] {
+            let (_, body) = rendered[4..].split_once("---\n").unwrap();
+            assert_eq!(body, "\nDear Sir,\n\nthanks.\n", "{rendered}");
+        }
+        assert_eq!(load_body(&fx.store, &fx.blobs, id).unwrap(), e.body_text);
     }
 }

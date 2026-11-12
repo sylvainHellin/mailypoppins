@@ -850,7 +850,6 @@ pub fn create_reply_draft_from(
     signature: Option<&str>,
 ) -> Result<PathBuf> {
     let inbox = source;
-    let original_body = inbox.body.trim();
 
     // A reply to a message this account sent itself (a Sent copy) goes back
     // to that message's recipients, not to the sender, which is this account
@@ -867,9 +866,9 @@ pub fn create_reply_draft_from(
         format!("Re: {}", inbox.subject)
     };
 
-    // The body from the .md file is already plain text (either the server's
-    // text/plain or the result of html_to_plain() at fetch time). Use as-is.
-    let clean_body = original_body.to_string();
+    // The source's plain text (the server's text/plain, or html_to_plain()'s
+    // at fetch time), quoted as a reader sees it (PERSO-291).
+    let clean_body = crate::body::for_reading(&inbox.body);
 
     // Build quoted body with attribution. The sender is text a reader is
     // shown, so its name is unquoted (`"Doe, Jane" <j@x>` reads
@@ -1040,7 +1039,6 @@ pub fn create_forward_draft_with(
     signature: Option<&str>,
 ) -> Result<PathBuf> {
     let inbox = source;
-    let original_body = inbox.body.trim();
 
     // Build forward subject
     let fwd_subject = fwd_subject(&inbox.subject);
@@ -1085,9 +1083,8 @@ pub fn create_forward_draft_with(
         .collect::<Vec<_>>()
         .join("  \n");
 
-    // The body from the .md file is already plain text (either the server's
-    // text/plain or the result of html_to_plain() at fetch time). Use as-is.
-    let clean_body = original_body.to_string();
+    // The source's plain text, quoted as a reader sees it (PERSO-291).
+    let clean_body = crate::body::for_reading(&inbox.body);
 
     // See create_reply_draft_from: the quote marker stays for splicing,
     // the per-account signature (#0099) goes above it in the reply area.
@@ -3695,6 +3692,37 @@ mod tests {
             draft.frontmatter.attachments,
             Some(vec![r"/tmp/odd\dir/a.pdf".to_string()])
         );
+    }
+
+    /// PERSO-291: a reply and a forward quote the body as a reader sees it,
+    /// without the blank lines above the text and with a run of them inside
+    /// collapsed to one.
+    #[test]
+    fn a_reply_and_a_forward_quote_the_body_without_its_blank_line_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            from: "Sender <sender@example.com>".into(),
+            subject: "LOC Day".into(),
+            body: format!(
+                "{} \r\nDear Sir,\r\n\r\n\r\n\r\n\r\nthanks.\r\n\r\n",
+                "\r\n".repeat(314)
+            ),
+            ..Default::default()
+        };
+        let reply =
+            create_reply_draft_from(&source, false, "me@example.com", Some(tmp.path()), None)
+                .unwrap();
+        let reply = fs::read_to_string(reply).unwrap().replace("\r\n", "\n");
+        assert!(
+            reply.contains("wrote:\n> Dear Sir,\n> \n> thanks.\n"),
+            "{reply}"
+        );
+
+        let forward =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        let forward = fs::read_to_string(forward).unwrap().replace("\r\n", "\n");
+        assert!(forward.contains("\n\nDear Sir,\n\nthanks.\n"), "{forward}");
+        assert!(!forward.contains("Dear Sir,\n\n\n"), "{forward}");
     }
 
     #[test]
