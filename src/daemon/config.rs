@@ -613,7 +613,10 @@ async fn stop_account(runtimes: &Arc<RuntimeTable>, account: &str) {
 /// `sender.block` that came while the store was opening, in this daemon or
 /// one that stopped before the account turned ready, moves the account's
 /// Inbox mail from that sender to Junk here, before the state is committed
-/// ([`super::runtime::sender_runner::move_owed`]).
+/// ([`super::runtime::sender_runner::move_owed`]). `daemon.status` reports a
+/// startup start's account `opening` until then
+/// ([`super::opening::committed`]), so a client that waited for no account to
+/// be opening finds it served, its seed whole and the owed move done.
 pub async fn start_account(
     runtimes: &Arc<RuntimeTable>,
     canonical: &Arc<CanonicalState>,
@@ -622,12 +625,14 @@ pub async fn start_account(
 ) {
     let account = cfg.name.clone();
     let change = start_runtime(runtimes, canonical, cfg.clone(), account_runtimes).await;
+    super::opening::hold_commit(&account).await;
     super::opening::end(&account);
     let runtime = runtimes.get(&account);
     if change.is_some() && runtime.is_some() {
         super::runtime::publish::reseed_from_store(canonical, &cfg).await;
     }
     super::runtime::sender_runner::move_owed(runtime.as_deref(), canonical, &cfg).await;
+    super::opening::committed(&account);
     if let Some(change) = change {
         canonical.apply(change);
     }

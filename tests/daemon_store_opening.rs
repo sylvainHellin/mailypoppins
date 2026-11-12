@@ -490,6 +490,59 @@ async fn hook_list_and_contact_rebuild_refuse_an_opening_account() {
         .expect("hook.list answers once the store is open");
 }
 
+/// `daemon.status` reports an account `opening` until its start has committed
+/// the account's state, so a client that waited for no account to be opening
+/// is never refused with `-32006` (PERSO-109). The start is held after its
+/// runtime is filed and before it commits, the window in which the status
+/// used to read the filed runtime as `ready` while the store methods still
+/// refused the account.
+#[tokio::test]
+async fn daemon_status_reports_opening_until_the_start_commits() {
+    let sandbox = Sandbox::new();
+    let gate = sandbox.hold_dir().join(format!("{LARGE}.commit.hold"));
+    fs::write(&gate, b"").expect("arm the commit hold");
+    let _daemon = sandbox.spawn_daemon();
+    let held = sandbox.hold_dir().join(format!("{LARGE}.commit.held"));
+    let start = Instant::now();
+    while !held.exists() {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the large account's start never reached the commit hold"
+        );
+        tokio::time::sleep(TICK).await;
+    }
+
+    let answer = status(&sandbox.socket(), DEADLINE)
+        .await
+        .expect("daemon.status");
+    assert_eq!(
+        state_of(&answer["accounts"], LARGE, "state"),
+        Some("opening"),
+        "an account whose start has not committed is opening: {answer}"
+    );
+    let mut conn = connected(&sandbox).await;
+    let answer = call(&mut conn, "mailbox.list", json!({"account": LARGE})).await;
+    assert_opening("mailbox.list", answer);
+
+    let mut events = connected(&sandbox).await;
+    call(&mut events, "state.bootstrap", json!({}))
+        .await
+        .expect("state.bootstrap");
+    fs::remove_file(&gate).expect("release the commit hold");
+    until_ready(&mut events).await;
+    let answer = status(&sandbox.socket(), DEADLINE)
+        .await
+        .expect("daemon.status");
+    assert_eq!(
+        state_of(&answer["accounts"], LARGE, "state"),
+        Some("ready"),
+        "{answer}"
+    );
+    call(&mut conn, "mailbox.list", json!({"account": LARGE}))
+        .await
+        .expect("mailbox.list answers once the start committed");
+}
+
 /// Blocking a sender while an account is still opening its store answers at
 /// once, names that account in `skipped` with the reason, and moves the
 /// sender's mail already in its Inbox to Junk as soon as the store is open:
@@ -593,9 +646,8 @@ async fn a_block_owed_to_an_opening_account_survives_a_daemon_restart() {
     fs::remove_file(&gate).expect("release the hold");
     assert_eq!(large_mailbox(&sandbox), "inbox", "nothing moved yet");
 
-    // The next daemon holds the open too, so the test hears its ready event:
-    // `daemon.status` reads the runtime table, filled before the owed move
-    // runs and the state is committed.
+    // The next daemon holds the open too, so the test hears its ready event,
+    // which the start publishes once the owed move ran.
     let (_daemon, gate) = held_in(&sandbox).await;
     let mut events = connected(&sandbox).await;
     call(&mut events, "state.bootstrap", json!({}))

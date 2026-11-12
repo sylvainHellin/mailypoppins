@@ -192,9 +192,18 @@ impl RuntimeTable {
     }
 
     /// The state `daemon.status` reports for `account`, or `None` when no start
-    /// has come back yet, which reads as `opening`.
+    /// has come back yet, which reads as `opening`. A runtime filed by a
+    /// startup start that has not committed the account's state reads as
+    /// `opening` too ([`super::opening::is_starting`]): the store methods may
+    /// still refuse it, and its seed and owed move are not done.
     pub fn state_of(&self, account: &str) -> Option<&'static str> {
-        Some(match lock(&self.entries).get(account)? {
+        let starting = super::opening::is_starting(account);
+        let entries = lock(&self.entries);
+        let entry = entries.get(account)?;
+        if starting {
+            return Some("opening");
+        }
+        Some(match entry {
             RuntimeEntry::Live(runtime) => match runtime.readiness() {
                 Readiness::Opening => "opening",
                 Readiness::Ready => "ready",
@@ -207,8 +216,10 @@ impl RuntimeTable {
     /// How `account` is doing, with a blocked runtime told apart from one that
     /// never came up (P6-U8).
     pub fn health_of(&self, account: &str) -> RuntimeHealth {
+        let starting = super::opening::is_starting(account);
         match lock(&self.entries).get(account) {
             None => RuntimeHealth::Opening,
+            Some(_) if starting => RuntimeHealth::Opening,
             Some(RuntimeEntry::Live(runtime)) => match runtime.readiness() {
                 Readiness::Opening => RuntimeHealth::Opening,
                 Readiness::Ready => RuntimeHealth::Ready,
