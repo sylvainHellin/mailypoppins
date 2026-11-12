@@ -1004,6 +1004,9 @@ pub fn init_secrets_backend(
 /// caller chose, and must never trigger a migration side effect.
 pub const CONFIG_DIR_ENV: &str = "MAILYPOPPINS_CONFIG_DIR";
 
+/// Environment variable overriding the data directory.
+pub const DATA_DIR_ENV: &str = "MAILYPOPPINS_DATA_DIR";
+
 fn home_dir() -> PathBuf {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(p) = test_env::home() {
@@ -1022,14 +1025,15 @@ fn legacy_config_dir() -> PathBuf {
 }
 
 /// Return the config directory: `$MAILYPOPPINS_CONFIG_DIR`, else
-/// `~/.config/mailypoppins`.
+/// `~/.config/mailypoppins`, or `~/.config/mailypoppins/profiles/<name>` on a
+/// profile (PERSO-176, [`crate::profile`]).
 pub fn config_dir() -> PathBuf {
     if let Some(p) = config_dir_env() {
         if !p.is_empty() {
             return PathBuf::from(shellexpand::tilde(&p).into_owned());
         }
     }
-    home_dir().join(".config").join("mailypoppins")
+    crate::profile::root_under(home_dir().join(".config").join("mailypoppins"))
 }
 
 /// The value of `$MAILYPOPPINS_CONFIG_DIR`, through the test seam.
@@ -1065,7 +1069,9 @@ pub fn config_path() -> PathBuf {
 /// filesystem in practice; a rename that fails anyway names both paths and the
 /// exact `mv` to run.
 pub fn migrate_legacy_config_dir() -> Result<()> {
-    if config_dir_env().is_some() {
+    // The legacy directory is the default profile's, so a profile never
+    // receives it (PERSO-176).
+    if config_dir_env().is_some() || crate::profile::active().is_some() {
         return Ok(());
     }
     let old = legacy_config_dir();
@@ -1575,7 +1581,9 @@ impl ServerLogin {
 //   - Linux:  $XDG_DATA_HOME/mailypoppins  (default ~/.local/share/mailypoppins)
 //
 // Override with the `MAILYPOPPINS_DATA_DIR` env var (for tests, or for power
-// users running mailypoppins from a portable location).
+// users running mailypoppins from a portable location). A profile
+// (`MAILYPOPPINS_PROFILE`, PERSO-176) moves the default to
+// `<data_dir>/profiles/<name>`.
 
 /// Thread-local overrides for the process-global inputs the path resolvers
 /// read (#0077).
@@ -1603,6 +1611,33 @@ pub mod test_env {
         /// `None` = no override (read the real env); `Some(v)` = override,
         /// where `v` is `None` for "explicitly unset".
         static CONFIG_DIR: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
+        /// `$MAILYPOPPINS_PROFILE`, with the same three states.
+        static PROFILE: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
+    }
+
+    pub fn profile() -> Option<Option<String>> {
+        PROFILE.with(|c| c.borrow().clone())
+    }
+
+    /// Sets `$MAILYPOPPINS_PROFILE` (`None` = unset) for this thread,
+    /// restoring the previous override on drop.
+    pub struct ProfileOverride {
+        previous: Option<Option<String>>,
+    }
+
+    impl ProfileOverride {
+        pub fn set(value: Option<&str>) -> Self {
+            let value = value.map(str::to_string);
+            let previous = PROFILE.with(|c| c.borrow_mut().replace(value));
+            Self { previous }
+        }
+    }
+
+    impl Drop for ProfileOverride {
+        fn drop(&mut self) {
+            let previous = self.previous.take();
+            PROFILE.with(|c| *c.borrow_mut() = previous);
+        }
     }
 
     pub fn data_dir() -> Option<PathBuf> {
@@ -1699,17 +1734,25 @@ pub fn mailypoppins_data_dir() -> PathBuf {
     if let Some(p) = test_env::data_dir() {
         return p;
     }
-    if let Ok(p) = std::env::var("MAILYPOPPINS_DATA_DIR") {
-        if !p.is_empty() {
-            return PathBuf::from(shellexpand::tilde(&p).into_owned());
-        }
-    }
-    dirs::data_dir()
+    let base = dirs::data_dir()
         .map(|d| d.join("mailypoppins"))
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".local/share/mailypoppins")
-        })
+        });
+    data_dir_from(std::env::var(DATA_DIR_ENV).ok(), base)
+}
+
+/// The data directory from `$MAILYPOPPINS_DATA_DIR`'s value and the platform
+/// default `base`, which a profile moves to `base/profiles/<name>`
+/// (PERSO-176).
+fn data_dir_from(explicit: Option<String>, base: PathBuf) -> PathBuf {
+    if let Some(p) = explicit {
+        if !p.is_empty() {
+            return PathBuf::from(shellexpand::tilde(&p).into_owned());
+        }
+    }
+    crate::profile::root_under(base)
 }
 
 /// `fs::create_dir_all` for a directory under the data dir, owner-only.
@@ -2703,6 +2746,67 @@ name = "test"
     // -----------------------------------------------------------------------
 
     use test_env::ConfigDirOverride as ConfigEnv;
+
+    /// A profile moves the config root under `profiles/<name>` (PERSO-176),
+    /// and every file the config dir holds follows it.
+    #[test]
+    fn a_profile_moves_the_config_and_data_roots_under_profiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = ConfigEnv::new(tmp.path());
+        let _profile = test_env::ProfileOverride::set(Some("demo"));
+        let expected = tmp
+            .path()
+            .join(".config")
+            .join("mailypoppins")
+            .join("profiles")
+            .join("demo");
+        assert_eq!(config_dir(), expected);
+        assert_eq!(config_path(), expected.join("config.toml"));
+        assert_eq!(crate::secrets::secrets_path(), expected.join("secrets.enc"));
+        assert_eq!(
+            data_dir_from(None, PathBuf::from("/share/mailypoppins")),
+            PathBuf::from("/share/mailypoppins/profiles/demo")
+        );
+        // An explicit directory is the caller's, profile or not; the entry
+        // point refuses the two together before anything resolves a path.
+        assert_eq!(
+            data_dir_from(Some("/chosen".into()), PathBuf::from("/share/mailypoppins")),
+            PathBuf::from("/chosen")
+        );
+    }
+
+    /// No profile, and the default one, are exactly the paths there were
+    /// before profiles: nothing moves without the flag.
+    #[test]
+    fn no_profile_keeps_todays_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = ConfigEnv::new(tmp.path());
+        let today = tmp.path().join(".config").join("mailypoppins");
+        for value in [None, Some(""), Some("default")] {
+            let _profile = test_env::ProfileOverride::set(value);
+            assert_eq!(config_dir(), today, "{value:?}");
+            assert_eq!(
+                data_dir_from(None, PathBuf::from("/share/mailypoppins")),
+                PathBuf::from("/share/mailypoppins"),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// The legacy `~/.config/email` belongs to the default profile, so a run on
+    /// a profile never moves it into `profiles/<name>`.
+    #[test]
+    fn the_legacy_config_move_is_skipped_under_a_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = ConfigEnv::new(tmp.path());
+        let legacy = seed_legacy_dir(tmp.path());
+        let _profile = test_env::ProfileOverride::set(Some("demo"));
+
+        migrate_legacy_config_dir().unwrap();
+
+        assert!(legacy.join("config.toml").exists(), "legacy dir was moved");
+        assert!(!config_dir().exists(), "the profile dir was created");
+    }
 
     fn seed_legacy_dir(home: &Path) -> PathBuf {
         let legacy = home.join(".config").join("email");
