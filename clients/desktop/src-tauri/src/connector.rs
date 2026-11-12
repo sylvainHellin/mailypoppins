@@ -60,7 +60,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use mp_client::session::Connector;
-use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity, InitializeResult};
+use mp_client::{
+    ClientError, ClientInfo, ClientKind, Connection, Identity, InitializeResult, VersionRefusal,
+};
 use mp_protocol::ErrorCode;
 
 use crate::error::{GuiError, ProtocolRange};
@@ -209,6 +211,9 @@ pub struct ConnectError {
     pub socket: PathBuf,
     pub log: PathBuf,
     pub daemon_version: Option<String>,
+    /// The daemon's protocol range, which only a refused handshake names
+    /// (PERSO-277).
+    pub daemon_protocol: Option<ProtocolRange>,
 }
 
 impl std::fmt::Display for ConnectError {
@@ -361,6 +366,7 @@ fn error(kind: ConnectFailure, why: impl Into<String>) -> ConnectError {
         socket: paths.socket.clone(),
         log: paths.daemon_log.clone(),
         daemon_version: None,
+        daemon_protocol: None,
     }
 }
 
@@ -397,14 +403,29 @@ async fn handshake() -> Result<(Connection, InitializeResult), ClientError> {
 
 /// A handshake failure as the screen shows it; `None` for "nothing is
 /// listening", which is the one failure answered by starting a daemon.
+///
+/// A version refusal is told in the sentence `mp` and the TUI print, naming
+/// the daemon's version and protocol from the refusal itself (PERSO-277).
 fn classify(e: &ClientError) -> Option<ConnectError> {
     match e {
         ClientError::NotRunning => None,
         ClientError::Rpc(rpc) => {
+            if let Some(refusal) = VersionRefusal::from_rpc(rpc) {
+                let ours = client_info(APP_VERSION.get()).app_version;
+                let mut failure = error(
+                    ConnectFailure::VersionMismatch,
+                    format!(
+                        "{}; restart the daemon to run the matching version",
+                        refusal.describe(&ours)
+                    ),
+                );
+                failure.daemon_version = refusal.daemon_version;
+                failure.daemon_protocol = refusal
+                    .daemon_protocol
+                    .map(|(min, max)| ProtocolRange { min, max });
+                return Some(failure);
+            }
             let kind = match ErrorCode::from_code(rpc.code) {
-                Some(ErrorCode::ProtocolIncompatible) | Some(ErrorCode::CapabilityMissing) => {
-                    ConnectFailure::VersionMismatch
-                }
                 Some(ErrorCode::IdentityMismatch) => ConnectFailure::IdentityMismatch,
                 _ => ConnectFailure::Unavailable,
             };
@@ -415,17 +436,7 @@ fn classify(e: &ClientError) -> Option<ConnectError> {
             if let Some(data) = &rpc.data {
                 why.push_str(&format!(" {data}"));
             }
-            let mut failure = error(kind, why);
-            failure.daemon_version = rpc
-                .data
-                .as_ref()
-                .and_then(|d| {
-                    d.pointer("/daemon/version")
-                        .or_else(|| d.get("daemon_version"))
-                })
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            Some(failure)
+            Some(error(kind, why))
         }
         ClientError::Timeout { .. } => Some(error(
             ConnectFailure::Unavailable,
@@ -1215,19 +1226,54 @@ mod tests {
         }
     }
 
+    /// A refused handshake names the daemon's version and protocol from the
+    /// refusal, and an older daemon's bare refusal is still a mismatch
+    /// (PERSO-277).
     #[test]
-    fn a_capability_refusal_is_a_version_mismatch() {
+    fn a_capability_refusal_is_a_version_mismatch_naming_the_daemon() {
         let e = ClientError::Rpc(mp_protocol::RpcError {
+            code: ErrorCode::CapabilityMissing.code(),
+            message: "capability_missing".into(),
+            data: Some(serde_json::json!({
+                "missing": ["calendar.reminders"],
+                "daemon": {"version": "0.11.0", "min": 1, "max": 1},
+            })),
+        });
+        let failure = classify(&e).expect("a failure");
+        assert_eq!(failure.kind, ConnectFailure::VersionMismatch);
+        assert_eq!(failure.daemon_version.as_deref(), Some("0.11.0"));
+        assert_eq!(
+            failure.daemon_protocol,
+            Some(ProtocolRange { min: 1, max: 1 })
+        );
+        assert!(
+            failure.why.contains("mailypoppins 0.11.0"),
+            "{}",
+            failure.why
+        );
+        assert!(
+            failure.why.contains("calendar.reminders"),
+            "{}",
+            failure.why
+        );
+        assert!(matches!(
+            GuiError::from(failure),
+            GuiError::VersionMismatch { daemon_version: Some(v), .. } if v == "0.11.0"
+        ));
+
+        let older = ClientError::Rpc(mp_protocol::RpcError {
             code: ErrorCode::CapabilityMissing.code(),
             message: "capability_missing".into(),
             data: None,
         });
-        let failure = classify(&e).expect("a failure");
+        let failure = classify(&older).expect("a failure");
         assert_eq!(failure.kind, ConnectFailure::VersionMismatch);
-        assert!(matches!(
-            GuiError::from(failure),
-            GuiError::VersionMismatch { .. }
-        ));
+        assert_eq!(failure.daemon_version, None);
+        assert!(
+            failure.why.contains("does not report its version"),
+            "{}",
+            failure.why
+        );
         assert!(classify(&ClientError::NotRunning).is_none());
     }
 

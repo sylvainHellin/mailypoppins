@@ -36,7 +36,7 @@ The fixture's long operations wait until their driver settles them, as in the te
 ```js
 mpFixture.mock                                   // the state: rows, drafts, holds, outbox, settings, ...
 mpFixture.emitEnvelope("state.invalidate", { resource: "mailbox:work/inbox", scope: { query: "counts" } })
-mpFixture.emit({ type: "connection", status: { state: "failed", error: { kind: "version_mismatch", why: "...", socket: "", log: "", daemon_version: "0.9.0" } } })
+mpFixture.emit({ type: "connection", status: { state: "failed", error: { kind: "version_mismatch", why: "...", socket: "", log: "", daemon_version: "0.9.0", daemon_protocol: { min: 1, max: 1 } } } })
 mpFixture.emitMenu("settings")                   // a native menu item, by its id in src-tauri/src/menu.rs
 mpFixture.settleRebuild()                        // the oldest contact rebuild; { saved: "refused_shrunk" } or { fail: "..." }
 mpFixture.settleRsvp()                           // the oldest event_respond answer; { fail: true } or { delivered: false }

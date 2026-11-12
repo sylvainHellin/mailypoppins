@@ -10,6 +10,7 @@ const unavailable: ConnectError = {
   socket: "/run/user/501/mailypoppins/daemon.sock",
   log: "/Users/me/.local/share/mailypoppins/logs/daemon.log",
   daemon_version: null,
+  daemon_protocol: null,
 };
 
 describe("the connection screens", () => {
@@ -53,6 +54,35 @@ describe("the connection screens", () => {
     expect(screen.getByText("9.9.9")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Restart daemon/ })).toBeInTheDocument();
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("names the daemon's version and protocol from a refused handshake, and what to do (PERSO-277)", async () => {
+    const why =
+      "the running daemon is mailypoppins 0.11.0 (protocol 1) and lacks calendar.reminders, which this client (mailypoppins 0.12.0, protocol 1) requires; restart the daemon to run the matching version";
+    renderApp(1400, () => {
+      mock.connection = {
+        state: "failed",
+        error: { ...unavailable, kind: "version_mismatch", why, daemon_version: "0.11.0", daemon_protocol: { min: 1, max: 2 } },
+      };
+    });
+    expect(await screen.findByRole("heading", { name: /incompatible version/ })).toBeInTheDocument();
+    expect(screen.getByText("0.11.0")).toBeInTheDocument();
+    expect(screen.getByText("Daemon protocol")).toBeInTheDocument();
+    expect(screen.getByText("1 to 2")).toBeInTheDocument();
+    expect(screen.getByText(/Restart the daemon to run the version this app expects/)).toBeInTheDocument();
+  });
+
+  it("says a daemon that does not report its version is older, never unknown (PERSO-277)", async () => {
+    renderApp(1400, () => {
+      mock.connection = {
+        state: "failed",
+        error: { ...unavailable, kind: "version_mismatch", why: "the daemon refused the handshake" },
+      };
+    });
+    expect(await screen.findByRole("heading", { name: /incompatible version/ })).toBeInTheDocument();
+    expect(screen.getByText(/not reported: an older daemon/)).toBeInTheDocument();
+    expect(screen.queryByText("unknown")).toBeNull();
+    expect(screen.queryByText("Daemon protocol")).toBeNull();
   });
 
   it("turns a reconnect to a daemon of another version into the restart screen, and back", async () => {

@@ -397,6 +397,7 @@ impl SessionHandle {
                 socket: crate::paths::Paths::resolve().socket,
                 log: crate::paths::Paths::resolve().daemon_log,
                 daemon_version: None,
+                daemon_protocol: None,
             });
         }
     }
@@ -1008,6 +1009,7 @@ fn unavailable(why: impl Into<String>) -> ConnectError {
         socket: paths.socket,
         log: paths.daemon_log,
         daemon_version: None,
+        daemon_protocol: None,
     }
 }
 

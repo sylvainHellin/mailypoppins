@@ -47,6 +47,7 @@ type GuiError =
 ```
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
+A handshake the daemon refuses with `protocol_incompatible` or `capability_missing` is one too, its `why` the sentence `mp` and the TUI print (`mp_client::VersionRefusal`), and its `daemon_version` and `daemon_protocol` read off the refusal's `data.daemon`; a daemon of 0.12.0 or older names neither, which the screen says instead of "unknown".
 The connect also refuses a daemon whose `app_version` is not the version of the `mp` the layer would start one with (`MP_DESKTOP_MP_BIN`, else the bundled sidecar, else `PATH`; see Environment), read off that binary's `mp --version` and read again when the binary's size or modification time changes.
 That refusal is a `version_mismatch` too, its `why` naming both versions and the binary, so a daemon left by another install or by a `cargo install` with no `mp daemon restart` gets the same screen, and Restart replaces it with the matching one.
 A binary that is missing or prints no version skips the check, with a warning in the log.
@@ -190,6 +191,7 @@ The type blocks in this document are for reading, and the generated files are th
 type ConnectError = {
   kind: "unavailable" | "version_mismatch" | "identity_mismatch";
   why: string; socket: string; log: string; daemon_version: string | null;
+  daemon_protocol: { min: number; max: number } | null;
 };
 type ConnectionStatus =
   | { state: "connecting" }
