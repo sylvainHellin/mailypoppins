@@ -57,6 +57,14 @@
 //! `initialize`: `daemon.status` and `daemon.stop` are lifecycle surface and
 //! answer before a handshake, which is exactly what lets these commands
 //! describe and end a daemon whose protocol range they cannot negotiate.
+//!
+//! The wait has two bounds (PERSO-109). Within the answer window
+//! (`--timeout-secs`) it waits for an answer whatever it finds. Past the window
+//! a socket that accepts the connect is a daemon that is bound and alive but
+//! still opening its stores, which can take longer than the window on a large
+//! store, so the wait goes on up to [`STARTUP_CEILING`]; a socket that refuses
+//! the connect, a stale file a dead daemon left included, is no daemon at all
+//! and ends the wait at the window.
 
 use std::fs::{self, File, Permissions};
 use std::os::unix::fs::PermissionsExt;
@@ -145,6 +153,20 @@ const POLL: Duration = Duration::from_millis(25);
 /// Timeout for a single request/response on the admin socket.
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The default answer window of `mp daemon start` and `mp daemon restart`, in
+/// seconds: how long they wait for an answer from a socket nothing has bound.
+const ANSWER_WINDOW_SECS: u64 = 10;
+
+/// How long a start waits, in all, for a daemon that has bound its socket but
+/// not answered yet because it is still opening its stores (PERSO-109: a
+/// 1.6 GB store's integrity check took about 10 s at startup). A window longer
+/// than this is the bound instead.
+pub const STARTUP_CEILING: Duration = Duration::from_secs(120);
+
+/// The line `mp daemon start` and `restart` print on stderr once the answer
+/// window has passed with a daemon bound and not answering yet.
+const STILL_OPENING: &str = "daemon is up and still opening its stores, waiting";
+
 /// The file `mp daemon start` points a detached daemon's stdio at.
 ///
 /// Public because the client's exit-4 diagnostic names it too
@@ -165,8 +187,8 @@ pub enum DaemonAction {
     },
     /// Start the daemon (via the login service if installed) and return once it answers
     Start {
-        /// Seconds to wait for the daemon to become ready
-        #[arg(long, default_value_t = 10)]
+        /// Seconds to wait for the daemon to answer; one that has bound its socket gets up to 120
+        #[arg(long, default_value_t = ANSWER_WINDOW_SECS)]
         timeout_secs: u64,
     },
     /// Report whether a daemon is running against this data directory
@@ -189,6 +211,9 @@ pub enum DaemonAction {
         /// Seconds the daemon may spend settling work in flight (0 waits none)
         #[arg(long)]
         grace_secs: Option<u64>,
+        /// Seconds to wait for the new daemon to answer; one that has bound its socket gets up to 120
+        #[arg(long, default_value_t = ANSWER_WINDOW_SECS)]
+        timeout_secs: u64,
     },
     /// Install the login-start service for this user and enable it
     InstallService {
@@ -241,7 +266,10 @@ pub async fn dispatch(action: DaemonAction) -> i32 {
             timeout_secs,
             grace_secs,
         } => stop(Duration::from_secs(timeout_secs), grace_secs).await,
-        DaemonAction::Restart { grace_secs } => restart(grace_secs).await,
+        DaemonAction::Restart {
+            grace_secs,
+            timeout_secs,
+        } => restart(grace_secs, Duration::from_secs(timeout_secs)).await,
         DaemonAction::InstallService { force, check } => super::service::install(force, check),
         DaemonAction::UninstallService => super::service::uninstall(),
         DaemonAction::Health { json } => health(json).await,
@@ -602,24 +630,35 @@ fn spawn_diagnostic_sweep(state: Arc<DaemonState>) {
 /// two racing starters produce one daemon, the stale-socket sweep, the
 /// `current_exe()` spawn into its own session, and the early exit on a child
 /// that died are all decisions this function already took correctly.
+///
+/// `timeout` is the answer window, and a daemon that has bound its socket gets
+/// up to [`STARTUP_CEILING`]; on-demand start passes its budget and no notice,
+/// since it may not print into another command's output.
 pub async fn start(timeout: Duration) -> Result<i32> {
+    start_noting(timeout, Notice::Quiet).await
+}
+
+/// [`start`], saying on stderr when it waits past the window if `notice` asks.
+async fn start_noting(timeout: Duration, notice: Notice) -> Result<i32> {
     let socket = socket_path();
-    if query_status().await.is_ok() {
-        info!("[daemon] start: a daemon is already running");
-        return Ok(EXIT_OK);
+    match probe(&socket, RPC_TIMEOUT).await {
+        Probe::Answered => {
+            info!("[daemon] start: a daemon is already running");
+            return Ok(EXIT_OK);
+        }
+        // Bound and silent: a daemon that is still opening its stores, whose
+        // start lock is already released. A second one spawned now would only
+        // find the socket taken and exit.
+        Probe::Bound => {
+            info!("[daemon] start: a daemon is bound and not answering yet; waiting for it");
+            return waited_for_another(timeout, notice).await;
+        }
+        Probe::Unbound => {}
     }
 
     let Some(_lock) = acquire_start_lock()? else {
         // Another starter is ahead of us; its daemon is the one daemon.
-        return Ok(match wait_ready(timeout, None).await? {
-            Some(_) => EXIT_OK,
-            None => {
-                report_start_failure(
-                    "the daemon another `mp daemon start` launched never became ready",
-                );
-                EXIT_UNAVAILABLE
-            }
-        });
+        return waited_for_another(timeout, notice).await;
     };
 
     // The socket may have outlived a crashed daemon; `run` would refuse to bind
@@ -630,17 +669,42 @@ pub async fn start(timeout: Duration) -> Result<i32> {
     }
 
     let mut child = spawn_detached()?;
-    match wait_ready(timeout, Some(&mut child)).await? {
-        Some(_) => Ok(EXIT_OK),
-        None => {
-            // The child may still be alive but wedged; it is ours until we
-            // return, so it does not get to outlive a failed start.
-            let _ = child.kill();
-            let _ = child.wait();
-            report_start_failure("the daemon did not become ready in time");
-            Ok(EXIT_UNAVAILABLE)
-        }
+    let readiness = wait_ready(timeout, Some(&mut child), notice).await?;
+    if let Readiness::Answered = readiness {
+        return Ok(EXIT_OK);
     }
+    // The child may still be alive but wedged; it is ours until we return, so
+    // it does not get to outlive a failed start.
+    let _ = child.kill();
+    let _ = child.wait();
+    report_start_failure(&match readiness {
+        Readiness::Silent => silent_daemon(timeout),
+        _ => "the daemon did not become ready in time".to_string(),
+    });
+    Ok(EXIT_UNAVAILABLE)
+}
+
+/// Wait for a daemon this start did not spawn, and say why when it never
+/// answers.
+async fn waited_for_another(timeout: Duration, notice: Notice) -> Result<i32> {
+    let what = match wait_ready(timeout, None, notice).await? {
+        Readiness::Answered => return Ok(EXIT_OK),
+        Readiness::Silent => silent_daemon(timeout),
+        Readiness::Unbound | Readiness::Exited => {
+            "the daemon another `mp daemon start` launched never became ready".to_string()
+        }
+    };
+    report_start_failure(&what);
+    Ok(EXIT_UNAVAILABLE)
+}
+
+/// The failure of a daemon that bound its socket and never answered, which
+/// names the ceiling it was given.
+fn silent_daemon(window: Duration) -> String {
+    format!(
+        "the daemon is listening but did not answer within {}s",
+        STARTUP_CEILING.max(window).as_secs()
+    )
 }
 
 /// Launch `mp daemon run` with its stdio in the daemon log and its own session.
@@ -681,21 +745,126 @@ fn spawn_detached() -> Result<Child> {
     Ok(child)
 }
 
-/// Poll for readiness until `timeout`, failing early if `child` dies.
-async fn wait_ready(timeout: Duration, mut child: Option<&mut Child>) -> Result<Option<Value>> {
-    let deadline = Instant::now() + timeout;
+/// Whether a start may say on stderr that it is waiting past the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    /// `mp daemon start` and `restart`: one line, once.
+    Stderr,
+    /// On-demand start inside another command: the log only.
+    Quiet,
+}
+
+/// What one readiness probe found at a socket.
+#[derive(Debug)]
+enum Probe {
+    /// A daemon answered `daemon.status`.
+    Answered,
+    /// The connect succeeded and no answer came: a daemon is bound and alive,
+    /// and not serving yet.
+    Bound,
+    /// The connect failed: nothing is there, or a file nobody listens on.
+    Unbound,
+}
+
+/// How a readiness wait ended.
+#[derive(Debug)]
+enum Readiness {
+    /// A daemon answered `daemon.status`.
+    Answered,
+    /// Nothing accepted the connect at the end of the answer window.
+    Unbound,
+    /// A daemon accepted the connect and did not answer within the ceiling.
+    Silent,
+    /// The child this start spawned exited, and the wait has said so.
+    Exited,
+}
+
+/// One `daemon.status` round trip on `socket`, each half bounded by `budget`,
+/// that tells a bound daemon that has not answered from no daemon.
+///
+/// The connect alone is the proof of life: a listener's backlog accepts it
+/// before the daemon's accept loop runs, and a socket file whose daemon died
+/// refuses it.
+async fn probe(socket: &Path, budget: Duration) -> Probe {
+    let Ok(Ok(mut connection)) = tokio::time::timeout(budget, Connection::connect(socket)).await
+    else {
+        return Probe::Unbound;
+    };
+    match tokio::time::timeout(budget, connection.call("daemon.status", json!({}))).await {
+        Ok(Ok(_)) => Probe::Answered,
+        _ => Probe::Bound,
+    }
+}
+
+/// Wait for this data directory's daemon to answer, failing early if `child`
+/// dies: up to `window` whatever the socket holds, and up to
+/// [`STARTUP_CEILING`] while a daemon is bound to it.
+async fn wait_ready(
+    window: Duration,
+    child: Option<&mut Child>,
+    notice: Notice,
+) -> Result<Readiness> {
+    wait_ready_at(&socket_path(), window, STARTUP_CEILING, child, notice).await
+}
+
+/// [`wait_ready`] on `socket` with `ceiling` for the bound daemon's bound,
+/// which a `window` longer than it replaces.
+///
+/// Each probe's call is bounded by what is left of the window, and past it of
+/// the ceiling, so the notice comes when the window ends rather than when a
+/// call that started inside it gives up.
+async fn wait_ready_at(
+    socket: &Path,
+    window: Duration,
+    ceiling: Duration,
+    mut child: Option<&mut Child>,
+    notice: Notice,
+) -> Result<Readiness> {
+    let began = Instant::now();
+    let window_end = began + window;
+    let ceiling_end = began + ceiling.max(window);
+    let mut noted = false;
     loop {
-        if let Ok(status) = query_status().await {
-            return Ok(Some(status));
-        }
+        let now = Instant::now();
+        let deadline = if now < window_end {
+            window_end
+        } else {
+            ceiling_end
+        };
+        let budget = deadline
+            .saturating_duration_since(now)
+            .clamp(POLL, RPC_TIMEOUT);
+        let bound = match probe(socket, budget).await {
+            Probe::Answered => return Ok(Readiness::Answered),
+            Probe::Bound => true,
+            Probe::Unbound => false,
+        };
         if let Some(child) = child.as_mut() {
             if let Some(exit) = child.try_wait().context("polling the daemon child")? {
                 report_start_failure(&format!("`mp daemon run` exited with {exit}"));
-                return Ok(None);
+                return Ok(Readiness::Exited);
             }
         }
-        if Instant::now() >= deadline {
-            return Ok(None);
+        let now = Instant::now();
+        if now >= window_end {
+            if !bound {
+                return Ok(Readiness::Unbound);
+            }
+            if now >= ceiling_end {
+                return Ok(Readiness::Silent);
+            }
+            if !noted {
+                noted = true;
+                info!(
+                    "[daemon] start: the daemon is bound and has not answered within {}s; \
+                     waiting up to {}s",
+                    window.as_secs(),
+                    ceiling.max(window).as_secs()
+                );
+                if notice == Notice::Stderr {
+                    eprintln!("{STILL_OPENING} up to {}s", ceiling.max(window).as_secs());
+                }
+            }
         }
         tokio::time::sleep(POLL).await;
     }
@@ -933,7 +1102,9 @@ fn print_stop_outcome(outcome: &StopOutcome) {
 /// stop returns once the old process has exited, a zombie included, which can
 /// be before the manager has processed the exit, and a start sent while the
 /// manager still counts the service running is a no-op that leaves it dead.
-async fn restart(grace_secs: Option<u64>) -> Result<i32> {
+///
+/// `timeout` is the start's answer window, as `mp daemon start` takes it.
+async fn restart(grace_secs: Option<u64>, timeout: Duration) -> Result<i32> {
     let route = super::service::start_route(super::service::StartKind::Restart)?;
     // The stop returns once the old process has exited, so the new daemon
     // does not race the old one's cleanup for the socket it just created.
@@ -941,7 +1112,7 @@ async fn restart(grace_secs: Option<u64>) -> Result<i32> {
     if code != EXIT_OK {
         return Ok(code);
     }
-    start_via(route, Duration::from_secs(10)).await
+    start_via(route, timeout).await
 }
 
 /// `mp daemon start`: [`start`], and one line saying what it found or did.
@@ -992,12 +1163,21 @@ async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Resu
                 )
                 .await;
             }
-            if wait_ready(timeout, None).await?.is_none() {
-                report_start_failure(&format!(
-                    "the service started but its daemon did not answer within {}s; see `{}`",
-                    timeout.as_secs(),
-                    plan.status_hint()
-                ));
+            let unanswered = match wait_ready(timeout, None, Notice::Stderr).await? {
+                Readiness::Answered => None,
+                Readiness::Silent => Some(format!(
+                    "the service started and its daemon is listening, \
+                     but it did not answer within {}s",
+                    STARTUP_CEILING.max(timeout).as_secs()
+                )),
+                // `Exited` needs a child, and a supervised start has none.
+                Readiness::Unbound | Readiness::Exited => Some(format!(
+                    "the service started but its daemon did not answer within {}s",
+                    timeout.as_secs()
+                )),
+            };
+            if let Some(what) = unanswered {
+                report_start_failure(&format!("{what}; see `{}`", plan.status_hint()));
                 return Ok(EXIT_UNAVAILABLE);
             }
             print_started();
@@ -1016,7 +1196,7 @@ async fn start_detached(note: Option<String>, timeout: Duration) -> Result<i32> 
         info!("[daemon] start: {note}");
         eprintln!("note: {note}");
     }
-    let code = start(timeout).await?;
+    let code = start_noting(timeout, Notice::Stderr).await?;
     if code == EXIT_OK {
         print_started();
     }
@@ -1612,5 +1792,151 @@ mod tests {
         );
         done.wait().expect("reap true");
         assert!(process_exited(pid), "and reaped it is gone");
+    }
+
+    /// A socket path in a fresh directory, and the directory that holds it.
+    fn scratch_socket() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        (dir, socket)
+    }
+
+    /// A socket file whose listener is gone refuses the connect, so the probe
+    /// reads it as no daemon, and a listener that has not accepted yet takes
+    /// the connect, so the probe reads it as a bound daemon (PERSO-109).
+    #[tokio::test]
+    async fn the_probe_tells_a_bound_daemon_from_a_stale_socket_file() {
+        let (_dir, socket) = scratch_socket();
+        assert!(matches!(
+            probe(&socket, Duration::from_millis(100)).await,
+            Probe::Unbound
+        ));
+
+        drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind"));
+        assert!(socket.exists(), "the stale file stays behind");
+        assert!(matches!(
+            probe(&socket, Duration::from_millis(100)).await,
+            Probe::Unbound
+        ));
+
+        fs::remove_file(&socket).expect("remove the stale file");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        assert!(matches!(
+            probe(&socket, Duration::from_millis(100)).await,
+            Probe::Bound
+        ));
+    }
+
+    /// A stale socket file ends the wait at the window, not at the ceiling.
+    #[tokio::test]
+    async fn a_stale_socket_ends_the_wait_at_the_window() {
+        let (_dir, socket) = scratch_socket();
+        drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind"));
+
+        let began = Instant::now();
+        let readiness = wait_ready_at(
+            &socket,
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            None,
+            Notice::Quiet,
+        )
+        .await
+        .expect("wait");
+        assert!(matches!(readiness, Readiness::Unbound), "{readiness:?}");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    /// A daemon that binds and never answers is waited for until the ceiling,
+    /// and then it is the silent daemon the exit-4 message names.
+    #[tokio::test]
+    async fn a_bound_daemon_that_never_answers_is_waited_for_until_the_ceiling() {
+        let (_dir, socket) = scratch_socket();
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+
+        let began = Instant::now();
+        let readiness = wait_ready_at(
+            &socket,
+            Duration::from_millis(100),
+            Duration::from_millis(600),
+            None,
+            Notice::Quiet,
+        )
+        .await
+        .expect("wait");
+        assert!(matches!(readiness, Readiness::Silent), "{readiness:?}");
+        let waited = began.elapsed();
+        assert!(
+            waited >= Duration::from_millis(600) && waited < Duration::from_secs(5),
+            "{waited:?}"
+        );
+        assert!(
+            silent_daemon(Duration::from_secs(10)).ends_with("within 120s"),
+            "{}",
+            silent_daemon(Duration::from_secs(10))
+        );
+    }
+
+    /// A daemon that binds at once and answers after the window, as one
+    /// opening a large store does, is ready rather than failed.
+    #[tokio::test]
+    async fn a_bound_daemon_that_answers_after_the_window_is_ready() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (_dir, socket) = scratch_socket();
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(read).read_line(&mut line).await.unwrap_or(0) == 0 {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).expect("a request");
+                let answer = json!({"jsonrpc": "2.0", "id": request["id"], "result": {"pid": 7}});
+                let _ = write.write_all(format!("{answer}\n").as_bytes()).await;
+            }
+        });
+
+        let readiness = wait_ready_at(
+            &socket,
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+            None,
+            Notice::Quiet,
+        )
+        .await
+        .expect("wait");
+        assert!(matches!(readiness, Readiness::Answered), "{readiness:?}");
+    }
+
+    /// `start` and `restart` name the ceiling in their `--help`, which has to
+    /// be the constant the wait uses.
+    #[test]
+    fn the_timeout_help_names_the_ceiling() {
+        use clap::Subcommand;
+
+        let command = DaemonAction::augment_subcommands(clap::Command::new("daemon"));
+        let ceiling = format!("up to {}", STARTUP_CEILING.as_secs());
+        for name in ["start", "restart"] {
+            let sub = command.find_subcommand(name).expect("subcommand");
+            let timeout = sub
+                .get_arguments()
+                .find(|arg| arg.get_id() == "timeout_secs")
+                .expect("--timeout-secs");
+            let help = timeout.get_help().expect("help").to_string();
+            assert!(help.contains(&ceiling), "{name}: {help}");
+            assert_eq!(
+                timeout.get_default_values(),
+                [ANSWER_WINDOW_SECS.to_string()],
+                "{name}"
+            );
+        }
     }
 }

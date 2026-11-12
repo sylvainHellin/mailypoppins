@@ -32,8 +32,12 @@
 //! `MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS`) on the whole start-and-connect
 //! sequence: the readiness wait inside [`lifecycle::start`] first, then a
 //! connect retry that backs off from 25 ms to 400 ms until the same deadline.
-//! One budget rather than two, so the worst case a user waits is the number in
-//! the variable and not some multiple of it.
+//! One budget rather than two, so the worst case a user waits for a daemon that
+//! never binds is the number in the variable and not some multiple of it. The
+//! budget is the readiness wait's answer window: a daemon that has bound its
+//! socket and is still opening its stores is waited for up to
+//! [`lifecycle::STARTUP_CEILING`] rather than killed at the budget
+//! (PERSO-109).
 //!
 //! `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns the start off and leaves the exit-4
 //! diagnostic, which is what a test that wants "no daemon, and none appearing"

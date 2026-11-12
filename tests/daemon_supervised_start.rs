@@ -18,12 +18,20 @@
 //! environment.
 //! `XDG_RUNTIME_DIR` is a sandbox directory whose `systemd/private` is a bound
 //! Unix socket, which is all the probe for a reachable user manager reads.
+//!
+//! A daemon that is slow to answer is not a real one: [`SlowDaemon`] binds the
+//! sandbox socket once the fake `systemctl` has been asked for the daemon and
+//! answers `daemon.status` only later, as a daemon opening a large store does.
 
 use std::fs;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -32,6 +40,10 @@ const MP: &str = env!("CARGO_BIN_EXE_mp");
 
 /// The systemd unit's name, as every `systemctl` line carries it.
 const UNIT_NAME: &str = "mailypoppins.service";
+
+/// The line `start` and `restart` print on stderr once the answer window has
+/// passed while a daemon holds the socket without answering yet.
+const STILL_OPENING: &str = "daemon is up and still opening its stores, waiting";
 
 struct Sandbox {
     root: TempDir,
@@ -55,6 +67,15 @@ impl Sandbox {
 
     fn pid_file(&self) -> PathBuf {
         self.dir("data").join("runtime").join("daemon.pid")
+    }
+
+    /// The socket a daemon for the sandbox data directory binds, in a runtime
+    /// directory created at the daemon's mode.
+    fn socket(&self) -> PathBuf {
+        let runtime = self.dir("data").join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime dir");
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).expect("chmod 0700");
+        runtime.join("daemon.sock")
     }
 
     fn recorded_pid(&self) -> i32 {
@@ -136,6 +157,12 @@ impl Sandbox {
             .and_then(|raw| raw.trim().parse().ok())
     }
 
+    /// A fake `systemctl` that records its argv and starts nothing: the daemon
+    /// it is asked for, if any, is the test's [`SlowDaemon`].
+    fn recording_systemctl(&self) {
+        self.write_systemctl("exit 0\n");
+    }
+
     /// A fake `systemctl` that records its argv and fails every call, as one
     /// with no user manager behind it does.
     fn failing_systemctl(&self) {
@@ -191,6 +218,88 @@ impl Drop for Sandbox {
             }
         }
     }
+}
+
+/// A stand-in for a daemon that binds its socket at once and answers only
+/// later, as one does while it opens a large store (PERSO-109: the home
+/// server's daemon answered 11.6 s after it bound, against a 10 s wait).
+///
+/// It binds once the fake `systemctl` has been called, so the command's own
+/// first probe, before it asks the service manager, finds nothing, and then
+/// answers every `daemon.status` from `silent` on, or never with `None`.
+struct SlowDaemon {
+    done: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SlowDaemon {
+    fn spawn(sandbox: &Sandbox, silent: Option<Duration>) -> Self {
+        let asked = sandbox.dir("bin").join("systemctl.log");
+        let socket = sandbox.socket();
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&done);
+        let thread = std::thread::spawn(move || {
+            let pause = || std::thread::sleep(Duration::from_millis(10));
+            while !asked.exists() {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                pause();
+            }
+            let listener = UnixListener::bind(&socket).expect("bind the slow daemon's socket");
+            let bound = Instant::now();
+            while silent.is_none_or(|silent| bound.elapsed() < silent) {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                pause();
+            }
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => answer_status(stream),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => pause(),
+                    Err(e) => panic!("the slow daemon's accept failed: {e}"),
+                }
+            }
+        });
+        Self {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for SlowDaemon {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Answer the one `daemon.status` request on `stream`, if it holds one: a
+/// connection the command gave up on reads as closed, and is dropped.
+fn answer_status(stream: UnixStream) {
+    stream.set_nonblocking(false).expect("blocking stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let mut line = String::new();
+    if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+        return;
+    }
+    let request: serde_json::Value = serde_json::from_str(&line).expect("a JSON-RPC request");
+    assert_eq!(request["method"], "daemon.status", "{line}");
+    let answer = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request["id"],
+        "result": {"pid": std::process::id()},
+    });
+    let _ = (&stream).write_all(format!("{answer}\n").as_bytes());
 }
 
 fn ok(out: &Output, what: &str) -> Vec<String> {
@@ -423,4 +532,96 @@ fn a_failing_service_start_falls_back_to_a_detached_daemon() {
 
     ok(&sandbox.mp(&["daemon", "stop"]), "stop");
     assert!(wait_gone(second), "the stopped daemon {second} exited");
+}
+
+/// A daemon the service started that binds its socket at once but answers
+/// only after the answer window, because it is still opening its stores, is a
+/// daemon that came up: `start` says once that it is waiting and exits 0 when
+/// the daemon answers (PERSO-109, 2026-11-12: exit 4 after 10 s for a daemon
+/// that answered 11.6 s after it bound).
+#[test]
+fn start_waits_past_the_window_for_a_daemon_still_opening_its_stores() {
+    let sandbox = Sandbox::new();
+    sandbox.recording_systemctl();
+    sandbox.install_unit(&sandbox.dir("data"));
+    let _daemon = SlowDaemon::spawn(&sandbox, Some(Duration::from_secs(7)));
+
+    let start = sandbox.mp(&["daemon", "start", "--timeout-secs", "1"]);
+    let lines = ok(&start, "start");
+    assert_eq!(
+        lines,
+        [
+            "\u{2713} daemon started".to_string(),
+            format!("  systemctl --user start {UNIT_NAME}"),
+        ]
+    );
+    let stderr = String::from_utf8_lossy(&start.stderr);
+    assert_eq!(stderr.matches(STILL_OPENING).count(), 1, "{stderr}");
+}
+
+/// `restart` takes `start`'s `--timeout-secs` and waits for a slow daemon the
+/// same way.
+#[test]
+fn restart_waits_past_the_window_for_a_daemon_still_opening_its_stores() {
+    let sandbox = Sandbox::new();
+    sandbox.recording_systemctl();
+    sandbox.install_unit(&sandbox.dir("data"));
+    let _daemon = SlowDaemon::spawn(&sandbox, Some(Duration::from_secs(7)));
+
+    let restart = sandbox.mp(&["daemon", "restart", "--timeout-secs", "1"]);
+    let lines = ok(&restart, "restart");
+    assert_eq!(
+        lines,
+        [
+            "\u{2713} daemon started".to_string(),
+            format!("  systemctl --user restart {UNIT_NAME}"),
+        ]
+    );
+    let stderr = String::from_utf8_lossy(&restart.stderr);
+    assert_eq!(stderr.matches(STILL_OPENING).count(), 1, "{stderr}");
+}
+
+/// A service start after which nothing binds the socket is exit 4 at the end
+/// of the answer window, not at the ceiling a bound daemon gets.
+#[test]
+fn a_service_start_that_binds_nothing_fails_at_the_window() {
+    let sandbox = Sandbox::new();
+    sandbox.recording_systemctl();
+    sandbox.install_unit(&sandbox.dir("data"));
+
+    let began = Instant::now();
+    let start = sandbox.mp(&["daemon", "start", "--timeout-secs", "1"]);
+    assert_eq!(start.status.code(), Some(4), "{start:?}");
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        began.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&start.stderr);
+    assert!(stderr.contains("did not answer within 1s"), "{stderr}");
+    assert!(!stderr.contains(STILL_OPENING), "{stderr}");
+}
+
+/// A socket file a dead daemon left behind refuses the connect, so it is no
+/// daemon at all: exit 4 at the end of the answer window.
+#[test]
+fn a_stale_socket_is_not_a_daemon_still_opening_its_stores() {
+    let sandbox = Sandbox::new();
+    sandbox.recording_systemctl();
+    sandbox.install_unit(&sandbox.dir("data"));
+    let socket = sandbox.socket();
+    drop(UnixListener::bind(&socket).expect("bind, then leave the file behind"));
+    assert!(socket.exists(), "the stale socket file stays");
+
+    let began = Instant::now();
+    let start = sandbox.mp(&["daemon", "start", "--timeout-secs", "1"]);
+    assert_eq!(start.status.code(), Some(4), "{start:?}");
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        began.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&start.stderr);
+    assert!(stderr.contains("did not answer within 1s"), "{stderr}");
+    assert!(!stderr.contains(STILL_OPENING), "{stderr}");
 }

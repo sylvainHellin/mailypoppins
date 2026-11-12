@@ -18,7 +18,10 @@ A missing `config.toml` is not a startup failure: the daemon serves zero account
 It takes the start lock and holds it across both the spawn and the readiness wait, because releasing it at spawn time would let a second starter see a socket inode that no daemon has bound yet and spawn a second daemon.
 The child is told the lock is already held through `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` and skips the acquisition.
 A starter that finds a daemon already answering returns 0 without spawning; one that loses the lock race waits for the winner's daemon instead of starting its own.
-Readiness is a real `daemon.status` round trip over the socket rather than the existence of a file, polled every 25 ms until `--timeout-secs` (default 10).
+Readiness is a real `daemon.status` round trip over the socket rather than the existence of a file, polled every 25 ms until `--timeout-secs` (default 10), the answer window.
+Past the window a socket that accepts the connect is a daemon that is bound and alive but still opening its stores (the integrity check of a 1.6 GB store took about 10 s, PERSO-109), so the wait goes on up to `STARTUP_CEILING` (120 s, or the window when that is longer) and prints `daemon is up and still opening its stores, waiting up to 120s` on stderr once.
+A socket that refuses the connect, a file a dead daemon left behind included, is no daemon at all, and the start exits 4 at the end of the window; a bound daemon that has not answered by the ceiling is exit 4 with a message naming the ceiling.
+A start that finds a daemon bound and not answering yet waits for it the same way instead of spawning a second one, which would only find the socket taken.
 The child is spawned through `setsid` with its stdio in the daemon log, so closing the launching terminal does not take it down.
 With a login service installed for this data directory, the start goes through the service manager instead; see [Starting under the login service](#starting-under-the-login-service).
 
@@ -49,7 +52,7 @@ With nothing running it exits 0, and it sweeps a stale socket on the way out, be
 
 `mp daemon restart` stops whatever runs, waits for the old pid to disappear (up to 10 s), and then starts this executable's daemon.
 The wait is not decoration: a new daemon binding before the old one's cleanup runs would have its own socket unlinked by its predecessor.
-It takes `stop`'s `--grace-secs <N>` for its stop, and prints the stop's line followed by the start's `✓ daemon started (pid N)`, so a successful restart reads as one.
+It takes `stop`'s `--grace-secs <N>` for its stop and `start`'s `--timeout-secs <N>` (default 10, with the same ceiling) for its start, and prints the stop's line followed by the start's `✓ daemon started (pid N)`, so a successful restart reads as one.
 Under an installed login service it is the service manager that brings the daemon back, through its restart rather than its start ("Starting under the login service" below).
 
 ## On-demand start, and the no-daemon list
@@ -59,7 +62,8 @@ It goes through the same routine `mp daemon start` uses, so the start lock that 
 The daemon it produces is detached, so it outlives the client that wanted it, which is the whole point.
 
 The bound on the whole sequence is 5 s: the readiness wait first, then a connect retry that backs off from 25 ms to 400 ms until the same deadline.
-One budget rather than two, so the worst case a user waits is that number and not some multiple of it.
+One budget rather than two, so the worst case a user waits for a daemon that never binds is that number and not some multiple of it.
+The readiness wait is `mp daemon start`'s with the budget as its answer window, so a daemon that has bound its socket and is still opening its stores is waited for up to the 120 s ceiling rather than killed at 5 s, and the wait prints nothing into the command's output.
 When it expires, or when the spawn dies, the run exits 4 naming the socket, the daemon log and the literal `mp daemon run` to type by hand.
 There is no fallback to answering in process: a command that quietly did the work locally would let the user believe the daemon did it.
 

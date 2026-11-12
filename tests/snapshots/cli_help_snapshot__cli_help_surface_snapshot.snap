@@ -1544,7 +1544,7 @@ Start the daemon (via the login service if installed) and return once it answers
 Usage: mp daemon start [OPTIONS]
 
 Options:
-      --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to become ready [default: 10]
+      --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to answer; one that has bound its socket gets up to 120 [default: 10]
   -h, --help                         Print help
 
 $ mp daemon status --help
@@ -1572,8 +1572,9 @@ Stop the running daemon and start this executable's (via the login service if in
 Usage: mp daemon restart [OPTIONS]
 
 Options:
-      --grace-secs <GRACE_SECS>  Seconds the daemon may spend settling work in flight (0 waits none)
-  -h, --help                     Print help
+      --grace-secs <GRACE_SECS>      Seconds the daemon may spend settling work in flight (0 waits none)
+      --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the new daemon to answer; one that has bound its socket gets up to 120 [default: 10]
+  -h, --help                         Print help
 
 $ mp daemon install-service --help
 Install the login-start service for this user and enable it
