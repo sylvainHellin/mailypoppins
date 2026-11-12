@@ -1157,19 +1157,17 @@ impl MessageAddress {
 /// The attachments of one message, materialised into files a picker can name
 /// (`RD-06`'s neighbour, `#0052` scope item 8).
 ///
-/// Two calls rather than one: `message.get` for the part list the row carries,
-/// then `message.materialise_attachment` per part. The files land in the
-/// daemon's handle directory instead of the per-row materialisation directory
-/// `mp open` writes to, which is the one visible consequence of the move: a
-/// handle expires (ten minutes by default) where a materialised copy survived
-/// until the temp directory was swept.
+/// Two calls rather than one: `message.attachments` for the part list
+/// (PERSO-222), then
+/// `message.materialise_attachment` per part. The files land in the daemon's
+/// handle directory, and a handle expires (ten minutes by default).
 ///
-/// The real attachments come first and the body's inline images after them
-/// (PERSO-165), each group in the row's own order; `part` stays the index in
-/// the daemon's full list, which is what addresses it.
+/// The list comes in reading order, the real attachments first and the
+/// body's inline images after them (PERSO-165), and each part is
+/// materialised by the `part` its entry carries, never by its position.
 ///
 /// A server-only hit is listed and cut by the daemon from the server's copy,
-/// with the same two calls and the same `part` order (PERSO-155).
+/// with the same two calls (PERSO-155).
 ///
 /// An empty list is a message with no attachments, which is the caller's
 /// status line to write; `Err` is a sentence for it to print.
@@ -1178,22 +1176,14 @@ pub(super) fn attachment_files(
     account: &str,
     address: &MessageAddress,
 ) -> Result<crate::app::AttachmentFiles, String> {
-    let mut get = address.params(account);
-    get["body"] = json!(false);
-    let shown = commands
-        .call("message.get", get)
+    let listing = mp_client::queries::message_attachments(commands, address.params(account))
         .map_err(|e| format!("{e:#}"))?;
-    let parts = shown["attachments"].as_array().cloned().unwrap_or_default();
-    let is_inline = |part: &Value| part["inline"].as_bool().unwrap_or(false);
-    let real: Vec<usize> = (0..parts.len())
-        .filter(|&p| !is_inline(&parts[p]))
-        .collect();
-    let inline_from = real.len();
-    let order = real
-        .into_iter()
-        .chain((0..parts.len()).filter(|&p| is_inline(&parts[p])));
-    let files = order
-        .map(|part| {
+    let inline_from = listing.attachments.iter().filter(|a| !a.inline).count();
+    let files = listing
+        .attachments
+        .iter()
+        .map(|entry| {
+            let part = entry.part;
             let mut params = address.params(account);
             params["part"] = json!(part);
             commands
@@ -2313,7 +2303,8 @@ mod tests {
     fn a_hits_attachments_and_view_are_the_rows_calls_with_its_address() {
         let door = Recorder::answering(json!({
             "handle": "h", "path": "/run/handles/h/x",
-            "attachments": [{"name": "a.pdf", "size": 3}],
+            "account": "alice", "selector": "mp://alice/sent/hit@example.com",
+            "attachments": [{"part": 0, "name": "a.pdf", "size": 3, "inline": false}],
         }));
         let hit = MessageAddress::Hit {
             message_id: "<hit@example.com>".to_string(),
@@ -2327,8 +2318,8 @@ mod tests {
             *door.calls.borrow(),
             vec![
                 (
-                    "message.get".to_string(),
-                    json!({"account": "alice", "hit": address, "body": false}),
+                    "message.attachments".to_string(),
+                    json!({"account": "alice", "hit": address}),
                 ),
                 (
                     "message.materialise_attachment".to_string(),
@@ -2340,6 +2331,41 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// The picker lists the parts in the daemon's order and materialises each
+    /// by the `part` it carries, not by its position: an inline logo stored
+    /// first comes last and is still part 0, and the inline group starts after
+    /// the real attachments (PERSO-222).
+    #[test]
+    fn the_parts_are_the_listings_order_materialised_by_their_own_index() {
+        let door = Recorder::answering(json!({
+            "handle": "h", "path": "/run/handles/h/x",
+            "account": "alice", "selector": "mp://alice/inbox/r@example.com",
+            "attachments": [
+                {"part": 1, "name": "Rechnung.pdf", "size": 8, "inline": false},
+                {"part": 0, "name": "image001.png", "size": 12, "inline": true},
+            ],
+        }));
+        let files = attachment_files(&door, "alice", &MessageAddress::Row(7)).unwrap();
+        assert_eq!(files.files.len(), 2);
+        assert_eq!(files.inline_from, 1);
+        let calls = door.calls.borrow();
+        assert_eq!(
+            calls[0],
+            (
+                "message.attachments".to_string(),
+                json!({"account": "alice", "row_id": 7})
+            )
+        );
+        let parts: Vec<&Value> = calls[1..]
+            .iter()
+            .map(|(method, params)| {
+                assert_eq!(method, "message.materialise_attachment");
+                &params["part"]
+            })
+            .collect();
+        assert_eq!(parts, [&json!(1), &json!(0)]);
     }
 
     /// `te` reads the file `message.materialise_eml` wrote, as `mp export`.

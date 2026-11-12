@@ -157,7 +157,7 @@ The table is what routes and through what:
 | `mp`'s `cX` and its RSVP key | `send.approved`, `calendar.rsvp`, the same wait | P5-U6 |
 | `mp`'s search overlay, local pass | `message.search` with `body: true` | P5-U6 |
 | `mp`'s reply, forward and compose-wizard forward | `draft.reply` / `draft.forward` by `row_id` | P5-U6 |
-| `mp`'s attachment key and browser key | `message.get`, then `message.materialise_attachment` per part; `message.materialise_html` | P5-U6 |
+| `mp`'s attachment key and browser key | `message.attachments`, then `message.materialise_attachment` per part; `message.materialise_html` | P5-U6, PERSO-222 |
 
 The TUI's row is a session rather than a call: `mp` with no arguments connects through the same `client_session` every command above goes through, before it takes over the terminal, and holds the connection until the user quits.
 It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal.

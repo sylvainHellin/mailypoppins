@@ -62,6 +62,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
+use mp_protocol::attachment::{MessageAttachments, METHOD_MESSAGE_ATTACHMENTS};
 use mp_protocol::calendar::{
     CalendarInfo, CalendarListResult, CalendarViewParams, CalendarViewResult, EventFrontmatter,
     EventProposedTime, EventRespondParams,
@@ -430,6 +431,20 @@ pub fn message_html(q: &dyn Queries, account: &str, row_id: i64) -> Result<Messa
     };
     let answer = q.call(METHOD_MESSAGE_HTML, serde_json::to_value(params)?)?;
     Ok(serde_json::from_value(answer)?)
+}
+
+/// One message's parts, through `message.attachments` (PERSO-222): in reading
+/// order, the real attachments and then the inline images, each with the
+/// `part` `message.materialise_attachment` takes.
+///
+/// `address` is the call's whole params, `account` and one of the addresses
+/// `message.get` takes (`row_id`, `id`, `selector` with an optional
+/// `mailbox`, or a server-search hit's `hit`), because a client holds one
+/// address form or another and the daemon resolves them all alike.
+pub fn message_attachments(q: &dyn Queries, address: Value) -> Result<MessageAttachments> {
+    Ok(serde_json::from_value(
+        q.call(METHOD_MESSAGE_ATTACHMENTS, address)?,
+    )?)
 }
 
 /// The conversation one message belongs to, through `message.thread`
@@ -898,6 +913,31 @@ mod tests {
         let seen = door.seen.borrow();
         assert_eq!(seen[0].0, "message.html");
         assert_eq!(seen[0].1, json!({"account": "work", "row_id": 3141}));
+    }
+
+    /// `message_attachments` sends the address it is given and decodes the
+    /// committed listing, whose order and indexes it keeps as the daemon
+    /// sent them.
+    #[test]
+    fn message_attachments_sends_the_address_and_keeps_the_daemons_order() {
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/message.attachments.response.json"
+        )));
+        let request: Value = serde_json::from_str(include_str!(
+            "../../mp-protocol/fixtures/message.attachments.request.json"
+        ))
+        .expect("fixture is JSON");
+        let address = request["params"].clone();
+        let listing = message_attachments(&door, address.clone()).expect("a listing");
+        let parts: Vec<(u32, &str)> = listing
+            .attachments
+            .iter()
+            .map(|a| (a.part, a.name.as_str()))
+            .collect();
+        assert_eq!(parts, vec![(1, "Rechnung.pdf"), (0, "image001.png")]);
+        let seen = door.seen.borrow();
+        assert_eq!(seen[0].0, "message.attachments");
+        assert_eq!(seen[0].1, address);
     }
 
     #[test]
