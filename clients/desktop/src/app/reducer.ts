@@ -1019,6 +1019,19 @@ function parseResource(resource: string): { family: string; parts: string[] } {
   return { family: resource.slice(0, i), parts: resource.slice(i + 1).split("/") };
 }
 
+/**
+ * A `state.remove` of `message:<account>/<mailbox>/<uid>` takes the local hit
+ * it names out of the search results (PERSO-286): the message left the
+ * mailbox the hit lists, moved by another client, a block or the daemon, as
+ * this window's own archive of a hit drops it. The mailbox may hold `/`; the
+ * uid is the last segment. A server hit carries no uid and stays.
+ */
+function dropRemovedHit(s: AppState, account: string, mailbox: string, uid: number): AppState {
+  if (!s.search || !Number.isInteger(uid)) return s;
+  const hits = s.search.hits.filter((h) => !(h.account === account && h.mailbox === mailbox && h.uid === uid));
+  return hits.length === s.search.hits.length ? s : { ...s, search: { ...s.search, hits } };
+}
+
 function staleMailboxes(s: AppState, account: string): AppState {
   const l = s.mailboxes[account];
   if (!l) return s;
@@ -1441,6 +1454,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       }
       if (family === "message") {
         const slug = parts[1] ?? "";
+        s = dropRemovedHit(s, account, parts.slice(1, -1).join("/"), Number(parts[parts.length - 1]));
         return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === slug);
       }
       return s;

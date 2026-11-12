@@ -291,3 +291,24 @@ describe("a search's seq", () => {
     expect(next.search?.seq).toBe(3);
   });
 });
+
+describe("a hit whose message left its mailbox (PERSO-286)", () => {
+  const removed = (resource: string, revision: number): Action => ({
+    type: "gui_event",
+    event: { type: "event", event: { instance_id: fixtures.bootstrap.instance_id, revision, kind: "state.remove", payload: { resource } } },
+  });
+  const hit = (id: number, message_id: string, uid: number, mailbox = "inbox"): LocalSearchHit => ({
+    ...localHit(id, message_id),
+    uid,
+    mailbox,
+  });
+
+  it("leaves the results by the state.remove that names its account, mailbox and uid", () => {
+    let s = run(booted(), { type: "search_local", query: "ledger" });
+    const hits = [hit(1001, "<moved@x>", 41), hit(1002, "<kept@x>", 42), hit(1003, "<elsewhere@x>", 41, "archive")];
+    s = run(s, { type: "search_local_loaded", seq: s.search!.seq, hits, order: "newest" });
+    const revision = fixtures.bootstrap.revision + 1;
+    s = run(s, removed("message:work/inbox/41", revision), removed("message:home/inbox/42", revision + 1));
+    expect(s.search?.hits.map((h) => h.message_id)).toEqual(["<kept@x>", "<elsewhere@x>"]);
+  });
+});

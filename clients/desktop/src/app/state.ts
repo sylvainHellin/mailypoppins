@@ -253,6 +253,11 @@ export type SearchHit = {
   message_id: string | null;
   /** Null for a server-only hit the store has never ingested. */
   row_id: number | null;
+  /**
+   * A local hit's uid in `mailbox`, which a `state.remove` of its message names
+   * it by (PERSO-286); null for a server hit, whose wire carries no uid.
+   */
+  uid: number | null;
   selector: string | null;
   from: string;
   subject: string;
