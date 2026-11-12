@@ -17,6 +17,14 @@
 //! daemon tick to list, select, search and IDLE, so a test can let the
 //! daemon in and then refuse it, the password changing while it runs.
 //!
+//! A test can replace that `INBOX` with folders of its own
+//! ([`RejectingImapServer::set_folders`]): `LIST` names them, `STATUS`,
+//! `SELECT` and `EXAMINE` report each one's UIDVALIDITY and UIDNEXT, and
+//! `UID FETCH` of `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` answers the
+//! Message-ID of each listed UID the selected folder holds, which is what a
+//! rename probe reads (PERSO-185). Nothing else reads the messages: a
+//! `SEARCH` still finds none.
+//!
 //! Two test trees use it: the daemon suites through `mod support;`, and the
 //! library's own unit tests, which include this file by path from
 //! `src/imap_client/mod.rs`, so the pool's test and the health row drive the
@@ -77,12 +85,51 @@ impl LoginPolicy {
     }
 }
 
+/// One folder of the server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FakeFolder {
+    pub name: String,
+    pub uidvalidity: u32,
+    pub uidnext: u32,
+    /// Each message's UID and its Message-ID, brackets included.
+    pub messages: Vec<(u32, String)>,
+}
+
+impl FakeFolder {
+    /// An empty folder with UIDVALIDITY 1, which is what `INBOX` is by
+    /// default.
+    pub fn empty(name: &str) -> FakeFolder {
+        FakeFolder {
+            name: name.to_string(),
+            uidvalidity: 1,
+            uidnext: 1,
+            messages: Vec::new(),
+        }
+    }
+}
+
 /// What every connection shares with the test.
 struct Shared {
     logins: AtomicUsize,
     policy: AtomicU8,
     /// The open connections, so a test can cut them all at once.
     connections: Mutex<Vec<TcpStream>>,
+    /// What `LIST` names, in order.
+    folders: Mutex<Vec<FakeFolder>>,
+}
+
+impl Shared {
+    /// The folder `name`, or an empty one for a name `LIST` does not give,
+    /// which is how this server answered every name before it held folders.
+    fn folder(&self, name: &str) -> FakeFolder {
+        self.folders
+            .lock()
+            .expect("the folder list")
+            .iter()
+            .find(|f| f.name == name)
+            .cloned()
+            .unwrap_or_else(|| FakeFolder::empty(name))
+    }
 }
 
 /// A running server, which lives as long as the test process.
@@ -106,6 +153,7 @@ impl RejectingImapServer {
             logins: AtomicUsize::new(0),
             policy: AtomicU8::new(policy.as_u8()),
             connections: Mutex::new(Vec::new()),
+            folders: Mutex::new(vec![FakeFolder::empty("INBOX")]),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -148,6 +196,12 @@ impl RejectingImapServer {
     /// stay logged in.
     pub fn set_policy(&self, policy: LoginPolicy) {
         self.shared.policy.store(policy.as_u8(), Ordering::SeqCst);
+    }
+
+    /// Serve `folders` in place of the empty `INBOX`, from the next command
+    /// on.
+    pub fn set_folders(&self, folders: Vec<FakeFolder>) {
+        *self.shared.folders.lock().expect("the folder list") = folders;
     }
 
     /// Cut every open connection, the way a server drops the sessions of an
@@ -200,6 +254,7 @@ async fn serve(
     // says nothing until it is asked.
     let mut tls = BufReader::new(tls);
     let mut logged_in = false;
+    let mut selected: Option<FakeFolder> = None;
     loop {
         let mut line = String::new();
         if tls.read_line(&mut line).await? == 0 {
@@ -241,17 +296,56 @@ async fn serve(
             "LOGOUT" => format!("* BYE\r\n{tag} OK LOGOUT completed\r\n"),
             _ if !logged_in => format!("{tag} BAD not logged in\r\n"),
             "LIST" => {
-                format!("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n")
+                let mut reply = String::new();
+                for folder in shared.folders.lock().expect("the folder list").iter() {
+                    reply.push_str(&format!(
+                        "* LIST (\\HasNoChildren) \"/\" \"{}\"\r\n",
+                        folder.name
+                    ));
+                }
+                format!("{reply}{tag} OK LIST completed\r\n")
             }
-            "SELECT" | "EXAMINE" => format!(
-                "* 0 EXISTS\r\n* 0 RECENT\r\n* FLAGS (\\Seen \\Deleted \\Draft)\r\n\
-                 * OK [UIDVALIDITY 1] UIDs valid\r\n* OK [UIDNEXT 1] Predicted next UID\r\n\
-                 {tag} OK [READ-WRITE] {command} completed\r\n"
-            ),
-            "STATUS" => format!(
-                "* STATUS {} (MESSAGES 0 UNSEEN 0)\r\n{tag} OK STATUS completed\r\n",
-                words.get(2).copied().unwrap_or("INBOX")
-            ),
+            "SELECT" | "EXAMINE" => {
+                let folder = shared.folder(&quoted_name(&line));
+                let reply = format!(
+                    "* {} EXISTS\r\n* 0 RECENT\r\n* FLAGS (\\Seen \\Deleted \\Draft)\r\n\
+                         * OK [UIDVALIDITY {}] UIDs valid\r\n\
+                         * OK [UIDNEXT {}] Predicted next UID\r\n\
+                         {tag} OK [READ-WRITE] {command} completed\r\n",
+                    folder.messages.len(),
+                    folder.uidvalidity,
+                    folder.uidnext
+                );
+                selected = Some(folder);
+                reply
+            }
+            "STATUS" => {
+                let folder = shared.folder(&quoted_name(&line));
+                format!(
+                    "* STATUS \"{}\" (MESSAGES {} UNSEEN 0 UIDVALIDITY {} UIDNEXT {})\r\n\
+                     {tag} OK STATUS completed\r\n",
+                    folder.name,
+                    folder.messages.len(),
+                    folder.uidvalidity,
+                    folder.uidnext
+                )
+            }
+            "FETCH" if verb == "UID" => {
+                let wanted = words.get(3).copied().unwrap_or_default();
+                let mut reply = String::new();
+                for (seq, (uid, id)) in selected.iter().flat_map(|f| f.messages.iter()).enumerate()
+                {
+                    if wanted.split(',').any(|w| w == uid.to_string()) {
+                        let header = format!("Message-ID: {id}\r\n\r\n");
+                        reply.push_str(&format!(
+                            "* {} FETCH (UID {uid} BODY[HEADER.FIELDS (MESSAGE-ID)] {{{}}}\r\n{header})\r\n",
+                            seq + 1,
+                            header.len()
+                        ));
+                    }
+                }
+                format!("{reply}{tag} OK FETCH completed\r\n")
+            }
             "SEARCH" => format!("* SEARCH\r\n{tag} OK SEARCH completed\r\n"),
             "IDLE" => {
                 tls.get_mut().write_all(b"+ idling\r\n").await?;
@@ -274,5 +368,19 @@ async fn serve(
         if verb == "LOGOUT" {
             return Ok(());
         }
+    }
+}
+
+/// The mailbox a `SELECT`, `EXAMINE` or `STATUS` line names: its first
+/// quoted string, else its third word.
+fn quoted_name(line: &str) -> String {
+    let mut quoted = line.split('"');
+    match (quoted.next(), quoted.next()) {
+        (Some(_), Some(name)) => name.to_string(),
+        _ => line
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .to_string(),
     }
 }

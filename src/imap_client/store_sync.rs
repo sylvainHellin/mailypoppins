@@ -346,6 +346,110 @@ pub async fn status_counts(
     pooled.check(counted)
 }
 
+/// What the server says of one folder a listing gained, for telling a folder
+/// it renamed from a new one (PERSO-185).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FolderIdentity {
+    /// The name as the server lists it.
+    pub name: String,
+    pub uidvalidity: Option<u32>,
+    pub uidnext: Option<u32>,
+    /// The bare Message-ID of each sampled UID the folder holds and whose
+    /// header carries one, by ascending UID.
+    pub message_ids: Vec<(u32, String)>,
+}
+
+/// The `UID FETCH` items of a rename probe: the Message-ID header alone.
+const MESSAGE_ID_QUERY: &str = "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])";
+
+/// One `STATUS (UIDVALIDITY UIDNEXT)` per folder of `names`, on one borrowed
+/// session, and for a folder whose UIDVALIDITY is one of `samples`', an
+/// `EXAMINE` and a `UID FETCH` of that sample's UIDs for their Message-IDs
+/// (PERSO-185).
+///
+/// A folder the server refuses a `STATUS` or an `EXAMINE` of is left out
+/// and logged: no answer is no evidence of a rename, never an error that
+/// fails the listing.
+pub async fn folder_identities(
+    imap_config: &ImapConfig,
+    names: &[String],
+    samples: &[(u32, Vec<u32>)],
+) -> Result<Vec<FolderIdentity>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pooled = pool::checkout(imap_config).await?;
+    let probed = identities_on(pooled.session(), names, samples).await;
+    pooled.check(probed)
+}
+
+/// [`folder_identities`] on a session already open.
+async fn identities_on(
+    session: &mut super::ImapSession,
+    names: &[String],
+    samples: &[(u32, Vec<u32>)],
+) -> Result<Vec<FolderIdentity>> {
+    use futures::TryStreamExt;
+
+    let mut seen = Vec::with_capacity(names.len());
+    for name in names {
+        let status = match session.status(name, "(UIDVALIDITY UIDNEXT)").await {
+            Ok(status) => status,
+            Err(async_imap::error::Error::No(why)) => {
+                log::warn!("[catalogue] STATUS {name} was refused: {why}");
+                continue;
+            }
+            Err(e) => return Err(anyhow!("STATUS {name} failed: {e}")),
+        };
+        let mut identity = FolderIdentity {
+            name: name.clone(),
+            uidvalidity: status.uid_validity,
+            uidnext: status.uid_next,
+            message_ids: Vec::new(),
+        };
+        let sample = samples
+            .iter()
+            .find(|(uidvalidity, _)| Some(*uidvalidity) == status.uid_validity)
+            .map(|(_, uids)| uids)
+            .filter(|uids| !uids.is_empty());
+        if let Some(uids) = sample {
+            match session.examine(name).await {
+                Ok(_) => {}
+                Err(async_imap::error::Error::No(why)) => {
+                    log::warn!("[catalogue] EXAMINE {name} was refused: {why}");
+                    seen.push(identity);
+                    continue;
+                }
+                Err(e) => return Err(anyhow!("EXAMINE {name} failed: {e}")),
+            }
+            let set = uids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let fetched: Vec<_> = session
+                .uid_fetch(&set, MESSAGE_ID_QUERY)
+                .await
+                .map_err(|e| anyhow!("Failed to fetch the Message-IDs of {name}: {e}"))?
+                .try_collect()
+                .await
+                .map_err(|e| anyhow!("Failed to collect the Message-IDs of {name}: {e}"))?;
+            identity.message_ids = fetched
+                .iter()
+                .filter_map(|msg| {
+                    let id =
+                        crate::draft_mirror::folder::header_value(msg.header()?, "Message-ID")?;
+                    let bare = crate::draft_mirror::folder::bare_message_id(&id).to_string();
+                    Some((msg.uid?, bare)).filter(|(_, bare)| !bare.is_empty())
+                })
+                .collect();
+            identity.message_ids.sort();
+        }
+        seen.push(identity);
+    }
+    Ok(seen)
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;
@@ -400,5 +504,71 @@ mod tests {
             .await
         });
         assert_eq!(out, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// PERSO-185: the rename probe reads each gained folder's UIDVALIDITY and
+    /// UIDNEXT with a `STATUS`, and the Message-IDs of the sampled UIDs only
+    /// from a folder carrying the UIDVALIDITY a lost folder had, bare, and
+    /// only for the UIDs the folder still holds.
+    #[test]
+    fn the_rename_probe_reads_uidvalidity_uidnext_and_message_ids() {
+        use crate::config::ImapConfig;
+        use crate::imap_client::fake_imap::{FakeFolder, LoginPolicy, RejectingImapServer};
+
+        let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+        server.set_folders(vec![
+            FakeFolder::empty("INBOX"),
+            FakeFolder {
+                name: "Projekte".to_string(),
+                uidvalidity: 7,
+                uidnext: 4,
+                messages: vec![
+                    (1, "<one@example.com>".to_string()),
+                    (3, "<three@example.com>".to_string()),
+                ],
+            },
+            FakeFolder {
+                name: "Neu".to_string(),
+                uidvalidity: 9,
+                uidnext: 2,
+                messages: vec![(1, "<other@example.com>".to_string())],
+            },
+        ]);
+        let config = ImapConfig {
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            username: "probe@example.com".into(),
+            password: "right".into(),
+            accept_invalid_certs: true,
+            fetch_concurrency: 4,
+            body_fetch_deadline_secs: 30,
+        };
+
+        let seen = futures::executor::block_on(super::folder_identities(
+            &config,
+            &["Projekte".to_string(), "Neu".to_string()],
+            &[(7, vec![1, 2, 3])],
+        ))
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                super::FolderIdentity {
+                    name: "Projekte".to_string(),
+                    uidvalidity: Some(7),
+                    uidnext: Some(4),
+                    message_ids: vec![
+                        (1, "one@example.com".to_string()),
+                        (3, "three@example.com".to_string()),
+                    ],
+                },
+                super::FolderIdentity {
+                    name: "Neu".to_string(),
+                    uidvalidity: Some(9),
+                    uidnext: Some(2),
+                    message_ids: Vec::new(),
+                },
+            ]
+        );
     }
 }
