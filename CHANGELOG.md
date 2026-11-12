@@ -132,6 +132,8 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- The daemon no longer retries an IMAP login the server refused: the same password waits an hour, or until `mp config set-password` or a sync you start, a refused tick ends as failed, `mp daemon health` says "login rejected by the server", and a move, flag or draft push queued meanwhile stays queued instead of being rolled back (PERSO-296).
+- Server search with umlauts or other non-ASCII text sends the value as a UTF-8 literal under `CHARSET UTF-8` (RFC 3501), and a server that cannot search UTF-8 is reported as such (PERSO-214).
 - A mail whose body opens with hundreds of blank lines no longer reads as empty: every view (`mp show`, search output, TUI preview, desktop reader, Markdown view) and every reply or forward quote drops a body's leading and trailing blank lines and collapses runs of more than two to one; the stored message is unchanged (PERSO-291).
 - `mp daemon start` and `mp daemon restart` wait up to 120 s for a daemon that is up and still opening its stores instead of exiting 4 at 10 s, a command that starts the daemon on demand waits the same way, and `restart` takes `--timeout-secs` (PERSO-109).
 - `mp send` no longer reports a delivered mail as failed when a sync tick lands inside its SMTP session (PERSO-280).
