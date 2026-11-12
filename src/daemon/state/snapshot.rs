@@ -59,9 +59,9 @@ pub struct AccountSeed {
 /// cannot disagree with itself about which mailboxes an account has (#0141).
 /// It creates no store: the catalogue is read from a store that exists, and an
 /// account without one is seeded from its config alone. It does open every
-/// store that exists, so it is the configuration swap's, whose accounts the
-/// runtimes have mostly opened already; the daemon's startup seeds from
-/// [`config_seeds`] instead.
+/// store that exists but one the daemon is still opening ([`seed_of`]), so it
+/// is the configuration swap's, whose accounts the runtimes have mostly opened
+/// already; the daemon's startup seeds from [`config_seeds`] instead.
 pub fn seeds_from_config(accounts: &[AccountConfig]) -> Vec<AccountSeed> {
     accounts.iter().map(seed_of).collect()
 }
@@ -82,9 +82,18 @@ pub fn config_seeds(accounts: &[AccountConfig]) -> Vec<AccountSeed> {
         .collect()
 }
 
-/// One account's seed, from its catalogue as the store holds it.
+/// One account's seed, from its catalogue as the store holds it, or from its
+/// configuration alone while the daemon is still opening its store: a swap
+/// during the startup window would otherwise open that store a second time,
+/// and the account's start completes the seed once the store is open
+/// (PERSO-109).
 pub fn seed_of(account: &AccountConfig) -> AccountSeed {
-    seed_with(account, &crate::catalogue::Catalogue::load(account))
+    let catalogue = if crate::daemon::opening::is_opening(&account.name) {
+        crate::catalogue::Catalogue::resolve(account, &[])
+    } else {
+        crate::catalogue::Catalogue::load(account)
+    };
+    seed_with(account, &catalogue)
 }
 
 /// One account's seed, from a catalogue already in hand.
@@ -471,4 +480,38 @@ fn per_account<T>(map: &BTreeMap<String, T>, render: impl Fn(&T) -> Value) -> Va
             .map(|(name, value)| (name.clone(), render(value)))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration swap seeds every account from its store, and an
+    /// account whose store the daemon is still opening is seeded from its
+    /// configuration instead: opening that store again would run a second
+    /// integrity check of it, and on a file the check rejects would drop it
+    /// under the runtime opening it (PERSO-109).
+    #[test]
+    fn a_swap_seeds_an_opening_account_without_opening_its_store() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = AccountConfig {
+            name: "seed-opening".to_string(),
+            ..Default::default()
+        };
+        let dir = crate::config::account_dir(&account.name);
+        crate::config::create_private_dir_all(&dir).expect("the account directory");
+        let path = crate::config::store_path(&account.name);
+        std::fs::write(&path, b"not a database").expect("a store file");
+
+        let mark = crate::daemon::opening::begin(&account.name);
+        let seeds = seeds_from_config(std::slice::from_ref(&account));
+        drop(mark);
+
+        assert_eq!(seeds, config_seeds(std::slice::from_ref(&account)));
+        assert_eq!(
+            std::fs::read(&path).expect("the store file"),
+            b"not a database",
+            "the seed left the store the daemon is opening alone"
+        );
+    }
 }
