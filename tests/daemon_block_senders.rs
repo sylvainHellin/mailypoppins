@@ -590,6 +590,61 @@ async fn keeping_existing_mail_moves_nothing_and_unblocking_moves_nothing_back()
     assert_eq!(slice.mailbox_of(ALPHA, "old@x"), "inbox");
 }
 
+/// An owed-moves file that does not parse never fails an unblock: the entry
+/// leaves the list, every bootstrapped client hears the new list, a second
+/// unblock answers too, and the broken file is left as it is (PERSO-109).
+#[tokio::test]
+async fn a_broken_owed_moves_file_never_fails_an_unblock() {
+    let slice = Slice::start(|_| {});
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({}))
+        .await
+        .unwrap();
+    let mut conn = slice.connect().await;
+    for address in ["spam@x.com", "@other.example"] {
+        call(
+            &mut conn,
+            "sender.block",
+            json!({"address": address, "move_existing": false}),
+        )
+        .await
+        .unwrap();
+        next_blocklist_event(&mut watcher).await;
+    }
+    let owed = slice.root().join(mailypoppins::daemon::senders::OWED_FILE);
+    std::fs::write(&owed, "not an owed-moves file").unwrap();
+
+    let unblocked = call(
+        &mut conn,
+        "sender.unblock",
+        json!({"address": "spam@x.com"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        unblocked,
+        json!({"entry": "spam@x.com", "removed": true, "entries": ["@other.example"]})
+    );
+    assert_eq!(
+        next_blocklist_event(&mut watcher).await,
+        json!({"entries": ["@other.example"]})
+    );
+    let unblocked = call(
+        &mut conn,
+        "sender.unblock",
+        json!({"address": "@other.example"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unblocked["entries"], json!([]), "{unblocked}");
+    let listed = call(&mut conn, "sender.list", json!({})).await.unwrap();
+    assert_eq!(listed, json!({"entries": []}));
+    assert_eq!(
+        std::fs::read_to_string(&owed).unwrap(),
+        "not an owed-moves file"
+    );
+}
+
 /// Mail a tick brings in from a blocked sender moves to Junk once the tick
 /// ends, and a message the user moved back to the Inbox stays there.
 #[tokio::test]

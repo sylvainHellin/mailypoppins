@@ -211,6 +211,11 @@ pub fn block(path: &Path, entry: &str) -> Result<Edit> {
 
 /// Remove `entry`, already [`normalize`]d, from the list at `path`, and the
 /// moves owed for it from every account ([`owe`]). Nothing moves back.
+///
+/// The unblock stands once the list is saved: an owed-moves file that does
+/// not parse or cannot be written is logged and left as it is, and an owed
+/// move it still keeps for `entry` settles unmoved once it parses again,
+/// since the list no longer holds the entry ([`move_owed`]).
 pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
     let _turn = locked();
     let mut entries = load(path)?;
@@ -220,8 +225,19 @@ pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
     if changed {
         save(path, &entries)?;
     }
-    let owed_path = owed_path(path);
-    let mut owed = load_owed(&owed_path)?;
+    if let Err(e) = forget_owed(&owed_path(path), entry) {
+        warn!("unblocked {entry} but left its owed moves as they are: {e:#}");
+    }
+    Ok(Edit {
+        entry: entry.to_string(),
+        changed,
+        entries,
+    })
+}
+
+/// Drop `entry` from every account's owed moves in the file at `path`.
+fn forget_owed(path: &Path, entry: &str) -> Result<()> {
+    let mut owed = load_owed(path)?;
     let mut settled = false;
     owed.accounts.retain(|_, owed| {
         let before = owed.len();
@@ -230,13 +246,9 @@ pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
         !owed.is_empty()
     });
     if settled {
-        save_owed(&owed_path, &owed)?;
+        save_owed(path, &owed)?;
     }
-    Ok(Edit {
-        entry: entry.to_string(),
-        changed,
-        entries,
-    })
+    Ok(())
 }
 
 /// The owed moves beside the list at `list`.

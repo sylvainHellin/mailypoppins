@@ -974,6 +974,7 @@ An `address` that is neither a full address nor `@domain` is `-32602` with the s
 
 After every tick that ran a body, each ready account with a server judges the Inbox rows that arrived since its last scan and moves the ones from a blocked sender to Junk the same way ([architecture.md](architecture.md#watchers)); a message the user moved back to the Inbox after it was judged stays there.
 `sender.unblock` only removes the entry and the moves still owed for it: nothing moves back.
+An owed-moves file that does not parse never fails an unblock: the daemon logs a warning and leaves the file as it is.
 Both writers publish `sender.blocklist_changed` `{entries}` when the list changed, and the mailbox counts of every account whose mail moved.
 As for a `message.move`, each moved message is announced as a `state.remove` of its Inbox row and the Junk listing as a `state.invalidate` with scope `{"query": "list"}` (PERSO-286), so every client, the one that blocked included, drops the rows from what it holds without reloading on the answer.
 
