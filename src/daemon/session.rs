@@ -139,9 +139,10 @@ impl Session {
 
         let request = InitializeParams::parse(params)?;
         check_identity(&request, state)?;
-        let protocol = select_protocol(&request)?;
+        let version = &state.meta.app_version;
+        let protocol = select_protocol(&request, version)?;
         let offered = capabilities(state);
-        check_capabilities(&request, &offered)?;
+        check_capabilities(&request, &offered, version)?;
 
         let negotiated = self.negotiated.insert(Negotiated {
             protocol,
@@ -262,8 +263,16 @@ fn check_identity(request: &InitializeParams, state: &DaemonState) -> Result<(),
     ))
 }
 
-/// The highest version both sides can speak, or the refusal naming both ranges.
-fn select_protocol(request: &InitializeParams) -> Result<u32, RpcError> {
+/// The daemon as a version refusal names it: its application version and
+/// protocol range, which a refused client cannot read from a handshake result
+/// it never gets (PERSO-277).
+fn refusing_daemon(version: &str) -> Value {
+    json!({"version": version, "min": PROTOCOL_MIN, "max": PROTOCOL_MAX})
+}
+
+/// The highest version both sides can speak, or the refusal naming both ranges
+/// and the daemon's `version`.
+fn select_protocol(request: &InitializeParams, version: &str) -> Result<u32, RpcError> {
     let low = request.protocol_min.max(PROTOCOL_MIN);
     let high = request.protocol_max.min(PROTOCOL_MAX);
     if low <= high {
@@ -273,14 +282,19 @@ fn select_protocol(request: &InitializeParams) -> Result<u32, RpcError> {
         ErrorCode::ProtocolIncompatible,
         "no protocol version is supported by both sides",
         json!({
-            "daemon": {"min": PROTOCOL_MIN, "max": PROTOCOL_MAX},
+            "daemon": refusing_daemon(version),
             "client": {"min": request.protocol_min, "max": request.protocol_max},
         }),
     ))
 }
 
-/// Refuse a client requiring capabilities this build does not offer.
-fn check_capabilities(request: &InitializeParams, offered: &[String]) -> Result<(), RpcError> {
+/// Refuse a client requiring capabilities this build does not offer, naming
+/// them and the daemon's `version`.
+fn check_capabilities(
+    request: &InitializeParams,
+    offered: &[String],
+    version: &str,
+) -> Result<(), RpcError> {
     let missing: Vec<&String> = request
         .required
         .iter()
@@ -292,7 +306,7 @@ fn check_capabilities(request: &InitializeParams, offered: &[String]) -> Result<
     Err(rpc_error(
         ErrorCode::CapabilityMissing,
         "the daemon does not offer every required capability",
-        json!({"missing": missing}),
+        json!({"missing": missing, "daemon": refusing_daemon(version)}),
     ))
 }
 
@@ -674,7 +688,7 @@ mod tests {
         assert_eq!(data["client"], json!({"min": 2, "max": 2}));
         assert_eq!(
             data["daemon"],
-            json!({"min": PROTOCOL_MIN, "max": PROTOCOL_MAX})
+            json!({"version": "0.0.0-test", "min": PROTOCOL_MIN, "max": PROTOCOL_MAX})
         );
     }
 
@@ -697,6 +711,12 @@ mod tests {
         assert_eq!(error.code, ErrorCode::CapabilityMissing.code());
         let data = error.data.expect("capability_missing carries data");
         assert_eq!(data["missing"], json!(["no.such.capability"]));
+        // The refusal names the daemon too, so a client can say which version
+        // it reached without a handshake it was just refused (PERSO-277).
+        assert_eq!(
+            data["daemon"],
+            json!({"version": "0.0.0-test", "min": PROTOCOL_MIN, "max": PROTOCOL_MAX})
+        );
     }
 
     /// What the TUI requires at its handshake (#0138) is served by this build,
@@ -729,7 +749,7 @@ mod tests {
             .collect();
         assert!(older.iter().any(|name| name == "message.list_stream"));
 
-        let error = check_capabilities(&request, &older).expect_err("refused");
+        let error = check_capabilities(&request, &older, "0.0.0-test").expect_err("refused");
         assert_eq!(error.code, ErrorCode::CapabilityMissing.code());
         let data = error.data.expect("capability_missing carries data");
         assert_eq!(data["missing"], json!(["message.list_conversations"]));

@@ -1382,8 +1382,8 @@ The daemon's conditions occupy `-32010` to `-32000`.
 |---:|---|---|
 | -32000 | `not_initialized` | `{}` |
 | -32001 | `identity_mismatch` | `{daemon: {data_dir, config_dir}, client: {data_dir, config_dir}}` |
-| -32002 | `protocol_incompatible` | `{daemon: {min, max}, client: {min, max}}` |
-| -32003 | `capability_missing` | `{missing: [..]}` |
+| -32002 | `protocol_incompatible` | `{daemon: {version, min, max}, client: {min, max}}` |
+| -32003 | `capability_missing` | `{missing: [..], daemon: {version, min, max}}` |
 | -32004 | `frame_too_large` | `{limit, seen, fallback?}` |
 | -32005 | `account_unknown` | `{account}` |
 | -32006 | `account_not_ready` | `{account, state}` |
@@ -1393,6 +1393,9 @@ The daemon's conditions occupy `-32010` to `-32000`.
 | -32010 | `draft_invalid` | `{account, id, path, diagnostics: [{line, message}]}` |
 
 `identity_mismatch` names both directories on both sides so the client can print all four and tell the user which override to drop.
+
+The two version refusals name the daemon's application `version` and protocol range, because a refused client never reads the handshake result that would otherwise tell it which daemon it reached.
+A daemon of 0.12.0 or older sends `daemon: {min, max}` without `version` in `protocol_incompatible` and no `daemon` in `capability_missing`, so a client treats the field as optional.
 `frame_too_large` reports the cap that was breached and the byte count that breached it, the same pair the decoder produces.
 `message.html` answers it for a rendition over its own 8 MiB inline limit, with `fallback` naming the method that serves the same bytes as a file.
 It can also arrive inside an `operation.finished` event as a failed operation's `error`: a `message.list_stream` row too large for any frame fails the stream that way, with the same `{limit, seen}` and no `fallback`.

@@ -744,8 +744,12 @@ async fn an_unsupported_protocol_range_is_protocol_incompatible() {
     );
     assert_eq!(
         reply["error"]["data"]["daemon"],
-        json!({"min": PROTOCOL_MIN, "max": PROTOCOL_MAX}),
-        "the refusal names the daemon's range, got {reply}"
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "min": PROTOCOL_MIN,
+            "max": PROTOCOL_MAX,
+        }),
+        "the refusal names the daemon's version and range, got {reply}"
     );
 }
 
@@ -785,6 +789,17 @@ async fn a_missing_required_capability_is_capability_missing() {
         listed,
         missing.map(str::to_string).to_vec(),
         "capability_missing lists exactly the required identifiers the daemon lacks"
+    );
+    // A refused client never sees the handshake result, so the refusal is
+    // where it learns which daemon it reached (PERSO-277).
+    assert_eq!(
+        data["daemon"],
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "min": PROTOCOL_MIN,
+            "max": PROTOCOL_MAX,
+        }),
+        "capability_missing names the daemon's version and protocol range"
     );
 }
 
