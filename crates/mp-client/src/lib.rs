@@ -34,12 +34,14 @@ pub mod queries;
 pub mod session;
 
 mod connection;
+mod refusal;
 mod state;
 mod types;
 
 pub use connection::{
     opening_account, Connection, Inbound, OPENING_NOTICE_AFTER, OPENING_POLL, OPENING_WAIT,
 };
+pub use refusal::{RefusalReason, VersionRefusal};
 pub use state::{Observe, StateTracker};
 pub use types::{
     ClientError, ClientInfo, ClientKind, ConfigStatus, Identity, InitializeResult, PlatformInfo,

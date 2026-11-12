@@ -161,7 +161,7 @@ The table is what routes and through what:
 The TUI's row is a session rather than a call: `mp` with no arguments connects through the same `client_session` every command above goes through, before it takes over the terminal, and holds the connection until the user quits.
 It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal.
 A daemon it cannot reach ends the run with the ordinary exit-4 diagnostic, on a terminal that is still in its normal mode.
-Its handshake requires `message.list_stream` (`TUI_REQUIRED_CAPABILITIES` in `src/daemon/client.rs`), which no one-shot command does, so a daemon too old to stream a mailbox ends the run at once with that diagnostic and `mp daemon restart` as the way out, instead of starting the TUI over mailboxes that open empty.
+Its handshake requires `message.list_stream` (`TUI_REQUIRED_CAPABILITIES` in `src/daemon/client.rs`), which no one-shot command does, so a daemon too old to stream a mailbox ends the run at once with that diagnostic, naming the daemon's version and this build's, and `mp daemon restart` as the way out, instead of starting the TUI over mailboxes that open empty.
 
 Since P5-U4 the three reads a frame needs go the same way, through `crate::tui::queries` and the session the `App` holds.
 The two that can wait keep the thread they always had and block on a call rather than on a store open: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup, both through a `Session::handle()` a worker thread can own, so nothing about the load moved onto the draw thread.

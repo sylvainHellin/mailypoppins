@@ -51,8 +51,7 @@ use anyhow::{bail, Result};
 use colored::Colorize;
 use log::{info, warn};
 
-use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
-use mp_protocol::ErrorCode;
+use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity, VersionRefusal};
 
 use super::lifecycle::{self, EXIT_UNAVAILABLE};
 use super::runtime::socket_path;
@@ -326,8 +325,8 @@ pub const TUI_REQUIRED_CAPABILITIES: &[&str] =
 
 /// Connect, starting a daemon on demand, or say why it could not be done.
 ///
-/// A daemon that refuses the handshake for a missing capability is answered at
-/// once: it is listening, so starting one on demand would find it running and
+/// A daemon that refuses the handshake for a missing capability or a disjoint
+/// protocol range is answered at once: it is listening, so starting one on demand would find it running and
 /// the retries would meet the same refusal until the budget ran out.
 async fn open_session(required: &[&str]) -> Result<(Connection, String), String> {
     let socket = socket_path();
@@ -377,19 +376,15 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
     }
 }
 
-/// Why a handshake refused for a missing capability cannot be answered by
-/// starting a daemon, or `None` for any other failure.
+/// Why a handshake refused for a missing capability or a disjoint protocol
+/// range cannot be answered by starting a daemon, naming both versions
+/// (PERSO-277), or `None` for any other failure.
 fn too_old(error: &ClientError) -> Option<String> {
-    match error {
-        ClientError::Rpc(error) if error.code == ErrorCode::CapabilityMissing.code() => {
-            Some(format!(
-                "the running daemon is too old for this client ({}); \
-                 restart it on this build with `mp daemon restart`",
-                error.message
-            ))
-        }
-        _ => None,
-    }
+    let refusal = VersionRefusal::from_error(error)?;
+    Some(format!(
+        "{}; restart it on this build with `mp daemon restart`",
+        refusal.describe(env!("CARGO_PKG_VERSION"))
+    ))
 }
 
 /// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
@@ -453,6 +448,7 @@ pub fn unavailable(why: &str, socket: &Path) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp_protocol::ErrorCode;
 
     /// The no-daemon list, as plan section 3.6 (P4-U2) fixes it, plus
     /// `mp completions`, which prints a script generated from clap alone.
@@ -517,17 +513,48 @@ mod tests {
         assert!(needs_daemon(None, None));
     }
 
-    /// A handshake refused for a missing capability is answered at once, with
+    /// A handshake refused for a missing capability or a disjoint protocol
+    /// range is answered at once, naming both versions, what is missing and
     /// the way out; any other failure still goes to the on-demand start.
     #[test]
-    fn only_a_missing_capability_is_answered_without_an_autostart() {
+    fn only_a_version_refusal_is_answered_without_an_autostart() {
         let missing = ClientError::Rpc(mp_protocol::RpcError {
             code: ErrorCode::CapabilityMissing.code(),
-            message: "the daemon lacks message.list_stream".to_string(),
-            data: None,
+            message: "the daemon does not offer every required capability".to_string(),
+            data: Some(serde_json::json!({
+                "missing": ["message.list_stream"],
+                "daemon": {"version": "0.11.0", "min": 1, "max": 1},
+            })),
         });
         let why = too_old(&missing).expect("a missing capability is final");
         assert!(why.contains("message.list_stream"), "{why}");
+        assert!(why.contains("mailypoppins 0.11.0"), "{why}");
+        assert!(
+            why.contains(concat!("mailypoppins ", env!("CARGO_PKG_VERSION"))),
+            "{why}"
+        );
+        assert!(why.contains("mp daemon restart"), "{why}");
+
+        let older = ClientError::Rpc(mp_protocol::RpcError {
+            code: ErrorCode::CapabilityMissing.code(),
+            message: "the daemon does not offer every required capability".to_string(),
+            data: Some(serde_json::json!({"missing": ["message.list_stream"]})),
+        });
+        let why = too_old(&older).expect("a daemon that predates the version is final too");
+        assert!(why.contains("does not report its version"), "{why}");
+        assert!(why.contains("message.list_stream"), "{why}");
+
+        let disjoint = ClientError::Rpc(mp_protocol::RpcError {
+            code: ErrorCode::ProtocolIncompatible.code(),
+            message: "no protocol version is supported by both sides".to_string(),
+            data: Some(serde_json::json!({
+                "daemon": {"version": "9.0.0", "min": 2, "max": 2},
+                "client": {"min": 1, "max": 1},
+            })),
+        });
+        let why = too_old(&disjoint).expect("a disjoint protocol range is final");
+        assert!(why.contains("mailypoppins 9.0.0"), "{why}");
+        assert!(why.contains("protocol 2"), "{why}");
         assert!(why.contains("mp daemon restart"), "{why}");
 
         assert!(too_old(&ClientError::NotRunning).is_none());
