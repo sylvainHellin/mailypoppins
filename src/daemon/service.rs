@@ -3,7 +3,8 @@
 //! Two local commands that write one file and call one service manager. No
 //! daemon has to be running and no wire method is added: asking a running
 //! daemon to arrange for a daemon to run would be circular, and the file this
-//! writes is the thing that starts one.
+//! writes is the thing that starts one. A daemon that is running is handed
+//! over to the service the install enables (PERSO-219, see [`install`]).
 //!
 //! ## What is written, and where
 //!
@@ -169,7 +170,17 @@ enum Mode {
 // ---------------------------------------------------------------------------
 
 /// Write the unit for this platform and ask the session manager to enable it.
-pub fn install(force: bool, check: bool) -> Result<i32> {
+///
+/// A daemon already answering on the socket is handed over to the service
+/// (PERSO-219) whenever the service manager is run and the service can start
+/// this daemon ([`start_route`]): the service is registered without being
+/// started, the daemon is stopped over its socket, and the manager's restart
+/// brings the service up, which is `mp daemon restart`'s stop and start. An
+/// `enable --now` beside it would start a daemon that cannot bind the socket
+/// the running one holds, so the unit would crash-loop until that one
+/// stopped. A registration that fails exits 1 with the running daemon left
+/// alone.
+pub async fn install(force: bool, check: bool) -> Result<i32> {
     let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
     let path = service_path(target);
 
@@ -196,6 +207,13 @@ pub fn install(force: bool, check: bool) -> Result<i32> {
 
     let commands = install_commands(target, &path);
     let mode = mode_for(commands[0].program);
+    if mode == Mode::Run {
+        if let Some(pid) = super::lifecycle::running_pid().await {
+            if let StartRoute::Supervised(plan) = start_route(StartKind::Restart)? {
+                return hand_over(target, header, &pid, plan).await;
+            }
+        }
+    }
     let mut lines = vec![header];
     lines.extend(commands.iter().map(Invocation::line));
     lines.extend(note(mode, commands[0].program, "enable"));
@@ -207,6 +225,25 @@ pub fn install(force: bool, check: bool) -> Result<i32> {
     print_lines(&lines);
     outcome?;
     Ok(EXIT_OK)
+}
+
+/// Register the service without starting it, then stop the running daemon
+/// over its socket and start the service through `plan`.
+async fn hand_over(
+    target: Target,
+    header: String,
+    pid: &str,
+    plan: SupervisedStart,
+) -> Result<i32> {
+    let commands = register_commands(target);
+    let mut lines = vec![header];
+    lines.extend(commands.iter().map(Invocation::line));
+    let outcome = run_all(&commands);
+    print_lines(&lines);
+    outcome?;
+    info!("[service] handing the running daemon (pid {pid}) over to the service");
+    println!("  the running daemon (pid {pid}) is handed over to the service");
+    super::lifecycle::hand_over(StartRoute::Supervised(plan)).await
 }
 
 /// `--check`: report, write nothing, and exit 1 when there is nothing there.
@@ -482,6 +519,20 @@ fn install_commands(target: Target, path: &Path) -> Vec<Invocation> {
             "launchctl",
             &strings(&["bootstrap", &gui_domain(), &path.display().to_string()]),
         )],
+    }
+}
+
+/// What registers the service without starting it, for a handover whose start
+/// is the manager's restart: reload, then enable without `--now`. Nothing on
+/// macOS, where `bootstrap` both loads and starts the agent and is therefore
+/// the start itself.
+fn register_commands(target: Target) -> Vec<Invocation> {
+    match target {
+        Target::Linux => vec![
+            Invocation::new("systemctl", &strings(&["--user", "daemon-reload"])),
+            Invocation::new("systemctl", &strings(&["--user", "enable", UNIT_NAME])),
+        ],
+        Target::Darwin => Vec::new(),
     }
 }
 
@@ -1140,6 +1191,25 @@ mod tests {
                 "systemctl --user daemon-reload".to_string(),
             ]
         );
+    }
+
+    /// A handover registers the unit without starting it, since its start is
+    /// the manager's restart once the running daemon is stopped; on macOS
+    /// `bootstrap` is the start, so nothing registers ahead of it.
+    #[test]
+    fn a_handover_registers_the_service_without_starting_it() {
+        let register: Vec<String> = register_commands(Target::Linux)
+            .iter()
+            .map(Invocation::display)
+            .collect();
+        assert_eq!(
+            register,
+            vec![
+                "systemctl --user daemon-reload".to_string(),
+                format!("systemctl --user enable {UNIT_NAME}"),
+            ]
+        );
+        assert!(register_commands(Target::Darwin).is_empty());
     }
 
     /// `bootstrap` takes the plist, `bootout` takes the label.

@@ -1,7 +1,8 @@
 //! `mp daemon run | start | status | stop | restart` (P2-U7),
 //! `install-service | uninstall-service` (P6-U6), which [`super::service`]
 //! owns - they write a login-start unit and call a service manager, and touch
-//! neither the socket nor a daemon - and `health | logs | support-bundle`
+//! a daemon only to hand a running one over to the service they install -
+//! and `health | logs | support-bundle`
 //! (P6-U8), which [`super::diagnostics`] answers.
 //!
 //! ## The three diagnostic commands
@@ -271,7 +272,9 @@ pub async fn dispatch(action: DaemonAction) -> i32 {
             grace_secs,
             timeout_secs,
         } => restart(grace_secs, Duration::from_secs(timeout_secs)).await,
-        DaemonAction::InstallService { force, check } => super::service::install(force, check),
+        DaemonAction::InstallService { force, check } => {
+            super::service::install(force, check).await
+        }
         DaemonAction::UninstallService => super::service::uninstall(),
         DaemonAction::Health { json } => health(json).await,
         DaemonAction::Logs { lines, level, json } => logs(lines, level, json).await,
@@ -1127,6 +1130,15 @@ fn print_stop_outcome(outcome: &StopOutcome) {
 /// `timeout` is the start's answer window, as `mp daemon start` takes it.
 async fn restart(grace_secs: Option<u64>, timeout: Duration) -> Result<i32> {
     let route = super::service::start_route(super::service::StartKind::Restart)?;
+    replace(route, grace_secs, timeout).await
+}
+
+/// Stop the daemon over its socket, then start one the way `route` says.
+async fn replace(
+    route: super::service::StartRoute,
+    grace_secs: Option<u64>,
+    timeout: Duration,
+) -> Result<i32> {
     // The stop returns once the old process has exited, so the new daemon
     // does not race the old one's cleanup for the socket it just created.
     let code = stop(Duration::from_secs(10), grace_secs).await?;
@@ -1134,6 +1146,23 @@ async fn restart(grace_secs: Option<u64>, timeout: Duration) -> Result<i32> {
         return Ok(code);
     }
     start_via(route, timeout, Notice::Stderr).await
+}
+
+/// The pid of the daemon answering on this data directory's socket, as
+/// `daemon.status` reports it, or `None` when nothing answers.
+pub(crate) async fn running_pid() -> Option<String> {
+    query_status()
+        .await
+        .ok()
+        .map(|status| status["pid"].to_string())
+}
+
+/// Hand the running daemon over to the service `install-service` just
+/// enabled (PERSO-219): [`restart`]'s stop and start, with the default grace
+/// and answer window, and `route` decided by the caller, which is the
+/// manager's restart for the reason [`restart`] gives.
+pub(crate) async fn hand_over(route: super::service::StartRoute) -> Result<i32> {
+    replace(route, None, Duration::from_secs(ANSWER_WINDOW_SECS)).await
 }
 
 /// `mp daemon start`: [`start`], and one line saying what it found or did.

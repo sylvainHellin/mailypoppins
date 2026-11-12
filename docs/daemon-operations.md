@@ -889,6 +889,12 @@ A `systemctl` that runs and fails is exit 1 with the file left on disk: the file
 An install over a file whose content differs is refused rather than overwritten, because a user may have edited it; `--force` replaces it and reports a write.
 An identical file is not rewritten at all, but the enable runs again, because a user who disabled the unit by hand expects `install-service` to put it back.
 
+An install over a daemon already answering on the socket hands that daemon over to the service (PERSO-219), because a service started beside it cannot bind the socket it holds and crash-loops until it stops.
+When the service manager is run and the service is one `mp daemon start` would use (see below), the install registers the service without starting it (`systemctl --user daemon-reload`, then `systemctl --user enable mailypoppins.service`; nothing on macOS, where `bootstrap` is the start), prints `  the running daemon (pid N) is handed over to the service`, and then does what `mp daemon restart` does: the socket stop, `✓ daemon stopped`, and the manager's restart (`systemctl --user restart`, or `launchctl kickstart -k` / `bootstrap`), `✓ daemon started (pid M)` with the command under it.
+The restart rather than a start covers a re-install over the service's own daemon, which the manager may still count running for a moment after the stop.
+A registration that fails is exit 1 with the running daemon left alone; a service whose daemon never answers is exit 4, as for `restart`.
+Under the dry-run hook, with no service manager on `PATH`, or with no user manager reachable, nothing is stopped and the install runs as above.
+
 ### Starting under the login service
 
 `mp daemon start` and `mp daemon restart` ask the service manager for the daemon when the installed service file is this `mp`'s, and spawn a detached `mp daemon run` otherwise (PERSO-109).

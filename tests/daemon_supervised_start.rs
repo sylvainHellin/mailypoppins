@@ -135,7 +135,8 @@ impl Sandbox {
     /// daemon's parent, marks the unit inactive only `latency` after the
     /// daemon exited, as systemd does once it has processed the `SIGCHLD`.
     /// `stop` and `restart` signal the main process and wait for the unit to
-    /// go inactive; `is-active` answers from the same state.
+    /// go inactive; `enable --now` starts it as `start` does, and `is-active`
+    /// answers from the same state.
     fn stateful_systemctl(&self, latency: Duration) {
         let state = self.dir("bin").join("unit.mainpid");
         let state = state.display();
@@ -159,6 +160,7 @@ impl Sandbox {
              \x20 start) do_start ;;\n\
              \x20 stop) do_stop ;;\n\
              \x20 restart) do_stop; do_start ;;\n\
+             \x20 enable) if [ \"$3\" = --now ]; then do_start; fi ;;\n\
              \x20 is-active) if [ -s \"$state\" ]; then echo active; else echo inactive; exit 3; fi ;;\n\
              esac\n\
              exit 0\n"
@@ -442,6 +444,116 @@ fn a_failing_on_demand_service_start_falls_back_to_a_detached_daemon() {
         [format!("--user start {UNIT_NAME}")]
     );
 
+    let pid = sandbox.recorded_pid();
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(pid), "the stopped daemon {pid} exited");
+}
+
+/// `mp daemon install-service` over a daemon already running hands it over to
+/// the unit: it stops the daemon over its socket and has systemd start the
+/// unit, instead of enabling a unit whose daemon cannot bind the socket the
+/// running one holds (PERSO-219). A second install over the unit's own daemon
+/// hands over the same way, and the manager's restart brings the unit back
+/// although systemd still counts it active for a moment after the stop.
+#[test]
+fn install_over_a_running_daemon_hands_it_over_to_the_unit() {
+    let sandbox = Sandbox::new();
+    sandbox.stateful_systemctl(Duration::from_secs(1));
+    let unit = sandbox
+        .dir("xdg")
+        .join("systemd")
+        .join("user")
+        .join(UNIT_NAME);
+    let reload = "--user daemon-reload".to_string();
+    let enable = format!("--user enable {UNIT_NAME}");
+    let restart = format!("--user restart {UNIT_NAME}");
+
+    ok(
+        &sandbox.mp(&["daemon", "start", "--timeout-secs", "15"]),
+        "start",
+    );
+    let detached = sandbox.recorded_pid();
+    assert!(
+        sandbox.systemctl_calls().is_empty(),
+        "with no unit the daemon is detached"
+    );
+
+    let install = sandbox.mp(&["daemon", "install-service"]);
+    let lines = ok(&install, "install-service");
+    assert!(wait_gone(detached), "the detached daemon {detached} exited");
+    let served = sandbox.recorded_pid();
+    assert_ne!(served, detached, "the unit runs a daemon of its own");
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(served),
+        "the unit is active with that daemon as its main process"
+    );
+    assert_eq!(
+        lines,
+        [
+            format!("\u{2713} wrote {}", unit.display()),
+            format!("  systemctl {reload}"),
+            format!("  systemctl {enable}"),
+            format!("  the running daemon (pid {detached}) is handed over to the service"),
+            "\u{2713} daemon stopped".to_string(),
+            format!("\u{2713} daemon started (pid {served})"),
+            format!("  systemctl {restart}"),
+        ]
+    );
+    assert_eq!(
+        sandbox.systemctl_calls(),
+        [reload.clone(), enable.clone(), restart.clone()]
+    );
+
+    let again = sandbox.mp(&["daemon", "install-service"]);
+    let lines = ok(&again, "install-service again");
+    assert!(wait_gone(served), "the unit's old daemon {served} exited");
+    let second = sandbox.recorded_pid();
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(second),
+        "the unit is active again, with the new daemon"
+    );
+    assert_eq!(
+        lines,
+        [
+            format!("\u{2713} {} is already installed", unit.display()),
+            format!("  systemctl {reload}"),
+            format!("  systemctl {enable}"),
+            format!("  the running daemon (pid {served}) is handed over to the service"),
+            "\u{2713} daemon stopped".to_string(),
+            format!("\u{2713} daemon started (pid {second})"),
+            format!("  systemctl {restart}"),
+        ]
+    );
+
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(second), "the stopped daemon {second} exited");
+}
+
+/// `mp daemon install-service` with nothing running enables the unit and
+/// starts it in one `systemctl --user enable --now`, as before PERSO-219.
+#[test]
+fn install_with_no_daemon_running_enables_and_starts_the_unit() {
+    let sandbox = Sandbox::new();
+    sandbox.stateful_systemctl(Duration::from_secs(1));
+
+    let install = sandbox.mp(&["daemon", "install-service"]);
+    let lines = ok(&install, "install-service");
+    assert_eq!(
+        lines[1..],
+        [
+            "  systemctl --user daemon-reload".to_string(),
+            format!("  systemctl --user enable --now {UNIT_NAME}"),
+        ]
+    );
+    assert!(sandbox.unit_main_pid().is_some(), "the unit is active");
+
+    // The unit's daemon is the subshell's child and binds in its own time.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !sandbox.pid_file().exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let pid = sandbox.recorded_pid();
     ok(&sandbox.mp(&["daemon", "stop"]), "stop");
     assert!(wait_gone(pid), "the stopped daemon {pid} exited");
