@@ -1465,10 +1465,11 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       let next = staleMailboxes(patchAccount(s, p.account, { runtime_state: p.state }), p.account);
       // An account that has just opened its store (PERSO-109) serves what it
       // refused while it was opening: its outbox and contacts are read again
-      // too, when this window has read them.
+      // too, when this window has read them, and the calendar, which the
+      // daemon answered without that account, with its invitation cards.
       if (p.state === "ready") {
         if (next.outbox[p.account]) next = staleOutbox(next, p.account);
-        next = staleContacts(next, p.account);
+        next = staleInvitations(staleContacts(next, p.account), p.account);
       }
       return staleListIf(next, (a) => a === p.account);
     }

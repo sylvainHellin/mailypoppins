@@ -296,6 +296,20 @@ describe("the reducer", () => {
     expect(s.outbox.work.gen).toBe(outboxGen + 1);
   });
 
+  it("reads the calendar again once an account that was opening is ready (PERSO-109)", () => {
+    // The daemon leaves an account still opening its store out of a calendar
+    // read over every account, so the view and the calendar list it answered
+    // meanwhile lack that account until they are read again.
+    let s = booted();
+    const calendarGen = s.calendar.gen;
+    const calendarsGen = s.calendars.gen;
+    s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 103, kind: "account.state_changed", payload: { account: "work", state: "ready" } } } });
+    expect(s.calendar.gen).toBe(calendarGen + 1);
+    expect(s.calendars.gen).toBe(calendarsGen + 1);
+    s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 104, kind: "account.state_changed", payload: { account: "work", state: "blocked", reason: "x" } } } });
+    expect(s.calendar.gen).toBe(calendarGen + 1);
+  });
+
   it("drives the banners from disconnected, reconnected, resync and rebootstrapped", () => {
     let s = booted();
     s = run(s, { type: "gui_event", event: { type: "disconnected", reason: "socket closed" } });
