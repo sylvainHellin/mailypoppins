@@ -23,7 +23,7 @@ No write takes a block naming it: the daemon's `account_block` refuses one.
 - IMAP falls back to the SMTP password if `imap-password-<account>` is missing.
 - Default backend: machine-bound encrypted file at `~/.config/mailypoppins/secrets.enc`.
   Opt into the OS keyring with `secrets_backend = "keyring"` in `config.toml`; both backends use the same keys (see [secrets.md](secrets.md)).
-- Set or rotate via `mp config set-password {smtp|imap} --account <name>`.
+- Set or rotate via `mp config set-password {smtp|imap} --account <name>`; `--stdin` reads the password from a pipe instead of the prompt (first line, newline removed, nothing else trimmed; refused on a terminal or an empty line).
 
 ## Graph (Microsoft Graph REST)
 

@@ -1708,6 +1708,11 @@ enum ConfigAction {
     SetPassword {
         /// Which password to set: "smtp" or "imap"
         which: String,
+        /// Read the password from standard input instead of prompting: the
+        /// first line, its newline removed and nothing else trimmed. Refused
+        /// when standard input is a terminal or the line is empty
+        #[arg(long)]
+        stdin: bool,
     },
     /// Wipe the encrypted secrets file (and Graph token caches) and re-prompt
     /// for credentials. Use this after a Time Machine restore to a new
@@ -5601,11 +5606,16 @@ async fn routed_signature(account: &str, action: SignatureAction) -> Result<()> 
     Ok(())
 }
 
-/// `mp config set-password`: the prompt is this process's terminal's, the value
-/// crosses the socket once, and nothing else about it is written here.
-async fn routed_set_password(which: &str, account: &str) -> Result<()> {
+/// `mp config set-password`: the prompt is this process's terminal's, or the
+/// line `--stdin` reads from a pipe; the value crosses the socket once, and
+/// nothing else about it is written here.
+async fn routed_set_password(which: &str, account: &str, stdin: bool) -> Result<()> {
     mailypoppins::config_cmd::password::check_kind(which);
-    let value = mailypoppins::config_cmd::password::prompt(which, account)?;
+    let value = if stdin {
+        mailypoppins::config_cmd::password::from_stdin()?
+    } else {
+        mailypoppins::config_cmd::password::prompt(which, account)?
+    };
     let mut connection = daemon_connection().await;
     daemon_try_call(
         &mut connection,
@@ -7115,13 +7125,13 @@ async fn main() -> Result<()> {
                     cmd_config_init(&mut wizard, &path, exists).await?;
                 }
                 ConfigAction::Show { .. } => routed_config_show().await?,
-                ConfigAction::SetPassword { which } => {
+                ConfigAction::SetPassword { which, stdin } => {
                     let acct_name = cli
                         .account
                         .clone()
                         .or_else(|| global_config.accounts.first().map(|a| a.name.clone()))
                         .unwrap_or_else(|| "main".to_string());
-                    routed_set_password(&which, &acct_name).await?;
+                    routed_set_password(&which, &acct_name, stdin).await?;
                 }
                 ConfigAction::AddAccount { .. } => {
                     let (path, exists, config) = routed_config_state().await?;

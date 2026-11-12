@@ -140,7 +140,7 @@
 //! |---|---|---|
 //! | `mp config init` | `Overwrite? [y/N]` | prints `Cancelled.`, exits 0 |
 //! | `mp config add-account` | the wizard's answers | refuses before the first, no config file |
-//! | `mp config set-password` | a `dialoguer::Password` | fails, no secret written |
+//! | `mp config set-password` | a `dialoguer::Password`, or one piped line with `--stdin` | fails, no secret written |
 //! | `mp config reset-secrets` | `Continue? [y/N]` | prints `Cancelled.`, exits 0 |
 //! | `mp config oauth2-login` | nothing; it *writes* the code | n/a |
 //!
@@ -165,7 +165,11 @@
 //! `config.set_password` (P2) already takes the value as a parameter. So the
 //! client prompts and then calls, the value crosses the socket once, and a run
 //! whose stdin is not a terminal fails exactly as it fails today
-//! ([`mp_config_set_password_reads_the_password_in_the_client`]).
+//! ([`mp_config_set_password_reads_the_password_in_the_client`]). `--stdin`
+//! (PERSO-281) is the scripted way in: one piped line, the same call
+//! ([`mp_config_set_password_stdin_stores_the_piped_line_as_is`]), and an empty
+//! line refused before the daemon is asked
+//! ([`mp_config_set_password_stdin_refuses_an_empty_password`]).
 //!
 //! **OAuth2's browser is the client's** (`INT-04`). The daemon runs the device
 //! flow as an operation and reports the verification URL and the user code as
@@ -2701,6 +2705,86 @@ fn mp_config_set_password_reads_the_password_in_the_client() {
         !fixture::secrets_file(slice.root()).exists(),
         "a run that never read a password never wrote one"
     );
+}
+
+/// `ACC-05` with `--stdin` (PERSO-281): a script pipes the password in, the
+/// one line loses its newline and nothing else, it goes through the same
+/// `config.set_password`, and the value is in neither output stream.
+#[test]
+fn mp_config_set_password_stdin_stores_the_piped_line_as_is() {
+    use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+
+    let slice = Slice::start();
+    let secret = " s3cret pass\t";
+    let out = slice.routed_with_stdin(
+        &[
+            "config",
+            "set-password",
+            "smtp",
+            "-A",
+            fixture::ACCOUNT,
+            "--stdin",
+        ],
+        &format!("{secret}\nnot part of the password\n"),
+    );
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a piped password is stored: {}",
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains(&format!("SMTP password for '{}' stored", fixture::ACCOUNT)),
+        "the line a stored password prints:\n{}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("s3cret") && !stderr(&out).contains("s3cret"),
+        "the value is never echoed"
+    );
+    // A host with no readable machine ID cannot hold a secret, which is a
+    // reason to skip the read-back rather than fail it.
+    let Ok(secrets) = EncryptedFileBackend::open(fixture::secrets_file(slice.root())) else {
+        return;
+    };
+    assert_eq!(
+        secrets
+            .get(&format!("smtp-password-{}", fixture::ACCOUNT))
+            .expect("the piped password was stored under the account's key"),
+        secret,
+        "the first line, its newline removed and nothing else trimmed"
+    );
+}
+
+/// `--stdin` refuses an empty password, and a closed stdin is one: nothing is
+/// written and the daemon is never asked.
+#[test]
+fn mp_config_set_password_stdin_refuses_an_empty_password() {
+    let slice = Slice::start();
+    for input in ["", "\n"] {
+        let out = slice.routed_with_stdin(
+            &[
+                "config",
+                "set-password",
+                "smtp",
+                "-A",
+                fixture::ACCOUNT,
+                "--stdin",
+            ],
+            input,
+        );
+        assert_eq!(out.status.code(), Some(1), "input {input:?} is refused");
+        assert!(
+            stderr(&out).contains("empty"),
+            "the refusal names the empty password:\n{}",
+            stderr(&out)
+        );
+        assert!(
+            !fixture::secrets_file(slice.root()).exists(),
+            "a refused password is never written"
+        );
+    }
 }
 
 /// `ACC-07` through the CLI, declined: the confirmation is the client's, and a

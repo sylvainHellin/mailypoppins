@@ -461,6 +461,15 @@ server = "sentitems"`} />
         <Code code="mp config set-password smtp --account personal" lang="bash" theme={codeTheme} />
       </div>
       <p>
+        A script or a password manager can pipe the password in with <code>--stdin</code>
+        instead of answering the prompt. The first line of standard input is the password,
+        its newline removed and nothing else trimmed; the command refuses an empty line
+        and a standard input that is a terminal, and never prints the value.
+      </p>
+      <div class="code-inline">
+        <Code code="pass show mail/personal | mp config set-password smtp --account personal --stdin" lang="bash" theme={codeTheme} />
+      </div>
+      <p>
         An on-premises Exchange server, one your organisation runs itself, is a password
         account like any other IMAP server.
       </p>

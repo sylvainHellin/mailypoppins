@@ -622,6 +622,7 @@ Arguments:
   <WHICH>  Which password to set: "smtp" or "imap"
 
 Options:
+      --stdin              Read the password from standard input instead of prompting: the first line, its newline removed and nothing else trimmed. Refused when standard input is a terminal or the line is empty
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 

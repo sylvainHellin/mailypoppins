@@ -373,3 +373,26 @@ async fn a_password_that_was_not_stored_is_named_with_its_command() {
         "{both}"
     );
 }
+
+/// `mp config set-password --stdin` (PERSO-281): one line, its newline gone and
+/// nothing else trimmed; a terminal and an empty line are refused, and no
+/// refusal carries the value.
+#[test]
+fn a_piped_password_is_its_first_line_without_the_newline() {
+    use super::password::read_piped;
+
+    let read = |input: &str| read_piped(false, input.as_bytes());
+    assert_eq!(read(" pa ss\t\nsecond line\n").unwrap(), " pa ss\t");
+    assert_eq!(read("crlf\r\n").unwrap(), "crlf");
+    assert_eq!(read("no newline").unwrap(), "no newline");
+
+    for empty in ["", "\n", "\r\n"] {
+        let error = read(empty).expect_err("an empty password is refused");
+        assert!(error.to_string().contains("empty"), "{error}");
+    }
+
+    let error = read_piped(true, "hunter2\n".as_bytes())
+        .expect_err("a terminal on stdin is refused before anything is read");
+    assert!(error.to_string().contains("terminal"), "{error}");
+    assert!(!error.to_string().contains("hunter2"), "{error}");
+}
