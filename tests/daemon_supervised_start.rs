@@ -227,6 +227,42 @@ impl Sandbox {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod +x");
     }
 
+    /// A fake `launchctl` that appends its argv to `bin/launchctl.log`, answers
+    /// `print` as for an agent launchd holds loaded and runs no process of,
+    /// and on `bootstrap` runs `mp daemon run` detached, as loading a
+    /// `RunAtLoad` agent would.
+    fn fake_launchctl(&self) {
+        let script = self.dir("bin").join("launchctl");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$@\" >> '{log}'\n\
+                 if [ \"$1\" = bootstrap ]; then\n\
+                 \x20 '{MP}' daemon run </dev/null >/dev/null 2>&1 &\n\
+                 fi\n\
+                 exit 0\n",
+                log = self.dir("bin").join("launchctl.log").display()
+            ),
+        )
+        .expect("write the fake launchctl");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+    }
+
+    fn launchctl_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.dir("bin").join("launchctl.log"))
+            .map(|raw| raw.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// [`Sandbox::mp`] on the launchd half.
+    fn mp_darwin(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .env("MAILYPOPPINS_DAEMON_SERVICE_OS", "darwin")
+            .output()
+            .unwrap_or_else(|e| panic!("run mp {args:?}: {e}"))
+    }
+
     /// `mp daemon install-service` under the dry-run hook, for `data`.
     fn install_unit(&self, data: &std::path::Path) {
         let install = Command::new(MP)
@@ -953,4 +989,76 @@ fn a_stale_socket_is_not_a_daemon_still_opening_its_stores() {
     let stderr = String::from_utf8_lossy(&start.stderr);
     assert!(stderr.contains("did not answer within 1s"), "{stderr}");
     assert!(!stderr.contains(STILL_OPENING), "{stderr}");
+}
+
+/// `mp daemon install-service --force` on macOS over a running daemon, with
+/// an older plist that launchd holds loaded, boots the agent out and
+/// bootstraps the new plist after the socket stop, so the agent that runs is
+/// the new file's: `launchctl kickstart -k` would restart the definition
+/// launchd loaded and never read the new file.
+#[test]
+fn a_forced_install_over_a_loaded_agent_loads_the_new_plist() {
+    let sandbox = Sandbox::new();
+    sandbox.fake_launchctl();
+    let plist = sandbox
+        .dir("home")
+        .join("Library")
+        .join("LaunchAgents")
+        .join("dev.mailypoppins.daemon.plist");
+    // SAFETY: `getuid` takes no argument and cannot fail.
+    let label = format!("gui/{}/dev.mailypoppins.daemon", unsafe { libc::getuid() });
+    let domain = format!("gui/{}", unsafe { libc::getuid() });
+
+    ok(
+        &sandbox.mp_darwin(&["daemon", "start", "--timeout-secs", "15"]),
+        "start",
+    );
+    let detached = sandbox.recorded_pid();
+    assert!(
+        sandbox.launchctl_calls().is_empty(),
+        "with no agent the daemon is detached"
+    );
+    let dry = sandbox
+        .command(&["daemon", "install-service"])
+        .env("MAILYPOPPINS_DAEMON_SERVICE_OS", "darwin")
+        .env("MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN", "1")
+        .output()
+        .expect("run mp daemon install-service");
+    ok(&dry, "dry-run install-service");
+    let older = format!(
+        "{}<!-- an older version -->\n",
+        fs::read_to_string(&plist).expect("read the plist")
+    );
+    fs::write(&plist, older).expect("age the plist");
+
+    let install = sandbox.mp_darwin(&["daemon", "install-service", "--force"]);
+    let lines = ok(&install, "install-service --force");
+    assert!(wait_gone(detached), "the detached daemon {detached} exited");
+    let served = sandbox.recorded_pid();
+    assert_ne!(served, detached, "the agent runs a daemon of its own");
+    assert_eq!(
+        lines,
+        [
+            format!("\u{2713} wrote {}", plist.display()),
+            format!("  the running daemon (pid {detached}) is handed over to the service"),
+            "\u{2713} daemon stopped".to_string(),
+            format!("\u{2713} daemon started (pid {served})"),
+            format!("  launchctl bootout {label}"),
+            format!("  launchctl bootstrap {domain} {}", plist.display()),
+        ]
+    );
+    assert_eq!(
+        sandbox.launchctl_calls(),
+        [
+            format!("print {label}"),
+            format!("print {label}"),
+            format!("bootout {label}"),
+            format!("bootstrap {domain} {}", plist.display()),
+        ],
+        "launchd is asked whether it holds the agent and which pid it runs, \
+         then unloads it and loads the new file"
+    );
+
+    ok(&sandbox.mp_darwin(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(served), "the stopped daemon {served} exited");
 }

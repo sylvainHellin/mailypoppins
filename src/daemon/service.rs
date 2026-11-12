@@ -219,7 +219,12 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
     let mode = mode_for(commands[0].program);
     if mode == Mode::Run {
         if let Some(pid) = super::lifecycle::running_pid().await {
-            if let StartRoute::Supervised(plan) = start_route(StartKind::Restart)? {
+            let kind = if written {
+                StartKind::Reinstall
+            } else {
+                StartKind::Restart
+            };
+            if let StartRoute::Supervised(plan) = start_route(kind)? {
                 let running = Running {
                     own: service_main_pid(target).is_some_and(|main| main.to_string() == pid),
                     pid,
@@ -701,8 +706,8 @@ fn on_path(name: &str) -> bool {
 // Starting through the service manager (PERSO-109)
 // ---------------------------------------------------------------------------
 
-/// Which command brings the daemon up: `mp daemon start`'s or the start half
-/// of `mp daemon restart`.
+/// Which command brings the daemon up: `mp daemon start`'s, the start half
+/// of `mp daemon restart`, or that of an `install-service` handover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartKind {
     /// Nothing answers on the socket, and the service manager is asked to
@@ -714,6 +719,9 @@ pub(crate) enum StartKind {
     /// then end dead (PERSO-109). The manager's restart stops what it counts
     /// running, which waits for that exit, and starts the service in one job.
     Restart,
+    /// A [`StartKind::Restart`] after `install-service` rewrote the service
+    /// file: the service that comes up must run the new definition.
+    Reinstall,
 }
 
 /// How `mp daemon start` and `mp daemon restart` bring a daemon up.
@@ -894,14 +902,27 @@ fn decide_start(
 /// then start the service, where a plain start would see it running and do
 /// nothing. An agent launchd has not loaded runs nothing it could count, so
 /// `bootstrap` serves both.
+///
+/// A [`StartKind::Reinstall`] must run the file just written. On Linux that
+/// is the restart, since the handover's registration ran `daemon-reload`
+/// before it ([`register_commands`]). On macOS `kickstart -k` restarts the
+/// definition launchd loaded and never reads the plist again, so a loaded
+/// agent is booted out, as `uninstall-service` does, and the new plist
+/// bootstrapped, as `install-service` does.
 fn start_commands(target: Target, path: &Path, kind: StartKind, loaded: bool) -> Vec<Invocation> {
     let label = format!("{}/{LAUNCHD_LABEL}", gui_domain());
+    let bootstrap = || {
+        Invocation::new(
+            "launchctl",
+            &strings(&["bootstrap", &gui_domain(), &path.display().to_string()]),
+        )
+    };
     match (target, kind) {
         (Target::Linux, StartKind::Start) => vec![Invocation::new(
             "systemctl",
             &strings(&["--user", "start", UNIT_NAME]),
         )],
-        (Target::Linux, StartKind::Restart) => vec![Invocation::new(
+        (Target::Linux, StartKind::Restart | StartKind::Reinstall) => vec![Invocation::new(
             "systemctl",
             &strings(&["--user", "restart", UNIT_NAME]),
         )],
@@ -915,10 +936,11 @@ fn start_commands(target: Target, path: &Path, kind: StartKind, loaded: bool) ->
             "launchctl",
             &strings(&["kickstart", "-k", &label]),
         )],
-        (Target::Darwin, _) => vec![Invocation::new(
-            "launchctl",
-            &strings(&["bootstrap", &gui_domain(), &path.display().to_string()]),
-        )],
+        (Target::Darwin, StartKind::Reinstall) if loaded => vec![
+            Invocation::new("launchctl", &strings(&["bootout", &label])),
+            bootstrap(),
+        ],
+        (Target::Darwin, _) => vec![bootstrap()],
     }
 }
 
@@ -1637,6 +1659,53 @@ mod tests {
                 gui_domain(),
                 plist.display()
             )]
+        );
+    }
+
+    /// The start half of a handover after `install-service` rewrote the file
+    /// runs the new definition: systemd's restart, after the `daemon-reload`
+    /// the registration ran ([`register_commands`]), and on macOS a `bootout`
+    /// of the loaded agent followed by a `bootstrap` of the new plist, since
+    /// `kickstart -k` restarts the definition launchd already holds and never
+    /// reads the file again.
+    #[test]
+    fn a_reinstall_runs_the_new_definition() {
+        let reinstall = |target, path, loaded| {
+            let route = decide_start(
+                target,
+                path,
+                StartKind::Reinstall,
+                Installed::This,
+                true,
+                None,
+                loaded,
+            );
+            route_lines(&route)
+        };
+        let unit = Path::new("/home/u/.config/systemd/user/mailypoppins.service");
+        assert_eq!(
+            reinstall(Target::Linux, unit, false),
+            [format!("  systemctl --user restart {UNIT_NAME}")]
+        );
+        assert_eq!(
+            register_commands(Target::Linux)[0].display(),
+            "systemctl --user daemon-reload"
+        );
+
+        let plist = Path::new("/Users/u/Library/LaunchAgents/dev.mailypoppins.daemon.plist");
+        let bootstrap = format!("  launchctl bootstrap {} {}", gui_domain(), plist.display());
+        assert_eq!(
+            reinstall(Target::Darwin, plist, true),
+            [
+                format!("  launchctl bootout {}/{LAUNCHD_LABEL}", gui_domain()),
+                bootstrap.clone(),
+            ],
+            "the loaded agent is unloaded and the new plist loaded"
+        );
+        assert_eq!(
+            reinstall(Target::Darwin, plist, false),
+            [bootstrap],
+            "an agent launchd does not hold is only loaded"
         );
     }
 
