@@ -149,6 +149,19 @@ pub fn forget(login: &ImapLogin) {
     refusals().forget(login);
 }
 
+/// Record a refusal of `login`, as a refused dial does, for a test outside
+/// this module that needs the gate to hold one.
+#[cfg(test)]
+pub(crate) fn refuse_for_test(login: ImapLogin) {
+    refusals().record(
+        login,
+        fingerprint("refused"),
+        &LoginRejected::new("no response: LOGIN failed.".into()),
+        Instant::now(),
+        REFUSAL_HOLD,
+    );
+}
+
 /// The refusal a login with `config` would get without dialling, if any.
 pub(super) fn refused(config: &ImapConfig) -> Option<LoginRejected> {
     refusals().refused(

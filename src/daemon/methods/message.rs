@@ -1996,10 +1996,14 @@ async fn mutate_with<E: OpExecutor>(
         // A tick holds the account's turn for its whole body, and no drain
         // runs until it ends: that wait spends none of the settle's patience.
         let turn_held = || runtimes.get(&name).is_some_and(|r| r.turn_held());
+        // A refused login holds every queued op until the password is set
+        // (PERSO-296): the settle does not wait for one then.
+        let login_refused = || super::super::diagnostics::login_refused(account);
         // The ops committed earlier on this message reach the server first
         // (PERSO-241): the settle waits for the drain it asks for here.
-        let older =
-            pending_ops::OlderOps::wait_for(patience, &ask_for_drain).paused_while(&turn_held);
+        let older = pending_ops::OlderOps::wait_for(patience, &ask_for_drain)
+            .paused_while(&turn_held)
+            .unless_login_refused(&login_refused);
         let settled =
             pending_ops::run_and_settle(&store, &blobs, &scope, queued.op_id, &mut backend, older)
                 .await;
@@ -3622,14 +3626,21 @@ mod tests {
 
         /// [`seeded`], with a runtime whose ticks run `hooks`.
         fn seeded_with(hooks: TickHooks) -> Seeded {
+            seeded_as(
+                AccountConfig {
+                    name: "alice".to_string(),
+                    ..Default::default()
+                },
+                hooks,
+            )
+        }
+
+        /// [`seeded`], for `alice` configured as `account`.
+        fn seeded_as(account: AccountConfig, hooks: TickHooks) -> Seeded {
             let data = TestDataDir::new();
             let dir = crate::config::account_dir("alice");
             let fx = fixture_in(&dir);
             let id = fx.ingest_plain("inbox", 1, "Receipt");
-            let account = AccountConfig {
-                name: "alice".to_string(),
-                ..Default::default()
-            };
             let snapshot = Snapshot {
                 revision: 0,
                 state: ConfigState::Ok,
@@ -4145,6 +4156,131 @@ mod tests {
                 .unwrap();
             assert_eq!(row.mailbox, "archive");
             assert!(row.is_flagged());
+        }
+
+        /// The account's login, as the login gate answers it while it holds a
+        /// refusal: every op fails before the server is asked about it.
+        struct RefusedLogin;
+
+        impl OpExecutor for RefusedLogin {
+            async fn execute(&mut self, _op: &ServerOp) -> anyhow::Result<()> {
+                Err(
+                    crate::imap_client::LoginRejected::new("no response: LOGIN failed.".into())
+                        .into(),
+                )
+            }
+        }
+
+        /// PERSO-296: a star the TUI queued is held behind a refused login,
+        /// with no attempt spent, and `mp archive` follows on the message.
+        /// No drain can run the star until the password is set, so the
+        /// archive fails at once, naming the refused login and its fix, and
+        /// leaves the star queued. It used to wait out its whole patience for
+        /// the star and then say only that it had not reached the server.
+        /// Once the refusal is cleared the same archive waits for the drain
+        /// and lands after the star.
+        #[tokio::test]
+        async fn a_settle_behind_an_op_held_by_a_refused_login_fails_at_once_and_names_it() {
+            let mut account = AccountConfig {
+                name: "alice".to_string(),
+                ..Default::default()
+            };
+            // A login of its own: the gate is one list for the whole process.
+            account.imap.host = "held-settle.example.test".to_string();
+            account.imap.username = "alice".to_string();
+            let login = crate::config::ImapLogin::of(&account);
+            let idle = || -> crate::daemon::runtime::account::DrainHook {
+                Arc::new(|_ctx| async { String::new() }.boxed())
+            };
+            let daemon = seeded_as(
+                account,
+                TickHooks {
+                    outbox: idle(),
+                    mutations: idle(),
+                    body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+                },
+            );
+            let mut star = by_row(daemon.id);
+            star["flagged"] = json!(true);
+            star["settle"] = json!(false);
+            daemon.call(Kind::SetFlag, star, no_server).await.unwrap();
+            crate::imap_client::login_gate::refuse_for_test(login.clone());
+            let held = pending_ops::drain(
+                &daemon.fx.store,
+                &daemon.fx.blobs,
+                "alice",
+                &mut RefusedLogin,
+                crate::outbox::unix_now(),
+            )
+            .await
+            .unwrap();
+            assert_eq!((held.failed, held.still_open), (0, 1));
+            let log = Arc::default();
+
+            let started = std::time::Instant::now();
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+            let err = tokio::time::timeout(
+                Duration::from_secs(3),
+                daemon.call(Kind::Archive, by_row(daemon.id), |_| Ok(server)),
+            )
+            .await
+            .expect("the archive waited on an op no drain can run")
+            .unwrap_err();
+
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(
+                err.message.contains(
+                    "is still queued: login rejected by the server \
+                     (mp config set-password imap -A alice); nothing was changed"
+                ),
+                "{}",
+                err.message
+            );
+            assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+            assert_eq!(
+                daemon.ops(),
+                [("set_flagged".to_string(), "queued".to_string())]
+            );
+            let queued = pending_ops::queued_ops(&daemon.fx.store, "alice").unwrap();
+            assert_eq!(queued[0].attempts, 0);
+            assert!(
+                queued[0]
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("IMAP login failed")),
+                "{:?}",
+                queued[0].last_error
+            );
+            let row = read::find_by_id(&daemon.fx.store, daemon.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.mailbox, "inbox", "the archive was undone");
+            assert!(row.is_flagged(), "the held star stands");
+
+            crate::imap_client::login_gate::forget(&login);
+            let mut requests = daemon.runtime.drain_requests();
+            requests.borrow_and_update();
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+            let archive = daemon.call(Kind::Archive, by_row(daemon.id), |_| Ok(server));
+            let drain_store = Store::open(daemon.fx.store.path()).unwrap();
+            let mut drainer = FakeServer::new("drain", &log, &daemon.fx.store);
+            let drained = async {
+                let _ = tokio::time::timeout(Duration::from_secs(2), requests.changed()).await;
+                pending_ops::drain(
+                    &drain_store,
+                    &daemon.fx.blobs,
+                    "alice",
+                    &mut drainer,
+                    crate::outbox::unix_now(),
+                )
+                .await
+            };
+            let (archived, drained) = tokio::join!(archive, drained);
+
+            archived.unwrap();
+            assert_eq!(drained.unwrap().completed, 1);
+            assert_eq!(*log.lock().unwrap(), ["drain set_flagged", "caller move"]);
+            assert!(daemon.ops().is_empty());
         }
     }
 }

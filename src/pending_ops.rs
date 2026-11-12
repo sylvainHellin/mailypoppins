@@ -954,8 +954,9 @@ pub struct DrainResult {
 /// attempt count and, once the budget is spent, rolls the local state back and
 /// parks the row as `failed`. A refused login
 /// ([`crate::imap_client::LoginRejected`]) is no failure of the op: the row
-/// is counted as still open with no attempt spent, for as long as the login
-/// is refused (PERSO-296).
+/// is counted as still open with no attempt spent and its retry time left
+/// alone, for as long as the login is refused, and records the refusal as
+/// its `last_error` (PERSO-296).
 ///
 /// The drain **does not re-apply the local write**: that happened once, in the
 /// transaction that enqueued the row. This is the guard against a duplicate
@@ -1069,7 +1070,14 @@ pub(crate) async fn drain<E: OpExecutor>(
                 // op was never asked about, and the gate holds the refusal
                 // for up to an hour, longer than the budget lasts. The row
                 // stays owed with no attempt spent and runs once a login
-                // succeeds; health names the refused login meanwhile.
+                // succeeds; health names the refused login meanwhile, and
+                // the row records it as why it waits.
+                if let Err(e) = record_hold(store, row.id, &format!("{e:#}")) {
+                    warn!(
+                        "[pending_ops] could not record the refused login on op {}: {e:#}",
+                        row.id
+                    );
+                }
                 still_owed(&mut owed, &row);
                 result.still_open += 1;
             }
@@ -1490,13 +1498,15 @@ pub const SETTLE_CEILING: Duration = Duration::from_secs(240);
 const SETTLE_POLL: Duration = Duration::from_millis(100);
 
 /// How a caller settling an op waits for the older ops on its message
-/// (PERSO-241): how long, how it asks for the drain that runs them, and how it
-/// tells that the drain cannot run yet.
+/// (PERSO-241): how long, how it asks for the drain that runs them, how it
+/// tells that the drain cannot run yet, and how it tells that the drain
+/// cannot run them at all until the user acts.
 pub struct OlderOps<'a> {
     patience: Duration,
     ceiling: Duration,
     nudge: &'a dyn Fn(),
     turn_held: Option<&'a dyn Fn() -> bool>,
+    login_refused: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> OlderOps<'a> {
@@ -1513,6 +1523,7 @@ impl<'a> OlderOps<'a> {
             ceiling: SETTLE_CEILING,
             nudge,
             turn_held: None,
+            login_refused: None,
         }
     }
 
@@ -1529,6 +1540,17 @@ impl<'a> OlderOps<'a> {
     /// End the wait after `ceiling` in all, instead of [`SETTLE_CEILING`].
     pub fn within(self, ceiling: Duration) -> OlderOps<'a> {
         OlderOps { ceiling, ..self }
+    }
+
+    /// Wait for no queued op while `login_refused` says the server refused
+    /// the account's login (PERSO-296): every drain fails at that login
+    /// until the password is set, so the wait would only run out its
+    /// patience, and the caller is told what to do instead.
+    pub fn unless_login_refused(self, login_refused: &'a dyn Fn() -> bool) -> OlderOps<'a> {
+        OlderOps {
+            login_refused: Some(login_refused),
+            ..self
+        }
     }
 }
 
@@ -1601,6 +1623,17 @@ pub async fn run_and_settle<E: OpExecutor>(
 /// ([`OlderOps::paused_while`]): each poll interval counts when the turn was
 /// free at its end, so a tick holding the turn for minutes costs none of it.
 ///
+/// An older `queued` op is not waited for while the server refuses the
+/// account's login ([`OlderOps::unless_login_refused`], PERSO-296): the
+/// drain holds it, with no attempt spent, until a login succeeds, which
+/// takes the user setting the password or the hour the gate holds a
+/// refusal. The caller is told so at once, with the command that sets the
+/// password, in the words of the health check.
+/// A settling older op is another caller's, which fails at the same login
+/// on its own.
+/// The check comes before the one for an op refused once, since a held op
+/// may have spent attempts on other failures before the login was refused.
+///
 /// An older op refused for good rolls `row` back with it and parks it
 /// `failed`, in the transaction that takes the older op off the queue
 /// ([`refuse`], PERSO-249), so `row` is read again after the older ops at
@@ -1629,6 +1662,20 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
         let Some(first) = ahead.first() else {
             return Ok(());
         };
+        let held = ahead
+            .iter()
+            .find(|op| op.state == STATE_QUEUED)
+            .filter(|_| older.login_refused.is_some_and(|refused| refused()));
+        if let Some(queued) = held {
+            anyhow::bail!(
+                "an earlier change to this message (op {}, {}) is still queued: login rejected \
+                 by the server (mp config set-password imap -A {}); nothing was changed, try \
+                 again once the password is set",
+                queued.id,
+                queued.kind,
+                row.account
+            );
+        }
         if let Some(refused) = ahead.iter().find(|op| op.attempts > 0) {
             anyhow::bail!(
                 "an earlier change to this message (op {}, {}) was refused by the server and \
@@ -1835,6 +1882,19 @@ fn retire(store: &Store, id: i64) -> Result<()> {
         .conn()
         .execute("DELETE FROM pending_ops WHERE id = ?1", [id])
         .context("retiring a completed pending op")?;
+    Ok(())
+}
+
+/// Record why a row the drain holds behind a refused login waits
+/// (PERSO-296), spending no attempt and leaving its retry time alone.
+fn record_hold(store: &Store, id: i64, err: &str) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            "UPDATE pending_ops SET last_error = ?2 WHERE id = ?1",
+            rusqlite::params![id, err],
+        )
+        .context("recording why a pending op is held")?;
     Ok(())
 }
 
@@ -2420,6 +2480,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
+        let queued_at = row_by_id(&fx.store, star).unwrap().unwrap().updated;
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS * 2 {
             let refused = crate::imap_client::LoginRejected::new("no response: refused".into());
@@ -2442,6 +2503,12 @@ mod tests {
             "parked while the login was refused"
         );
         assert_eq!(row.attempts, 0, "a refused login is no attempt at the op");
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("IMAP login failed: no response: refused"),
+            "the row says why it waits"
+        );
+        assert_eq!(row.updated, queued_at, "the retry time is left alone");
         assert!(failed_ops(&fx.store, "alice").unwrap().is_empty());
         assert!(
             read::find_by_id(&fx.store, id)
