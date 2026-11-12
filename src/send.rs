@@ -2942,8 +2942,72 @@ pub async fn send_durably(
     account: &crate::config::AccountConfig,
     smtp_config: &SmtpConfig,
 ) -> Result<SendReport> {
+    send_durably_via(built, account, smtp_config, &RealSmtp).await
+}
+
+/// [`send_durably`] through `smtp`.
+async fn send_durably_via<S: SmtpSubmit>(
+    built: &BuiltMessage,
+    account: &crate::config::AccountConfig,
+    smtp_config: &SmtpConfig,
+    smtp: &S,
+) -> Result<SendReport> {
     let durable = begin_durably(account, built)?;
-    submit_durably(durable, built, smtp_config, &RealSmtp).await
+    let report = submit_durably(durable, built, smtp_config, smtp).await?;
+    owe_rowless_send(account, built, &report);
+    Ok(report)
+}
+
+/// What a send that went out with no outbox row owes the contacts index
+/// (PERSO-237).
+///
+/// The outbox observes every send it finishes as it stores the Sent copy
+/// ([`crate::outbox::ingest_sent_copy`]), but a send whose row could not be
+/// committed has neither row nor stored copy, so it owes its recipients
+/// itself: the From, To and Cc of its headers and the Bcc of its envelope,
+/// in one unnumbered observation the next merge numbers and counts, as it
+/// counts the outbox's Bcc recipients. A send that reached no one owes
+/// nothing.
+fn owe_rowless_send(
+    account: &crate::config::AccountConfig,
+    built: &BuiltMessage,
+    report: &SendReport,
+) {
+    if report.row_id.is_some() || !report.send_result.any_succeeded() {
+        return;
+    }
+    let of_role = |wanted: RecipientRole| {
+        let list: Vec<&str> = built
+            .recipients
+            .iter()
+            .filter(|(_, role)| *role == wanted)
+            .map(|(address, _)| address.as_str())
+            .collect();
+        (!list.is_empty()).then(|| list.join(", "))
+    };
+    let now = || chrono::Utc::now().to_rfc3339();
+    let (from, to, cc, date) = match crate::parse::parse_rfc822_to_fetched_email(&built.raw) {
+        Some(email) => (email.from, email.to, email.cc, email.date),
+        None => (
+            built.from.clone(),
+            of_role(RecipientRole::To).unwrap_or_default(),
+            of_role(RecipientRole::Cc),
+            now(),
+        ),
+    };
+    let observation = crate::sync::FreshObservation {
+        sequence: 0,
+        role: crate::types::MailboxRole::Sent,
+        from,
+        to,
+        cc,
+        bcc: of_role(RecipientRole::Bcc),
+        date: if date.trim().is_empty() { now() } else { date },
+    };
+    crate::contacts::window::owe(
+        &crate::config::account_dir(&account.name),
+        vec![crate::contacts::window::Owed::Unstored(observation)],
+    );
 }
 
 /// The SMTP submission of one built message, behind a trait so the durable
@@ -3118,11 +3182,13 @@ pub async fn send_durably_graph<A: graph_submit::GraphSendApi>(
     };
 
     let Some(durable) = durable else {
-        return Ok(SendReport {
+        let report = SendReport {
             send_result,
             state: None,
             row_id: None,
-        });
+        };
+        owe_rowless_send(account, built, &report);
+        return Ok(report);
     };
     let mut state = match outcome.submit_outcome() {
         Some(transition) => durable.record(&transition)?,
@@ -3699,7 +3765,9 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         // so the correspondent is worth remembering whether or not the file
         // could be retired. The outbox owes what it observed of the send
         // (PERSO-237): a copy still waiting for its APPEND is owed when the
-        // drain stores it, and the next sync's merge takes it then.
+        // drain stores it, and the next sync's merge takes it then. A send
+        // that got no outbox row owes its recipients itself
+        // ([`owe_rowless_send`]).
         contacts = crate::contacts::hooks::bump_owed_sends(&ctx.account);
         mark_source_after_send(draft, ctx).await;
     }
@@ -5451,5 +5519,63 @@ mod smtp_durability_tests {
         assert!(report.send_result.all_succeeded());
         assert_eq!(report.state, Some(OutboxState::Done));
         assert_eq!(outbox.row(row_id).state, OutboxState::Done);
+    }
+
+    /// PERSO-237: a send whose outbox row could not be committed (the store
+    /// would not open) still goes out, and with no row there is no Sent copy
+    /// for the outbox to observe: the send owes its own recipients, To, Cc
+    /// and Bcc, so the caller's bump counts them, once.
+    #[tokio::test]
+    async fn a_send_with_no_outbox_row_owes_its_recipients() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = crate::config::AccountConfig {
+            name: ACCOUNT.to_string(),
+            default_from: "me@example.com".to_string(),
+            ..Default::default()
+        };
+        let root = crate::config::account_dir(ACCOUNT);
+        // A directory where the store file goes: the store will not open.
+        std::fs::create_dir_all(crate::config::store_path(ACCOUNT)).unwrap();
+        let empty = crate::contacts::ContactIndex {
+            account: ACCOUNT.to_string(),
+            extractor_version: crate::contacts::EXTRACTOR_VERSION,
+            ..Default::default()
+        };
+        crate::contacts::save_cache(&root, &empty).unwrap();
+        let built = BuiltMessage {
+            raw: b"From: me@example.com\r\nTo: Zed <zed@example.com>\r\n\
+                   Cc: Bob <bob@example.com>\r\nSubject: x\r\n\
+                   Date: Wed, 07 Jan 2026 12:00:00 +0000\r\n\
+                   Message-ID: <rowless@example.com>\r\n\r\nbody\r\n"
+                .to_vec(),
+            message_id: "<rowless@example.com>".to_string(),
+            recipients: vec![
+                ("zed@example.com".to_string(), RecipientRole::To),
+                ("bob@example.com".to_string(), RecipientRole::Cc),
+                ("bea@example.com".to_string(), RecipientRole::Bcc),
+            ],
+            from: "me@example.com".to_string(),
+            draft_key: None,
+            server_copy: None,
+        };
+        let smtp = CountingSmtp::default();
+
+        let report = send_durably_via(&built, &account, &smtp_config(), &smtp)
+            .await
+            .expect("sent without a row");
+        assert_eq!((report.state, report.row_id), (None, None));
+        assert_eq!(smtp.calls(), 1);
+
+        assert_eq!(
+            crate::contacts::hooks::bump_owed_sends(&account),
+            Some(3),
+            "the send owes its three recipients"
+        );
+        assert_eq!(crate::contacts::hooks::bump_owed_sends(&account), None);
+        let cached = crate::contacts::load_cache(&root).unwrap().unwrap();
+        let zed = &cached.contacts["zed@example.com"];
+        assert_eq!((zed.sent_to, zed.display_name.as_str()), (1, "Zed"));
+        assert_eq!(cached.contacts["bob@example.com"].sent_cc, 1);
+        assert_eq!(cached.contacts["bea@example.com"].sent_cc, 1, "the Bcc");
     }
 }
