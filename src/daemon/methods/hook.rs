@@ -82,6 +82,10 @@ impl Method for HookMethod {
                     only_params("hook.list", &params, &["account"])?;
                     let name = string_param(&params, "account")?;
                     let account = super::account::configured_account(&accounts, &name)?.clone();
+                    // The hook mailboxes resolve through the catalogue, which
+                    // opens the store: not while the daemon is still opening
+                    // it (PERSO-109).
+                    super::account::opened(&name)?;
                     let answer = tokio::task::spawn_blocking(move || list(&account))
                         .await
                         .map_err(|e| DomainError::internal(format!("the hook list {e}")))??;

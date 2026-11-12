@@ -80,6 +80,12 @@ default_from = "small@example.com"
 [[accounts]]
 name = "{LARGE}"
 default_from = "large@example.com"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 9
+username = "large@example.com"
+sync_interval_secs = 0
 "#
         );
         fs::write(sandbox.config_dir().join("config.toml"), config).expect("write config.toml");
@@ -93,6 +99,7 @@ default_from = "large@example.com"
             &[
                 ListedFolder::named("INBOX").with_attributes(&["\\Inbox"]),
                 ListedFolder::named(LISTED),
+                ListedFolder::named("Junk").with_attributes(&["\\Junk"]),
             ],
         )
         .expect("record the listing");
@@ -397,4 +404,82 @@ async fn a_held_store_open_holds_up_its_account_and_nothing_else() {
         Some("ready"),
         "{answer}"
     );
+}
+
+/// A daemon serving [`Sandbox`] with `large`'s store open held, once it
+/// reports `small` ready and `large` opening. The hold is released by
+/// removing the returned gate.
+async fn held() -> (Sandbox, Proc, PathBuf) {
+    let sandbox = Sandbox::new();
+    let gate = sandbox.hold_dir().join(format!("{LARGE}.hold"));
+    fs::write(&gate, b"").expect("arm the hold");
+    let daemon = sandbox.spawn_daemon();
+    let answer = status_until(
+        &sandbox.socket(),
+        "daemon.status answered with small ready",
+        |answer| state_of(&answer["accounts"], SMALL, "state") == Some("ready"),
+    )
+    .await;
+    assert_eq!(
+        state_of(&answer["accounts"], LARGE, "state"),
+        Some("opening"),
+        "{answer}"
+    );
+    (sandbox, daemon, gate)
+}
+
+/// Assert `answer` is the `-32006` `opening` refusal of `large`.
+fn assert_opening(method: &str, answer: Result<Value, ClientError>) {
+    let Err(ClientError::Rpc(error)) = answer else {
+        panic!("{method} on the opening account must be refused, got {answer:?}");
+    };
+    assert_eq!(
+        error.code,
+        ErrorCode::AccountNotReady.code(),
+        "{method}: {error:?}"
+    );
+    let data = error.data.clone().expect("the refusal carries data");
+    assert_eq!(data["account"], LARGE, "{method}: {error:?}");
+    assert_eq!(data["state"], "opening", "{method}: {error:?}");
+}
+
+/// Wait for `large`'s `account.state_changed` to `ready` on `conn`.
+async fn until_ready(conn: &mut Connection) {
+    loop {
+        let notification = within("the ready event", conn.next_notification())
+            .await
+            .expect("the daemon keeps the connection open");
+        let params = &notification.params;
+        if params["kind"] == "account.state_changed" && params["payload"]["account"] == LARGE {
+            assert_eq!(params["payload"]["state"], "ready", "{params}");
+            return;
+        }
+    }
+}
+
+/// `hook.list` and `contact.rebuild` refuse an account still opening its
+/// store, as every other store method does, rather than opening the store a
+/// second time on the request path (PERSO-109); the CLI waits on that
+/// refusal. Once the account is ready both are served.
+#[tokio::test]
+async fn hook_list_and_contact_rebuild_refuse_an_opening_account() {
+    let (sandbox, _daemon, gate) = held().await;
+    let mut conn = connected(&sandbox).await;
+    for method in ["hook.list", "contact.rebuild"] {
+        let answer = call(&mut conn, method, json!({"account": LARGE})).await;
+        assert_opening(method, answer);
+    }
+    call(&mut conn, "hook.list", json!({"account": SMALL}))
+        .await
+        .expect("the small account's hooks are listed while the large one opens");
+
+    let mut events = connected(&sandbox).await;
+    call(&mut events, "state.bootstrap", json!({}))
+        .await
+        .expect("state.bootstrap");
+    fs::remove_file(&gate).expect("release the hold");
+    until_ready(&mut events).await;
+    call(&mut conn, "hook.list", json!({"account": LARGE}))
+        .await
+        .expect("hook.list answers once the store is open");
 }

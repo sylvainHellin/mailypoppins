@@ -213,6 +213,9 @@ impl Method for ContactMethod {
                     let name = string_param(&params, "account")?;
                     let account =
                         super::account::configured_account(&snapshot.accounts, &name)?.clone();
+                    // The rebuild walks the store: refused before it starts
+                    // while the daemon is still opening it (PERSO-109).
+                    super::account::opened(&name)?;
                     let (id, handle) = self.operations.start(
                         ConnectionId(ctx.connection_id),
                         self.spec.cancel_scope,
