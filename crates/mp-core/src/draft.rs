@@ -1517,6 +1517,10 @@ pub fn expand_home(input: &str, home: Option<&Path>) -> PathBuf {
 /// Where the send path finds one entry of a draft's `attachments:` list: `~`
 /// against `home`, an absolute path as it is, and a relative one against the
 /// draft file's own directory (ATT-03's accepted divergence).
+///
+/// The one resolver for an entry: the send path's `resolve_attachment_paths`,
+/// [`validate_draft`] and the daemon's `draft.attachments` all go through it,
+/// so validate, preview and send never disagree on a padded entry (PERSO-215).
 pub fn resolve_attachment_entry(entry: &str, draft_dir: &Path, home: Option<&Path>) -> PathBuf {
     let expanded = expand_home(entry.trim(), home);
     if expanded.is_absolute() {

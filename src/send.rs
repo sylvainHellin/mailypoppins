@@ -795,6 +795,41 @@ mod tests {
         assert_eq!(absolute, vec![file]);
     }
 
+    /// `mp validate` and the send path read one entry through one resolver
+    /// (PERSO-215): a quoted entry with a trailing space beside a real file is
+    /// found by both, rather than passing validation and failing at send with
+    /// "Failed to read attachment".
+    #[test]
+    fn validate_and_send_agree_on_an_entry_with_a_trailing_space() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("report.pdf"), b"%PDF-1.4").unwrap();
+        let path = dir.path().join("draft.md");
+        fs::write(
+            &path,
+            "---\nsubject: x\nstatus: draft\nto: a@example.com\nattachments:\n  - \"report.pdf \"\n---\nbody\n",
+        )
+        .unwrap();
+        let draft = crate::draft::parse_email_draft(&path).unwrap();
+
+        let warnings = crate::draft::validate_draft(&draft).unwrap();
+        let validate_finds = !warnings
+            .iter()
+            .any(|w| w.starts_with("Attachment not found"));
+        let entries = draft.frontmatter.attachments.clone().unwrap_or_default();
+        assert_eq!(entries, vec!["report.pdf ".to_string()]);
+        let resolved = resolve_attachment_paths(&entries, attachment_anchor(&draft)).unwrap();
+        let send_finds = !resolved.is_empty() && resolved.iter().all(|p| p.is_file());
+
+        assert_eq!(
+            validate_finds, send_finds,
+            "validate ({warnings:?}) and send ({resolved:?}) disagree"
+        );
+        assert!(
+            send_finds,
+            "the file beside the draft is found: {resolved:?}"
+        );
+    }
+
     #[test]
     fn test_attachment_anchor_is_the_drafts_own_directory() {
         let draft_at = |path: &str| EmailDraft {
@@ -3366,7 +3401,10 @@ fn attachment_anchor(draft: &EmailDraft) -> &Path {
 
 /// Expand a draft's `attachments:` frontmatter entries into concrete files.
 ///
-/// Each entry is tilde-expanded and then made absolute against `anchor`. A
+/// Each entry is resolved by [`crate::draft::resolve_attachment_entry`], the
+/// one resolver `mp validate`, the send preview and the daemon's
+/// `draft.attachments` use too (PERSO-215): trimmed, `~` against the home
+/// directory, an absolute path as it is, a relative one against `anchor`. A
 /// directory entry contributes every regular file directly inside it
 /// (non-recursive, sorted by file name, dotfiles skipped); any other entry
 /// contributes itself. This lets a draft name one folder instead of listing
@@ -3388,10 +3426,10 @@ fn attachment_anchor(draft: &EmailDraft) -> &Path {
 /// The other visible change is in a failure: a missing `report.pdf` is now
 /// reported by its full path.
 pub fn resolve_attachment_paths(entries: &[String], anchor: &Path) -> Result<Vec<PathBuf>> {
+    let home = dirs::home_dir();
     let mut paths = Vec::new();
     for entry in entries {
-        let expanded = shellexpand::tilde(entry);
-        let path = crate::daemon::client::absolutise_in(Path::new(expanded.as_ref()), anchor);
+        let path = crate::draft::resolve_attachment_entry(entry, anchor, home.as_deref());
         if path.is_dir() {
             let mut dir_files = Vec::new();
             for dent in fs::read_dir(&path)
