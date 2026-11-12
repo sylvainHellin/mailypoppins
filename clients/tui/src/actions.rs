@@ -130,8 +130,11 @@ pub fn cursor_attachment_files(app: &mut App) -> Option<crate::app::AttachmentFi
 /// a private temp copy, and `o` opens the very file that will be sent, which
 /// is the point of the key on a draft.
 ///
-/// `~` is expanded the way the send path expands it ([`crate::send`]'s
-/// `draft_attachments`), so a draft that sends is a draft that opens.
+/// Each entry is expanded by [`mp_core::draft::attachment_entry_files`], the
+/// send path's own expansion (PERSO-215): trimmed, `~` against the home
+/// directory, a relative entry beside the draft file rather than under the
+/// TUI's working directory, and a folder as the files inside it, so a draft
+/// that sends is a draft that opens the very files it sends.
 /// A path that is not there is named rather than skipped silently: a stale
 /// entry is precisely what `o` is being pressed to find out about, and it is
 /// the failure `mp send` would hit later (see the forwarded-attachment note in
@@ -147,15 +150,20 @@ fn draft_attachment_files(app: &mut App) -> Option<Vec<PathBuf>> {
     };
 
     let listed = draft.frontmatter.attachments.unwrap_or_default();
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let home = shellexpand::tilde("~");
+    let home = (home != "~").then(|| PathBuf::from(home.as_ref()));
     let mut files = Vec::new();
     let mut missing = Vec::new();
     for entry in &listed {
-        let expanded = shellexpand::tilde(entry).into_owned();
-        let candidate = PathBuf::from(expanded);
-        if candidate.is_file() {
-            files.push(candidate);
-        } else {
-            missing.push(entry.clone());
+        match mp_core::draft::attachment_entry_files(entry, dir, home.as_deref()) {
+            Ok(found) if !found.is_empty() && found.iter().all(|f| f.is_file()) => {
+                files.extend(found);
+            }
+            // Empty after trimming: named by its spelling, or it is blank.
+            _ if entry.trim().is_empty() => missing.push(format!("{entry:?}")),
+            // Not there, an empty or unreadable folder: nothing to send.
+            _ => missing.push(entry.trim().to_string()),
         }
     }
 
@@ -3043,5 +3051,98 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Alice B., Team Lead"), "{content}");
         assert!(!content.contains("\nAlice\n"), "{content}");
+    }
+
+    // -----------------------------------------------------------------------
+    // `o` on a draft's attachments (PERSO-215)
+    // -----------------------------------------------------------------------
+
+    /// A door that knows one draft, at `path`, for `draft.path`.
+    struct DraftPathDoor {
+        path: PathBuf,
+    }
+
+    impl super::super::queries::Queries for DraftPathDoor {
+        fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+            match method {
+                "draft.path" => Ok(json!({
+                    "account": params["account"],
+                    "id": params["id"],
+                    "path": self.path.display().to_string(),
+                })),
+                other => Err(anyhow::anyhow!("unexpected {other}")),
+            }
+        }
+    }
+
+    /// `o` on a draft opens the files its send would attach: a padded
+    /// relative entry is the file beside the draft, not one under the TUI's
+    /// working directory, and a folder entry is the files inside it.
+    #[test]
+    fn o_on_a_draft_opens_the_files_beside_the_draft_its_send_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = "perso-215-beside-the-draft.pdf";
+        // The test runs from the crate's directory, which is not the draft's
+        // and holds no such file.
+        assert!(!Path::new(entry).exists());
+        std::fs::write(dir.path().join(entry), b"%PDF-1.4").unwrap();
+        std::fs::create_dir(dir.path().join("anlagen")).unwrap();
+        std::fs::write(dir.path().join("anlagen/b.txt"), b"b").unwrap();
+        std::fs::write(dir.path().join("anlagen/a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("anlagen/.hidden"), b"h").unwrap();
+        let path = dir.path().join("draft.md");
+        std::fs::write(
+            &path,
+            format!(
+                "---\nto: bob@example.com\nsubject: Anhang\nstatus: draft\n\
+                 attachments:\n  - \" {entry} \"\n  - anlagen\n---\n\nAnbei.\n"
+            ),
+        )
+        .unwrap();
+
+        let fetched = mp_core::parse::FetchedEmail {
+            from: "me@example.com".into(),
+            to: "bob@example.com".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: "Anhang".into(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".into(),
+            body_text: String::new(),
+            html_body: None,
+            has_attachments: true,
+            server_has_attachments: None,
+            message_id: None,
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        let mut entry_row = super::super::helpers::fetched_to_email_entry(None, None, &fetched);
+        entry_row.draft_id = Some("d1".to_string());
+        entry_row.status = "draft".to_string();
+        let mut app = App::default_for_tests();
+        app.emails = std::sync::Arc::new(vec![entry_row]);
+        app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
+        app.mailbox_counts = vec![app.emails.len()];
+        app.rebuild_visible();
+        let served = path.clone();
+        app.session = Some(crate::session::Session::serving(move || DraftPathDoor {
+            path: served.clone(),
+        }));
+
+        let Some(files) = cursor_attachment_files(&mut app) else {
+            panic!("no files: {:?}", app.status_message);
+        };
+        assert_eq!(
+            files.files,
+            vec![
+                dir.path().join(entry),
+                dir.path().join("anlagen/a.txt"),
+                dir.path().join("anlagen/b.txt"),
+            ],
+            "status: {:?}",
+            app.status_message
+        );
     }
 }

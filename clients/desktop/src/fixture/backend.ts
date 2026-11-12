@@ -1059,6 +1059,19 @@ export function simulateInvite(cancel: boolean): void {
 
 const expandHome = (p: string) => (p === "~" ? MOCK_HOME : p.startsWith("~/") ? `${MOCK_HOME}/${p.slice(2)}` : p);
 
+/**
+ * Where the send path finds a draft's attachment entry, as
+ * `mp_core::draft::resolve_attachment_entry` resolves it: trimmed, `~`
+ * against the home, a relative entry beside the draft file; null for an
+ * entry empty after trimming, which names no file (PERSO-215).
+ */
+function resolveEntry(entry: string, draftPath: string): string | null {
+  const typed = entry.trim();
+  if (!typed) return null;
+  const path = expandHome(typed);
+  return path.startsWith("/") ? path : `${draftPath.slice(0, draftPath.lastIndexOf("/"))}/${path}`;
+}
+
 /** A draft's attachments as `draft_attachments` answers them. */
 function draftAttachmentsOf(account: string, id: string) {
   const d = findDraft("draft.path", account, id);
@@ -1068,8 +1081,8 @@ function draftAttachmentsOf(account: string, id: string) {
     id,
     path: d.path,
     attachments: entries.map((entry, index) => {
-      const path = expandHome(entry);
-      return { index, entry, path, exists: mock.files.has(path) };
+      const path = resolveEntry(entry, d.path);
+      return { index, entry, path: path ?? "", exists: path !== null && mock.files.has(path) };
     }),
   };
 }
@@ -2132,7 +2145,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (!file.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
       if (!mock.files.has(file)) throw { kind: "not_found", message: `No such file: ${typed}`, code: null };
       const entries = (mock.draftAttachments[`${account}/${id}`] ??= []);
-      const dup = entries.find((e) => expandHome(e) === file);
+      const draftPath = findDraft("draft.path", account, id).path;
+      const dup = entries.find((e) => resolveEntry(e, draftPath) === file);
       if (dup) throw { kind: "protocol", message: `${dup} is already attached`, code: null };
       entries.push(typed);
       draftChanged(account, findDraft("draft.path", account, id));
@@ -2152,7 +2166,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       knownAccount(cmd, account);
       const entry = (mock.draftAttachments[`${account}/${String(args.id)}`] ?? [])[Number(args.index)];
       if (entry === undefined) throw { kind: "not_found", message: `no attachment ${Number(args.index) + 1}`, code: null };
-      const path = expandHome(entry);
+      const path = resolveEntry(entry, findDraft("draft.path", account, String(args.id)).path) ?? "";
       if (!mock.files.has(path)) throw { kind: "not_found", message: `${entry} is missing: no file at ${path}`, code: null };
       mock.opened.push(path);
       return { name: path.slice(path.lastIndexOf("/") + 1), path };

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { messageItems, openHtml } from "@/app/attachments";
+import { messageItems, openAttachment, openHtml } from "@/app/attachments";
 import type { Action } from "@/app/reducer";
 import { initialState, type AppState } from "@/app/state";
+import { draftAttachments } from "@/lib/commands";
 import { fixtures, mock, resetMock } from "@/test/tauri-mock";
 import type { DraftListing } from "@/protocol/types";
 
@@ -52,6 +53,33 @@ describe("tb on a draft (PERSO-136)", () => {
     await openHtml(onDraft("broken", listing), dispatch);
     expect(calls("draft_html_open")).toEqual([]);
     expect(dispatch).toHaveBeenCalledWith({ type: "notice", text: "This draft does not parse; fix it in the editor first" });
+  });
+});
+
+describe("to on a draft (PERSO-215)", () => {
+  beforeEach(() => resetMock());
+
+  it("opens a padded relative entry beside the draft file, as the send resolves it", async () => {
+    const draft = fixtures.drafts.work.drafts.find((d) => d.id === "angebot-antwort");
+    if (!draft) throw new Error("the fixture holds angebot-antwort");
+    const beside = `${draft.path.slice(0, draft.path.lastIndexOf("/"))}/report.pdf`;
+    mock.files.add(beside);
+    mock.draftAttachments["work/angebot-antwort"] = [" report.pdf "];
+    const dispatch = vi.fn<(a: Action) => void>();
+    await openAttachment(onDraft("angebot-antwort"), dispatch);
+    expect(calls("draft_attachment_open")).toEqual([{ account: "work", id: "angebot-antwort", index: 0 }]);
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledWith({ type: "notice", text: "Opened: report.pdf" }));
+    expect(mock.opened).toEqual([beside]);
+  });
+
+  it("lists an entry empty after trimming as missing, with no path, and opens nothing", async () => {
+    mock.draftAttachments["work/angebot-antwort"] = [" "];
+    const listed = await draftAttachments("work", "angebot-antwort");
+    expect(listed.attachments).toEqual([{ index: 0, entry: " ", path: "", exists: false }]);
+    const dispatch = vi.fn<(a: Action) => void>();
+    await openAttachment(onDraft("angebot-antwort"), dispatch);
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ kind: "failed", account: "work" })));
+    expect(mock.opened).toEqual([]);
   });
 });
 

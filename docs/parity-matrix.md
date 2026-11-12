@@ -839,6 +839,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: `tests/cli_selector_contract.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`to on a draft picks among its files; ta outside Drafts and ts on a draft say why not`, `the preview lists the entries in order, opens one, flags a missing one and removes one`)
 - Status: GUI shipped (M3, #0131)
 - Note: `draft.materialize_attachment` is not served; a draft's file is already on disk, so the desktop opens the path the frontmatter lists, resolved as the send path resolves it.
+  The TUI's `o` on a draft expands each entry through `draft::attachment_entry_files`, the expansion `send::resolve_attachment_paths` uses: trimmed, a relative entry beside the draft file rather than under the TUI's working directory, a folder as the files inside it (PERSO-215; `o_on_a_draft_opens_the_files_beside_the_draft_its_send_attaches` in `clients/tui/src/actions.rs`).
+  The desktop opens per entry the path `draft.attachments` resolved, so a folder entry reads as missing there.
 
 ### ATT-05 Open a message's HTML part in the browser
 

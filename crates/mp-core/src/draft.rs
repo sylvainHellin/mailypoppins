@@ -1550,6 +1550,49 @@ pub fn empty_attachment_entry(entry: &str) -> String {
     format!("Attachment entry is empty: {entry:?}")
 }
 
+/// The files one entry of a draft's `attachments:` list contributes to a
+/// send: the path [`resolve_attachment_entry`] gives, or, when that is a
+/// folder, every regular file directly inside it (non-recursive, sorted by
+/// path, dotfiles skipped), so a draft can name one folder instead of
+/// listing every file in it. A path that is neither a readable folder nor an
+/// existing file is passed through, for its reader to report as missing; an
+/// entry empty after trimming is an error in [`empty_attachment_entry`]'s
+/// words.
+///
+/// The send path's `resolve_attachment_paths` and the TUI's `o` on a draft
+/// both expand an entry through it, so `o` opens what the send attaches.
+pub fn attachment_entry_files(
+    entry: &str,
+    draft_dir: &Path,
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    let Some(path) = resolve_attachment_entry(entry, draft_dir, home) else {
+        bail!(empty_attachment_entry(entry));
+    };
+    if !path.is_dir() {
+        return Ok(vec![path]);
+    }
+    let mut files = Vec::new();
+    for dent in
+        fs::read_dir(&path).with_context(|| format!("Failed to read attachment folder: {entry}"))?
+    {
+        let file = dent
+            .with_context(|| format!("Failed to read attachment folder: {entry}"))?
+            .path();
+        let is_dotfile = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'));
+        if file.is_file() && !is_dotfile {
+            files.push(file);
+        }
+    }
+    // Deterministic order so the same folder always attaches the same
+    // sequence; `read_dir` yields entries in arbitrary order.
+    files.sort();
+    Ok(files)
+}
+
 /// Two paths name one file: compared canonically when both exist.
 fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {

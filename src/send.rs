@@ -3401,19 +3401,19 @@ fn attachment_anchor(draft: &EmailDraft) -> &Path {
 
 /// Expand a draft's `attachments:` frontmatter entries into concrete files.
 ///
-/// Each entry is resolved by [`crate::draft::resolve_attachment_entry`], the
-/// one resolver `mp validate`, the send preview and the daemon's
-/// `draft.attachments` use too (PERSO-215): trimmed, `~` against the home
-/// directory, an absolute path as it is, a relative one against `anchor`. A
-/// directory entry contributes every regular file directly inside it
-/// (non-recursive, sorted by file name, dotfiles skipped); any other entry
-/// contributes itself. This lets a draft name one folder instead of listing
-/// every file in it. A path that is neither a readable directory nor an
-/// existing file is passed through, so the later `fs::read` reports the
-/// missing path the same way it always has. An entry that is empty after
-/// trimming names no file and is an error in the words `mp validate` warns
-/// with ([`crate::draft::empty_attachment_entry`]): the send refuses the
-/// draft, and the drafts mirror's server copy leaves the entry out.
+/// Each entry is expanded by [`crate::draft::attachment_entry_files`] over
+/// [`crate::draft::resolve_attachment_entry`], the one resolver `mp
+/// validate`, the send preview, the daemon's `draft.attachments` and the
+/// TUI's `o` use too (PERSO-215): trimmed, `~` against the home directory, an
+/// absolute path as it is, a relative one against `anchor`. A directory entry
+/// contributes every regular file directly inside it (non-recursive, sorted,
+/// dotfiles skipped); any other entry contributes itself. A path that is
+/// neither a readable directory nor an existing file is passed through, so
+/// the later `fs::read` reports the missing path the same way it always has.
+/// An entry that is empty after trimming names no file and is an error in
+/// the words `mp validate` warns with
+/// ([`crate::draft::empty_attachment_entry`]): the send refuses the draft,
+/// and the drafts mirror's server copy leaves the entry out.
 ///
 /// `anchor` is the draft's own directory ([`attachment_anchor`]), not the
 /// process's working directory. Every send runs inside the daemon now, and the
@@ -3432,37 +3432,11 @@ pub fn resolve_attachment_paths(entries: &[String], anchor: &Path) -> Result<Vec
     let home = dirs::home_dir();
     let mut paths = Vec::new();
     for entry in entries {
-        let Some(path) = crate::draft::resolve_attachment_entry(entry, anchor, home.as_deref())
-        else {
-            return Err(anyhow!(crate::draft::empty_attachment_entry(entry)));
-        };
-        if path.is_dir() {
-            let mut dir_files = Vec::new();
-            for dent in fs::read_dir(&path)
-                .with_context(|| format!("Failed to read attachment folder: {}", entry))?
-            {
-                let dent =
-                    dent.with_context(|| format!("Failed to read attachment folder: {}", entry))?;
-                let file = dent.path();
-                if !file.is_file() {
-                    continue;
-                }
-                let is_dotfile = file
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with('.'));
-                if is_dotfile {
-                    continue;
-                }
-                dir_files.push(file);
-            }
-            // Deterministic order so the same folder always attaches the same
-            // sequence; `read_dir` yields entries in arbitrary order.
-            dir_files.sort();
-            paths.extend(dir_files);
-        } else {
-            paths.push(path);
-        }
+        paths.extend(crate::draft::attachment_entry_files(
+            entry,
+            anchor,
+            home.as_deref(),
+        )?);
     }
     Ok(paths)
 }
