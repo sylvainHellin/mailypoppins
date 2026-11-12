@@ -84,6 +84,13 @@ impl crate::queries::Queries for Daemon {
                 entries.retain(|e| *e != address);
                 Ok(json!({ "entry": address, "removed": removed, "entries": *entries }))
             }
+            // The sidebar after a block moved two of the Inbox's three rows
+            // to Junk.
+            "mailbox.list" => Ok(json!({"mailboxes": [
+                {"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 1, "badge": 1},
+                {"role": "junk", "slug": "Junk", "label": "Junk", "server": "Junk", "total": 2, "badge": 2},
+                {"role": "sent", "slug": "sent", "label": "Sent", "total": 0},
+            ]})),
             other => Err(anyhow::anyhow!("unexpected {other}")),
         }
     }
@@ -342,14 +349,9 @@ fn row_event(revision: u64, kind: &str, payload: Value) -> EventEnvelope {
     }
 }
 
-/// A block reloads nothing itself: what it moved reaches the TUI as the
-/// daemon's events, the TUI that blocked as much as any other (PERSO-286).
-/// The removal of an open Inbox row reads the Inbox again (this list was
-/// built by hand, so its uids are unknown and the delta cannot fold in
-/// place), the Junk listing's invalidate drops its cache, Sent is left warm,
-/// and the moved messages, the cursor one included, leave the list.
-#[test]
-fn a_block_that_moved_the_open_inbox_leaves_it_to_the_daemons_events() {
+/// The account `work` with the shop's two messages and Alice's in its open
+/// Inbox beside Junk and Sent, every listing cached, past the bootstrap at 10.
+fn work_inbox() -> (App, Daemon) {
     let mailbox = |label: &str, id: &str, kind: MailboxKind| MailboxInfo {
         label: label.to_string(),
         icon: "",
@@ -357,11 +359,10 @@ fn a_block_that_moved_the_open_inbox_leaves_it_to_the_daemons_events() {
         kind,
         server_name: None,
     };
-    let kept = received(2, "Alice <alice@example.org>");
     let (mut app, daemon) = app(
         vec![
             received(1, "Offers <offers@shop.example>"),
-            kept.clone(),
+            received(2, "Alice <alice@example.org>"),
             received(3, "Deals <deals@shop.example>"),
         ],
         &[],
@@ -382,6 +383,19 @@ fn a_block_that_moved_the_open_inbox_leaves_it_to_the_daemons_events() {
         ..Default::default()
     });
     app.pending_actions.clear();
+    (app, daemon)
+}
+
+/// A block reloads nothing itself: what it moved reaches the TUI as the
+/// daemon's events, the TUI that blocked as much as any other (PERSO-286).
+/// The removal of an open Inbox row reads the Inbox again (this list was
+/// built by hand, so its uids are unknown and the delta cannot fold in
+/// place), the Junk listing's invalidate drops its cache, Sent is left warm,
+/// and the moved messages, the cursor one included, leave the list.
+#[test]
+fn a_block_that_moved_the_open_inbox_leaves_it_to_the_daemons_events() {
+    let (mut app, daemon) = work_inbox();
+    let kept = app.emails[1].clone();
 
     press(&mut app, 'B');
     press(&mut app, 'j');
@@ -448,6 +462,49 @@ fn a_block_that_moved_the_open_inbox_leaves_it_to_the_daemons_events() {
         Some("Alice <alice@example.org>"),
         "the cursor leaves the moved message"
     );
+}
+
+/// The sidebar recounts on the daemon's counts event for the mailboxes a
+/// block moved mail between, not on the block's answer (PERSO-286): the
+/// counts are what `mailbox.list` reads after the move, and another
+/// account's counts event asks for none.
+#[test]
+fn a_blocks_counts_event_recounts_the_sidebar() {
+    let (mut app, daemon) = work_inbox();
+
+    press(&mut app, 'B');
+    press(&mut app, 'j');
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.mailbox_counts, [3, 0, 0], "the answer recounts nothing");
+
+    let counts = |revision: u64, resource: &str| {
+        row_event(
+            revision,
+            "state.invalidate",
+            json!({"resource": resource, "scope": {"query": "counts"}}),
+        )
+    };
+    app.apply_event(&counts(11, "mailbox:home/inbox"));
+    assert!(
+        calls(&daemon).iter().all(|(m, _)| m != "mailbox.list"),
+        "another account's counts"
+    );
+
+    app.apply_event(&counts(12, "mailbox:work/inbox"));
+    app.apply_event(&counts(13, "mailbox:work/Junk"));
+    let sidebar: Vec<(&str, usize)> = app
+        .mailboxes
+        .iter()
+        .map(|mb| mb.id.as_str())
+        .zip(app.mailbox_counts.iter().copied())
+        .collect();
+    assert_eq!(sidebar, [("inbox", 1), ("Junk", 2), ("sent", 0)]);
+    let recounts: Vec<Value> = calls(&daemon)
+        .into_iter()
+        .filter(|(m, _)| m == "mailbox.list")
+        .map(|(_, params)| params)
+        .collect();
+    assert_eq!(recounts, vec![json!({"account": "work"}); 2]);
 }
 
 /// The removal of another account's moved mail drops that account's cached
