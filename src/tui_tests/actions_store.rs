@@ -1617,13 +1617,59 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
                 }
                 _ => panic!("the forward wizard did not open"),
             }
+            app.server_search_status = None;
             crate::tui::actions::cancel_compose_wizard(&mut app);
             assert!(
                 matches!(app.overlay, Overlay::Search),
                 "back to the overlay"
             );
             assert_eq!(app.server_search_results.len(), 1, "the results stay");
+            assert_eq!(
+                app.server_search_status.as_deref(),
+                Some("Compose cancelled"),
+                "the cancel went to the status line the overlay hides: {:?}",
+                app.status_message
+            );
         }
+    }
+
+    /// The search overlay's `o` on a hit with no attachments says so on the
+    /// overlay's own line, as the list's `o` says it on the status line
+    /// (PERSO-216).
+    #[test]
+    fn the_search_overlays_o_on_a_hit_without_attachments_says_so_on_the_overlays_line() {
+        use crate::tui::app::{Overlay, SearchOverlayFocus, SearchResultEntry};
+        let fx = Fixture::new();
+        let email = fixture_email("Plain");
+        let row = fx.ingest(&email);
+        let mut app = app_on_row(&fx, &row);
+        app.server_search_results = vec![SearchResultEntry {
+            entry: app.emails[0].clone(),
+            fetched: email,
+            source_label: "Inbox".to_string(),
+            seq: None,
+        }];
+        app.server_search_index = 0;
+        app.overlay = Overlay::Search;
+        app.server_search_focus = SearchOverlayFocus::List;
+
+        press(&mut app, "o");
+
+        assert!(
+            app.pending_actions.is_empty(),
+            "nothing to open: {:?}",
+            app.pending_actions
+        );
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("No attachments"),
+            "the answer went to the status line the overlay hides: {:?}",
+            app.status_message
+        );
+        assert!(
+            matches!(app.overlay, Overlay::Search),
+            "the overlay stays open over the results"
+        );
     }
 
     /// `cf` and `cF` open the one forward wizard; `cF`'s carries the message
