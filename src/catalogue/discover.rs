@@ -168,6 +168,10 @@ fn record_listing(
 /// [`refresh`] once the server has answered: record `fresh` and follow its
 /// renames, the Graph ones the listing shows and the IMAP ones `renamed`
 /// carries.
+///
+/// The listing and the rows a rename moves are written in one transaction:
+/// a failure while the rows move leaves the old name listed as present with
+/// its rows and cursor, so the next listing finds the rename again.
 fn record(
     store: &Store,
     blobs: &crate::store::BlobStore,
@@ -175,17 +179,20 @@ fn record(
     fresh: &[ListedFolder],
     renamed: &[listing::Rename],
 ) -> Result<bool> {
+    use anyhow::Context;
     let before = Catalogue::from_store(store, account);
     let resolved = Catalogue::resolve(account, fresh);
-    let recorded = listing::replace_with(store, &account.name, fresh, renamed, &|rename| {
+    let tx = store.immediate_transaction()?;
+    let recorded = listing::replace_in(&tx, &account.name, fresh, renamed, &|rename| {
         keeps_role_keys(&before, &resolved, rename)
     })?;
     if !recorded.renames.is_empty() {
-        let after = Catalogue::from_store(store, account);
+        let after = Catalogue::resolve(account, &listing::load_from(&tx, &account.name)?);
         for rename in &recorded.renames {
-            follow_rename(store, blobs, &account.name, &before, &after, rename)?;
+            follow_rename(&tx, blobs, &account.name, &before, &after, rename)?;
         }
     }
+    tx.commit().context("committing the folder list")?;
     Ok(recorded.changed)
 }
 
@@ -221,7 +228,7 @@ fn keeps_role_keys(before: &Catalogue, after: &Catalogue, rename: &listing::Rena
 /// its rows away would leave the pin empty; the log says to edit the config),
 /// or when the new name would shadow a role or the local Drafts.
 fn follow_rename(
-    store: &Store,
+    tx: &rusqlite::Transaction<'_>,
     blobs: &crate::store::BlobStore,
     account: &str,
     before: &Catalogue,
@@ -253,7 +260,7 @@ fn follow_rename(
     if old.key == new.key || (!new.keyed_by_role() && super::shadows_reserved_key(&new.key)) {
         return Ok(());
     }
-    let moved = rekey(store, blobs, account, &old.key, &new.key)?;
+    let moved = rekey(tx, blobs, account, &old.key, &new.key)?;
     log::info!(
         "[catalogue] {account}: '{}' was renamed '{}' on the server; {moved} row(s) follow it",
         rename.from,
@@ -265,18 +272,17 @@ fn follow_rename(
 /// Re-key every row of mailbox `from` to `to`: the messages, the sync cursor
 /// (which stays valid: a Graph folder kept its id and with it the delta
 /// token, an IMAP folder its UIDVALIDITY and UIDs), the mailbox record and the
-/// ingest failures. A message `to`
-/// already holds stays there and its old copy is deleted. Answers how many
-/// messages moved.
+/// ingest failures. A message `to` already holds stays there and its old
+/// copy is deleted. Answers how many messages moved. Written in `tx`, which
+/// the caller commits with the listing row the rename renamed.
 fn rekey(
-    store: &Store,
+    tx: &rusqlite::Transaction<'_>,
     blobs: &crate::store::BlobStore,
     account: &str,
     from: &str,
     to: &str,
 ) -> Result<usize> {
     use anyhow::Context;
-    let tx = store.immediate_transaction()?;
     let moved = tx
         .execute(
             "UPDATE OR IGNORE messages SET mailbox = ?3 WHERE account = ?1 AND mailbox = ?2",
@@ -308,9 +314,9 @@ fn rekey(
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         ids
     };
-    tx.commit().context("committing the rename")?;
     for id in leftovers {
-        crate::store::write::delete_row(store, blobs, id)?;
+        crate::store::write::delete_row_in(tx, blobs, id)
+            .context("dropping a copy the new name already holds")?;
     }
     Ok(moved)
 }
@@ -485,6 +491,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
+    }
+
+    /// PERSO-185: a Graph rename that fails while its rows move leaves
+    /// nothing half done, so the next listing, carrying the same folder id,
+    /// follows it.
+    #[test]
+    fn a_graph_rename_that_fails_midway_is_followed_by_the_next_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let account = AccountConfig {
+            name: "work".to_string(),
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Projects", "BBB")],
+            &[],
+        )
+        .unwrap();
+        crate::ingest::ingest_message(
+            &store,
+            &blobs,
+            &crate::ingest::IngestInput {
+                account: "work",
+                mailbox: "Projects",
+                uid: 1,
+                email: &email("one"),
+                raw: None,
+            },
+        )
+        .unwrap();
+        crate::ingest::record_mailbox_cursor(
+            &store,
+            "work",
+            "Projects",
+            &crate::ingest::MailboxCursor {
+                deltalink: Some("token".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let renamed = [folder("Inbox", "AAA"), folder("Projekte", "BBB")];
+
+        refuse_cursor_moves(&store);
+        assert!(record(&store, &blobs, &account, &renamed, &[]).is_err());
+        let listed = listing::load(&store, "work").unwrap();
+        assert!(
+            listed.iter().any(|f| f.name == "Projects" && !f.missing),
+            "the listing still names the old folder: {listed:?}"
+        );
+        assert_eq!(mailbox_of(&store, "one"), vec!["Projects"]);
+
+        allow_cursor_moves(&store);
+        assert!(record(&store, &blobs, &account, &renamed, &[]).unwrap());
+        assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
+        let cursor = crate::ingest::load_mailbox_cursor(&store, "work", "Projekte")
+            .unwrap()
+            .expect("the cursor moved");
+        assert_eq!(cursor.deltalink.as_deref(), Some("token"));
     }
 
     /// PERSO-185: a Graph folder keyed by its role whose rename takes the
@@ -751,6 +820,61 @@ mod tests {
         let counts = crate::store::read::mailbox_read_counts(&store, "tum").unwrap();
         assert_eq!(counts.get("Projekte").map(|c| c.total), Some(2));
         assert!(!counts.contains_key("Projects"));
+    }
+
+    /// Make every move of a sync cursor fail, which is a step of following a
+    /// rename taken after its listing row is renamed.
+    fn refuse_cursor_moves(store: &Store) {
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER refuse_cursor_move BEFORE UPDATE ON sync_cursors
+                 BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+            )
+            .unwrap();
+    }
+
+    fn allow_cursor_moves(store: &Store) {
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER refuse_cursor_move")
+            .unwrap();
+    }
+
+    /// PERSO-185: an IMAP rename that fails while its rows move leaves
+    /// nothing half done, the listing still naming the old folder as present
+    /// with its rows, so the next listing proves the rename again and
+    /// follows it.
+    #[test]
+    fn an_imap_rename_that_fails_midway_is_followed_by_the_next_listing() {
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![served("Projekte", 7, 3, &[(1, "one"), (2, "two")])]);
+        let (store, _) = fixture.store();
+        refuse_cursor_moves(&store);
+
+        let failed = futures::executor::block_on(refresh_imap(&fixture.account, &fixture.imap));
+        assert!(failed.is_err(), "the injected failure surfaces");
+        let listed = listing::load(&store, "tum").unwrap();
+        assert!(
+            listed.iter().any(|f| f.name == "Projects" && !f.missing),
+            "the listing still names the old folder: {listed:?}"
+        );
+        assert_eq!(fixture.mailbox_of("one"), vec!["Projects"]);
+
+        allow_cursor_moves(&store);
+        assert!(fixture.refresh(), "the listing changed");
+        assert_eq!(fixture.mailbox_of("one"), vec!["Projekte"]);
+        assert_eq!(fixture.mailbox_of("two"), vec!["Projekte"]);
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "tum", "Projekte")
+                .unwrap()
+                .is_some(),
+            "the cursor moved"
+        );
+        assert!(!listing::load(&store, "tum")
+            .unwrap()
+            .iter()
+            .any(|f| f.name == "Projects"));
     }
 
     /// PERSO-185: a gained folder under another UIDVALIDITY is a new folder

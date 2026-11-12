@@ -127,15 +127,22 @@ pub fn delete_row(store: &Store, blobs: &BlobStore, id: i64) -> Result<Option<Mu
         .conn()
         .unchecked_transaction()
         .context("opening a delete transaction")?;
-    let hashes = blob_refs(&tx, id)?;
-    super::fts::unindex(&tx, id).context("removing the FTS entry")?;
+    delete_row_in(&tx, blobs, id)?;
+    tx.commit().context("committing a delete transaction")?;
+    Ok(Some(previous))
+}
+
+/// [`delete_row`] inside the caller's transaction, which commits it with
+/// whatever else it writes.
+pub fn delete_row_in(tx: &Transaction<'_>, blobs: &BlobStore, id: i64) -> Result<()> {
+    let hashes = blob_refs(tx, id)?;
+    super::fts::unindex(tx, id).context("removing the FTS entry")?;
     tx.execute("DELETE FROM messages WHERE id = ?1", [id])
         .context("deleting the message row")?;
     for hash in hashes {
-        blobs.release(&tx, &hash)?;
+        blobs.release(tx, &hash)?;
     }
-    tx.commit().context("committing a delete transaction")?;
-    Ok(Some(previous))
+    Ok(())
 }
 
 /// Delete the row a `(account, mailbox, uid)` triple names, if it is there.

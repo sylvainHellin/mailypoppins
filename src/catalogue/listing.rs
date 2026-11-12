@@ -100,8 +100,12 @@ impl ListedFolder {
 /// Every folder of `account` the store holds, in the order the server last
 /// listed them, the missing ones after.
 pub fn load(store: &Store, account: &str) -> Result<Vec<ListedFolder>> {
-    let mut stmt = store
-        .conn()
+    load_from(store.conn(), account)
+}
+
+/// [`load`] over `conn`, which inside a transaction sees what it wrote.
+pub fn load_from(conn: &rusqlite::Connection, account: &str) -> Result<Vec<ListedFolder>> {
+    let mut stmt = conn
         .prepare(&format!(
             "SELECT name, delimiter, attributes, missing, total, unread, folder_id FROM {TABLE}
              WHERE account = ?1 ORDER BY missing, position"
@@ -157,7 +161,26 @@ pub fn replace_with(
     confirmed: &[Rename],
     follows: &dyn Fn(&Rename) -> bool,
 ) -> Result<Recorded> {
-    let previous = load(store, account)?;
+    let tx = store.immediate_transaction()?;
+    let recorded = replace_in(&tx, account, fresh, confirmed, follows)?;
+    tx.commit().context("committing the folder list")?;
+    Ok(recorded)
+}
+
+/// [`replace_with`] inside the caller's transaction `tx`, which commits it.
+///
+/// A caller that moves a renamed folder's rows writes them in `tx` too
+/// ([`super::discover::refresh`]): the listing row then takes the new name
+/// only together with the rows, and a failure in between leaves the old
+/// name listed with its rows, so the next listing finds the rename again.
+pub fn replace_in(
+    tx: &rusqlite::Transaction<'_>,
+    account: &str,
+    fresh: &[ListedFolder],
+    confirmed: &[Rename],
+    follows: &dyn Fn(&Rename) -> bool,
+) -> Result<Recorded> {
+    let previous = load_from(tx, account)?;
     let mut renames = renames(&previous, fresh);
     renames.extend(
         confirmed
@@ -175,7 +198,6 @@ pub fn replace_with(
             .collect::<Vec<_>>(),
     );
     renames.retain(|rename| follows(rename));
-    let tx = store.immediate_transaction()?;
     for rename in &renames {
         tx.execute(
             &format!("UPDATE {TABLE} SET name = ?3 WHERE account = ?1 AND name = ?2"),
@@ -237,7 +259,6 @@ pub fn replace_with(
         .with_context(|| format!("marking the folder {} missing", folder.name))?;
         gone += 1;
     }
-    tx.commit().context("committing the folder list")?;
 
     let present = |list: &[ListedFolder]| -> Vec<(String, Vec<String>)> {
         let mut names: Vec<(String, Vec<String>)> = list
