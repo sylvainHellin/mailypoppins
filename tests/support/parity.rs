@@ -176,9 +176,12 @@ pub fn socket_path(root: &Path) -> PathBuf {
 /// Point `cmd` at `root` as `HOME`, data root and config root, and clear every
 /// daemon hook.
 pub fn sandbox_env<'a>(cmd: &'a mut Command, root: &Path) -> &'a mut Command {
+    // A profile exported in the developer's shell would be refused beside the
+    // two directory variables (PERSO-176), so it is cleared with them.
     cmd.env("HOME", root)
         .env("MAILYPOPPINS_DATA_DIR", root)
-        .env("MAILYPOPPINS_CONFIG_DIR", root);
+        .env("MAILYPOPPINS_CONFIG_DIR", root)
+        .env_remove("MAILYPOPPINS_PROFILE");
     for hook in DAEMON_ENV_HOOKS {
         cmd.env_remove(hook);
     }

@@ -935,6 +935,13 @@ Layout under the data dir:
 Nothing under `accounts/<name>/` is created eagerly: `mp config init` makes the account directory, the first sync makes the store and its blob directory, and the first draft makes `drafts/`.
 Override the root via the `MAILYPOPPINS_DATA_DIR` env var, which tests use and which doubles as the escape hatch for a portable location.
 
+Named profiles (PERSO-176, `crates/mp-core/src/profile.rs`) move both roots: on profile `<name>`, `config_dir()` is `~/.config/mailypoppins/profiles/<name>` and `mailypoppins_data_dir()` is `<data_dir>/profiles/<name>`, so the store, drafts, tokens, `secrets.enc`, logs, runtime directory and socket of a profile are its own and a second daemon serves it.
+No profile, an empty `MAILYPOPPINS_PROFILE` or the name `default` are the paths above, unchanged.
+The resolvers read only `MAILYPOPPINS_PROFILE`; `mp` turns `--profile` into it in a synchronous `main`, before the tokio runtime and the logger exist, so every process it spawns inherits the profile.
+`--profile` wins over the variable, a name is 1 to 12 ASCII letters, digits, `-` or `_` (the macOS socket path limit), and a profile beside `MAILYPOPPINS_CONFIG_DIR` or `MAILYPOPPINS_DATA_DIR` is refused with exit 2 naming both.
+The legacy `~/.config/email` move is skipped on a profile, since that directory is the default profile's.
+Nothing walks the config or data root recursively, so `profiles/` is never read as the default profile's files.
+
 `retention` is parsed and validated in config but not enforced yet: the blob store grows without bound until #0060 lands.
 
 The OS keyring service name (when the keyring backend is opted into) is `mailypoppins` (constant `KEYRING_SERVICE` in `crates/mp-core/src/secrets.rs`).

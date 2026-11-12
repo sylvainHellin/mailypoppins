@@ -243,6 +243,24 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
         <code>MAILYPOPPINS_DATA_DIR=/some/path</code> for tests or portable installs.
       </p>
 
+      <h3 id="profiles-section">Profiles</h3>
+      <p>
+        A profile is a separate setup with its own accounts, store and daemon, for a demo,
+        a test or a work setup that must never show your other mail. Run any command on one
+        with <code>mp --profile demo</code> or <code>MAILYPOPPINS_PROFILE=demo</code>; the
+        flag wins over the variable. The profile keeps its config in
+        <code>~/.config/mailypoppins/profiles/demo/</code> and its data in
+        <code>profiles/demo/</code> under the data directory, so
+        <code>mp --profile demo config init</code> sets up its first account like any other.
+        Without a profile, or with <code>--profile default</code>, nothing moves.
+      </p>
+      <p>
+        A profile name is 1 to 12 letters, digits, <code>-</code> or <code>_</code>. A profile
+        together with <code>MAILYPOPPINS_CONFIG_DIR</code> or
+        <code>MAILYPOPPINS_DATA_DIR</code> is refused, since the two would disagree on where
+        the files are.
+      </p>
+
       <!-- [mailboxes] -->
       <h3 id="mailboxes-section">[mailboxes]</h3>
       <p>

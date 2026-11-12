@@ -235,6 +235,7 @@ Its message carries the socket path, the daemon log path and the `mp daemon run`
 ## Runtime files
 
 Everything the daemon needs on disk lives in one directory below the data root, so pointing `MAILYPOPPINS_DATA_DIR` at a tempdir moves a whole daemon instance with it.
+A profile (`mp --profile demo`, PERSO-176) moves the data root to `<data_dir>/profiles/demo`, so its daemon has its own socket and start lock and runs beside the default profile's.
 
 ```
 <data_dir>/runtime/                    dir mode 0700

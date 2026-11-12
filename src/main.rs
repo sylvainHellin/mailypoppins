@@ -32,6 +32,14 @@ struct Cli {
     // hidden [`NoAccount`] and refuse it ([`refuse_account_where_meaningless`]).
     #[arg(short = 'A', long, global = true)]
     account: Option<String>,
+
+    /// Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+    //
+    // Read by `main` before anything resolves a path and turned into
+    // `MAILYPOPPINS_PROFILE`, which every process this one spawns inherits
+    // (PERSO-176, `mp_core::profile`).
+    #[arg(long, global = true, value_name = "NAME")]
+    profile: Option<String>,
 }
 
 /// The signature a draft writer splices into the new draft: `-s/--signature`
@@ -6142,9 +6150,7 @@ fn write_completions(shell: clap_complete::Shell, out: &mut dyn Write) -> Result
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_logging();
+fn main() -> Result<()> {
     // Two steps rather than `Cli::parse()`, which is these two: the matches
     // carry the typed command name that the daemon policy is written in.
     // `get_matches` answers `--help` and `--version` and exits, exactly as
@@ -6152,6 +6158,23 @@ async fn main() -> Result<()> {
     let matches = <Cli as clap::CommandFactory>::command().get_matches();
     let cli =
         <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // The profile picks the config and data roots, so it is settled before
+    // the log file or anything else resolves a path, and while this process
+    // still has one thread, since settling it writes `MAILYPOPPINS_PROFILE`
+    // for the children to inherit (PERSO-176). A refusal is a usage error.
+    if let Err(e) = mp_core::profile::apply(cli.profile.as_deref()) {
+        eprintln!("{} {e}", "\u{2717}".red());
+        std::process::exit(2);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run(matches, cli))
+}
+
+async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
+    init_logging();
     refuse_all_accounts_with_selector(&cli).unwrap_or_else(|e| e.exit());
     let (command_name, subcommand_name) = invocation(&matches);
     let command_label = match (command_name, subcommand_name) {

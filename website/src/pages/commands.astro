@@ -126,6 +126,7 @@ const syncOptions = [
 
 const globalOptions = [
   { command: '-A, --account <name>', description: 'Account to use, before or after the command (default: first in config; mp calendar rebuild, mp calendar list, mp calendar view, mp calendar reminders, mp cutover and mp contacts rebuild cover every account unless it names one, and mp calendar view takes it more than once; mp -A <name> with no command opens the TUI on that account). Refused by the commands that act on no account: mp daemon, mp completions, mp dump-keys, mp account list, and mp config init, show, add-account, reset-secrets and path' },
+  { command: '--profile <name>', description: 'Profile to run on, before or after the command, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile; --profile default is the default profile). A name is 1 to 12 letters, digits, - or _, and a profile beside MAILYPOPPINS_CONFIG_DIR or MAILYPOPPINS_DATA_DIR is refused. mp --profile <name> with no command opens the TUI on that profile' },
 ];
 
 const signatureOptions = [

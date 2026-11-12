@@ -56,6 +56,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
   -V, --version            Print version
 
@@ -83,6 +84,7 @@ Options:
   -s, --signature <SIGNATURE>      Signature to use in the invitation (overrides config default)
       --no-signature               Skip the signature in the invitation
   -A, --account <ACCOUNT>          Account to use
+      --profile <NAME>             Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                       Print help
 
 $ mp send-approved --help
@@ -94,6 +96,7 @@ Options:
       --all-accounts       Send the approved drafts of every configured account
   -y, --yes                Skip confirmation prompt
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp list --help
@@ -105,6 +108,7 @@ Options:
       --status <STATUS>    Only list drafts with this status [possible values: draft, approved, sent]
       --json               Print the listing as JSON on stdout (warnings stay on stderr)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp validate --help
@@ -117,6 +121,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp mark-approved --help
@@ -129,6 +134,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp mark-draft --help
@@ -141,6 +147,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp new --help
@@ -155,6 +162,7 @@ Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use
+      --profile <NAME>         Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                   Print help
 
 $ mp path --help
@@ -167,6 +175,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp edit --help
@@ -179,6 +188,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp reply --help
@@ -195,6 +205,7 @@ Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use
+      --profile <NAME>         Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                   Print help
 
 $ mp forward --help
@@ -211,6 +222,7 @@ Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use
+      --profile <NAME>         Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                   Print help
 
 $ mp invite --help
@@ -226,6 +238,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp invite accept --help
@@ -241,6 +254,7 @@ Options:
       --comment <TEXT>     A comment for the organizer
       --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp invite tentative --help
@@ -256,6 +270,7 @@ Options:
       --comment <TEXT>     A comment for the organizer
       --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp invite decline --help
@@ -271,6 +286,7 @@ Options:
       --comment <TEXT>     A comment for the organizer
       --no-send-response   Record the answer without telling the organizer, and so without a comment (server events only: an iMIP reply is the answer itself)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp list-mailboxes --help
@@ -287,6 +303,9 @@ Options:
   -A, --account <ACCOUNT>
           Account to use
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -301,6 +320,7 @@ Options:
       --dry-run            Show what would be ingested without writing anything
       --all-accounts       Sync every configured account (failures are named at the end; exit code 1 if any account failed)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp watch --help
@@ -312,6 +332,7 @@ Options:
       --mailbox <MAILBOX>  Mailbox to watch [default: INBOX]
       --timeout <TIMEOUT>  Timeout in seconds (exits with code 2 on timeout)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp archive --help
@@ -325,6 +346,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selectors in
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp move --help
@@ -339,6 +361,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selectors in
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp block --help
@@ -353,6 +376,7 @@ Options:
       --keep-existing      Leave the sender's mail already in the Inbox; only new mail moves
       --json               Emit the daemon's answer as one JSON object {entry, added, entries, moved: [{account, mailbox, count}], skipped: [{account, reason}]}
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 The daemon keeps one block list for every account. A sender is a full address
@@ -381,6 +405,7 @@ Arguments:
 Options:
       --json               Emit the daemon's answer as one JSON object {entry, removed, entries}
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp blocked --help
@@ -391,6 +416,7 @@ Usage: mp blocked [OPTIONS]
 Options:
       --json               Emit one JSON object {entries}
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp delete --help
@@ -406,6 +432,7 @@ Options:
       --force              Delete an approved draft (a queued send) anyway
       --sent               Clear every sent draft of the account (takes no selector)
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp open --help
@@ -419,6 +446,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp save --help
@@ -433,6 +461,7 @@ Options:
   -o, --output <OUTPUT>    Output directory (default: current directory)
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp export --help
@@ -447,6 +476,7 @@ Options:
   -o, --output <OUTPUT>    Output directory (default: current directory)
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp show --help
@@ -461,6 +491,7 @@ Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
       --json               Emit one JSON object (headers, attachments and body) instead
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp list-messages --help
@@ -473,6 +504,7 @@ Options:
   -n, --limit <LIMIT>      Max messages per mailbox listed [default: 20]
       --json               Emit one JSON object {account, mailboxes: [{mailbox, label, total, shown}], messages: [...]} on stdout; each message carries selector (ending in /<uid> for one of two copies its mailbox holds), mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC), date_header, flags, has_attachments, invite
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp search --help
@@ -575,6 +607,9 @@ Options:
   -A, --account <ACCOUNT>
           Account to use
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -595,23 +630,26 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp config init --help
 Interactive setup wizard
 
-Usage: mp config init
+Usage: mp config init [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp config show --help
 Show current configuration
 
-Usage: mp config show
+Usage: mp config show [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp config set-password --help
 Store a password in the active secrets backend (for the first account unless `-A` names one)
@@ -624,23 +662,26 @@ Arguments:
 Options:
       --stdin              Read the password from standard input instead of prompting: the first line, its newline removed and nothing else trimmed. Refused when standard input is a terminal or the line is empty
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp config reset-secrets --help
 Wipe the encrypted secrets file (and Graph token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
 
-Usage: mp config reset-secrets
+Usage: mp config reset-secrets [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp config add-account --help
 Add a new account to the existing config
 
-Usage: mp config add-account
+Usage: mp config add-account [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp config oauth2-login --help
 Sign a Microsoft 365 (Graph) account in with the OAuth2 device code flow and cache its token (for the first Graph account unless `-A` names one)
@@ -649,15 +690,17 @@ Usage: mp config oauth2-login [OPTIONS]
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp config path --help
 Print config file path
 
-Usage: mp config path
+Usage: mp config path [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp contacts --help
 Contact index operations
@@ -672,6 +715,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 The index is a cache per account, `contacts-cache.json` in the account's data
@@ -695,6 +739,7 @@ Options:
       --json               Emit one JSON object {account, query, contacts: [{address, display_name, sent_to, sent_cc, received}]}, best match first
   -n, --limit <LIMIT>      Max number of results [default: 20]
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp contacts rebuild --help
@@ -704,6 +749,7 @@ Usage: mp contacts rebuild [OPTIONS]
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp contacts stats --help
@@ -713,6 +759,7 @@ Usage: mp contacts stats [OPTIONS]
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature --help
@@ -732,6 +779,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 A signature is one Markdown file the daemon keeps under the configuration
@@ -752,6 +800,7 @@ Usage: mp signature list [OPTIONS]
 Options:
       --json               Print the daemon's answer as JSON {account, names, default}
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature show --help
@@ -765,6 +814,7 @@ Arguments:
 Options:
       --path               Print the path of its file instead
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature new --help
@@ -777,6 +827,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature edit --help
@@ -789,6 +840,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature rename --help
@@ -802,6 +854,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature delete --help
@@ -814,6 +867,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp signature default --help
@@ -827,6 +881,7 @@ Arguments:
 Options:
       --none               Clear the default, so drafts carry no signature unless one is named
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp calendar --help
@@ -847,6 +902,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp calendar list --help
@@ -862,6 +918,9 @@ Options:
 
   -A, --account <ACCOUNT>
           Account to use
+
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
 
   -h, --help
           Print help (see a summary with '-h')
@@ -907,6 +966,9 @@ Options:
       --json
           Print the `calendar.view` answer as JSON on stdout
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -938,6 +1000,7 @@ Options:
       --zone <ZONE>        The IANA zone the days run in (default the local zone)
       --json               Print the settled `calendar.freebusy` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 Dates: YYYY-MM-DD, today, tomorrow, yesterday, or +N / -N for N days from
@@ -961,6 +1024,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp calendar hide --help
@@ -973,6 +1037,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp calendar reminders --help
@@ -989,6 +1054,9 @@ Options:
   -A, --account <ACCOUNT>
           Account to use
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -1004,6 +1072,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 A dismissal or a snooze reaches every open client, and on a Microsoft 365
@@ -1024,6 +1093,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp calendar reminder snooze --help
@@ -1037,6 +1107,7 @@ Arguments:
 Options:
       --minutes <N>        How long until it fires again [default: 5]
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp calendar rebuild --help
@@ -1046,6 +1117,7 @@ Usage: mp calendar rebuild [OPTIONS]
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp event --help
@@ -1064,6 +1136,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 Examples:
@@ -1104,6 +1177,7 @@ Options:
       --count <N>            How many occurrences the series has
       --json                 Print the settled `event.create` result as JSON on stdout
   -A, --account <ACCOUNT>    Account to use
+      --profile <NAME>       Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                 Print help
 
 WHEN is a time read in --zone (2026-11-18T14:00), a time with an offset
@@ -1161,6 +1235,7 @@ Options:
       --use-proposal <ADDR>  Move the meeting to the time the attendee ADDR proposed, as `mp event show` lists it
       --json                 Print the settled `event.update` result as JSON on stdout
   -A, --account <ACCOUNT>    Account to use
+      --profile <NAME>       Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                 Print help
 
 WHEN takes the forms of mp event create. A new --start keeps the event's
@@ -1198,6 +1273,7 @@ Options:
       --comment <TEXT>     A message for the attendees, sent with the cancellation
       --json               Print the settled `event.cancel` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 A meeting that invites nobody is deleted with mp event delete, and a meeting
@@ -1217,6 +1293,7 @@ Options:
       --scope <SCOPE>      What a delete of an occurrence of a series reaches [possible values: occurrence, series]
       --json               Print the settled `event.delete` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 A live meeting is not deleted: its organizer cancels it (mp event cancel), so
@@ -1235,6 +1312,7 @@ Arguments:
 Options:
       --json               Print the `event.get` answer as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp event respond --help
@@ -1255,6 +1333,7 @@ Options:
       --zone <ZONE>           The IANA zone the proposed times are read in (default the event's own, the local zone for an all-day event)
       --json                  Print the settled `event.respond` result as JSON on stdout
   -A, --account <ACCOUNT>     Account to use
+      --profile <NAME>        Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                  Print help
 
 A tentative or a decline of a server event may propose a new time to the
@@ -1284,6 +1363,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 The daemon runs a hook's command once for every message that arrives after
@@ -1303,6 +1383,7 @@ Usage: mp hooks list [OPTIONS]
 Options:
       --json               Print the daemon's answer as JSON
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp hooks test --help
@@ -1318,6 +1399,7 @@ Options:
       --mailbox <MAILBOX>  Narrow the selector to one mailbox
       --json               Print the verdict and the payload the command would read, as JSON
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp hooks replay --help
@@ -1332,6 +1414,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>  Narrow the selector to one mailbox
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp outbox --help
@@ -1347,6 +1430,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp outbox list --help
@@ -1357,6 +1441,7 @@ Usage: mp outbox list [OPTIONS]
 Options:
       --json               Print the listing as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp outbox retry --help
@@ -1369,6 +1454,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp outbox discard --help
@@ -1381,6 +1467,7 @@ Arguments:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp store --help
@@ -1394,6 +1481,7 @@ Commands:
 
 Options:
   -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help
 
 $ mp store gc --help
@@ -1416,6 +1504,9 @@ Options:
   -A, --account <ACCOUNT>
           Account to use
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -1433,6 +1524,9 @@ Options:
   -A, --account <ACCOUNT>
           Account to use
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -1446,6 +1540,9 @@ Usage: mp dump-keys [OPTIONS]
 Options:
       --json
           Emit JSON grouped by section instead of Markdown
+
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
 
   -h, --help
           Print help (see a summary with '-h')
@@ -1471,19 +1568,23 @@ Options:
   -A, --account <ACCOUNT>
           Account to use
 
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
   -h, --help
           Print help (see a summary with '-h')
 
 $ mp completions --help
 Print a shell completion script (eval or save under the shell's completion dir)
 
-Usage: mp completions <SHELL>
+Usage: mp completions [OPTIONS] <SHELL>
 
 Arguments:
   <SHELL>  Shell to generate the script for [possible values: bash, elvish, fish, powershell, zsh]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 Examples:
   mp completions zsh > "${fpath[1]}/_mp"
@@ -1492,27 +1593,29 @@ Examples:
 $ mp account --help
 Inspect the configured accounts
 
-Usage: mp account <COMMAND>
+Usage: mp account [OPTIONS] <COMMAND>
 
 Commands:
   list  List the configured accounts, their backend and their state
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp account list --help
 List the configured accounts, their backend and their state
 
-Usage: mp account list
+Usage: mp account list [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon --help
 Manage the local mailypoppins daemon (run, start, status, stop, restart)
 
-Usage: mp daemon <COMMAND>
+Usage: mp daemon [OPTIONS] <COMMAND>
 
 Commands:
   run                Run the daemon in the foreground; never connects to another daemon
@@ -1528,7 +1631,8 @@ Commands:
   help               Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon run --help
 Run the daemon in the foreground; never connects to another daemon
@@ -1537,6 +1641,7 @@ Usage: mp daemon run [OPTIONS]
 
 Options:
       --foreground-logs  Echo lifecycle logs to stderr as well as to the log directory
+      --profile <NAME>   Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help             Print help
 
 $ mp daemon start --help
@@ -1546,6 +1651,7 @@ Usage: mp daemon start [OPTIONS]
 
 Options:
       --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to answer; one that has bound its socket gets up to 120 [default: 10]
+      --profile <NAME>               Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                         Print help
 
 $ mp daemon status --help
@@ -1554,8 +1660,9 @@ Report whether a daemon is running against this data directory
 Usage: mp daemon status [OPTIONS]
 
 Options:
-      --json  Print one JSON object instead of a human-readable summary
-  -h, --help  Print help
+      --json            Print one JSON object instead of a human-readable summary
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon stop --help
 Ask the running daemon to shut down
@@ -1565,6 +1672,7 @@ Usage: mp daemon stop [OPTIONS]
 Options:
       --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to go away, counted after the grace [default: 10]
       --grace-secs <GRACE_SECS>      Seconds the daemon may spend settling work in flight (0 waits none)
+      --profile <NAME>               Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                         Print help
 
 $ mp daemon restart --help
@@ -1575,6 +1683,7 @@ Usage: mp daemon restart [OPTIONS]
 Options:
       --grace-secs <GRACE_SECS>      Seconds the daemon may spend settling work in flight (0 waits none)
       --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the new daemon to answer; one that has bound its socket gets up to 120 [default: 10]
+      --profile <NAME>               Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help                         Print help
 
 $ mp daemon install-service --help
@@ -1583,17 +1692,19 @@ Install the login-start service for this user and enable it
 Usage: mp daemon install-service [OPTIONS]
 
 Options:
-      --force  Replace a service file whose content differs from this version's
-      --check  Report whether a service is installed, and write nothing
-  -h, --help   Print help
+      --force           Replace a service file whose content differs from this version's
+      --check           Report whether a service is installed, and write nothing
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon uninstall-service --help
 Disable the login-start service and remove its file
 
-Usage: mp daemon uninstall-service
+Usage: mp daemon uninstall-service [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon health --help
 Report the running daemon's health, its counters and its checks
@@ -1601,8 +1712,9 @@ Report the running daemon's health, its counters and its checks
 Usage: mp daemon health [OPTIONS]
 
 Options:
-      --json  Print one JSON object instead of a human-readable block
-  -h, --help  Print help
+      --json            Print one JSON object instead of a human-readable block
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon logs --help
 Print the tail of the daemon's own structured log
@@ -1610,10 +1722,11 @@ Print the tail of the daemon's own structured log
 Usage: mp daemon logs [OPTIONS]
 
 Options:
-      --lines <LINES>  How many lines to print, at most 5000 [default: 200]
-      --level <LEVEL>  Print only lines at or above this level (trace, debug, info, warn, error)
-      --json           Print the wire answer as one JSON object instead of the lines
-  -h, --help           Print help
+      --lines <LINES>   How many lines to print, at most 5000 [default: 200]
+      --level <LEVEL>   Print only lines at or above this level (trace, debug, info, warn, error)
+      --json            Print the wire answer as one JSON object instead of the lines
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
 
 $ mp daemon support-bundle --help
 Write a redacted support bundle and say what went into it
@@ -1624,5 +1737,6 @@ Arguments:
   [OUT]  Where the bundle directory goes; below the data directory by default
 
 Options:
-      --no-redact  Copy every value verbatim, credentials included
-  -h, --help       Print help
+      --no-redact       Copy every value verbatim, credentials included
+      --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help            Print help
