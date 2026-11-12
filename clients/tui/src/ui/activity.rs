@@ -56,7 +56,8 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
     } else if total == 0 {
         " /filter  l level  Esc: close ".to_string()
     } else {
-        " j/k scroll  gg/G top/bottom  d/u page  /filter  l level  Esc: close ".to_string()
+        // 61 cells: an 80-column terminal leaves 62 inside the overlay's border.
+        " j/k line  d/u page  gg/G ends  /filter  l level  Esc: close ".to_string()
     };
 
     let border_color = theme::active().accent_alt;
@@ -261,7 +262,10 @@ mod tests {
     use ratatui::Terminal;
 
     fn overlay_text(app: &mut App) -> String {
-        let (w, h) = (100, 16);
+        overlay_text_at(app, 100, 16)
+    }
+
+    fn overlay_text_at(app: &mut App, w: u16, h: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
             .draw(|frame| render_activity_overlay(app, frame, frame.area()))
@@ -317,6 +321,30 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('l')));
         assert_eq!(app.activity_level, ActivityLevelFilter::All);
         assert!(overlay_text(&mut app).contains("Activity Log (5)"));
+    }
+
+    /// PERSO-218: at 80 columns the overlay keeps 62 cells inside its border,
+    /// and the footer and the title with a level chosen fit there whole,
+    /// so `l level` and `Esc: close` are not cut off.
+    #[test]
+    fn footer_and_title_fit_inside_the_overlay_at_80_columns() {
+        let mut app = App::default_for_tests();
+        app.push_status("note-warning".into(), StatusLevel::Warning);
+        app.push_status("note-error".into(), StatusLevel::Error);
+        for c in ['s', 'l', 'l'] {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.activity_level, ActivityLevelFilter::Warnings);
+
+        let text = overlay_text_at(&mut app, 80, 24);
+        let lines: Vec<&str> = text.lines().collect();
+        let title = lines.iter().find(|l| l.contains('\u{256d}')).unwrap();
+        let footer = lines.iter().find(|l| l.contains('\u{2570}')).unwrap();
+        assert!(title.contains(" Activity Log (2) "), "{text}");
+        assert!(title.contains(" Level: warnings and errors "), "{text}");
+        for key in ["j/k ", "d/u ", "gg/G ", "/filter", "l level", "Esc: close "] {
+            assert!(footer.contains(key), "{key} cut from the footer: {footer}");
+        }
     }
 
     /// The level and the text filter combine, a level with no line says so,
