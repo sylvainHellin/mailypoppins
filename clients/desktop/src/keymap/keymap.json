@@ -561,6 +561,10 @@
         "action": "Filter entries"
       },
       {
+        "key": "l",
+        "action": "Cycle level: all, warnings, errors"
+      },
+      {
         "key": "Esc",
         "action": "Close overlay"
       }

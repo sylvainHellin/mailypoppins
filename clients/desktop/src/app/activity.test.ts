@@ -6,6 +6,10 @@ import {
   configInvalidLine,
   FAILURES,
   filterLog,
+  LEVEL_FLOOR_LABEL,
+  LEVEL_FLOORS,
+  type LevelFloor,
+  nextLevelFloor,
   LIFETIME_MS,
   noticeLifetime,
   READ_MS,
@@ -150,6 +154,25 @@ describe("the activity log", () => {
     expect(filterLog(s.activityLog, "error").map((e) => e.text)).toEqual(["Open log failed: gone"]);
     expect(filterLog(s.activityLog, "warn").map((e) => e.text)).toEqual(["No log file found"]);
     expect(filterLog(s.activityLog, "nothing")).toEqual([]);
+  });
+
+  it("keeps the lines at or above a level, before the text filter, and l cycles all, warnings, errors (PERSO-218)", () => {
+    const s = run(
+      initialState(),
+      { type: "notice", text: "Copied the subject" },
+      { type: "notice", text: "Open log failed: gone", level: "error" },
+      { type: "notice", text: "No log file found", level: "warning" },
+    );
+    const texts = (floor: LevelFloor, filter = "") => filterLog(s.activityLog, filter, floor).map((e) => e.text);
+    expect(texts("all")).toHaveLength(3);
+    expect(texts("warning")).toEqual(["Open log failed: gone", "No log file found"]);
+    expect(texts("error")).toEqual(["Open log failed: gone"]);
+    expect(texts("warning", "found")).toEqual(["No log file found"]);
+    expect(texts("error", "found")).toEqual([]);
+    expect(nextLevelFloor("all")).toBe("warning");
+    expect(nextLevelFloor("warning")).toBe("error");
+    expect(nextLevelFloor("error")).toBe("all");
+    expect(LEVEL_FLOORS.map((f) => LEVEL_FLOOR_LABEL[f])).toEqual(["all", "warnings and errors", "errors"]);
   });
 });
 

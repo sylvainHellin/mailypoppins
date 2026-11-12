@@ -108,7 +108,8 @@ Same function, the `else` branch.
 - `d` (1293) scrolls a half page down.
 - `u` (1297) scrolls a half page up.
 - `/` (1301) arms the filter input and clears the previous filter.
-- `Esc` / `L` / `q` (1307) closes the overlay and resets scroll and filter.
+- `l`, added by PERSO-218 after the freeze, cycles the lowest level the overlay lists (all, warnings and errors, errors) and resets the scroll; the title's right corner names it.
+- `Esc` / `L` / `q` (1307) closes the overlay and resets scroll, filter and, since PERSO-218, the level.
   Only `Esc` is catalogued or advertised; `L` is the pre-#0092 opener kept as a closer.
 
 ## Event card overlay

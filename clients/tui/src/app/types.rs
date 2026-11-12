@@ -3201,6 +3201,52 @@ pub enum StatusLevel {
     Progress,
 }
 
+/// The lowest level the activity overlay lists (PERSO-218): `l` there cycles
+/// all, warnings and errors, errors, and back. Success, information and
+/// progress lines rank below a warning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActivityLevelFilter {
+    #[default]
+    All,
+    Warnings,
+    Errors,
+}
+
+impl ActivityLevelFilter {
+    /// The level `l` moves to.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Warnings,
+            Self::Warnings => Self::Errors,
+            Self::Errors => Self::All,
+        }
+    }
+
+    /// How the overlay names it, the desktop's words.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Warnings => "warnings and errors",
+            Self::Errors => "errors",
+        }
+    }
+
+    /// Whether a line at `level` is at or above this one.
+    pub fn keeps(self, level: &StatusLevel) -> bool {
+        let rank = match level {
+            StatusLevel::Error => 2,
+            StatusLevel::Warning => 1,
+            StatusLevel::Info | StatusLevel::Success | StatusLevel::Progress => 0,
+        };
+        let floor = match self {
+            Self::All => 0,
+            Self::Warnings => 1,
+            Self::Errors => 2,
+        };
+        rank >= floor
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusEntry {
     pub timestamp: chrono::DateTime<chrono::Local>,

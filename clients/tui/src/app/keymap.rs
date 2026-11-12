@@ -1950,6 +1950,12 @@ pub static KEYMAP: &[KeyBinding] = &[
     manual("d/u", KeyCtx::Activity, "Half-page down / up", false),
     manual("gg / G", KeyCtx::Activity, "Jump to top / bottom", false),
     manual("/", KeyCtx::Activity, "Filter entries", false),
+    manual(
+        "l",
+        KeyCtx::Activity,
+        "Cycle level: all, warnings, errors",
+        false,
+    ),
     manual("Esc", KeyCtx::Activity, "Close overlay", true),
 ];
 

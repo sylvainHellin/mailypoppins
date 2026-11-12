@@ -258,6 +258,7 @@ export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Half-page down / up": { badge: "key" },
     "Jump to top / bottom": { badge: "key" },
     "Filter entries": { badge: "key" },
+    "Cycle level: all, warnings, errors": { badge: "key" },
     "Close overlay": { badge: "key" },
   },
   // The Calendar view's own keys (src/keymap/viewKeys.ts); its moves are

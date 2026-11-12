@@ -971,6 +971,7 @@ The log holds only what this window heard since it started; the daemon's own log
 It lists the lines oldest first, scrolled to the newest, each with its local time, its level in its colour token (`link` for information, `warning`, `destructive` for an error) and its text, in a `role="log"` element named "Activity log lines".
 A line that arrives while the end is in view keeps the view at the end.
 The Filter field keeps the lines whose text or level name holds what is typed, case-insensitively, the TUI's rule; "No line matches the filter" and "Nothing reported yet" say why the list is empty.
+The Level buttons (all, warnings and errors, errors) keep only the lines at or above the pressed one before the filter applies (PERSO-218, `filterLog`'s floor); `l` moves to the next one, the TUI overlay's `l`, and the dialog opens again at all.
 
 | Key | Action |
 |---|---|
@@ -978,6 +979,7 @@ The Filter field keeps the lines whose text or level name holds what is typed, c
 | `d` / `u` | scroll half the view |
 | `gg` / `G` | the first line, the newest |
 | `/` | the Filter field |
+| `l` | the next level: all, warnings and errors, errors |
 | Escape | close |
 
 The dialog owns every key while it is open, and reads them in the capture phase, as the Signatures dialog does.

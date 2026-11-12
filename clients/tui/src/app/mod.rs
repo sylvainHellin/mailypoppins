@@ -214,6 +214,8 @@ pub struct App {
     // Activity log overlay scratch state (overlay presence is Overlay::Activity)
     pub activity_filter: String,
     pub activity_filter_active: bool,
+    /// The lowest level the overlay lists, cycled by its `l` (PERSO-218).
+    pub activity_level: ActivityLevelFilter,
     pub activity_scroll: u16,
 
     // Server search overlay scratch state (overlay presence is Overlay::Search)
@@ -441,6 +443,7 @@ impl App {
             show_activity_log: true,
             activity_filter: String::new(),
             activity_filter_active: false,
+            activity_level: ActivityLevelFilter::All,
             activity_scroll: 0,
             search_form: SearchForm::default(),
             server_search_focus: SearchOverlayFocus::Field(SearchField::From),
@@ -528,6 +531,7 @@ impl App {
             show_activity_log: true,
             activity_filter: String::new(),
             activity_filter_active: false,
+            activity_level: ActivityLevelFilter::All,
             activity_scroll: 0,
             search_form: SearchForm::default(),
             server_search_focus: SearchOverlayFocus::Field(SearchField::From),

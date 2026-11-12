@@ -179,6 +179,7 @@
       { "key": "d/u", "action": "Half-page down / up" },
       { "key": "gg / G", "action": "Jump to top / bottom" },
       { "key": "/", "action": "Filter entries" },
+      { "key": "l", "action": "Cycle level: all, warnings, errors" },
       { "key": "Esc", "action": "Close overlay" }
     ]
   }

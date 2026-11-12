@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::super::app::{App, StatusLevel};
+use super::super::app::{ActivityLevelFilter, App, StatusLevel};
 use super::super::theme;
 
 pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
@@ -35,11 +35,13 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
         area,
     );
 
-    // Build filtered entries
+    // Build filtered entries: at or above the chosen level, then the text filter
     let filter = app.activity_filter.to_lowercase();
+    let level = app.activity_level;
     let entries: Vec<_> = app
         .status_log
         .iter()
+        .filter(|e| level.keeps(&e.level))
         .filter(|e| {
             filter.is_empty()
                 || e.message.to_lowercase().contains(&filter)
@@ -52,14 +54,15 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
     let bottom_title = if app.activity_filter_active {
         " Type to filter | Esc: clear ".to_string()
     } else if total == 0 {
-        " /filter  Esc: close ".to_string()
+        " /filter  l level  Esc: close ".to_string()
     } else {
-        " j/k scroll  gg/G top/bottom  d/u page  /filter  Esc: close ".to_string()
+        " j/k scroll  gg/G top/bottom  d/u page  /filter  l level  Esc: close ".to_string()
     };
 
     let border_color = theme::active().accent_alt;
     let block = Block::default()
         .title(format!(" Activity Log ({total}) "))
+        .title(Line::from(format!(" Level: {} ", level.label())).alignment(Alignment::Right))
         .title_bottom(Line::from(bottom_title).alignment(Alignment::Center))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -103,7 +106,7 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
     };
 
     if entries.is_empty() {
-        let msg = if filter.is_empty() {
+        let msg = if filter.is_empty() && level == ActivityLevelFilter::All {
             "  No activity yet"
         } else {
             "  No matching entries"
@@ -253,6 +256,98 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn overlay_text(app: &mut App) -> String {
+        let (w, h) = (100, 16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| render_activity_overlay(app, frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PERSO-218: `l` cycles the lowest level the overlay lists, all,
+    /// warnings and errors, errors, and back; the title counts what is listed
+    /// and its right corner names the level.
+    #[test]
+    fn l_lists_only_the_lines_at_or_above_the_chosen_level() {
+        let mut app = App::default_for_tests();
+        app.push_status("note-info".into(), StatusLevel::Info);
+        app.push_status("note-success".into(), StatusLevel::Success);
+        app.push_status("note-progress".into(), StatusLevel::Progress);
+        app.push_status("note-warning".into(), StatusLevel::Warning);
+        app.push_status("note-error".into(), StatusLevel::Error);
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        assert!(matches!(app.overlay, crate::app::Overlay::Activity));
+
+        let all = overlay_text(&mut app);
+        assert!(all.contains("Activity Log (5)"), "{all}");
+        assert!(all.contains("Level: all"), "{all}");
+        assert!(all.contains("l level"), "{all}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        assert_eq!(app.activity_level, ActivityLevelFilter::Warnings);
+        let warnings = overlay_text(&mut app);
+        assert!(warnings.contains("Activity Log (2)"), "{warnings}");
+        assert!(
+            warnings.contains("Level: warnings and errors"),
+            "{warnings}"
+        );
+        assert!(warnings.contains("note-warning"), "{warnings}");
+        assert!(warnings.contains("note-error"), "{warnings}");
+        for below in ["note-info", "note-success", "note-progress"] {
+            assert!(!warnings.contains(below), "{below} listed: {warnings}");
+        }
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        let errors = overlay_text(&mut app);
+        assert!(errors.contains("Activity Log (1)"), "{errors}");
+        assert!(errors.contains("Level: errors"), "{errors}");
+        assert!(errors.contains("note-error"), "{errors}");
+        assert!(!errors.contains("note-warning"), "{errors}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        assert_eq!(app.activity_level, ActivityLevelFilter::All);
+        assert!(overlay_text(&mut app).contains("Activity Log (5)"));
+    }
+
+    /// The level and the text filter combine, a level with no line says so,
+    /// and the overlay opens again at all levels.
+    #[test]
+    fn the_level_combines_with_the_filter_and_resets_on_close() {
+        let mut app = App::default_for_tests();
+        app.push_status("alpha synced".into(), StatusLevel::Info);
+        app.push_status("alpha refused".into(), StatusLevel::Warning);
+        app.push_status("beta refused".into(), StatusLevel::Warning);
+        for c in ['s', 'l', 'l', '/', 'a', 'l', 'p', 'h', 'a'] {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let text = overlay_text(&mut app);
+        assert!(text.contains("Activity Log (1)"), "{text}");
+        assert!(text.contains("alpha refused"), "{text}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+        let text = overlay_text(&mut app);
+        assert!(text.contains("Activity Log (0)"), "{text}");
+        assert!(text.contains("No matching entries"), "{text}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.activity_level, ActivityLevelFilter::All);
+        for c in ['s', 'l'] {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.activity_level, ActivityLevelFilter::All);
+        assert!(overlay_text(&mut app).contains("Level: all"));
+    }
 
     #[test]
     fn word_wrap_narrower_than_one_char_does_not_panic() {

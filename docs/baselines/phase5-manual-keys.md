@@ -19,7 +19,7 @@ A failing key is not a status this document may carry: it is a bug to fix before
 Seventeen of the twenty pass.
 The three that do not are the three whose effect leaves the process: the clipboard, a server-only search hit, and a browser over a message with an HTML part.
 Each says in its own row what a host with a display, a browser and a real account would have to press to close it.
-The result list's `cF` and `te` (PERSO-174), the event card's `p`, `Tab` and `m` (PERSO-255) and its `V`, `E`, `D`, `e`, `j/k` and `Esc / q / Enter` (PERSO-270) came after this walk; their rows say so and are not taken until the next walk presses them.
+The result list's `cF` and `te` (PERSO-174), `S` (PERSO-273) and `B` (PERSO-261), the event card's `p`, `Tab` and `m` (PERSO-255) and its `V`, `E`, `D`, `e`, `j/k` and `Esc / q / Enter` (PERSO-270), and the activity log's `l` (PERSO-218) came after this walk; their rows say so and are not taken until the next walk presses them.
 
 ## The table
 
@@ -57,6 +57,7 @@ The result list's `cF` and `te` (PERSO-174), the event card's `p`, `Tab` and `m`
 | ACTIVITY LOG | `d/u` | pass | `d` moved the top visible line on by half a window (from the first entry to the middle of the second), `u` moved it back to where `gg` had left it. |
 | ACTIVITY LOG | `gg / G` | pass | `G` put the tail of the log on screen (entry `n46` of the ladder at the top of the window), `gg` put the oldest entry back. |
 | ACTIVITY LOG | `/` | pass | The footer changed to `Type to filter / Esc: clear`, the prompt took `n37`, and the title went from `Activity Log (100)` to `Activity Log (25)`. |
+| ACTIVITY LOG | `l` | NOT TAKEN (owner-only) | Added by PERSO-218 after this walk, so never pressed here. `clients/tui/src/ui/activity.rs::l_lists_only_the_lines_at_or_above_the_chosen_level` presses it three times over a log with a line at each level and sees the title go from `Activity Log (5)` to `(2)`, `(1)` and back, its right corner name `all`, `warnings and errors` and `errors`, and only the warning and error lines, then only the error line, drawn; a real session's log needs a warning or an error to come up to be worth filtering. |
 | ACTIVITY LOG | `Esc` | pass | The first `Esc` cleared the filter and the title went back to `Activity Log (100)`; the second closed the overlay. |
 
 ## How the log was made scrollable

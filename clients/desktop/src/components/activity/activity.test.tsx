@@ -86,6 +86,42 @@ describe("the activity log dialog", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Activity log" })).toBeNull());
   });
 
+  it("l and the Level buttons list only the lines at or above the level, which the pressed button names (PERSO-218)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    mock.failing.set("sync_trigger", { kind: "internal", message: "no route" });
+    await user.keyboard("ss");
+    await screen.findByRole("alert");
+    await user.keyboard("sl");
+    const { dialog, log } = await openLog();
+    const level = within(dialog).getByRole("group", { name: "Level" });
+    const pressed = () => within(level).getAllByRole("button").filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent);
+    expect(pressed()).toEqual(["all"]);
+    expect(entries(log)).toHaveLength(3);
+    await user.keyboard("l");
+    expect(pressed()).toEqual(["warnings and errors"]);
+    expect(entries(log)).toEqual([checkEntry, ["error", "Sync of work did not start: no route"]]);
+    await user.keyboard("l");
+    expect(pressed()).toEqual(["errors"]);
+    expect(entries(log)).toEqual([["error", "Sync of work did not start: no route"]]);
+    // The level and the text filter combine.
+    await user.keyboard("/quick{Enter}");
+    expect(within(log).getByText("No line matches the filter")).toBeInTheDocument();
+    await user.keyboard("l");
+    expect(pressed()).toEqual(["all"]);
+    expect(entries(log)).toEqual([["info", "Quick sync of work…"]]);
+    await user.click(within(level).getByRole("button", { name: "warnings and errors" }));
+    expect(pressed()).toEqual(["warnings and errors"]);
+    expect(within(log).getByText("No line matches the filter")).toBeInTheDocument();
+    // A new dialog opens at every level.
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Activity log" })).toBeNull());
+    await user.keyboard("sl");
+    const again = await openLog();
+    expect(within(again.dialog).getByRole("button", { name: "all" })).toHaveAttribute("aria-pressed", "true");
+    expect(entries(again.log)).toHaveLength(3);
+  });
+
   it("opens at the end and scrolls with j/k, d/u, gg and G", async () => {
     const { user } = renderApp();
     await shellReady();

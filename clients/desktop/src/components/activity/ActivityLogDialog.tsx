@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ACTIVITY_LOG_CAP, entryTime, filterLog } from "@/app/activity";
+import {
+  ACTIVITY_LOG_CAP,
+  entryTime,
+  filterLog,
+  LEVEL_FLOOR_LABEL,
+  LEVEL_FLOORS,
+  nextLevelFloor,
+  type LevelFloor,
+} from "@/app/activity";
 import type { ActivityLevel } from "@/app/state";
 import { useAppState } from "@/app/store";
 import { isEditable } from "@/keymap/useKeymap";
@@ -23,9 +32,11 @@ const LEVEL_CLASS: Record<ActivityLevel, string> = {
  * LOG overlay: every line this window reported, oldest first and scrolled to
  * the newest, each with its time and level. `j`/`k` scroll a line, `d`/`u`
  * half the view, `gg` and `G` to the top and the end, `/` goes to the filter
- * field, Escape closes. In the field Enter goes back to the lines with the
- * filter kept, Escape clears the filter, or closes the dialog when it is
- * already empty (the TUI's). The dialog owns every key while it is open.
+ * field, `l` cycles the lowest level listed (all, warnings and errors, errors;
+ * the Level buttons pick one too, PERSO-218), Escape closes. In the field
+ * Enter goes back to the lines with the filter kept, Escape clears the filter,
+ * or closes the dialog when it is already empty (the TUI's). The dialog owns
+ * every key while it is open, and opens again unfiltered at every level.
  */
 export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps) {
   const s = useAppState();
@@ -33,16 +44,23 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
   const logRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const [filter, setFilter] = useState("");
+  const [level, setLevel] = useState<LevelFloor>("all");
   const atEnd = useRef(true);
-  const shown = filterLog(s.activityLog, filter);
+  const shown = filterLog(s.activityLog, filter, level);
 
-  // A new dialog starts unfiltered, at the end.
+  // A new dialog starts unfiltered, at every level, at the end.
   useEffect(() => {
     if (open) {
       setFilter("");
+      setLevel("all");
       atEnd.current = true;
     }
   }, [open]);
+
+  const pickLevel = (next: LevelFloor) => {
+    atEnd.current = true;
+    setLevel(next);
+  };
 
   // Scrolled to the newest line when it opens (the popup mounts after the
   // dialog's first render, so on the element's mount), when the filter
@@ -55,7 +73,7 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
   useLayoutEffect(() => {
     const el = logRef.current;
     if (el && atEnd.current) el.scrollTop = el.scrollHeight;
-  }, [open, filter, newest]);
+  }, [open, filter, level, newest]);
 
   const onScroll = () => {
     const el = logRef.current;
@@ -111,6 +129,11 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
           filterRef.current?.focus();
           filterRef.current?.select();
           return;
+        case "l":
+          e.preventDefault();
+          atEnd.current = true;
+          setLevel(nextLevelFloor);
+          return;
         default:
           return;
       }
@@ -162,6 +185,16 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
             }}
             onKeyDown={onFilterKey}
           />
+          <span id={`${id}-level`} className="text-sm text-muted-foreground">
+            Level
+          </span>
+          <div role="group" aria-labelledby={`${id}-level`} data-slot="activity-level" className="flex gap-1">
+            {LEVEL_FLOORS.map((floor) => (
+              <Button key={floor} size="sm" variant="outline" aria-pressed={level === floor} onClick={() => pickLevel(floor)}>
+                {LEVEL_FLOOR_LABEL[floor]}
+              </Button>
+            ))}
+          </div>
         </div>
         <div
           id={`${id}-log`}

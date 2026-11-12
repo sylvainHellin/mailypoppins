@@ -199,13 +199,39 @@ export function logEvent(s: AppState, kind: string, payload: unknown): AppState 
 }
 
 /**
- * The entries a filter keeps, the TUI's rule: a case-insensitive match on the
- * text or the level's name; an empty filter keeps them all.
+ * The lowest level the log lists (PERSO-218), the TUI's `ActivityLevelFilter`:
+ * every line, warnings and errors, or errors; `l` in the dialog cycles them in
+ * this order.
  */
-export function filterLog(entries: readonly ActivityLogEntry[], filter: string): ActivityLogEntry[] {
+export type LevelFloor = "all" | "warning" | "error";
+
+export const LEVEL_FLOORS: readonly LevelFloor[] = ["all", "warning", "error"];
+
+/** How the dialog names each floor, the TUI overlay's words. */
+export const LEVEL_FLOOR_LABEL: Record<LevelFloor, string> = {
+  all: "all",
+  warning: "warnings and errors",
+  error: "errors",
+};
+
+/** The floor `l` moves to. */
+export function nextLevelFloor(floor: LevelFloor): LevelFloor {
+  return LEVEL_FLOORS[(LEVEL_FLOORS.indexOf(floor) + 1) % LEVEL_FLOORS.length];
+}
+
+const LEVEL_RANK: Record<ActivityLevel, number> = { info: 0, warning: 1, error: 2 };
+const FLOOR_RANK: Record<LevelFloor, number> = { all: 0, warning: 1, error: 2 };
+
+/**
+ * The entries a filter keeps, the TUI's rule: those at or above `floor`, then
+ * a case-insensitive match on the text or the level's name; an empty filter
+ * keeps them all.
+ */
+export function filterLog(entries: readonly ActivityLogEntry[], filter: string, floor: LevelFloor = "all"): ActivityLogEntry[] {
   const f = filter.trim().toLowerCase();
-  if (!f) return [...entries];
-  return entries.filter((e) => e.text.toLowerCase().includes(f) || e.level.includes(f));
+  return entries.filter(
+    (e) => LEVEL_RANK[e.level] >= FLOOR_RANK[floor] && (!f || e.text.toLowerCase().includes(f) || e.level.includes(f)),
+  );
 }
 
 /** An entry's time as the log shows it, local `HH:MM:SS`. */

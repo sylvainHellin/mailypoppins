@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, BlockChooser,
-    BlockedSendersOverlay, CommandPalette, ComposeField, ComposeMode, ComposeSuggestion,
-    ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode, EmailEntry, EntryKey,
-    EventFormRow, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay, PickerPurpose,
-    RsvpChoice, RsvpOverlay, RsvpRow, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
-    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
+    AccountPicker, Action, ActivityLevelFilter, App, AttachmentPicker, AttachmentPickerMode,
+    BlockChooser, BlockedSendersOverlay, CommandPalette, ComposeField, ComposeMode,
+    ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
+    EmailEntry, EntryKey, EventFormRow, Focus, MailboxKind, MailboxPicker, Message, MessageRef,
+    Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, RsvpRow, SearchField, SearchOverlayFocus,
+    SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -260,6 +260,7 @@ impl App {
                 self.pending_prefix = None;
                 self.activity_filter.clear();
                 self.activity_filter_active = false;
+                self.activity_level = ActivityLevelFilter::All;
                 self.activity_scroll = 0;
                 self.overlay = Overlay::Activity;
             }
@@ -1538,12 +1539,18 @@ impl App {
                     self.activity_filter.clear();
                     self.activity_scroll = 0;
                 }
+                KeyCode::Char('l') => {
+                    self.pending_prefix = None;
+                    self.activity_level = self.activity_level.next();
+                    self.activity_scroll = 0;
+                }
                 KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => {
                     self.pending_prefix = None;
                     self.close_overlay();
                     self.activity_scroll = 0;
                     self.activity_filter.clear();
                     self.activity_filter_active = false;
+                    self.activity_level = ActivityLevelFilter::All;
                 }
                 _ => {
                     self.pending_prefix = None;
