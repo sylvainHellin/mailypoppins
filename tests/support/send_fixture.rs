@@ -685,10 +685,17 @@ pub fn draft_status(root: &Path, account: &str, file: &str) -> String {
 /// index orders by `mtime DESC, id ASC`, and a restore that rewrote every file
 /// would hand the second binary a different order than the first one saw.
 ///
-/// **The daemon must not be running while `restore` runs.** It holds the
-/// SQLite store open in WAL mode, and putting a different `store.sqlite3`
-/// underneath an open connection is undefined. The test file stops it and
-/// starts it again around each mutating comparison.
+/// **The daemon must not be running while `take` or `restore` runs.** It
+/// holds the SQLite store open in WAL mode, and putting a different
+/// `store.sqlite3` underneath an open connection is undefined. Copying one is
+/// no better: a store some process writes is torn by a file-by-file copy, and
+/// while a daemon brings its accounts up it opens and closes connections, so a
+/// store's `-wal` and `-shm` sidecars appear and vanish under the walk
+/// (PERSO-222: one vanished between the walk and the read under load). A
+/// daemon that is gone, even killed, leaves a store a crash could have left,
+/// which is what SQLite recovers from. The test files stop it before the copy
+/// and start it again around each mutating comparison, and `take` refuses
+/// while any account's engine lock is held.
 pub struct Pristine {
     root: PathBuf,
     files: std::collections::BTreeMap<PathBuf, Saved>,
@@ -700,10 +707,27 @@ struct Saved {
 }
 
 impl Pristine {
-    /// Take a copy of `root`'s `accounts/` tree.
+    /// Take a copy of `root`'s `accounts/` tree, which no engine may hold.
     pub fn take(root: &Path) -> Pristine {
+        let accounts = root.join("accounts");
+        for path in walk(&accounts) {
+            if path.file_name().is_some_and(|name| name == "store.lock") {
+                let account = path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let free = mailypoppins::engine_lock::EngineLock::try_acquire_at(&path, &account)
+                    .unwrap_or_else(|e| panic!("probe {}: {e:#}", path.display()));
+                assert!(
+                    free.is_some(),
+                    "the engine lock of {account} is held: stop the daemon before \
+                     Pristine::take, whose copy of a store in use would be torn"
+                );
+            }
+        }
         let mut files = std::collections::BTreeMap::new();
-        for path in walk(&root.join("accounts")) {
+        for path in walk(&accounts) {
             let bytes = fs::read(&path).unwrap_or_else(|e| panic!("stash {}: {e}", path.display()));
             let modified = fs::metadata(&path)
                 .and_then(|meta| meta.modified())

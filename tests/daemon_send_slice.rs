@@ -147,12 +147,14 @@
 //! **Mutating rows restore first.** Half of this slice writes. A parity
 //! comparison of a writing command cannot run the two binaries one after the
 //! other over one root - the second would see the first one's work - so
-//! [`Slice::both_mutating`] takes a [`send_fixture::Pristine`] copy of the
-//! `accounts/` tree, runs the routed binary, stops the daemon, restores,
-//! runs the oracle, compares both the bytes and the resulting state, restores
-//! again and starts the daemon back up. The daemon is stopped around the
-//! restore deliberately: it holds the store open in WAL mode and replacing
-//! `store.sqlite3` under an open connection is undefined.
+//! [`Slice::both_mutating`] stops the daemon, takes a
+//! [`send_fixture::Pristine`] copy of the `accounts/` tree, starts it again,
+//! runs the routed binary, stops the daemon, restores, runs the oracle,
+//! compares both the bytes and the resulting state, restores again and starts
+//! the daemon back up. The daemon is stopped around the copy and the restore
+//! deliberately: it holds the store open in WAL mode, replacing
+//! `store.sqlite3` under an open connection is undefined, and copying it
+//! while its sidecars come and go is torn (PERSO-222).
 //!
 //! # What this fixture cannot reach, and the hook that fixes it
 //!
@@ -434,14 +436,16 @@ impl Slice {
     ///
     /// `state` is read after each binary has run and must agree: bytes alone
     /// would let a routed command print the right sentence about the wrong
-    /// row. The daemon is stopped before the restore and started again after
-    /// it, because it holds the store open.
+    /// row. The daemon is stopped around the copy and before the restore, and
+    /// started again after each, because it holds the store open.
     fn both_mutating<S: std::fmt::Debug + PartialEq>(
         &mut self,
         args: &[&str],
         state: impl Fn(&Path) -> S,
     ) -> Output {
+        self.stop_daemon();
         let pristine = fixture::Pristine::take(self.root());
+        self.start_daemon();
 
         let routed = self.routed(args);
         let after_routed = state(self.root());
@@ -2358,6 +2362,42 @@ fn mp_outbox_discard_drops_the_same_row_in_both_binaries() {
         fixture::listed_rows(slice.root(), fixture::ACCOUNT).contains(&fixture::FAILED_ROW),
         "the fixture is pristine again once both binaries have had their turn"
     );
+}
+
+/// A pristine copy taken while an engine holds an account's store refuses
+/// (PERSO-222): a live daemon opens and closes connections while it brings
+/// accounts up, so a store's `-wal` and `-shm` sidecars come and go under the
+/// walk (one vanished between the walk and the read under load), and a copy
+/// of a store some process is writing is torn anyway. `both_mutating` stops
+/// the daemon before it takes the copy.
+#[test]
+fn a_pristine_copy_refuses_while_an_engine_holds_a_store() {
+    let tmp = TempDir::new().expect("a temporary send-slice root");
+    fixture::seed(tmp.path());
+    let lock = tmp
+        .path()
+        .join("accounts")
+        .join(fixture::ACCOUNT)
+        .join("store.lock");
+    let held = mailypoppins::engine_lock::EngineLock::try_acquire_at(&lock, fixture::ACCOUNT)
+        .expect("the lock file opens")
+        .expect("nothing else holds a fresh root's lock");
+
+    let taken = std::panic::catch_unwind(|| fixture::Pristine::take(tmp.path()));
+    let refusal = taken
+        .err()
+        .expect("a copy under a live engine is refused, not taken");
+    let message = refusal
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("engine lock") && message.contains(fixture::ACCOUNT),
+        "the refusal names the account whose store is held: {message}"
+    );
+
+    drop(held);
+    fixture::Pristine::take(tmp.path());
 }
 
 // ---------------------------------------------------------------------------

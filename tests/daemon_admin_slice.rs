@@ -233,12 +233,14 @@
 //! **Mutating rows restore first.** Most of this slice writes. A parity
 //! comparison of a writing command cannot run the two binaries one after the
 //! other over one root - the second would see the first one's work - so
-//! [`Slice::both_mutating`] takes a [`admin_fixture::Pristine`] copy of the
-//! `accounts/` tree, runs the routed binary, stops the daemon, restores, runs
-//! the oracle, compares both the bytes and the resulting state, restores again
-//! and starts the daemon back up. The daemon is stopped around the restore
-//! deliberately: it holds the store open in WAL mode and replacing
-//! `store.sqlite3` under an open connection is undefined.
+//! [`Slice::both_mutating`] stops the daemon, takes a
+//! [`admin_fixture::Pristine`] copy of the `accounts/` tree, starts it again,
+//! runs the routed binary, stops the daemon, restores, runs the oracle,
+//! compares both the bytes and the resulting state, restores again and starts
+//! the daemon back up. The daemon is stopped around the copy and the restore
+//! deliberately: it holds the store open in WAL mode, replacing
+//! `store.sqlite3` under an open connection is undefined, and copying it
+//! while its sidecars come and go is torn (PERSO-222).
 //!
 //! # Results are path-free, with three named exceptions
 //!
@@ -534,14 +536,16 @@ impl Slice {
     ///
     /// `state` is read after each binary has run and must agree: bytes alone
     /// would let a routed command print the right sentence about the wrong
-    /// file. The daemon is stopped before the restore and started again after
-    /// it, because it holds the store open.
+    /// file. The daemon is stopped around the copy and before the restore, and
+    /// started again after each, because it holds the store open.
     fn both_mutating<S: std::fmt::Debug + PartialEq>(
         &mut self,
         args: &[&str],
         state: impl Fn(&Path) -> S,
     ) -> Output {
+        self.stop_daemon();
         let pristine = fixture::Pristine::take(self.root());
+        self.start_daemon();
 
         let routed = self.routed(args);
         let after_routed = state(self.root());
