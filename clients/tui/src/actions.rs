@@ -2382,6 +2382,7 @@ mod tests {
             fetched,
             source_label: "INBOX".into(),
             seq: None,
+            uid: None,
         }
     }
 

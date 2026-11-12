@@ -3067,52 +3067,15 @@ impl App {
                 } else {
                     StatusLevel::Warning
                 };
+                // The listings the moves made stale reach every client as the
+                // daemon's row removals and Junk invalidates (PERSO-286), this
+                // one included, so nothing is reloaded here.
                 self.set_visible_status(block_summary(&blocked), level);
-                self.land_block_moves(&blocked.moved);
             }
             Err(e) => {
                 self.set_visible_status(format!("Cannot block {entry}: {e}"), StatusLevel::Error)
             }
         }
-    }
-
-    /// The listings a block's moves made stale. The daemon publishes a move's
-    /// counts and no row of it, and a flat list does not reload on counts, so
-    /// the client that blocked drops what it holds here: every cached listing
-    /// of another account whose Inbox moved, and on the active account the
-    /// Inbox and the Junk listings, the sidebar recounted and the open list
-    /// read again.
-    fn land_block_moves(&mut self, moved: &[mp_protocol::sender::BlockMoved]) {
-        let active = self.account_config.name.clone();
-        for row in moved.iter().filter(|row| row.account != active) {
-            if let Some(index) = self
-                .accounts
-                .iter()
-                .position(|acct| acct.account_config.name == row.account)
-            {
-                self.invalidate_all_caches_on(index);
-            }
-        }
-        let junk: Vec<&str> = moved
-            .iter()
-            .filter(|row| row.account == active)
-            .map(|row| row.mailbox.as_str())
-            .collect();
-        if junk.is_empty() {
-            return;
-        }
-        let stale: Vec<usize> = self
-            .mailboxes
-            .iter()
-            .enumerate()
-            .filter(|(_, mb)| mb.kind == MailboxKind::Inbox || junk.contains(&mb.id.as_str()))
-            .map(|(idx, _)| idx)
-            .collect();
-        for idx in stale {
-            self.invalidate_cache_idx(idx);
-        }
-        self.recount_all_mailboxes();
-        self.reload_current_mailbox();
     }
 
     /// `sb`: the blocked senders, read from the daemon.

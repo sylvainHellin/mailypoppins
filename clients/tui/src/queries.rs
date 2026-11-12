@@ -270,11 +270,13 @@ fn search_hit(hit: wire::SearchHit) -> crate::app::SearchResultEntry {
         event: None,
     };
     let status = status_for_mailbox(&mailbox);
+    let uid = row.uid;
     crate::app::SearchResultEntry {
         entry: entry_from_row(row, &status),
         fetched,
         source_label: mailbox,
         seq: None,
+        uid: Some(uid),
     }
 }
 

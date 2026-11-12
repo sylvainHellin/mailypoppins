@@ -332,13 +332,24 @@ fn enter_blocks_the_picked_entry_and_the_status_line_counts_the_moves() {
     );
 }
 
-/// A block that moved the active account's Inbox mail reads its listings
-/// again, since the daemon publishes the counts of the move and no row: the
-/// Inbox and Junk caches go, the sidebar is recounted, and the open Inbox is
-/// loaded afresh, so the moved messages, the cursor one included, leave the
-/// list.
+/// One row event as the daemon publishes it, past the bootstrap at 10.
+fn row_event(revision: u64, kind: &str, payload: Value) -> EventEnvelope {
+    EventEnvelope {
+        instance_id: INSTANCE.to_string(),
+        revision,
+        kind: kind.to_string(),
+        payload,
+    }
+}
+
+/// A block reloads nothing itself: what it moved reaches the TUI as the
+/// daemon's events, the TUI that blocked as much as any other (PERSO-286).
+/// The removal of an open Inbox row reads the Inbox again (this list was
+/// built by hand, so its uids are unknown and the delta cannot fold in
+/// place), the Junk listing's invalidate drops its cache, Sent is left warm,
+/// and the moved messages, the cursor one included, leave the list.
 #[test]
-fn a_block_that_moved_the_open_inbox_reloads_it() {
+fn a_block_that_moved_the_open_inbox_leaves_it_to_the_daemons_events() {
     let mailbox = |label: &str, id: &str, kind: MailboxKind| MailboxInfo {
         label: label.to_string(),
         icon: "",
@@ -365,20 +376,49 @@ fn a_block_that_moved_the_open_inbox_reloads_it() {
     app.email_cache = vec![Some(Arc::clone(&app.emails)), cached.clone(), cached];
     app.mailbox_counts = vec![3, 0, 0];
 
+    app.apply_bootstrap(&Bootstrap {
+        instance_id: INSTANCE.to_string(),
+        revision: 10,
+        ..Default::default()
+    });
+    app.pending_actions.clear();
+
     press(&mut app, 'B');
     press(&mut app, 'j');
     key(&mut app, KeyCode::Enter);
 
-    assert!(app.email_cache[0].is_none(), "the Inbox listing is stale");
+    assert!(
+        app.email_cache.iter().all(Option::is_some),
+        "the answer reloads nothing"
+    );
+    assert!(!app
+        .pending_actions
+        .iter()
+        .any(|a| matches!(a, Action::LoadMailbox { .. })));
+    assert!(
+        calls(&daemon).iter().all(|(m, _)| m != "mailbox.list"),
+        "the counts are the daemon's to announce"
+    );
+
+    for (revision, uid) in [(11, 9041), (12, 9043)] {
+        app.apply_event(&row_event(
+            revision,
+            "state.remove",
+            json!({"resource": format!("message:work/inbox/{uid}")}),
+        ));
+    }
+    app.apply_event(&row_event(
+        13,
+        "state.invalidate",
+        json!({"resource": "mailbox:work/Junk", "scope": {"query": "list"}}),
+    ));
     assert!(app.email_cache[1].is_none(), "the Junk listing is stale");
     assert!(app.email_cache[2].is_some(), "Sent did not move");
-    assert!(
-        calls(&daemon).iter().any(|(m, _)| m == "mailbox.list"),
-        "the sidebar is recounted"
-    );
+    // Each removal asked for the Inbox; the newest load is the one that lands.
     let load = app
         .pending_actions
         .iter()
+        .rev()
         .find_map(|a| match a {
             Action::LoadMailbox {
                 mailbox_idx,
@@ -410,17 +450,39 @@ fn a_block_that_moved_the_open_inbox_reloads_it() {
     );
 }
 
-/// A block that moved another account's mail drops that account's cached
-/// listings and leaves the open list alone.
+/// The removal of another account's moved mail drops that account's cached
+/// Inbox listing and leaves the open list alone (PERSO-286).
 #[test]
 fn a_block_that_moved_another_account_drops_its_caches() {
     let (mut app, _daemon) = app(vec![received(1, "Offers <offers@shop.example>")], &[]);
     app.account_config.name = "home".to_string();
     let mut work = crate::app::AccountState::for_tests("work");
+    work.mailboxes = vec![MailboxInfo {
+        label: "Inbox".to_string(),
+        icon: "",
+        id: "inbox".to_string(),
+        kind: MailboxKind::Inbox,
+        server_name: None,
+    }];
     work.email_cache = vec![Some(Arc::new(Vec::new()))];
     app.accounts = vec![crate::app::AccountState::for_tests("home"), work];
+    app.apply_bootstrap(&Bootstrap {
+        instance_id: INSTANCE.to_string(),
+        revision: 10,
+        ..Default::default()
+    });
+    app.pending_actions.clear();
     press(&mut app, 'B');
     key(&mut app, KeyCode::Enter);
+    assert!(
+        app.accounts[1].email_cache[0].is_some(),
+        "the answer drops nothing"
+    );
+    app.apply_event(&row_event(
+        11,
+        "state.remove",
+        json!({"resource": "message:work/inbox/9041"}),
+    ));
     assert!(app.accounts[1].email_cache[0].is_none());
     assert!(
         app.email_cache[0].is_some(),
@@ -496,6 +558,7 @@ fn hit(row: Option<i64>, from: &str) -> crate::app::SearchResultEntry {
         fetched,
         source_label: "INBOX".into(),
         seq: None,
+        uid: None,
     }
 }
 

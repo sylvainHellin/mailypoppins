@@ -1,4 +1,6 @@
-use super::app::{App, BgResult, MailboxKind, MessageRef, SearchOverlayFocus, StatusLevel};
+use super::app::{
+    mailbox_key, App, BgResult, MailboxKind, MessageRef, SearchOverlayFocus, StatusLevel,
+};
 
 /// The status level of a completed sync/fetch: Success, unless the drain
 /// suffix says mutations were rolled back (#0039 review note) or the sync
@@ -602,20 +604,56 @@ pub(super) fn land_sync(
 ///
 /// The cache slot moves with the list, because the two share the allocation and
 /// a slot that kept the pre-delta rows would undo the delta on the next visit.
+///
+/// A delta about a mailbox not on screen, of this account or another, drops
+/// that mailbox's cache slot, so its next visit reads it again rather than
+/// showing a row another client or the daemon moved away (PERSO-286); a
+/// removal also drops the search hit it names.
 pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowDelta) -> bool {
+    if let super::queries::MessageRowDelta::Remove {
+        account,
+        mailbox,
+        uid,
+    } = delta
+    {
+        drop_removed_hit(app, account, mailbox, *uid);
+    }
+    if delta.account() != app.account_config.name {
+        if let Some(index) = app
+            .accounts
+            .iter()
+            .position(|acct| acct.account_config.name == delta.account())
+        {
+            if let Some(idx) = app.accounts[index]
+                .mailboxes
+                .iter()
+                .position(|mb| mailbox_key(mb) == delta.mailbox())
+            {
+                app.invalidate_cache_idx_on(index, idx);
+            }
+        }
+        return true;
+    }
     // A conversation list cannot fold a row delta (#0142): the row carries no
     // `thread_id`, and a delta about Sent moves a conversation listed in the
     // inbox. Any delta of the account re-streams the list, coalesced.
     if app.conversation_mode() {
-        if delta.account() != app.account_config.name {
-            return true;
-        }
         app.request_restream();
         return false;
     }
     let Some(mailbox) = app.current_local_mailbox_key() else {
         return true;
     };
+    if delta.mailbox() != mailbox {
+        if let Some(idx) = app
+            .mailboxes
+            .iter()
+            .position(|mb| mailbox_key(mb) == delta.mailbox())
+        {
+            app.invalidate_cache_idx(idx);
+        }
+        return true;
+    }
     let mut rows = (*app.emails).clone();
     if super::queries::apply_row_delta(&mut rows, &mailbox, delta) {
         let rows = std::sync::Arc::new(rows);
@@ -629,6 +667,30 @@ pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowD
     }
     app.reload_current_mailbox();
     false
+}
+
+/// Drop the search hit of `account` that a `state.remove` names by its
+/// mailbox and uid (PERSO-286): the message left the mailbox the hit lists,
+/// as the overlay's own `a` drops a hit it archived. The search is the active
+/// account's, and only a local hit knows its uid.
+fn drop_removed_hit(app: &mut App, account: &str, mailbox: &str, uid: i64) {
+    if account != app.account_config.name {
+        return;
+    }
+    let Some(index) = app
+        .server_search_results
+        .iter()
+        .position(|hit| hit.uid == Some(uid) && hit.source_label == mailbox)
+    else {
+        return;
+    };
+    app.server_search_results.remove(index);
+    if index < app.server_search_index {
+        app.server_search_index -= 1;
+    }
+    if app.server_search_index >= app.server_search_results.len() {
+        app.server_search_index = app.server_search_results.len().saturating_sub(1);
+    }
 }
 
 /// Land a fetch-into-store result on the overlay (#0104): the hit named by
@@ -868,6 +930,7 @@ mod tests {
             fetched,
             source_label: "inbox".into(),
             seq: None,
+            uid: None,
         }
     }
 
@@ -1656,5 +1719,86 @@ mod tests {
             "the cache slot holds the post-delta rows"
         );
         assert!(app.pending_actions.is_empty(), "nothing to reload");
+    }
+
+    /// The delta a `state.remove` of `resource` decodes to.
+    fn removal(resource: &str) -> super::super::queries::MessageRowDelta {
+        super::super::queries::MessageRowDelta::decode(&mp_protocol::EventEnvelope {
+            instance_id: "bg".to_string(),
+            revision: 6,
+            kind: mp_protocol::events::KIND_REMOVE.to_string(),
+            payload: serde_json::json!({"resource": resource}),
+        })
+        .expect("a state.remove of a message decodes")
+    }
+
+    /// A removal from a mailbox that is not on screen drops that mailbox's
+    /// cache slot, so its next visit reads it again rather than showing the
+    /// row another client moved away; the open list is left alone
+    /// (PERSO-286).
+    #[test]
+    fn a_remove_from_a_mailbox_not_on_screen_drops_its_cache_slot() {
+        let _data = DataDir::new();
+        let mut app = app_with_warm_caches();
+        let open = std::sync::Arc::clone(&app.emails);
+
+        assert!(apply_row_delta(&mut app, &removal("message:alice/inbox/7")));
+
+        assert!(app.email_cache[0].is_none(), "the Inbox listing is stale");
+        assert!(app.email_cache[1].is_some(), "the open Archive is not");
+        assert!(std::sync::Arc::ptr_eq(&open, &app.emails));
+        assert!(app.pending_actions.is_empty(), "nothing to reload");
+    }
+
+    /// A delta of another account drops that account's cached listing of the
+    /// mailbox and touches nothing on screen, even where the active account
+    /// has a mailbox of the same name open (PERSO-286).
+    #[test]
+    fn a_delta_of_another_account_drops_its_slot_and_leaves_the_open_list() {
+        let _data = DataDir::new();
+        let mut app = app_with_warm_caches();
+        let mut bob = background_account("bob");
+        bob.mailboxes = vec![app.mailboxes[1].clone()];
+        app.accounts = vec![background_account("alice"), bob];
+        app.active_account = 0;
+
+        assert!(apply_row_delta(&mut app, &removal("message:bob/archive/7")));
+
+        assert!(app.accounts[1].email_cache[0].is_none(), "bob's Archive");
+        assert!(app.email_cache[1].is_some(), "alice's open Archive");
+        assert!(app.pending_actions.is_empty(), "nothing to reload");
+    }
+
+    /// A removal drops the local search hit it names by its mailbox and uid,
+    /// as the overlay's own `a` drops a hit it archived, and the cursor stays
+    /// on the hit it was on; a hit of another mailbox under the same uid and
+    /// a server hit stay (PERSO-286).
+    #[test]
+    fn a_remove_drops_the_search_hit_it_names() {
+        let _data = DataDir::new();
+        let mut app = app_with_warm_caches();
+        let hit = |subject: &str, mailbox: &str, uid: Option<i64>| crate::app::SearchResultEntry {
+            source_label: mailbox.into(),
+            uid,
+            ..local_row(subject, "2024-01-01T12:00:00Z")
+        };
+        app.server_search_results = vec![
+            hit("moved", "inbox", Some(7)),
+            hit("kept", "inbox", Some(8)),
+            hit("elsewhere", "archive", Some(7)),
+            hit("server", "INBOX", None),
+        ];
+        app.server_search_index = 2;
+
+        apply_row_delta(&mut app, &removal("message:alice/inbox/7"));
+        apply_row_delta(&mut app, &removal("message:bob/inbox/8"));
+
+        let subjects: Vec<&str> = app
+            .server_search_results
+            .iter()
+            .map(|hit| hit.fetched.subject.as_str())
+            .collect();
+        assert_eq!(subjects, ["kept", "elsewhere", "server"]);
+        assert_eq!(app.server_search_index, 1, "still on the same hit");
     }
 }

@@ -430,6 +430,7 @@ mod tests {
             fetched,
             source_label: "INBOX".into(),
             seq: None,
+            uid: None,
         }];
         let (w, h) = (100, 8);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

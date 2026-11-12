@@ -1336,6 +1336,10 @@ pub struct SearchResultEntry {
     /// `hit_order` orders the server's hits by (PERSO-273); `None` for a hit
     /// of the local pass, which the store answered in its own order.
     pub seq: Option<u64>,
+    /// A local hit's uid in the mailbox `source_label` names, which is how a
+    /// `state.remove` of its message names it (PERSO-286); `None` for a
+    /// server hit, whose wire carries no uid.
+    pub uid: Option<i64>,
 }
 
 /// Which control of the Outlook-shape server-search form (#0086b) is focused,

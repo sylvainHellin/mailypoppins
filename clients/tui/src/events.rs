@@ -399,9 +399,10 @@ impl App {
             // The blocked senders changed, here or in another client
             // (PERSO-261): the payload is the whole list, which an open
             // blocked-senders overlay takes as it is. The mail a block moved
-            // arrives as the counts invalidates of the mailboxes it left and
-            // entered, with no row event; the TUI that blocked reloads its
-            // listings on the answer (`land_block_moves`).
+            // arrives as a `state.remove` of each row it took out of the
+            // Inbox and an invalidate of the Junk listing (PERSO-286), which
+            // the row deltas below fold, in the TUI that blocked as in any
+            // other.
             KIND_SENDER_BLOCKLIST_CHANGED => {
                 match serde_json::from_value::<mp_protocol::sender::BlockedSenders>(
                     event.payload.clone(),
@@ -771,8 +772,9 @@ impl App {
     ///
     /// In conversation mode it also re-streams the open list, coalesced
     /// (#0142). The daemon publishes no `message.row` for a message change:
-    /// an ingest, a flag pass or a mutation reaches a client as this counts
-    /// invalidate of the mailbox it touched, and a conversation listed in the
+    /// an ingest, a flag pass or a flag mutation reaches a client as this
+    /// counts invalidate of the mailbox it touched (a move also as the row
+    /// removal and listing invalidate PERSO-286 added), and a conversation listed in the
     /// inbox moves when a reply lands in Sent, so any mailbox of the account
     /// counts. The flat list keeps the rule `MessageRowDelta::decode` states,
     /// since it folds the row events it does get.

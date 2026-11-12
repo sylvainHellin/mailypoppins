@@ -1515,6 +1515,7 @@ pub(super) fn hit_entry(
         fetched,
         source_label: hit.mailbox.clone(),
         seq: Some(seq),
+        uid: None,
     }
 }
 

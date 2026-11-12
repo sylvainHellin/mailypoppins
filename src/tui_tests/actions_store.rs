@@ -1410,6 +1410,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             fetched: email,
             source_label: "Inbox".to_string(),
             seq: None,
+            uid: None,
         }];
         app.server_search_index = 0;
         app.overlay = Overlay::Search;
@@ -1450,6 +1451,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             fetched: email,
             source_label: "Inbox".to_string(),
             seq: None,
+            uid: None,
         }];
         app.server_search_index = 0;
         app.overlay = Overlay::Search;
@@ -1544,6 +1546,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             fetched: crate::parse::parse_rfc822_to_fetched_email(raw).unwrap(),
             source_label: "Inbox".to_string(),
             seq: None,
+            uid: None,
         }];
         app.server_search_index = 0;
         app.overlay = Overlay::Search;
@@ -1591,6 +1594,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             fetched,
             source_label: "Sent".to_string(),
             seq: Some(0),
+            uid: None,
         }];
         app.server_search_index = 0;
         app.overlay = Overlay::Search;
@@ -1648,6 +1652,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             fetched: email,
             source_label: "Inbox".to_string(),
             seq: None,
+            uid: None,
         }];
         app.server_search_index = 0;
         app.overlay = Overlay::Search;
@@ -1865,6 +1870,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             fetched,
             source_label: "Sent".to_string(),
             seq: Some(0),
+            uid: None,
         }];
         app.server_search_index = 0;
         app.overlay = Overlay::Search;
