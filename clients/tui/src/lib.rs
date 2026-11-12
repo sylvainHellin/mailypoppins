@@ -14,6 +14,8 @@ mod events_resync_tests;
 pub(crate) mod helpers;
 #[cfg(test)]
 mod hold_tests;
+#[cfg(test)]
+mod opening_tests;
 pub mod prefs;
 pub mod queries;
 pub mod session;

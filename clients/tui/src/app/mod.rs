@@ -655,7 +655,25 @@ impl App {
 
     /// Queue one [`Action::LoadContacts`] for the active account, superseding
     /// any request still in flight.
+    ///
+    /// Not while the daemon is still opening the account's store (PERSO-109):
+    /// it would refuse the read, and the refusal is no failure to show. The
+    /// status line says the account is opening, as a mailbox switch does, the
+    /// view stays unloaded, and the account's `ready` asks again
+    /// ([`Self::reload_contacts`]).
     pub fn request_contacts(&mut self) {
+        if let Some(account) = self
+            .accounts
+            .get(self.active_account)
+            .filter(|account| account.opening)
+        {
+            let name = account.account_config.name.clone();
+            self.contacts_view.generation += 1;
+            self.contacts_view.loading = false;
+            self.contacts_view.loaded = false;
+            self.set_status_level(format!("Opening {name}..."), StatusLevel::Progress);
+            return;
+        }
         self.contacts_view.generation += 1;
         self.contacts_view.loading = true;
         let generation = self.contacts_view.generation;

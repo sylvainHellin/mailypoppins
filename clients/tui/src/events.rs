@@ -684,7 +684,9 @@ impl App {
     ///
     /// `ready` also ends the account's `opening` and reads its counts again,
     /// the desktop's `staleMailboxes`, and the active account reloads its open
-    /// mailbox, the desktop's `staleListIf`. A resync bootstrap that caught
+    /// mailbox, the desktop's `staleListIf`, and its contacts, the desktop's
+    /// `staleContacts`; a loaded calendar is read again, the desktop's
+    /// `staleInvitations`, since the daemon left an opening account out of it. A resync bootstrap that caught
     /// the runtime opening (a daemon restart) sets `opening`, and the startup
     /// open that would clear it ran long ago, so this event is the only thing
     /// left that tells the client the account serves. It asks the account's
@@ -712,10 +714,16 @@ impl App {
         // A sign-in again ends in `ready`, and may have granted the calendar
         // scope the re-login banner asks for (PERSO-200).
         self.refresh_credentials(index);
+        // The calendar shows every account, and the daemon answered it
+        // without an account still opening its store (PERSO-109).
+        self.rebuild_calendar_if_loaded();
         if index == self.active_account {
             self.recount_all_mailboxes();
             self.accounts[index].mailbox_counts = self.mailbox_counts.clone();
             self.reload_current_mailbox();
+            // The contacts the Contacts view or a compose wizard did not ask
+            // for while the account was opening.
+            self.reload_contacts();
             return Applied::Rows;
         }
         let account = &self.accounts[index];

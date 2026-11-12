@@ -124,6 +124,21 @@ fn render_list(app: &App, frame: &mut Frame, area: Rect) {
         frame.render_widget(msg, list_area);
         return;
     }
+    // The daemon is still opening the account's store (PERSO-109): its
+    // contacts load once it is ready, so the cache is not missing.
+    if let Some(opening) = app
+        .accounts
+        .get(app.active_account)
+        .filter(|account| cv.index.is_none() && account.opening)
+    {
+        let msg = Paragraph::new(Line::from(Span::styled(
+            format!("Opening {}...", opening.account_config.name),
+            Style::default().fg(theme::active().text_muted),
+        )))
+        .style(Style::default().bg(theme::active().bg));
+        frame.render_widget(msg, list_area);
+        return;
+    }
     if cv.index.is_none() {
         let msg = Paragraph::new(Line::from(Span::styled(
             "No contact cache yet — press r to build the index.",
