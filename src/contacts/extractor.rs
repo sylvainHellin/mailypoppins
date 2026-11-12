@@ -136,9 +136,13 @@ pub struct Committed {
 ///
 /// `stamp_kept` is for the reads that rebuild a stale cache: when the guard
 /// refuses the rebuild, the kept cache is stamped current, so the next read
-/// does not walk the store again to reach the same verdict, and whatever the
-/// window logged that never reached it (a stale cache takes no merge) is
-/// folded into it first.
+/// does not walk the store again to reach the same verdict. A stale cache
+/// takes no merge, so every correspondent a sync or a send brought while it
+/// was stale is missing from it, and stamping it current would leave them
+/// missing for good (PERSO-237): the refused rebuild, which walked their rows
+/// and holds what the window logged, is absorbed into it first
+/// ([`absorb`]). A kept cache that was current took every merge, and only
+/// the logged observations that never reached it are folded in.
 pub fn commit_rebuild_at(
     root: &Path,
     account: &AccountConfig,
@@ -161,10 +165,11 @@ pub fn commit_rebuild_at(
             Some(mut kept) => {
                 let stamp = stamp_kept && !kept.is_current();
                 if stamp {
+                    absorb(&mut kept, &index);
                     kept.extractor_version = EXTRACTOR_VERSION;
                 }
                 let unapplied: Vec<_> = logged.iter().filter(|entry| !entry.applied).collect();
-                let fold = kept.is_current() && !unapplied.is_empty();
+                let fold = !stamp && kept.is_current() && !unapplied.is_empty();
                 if fold {
                     for entry in unapplied {
                         fold_observation(&mut kept, &self_addr, &entry.observation);
@@ -179,6 +184,35 @@ pub fn commit_rebuild_at(
         };
         Ok(Committed { saved, index })
     })
+}
+
+/// Take into `kept` what `rebuilt` knows of each contact, without counting
+/// one message twice: the two indexes may have seen the same rows, so each
+/// counter is the larger of the two rather than their sum, `first_seen` the
+/// earlier and `last_seen` the later, and the display name is the one of the
+/// later sighting. A contact only `rebuilt` knows is added as it is.
+fn absorb(kept: &mut ContactIndex, rebuilt: &ContactIndex) {
+    for (address, found) in &rebuilt.contacts {
+        let Some(known) = kept.contacts.get_mut(address) else {
+            kept.contacts.insert(address.clone(), found.clone());
+            continue;
+        };
+        known.sent_to = known.sent_to.max(found.sent_to);
+        known.sent_cc = known.sent_cc.max(found.sent_cc);
+        known.received = known.received.max(found.received);
+        if !found.first_seen.is_empty()
+            && (known.first_seen.is_empty() || found.first_seen < known.first_seen)
+        {
+            known.first_seen = found.first_seen.clone();
+        }
+        let newer = found.last_seen >= known.last_seen;
+        if !found.display_name.is_empty() && (newer || known.display_name.is_empty()) {
+            known.display_name = found.display_name.clone();
+        }
+        if newer {
+            known.last_seen = found.last_seen.clone();
+        }
+    }
 }
 
 #[cfg(test)]

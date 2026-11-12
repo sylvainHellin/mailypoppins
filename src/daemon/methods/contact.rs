@@ -415,7 +415,9 @@ impl Loaded {
 /// A kept index another extractor version built is stamped current as it is
 /// kept ([`commit_rebuild_at`]'s `stamp_kept`): the guard judged the store's
 /// rebuild a failed read, and the next read would only walk the store again
-/// to reach the same verdict, on every keystroke of a recipient field.
+/// to reach the same verdict, on every keystroke of a recipient field. It
+/// absorbs the refused rebuild as it is stamped, so a correspondent whose
+/// merge the stale cache could not take is still found (PERSO-237).
 /// `mp contacts rebuild` still offers a rebuild to the guard whenever it is
 /// run, and the hooks keep the kept index up meanwhile.
 fn settle_built(
@@ -784,14 +786,50 @@ mod tests {
         cache_of(&account, &many, 0);
 
         let first = load_index(&account).await.expect("loaded");
-        assert_eq!(first.index.contacts.len(), 20, "the kept cache answers");
+        assert_eq!(
+            first.index.contacts.len(),
+            22,
+            "the kept cache answers, with the rebuild's two absorbed"
+        );
         assert_eq!(
             first.refused.map(|r| r.saved),
             Some("refused_shrunk".to_string())
         );
         let second = load_index(&account).await.expect("loaded");
         assert_eq!((second.written, second.refused), (None, None));
-        assert_eq!(second.index.contacts.len(), 20);
+        assert_eq!(second.index.contacts.len(), 22);
+    }
+
+    /// PERSO-237: a stale cache takes no hook merge, so the correspondents
+    /// the syncs stored while it was stale are missing from it. A read that
+    /// keeps it when the guard refuses the rebuild, and stamps it current,
+    /// takes them from the refused rebuild, which walked the rows they are
+    /// in, or no merge would ever bring them back.
+    #[tokio::test]
+    async fn a_refused_upgrade_keeps_what_the_rebuild_found() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = account_with_mail();
+        let mut many: Vec<String> = (0..20).map(|i| format!("c{i}@example.com")).collect();
+        many.push("zoe@example.com".to_string());
+        cache_of(&account, &many, 0);
+
+        let first = load_index(&account).await.expect("loaded");
+        assert_eq!(
+            first.refused.map(|r| r.saved),
+            Some("refused_shrunk".to_string())
+        );
+        let hits = search(&first.index, "hochmuth", 20);
+        assert_eq!(hits.len(), 1, "the rebuild's correspondent is served");
+        assert_eq!(hits[0].contact.tier_tuple(), (1, 0, 1));
+        let zoe = &first.index.contacts["zoe@example.com"];
+        assert_eq!(zoe.received, 1, "in both, counted once");
+        assert_eq!(zoe.display_name, "Zoe", "named by the newer sighting");
+        let root = crate::config::account_dir(&account.name);
+        let on_disk = load_cache(&root).expect("readable").expect("cached");
+        assert!(on_disk
+            .contacts
+            .contains_key("markus.hochmuth@obermeyer-group.com"));
+        assert!(on_disk.contacts.contains_key("c7@example.com"), "the kept");
     }
 
     /// PERSO-234 review: after an upgrade every cache is stale at once, and
