@@ -1209,6 +1209,46 @@ async fn validate_and_preview_find_a_relative_attachment_beside_the_draft() {
     assert_eq!(preview.warnings, wanted, "and so does the send preview");
 }
 
+/// An entry that is empty after trimming names no file: `mp validate` and
+/// the send preview warn about it in the words a refused send uses, rather
+/// than reading it as the drafts directory, which holds files (PERSO-215).
+#[tokio::test]
+async fn validate_and_preview_warn_about_an_empty_attachment_entry() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    let dir = slice.drafts_dir(fixture::ACCOUNT);
+    for (id, entry) in [("a0000000000000f5", " "), ("a0000000000000f6", "")] {
+        let document = fixture::document(id, "robin@example.com", "Leer", "draft", "Body.\n")
+            .replacen(
+                "date: ",
+                &format!("attachments:\n  - \"{entry}\"\ndate: "),
+                1,
+            );
+        fs::write(dir.join(format!("leer-{id}.md")), document).expect("write the draft");
+        let wanted = vec![format!("Attachment entry is empty: {entry:?}")];
+
+        let validation: DraftValidation = call_typed(
+            &mut conn,
+            "draft.validate",
+            json!({"account": fixture::ACCOUNT, "id": id}),
+        )
+        .await;
+        assert_eq!(
+            validation.reports[0].warnings, wanted,
+            "mp validate warns about the empty entry {entry:?}"
+        );
+
+        let preview: DraftPreview = call_typed(
+            &mut conn,
+            "draft.preview",
+            json!({"account": fixture::ACCOUNT, "id": id}),
+        )
+        .await;
+        assert_eq!(preview.warnings, wanted, "and so does the send preview");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 5. `draft.path`, the resolver
 // ---------------------------------------------------------------------------

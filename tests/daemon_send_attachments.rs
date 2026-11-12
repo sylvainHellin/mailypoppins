@@ -182,6 +182,36 @@ fn a_relative_attachment_beside_the_draft_sends_from_any_working_directory() {
     );
 }
 
+/// An entry that is empty after trimming names no file: joined to the anchor
+/// it would be the drafts directory itself, whose every file (the draft and
+/// its siblings) a folder entry attaches. The send is refused, naming the
+/// entry, and nothing reaches the transport (PERSO-215).
+#[test]
+fn an_empty_attachment_entry_refuses_the_send_naming_it() {
+    for entry in [" ", ""] {
+        let slice = Slice::start(entry, None);
+        let selector = fixture::selector(fixture::ACCOUNT, ATTACHING);
+
+        let out = slice.routed_elsewhere(&["send", &selector, "-y"]);
+        let text = format!("{}{}", stdout(&out), stderr(&out));
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "an empty entry {entry:?} is a refused send:\n{text}"
+        );
+        let named = format!("Attachment entry is empty: {entry:?}");
+        assert!(
+            text.contains(&named),
+            "the refusal names the empty entry ({named}):\n{text}"
+        );
+        let events = fixture::transport_events(&fixture::transport_log(slice.root()));
+        assert!(
+            events.is_empty(),
+            "nothing reached the transport for {entry:?}: {events:?}"
+        );
+    }
+}
+
 /// And when no such file is beside the draft, the failure names the draft's
 /// own directory: the anchor, said out loud.
 #[test]

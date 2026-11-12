@@ -289,7 +289,8 @@ pub struct DraftAttachment {
     /// The entry as the file spells it, `~` kept.
     pub entry: String,
     /// Where the send path finds it: `~` against the daemon's home, a
-    /// relative entry against the draft file's directory.
+    /// relative entry against the draft file's directory. Empty for an entry
+    /// that is empty after trimming, which names no file and is missing.
     pub path: String,
     /// Whether something is there now: a file, or a directory whose regular
     /// files the send path attaches. A send fails on a missing one.

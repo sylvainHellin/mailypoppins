@@ -1523,6 +1523,36 @@ fn no_part_of_a_server_copy_carries_the_draft_file_or_its_bcc() {
     }
 }
 
+/// An attachment entry that is empty after trimming names no file, so the
+/// server copy leaves it out: read as the drafts directory, it would upload
+/// the draft itself and every sibling draft beside it (PERSO-215).
+#[test]
+fn a_server_copy_skips_an_empty_attachment_entry() {
+    let fx = Fixture::new();
+    fx.write("nachbar", "d0", "", "Ein anderer Entwurf");
+    for (name, id, entry) in [("leer", "d1", " "), ("ganz-leer", "d2", "")] {
+        fx.write(
+            name,
+            id,
+            &format!("attachments:\n  - \"{entry}\"\n"),
+            "Ohne Anhang",
+        );
+        let mut folder = FakeFolder::default();
+        block_on(push::push(&fx.mirror(1), &mut folder, id)).unwrap();
+        let raw = folder.live()[0].raw.clone();
+        let email = crate::parse::parse_rfc822_to_fetched_email(&raw).unwrap();
+        let names: Vec<&str> = email
+            .attachments
+            .iter()
+            .map(|part| part.filename.as_str())
+            .collect();
+        assert!(
+            names.is_empty(),
+            "the copy of a draft listing {entry:?} carries no part: {names:?}"
+        );
+    }
+}
+
 /// Another machine's push over a draft this one has not touched since is a
 /// plain pull, with no conflict copy (review finding N1).
 #[test]

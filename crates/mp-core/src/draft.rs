@@ -1518,16 +1518,36 @@ pub fn expand_home(input: &str, home: Option<&Path>) -> PathBuf {
 /// against `home`, an absolute path as it is, and a relative one against the
 /// draft file's own directory (ATT-03's accepted divergence).
 ///
+/// An entry that is empty after trimming (`- ""`, `- " "`) names no file and
+/// resolves to `None`: joined to the draft's directory it would be that
+/// directory, whose every file, the draft itself and its siblings, a folder
+/// entry attaches. Each caller says what it does with one; the words are
+/// [`empty_attachment_entry`]'s.
+///
 /// The one resolver for an entry: the send path's `resolve_attachment_paths`,
 /// [`validate_draft`] and the daemon's `draft.attachments` all go through it,
 /// so validate, preview and send never disagree on a padded entry (PERSO-215).
-pub fn resolve_attachment_entry(entry: &str, draft_dir: &Path, home: Option<&Path>) -> PathBuf {
-    let expanded = expand_home(entry.trim(), home);
-    if expanded.is_absolute() {
+pub fn resolve_attachment_entry(
+    entry: &str,
+    draft_dir: &Path,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    let expanded = expand_home(entry, home);
+    Some(if expanded.is_absolute() {
         expanded
     } else {
         draft_dir.join(expanded)
-    }
+    })
+}
+
+/// What `mp validate` and the send preview warn, and a refused send says,
+/// about an entry [`resolve_attachment_entry`] resolves to no path.
+pub fn empty_attachment_entry(entry: &str) -> String {
+    format!("Attachment entry is empty: {entry:?}")
 }
 
 /// Two paths name one file: compared canonically when both exist.
@@ -1567,7 +1587,7 @@ pub fn attach_checked(path: &Path, input: &str, home: Option<&Path>) -> Result<(
         .attachments
         .unwrap_or_default()
         .iter()
-        .find(|e| same_file(&resolve_attachment_entry(e, dir, home), &file))
+        .find(|e| resolve_attachment_entry(e, dir, home).is_some_and(|p| same_file(&p, &file)))
     {
         bail!("{dup} is already attached");
     }
@@ -2092,7 +2112,10 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
         };
         let home = dirs::home_dir();
         for attachment in attachments {
-            let resolved = resolve_attachment_entry(attachment, dir, home.as_deref());
+            let Some(resolved) = resolve_attachment_entry(attachment, dir, home.as_deref()) else {
+                warnings.push(empty_attachment_entry(attachment));
+                continue;
+            };
             let path = resolved.as_path();
             if path.is_dir() {
                 let has_file = fs::read_dir(path)
@@ -2432,16 +2455,21 @@ mod tests {
         let dir = Path::new("/data/drafts");
         assert_eq!(
             resolve_attachment_entry("~/a.pdf", dir, Some(home)),
-            home.join("a.pdf")
+            Some(home.join("a.pdf"))
         );
         assert_eq!(
             resolve_attachment_entry("/abs/b.pdf", dir, Some(home)),
-            PathBuf::from("/abs/b.pdf")
+            Some(PathBuf::from("/abs/b.pdf"))
         );
         assert_eq!(
             resolve_attachment_entry("rel/c.pdf", dir, Some(home)),
-            dir.join("rel/c.pdf")
+            Some(dir.join("rel/c.pdf"))
         );
+        // Empty after trimming, an entry names no file, never the draft's
+        // own directory (PERSO-215).
+        for empty in ["", " ", "\t "] {
+            assert_eq!(resolve_attachment_entry(empty, dir, Some(home)), None);
+        }
     }
 
     /// The prompt's checks, then an append, and a removal by index.

@@ -1303,7 +1303,10 @@ fn attachment_draft(
 }
 
 /// The `result` of the three: the list as the file has it now, each entry
-/// resolved as the send path resolves it, against the daemon's home.
+/// resolved as the send path resolves it, against the daemon's home. An
+/// entry that is empty after trimming resolves to no path: it is listed with
+/// an empty `path` and as missing, so a client shows it and `draft.detach`
+/// can remove it.
 fn attachment_list(account: &str, row: &DraftRow) -> Result<Value, RpcError> {
     let draft = crate::draft::parse_email_draft(&row.path)
         .map_err(|_| refuse_unparseable(account, &row.id, &row.path))?;
@@ -1319,8 +1322,10 @@ fn attachment_list(account: &str, row: &DraftRow) -> Result<Value, RpcError> {
             let resolved = crate::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
             DraftAttachment {
                 index: index as u32,
-                exists: resolved.is_file() || resolved.is_dir(),
-                path: resolved.display().to_string(),
+                exists: resolved.as_ref().is_some_and(|p| p.is_file() || p.is_dir()),
+                path: resolved
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
                 entry,
             }
         })

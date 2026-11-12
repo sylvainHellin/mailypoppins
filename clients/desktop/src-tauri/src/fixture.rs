@@ -2870,13 +2870,18 @@ impl State {
                     .into_iter()
                     .enumerate()
                     .map(|(index, entry)| {
+                        // An entry empty after trimming resolves to no
+                        // path: listed with an empty one, as missing.
                         let resolved =
                             mp_core::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
                         json!({
                             "index": index,
                             "entry": entry,
-                            "path": resolved.display().to_string(),
-                            "exists": resolved.is_file(),
+                            "path": resolved
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default(),
+                            "exists": resolved.is_some_and(|p| p.is_file()),
                         })
                     })
                     .collect();

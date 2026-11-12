@@ -14,7 +14,8 @@ index: number,
 entry: string,
 /**
  * Where the send path finds it: `~` against the daemon's home, a
- * relative entry against the draft file's directory.
+ * relative entry against the draft file's directory. Empty for an entry
+ * that is empty after trimming, which names no file and is missing.
  */
 path: string,
 /**

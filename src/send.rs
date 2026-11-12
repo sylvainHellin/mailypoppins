@@ -3410,7 +3410,10 @@ fn attachment_anchor(draft: &EmailDraft) -> &Path {
 /// contributes itself. This lets a draft name one folder instead of listing
 /// every file in it. A path that is neither a readable directory nor an
 /// existing file is passed through, so the later `fs::read` reports the
-/// missing path the same way it always has.
+/// missing path the same way it always has. An entry that is empty after
+/// trimming names no file and is an error in the words `mp validate` warns
+/// with ([`crate::draft::empty_attachment_entry`]): the send refuses the
+/// draft, and the drafts mirror's server copy leaves the entry out.
 ///
 /// `anchor` is the draft's own directory ([`attachment_anchor`]), not the
 /// process's working directory. Every send runs inside the daemon now, and the
@@ -3429,7 +3432,10 @@ pub fn resolve_attachment_paths(entries: &[String], anchor: &Path) -> Result<Vec
     let home = dirs::home_dir();
     let mut paths = Vec::new();
     for entry in entries {
-        let path = crate::draft::resolve_attachment_entry(entry, anchor, home.as_deref());
+        let Some(path) = crate::draft::resolve_attachment_entry(entry, anchor, home.as_deref())
+        else {
+            return Err(anyhow!(crate::draft::empty_attachment_entry(entry)));
+        };
         if path.is_dir() {
             let mut dir_files = Vec::new();
             for dent in fs::read_dir(&path)
