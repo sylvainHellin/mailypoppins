@@ -141,17 +141,21 @@ pub struct Recorded {
 /// and the rename is answered so the caller can move the folder's messages
 /// with it ([`super::discover::refresh`]).
 pub fn replace(store: &Store, account: &str, fresh: &[ListedFolder]) -> Result<Recorded> {
-    replace_with(store, account, fresh, &[])
+    replace_with(store, account, fresh, &[], &|_| true)
 }
 
 /// [`replace`], also taking `confirmed` as renames: the IMAP renames the
 /// server proved ([`super::rename::confirm`]). One whose old name the store
 /// does not hold as present, or whose new name it already holds, is dropped.
+///
+/// A rename `follows` refuses, Graph's or IMAP's, is no rename: the old
+/// folder is kept as missing and the new one recorded as a new folder.
 pub fn replace_with(
     store: &Store,
     account: &str,
     fresh: &[ListedFolder],
     confirmed: &[Rename],
+    follows: &dyn Fn(&Rename) -> bool,
 ) -> Result<Recorded> {
     let previous = load(store, account)?;
     let mut renames = renames(&previous, fresh);
@@ -170,6 +174,7 @@ pub fn replace_with(
             .cloned()
             .collect::<Vec<_>>(),
     );
+    renames.retain(|rename| follows(rename));
     let tx = store.immediate_transaction()?;
     for rename in &renames {
         tx.execute(

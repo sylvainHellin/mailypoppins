@@ -78,11 +78,13 @@ impl Plan {
 /// `account`.
 ///
 /// A gained folder is one the store never listed, selectable, under a key no
-/// folder held before. A lost folder is one the previous listing had, whose
-/// key no folder of `fresh` takes over and whose cursor recorded a
-/// UIDVALIDITY. A role folder keyed by its role (inbox, archive, sent) keeps
-/// its key, and with it its rows, whatever the server calls it, so it is
-/// never either.
+/// folder held before. A lost folder is one the previous listing had, not
+/// keyed by a role, whose key no folder of `fresh` takes over and whose
+/// cursor recorded a UIDVALIDITY. A folder keyed by its role (inbox, archive,
+/// sent) is never lost: renamed within its role it keeps its key and rows,
+/// and renamed out of it, as a folder that held the role by its name can be,
+/// its rows stay under the role key ([`super::discover`]'s
+/// `keeps_role_keys`).
 pub fn plan(store: &Store, account: &AccountConfig, fresh: &[ListedFolder]) -> Result<Plan> {
     let previous = listing::load(store, &account.name)?;
     let before = Catalogue::resolve(account, &previous);
@@ -123,7 +125,7 @@ pub fn plan(store: &Store, account: &AccountConfig, fresh: &[ListedFolder]) -> R
         let Some(folder) = listed_as(&before, &gone.name) else {
             continue;
         };
-        if keys_after.contains(&folder.key) {
+        if folder.keyed_by_role() || keys_after.contains(&folder.key) {
             continue;
         }
         let Some(cursor) = crate::ingest::load_mailbox_cursor(store, &account.name, &folder.key)?
@@ -347,6 +349,21 @@ mod tests {
         );
     }
 
+    /// PERSO-185: a folder keyed by its role is never a lost candidate, even
+    /// renamed to a name that drops the role it held by name, so the server
+    /// is not asked about it.
+    #[test]
+    fn a_role_folder_keyed_by_its_name_is_never_lost() {
+        let (_dir, store) = store();
+        let account = account();
+        let named = ListedFolder::named;
+        listing::replace(&store, "tum", &[named("INBOX"), named("Archive")]).unwrap();
+        cursor(&store, "archive", 9);
+
+        let renamed = [named("INBOX"), named("Archiv 2025")];
+        assert!(plan(&store, &account, &renamed).unwrap().is_empty());
+    }
+
     /// PERSO-185: a probe that failed proves no rename, so the listing is
     /// recorded as it was before renames were detected, the lost folder kept
     /// as missing.
@@ -379,7 +396,14 @@ mod tests {
         assert!(renamed.is_empty());
 
         listing::replace(&store, "tum", &[ListedFolder::named("Projects")]).unwrap();
-        listing::replace_with(&store, "tum", &[ListedFolder::named("Projekte")], &renamed).unwrap();
+        listing::replace_with(
+            &store,
+            "tum",
+            &[ListedFolder::named("Projekte")],
+            &renamed,
+            &|_| true,
+        )
+        .unwrap();
         let listed = listing::load(&store, "tum").unwrap();
         assert!(listed.iter().any(|f| f.name == "Projects" && f.missing));
         assert!(listed.iter().any(|f| f.name == "Projekte" && !f.missing));

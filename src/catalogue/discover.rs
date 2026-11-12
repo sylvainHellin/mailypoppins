@@ -176,7 +176,10 @@ fn record(
     renamed: &[listing::Rename],
 ) -> Result<bool> {
     let before = Catalogue::from_store(store, account);
-    let recorded = listing::replace_with(store, &account.name, fresh, renamed)?;
+    let resolved = Catalogue::resolve(account, fresh);
+    let recorded = listing::replace_with(store, &account.name, fresh, renamed, &|rename| {
+        keeps_role_keys(&before, &resolved, rename)
+    })?;
     if !recorded.renames.is_empty() {
         let after = Catalogue::from_store(store, account);
         for rename in &recorded.renames {
@@ -184,6 +187,30 @@ fn record(
         }
     }
     Ok(recorded.changed)
+}
+
+/// Whether following `rename` leaves the role keys (inbox, archive, sent)
+/// with their rows (PERSO-185).
+///
+/// A folder keyed by its role keeps that key, and its rows, across a rename
+/// within the role. One whose new name no longer gives it the role, such as a
+/// folder that held it by name renamed to a name no role goes by, would take
+/// the role's rows to a key of its own, so its rename is not followed: it is
+/// kept as missing with its rows, and the new name is a new folder.
+fn keeps_role_keys(before: &Catalogue, after: &Catalogue, rename: &listing::Rename) -> bool {
+    let listed_as = |catalogue: &'_ Catalogue, name: &str| -> Option<super::Folder> {
+        catalogue
+            .folders
+            .iter()
+            .find(|f| f.listed_as.as_deref() == Some(name))
+            .cloned()
+    };
+    match listed_as(before, &rename.from) {
+        Some(old) if old.keyed_by_role() => {
+            listed_as(after, &rename.to).is_some_and(|new| new.key == old.key)
+        }
+        _ => true,
+    }
 }
 
 /// Move a renamed folder's rows from the key its old name gave it to the key
@@ -460,6 +487,94 @@ mod tests {
         assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
     }
 
+    /// PERSO-185: a Graph folder keyed by its role whose rename takes the
+    /// role from it (a folder that held it by name, Graph knowing no
+    /// well-known folder for the role) leaves the role's rows under the role
+    /// key, the old folder kept as missing, as an IMAP one does; a role
+    /// folder renamed within its role keeps its row and rows as before.
+    #[test]
+    fn a_graph_role_folder_renamed_out_of_its_role_keeps_the_role_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let account = AccountConfig {
+            name: "work".to_string(),
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Archive", "BBB")],
+            &[],
+        )
+        .unwrap();
+        crate::ingest::ingest_message(
+            &store,
+            &blobs,
+            &crate::ingest::IngestInput {
+                account: "work",
+                mailbox: "archive",
+                uid: 1,
+                email: &email("one"),
+                raw: None,
+            },
+        )
+        .unwrap();
+        crate::ingest::record_mailbox_cursor(
+            &store,
+            "work",
+            "archive",
+            &crate::ingest::MailboxCursor {
+                deltalink: Some("token".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Archives", "BBB")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(mailbox_of(&store, "one"), vec!["archive"]);
+        assert!(
+            !listing::load(&store, "work")
+                .unwrap()
+                .iter()
+                .any(|f| f.name == "Archive"),
+            "renamed within its role: no missing leftover"
+        );
+
+        record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Archiv 2025", "BBB")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(mailbox_of(&store, "one"), vec!["archive"]);
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "work", "archive")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "work", "Archiv 2025")
+                .unwrap()
+                .is_none()
+        );
+        assert!(listing::load(&store, "work")
+            .unwrap()
+            .iter()
+            .any(|f| f.name == "Archives" && f.missing));
+    }
+
     /// An IMAP account whose store holds `Projects` with the messages `one`
     /// (UID 1) and `two` (UID 2) under UIDVALIDITY 7, its server on the fake
     /// IMAP server, and the data dir pointed at a tempdir for this thread.
@@ -679,6 +794,37 @@ mod tests {
             served("Projekte Kopie", 7, 3, &[(1, "one"), (2, "two")]),
         ]);
         fixture.assert_no_rename("Projekte");
+    }
+
+    /// PERSO-185: a role folder keyed by its role is never a rename
+    /// candidate, even one whose role came from its name and whose new name
+    /// no role list holds: the role's rows stay under the role key and the
+    /// old folder is kept as missing, as before renames were detected.
+    #[test]
+    fn a_role_folder_renamed_out_of_its_role_keeps_the_role_key() {
+        let fixture = ImapRename::new(&["INBOX", "Archive", "Projects"]);
+        fixture.fill("archive", &[("three", 1), ("four", 2)], 9);
+        fixture.serve(vec![
+            served("Projects", 7, 3, &[(1, "one"), (2, "two")]),
+            served("Archiv 2025", 9, 3, &[(1, "three"), (2, "four")]),
+        ]);
+
+        assert!(fixture.refresh(), "the listing changed");
+        assert_eq!(fixture.mailbox_of("three"), vec!["archive"]);
+        assert_eq!(fixture.mailbox_of("four"), vec!["archive"]);
+        assert!(fixture.missing("Archive"));
+        let (store, _) = fixture.store();
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "tum", "archive")
+                .unwrap()
+                .is_some(),
+            "the role keeps its cursor"
+        );
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "tum", "Archiv 2025")
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// PERSO-185: a folder never hands out a UID twice, so a gained folder
