@@ -11,11 +11,12 @@
 //!   account every `-A`-less command already means.
 //! - `backend`: `auth_method` alone. `graph` is Graph, everything else reaches
 //!   its server over IMAP.
-//! - `state`: the store on disk. Present and readable at the current schema
+//! - `state`: [`STATE_OPENING`] while this daemon's runtime start is still
+//!   opening the account's store ([`crate::daemon::opening`], PERSO-109), and
+//!   otherwise the store on disk. Present and readable at the current schema
 //!   version is [`STATE_READY`]; anything else is [`STATE_BLOCKED`], because an
 //!   account with no store cannot serve a read and will not until `mp sync`
-//!   writes one. It is never `opening`: nothing here is asynchronous, so no
-//!   account is ever between states.
+//!   writes one.
 //!
 //! The probe behind `state` is read-only on purpose, see [`state_of_path`]:
 //! reporting what an account has may not change what it has.
@@ -42,6 +43,9 @@ use super::super::dispatch::{
 pub const STATE_READY: &str = "ready";
 /// The store is missing or does not open: reads are refused with `-32006`.
 pub const STATE_BLOCKED: &str = "blocked";
+/// The daemon is still opening the store: reads are refused with `-32006`
+/// until it is open, and a client waits for the account's `ready`.
+pub const STATE_OPENING: &str = "opening";
 
 /// One account as `account.list` reports it, and as `mp account list` prints
 /// it. One type for both directions, so the routed CLI renders the daemon's
@@ -221,9 +225,36 @@ pub fn backend_of(account: &AccountConfig) -> &'static str {
     }
 }
 
-/// Whether an account can serve reads, decided on disk.
+/// Whether an account can serve reads: `opening` while the daemon opens its
+/// store, and otherwise decided on disk.
 pub fn state_of(account: &str) -> &'static str {
+    if crate::daemon::opening::is_opening(account) {
+        return STATE_OPENING;
+    }
     state_of_path(&crate::config::store_path(account))
+}
+
+/// `-32006` with `state: "opening"` while the daemon is still opening
+/// `name`'s store, for a method that would otherwise open it itself and so run
+/// a second integrity check of the file (PERSO-109).
+///
+/// [`ready_account`] carries it; this is the gate for the methods that need
+/// the store and not the store probe, such as a sync, which creates the store
+/// of an account that has none.
+pub fn opened(name: &str) -> Result<(), RpcError> {
+    if crate::daemon::opening::is_opening(name) {
+        return Err(opening(name));
+    }
+    Ok(())
+}
+
+/// The refusal of an account whose store the daemon is still opening.
+fn opening(name: &str) -> RpcError {
+    RpcError {
+        code: ErrorCode::AccountNotReady.code(),
+        message: format!("{name} is still opening its store; try again once it is ready"),
+        data: Some(json!({"account": name, "state": STATE_OPENING})),
+    }
 }
 
 /// The state of one store file, probed without writing a byte to it.
@@ -272,12 +303,14 @@ fn probe(path: &Path) -> anyhow::Result<()> {
 ///
 /// Unknown is `-32005` naming what was asked for; known but storeless is
 /// `-32006` carrying the same state [`list`] reports for it, because two
-/// answers about one account may not contradict each other.
+/// answers about one account may not contradict each other. A store the
+/// daemon is still opening is `-32006` with `state: "opening"` ([`opened`]).
 pub fn ready_account<'a>(
     accounts: &'a [AccountConfig],
     name: &str,
 ) -> Result<&'a AccountConfig, RpcError> {
     let account = configured_account(accounts, name)?;
+    opened(name)?;
     let state = state_of(name);
     if state != STATE_READY {
         return Err(RpcError {

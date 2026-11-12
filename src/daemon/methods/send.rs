@@ -378,6 +378,9 @@ fn plan(
     only(method, params, allowed(method))?;
     let name = string_param(params, "account")?;
     let account = super::account::configured_account(&snapshot.accounts, &name)?.clone();
+    // Every method of the family reads or writes the outbox in the store,
+    // which the daemon may still be opening (PERSO-109).
+    super::account::opened(&name)?;
     let secrets = snapshot.config.secrets_backend;
     let email = snapshot.config.email.clone();
 

@@ -298,6 +298,36 @@ pub fn mailbox_counts(
     Ok(decode_counts(mailboxes, &answer))
 }
 
+/// [`mailbox_counts`], asked again for as long as the daemon answers that it
+/// is still opening the account's store, up to [`mp_client::OPENING_WAIT`].
+///
+/// The startup read of each account, on a thread of its own: a daemon that
+/// has just started answers before it has opened the stores (PERSO-109), and
+/// an account whose store is still opening is the `opening` the sidebar
+/// already shows, not a failure to report. Waiting here keeps the account
+/// `opening` until its store is open, and the landing that follows then loads
+/// its mailbox and kicks its auto-fetch against an account that serves.
+pub fn mailbox_counts_once_open(
+    q: &dyn Queries,
+    account: &str,
+    mailboxes: &[MailboxInfo],
+) -> Result<Vec<usize>> {
+    let began = std::time::Instant::now();
+    loop {
+        match mailbox_counts(q, account, mailboxes) {
+            Err(e)
+                if began.elapsed() < mp_client::OPENING_WAIT
+                    && mp_client::session::refusal(&e)
+                        .and_then(mp_client::opening_account)
+                        .is_some() =>
+            {
+                std::thread::sleep(mp_client::OPENING_POLL);
+            }
+            answer => return answer,
+        }
+    }
+}
+
 /// The params [`mailbox_counts`] sends.
 pub fn counts_params(account: &str) -> Value {
     wire::mailbox_list_params(account)
@@ -647,4 +677,69 @@ fn row_id_for(account: &str, mailbox: &str, uid: i64) -> Option<i64> {
         .get(&(account.to_string(), mailbox.to_string()))?
         .get(&uid)
         .copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use mp_client::session::Refused;
+    use mp_protocol::{ErrorCode, RpcError};
+    use serde_json::json;
+
+    use super::*;
+
+    /// A door that refuses `mailbox.list` with `state` for its first `refusals`
+    /// calls and answers an empty hierarchy after.
+    struct Opening {
+        state: &'static str,
+        refusals: Cell<u32>,
+        calls: Cell<u32>,
+    }
+
+    impl Queries for Opening {
+        fn call(&self, method: &str, _params: Value) -> Result<Value> {
+            self.calls.set(self.calls.get() + 1);
+            if self.refusals.get() == 0 {
+                return Ok(json!({"account": "work", "mailboxes": []}));
+            }
+            self.refusals.set(self.refusals.get() - 1);
+            Err(anyhow::Error::new(Refused {
+                method: method.to_string(),
+                error: RpcError {
+                    code: ErrorCode::AccountNotReady.code(),
+                    message: "not ready".to_string(),
+                    data: Some(json!({"account": "work", "state": self.state})),
+                },
+            }))
+        }
+    }
+
+    /// The startup count waits out an account the daemon is still opening
+    /// (PERSO-109) and answers a storeless one's refusal at once.
+    #[test]
+    fn the_startup_count_waits_out_an_opening_account_only() {
+        let opening = Opening {
+            state: "opening",
+            refusals: Cell::new(2),
+            calls: Cell::new(0),
+        };
+        assert_eq!(
+            mailbox_counts_once_open(&opening, "work", &[]).expect("counted once open"),
+            Vec::<usize>::new()
+        );
+        assert_eq!(opening.calls.get(), 3);
+
+        let blocked = Opening {
+            state: "blocked",
+            refusals: Cell::new(2),
+            calls: Cell::new(0),
+        };
+        assert!(mailbox_counts_once_open(&blocked, "work", &[]).is_err());
+        assert_eq!(
+            blocked.calls.get(),
+            1,
+            "a storeless account is not waited for"
+        );
+    }
 }

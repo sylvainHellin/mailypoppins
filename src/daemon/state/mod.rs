@@ -44,7 +44,8 @@ use mp_protocol::state::{SyncHealth, SyncHealthState};
 
 pub use revision::{ConnectionId, InstanceId, Revision};
 pub use snapshot::{
-    seed_of, seed_with, seeds_from_config, AccountSeed, AccountState, Change, MailboxSeed, Snapshot,
+    config_seeds, seed_of, seed_with, seeds_from_config, AccountSeed, AccountState, Change,
+    MailboxSeed, Snapshot,
 };
 
 use snapshot::{AccountView, DraftView, MailboxView, OutboxView};

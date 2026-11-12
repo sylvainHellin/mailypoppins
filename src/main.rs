@@ -2384,11 +2384,36 @@ async fn daemon_try_call_within(
     params: serde_json::Value,
     budget: std::time::Duration,
 ) -> std::result::Result<serde_json::Value, mp_protocol::RpcError> {
-    match connection.call_within(method, params, budget).await {
+    match connection
+        .call_awaiting_open(method, params, budget, note_opening)
+        .await
+    {
         Ok(result) => Ok(result),
         Err(mp_client::ClientError::Rpc(error)) => Err(error),
         Err(e) => unanswered(method, e),
     }
+}
+
+/// Start one operation and follow it to its end, waiting out an account the
+/// daemon is still opening as [`daemon_try_call_within`] does.
+async fn run_operation_awaiting_open(
+    connection: &mut mp_client::Connection,
+    method: &str,
+    params: serde_json::Value,
+    budget: std::time::Duration,
+) -> std::result::Result<Settled, mp_client::ClientError> {
+    let started = connection
+        .call_awaiting_open(method, params, budget, note_opening)
+        .await?;
+    connection.settle(&started).await
+}
+
+/// The line a routed command prints once on stderr while it waits for the
+/// daemon to open `account`'s store (PERSO-109): right after a daemon start, a
+/// large store's integrity check takes seconds, and a command that said
+/// nothing would look hung. A store that opens within a second costs no line.
+fn note_opening(account: &str) {
+    eprintln!("{account} is still opening its store, waiting");
 }
 
 /// The exit-4 diagnostic for a call that got no answer at all, as opposed to a
@@ -2715,18 +2740,17 @@ async fn fetch_on_miss<T>(
     // mailboxes says so in its own words.
     let account = account_config.name.as_str();
     let mut session = operation_session().await;
-    let fetched = match session
-        .run_operation(
-            "message.fetch",
-            serde_json::json!({
-                "account": account,
-                "mailbox": mailbox_key,
-                "message_id": message_id,
-            }),
-            DAEMON_TIMEOUT,
-            |_| {},
-        )
-        .await
+    let fetched = match run_operation_awaiting_open(
+        &mut session,
+        "message.fetch",
+        serde_json::json!({
+            "account": account,
+            "mailbox": mailbox_key,
+            "message_id": message_id,
+        }),
+        DAEMON_TIMEOUT,
+    )
+    .await
     {
         Ok(Settled::Done(result)) => result,
         Ok(Settled::Failed(message)) => {
@@ -5908,10 +5932,7 @@ async fn run_admin_operation(
     params: serde_json::Value,
     account: &str,
 ) -> Result<serde_json::Value> {
-    match connection
-        .run_operation(method, params, DAEMON_TIMEOUT, |_| {})
-        .await
-    {
+    match run_operation_awaiting_open(connection, method, params, DAEMON_TIMEOUT).await {
         Ok(Settled::Done(result)) => Ok(result),
         Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
         Err(mp_client::ClientError::Rpc(error)) => Err(refusal(account, error)),

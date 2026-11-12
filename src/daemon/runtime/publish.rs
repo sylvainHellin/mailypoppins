@@ -85,6 +85,32 @@ fn failure_line(account: &str, outcome: &TickOutcome) -> Option<String> {
 /// A `status-only` folder's counts are the server's, read by the tick's
 /// `STATUS`; every other mailbox's are the store's.
 pub async fn publish_changed_counts(canonical: &Arc<CanonicalState>, account: &AccountConfig) {
+    if let Some((seed, fresh)) = read_hierarchy(account).await {
+        land_hierarchy(canonical, &account.name, seed, fresh, false);
+    }
+}
+
+/// Complete `account`'s seed from its store once the runtime start has opened
+/// it (PERSO-109), announcing what the hierarchy gained, changed or lost as
+/// [`publish_changed_counts`] does for a pass.
+///
+/// The daemon starts from the configuration's seeds, because reading every
+/// catalogue before it serves would open every store first; this is where an
+/// account's listed folders join its sidebar. Only the rows the reseed touched
+/// are committed, with their counts: the other counts are the next pass's to
+/// publish, as they were before the daemon seeded from the configuration.
+pub async fn reseed_from_store(canonical: &Arc<CanonicalState>, account: &AccountConfig) {
+    if let Some((seed, fresh)) = read_hierarchy(account).await {
+        land_hierarchy(canonical, &account.name, seed, fresh, true);
+    }
+}
+
+/// The hierarchy `account`'s catalogue resolves to and the counts its sidebar
+/// shows per slug, read off the async thread; `None`, logged, when the store
+/// could not be read.
+async fn read_hierarchy(
+    account: &AccountConfig,
+) -> Option<(crate::daemon::state::AccountSeed, Vec<(String, (u64, u64))>)> {
     let cfg = account.clone();
     let read = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let store = crate::store::Store::open(crate::config::store_path(&cfg.name))?;
@@ -101,17 +127,38 @@ pub async fn publish_changed_counts(canonical: &Arc<CanonicalState>, account: &A
     })
     .await;
     let name = &account.name;
-    let (seed, fresh) = match read {
-        Ok(Ok(read)) => read,
-        Ok(Err(e)) => return warn!("[daemon] counting the mailboxes of {name}: {e:#}"),
-        Err(e) => return warn!("[daemon] the count task for {name} {e}"),
-    };
+    match read {
+        Ok(Ok(read)) => Some(read),
+        Ok(Err(e)) => {
+            warn!("[daemon] counting the mailboxes of {name}: {e:#}");
+            None
+        }
+        Err(e) => {
+            warn!("[daemon] the count task for {name} {e}");
+            None
+        }
+    }
+}
+
+/// Reseed `name` with `seed`, announce every row that went as a
+/// `state.remove`, and commit the counts in `fresh` that moved or whose row
+/// the reseed touched; with `touched_only`, the touched rows' alone.
+fn land_hierarchy(
+    canonical: &CanonicalState,
+    name: &str,
+    seed: crate::daemon::state::AccountSeed,
+    fresh: Vec<(String, (u64, u64))>,
+    touched_only: bool,
+) {
     let (touched, removed) = canonical.reseed_account(seed);
     for slug in removed {
         canonical.publish(Event::Remove {
             resource: ResourceId::new(format!("mailbox:{name}/{slug}")),
         });
     }
+    let fresh = fresh
+        .into_iter()
+        .filter(|(slug, _)| !touched_only || touched.contains(slug));
     commit_changed_counts(canonical, name, fresh, &touched);
 }
 

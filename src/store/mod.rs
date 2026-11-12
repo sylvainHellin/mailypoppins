@@ -327,6 +327,51 @@ fn forget_integrity_check(path: &Path) {
     registry.remove(&key);
 }
 
+/// Test-only hook: a directory in which the first open of an account's store
+/// waits before its `integrity_check` for as long as `<dir>/<account>.hold`
+/// exists, after recording `<dir>/<account>.held` (PERSO-109).
+///
+/// The integrity check of a large store takes seconds and a test store's takes
+/// a millisecond, so nothing else would let a test hold an account `opening`
+/// while another is `ready` and ask the daemon what it answers meanwhile. The
+/// account is the name of the directory the store file sits in, which is how
+/// [`crate::config::store_path`] lays it out. On the daemon's other hooks'
+/// precedent no flag exposes it and an unset or empty value is no hook at
+/// all; a hold is released after [`FAKE_OPEN_HOLD_LIMIT`] whatever the file
+/// says, so a test that forgets to release fails on an assertion rather than
+/// hanging.
+pub const FAKE_OPEN_HOLD_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_OPEN_HOLD";
+
+/// How long [`FAKE_OPEN_HOLD_ENV`] holds an open at most.
+pub const FAKE_OPEN_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait at [`FAKE_OPEN_HOLD_ENV`]'s gate, when it is armed for this store's
+/// account; return at once otherwise.
+fn hold_first_open(path: &Path) {
+    let Some(dir) = std::env::var_os(FAKE_OPEN_HOLD_ENV).filter(|dir| !dir.is_empty()) else {
+        return;
+    };
+    let Some(account) = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let gate = dir.join(format!("{account}.hold"));
+    if !gate.exists() {
+        return;
+    }
+    if let Err(e) = fs::write(dir.join(format!("{account}.held")), b"") {
+        warn!("[store] open hold marker for {account}: {e}");
+    }
+    let started = std::time::Instant::now();
+    while gate.exists() && started.elapsed() < FAKE_OPEN_HOLD_LIMIT {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Open an existing file and prove it is a usable store of the current schema
 /// version: readable as a
 /// database, passing `integrity_check` (once per file per process, see
@@ -337,6 +382,7 @@ fn open_validated(path: &Path) -> Result<Connection> {
     apply_pragmas(&conn)?;
 
     if integrity_check_count(path) == 0 {
+        hold_first_open(path);
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .context("running integrity_check")?;

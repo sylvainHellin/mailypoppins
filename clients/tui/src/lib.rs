@@ -179,12 +179,18 @@ fn run_loop(
                     })
                     .ok()
             });
+            // A store the daemon is still opening is waited for here rather
+            // than counted as zero (PERSO-109): landing early would load the
+            // mailbox and start the auto-fetch against an account that
+            // refuses both.
             let counts = match &queries {
-                Some(queries) => queries::mailbox_counts(queries, &account_name, &mailboxes)
-                    .unwrap_or_else(|e| {
-                        log::warn!("[queries] counting the mailboxes of {account_name}: {e:#}");
-                        vec![0; mailboxes.len()]
-                    }),
+                Some(queries) => {
+                    queries::mailbox_counts_once_open(queries, &account_name, &mailboxes)
+                        .unwrap_or_else(|e| {
+                            log::warn!("[queries] counting the mailboxes of {account_name}: {e:#}");
+                            vec![0; mailboxes.len()]
+                        })
+                }
                 None => {
                     log::warn!(
                         "[queries] no daemon session: the counts of {account_name} stay zero"

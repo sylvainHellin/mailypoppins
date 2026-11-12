@@ -1269,6 +1269,8 @@ fn forget_server_copy(
 /// mid-send check [`crate::draft::delete_indexed_draft`] makes against the
 /// outbox, and the index the removal has to leave consistent.
 fn drafts_store(account: &str) -> Result<Store, RpcError> {
+    // Not while the daemon is still opening it (PERSO-109).
+    super::account::opened(account)?;
     Store::open(crate::config::store_path(account))
         .map_err(|e| internal(format!("opening the store of {account}: {e:#}")))
 }

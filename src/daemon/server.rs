@@ -48,7 +48,7 @@ use super::runtime::InstanceMeta;
 use super::session::Session;
 use super::state::events::{Event, Outbound, Outgoing, Subscriber};
 use super::state::{
-    seeds_from_config, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, Revision,
+    config_seeds, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, Revision,
 };
 use crate::sync::Stop;
 
@@ -383,10 +383,13 @@ impl DaemonState {
         let configured = config.accounts();
         // Seeded from the configuration alone: no store is opened and no
         // runtime started here, so every account is `opening` with zeroed
-        // counts until something reports otherwise.
+        // counts and its configured mailboxes until its runtime start has
+        // opened the store and completed the seed from its catalogue
+        // (PERSO-109). Opening the stores here held up the whole daemon on
+        // the slowest integrity check before it answered anyone.
         let canonical = Arc::new(CanonicalState::new(
             InstanceId::new(meta.instance_id.clone()),
-            seeds_from_config(&configured),
+            config_seeds(&configured),
         ));
         let runtimes = Arc::new(RuntimeTable::default());
         // Rooted at the configured accounts and unconditional: the watcher

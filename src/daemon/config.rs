@@ -603,25 +603,52 @@ async fn stop_account(runtimes: &Arc<RuntimeTable>, account: &str) {
 /// to the event and immediately asks `daemon.status` cannot be told the account
 /// is still opening. A daemon that starts no runtimes commits nothing: there is
 /// no runtime to report a state for, and `daemon.status` lists no accounts.
+///
+/// The runtime opens the store, and with it runs the file's integrity check
+/// (PERSO-109). Before the account's state is committed, the store methods'
+/// `opening` refusal is lifted ([`super::opening::end`]) and a runtime that
+/// came up completes the account's seed from the store
+/// ([`super::runtime::publish::reseed_from_store`]), so a client that reacts
+/// to the event finds the account served and its hierarchy whole.
 pub async fn start_account(
     runtimes: &Arc<RuntimeTable>,
     canonical: &Arc<CanonicalState>,
     cfg: AccountConfig,
     account_runtimes: bool,
 ) {
+    let account = cfg.name.clone();
+    let change = start_runtime(runtimes, canonical, cfg.clone(), account_runtimes).await;
+    super::opening::end(&account);
+    let Some(change) = change else {
+        return;
+    };
+    if runtimes.get(&account).is_some() {
+        super::runtime::publish::reseed_from_store(canonical, &cfg).await;
+    }
+    canonical.apply(change);
+}
+
+/// [`start_account`] up to the change it commits: the runtime started and
+/// filed, or the failure recorded, and `None` for a daemon that starts no
+/// runtimes.
+async fn start_runtime(
+    runtimes: &Arc<RuntimeTable>,
+    canonical: &Arc<CanonicalState>,
+    cfg: AccountConfig,
+    account_runtimes: bool,
+) -> Option<Change> {
     use super::runtime::account::{AccountRuntime, Readiness};
     use super::runtime::pool::DEFAULT_READ_POOL_SIZE;
 
     if !account_runtimes {
-        return;
+        return None;
     }
     // An account naming the retired `auth_method = "oauth2"` has no
     // transport left to run on. It comes up blocked with the sentence that
     // says how to switch it, and every other account starts as usual.
     if cfg.auth_method == AuthMethod::RetiredOAuth2 {
         let reason = crate::config::retired_oauth2_message(&cfg.name);
-        canonical.apply(blocked_by_failure(runtimes, &cfg.name, reason));
-        return;
+        return Some(blocked_by_failure(runtimes, &cfg.name, reason));
     }
     // An account with no store has never been synced, and a runtime would
     // *create* one: `ReadPool::open` opens SQLite read-write, which
@@ -640,8 +667,7 @@ pub async fn start_account(
             cfg.name
         );
         info!("[daemon] {reason}");
-        canonical.apply(blocked_by_failure(runtimes, &cfg.name, reason));
-        return;
+        return Some(blocked_by_failure(runtimes, &cfg.name, reason));
     }
     // The daemon's first sync has created the store and holds the engine
     // lock, so a runtime started now would come up blocked on it and nothing
@@ -654,11 +680,10 @@ pub async fn start_account(
         );
         info!("[daemon] {reason}");
         runtimes.insert_failure(&cfg.name, reason.clone());
-        canonical.apply(Change::AccountBlocked {
+        return Some(Change::AccountBlocked {
             account: cfg.name.clone(),
             reason,
         });
-        return;
     }
     let account = cfg.name.clone();
     let cfg_for_watch = cfg.clone();
@@ -720,7 +745,7 @@ pub async fn start_account(
         Ok(Err(e)) => blocked_by_failure(runtimes, &account, format!("{e:#}")),
         Err(e) => blocked_by_failure(runtimes, &account, format!("the start task {e}")),
     };
-    canonical.apply(change);
+    Some(change)
 }
 
 /// The startup start of `account`'s runtime, taken under a shared hold on the

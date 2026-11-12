@@ -35,7 +35,7 @@
 //! One budget rather than two, so the worst case a user waits for a daemon that
 //! never binds is the number in the variable and not some multiple of it. The
 //! budget is the readiness wait's answer window: a daemon that has bound its
-//! socket and is still opening its stores is waited for up to
+//! socket and is not answering yet is waited for up to
 //! [`lifecycle::STARTUP_CEILING`] rather than killed at the budget
 //! (PERSO-109).
 //!

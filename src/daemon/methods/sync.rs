@@ -312,7 +312,10 @@ fn pass_request(
 /// `state: "local_only"`, which is the client's cue to print the skip line and
 /// keep the run's exit code at zero. An account naming the retired
 /// `auth_method = "oauth2"` is `-32006` with `state: "blocked"` and the
-/// sentence that says how to switch it, a failure of that account alone.
+/// sentence that says how to switch it, a failure of that account alone. An
+/// account whose store the daemon is still opening is `-32006` with
+/// `state: "opening"` (PERSO-109): the pass would open the store a second
+/// time and race the runtime start for the engine lock.
 pub(super) fn syncable_account<'a>(
     accounts: &'a [AccountConfig],
     name: &str,
@@ -332,6 +335,7 @@ pub(super) fn syncable_account<'a>(
             data: Some(json!({"account": name, "state": "blocked"})),
         });
     }
+    super::account::opened(name)?;
     Ok(account)
 }
 

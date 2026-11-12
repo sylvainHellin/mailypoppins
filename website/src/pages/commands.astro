@@ -83,7 +83,7 @@ const configCommands = [
 
 const daemonCommands = [
   { command: 'mp daemon run [--foreground-logs]', description: 'Run the daemon in the foreground; never connects to another daemon' },
-  { command: 'mp daemon start [--timeout-secs N]', description: 'Start the daemon (through the login service when one is installed for this data directory, detached otherwise) and return once it answers; it waits N seconds (default 10) for an answer, and up to 120 for a daemon that is up and still opening its stores' },
+  { command: 'mp daemon start [--timeout-secs N]', description: 'Start the daemon (through the login service when one is installed for this data directory, detached otherwise) and return once it answers; it waits N seconds (default 10) for an answer, and up to 120 for a daemon that is up and not answering yet' },
   { command: 'mp daemon status [--json]', description: 'Report whether a daemon is running against this data directory' },
   { command: 'mp daemon stop [--grace-secs N] [--timeout-secs N]', description: 'Ask the running daemon to shut down, letting work in flight settle for the grace' },
   { command: 'mp daemon restart [--grace-secs N] [--timeout-secs N]', description: "Stop the running daemon and start this executable's, through the login service when one is installed, so a systemd unit or launchd agent stays in charge; --timeout-secs is start's" },

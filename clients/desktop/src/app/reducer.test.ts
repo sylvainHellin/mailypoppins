@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { actionTargets, progressAction, reducer, type Action } from "@/app/reducer";
 import { runAction } from "@/app/actions";
 import { ACTIVITY_CAP } from "@/app/pending";
-import { accountExpanded, isStale, listKey, type AppState } from "@/app/state";
+import { ACCOUNT_NOT_READY, accountExpanded, isStale, listKey, refusedWhileOpening, type AppState } from "@/app/state";
 import { CLOSE_OUTBOX_FIRST } from "@/app/outbox";
 import { BACK_TO_MAIL_FIRST, hiddenByView, hiddenNotice } from "@/app/views";
 import { openableHits } from "@/app/search";
@@ -276,6 +276,24 @@ describe("the reducer", () => {
     expect(s.accounts.data?.[0].sync_health).toBe("failed");
     s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 102, kind: "account.state_changed", payload: { account: "work", state: "blocked", reason: "x" } } } });
     expect(s.accounts.data?.[0].runtime_state).toBe("blocked");
+  });
+
+  it("shows an account still opening its store as opening and reads it again once ready (PERSO-109)", () => {
+    let s = booted();
+    s = run(s, {
+      type: "accounts_loaded",
+      gen: s.accounts.gen,
+      accounts: [{ name: "work", default: true, backend: "imap", store_state: "opening", runtime_state: "opening", sync_health: "unknown", outbox: { queued: 0, failed: 0 } }],
+    });
+    const refusal = { kind: "protocol" as const, message: "work is still opening its store", code: ACCOUNT_NOT_READY };
+    s = run(s, { type: "outbox_failed", account: "work", gen: s.outbox.work?.gen ?? 1, error: refusal });
+    expect(refusedWhileOpening(s, "work", refusal)).toBe(true);
+    expect(refusedWhileOpening(s, "work", { ...refusal, code: -32603 })).toBe(false);
+    const outboxGen = s.outbox.work.gen;
+    s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 103, kind: "account.state_changed", payload: { account: "work", state: "ready" } } } });
+    expect(s.accounts.data?.[0].runtime_state).toBe("ready");
+    expect(refusedWhileOpening(s, "work", refusal)).toBe(false);
+    expect(s.outbox.work.gen).toBe(outboxGen + 1);
   });
 
   it("drives the banners from disconnected, reconnected, resync and rebootstrapped", () => {

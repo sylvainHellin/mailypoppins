@@ -60,9 +60,8 @@
 //!
 //! The wait has two bounds (PERSO-109). Within the answer window
 //! (`--timeout-secs`) it waits for an answer whatever it finds. Past the window
-//! a socket that accepts the connect is a daemon that is bound and alive but
-//! still opening its stores, which can take longer than the window on a large
-//! store, so the wait goes on up to [`STARTUP_CEILING`]; a socket that refuses
+//! a socket that accepts the connect is a daemon that is bound and alive and
+//! not answering yet, so the wait goes on up to [`STARTUP_CEILING`]; a socket that refuses
 //! the connect, a stale file a dead daemon left included, is no daemon at all
 //! and ends the wait at the window.
 
@@ -158,14 +157,16 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const ANSWER_WINDOW_SECS: u64 = 10;
 
 /// How long a start waits, in all, for a daemon that has bound its socket but
-/// not answered yet because it is still opening its stores (PERSO-109: a
-/// 1.6 GB store's integrity check took about 10 s at startup). A window longer
-/// than this is the bound instead.
+/// not answered yet (PERSO-109). The daemon used to open every store before it
+/// answered, and a 1.6 GB store's integrity check took about 10 s; it now
+/// answers first and opens the stores account by account, so this bounds what
+/// is left of its startup, which a busy machine can still stretch past the
+/// window. A window longer than this is the bound instead.
 pub const STARTUP_CEILING: Duration = Duration::from_secs(120);
 
 /// The line `mp daemon start` and `restart` print on stderr once the answer
 /// window has passed with a daemon bound and not answering yet.
-const STILL_OPENING: &str = "daemon is up and still opening its stores, waiting";
+const STILL_OPENING: &str = "daemon is up and not answering yet, waiting";
 
 /// The file `mp daemon start` points a detached daemon's stdio at.
 ///
@@ -574,8 +575,18 @@ fn spawn_account_runtimes(state: Arc<DaemonState>) {
     for account_config in state.config.accounts().iter() {
         let state = Arc::clone(&state);
         let account = account_config.name.clone();
+        // Marked here, before the daemon serves, rather than by the task: a
+        // call that arrived before the task ran would otherwise find the
+        // account unmarked and open the store itself (PERSO-109).
+        let mark = super::opening::begin(&account);
         tokio::spawn(async move {
-            if !start_configured(&state.config, &state.runtimes, &state.canonical, &account).await {
+            let started =
+                start_configured(&state.config, &state.runtimes, &state.canonical, &account).await;
+            // The start lifts the mark before it commits; this covers the
+            // account that left the configuration, or that a swap started,
+            // before this start ran, and a start that panicked.
+            drop(mark);
+            if !started {
                 return;
             }
             super::config::spawn_first_sync_if_new(
@@ -646,7 +657,7 @@ async fn start_noting(timeout: Duration, notice: Notice) -> Result<i32> {
             info!("[daemon] start: a daemon is already running");
             return Ok(EXIT_OK);
         }
-        // Bound and silent: a daemon that is still opening its stores, whose
+        // Bound and silent: a daemon that is still starting up, whose
         // start lock is already released. A second one spawned now would only
         // find the socket taken and exit.
         Probe::Bound => {

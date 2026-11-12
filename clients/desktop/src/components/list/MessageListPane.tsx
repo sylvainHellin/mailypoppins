@@ -21,6 +21,7 @@ import {
   filteredDrafts,
   filteredRows,
   memberKey,
+  refusedWhileOpening,
   sendingKeys,
   targetKey,
   threadKey,
@@ -276,6 +277,10 @@ export function MessageListPane() {
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         {search ? (
           <SearchResults search={search} />
+        ) : s.messages.error && !list && refusedWhileOpening(s, account, s.messages.error) ? (
+          <p role="status" aria-busy="true" className="p-4 text-sm text-muted-foreground">
+            Opening {account}: its mail appears once its store is open.
+          </p>
         ) : s.messages.error && !list ? (
           <p role="alert" className="p-4 text-sm text-destructive">
             The list did not load: {s.messages.error.message}

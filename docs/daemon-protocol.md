@@ -1397,6 +1397,9 @@ It can also arrive inside an `operation.finished` event as a failed operation's 
 
 The read-only methods use four of these, and `mailbox.list` uses the same two account refusals `message.list` does.
 An account no configuration names is `account_unknown`, carrying the name that was asked for; a configured account with no readable store is `account_not_ready`, carrying the same `state` `account.list` reports for it, so two answers about one account cannot contradict each other.
+The daemon answers before it has opened any account's store (PERSO-109), and an account whose store its runtime is still opening is `account_not_ready` with `state: "opening"` from every method that would read or write the store, `sync.*`, `send.*` and `message.search_server` included, rather than a second open running a second integrity check of the file; `account.list` reports it `opening` too.
+That refusal is transient: the account's `account.state_changed` to `ready` follows once its store is open, after a `mailbox.counts_changed` invalidation for every row its catalogue added to the configured hierarchy, so a client waits and asks again, or shows the account opening, rather than failing the user's command.
+`mp_client::opening_account` reads it and `Connection::call_awaiting_open` is the waiting call.
 A mailbox the account does not have is `-32602` naming the ones it does, because the caller asked for something that does not exist rather than for something the daemon refuses.
 A store that exists and then fails to open or to read is `-32603`.
 

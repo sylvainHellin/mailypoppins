@@ -48,6 +48,39 @@ use crate::MAX_RESPONSE_BYTES;
 /// business, not this buffer's.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// How long [`Connection::call_awaiting_open`] waits, in all, for an account
+/// the daemon is still opening: the daemon start's own ceiling for a daemon
+/// that is up and not answering yet, which a store's integrity check (12 to
+/// 16 s on a 1.6 GB store, PERSO-109) stays well inside.
+pub const OPENING_WAIT: Duration = Duration::from_secs(120);
+
+/// How often a wait for an opening account asks again.
+pub const OPENING_POLL: Duration = Duration::from_millis(200);
+
+/// How long a wait for an opening account lasts before its caller is told,
+/// so a store that opens in a blink costs the user no line.
+pub const OPENING_NOTICE_AFTER: Duration = Duration::from_secs(1);
+
+/// The account a refusal says the daemon is still opening the store of:
+/// `account_not_ready` with `state: "opening"` (PERSO-109). `None` for any
+/// other refusal, an `account_not_ready` for a missing or blocked store
+/// included.
+///
+/// The refusal is transient: the account turns `ready` on its own once its
+/// store is open, and `account.state_changed` says so. A client waits and
+/// asks again, or shows the account opening, rather than failing the user's
+/// command over it.
+pub fn opening_account(error: &RpcError) -> Option<&str> {
+    if error.code != mp_protocol::ErrorCode::AccountNotReady.code() {
+        return None;
+    }
+    let data = error.data.as_ref()?;
+    if data["state"] != "opening" {
+        return None;
+    }
+    data["account"].as_str()
+}
+
 /// One server-initiated frame, as [`Connection::next_inbound`] hands it over.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inbound {
@@ -251,6 +284,44 @@ impl Connection {
                     after: budget,
                 })
             }
+        }
+    }
+
+    /// [`Connection::call_within`], asked again every [`OPENING_POLL`] for as
+    /// long as the daemon answers that the account is still opening its store
+    /// ([`opening_account`]), up to [`OPENING_WAIT`] in all.
+    ///
+    /// The door of a one-shot client whose user is waiting on the answer, such
+    /// as a command run right after the daemon started. `on_wait` is handed
+    /// the account once, when the wait has lasted [`OPENING_NOTICE_AFTER`],
+    /// so the caller can say what it is waiting for. A wait that outlasts the
+    /// ceiling answers the last refusal.
+    pub async fn call_awaiting_open(
+        &mut self,
+        method: &str,
+        params: Value,
+        budget: Duration,
+        mut on_wait: impl FnMut(&str),
+    ) -> Result<Value, ClientError> {
+        let began = std::time::Instant::now();
+        let mut told = false;
+        loop {
+            let answer = self.call_within(method, params.clone(), budget).await;
+            let Err(ClientError::Rpc(error)) = &answer else {
+                return answer;
+            };
+            let Some(account) = opening_account(error) else {
+                return answer;
+            };
+            let waited = began.elapsed();
+            if waited >= OPENING_WAIT {
+                return answer;
+            }
+            if !told && waited >= OPENING_NOTICE_AFTER {
+                on_wait(account);
+                told = true;
+            }
+            tokio::time::sleep(OPENING_POLL).await;
         }
     }
 
@@ -557,6 +628,82 @@ mod tests {
                 message: "line 4: bad backend".to_string()
             }
         );
+    }
+
+    fn refusal(state: &str) -> RpcError {
+        RpcError {
+            code: mp_protocol::ErrorCode::AccountNotReady.code(),
+            message: "not ready".to_string(),
+            data: Some(json!({"account": "work", "state": state})),
+        }
+    }
+
+    /// Only `account_not_ready` with `state: "opening"` is the transient
+    /// refusal; a storeless or blocked account, and any other code, is not.
+    #[test]
+    fn only_the_opening_refusal_names_an_opening_account() {
+        assert_eq!(opening_account(&refusal("opening")), Some("work"));
+        assert_eq!(opening_account(&refusal("blocked")), None);
+        assert_eq!(opening_account(&refusal("local_only")), None);
+        let other = RpcError {
+            code: -32005,
+            ..refusal("opening")
+        };
+        assert_eq!(opening_account(&other), None);
+    }
+
+    /// A call refused as `opening` is asked again until the daemon answers
+    /// it, and a refusal of another kind is answered at once.
+    #[tokio::test]
+    async fn a_call_waits_out_an_opening_account_and_no_other_refusal() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let dir = std::env::temp_dir().join(format!("mp-client-opening-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let socket = dir.join("opening.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            // Two `opening` refusals, then the answer; then a `blocked` one.
+            let replies = [
+                json!({"error": refusal("opening")}),
+                json!({"error": refusal("opening")}),
+                json!({"result": {"mailboxes": []}}),
+                json!({"error": refusal("blocked")}),
+            ];
+            for mut reply in replies {
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                reply["jsonrpc"] = json!("2.0");
+                reply["id"] = request["id"].clone();
+                let mut frame = serde_json::to_vec(&reply).unwrap();
+                frame.push(b'\n');
+                write.write_all(&frame).await.unwrap();
+            }
+        });
+
+        let mut conn = Connection::connect(&socket).await.expect("connect");
+        let mut told = Vec::new();
+        let answer = conn
+            .call_awaiting_open("mailbox.list", json!({}), Duration::from_secs(5), |a| {
+                told.push(a.to_string())
+            })
+            .await
+            .expect("answered once the account is open");
+        assert_eq!(answer, json!({"mailboxes": []}));
+        assert!(told.is_empty(), "a wait shorter than the notice is silent");
+
+        let refused = conn
+            .call_awaiting_open("mailbox.list", json!({}), Duration::from_secs(5), |_| {})
+            .await;
+        assert!(
+            matches!(&refused, Err(ClientError::Rpc(e)) if e.data.as_ref().unwrap()["state"] == "blocked"),
+            "{refused:?}"
+        );
+        daemon.await.expect("the stand-in daemon");
     }
 
     /// A daemon that accepts the call and never answers is a typed timeout

@@ -15,12 +15,10 @@ import {
   rebuildOf,
   SEARCH_DEBOUNCE_MS,
 } from "@/app/contacts";
+import { ACCOUNT_NOT_READY, refusedWhileOpening } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import type { ActionId } from "@/keymap/catalog";
-
-/** The daemon's `AccountNotReady`: the account has no local store to read yet. */
-const ACCOUNT_NOT_READY = -32006;
 
 /**
  * The Contacts view (clients/desktop/docs/shell.md, "Contacts"): the
@@ -167,7 +165,11 @@ export function ContactsView() {
           {!account ? (
             <p className="p-4 text-sm text-muted-foreground">No account is selected.</p>
           ) : l?.error && !search ? (
-            "code" in l.error && l.error.code === ACCOUNT_NOT_READY ? (
+            refusedWhileOpening(s, account, l.error) ? (
+              <p role="status" aria-busy="true" className="p-4 text-sm text-muted-foreground">
+                Opening {account}: its contacts appear once its store is open.
+              </p>
+            ) : "code" in l.error && l.error.code === ACCOUNT_NOT_READY ? (
               <p className="p-4 text-sm text-muted-foreground">
                 {account} has no local store yet, so it has no contacts; they appear after the account's first sync.
               </p>

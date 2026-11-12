@@ -58,10 +58,28 @@ pub struct AccountSeed {
 /// `mailbox.list`, `message.list` and a move resolve against, so the daemon
 /// cannot disagree with itself about which mailboxes an account has (#0141).
 /// It creates no store: the catalogue is read from a store that exists, and an
-/// account without one is seeded from its config alone, which is what Phase 3a
-/// did before a runtime came up.
+/// account without one is seeded from its config alone. It does open every
+/// store that exists, so it is the configuration swap's, whose accounts the
+/// runtimes have mostly opened already; the daemon's startup seeds from
+/// [`config_seeds`] instead.
 pub fn seeds_from_config(accounts: &[AccountConfig]) -> Vec<AccountSeed> {
     accounts.iter().map(seed_of).collect()
+}
+
+/// The seeds behind `config.toml` alone, in the file's order, opening no
+/// store: the four fixed rows and the mailboxes the configuration names, which
+/// is the hierarchy of an account before its catalogue is read.
+///
+/// What the daemon starts from (PERSO-109). Reading the catalogues here would
+/// open every store, and the first open of a store runs its integrity check,
+/// seconds on a large one, before the daemon could answer anyone; each
+/// account's runtime start completes its seed from the store once the store is
+/// open ([`crate::daemon::runtime::publish::reseed_from_store`]).
+pub fn config_seeds(accounts: &[AccountConfig]) -> Vec<AccountSeed> {
+    accounts
+        .iter()
+        .map(|account| seed_with(account, &crate::catalogue::Catalogue::resolve(account, &[])))
+        .collect()
 }
 
 /// One account's seed, from its catalogue as the store holds it.

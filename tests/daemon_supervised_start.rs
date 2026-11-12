@@ -43,7 +43,7 @@ const UNIT_NAME: &str = "mailypoppins.service";
 
 /// The line `start` and `restart` print on stderr once the answer window has
 /// passed while a daemon holds the socket without answering yet.
-const STILL_OPENING: &str = "daemon is up and still opening its stores, waiting";
+const STILL_OPENING: &str = "daemon is up and not answering yet, waiting";
 
 struct Sandbox {
     root: TempDir,
@@ -535,7 +535,7 @@ fn a_failing_service_start_falls_back_to_a_detached_daemon() {
 }
 
 /// A daemon the service started that binds its socket at once but answers
-/// only after the answer window, because it is still opening its stores, is a
+/// only after the answer window, because it is still starting up, is a
 /// daemon that came up: `start` says once that it is waiting and exits 0 when
 /// the daemon answers (PERSO-109, 2026-11-12: exit 4 after 10 s for a daemon
 /// that answered 11.6 s after it bound).

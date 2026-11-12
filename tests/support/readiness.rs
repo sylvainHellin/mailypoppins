@@ -17,6 +17,16 @@
 //! round trip - what `mp daemon start` itself calls ready - means all of
 //! startup is done.
 //!
+//! # Why an answer is not readiness either
+//!
+//! The daemon answers before it has opened any account's store (PERSO-109):
+//! each runtime start opens its store off the accept loop, and until it has, a
+//! store method on that account is refused with `account_not_ready` and
+//! `state: "opening"`. A test that calls one right after the daemon answered
+//! would race that start, so the wait also waits until `daemon.status` lists
+//! no account as `opening`. A daemon that starts no runtimes lists no accounts,
+//! and passes at once.
+//!
 //! The wait blocks the calling thread. That is fine inside an async test: the
 //! daemon is another process, and nothing in the test needs to run until it
 //! answers.
@@ -26,46 +36,55 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Poll until the daemon on `socket` answers `daemon.status`, or fail the test
-/// after `within`, polling every `tick`.
+/// Poll until the daemon on `socket` answers `daemon.status` with no account
+/// still opening its store, or fail the test after `within`, polling every
+/// `tick`.
 pub fn wait_until_answering(socket: &Path, within: Duration, tick: Duration) {
     let start = Instant::now();
+    let mut answered = None;
     loop {
-        if status_round_trip(socket, start + within) {
-            return;
+        if let Some(status) = status_round_trip(socket, start + within) {
+            if !opening(&status) {
+                return;
+            }
+            answered = Some(status);
         }
         assert!(
             start.elapsed() < within,
-            "the daemon on {} never answered daemon.status within {within:?}",
+            "the daemon on {} never answered daemon.status with every account opened \
+             within {within:?}; it last answered {answered:?}",
             socket.display()
         );
         std::thread::sleep(tick);
     }
 }
 
-/// Ask the daemon at `socket` for `daemon.status` and answer whether it
-/// replied before `deadline`.
+/// Whether a `daemon.status` result lists an account still opening its store.
+fn opening(status: &serde_json::Value) -> bool {
+    status["accounts"]
+        .as_array()
+        .is_some_and(|accounts| accounts.iter().any(|a| a["state"] == "opening"))
+}
+
+/// Ask the daemon at `socket` for `daemon.status` and answer its result when
+/// it replied before `deadline`.
 ///
 /// `daemon.status` is lifecycle surface, answered without a handshake. Any
 /// failure - nothing listening, a connection closed during startup, a reply
-/// that is not this request's result - is `false`, and the caller polls again.
-fn status_round_trip(socket: &Path, deadline: Instant) -> bool {
-    let Ok(mut stream) = UnixStream::connect(socket) else {
-        return false;
-    };
+/// that is not this request's result - is `None`, and the caller polls again.
+fn status_round_trip(socket: &Path, deadline: Instant) -> Option<serde_json::Value> {
+    let mut stream = UnixStream::connect(socket).ok()?;
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
-        return false;
+        return None;
     }
     let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"daemon.status\",\"params\":{}}\n";
-    if stream.write_all(request).is_err() {
-        return false;
-    }
+    stream.write_all(request).ok()?;
     let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line).is_err() {
-        return false;
+    BufReader::new(&stream).read_line(&mut line).ok()?;
+    let mut reply = serde_json::from_str::<serde_json::Value>(&line).ok()?;
+    if reply["id"] != 1 {
+        return None;
     }
-    serde_json::from_str::<serde_json::Value>(&line)
-        .map(|reply| reply["id"] == 1 && reply.get("result").is_some())
-        .unwrap_or(false)
+    reply.get_mut("result").map(serde_json::Value::take)
 }

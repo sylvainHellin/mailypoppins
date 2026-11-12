@@ -19,7 +19,8 @@ It takes the start lock and holds it across both the spawn and the readiness wai
 The child is told the lock is already held through `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` and skips the acquisition.
 A starter that finds a daemon already answering returns 0 without spawning; one that loses the lock race waits for the winner's daemon instead of starting its own.
 Readiness is a real `daemon.status` round trip over the socket rather than the existence of a file, polled every 25 ms until `--timeout-secs` (default 10), the answer window.
-Past the window a socket that accepts the connect is a daemon that is bound and alive but still opening its stores (the integrity check of a 1.6 GB store took about 10 s, PERSO-109), so the wait goes on up to `STARTUP_CEILING` (120 s, or the window when that is longer) and prints `daemon is up and still opening its stores, waiting up to 120s` on stderr once.
+Past the window a socket that accepts the connect is a daemon that is bound and alive and not answering yet, so the wait goes on up to `STARTUP_CEILING` (120 s, or the window when that is longer) and prints `daemon is up and not answering yet, waiting up to 120s` on stderr once.
+The daemon answers before it opens any account's store (PERSO-109), so `start` does not wait for the stores: each account is `opening` until its runtime has opened its store, which runs the file's integrity check on the first open (about 10 s for a 1.6 GB store), and turns `ready` on its own.
 A socket that refuses the connect, a file a dead daemon left behind included, is no daemon at all, and the start exits 4 at the end of the window; a bound daemon that has not answered by the ceiling is exit 4 with a message naming the ceiling.
 A start that finds a daemon bound and not answering yet waits for it the same way instead of spawning a second one, which would only find the socket taken.
 The child is spawned through `setsid` with its stdio in the daemon log, so closing the launching terminal does not take it down.
@@ -63,7 +64,7 @@ The daemon it produces is detached, so it outlives the client that wanted it, wh
 
 The bound on the whole sequence is 5 s: the readiness wait first, then a connect retry that backs off from 25 ms to 400 ms until the same deadline.
 One budget rather than two, so the worst case a user waits for a daemon that never binds is that number and not some multiple of it.
-The readiness wait is `mp daemon start`'s with the budget as its answer window, so a daemon that has bound its socket and is still opening its stores is waited for up to the 120 s ceiling rather than killed at 5 s, and the wait prints nothing into the command's output.
+The readiness wait is `mp daemon start`'s with the budget as its answer window, so a daemon that has bound its socket and is not answering yet is waited for up to the 120 s ceiling rather than killed at 5 s, and the wait prints nothing into the command's output.
 When it expires, or when the spawn dies, the run exits 4 naming the socket, the daemon log and the literal `mp daemon run` to type by hand.
 There is no fallback to answering in process: a command that quietly did the work locally would let the user believe the daemon did it.
 
@@ -196,6 +197,7 @@ What still answers in process, and why, is one group, three rows of `CLI_ENGINE_
 A routed command produces the pre-daemon binary's bytes, refusals included: `tests/daemon_read_slice.rs` compares stdout, stderr and the exit code against `~/.cache/mp-oracle/pre-daemon/mp` over one seeded root, for every flag combination and every error case.
 One sanctioned deviation since #0141: `mp show --mailbox <a folder the server never listed>` hands the miss to `message.fetch`, so its error line carries the daemon's refusal after the pre-daemon "no match"; `config show` gains its `[folders]` block, which the admin slice cuts before comparing.
 That is why a refusal the daemon spelled out comes back typed rather than printed at the call site: `account_not_ready` becomes the sentence a store-less read has always produced, and the rest leaves through `main`'s ordinary error path, which is where the pre-daemon binary reported it.
+The one `account_not_ready` that is not a failure is `state: "opening"`, an account whose store a daemon that has just started is still opening (PERSO-109): every routed call asks again every 200 ms for up to 120 s, saying `<account> is still opening its store, waiting` once on stderr when the wait has lasted a second.
 `tests/daemon_draft_slice.rs` is the same gate for the draft slice, over a fixture whose drafts directories are stashed and restored between the two binaries, because half of those commands write.
 `tests/daemon_admin_slice.rs` is the gate for the admin slice, and it masks nothing: the two values that would have forced a mask are removed at the fixture instead, the contact index's `built_at` by building the cache once before either binary runs, and an RSVP's `Message-ID` by keeping every row that actually sends one on the routed side.
 `tests/daemon_mutation_slice.rs` is the gate for `mp archive`, `mp delete`, `mp open` and `mp save`, with one row deliberately not byte-identical: `mp open` prints the path it handed the opener, and a daemon-materialised file lives under `<data_dir>/runtime/handles/<handle>/` rather than in the client's own temp directory, so that row is compared with the two directories masked.
@@ -684,7 +686,7 @@ A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the g
 
 ## Test-only environment hooks
 
-Nineteen environment variables exist for the contract tests and for the migration.
+Twenty environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
@@ -754,6 +756,10 @@ With the hook set, the worker creates `<dir>/<method>.held`, waits until its ope
 Unset or empty it does nothing.
 It is what pins the cancel-at-commit cases in `tests/daemon_sync_slice.rs`, `tests/daemon_send_slice.rs` and `tests/daemon_admin_slice.rs`, and its name is `mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV`.
 
+`MAILYPOPPINS_DAEMON_FAKE_OPEN_HOLD=<dir>` holds the first open of an account's store before its integrity check for as long as `<dir>/<account>.hold` exists, after creating `<dir>/<account>.held`, so a test can keep one account `opening` while another is `ready` (PERSO-109); a test store's check takes a millisecond where a large store's takes seconds.
+The account is the name of the directory the store file sits in, a hold is let go after thirty seconds whatever the file says, and unset or empty the hook does nothing.
+It is what pins `tests/daemon_store_opening.rs`, and its name is `mailypoppins::store::FAKE_OPEN_HOLD_ENV`.
+
 `MAILYPOPPINS_DAEMON_FAKE_OPERATIONS=1` registers one extra method, `test.operation`, so a client can start, watch and cancel a long-running operation.
 Its params are `{"steps": u64, "step_ms": u64, "scope": "durable"|"client_scoped", "fail_at": u64|null}`; it answers immediately with `{"operation_id": str}` and reports `steps` times, `step_ms` apart, before succeeding with `{"steps": steps}`.
 A non-null `fail_at` of `k` fails with `-32603` and `{"failed_at": k}` after the `k`-th report instead of continuing, and a cancelled operation's worker stops before its next report.
@@ -813,8 +819,8 @@ The run that landed the file, its ceilings and the leak it found are in [baselin
 
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
-`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the fifteen environment hooks of its `DAEMON_ENV_HOOKS` list so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
-Four of the nineteen above are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
+`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the sixteen environment hooks of its `DAEMON_ENV_HOOKS` list so an exported variable cannot change an outcome, and returns once the daemon answers `daemon.status` with no account still `opening` its store.
+Four of the twenty above are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
 The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than three times.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.

@@ -37,7 +37,9 @@ mod connection;
 mod state;
 mod types;
 
-pub use connection::{Connection, Inbound};
+pub use connection::{
+    opening_account, Connection, Inbound, OPENING_NOTICE_AFTER, OPENING_POLL, OPENING_WAIT,
+};
 pub use state::{Observe, StateTracker};
 pub use types::{
     ClientError, ClientInfo, ClientKind, ConfigStatus, Identity, InitializeResult, PlatformInfo,

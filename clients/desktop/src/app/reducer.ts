@@ -1462,7 +1462,14 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     }
     case "account.state_changed": {
       const p = payload as AccountStateChangedPayload;
-      const next = staleMailboxes(patchAccount(s, p.account, { runtime_state: p.state }), p.account);
+      let next = staleMailboxes(patchAccount(s, p.account, { runtime_state: p.state }), p.account);
+      // An account that has just opened its store (PERSO-109) serves what it
+      // refused while it was opening: its outbox and contacts are read again
+      // too, when this window has read them.
+      if (p.state === "ready") {
+        if (next.outbox[p.account]) next = staleOutbox(next, p.account);
+        next = staleContacts(next, p.account);
+      }
       return staleListIf(next, (a) => a === p.account);
     }
     case "sync.completed": {

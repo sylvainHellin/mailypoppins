@@ -99,6 +99,23 @@ export function markStale<T>(l: Loadable<T>): Loadable<T> {
   return { ...l, gen: l.gen + 1 };
 }
 
+/** The daemon's `account_not_ready`: the account cannot serve its store yet, or has none. */
+export const ACCOUNT_NOT_READY = -32006;
+
+/**
+ * Whether `error` is the daemon refusing `account` because it is still
+ * opening the account's store (PERSO-109): `account_not_ready` while the
+ * account's runtime is `opening`. Not a failure to show: the daemon answers
+ * before it has opened the stores, and the account's `ready` event reads the
+ * refused list again, so a pane shows the account opening meanwhile.
+ */
+export function refusedWhileOpening(s: AppState, account: string | null, error: GuiError | null): boolean {
+  if (!account || !error || !("code" in error) || error.code !== ACCOUNT_NOT_READY) return false;
+  const info = s.accounts.data?.find((a) => a.name === account);
+  const state = info?.runtime_state ?? s.bootstrap?.snapshot.accounts.find((a) => a.name === account)?.state;
+  return state === "opening";
+}
+
 /**
  * The selected message, by its stable identifiers. `row_id` is per store and
  * per daemon instance, so after a re-bootstrap it is not trusted
