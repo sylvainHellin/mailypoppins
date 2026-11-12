@@ -661,4 +661,23 @@ mod tests {
         fixture.serve(vec![served("Projekte", 7, 3, &[])]);
         fixture.assert_no_rename("Projekte");
     }
+
+    /// PERSO-185: a UIDVALIDITY two lost folders share, or two gained ones,
+    /// pairs nothing, since which is which would be a guess; a server that
+    /// numbers every folder alike is such a server.
+    #[test]
+    fn two_folders_sharing_a_uidvalidity_are_no_rename() {
+        let fixture = ImapRename::new(&["INBOX", "Projects", "Spesen"]);
+        fixture.fill("Spesen", &[("three", 1), ("four", 2)], 7);
+        fixture.serve(vec![served("Projekte", 7, 3, &[(1, "one"), (2, "two")])]);
+        fixture.assert_no_rename("Projekte");
+        assert_eq!(fixture.mailbox_of("three"), vec!["Spesen"]);
+
+        let fixture = ImapRename::new(&["INBOX", "Projects"]);
+        fixture.serve(vec![
+            served("Projekte", 7, 3, &[(1, "one"), (2, "two")]),
+            served("Projekte Kopie", 7, 3, &[(1, "one"), (2, "two")]),
+        ]);
+        fixture.assert_no_rename("Projekte");
+    }
 }

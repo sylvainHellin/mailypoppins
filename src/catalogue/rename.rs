@@ -166,26 +166,25 @@ fn sample(store: &Store, account: &str, key: &str) -> Result<Vec<(u32, String)>>
 }
 
 /// The renames `seen` proves: a gained folder and a lost one sharing a
-/// UIDVALIDITY, whose sampled UIDs carry the Message-IDs the store holds at
-/// them ([`same_messages`]).
+/// UIDVALIDITY no other lost or gained folder has, whose sampled UIDs carry
+/// the Message-IDs the store holds at them ([`same_messages`]).
 pub fn confirm(plan: &Plan, seen: &[FolderIdentity]) -> Vec<Rename> {
     let mut renames = Vec::new();
-    let mut taken: HashSet<&str> = HashSet::new();
     for gained in seen {
         let Some(uidvalidity) = gained.uidvalidity else {
             continue;
         };
-        let Some(lost) = plan
-            .lost
+        let twins = seen
             .iter()
-            .find(|l| l.uidvalidity == uidvalidity && !taken.contains(l.name.as_str()))
-        else {
+            .filter(|g| g.uidvalidity == Some(uidvalidity))
+            .count();
+        let mut lost = plan.lost.iter().filter(|l| l.uidvalidity == uidvalidity);
+        let (Some(lost), None, 1) = (lost.next(), lost.next(), twins) else {
             continue;
         };
         if !same_messages(&lost.sample, &gained.message_ids) {
             continue;
         }
-        taken.insert(&lost.name);
         renames.push(Rename {
             from: lost.name.clone(),
             to: gained.name.clone(),
