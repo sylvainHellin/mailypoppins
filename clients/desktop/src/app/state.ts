@@ -950,6 +950,13 @@ export type AppState = {
    * older daemon, a `draft.invalid`) always counts.
    */
   draftRevs: { epoch: number; of: Record<string, number>; seen: Record<string, string> };
+  /**
+   * How many `message.body_fetched` events named each message, by
+   * `readerKey` (PERSO-205): the daemon's fetch of an evicted body is over,
+   * so a reader showing its "being fetched" sentence keys on this and reads
+   * the body again, and no other message's reader moves.
+   */
+  bodyRevs: Record<string, number>;
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
@@ -1227,6 +1234,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     readerMode: "html",
     draftHtml: null,
     draftRevs: { epoch: 0, of: {}, seen: {} },
+    bodyRevs: {},
     bootstrap: null,
     accounts: emptyLoadable(),
     mailboxes: {},

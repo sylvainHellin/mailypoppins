@@ -18,6 +18,18 @@ function setBody(body: string | null) {
   (row as { body?: string | null }).body = body;
 }
 
+/**
+ * Make the daemon answer work/inbox 1001 with the sentence for a body it is
+ * fetching from the server (PERSO-205), or with its stored body again on null.
+ */
+function setPending(sentence: string | null) {
+  const row = mock.rows.work.inbox.find((r) => r.id === 1001);
+  if (!row) throw new Error("no row 1001");
+  (row as { pending?: string | null }).pending = sentence;
+}
+
+const FETCHING = "The body of this message is not available locally and is being fetched from the server";
+
 /** Open the first message of the inbox and wait for its headers. */
 async function openFirst(user: ReturnType<typeof renderApp>["user"]) {
   await user.keyboard("j");
@@ -263,6 +275,57 @@ describe("the text pane", () => {
     await shellReady();
     await openFirst(user);
     expect(await within(reader()).findByRole("alert")).toHaveTextContent("The text did not load: the daemon did not answer");
+  });
+
+  it("shows the daemon's sentence for a body it is fetching, keeps no copy, and reads the text again on message.body_fetched", async () => {
+    const { user } = renderApp(1400, () => {
+      setPending(FETCHING);
+      mock.settings.set("reader_mode", "text");
+    });
+    await shellReady();
+    await openFirst(user);
+    expect((await textPane()).textContent).toBe(`(${FETCHING})`);
+    expect(calls("message_text")).toHaveLength(1);
+
+    // Another row's fetch is not this reader's business.
+    act(() => emitEnvelope("message.body_fetched", { account: "work", row_id: 1002 }));
+    act(() => emitEnvelope("message.body_fetched", { account: "home", row_id: 1001 }));
+    expect(calls("message_text")).toHaveLength(1);
+
+    // The fetch is over: the body is stored and the daemon says so.
+    setPending(null);
+    act(() => emitEnvelope("message.body_fetched", { account: "work", row_id: 1001 }));
+    await waitFor(async () => expect((await textPane()).textContent).toContain("the quarterly ledger"));
+    expect(calls("message_text")).toHaveLength(2);
+  });
+
+  it("does not cache the sentence for a body the daemon is fetching", async () => {
+    const { user } = renderApp(1400, () => {
+      setPending(FETCHING);
+      mock.settings.set("reader_mode", "text");
+    });
+    await shellReady();
+    await openFirst(user);
+    expect((await textPane()).textContent).toBe(`(${FETCHING})`);
+    setPending(null);
+    await user.keyboard("j");
+    await waitFor(async () => expect((await textPane()).textContent).toContain("Dachsanierung"));
+    await user.keyboard("k");
+    await waitFor(async () => expect((await textPane()).textContent).toContain("the quarterly ledger"));
+    expect(calls("message_text").filter((c) => c.args?.row_id === 1001)).toHaveLength(2);
+  });
+
+  it("reloads the HTML frame on message.body_fetched for the message it shows", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await openFirst(user);
+    const before = frame();
+    expect(before).not.toBeNull();
+    act(() => emitEnvelope("message.body_fetched", { account: "work", row_id: 1002 }));
+    expect(frame()).toBe(before);
+    act(() => emitEnvelope("message.body_fetched", { account: "work", row_id: 1001 }));
+    await waitFor(() => expect(frame()).not.toBe(before));
+    expect(frame()).not.toBeNull();
   });
 
   it("follows the cursor to the next message", async () => {

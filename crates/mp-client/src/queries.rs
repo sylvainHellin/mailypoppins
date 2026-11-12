@@ -1093,8 +1093,16 @@ mod tests {
                 .as_deref(),
             Some("(being fetched)")
         );
+        let preview = message_preview(&fetching, "work", 1).expect("an answer");
+        assert!(preview.is_transient());
+        assert!(message_preview(&lost, "work", 1)
+            .expect("an answer")
+            .is_transient());
         let empty = Canned::new(json!({"body": null}));
         assert_eq!(message_body(&empty, "work", 1).expect("an answer"), None);
+        assert!(!message_preview(&empty, "work", 1)
+            .expect("an answer")
+            .is_transient());
         let held = Canned::new(json!({"body": "hello"}));
         assert_eq!(
             message_body(&held, "work", 1)

@@ -1883,7 +1883,11 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const rowId = Number(args.row_id);
       const hit = findRow(account, rowId);
       if (!hit) throw { kind: "not_found", message: `no message has row_id ${rowId}`, code: -32602 };
-      return { account, row_id: rowId, body: hit[1].body ?? null } satisfies MessageText;
+      // A row a test marked `pending` answers as the daemon does while it
+      // fetches an evicted body from the server (PERSO-205).
+      const pending = (hit[1] as { pending?: string | null }).pending;
+      if (pending) return { account, row_id: rowId, body: `(${pending})`, transient: true } satisfies MessageText;
+      return { account, row_id: rowId, body: hit[1].body ?? null, transient: false } satisfies MessageText;
     }
     case "message_html_meta": {
       const rowId = Number(args.row_id);

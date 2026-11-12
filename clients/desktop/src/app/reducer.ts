@@ -1518,6 +1518,14 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       return reminderFired(s, payload);
     case "calendar.reminders_changed":
       return staleReminders(s);
+    // The daemon's fetch of a message's evicted body is over, stored or
+    // failed (PERSO-205): a reader showing that message reads it again.
+    case "message.body_fetched": {
+      const { account, row_id } = payload as { account?: unknown; row_id?: unknown };
+      if (typeof account !== "string" || typeof row_id !== "number") return s;
+      const key = readerKey(account, row_id);
+      return { ...s, bodyRevs: { ...s.bodyRevs, [key]: (s.bodyRevs[key] ?? 0) + 1 } };
+    }
     case "contact.changed": {
       const account = (payload as { account?: unknown }).account;
       return typeof account === "string" ? staleContacts(s, account) : s;

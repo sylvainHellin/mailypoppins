@@ -51,6 +51,7 @@ The reader shows a message in one of two modes, `html` (the frame above, the def
 Text mode shows the stored plain text, what the TUI's preview shows, as `ReaderText` in `src/components/reader/ReaderBody.tsx`, with no frame.
 It reads `message_text` once per message and reader load, caches the answer in `src/app/readerMode.ts`, and drops an answer whose message is no longer open.
 The cache key holds the daemon instance and the `Message-ID` beside the row id, since a restarted daemon may give a row id to another message.
+A body the retention sweep evicted and the daemon is fetching from the server shows the daemon's sentence in parentheses, which is not cached (PERSO-205); the daemon's `message.body_fetched` for the message reads the text again in text mode and reloads the frame in html mode.
 The text sits in a `<pre>` named "Message text: <subject>", on `bg-background` in `text-foreground` and the mono font, so it follows the app's theme.
 Line breaks stay as stored, long lines wrap, and a line whose first non-blank character is `>` is `text-muted-foreground`.
 The text flows in `#mp-reader-scroll`, so `j`/`k`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`, `G`, `gg` and `Home`/`End` scroll the body itself, and `z` zooms the reader as in html mode.

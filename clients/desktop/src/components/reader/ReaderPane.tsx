@@ -187,10 +187,15 @@ export function ReaderPane() {
                 rowId={s.reader.meta.row_id}
                 messageId={s.reader.meta.message_id}
                 version={s.reader.load.loadedGen}
+                bodyRev={s.bodyRevs[readerKey(s.reader.meta.account, s.reader.meta.row_id)] ?? 0}
                 subject={s.reader.meta.subject}
               />
             ) : (
-              <ReaderBody htmlUrl={s.reader.meta.html_url} subject={s.reader.meta.subject} />
+              <ReaderBody
+                htmlUrl={s.reader.meta.html_url}
+                bodyRev={s.bodyRevs[readerKey(s.reader.meta.account, s.reader.meta.row_id)] ?? 0}
+                subject={s.reader.meta.subject}
+              />
             )}
           </article>
         ) : (

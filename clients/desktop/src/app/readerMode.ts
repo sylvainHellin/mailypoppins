@@ -80,8 +80,12 @@ export function hiddenPaletteRows(s: AppState): ReadonlySet<ActionId> {
 // The text body
 // ---------------------------------------------------------------------------
 
-/** What `message_text` answered for one message: its body, or null when the store holds none. */
-type CachedText = { body: string | null };
+/**
+ * What `message_text` answered for one message: its body, or null when it has
+ * no text; `transient` when the body is the daemon's sentence for one it is
+ * fetching or could not get back (PERSO-205), which is shown and not kept.
+ */
+type CachedText = { body: string | null; transient?: boolean };
 
 const TEXT_CACHE_SIZE = 32;
 
@@ -105,7 +109,8 @@ let textEra = 0;
 /**
  * The text under `key`: cached, joined to the read on its way (StrictMode's
  * remount of the pane joins the first read, `joinRead`), or read with `read`
- * and remembered. A refused read is not kept.
+ * and remembered. A refused read is not kept, and neither is the daemon's
+ * sentence for a body it does not have, so the next visit asks again.
  */
 export function readText(key: string, read: () => Promise<CachedText>): Promise<CachedText> {
   const hit = textCache.get(key);
@@ -113,7 +118,7 @@ export function readText(key: string, read: () => Promise<CachedText>): Promise<
   const era = textEra;
   return joinRead(TEXT_READ + key, () =>
     read().then((text) => {
-      if (era === textEra) rememberText(key, text);
+      if (era === textEra && !text.transient) rememberText(key, text);
       return text;
     }),
   );

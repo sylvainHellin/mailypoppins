@@ -113,15 +113,22 @@ export function draftReaderUrl(account: string, id: string): string {
 export type ReaderBodyProps = {
   /** `MessageMeta.html_url`, as the Rust layer hands it over, or a draft's `draftReaderUrl`. */
   htmlUrl: string;
+  /**
+   * How many `message.body_fetched` events named the message (`AppState.bodyRevs`):
+   * a plain-text message whose evicted body the daemon was fetching loads
+   * its document again when the fetch is over (PERSO-205).
+   */
+  bodyRev?: number;
   /** The message subject, for the frame's accessible name. */
   subject: string | null;
   /** What the frame's accessible name calls the document; a draft's preview says "Draft as sent". */
   label?: string;
 };
 
-export function ReaderBody({ htmlUrl, subject, label }: ReaderBodyProps) {
-  // Keyed on the URL, so a new message starts with the skeleton again.
-  return <ReaderFrame key={htmlUrl} htmlUrl={htmlUrl} subject={subject} label={label} />;
+export function ReaderBody({ htmlUrl, bodyRev = 0, subject, label }: ReaderBodyProps) {
+  // Keyed on the URL, so a new message starts with the skeleton again, and
+  // on the body revision, so a fetched body replaces the "being fetched" page.
+  return <ReaderFrame key={`${htmlUrl}@${bodyRev}`} htmlUrl={htmlUrl} subject={subject} label={label} />;
 }
 
 function ReaderFrame({ htmlUrl, subject, label = "Message body" }: ReaderBodyProps) {
@@ -158,6 +165,8 @@ export type ReaderTextProps = {
   messageId: string;
   /** The reader load the headers came from: a reload of the message reads its text again. */
   version: number;
+  /** How many `message.body_fetched` events named the message: each reads its text again (PERSO-205). */
+  bodyRev?: number;
   /** The message subject, for the text's accessible name. */
   subject: string | null;
 };
@@ -165,15 +174,16 @@ export type ReaderTextProps = {
 type TextResult = { kind: "text"; body: string | null } | { kind: "error"; error: GuiError };
 
 /**
- * The stored plain text of the open message, read once per daemon instance,
- * message and load and cached; a message change drops an answer still on its way. Line breaks
- * stay as stored, and a line quoted with `>` is muted.
+ * The plain text of the open message, read once per daemon instance,
+ * message, load and body revision and cached; a message change drops an answer still on its way. Line breaks
+ * stay as stored, and a line quoted with `>` is muted. A body the daemon is
+ * still fetching shows its sentence until `message.body_fetched` reads it again.
  */
-export function ReaderText({ instance, account, rowId, messageId, version, subject }: ReaderTextProps) {
+export function ReaderText({ instance, account, rowId, messageId, version, bodyRev = 0, subject }: ReaderTextProps) {
   // A row id is per daemon instance (state.ts, `MessageRef`), so the cache
   // and the shown text are keyed by the instance and the Message-ID too.
   const message = `${instance}/${readerKey(account, rowId)}/${messageId}`;
-  const key = `${message}@${version}`;
+  const key = `${message}@${version}.${bodyRev}`;
   const [shown, setShown] = useState<{ message: string; result: TextResult } | null>(() => {
     const hit = cachedText(key);
     return hit ? { message, result: { kind: "text", body: hit.body } } : null;
@@ -186,7 +196,7 @@ export function ReaderText({ instance, account, rowId, messageId, version, subje
       return;
     }
     let live = true;
-    readText(key, () => cmd.messageText(account, rowId).then((text) => ({ body: text.body })))
+    readText(key, () => cmd.messageText(account, rowId).then((text) => ({ body: text.body, transient: text.transient })))
       .then((text) => {
         if (live) setShown({ message, result: { kind: "text", body: text.body } });
       })

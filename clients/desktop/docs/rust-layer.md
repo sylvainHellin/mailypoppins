@@ -877,8 +877,9 @@ The scheme answers:
 
 A rendition over 8 MiB goes through `message.materialise_html`, and the handle is released as soon as the file is read; a draft's has no such route, and over 8 MiB it is the 502 page.
 
-`message_text` answers the reader's text mode: `message.get {account, row_id, body: true}`, whose `body` is the stored plain text the TUI's preview shows (`mp_client::queries::message_body`).
-A row the store has no body for answers `body: null`, and the frontend says so rather than switching modes; a row that does not exist is `not_found`.
+`message_text` answers the reader's text mode: `message.get {account, row_id, body: true}`, read as the TUI's preview reads it (`mp_client::queries::MessagePreview::reading_text`), so `body` is the plain text, or the daemon's sentence in parentheses for a body the retention sweep evicted and the daemon is fetching from the server (`body_pending`) or could not get back (`body_unavailable`, PERSO-205).
+`transient` is true for that sentence: the frontend shows it and does not cache it, and the daemon's `message.body_fetched` `{account, row_id}` moves `AppState.bodyRevs` for the message, which reads the text again and reloads the reader frame.
+A message with no text body answers `body: null`, and the frontend says so rather than switching modes; a row that does not exist is `not_found`.
 The scheme's plain-text fallback reads the same command, so the two never disagree.
 
 ## Menus

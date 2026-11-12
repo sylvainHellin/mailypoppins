@@ -215,7 +215,7 @@ pub enum MessageList {
     },
 }
 
-/// The stored plain text of one message.
+/// The text the reader shows for one message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -223,8 +223,13 @@ pub struct MessageText {
     pub account: String,
     pub row_id: i64,
     /// The text the reader shows: the body, or the daemon's sentence for one
-    /// it could not get back; `None` when the message has no text body.
+    /// it is still fetching or could not get back; `None` when the message
+    /// has no text body.
     pub body: Option<String>,
+    /// Whether `body` is that sentence rather than the message's own text
+    /// (PERSO-205): the reader shows it and keeps no copy, and the daemon's
+    /// `message.body_fetched` for the row makes it read again.
+    pub transient: bool,
 }
 
 /// One attachment of a message.
@@ -915,12 +920,13 @@ pub fn message_text_on(door: &Door, account: &str, row_id: i64) -> Result<Messag
         door,
         budget: MESSAGE_BUDGET,
     };
-    let body = queries::message_body(&q, account, row_id)
+    let preview = queries::message_preview(&q, account, row_id)
         .map_err(|e| GuiError::from_call(&e, Addressing::Resource))?;
     Ok(MessageText {
         account: account.to_string(),
         row_id,
-        body,
+        body: preview.reading_text(),
+        transient: preview.is_transient(),
     })
 }
 
@@ -2893,7 +2899,7 @@ mod tests {
         assert_eq!(none.body, None);
         assert_eq!(
             serde_json::to_value(&none).expect("json"),
-            json!({"account": "work", "row_id": 1001, "body": null})
+            json!({"account": "work", "row_id": 1001, "body": null, "transient": false})
         );
     }
 
