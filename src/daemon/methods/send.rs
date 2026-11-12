@@ -686,7 +686,9 @@ fn discard(account: &str, graph: bool, row_id: i64) -> Result<Value, RpcError> {
 /// out, so the discard needs no network, works offline, and leaves nothing on
 /// the server that nothing names. A row a send or a resume in this process is
 /// working on is refused: that send may be about to create the draft the
-/// cleanup is meant to find.
+/// cleanup is meant to find, or be inside the session whose verdict needs the
+/// row. A draft-less send (an invite, an RSVP) holds no admission key, so the
+/// row's [`outbox::LiveSubmission`] slot is taken too (PERSO-280).
 pub(crate) fn discard_in(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
@@ -697,11 +699,17 @@ pub(crate) fn discard_in(
     let Some(row) = outbox::load(store, row_id).map_err(|e| server_error(account, &e))? else {
         return Err(invalid_params(format!("no outbox row {row_id}")));
     };
-    let Some(_slot) = crate::send::SendAdmission::claim_row(account, &row) else {
-        return Err(invalid_params(format!(
+    let in_flight = || {
+        invalid_params(format!(
             "outbox row {row_id} is being sent right now; discard it once that send has \
              finished"
-        )));
+        ))
+    };
+    let Some(_slot) = crate::send::SendAdmission::claim_row(account, &row) else {
+        return Err(in_flight());
+    };
+    let Some(_live) = outbox::LiveSubmission::claim(store, row_id) else {
+        return Err(in_flight());
     };
     let discarded = if graph {
         outbox::discard_graph(store, blobs, row_id)

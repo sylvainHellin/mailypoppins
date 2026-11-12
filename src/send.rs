@@ -5371,4 +5371,57 @@ mod smtp_durability_tests {
             .unwrap()
             .is_empty());
     }
+
+    /// PERSO-280 review: a send with no draft behind it (an invite, an RSVP)
+    /// holds no [`SendAdmission`] key, only the row's
+    /// [`outbox::LiveSubmission`] slot. `mp outbox discard` landing inside
+    /// its SMTP session is refused, so the row is still there when the
+    /// verdict comes back and a delivered mail is not reported as an error.
+    #[tokio::test]
+    async fn a_discard_during_a_draftless_live_session_is_refused() {
+        let outbox = Outbox::new();
+        let built = Outbox::built("<live-invite@example.com>", None);
+        let row_id = outbox.enqueue(&built);
+        let account = crate::config::AccountConfig {
+            name: ACCOUNT.to_string(),
+            ..Default::default()
+        };
+        let durable = DurableSend {
+            store: Store::open(outbox.dir.path().join("store.sqlite3")).unwrap(),
+            blobs: BlobStore::new(outbox.dir.path().join("blobs")),
+            account,
+            row_id,
+        };
+        let smtp = HeldSmtp {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        };
+
+        let config = smtp_config();
+        let send = submit_durably(Some(durable), &built, &config, &smtp);
+        let discard = async {
+            smtp.started.notified().await;
+            let refused = crate::daemon::methods::send::discard_in(
+                &outbox.store,
+                &outbox.blobs,
+                ACCOUNT,
+                false,
+                row_id,
+            );
+            smtp.release.notify_one();
+            refused
+        };
+        let (report, refused) = tokio::join!(send, discard);
+
+        let refused = refused.expect_err("the row is in a live session");
+        assert!(
+            refused.message.contains("being sent right now"),
+            "{}",
+            refused.message
+        );
+        let report = report.expect("the server took the message");
+        assert!(report.send_result.all_succeeded());
+        assert_eq!(report.state, Some(OutboxState::Done));
+        assert_eq!(outbox.row(row_id).state, OutboxState::Done);
+    }
 }
