@@ -2832,6 +2832,21 @@ impl DurableSend {
         self.row_id
     }
 
+    /// Take this row's [`crate::outbox::LiveSubmission`] slot, held until the
+    /// send has recorded its verdict.
+    ///
+    /// The row was enqueued by this very send, so the slot is only ever held
+    /// already by a resume in this process that picked the fresh row up in
+    /// between; that resume submits it, and this send must not.
+    fn claim_live(&self) -> Result<crate::outbox::LiveSubmission> {
+        crate::outbox::LiveSubmission::claim(&self.store, self.row_id).ok_or_else(|| {
+            anyhow::Error::new(crate::outbox::AlreadyInFlight(format!(
+                "outbox row {} is already being submitted by a resume; it goes out from there",
+                self.row_id
+            )))
+        })
+    }
+
     /// Commit "the transport is about to be entered" for this row.
     ///
     /// Called immediately before the submission, and never batched with
@@ -2943,6 +2958,10 @@ async fn submit_durably<S: SmtpSubmit>(
     smtp_config: &SmtpConfig,
     smtp: &S,
 ) -> Result<SendReport> {
+    // Held from before the marker until the verdict is committed, so a drain
+    // landing inside the SMTP session leaves the row to this send instead of
+    // parking it as a crash leftover (PERSO-280).
+    let _live = durable.as_ref().map(DurableSend::claim_live).transpose()?;
     if let Some(durable) = durable.as_ref() {
         if let Err(e) = durable.mark_started() {
             // Nothing entered the transport, so the failure is a clean one:
@@ -3027,6 +3046,9 @@ pub async fn send_durably_graph<A: graph_submit::GraphSendApi>(
         }
     };
 
+    // As in `submit_durably`: held until the verdict is committed, so the
+    // resume leaves a row this send is still working on alone (PERSO-280).
+    let _live = durable.as_ref().map(DurableSend::claim_live).transpose()?;
     let outcome =
         graph_submit::submit(durable.as_ref().map(|d| (&d.store, d.row_id)), plan, api).await;
     let verdict = match &outcome {
@@ -3978,7 +4000,8 @@ pub async fn drain_account_at(
 ///
 /// 1. [`crate::outbox::sweep_pending_sends`] reads the exactly-once marker on
 ///    every `pending_send` row. A row that died inside its SMTP session is
-///    parked in `failed` for a human and never re-sent.
+///    parked in `failed` for a human and never re-sent; one a send in this
+///    process is still submitting is left to it (PERSO-280).
 /// 2. The rows that provably never reached the transport are submitted here,
 ///    which is the half of the crash story the driver cannot do: it needs the
 ///    credentials and the envelope, and both live on this side.
@@ -4113,6 +4136,16 @@ async fn resubmit_rows<S: SmtpSubmit>(
         let Some(_claim) = SendAdmission::claim_row(account, &row) else {
             log::debug!(
                 "[outbox] row {} is being sent right now; leaving it",
+                row.id
+            );
+            continue;
+        };
+        // The row's own slot as well: a send of a message that came from no
+        // draft holds only this one, and taking it before the marker is what
+        // keeps a concurrent sweep from parking this resubmission (PERSO-280).
+        let Some(_live) = crate::outbox::LiveSubmission::claim(store, row.id) else {
+            log::debug!(
+                "[outbox] row {} is being submitted right now; leaving it",
                 row.id
             );
             continue;
@@ -5256,5 +5289,86 @@ mod smtp_durability_tests {
         let row = outbox.row(row_id);
         assert_eq!(row.state, OutboxState::PendingSend);
         assert_eq!(row.submission_started_at, None);
+    }
+
+    /// Takes every message, but only once released: the few seconds a live
+    /// SMTP session spends between `MAIL FROM` and the final 250.
+    struct HeldSmtp {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl SmtpSubmit for HeldSmtp {
+        fn submit(
+            &self,
+            built: &BuiltMessage,
+            _smtp_config: &SmtpConfig,
+        ) -> impl std::future::Future<Output = Result<SendResult>> {
+            let results = built
+                .recipients
+                .iter()
+                .map(|(address, role)| RecipientResult {
+                    address: address.clone(),
+                    role: *role,
+                    success: true,
+                    error: None,
+                    verdict: RecipientVerdict::Delivered,
+                })
+                .collect();
+            async move {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(SendResult { results })
+            }
+        }
+    }
+
+    /// PERSO-280: a sync tick that drains the outbox while a send of this
+    /// process is still inside its SMTP session must leave that row alone.
+    /// The marker is committed, but the session that set it is alive and
+    /// about to return its verdict, so the row is not a crash leftover: the
+    /// send ends `done` and reports so, and nothing is parked for a human.
+    #[tokio::test]
+    async fn a_drain_during_a_live_smtp_session_does_not_park_the_send() {
+        let outbox = Outbox::new();
+        let built = Outbox::built("<live-session@example.com>", Some("id:live"));
+        let row_id = outbox.enqueue(&built);
+        let account = crate::config::AccountConfig {
+            name: ACCOUNT.to_string(),
+            ..Default::default()
+        };
+        let durable = DurableSend {
+            store: Store::open(outbox.dir.path().join("store.sqlite3")).unwrap(),
+            blobs: BlobStore::new(outbox.dir.path().join("blobs")),
+            account: account.clone(),
+            row_id,
+        };
+        let smtp = HeldSmtp {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        };
+
+        let config = smtp_config();
+        let send = submit_durably(Some(durable), &built, &config, &smtp);
+        let tick = async {
+            // The sync tick lands inside the session, as at 12:01:56.
+            smtp.started.notified().await;
+            resubmit_pending(&outbox.store, &outbox.blobs, &account, outbox::unix_now()).await;
+            smtp.release.notify_one();
+        };
+        let (report, ()) = tokio::join!(send, tick);
+
+        let report = report.expect("the server took the message");
+        assert!(report.send_result.all_succeeded());
+        assert_eq!(
+            report.state,
+            Some(OutboxState::Done),
+            "the send reports what the server did"
+        );
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::Done, "{:?}", row.last_error);
+        assert!(outbox::pending_send_rows(&outbox.store, ACCOUNT)
+            .unwrap()
+            .is_empty());
     }
 }

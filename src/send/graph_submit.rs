@@ -603,6 +603,16 @@ pub async fn resume_rows<A: GraphSendApi>(
             );
             continue;
         };
+        // The row's own slot, which every live send and resume holds until its
+        // verdict is committed, whether or not it came from a draft
+        // (PERSO-280).
+        let Some(_live) = outbox::LiveSubmission::claim(store, row.id) else {
+            debug!(
+                "[outbox] row {} is being submitted right now; leaving it",
+                row.id
+            );
+            continue;
+        };
         let result = match row.submission_started_at {
             None => {
                 if row.updated + outbox::backoff_secs(row.attempts) > now {

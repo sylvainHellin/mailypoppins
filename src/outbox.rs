@@ -33,7 +33,11 @@
 //!   row found on restart with a NULL marker was never attempted, while one
 //!   with a marker died somewhere inside the conversation and is as ambiguous
 //!   as a dropped connection. [`sweep_pending_sends`] hands the first kind
-//!   back for submission and moves the second to `failed`.
+//!   back for submission and moves the second to `failed`. The sweep runs on
+//!   every drain, not only after a restart, so it first leaves alone the rows
+//!   a submission in this very process is still working on
+//!   ([`LiveSubmission`], PERSO-280): their marker is a session under way,
+//!   not a crash leftover.
 //! - `sent_pending_append`: the server returned 250 and owns the message now.
 //!   SMTP must never run again for this row; only the APPEND is retried. A crash
 //!   between the 250 and the APPEND lands here.
@@ -152,10 +156,13 @@
 //! state machine against an in-memory fake, so every crash window is covered
 //! offline and deterministically.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use log::{info, warn};
+use log::{debug, info, warn};
 use rusqlite::OptionalExtension;
 
 use crate::store::blobs::BlobHash;
@@ -1461,17 +1468,71 @@ pub struct PendingSends {
     pub stranded: Vec<i64>,
 }
 
+/// The outbox rows a submission in this process is working on, by store file
+/// and row id (PERSO-280).
+///
+/// The marker alone cannot tell a crash leftover from a session under way: the
+/// sweep runs on every drain (the sync tick, `sync`, `mp outbox retry`), so a
+/// drain landing inside the seconds a live SMTP session takes reads a committed
+/// marker with no verdict yet. Keyed by the store's path rather than the
+/// account because the same row id exists in every account's store.
+static LIVE_SUBMISSIONS: LazyLock<Mutex<HashSet<(PathBuf, i64)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// One row's slot in [`LIVE_SUBMISSIONS`]: taken by a send or a resume before
+/// it marks the row, held until its verdict is committed, and released when
+/// it is dropped, however the submission ended.
+///
+/// A row whose slot is held is neither parked nor resubmitted by
+/// [`sweep_pending_sends`] or a resume. A slot dropped without a verdict (an
+/// error between the marker and the record) leaves the row as ambiguous as a
+/// crash would, and the next sweep parks it.
+#[derive(Debug)]
+pub struct LiveSubmission((PathBuf, i64));
+
+impl LiveSubmission {
+    /// `None` when a submission in this process already holds the row.
+    pub fn claim(store: &Store, id: i64) -> Option<Self> {
+        let slot = (store.path().to_path_buf(), id);
+        let mut live = LIVE_SUBMISSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        live.insert(slot.clone()).then(|| LiveSubmission(slot))
+    }
+
+    /// Whether a submission in this process holds the row right now.
+    pub fn is_held(store: &Store, id: i64) -> bool {
+        let live = LIVE_SUBMISSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        live.contains(&(store.path().to_path_buf(), id))
+    }
+}
+
+impl Drop for LiveSubmission {
+    fn drop(&mut self) {
+        let mut live = LIVE_SUBMISSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        live.remove(&self.0);
+    }
+}
+
 /// Classify (and part-resolve) the `pending_send` rows left by a crash.
 ///
-/// Runs before any resubmission, on startup and on the sync tick. The stranded
+/// Runs before any resubmission, on startup and on every drain. The stranded
 /// rows are transitioned here, one committed transaction each; the
 /// resubmittable ones are handed back because SMTP belongs to the caller that
-/// owns the credentials (see [`crate::send::resume_outbox`]).
+/// owns the credentials (see [`crate::send::resume_outbox`]). A row a
+/// submission in this process holds ([`LiveSubmission`]) is in neither list:
+/// its marker is a session still under way, whose verdict is about to be
+/// recorded (PERSO-280).
 pub fn sweep_pending_sends(store: &Store, account: &str) -> Result<PendingSends> {
     let mut out = PendingSends::default();
     let now = unix_now();
     for row in open_rows(store, account)? {
         if row.state != OutboxState::PendingSend {
+            continue;
+        }
+        if LiveSubmission::is_held(store, row.id) {
+            debug!(
+                "[outbox] row {} is being submitted right now; leaving it",
+                row.id
+            );
             continue;
         }
         match row.submission_started_at {
@@ -1481,14 +1542,22 @@ pub fn sweep_pending_sends(store: &Store, account: &str) -> Result<PendingSends>
                     "submission started at {started} and never returned a verdict; \
                      the message may or may not have been delivered"
                 );
-                store
+                // Only the marker read above: a submission that ended between
+                // the read and the check recorded its verdict before it let go
+                // of the row, and a clean failure among them is `pending_send`
+                // again with the marker cleared, which must stay submittable.
+                let changed = store
                     .conn()
                     .execute(
                         "UPDATE outbox SET state = 'failed', last_error = ?2, updated = ?3
-                         WHERE id = ?1 AND state = 'pending_send'",
-                        rusqlite::params![row.id, err, now],
+                         WHERE id = ?1 AND state = 'pending_send'
+                           AND submission_started_at = ?4",
+                        rusqlite::params![row.id, err, now, started],
                     )
                     .context("failing a stranded submission")?;
+                if changed == 0 {
+                    continue;
+                }
                 warn!(
                     "[outbox] row {} ({}) died inside its SMTP session; parked as failed, \
                      never auto re-sent",
