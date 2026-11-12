@@ -229,6 +229,15 @@ pub fn no_junk_reason(account: &str) -> String {
     format!("{account} has no Junk folder; its Inbox keeps the sender's mail")
 }
 
+/// The `skipped` reason of an account whose store the daemon is still
+/// opening: its Inbox move is owed and runs once the store is open
+/// (PERSO-109).
+pub fn opening_reason(account: &str) -> String {
+    format!(
+        "{account} is still opening its store; its Inbox mail from the sender moves to Junk once it is ready"
+    )
+}
+
 /// What a move over one account did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Moved {

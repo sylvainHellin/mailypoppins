@@ -16,14 +16,29 @@
 //! before it commits the account's state, whatever that state is. Process-wide
 //! because the integrity check it guards is per process, and keyed by account
 //! name because one daemon serves one data directory.
+//!
+//! A `sender.block` cannot move an opening account's Inbox mail to Junk
+//! without its store, and the blocked-senders runner only judges mail that
+//! arrives later, so the move is owed to the account ([`owe_block_move`]):
+//! [`end`] hands the owed entries to the start, which moves that mail once
+//! the store is open. One lock covers the set and the debts, so an entry is
+//! either owed before [`end`] takes the debts or moved by the call itself.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-fn set() -> MutexGuard<'static, BTreeSet<String>> {
-    static OPENING: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+/// The accounts being opened, and the blocked-sender entries whose Inbox move
+/// each of them is owed.
+#[derive(Default)]
+struct Opening {
+    accounts: BTreeSet<String>,
+    owed: BTreeMap<String, Vec<String>>,
+}
+
+fn state() -> MutexGuard<'static, Opening> {
+    static OPENING: OnceLock<Mutex<Opening>> = OnceLock::new();
     OPENING
-        .get_or_init(|| Mutex::new(BTreeSet::new()))
+        .get_or_init(|| Mutex::new(Opening::default()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -31,7 +46,7 @@ fn set() -> MutexGuard<'static, BTreeSet<String>> {
 /// Mark `account`'s store as being opened by its runtime start until the
 /// returned [`Mark`] is dropped or [`end`] is called, whichever comes first.
 pub fn begin(account: &str) -> Mark {
-    set().insert(account.to_string());
+    state().accounts.insert(account.to_string());
     Mark(account.to_string())
 }
 
@@ -43,19 +58,41 @@ pub struct Mark(String);
 
 impl Drop for Mark {
     fn drop(&mut self) {
+        // A mark dropped before its start ended it belongs to an account
+        // that left the configuration or a start that panicked: nothing is
+        // left to move the owed mail on.
         end(&self.0);
     }
 }
 
-/// The open of `account`'s store is over, whether it succeeded or not; a
-/// no-op for an account that was not marked.
-pub fn end(account: &str) {
-    set().remove(account);
+/// The open of `account`'s store is over, whether it succeeded or not: the
+/// blocked-sender entries whose Inbox move it is owed ([`owe_block_move`]),
+/// in the order they were blocked. A no-op answering nothing for an account
+/// that was not marked.
+pub fn end(account: &str) -> Vec<String> {
+    let mut state = state();
+    state.accounts.remove(account);
+    state.owed.remove(account).unwrap_or_default()
 }
 
 /// Whether `account`'s store is still being opened.
 pub fn is_opening(account: &str) -> bool {
-    set().contains(account)
+    state().accounts.contains(account)
+}
+
+/// Owe `account` the move of `entry`'s mail in its Inbox to Junk when its
+/// store is still being opened, answering whether it was owed; `false` means
+/// the store is open and the caller moves the mail itself.
+pub fn owe_block_move(account: &str, entry: &str) -> bool {
+    let mut state = state();
+    if !state.accounts.contains(account) {
+        return false;
+    }
+    let owed = state.owed.entry(account.to_string()).or_default();
+    if !owed.iter().any(|known| known == entry) {
+        owed.push(entry.to_string());
+    }
+    true
 }
 
 #[cfg(test)]
@@ -68,7 +105,7 @@ mod tests {
         assert!(!is_opening(account));
         let mark = begin(account);
         assert!(is_opening(account));
-        end(account);
+        assert!(end(account).is_empty());
         assert!(!is_opening(account));
         drop(mark);
         assert!(!is_opening(account), "a second end is a no-op");
@@ -81,5 +118,19 @@ mod tests {
         assert!(is_opening(account));
         drop(mark);
         assert!(!is_opening(account));
+    }
+
+    #[test]
+    fn a_block_move_is_owed_only_while_the_account_opens_and_handed_over_once() {
+        let account = "opening-unit-test-owed";
+        assert!(!owe_block_move(account, "spam@example.com"));
+        let mark = begin(account);
+        assert!(owe_block_move(account, "spam@example.com"));
+        assert!(owe_block_move(account, "@junk.example"));
+        assert!(owe_block_move(account, "spam@example.com"));
+        assert_eq!(end(account), ["spam@example.com", "@junk.example"]);
+        assert!(!owe_block_move(account, "late@example.com"));
+        drop(mark);
+        assert!(end(account).is_empty(), "the debts were handed over once");
     }
 }

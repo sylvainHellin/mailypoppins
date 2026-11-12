@@ -12,8 +12,11 @@
 //! queue, then asks each of those accounts for a drain, so the server half
 //! runs as a `message.move` with `settle: false` does. An account with a
 //! server and no Junk folder is named in `skipped` and never fails the call;
-//! a local-only account has no mail arriving and is left out. `sender.unblock`
-//! removes the entry and moves nothing back.
+//! a local-only account has no mail arriving and is left out. An account whose
+//! store the daemon is still opening is named in `skipped` too, and its Inbox
+//! mail from the sender moves once the store is open
+//! ([`crate::daemon::opening::owe_block_move`]). `sender.unblock` removes the
+//! entry and moves nothing back.
 //!
 //! An entry that is neither a full address nor `@domain` is `-32602` with the
 //! sentence [`mp_core::blocklist::normalize`] refuses it with, and so is a
@@ -150,6 +153,23 @@ impl SenderMethod {
             let mut skipped = Vec::new();
             for account in &accounts {
                 let name = account.name.clone();
+                // An account whose store the daemon is still opening is not
+                // opened a second time here (PERSO-109): its Inbox move is
+                // owed to it and runs once the store is open, and the answer
+                // says so. With `move_existing` off nothing is owed, and its
+                // Junk folder is not known without the store.
+                if move_existing && super::super::opening::owe_block_move(&name, &entry) {
+                    let reason = senders::opening_reason(&name);
+                    warn!("[senders] blocking {entry}: {reason}");
+                    skipped.push(BlockSkipped {
+                        account: name,
+                        reason,
+                    });
+                    continue;
+                }
+                if super::super::opening::is_opening(&name) {
+                    continue;
+                }
                 let store = crate::store::open_store(&name);
                 let catalogue = match &store {
                     Some(store) => crate::catalogue::Catalogue::from_store(store, account),

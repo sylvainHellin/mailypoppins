@@ -609,7 +609,10 @@ async fn stop_account(runtimes: &Arc<RuntimeTable>, account: &str) {
 /// `opening` refusal is lifted ([`super::opening::end`]) and a runtime that
 /// came up completes the account's seed from the store
 /// ([`super::runtime::publish::reseed_from_store`]), so a client that reacts
-/// to the event finds the account served and its hierarchy whole.
+/// to the event finds the account served and its hierarchy whole. A
+/// `sender.block` that came while the store was opening moves the account's
+/// Inbox mail from that sender to Junk here, before the state is committed
+/// ([`super::runtime::sender_runner::move_owed`]).
 pub async fn start_account(
     runtimes: &Arc<RuntimeTable>,
     canonical: &Arc<CanonicalState>,
@@ -618,14 +621,15 @@ pub async fn start_account(
 ) {
     let account = cfg.name.clone();
     let change = start_runtime(runtimes, canonical, cfg.clone(), account_runtimes).await;
-    super::opening::end(&account);
-    let Some(change) = change else {
-        return;
-    };
-    if runtimes.get(&account).is_some() {
+    let owed = super::opening::end(&account);
+    let runtime = runtimes.get(&account);
+    if change.is_some() && runtime.is_some() {
         super::runtime::publish::reseed_from_store(canonical, &cfg).await;
     }
-    canonical.apply(change);
+    super::runtime::sender_runner::move_owed(runtime.as_deref(), canonical, &cfg, owed).await;
+    if let Some(change) = change {
+        canonical.apply(change);
+    }
 }
 
 /// [`start_account`] up to the change it commits: the runtime started and

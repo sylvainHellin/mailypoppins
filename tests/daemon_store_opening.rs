@@ -483,3 +483,59 @@ async fn hook_list_and_contact_rebuild_refuse_an_opening_account() {
         .await
         .expect("hook.list answers once the store is open");
 }
+
+/// Blocking a sender while an account is still opening its store answers at
+/// once, names that account in `skipped` with the reason, and moves the
+/// sender's mail already in its Inbox to Junk as soon as the store is open:
+/// the blocked-senders runner only judges mail that arrives later, so the
+/// block's own move is owed to that account (PERSO-109).
+#[tokio::test]
+async fn blocking_a_sender_while_an_account_opens_moves_its_inbox_mail_once_ready() {
+    let (sandbox, _daemon, gate) = held().await;
+    let mut conn = connected(&sandbox).await;
+    let blocked = call(
+        &mut conn,
+        "sender.block",
+        json!({"address": "someone@example.com"}),
+    )
+    .await
+    .expect("sender.block answers while an account opens");
+    assert_eq!(blocked["added"], true, "{blocked}");
+    let skipped = blocked["skipped"].as_array().expect("skipped");
+    let reason = skipped
+        .iter()
+        .find(|row| row["account"] == LARGE)
+        .and_then(|row| row["reason"].as_str())
+        .unwrap_or_else(|| panic!("the opening account is named in skipped: {blocked}"));
+    assert!(reason.contains("opening"), "{reason}");
+    assert!(reason.contains("once it is ready"), "{reason}");
+
+    let mut events = connected(&sandbox).await;
+    call(&mut events, "state.bootstrap", json!({}))
+        .await
+        .expect("state.bootstrap");
+    fs::remove_file(&gate).expect("release the hold");
+    until_ready(&mut events).await;
+
+    let store_path = sandbox.account_dir(LARGE).join("store.sqlite3");
+    let start = Instant::now();
+    loop {
+        let mailbox: String = Store::open(&store_path)
+            .expect("store")
+            .conn()
+            .query_row(
+                "SELECT mailbox FROM messages WHERE message_id = ?1",
+                [format!("<{LARGE}@example.com>")],
+                |row| row.get(0),
+            )
+            .expect("the large account's message");
+        if mailbox == "Junk" {
+            break;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the blocked sender's Inbox mail stayed in {mailbox} after the account opened"
+        );
+        tokio::time::sleep(TICK).await;
+    }
+}
