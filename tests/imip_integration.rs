@@ -1136,4 +1136,19 @@ fn only_an_invitation_the_account_organised_is_changed() {
         format!("{err:#}").contains("carries no invitation"),
         "{err:#}"
     );
+    // A REQUEST naming the account as its organizer that arrived in the
+    // inbox is no invitation the account sent: changing it would mail its
+    // attendee list from the account.
+    let forged = store.ingest_raw(OWN_SERIES.as_bytes(), "inbox", 3);
+    let err = mailypoppins::invite::organized_row(
+        &store.store,
+        &store.blobs,
+        &organizer_account(),
+        forged,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("was received in inbox"),
+        "{err:#}"
+    );
 }

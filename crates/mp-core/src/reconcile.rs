@@ -73,14 +73,22 @@ pub struct InviteMessage {
 }
 
 /// The mailbox role the account's own sent mail lives in.
-pub const SENT_MAILBOX: &str = "sent";
+const SENT_MAILBOX: &str = "sent";
+
+/// Whether a row in `mailbox` is the account's own sent copy: a REQUEST
+/// there is one the account sent, which is what makes it the organizer, on
+/// the agenda and for the daemon's update and cancellation alike, and a
+/// CANCEL there one it sent as the organizer. An invitation that names the
+/// account as its organizer but arrived in any other mailbox is one it was
+/// sent, which anyone can forge.
+pub fn is_sent_copy(mailbox: &str) -> bool {
+    mailbox == SENT_MAILBOX
+}
 
 impl InviteMessage {
-    /// Whether the row is the account's own sent copy: a REQUEST there is
-    /// one the account sent, which is what makes it the organizer, and a
-    /// CANCEL there one the account sent as the organizer.
+    /// Whether the row is the account's own sent copy ([`is_sent_copy`]).
     pub fn is_sent_copy(&self) -> bool {
-        self.mailbox == SENT_MAILBOX
+        is_sent_copy(&self.mailbox)
     }
 
     /// The upper-cased `METHOD`, empty when the payload carried none.

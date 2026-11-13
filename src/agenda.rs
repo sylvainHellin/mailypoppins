@@ -38,11 +38,6 @@ use mp_protocol::calendar::AgendaEvent;
 use crate::reconcile::{self, InviteMessage};
 use crate::store::{BlobStore, Store};
 
-/// The mailbox role our own sent mail lives in. A REQUEST found there is one
-/// we sent, which is what makes us the organizer (the pre-store build asked
-/// the same question of the `sent/` directory).
-const SENT_MAILBOX: &str = "sent";
-
 /// A REQUEST candidate before dedup, with its identity and tiebreak keys.
 struct Candidate {
     row: AgendaEvent,
@@ -184,7 +179,10 @@ fn candidate_from(
             start_sort: start.sort,
             end_sort,
             start_display: start.display,
-            is_organizer: invite.mailbox == SENT_MAILBOX,
+            // A REQUEST in our own sent mail is one we sent, which is what
+            // makes us the organizer, as the daemon's organizer changes ask
+            // (`crate::invite::organized_row`).
+            is_organizer: invite.is_sent_copy(),
             cancelled,
             event,
         },

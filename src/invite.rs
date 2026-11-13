@@ -243,7 +243,11 @@ pub struct OrganizedRow {
 /// The invitation on row `row_id` of `account`'s store, refused unless the
 /// account organised it: its `ORGANIZER` is the account's primary address,
 /// the address an update or a cancellation goes out from (Exchange drops a
-/// mismatch).
+/// mismatch), and the row is the account's own sent copy, as the agenda's
+/// `is_organizer` asks ([`crate::reconcile::is_sent_copy`]): a REQUEST that
+/// names the account as its organizer and arrived in the inbox is one
+/// anyone could forge, and changing it would mail its attendees from the
+/// account.
 pub fn organized_row(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
@@ -264,6 +268,18 @@ pub fn organized_row(
              and an invitation you were sent can only be answered (event.respond)",
             invite.title(),
             invite.organizer,
+            account.name
+        ));
+    }
+    let mailbox = crate::store::read::find_by_id(store, row_id)?
+        .map(|row| row.mailbox)
+        .unwrap_or_default();
+    if !crate::reconcile::is_sent_copy(&mailbox) {
+        return Err(anyhow!(
+            "{} names {} as its organizer but was received in {mailbox}, not sent from it: mp \
+             changes or cancels only the sent copy of an invitation the account organised, and \
+             an invitation you were sent can only be answered (event.respond)",
+            invite.title(),
             account.name
         ));
     }

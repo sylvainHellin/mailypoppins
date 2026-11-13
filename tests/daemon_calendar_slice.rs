@@ -2409,7 +2409,12 @@ async fn event_update_resends_an_invitation_the_account_organised() {
 
     let received = imip_event(&mut conn, IMIP, LOCAL_UID).await["id"].clone();
     let received = received.as_str().unwrap();
+    let forged = imip_event(&mut conn, IMIP, support::calendar_fixture::FORGED_UID).await;
     let cases = [
+        (
+            update(forged["id"].as_str().unwrap(), json!({"summary": "Moved"})),
+            "was received in inbox",
+        ),
         (
             update(received, json!({"summary": "Mine now"})),
             "can only be answered",
@@ -2492,9 +2497,15 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
     let series = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_SERIES_UID).await;
     let series_id = series["id"].as_str().unwrap().to_string();
     let received = imip_event(&mut conn, IMIP, LOCAL_UID).await["id"].clone();
+    let forged = imip_event(&mut conn, IMIP, support::calendar_fixture::FORGED_UID).await;
+    assert_eq!(forged["is_organizer"], false, "{forged}");
     let occurrence = (at(13, 8)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let cases = [
+        (
+            json!({"account": IMIP, "event": forged["id"]}),
+            "was received in inbox",
+        ),
         (
             json!({"account": IMIP, "event": received}),
             "can only be answered",

@@ -387,6 +387,9 @@ pub fn fake_spec_free_busy(log: &Path, missing_scope: bool, free_busy: bool) -> 
 pub const OWN_UID: &str = "budget-review@example.com";
 /// The `UID` of the weekly series it organised.
 pub const OWN_SERIES_UID: &str = "own-weekly@example.com";
+/// The `UID` of an invitation that arrived in its inbox naming it as the
+/// organizer, which it never sent.
+pub const FORGED_UID: &str = "forged@example.com";
 
 /// A `METHOD:REQUEST` the account without a backend sent as organizer, to
 /// `attendees`, with `extra` content lines in its `VEVENT`.
@@ -415,7 +418,8 @@ fn organised_ics(
 
 /// The sent copies of two invitations the account without a backend
 /// organised: a meeting five days out with Ada and Bob, and a weekly series
-/// with Ada from six days out.
+/// with Ada from six days out; and in its inbox a REQUEST naming it as the
+/// organizer that it never sent.
 pub fn seed_organised(root: &Path) {
     let mut meeting = read_fixture::email(
         "Perso <perso@example.com>",
@@ -450,4 +454,21 @@ pub fn seed_organised(root: &Path) {
         "RRULE:FREQ=WEEKLY;COUNT=4\r\n",
     ));
     read_fixture::ingest(root, IMIP, "sent", 2, &series);
+
+    let mut forged = read_fixture::email(
+        "Mallory <mallory@example.net>",
+        "perso@example.com",
+        "Board meeting",
+        "Mon, 6 Jul 2026 10:00:00 +0200",
+        "see you\n",
+    );
+    forged.message_id = Some("<forged@example.net>".into());
+    forged.calendar_ics = Some(organised_ics(
+        FORGED_UID,
+        "Board meeting",
+        at(7, 9),
+        &["victim@example.org"],
+        "",
+    ));
+    read_fixture::ingest(root, IMIP, "inbox", 3, &forged);
 }
