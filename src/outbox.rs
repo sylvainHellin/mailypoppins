@@ -1492,6 +1492,12 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     let Some(row) = load(store, id)? else {
         return Ok(false);
     };
+    discard_loaded(store, blobs, row, graph)
+}
+
+/// [`discard_row`] of `row` as it was read.
+fn discard_loaded(store: &Store, blobs: &BlobStore, row: OutboxRow, graph: bool) -> Result<bool> {
+    let id = row.id;
     if let Some(refusal) = discarded_refusal(&row) {
         anyhow::bail!("{refusal}");
     }
@@ -1501,6 +1507,8 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     // the copy's without touching zero, as in [`finish_done`].
     let kept = !row.is_discarded() && keep_the_version(store, blobs, &row)?;
     if kept && !graph && row.target_mailbox.is_some() {
+        // A drain that finished the row since it was read filed its copy in
+        // Sent itself, which is all the kept row was for.
         keep_for_filing(store, &row)?;
         return Ok(true);
     }
@@ -1508,11 +1516,22 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
         .conn()
         .unchecked_transaction()
         .context("opening the outbox discard transaction")?;
-    tx.execute("DELETE FROM outbox WHERE id = ?1", [id])
-        .context("deleting the outbox row")?;
+    // The row holds its blob reference exactly while it is not `done`
+    // (`finish_done` and `give_up_filing` release it in the transaction
+    // that ends the row), and the drain holds no slot this discard takes,
+    // so it may have finished the row since it was read: the release goes
+    // with the delete of a row that is still not `done`, never with the
+    // state that was read.
+    let still_held = tx
+        .execute("DELETE FROM outbox WHERE id = ?1 AND state <> 'done'", [id])
+        .context("deleting the outbox row")?
+        == 1;
+    if !still_held {
+        tx.execute("DELETE FROM outbox WHERE id = ?1", [id])
+            .context("deleting the outbox row")?;
+    }
     let mut unreferenced = crate::store::Unreferenced::default();
-    if row.state != OutboxState::Done {
-        // A `done` row already released its reference.
+    if still_held {
         unreferenced = blobs.release(&tx, &row.raw_blob)?;
         if graph {
             tx.execute(
@@ -1704,8 +1723,9 @@ pub fn retry_refusal(row: &OutboxRow) -> Option<String> {
 /// ([`refuse_a_second_submission`], [`refuse_a_finished_draft`]). An APPEND
 /// attempted before the discard may have landed, so a row already waiting
 /// for one keeps its attempt count, which has the drain search Sent first;
-/// any other row has started none.
-fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<()> {
+/// any other row has started none. Answers whether it kept the row: not
+/// when a drain finished it since `row` was read, its copy filed already.
+fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<bool> {
     let now = unix_now();
     let mut envelope = row.envelope.clone().unwrap_or_default();
     envelope.discarded = Some(now);
@@ -1713,23 +1733,34 @@ fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<()> {
     // Kept or reset in the statement, from the row as it is now: a drain
     // may have committed an APPEND attempt since `row` was read, and writing
     // back the count read then would hide that attempt from the dedup
-    // search.
-    store
+    // search. A drain may also have finished the row since (the discard
+    // holds no slot the drain takes): a `done` row released its bytes and
+    // filed its copy, so it is left as it is.
+    let changed = store
         .conn()
         .execute(
             "UPDATE outbox SET state = 'sent_pending_append', envelope = ?2,
              attempts = CASE WHEN state = 'sent_pending_append' THEN attempts ELSE 0 END,
-             last_error = NULL, updated = ?3 WHERE id = ?1",
+             last_error = NULL, updated = ?3
+             WHERE id = ?1 AND state IN ('pending_send', 'failed', 'sent_pending_append')",
             rusqlite::params![row.id, envelope.encode(), now],
         )
         .context("keeping a discarded invitation row to file its copy")?;
+    if changed == 0 {
+        info!(
+            "[outbox] row {} ({}) was filed in Sent while it was being discarded; nothing \
+             left to keep",
+            row.id, row.message_id
+        );
+        return Ok(false);
+    }
     info!(
         "[outbox] row {} ({}) discarded; its invitation version is kept and its copy goes to {}",
         row.id,
         row.message_id,
         row.target_mailbox.as_deref().unwrap_or("Sent")
     );
-    Ok(())
+    Ok(true)
 }
 
 /// End a discarded row whose copy the server's Sent folder refused a week
@@ -2430,6 +2461,121 @@ pub fn ingest_sent_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An invitation update `alice` sent as `message_id`, as raw bytes.
+    fn invitation_raw(message_id: &str) -> Vec<u8> {
+        format!(
+            "From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Review\r\n\
+             Message-ID: {message_id}\r\nMIME-Version: 1.0\r\n\
+             Content-Type: text/calendar; method=REQUEST; charset=UTF-8\r\n\r\n\
+             BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nMETHOD:REQUEST\r\n\
+             BEGIN:VEVENT\r\nUID:race@example.com\r\nSEQUENCE:1\r\n\
+             DTSTAMP:20240101T120000Z\r\nDTSTART:20240110T090000Z\r\n\
+             ORGANIZER:mailto:alice@example.com\r\nATTENDEE:mailto:bob@example.com\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// A row of `raw` the server took whole, waiting for its APPEND, in a
+    /// fresh store: the store, its blobs, the row id and its blob hash.
+    fn appending(dir: &std::path::Path, raw: &[u8]) -> (Store, BlobStore, i64, BlobHash) {
+        let store = Store::open(dir.join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.join("blobs"));
+        let message_id = crate::send::message_id_of(raw);
+        let envelope = Envelope {
+            from: "alice@example.com".into(),
+            recipients: vec![("bob@example.com".into(), crate::send::RecipientRole::To)],
+            ..Default::default()
+        };
+        let id = enqueue(
+            &store,
+            &blobs,
+            "alice",
+            Some("Sent"),
+            &message_id,
+            raw,
+            &envelope,
+        )
+        .unwrap();
+        record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+        let hash = load(&store, id).unwrap().unwrap().raw_blob;
+        (store, blobs, id, hash)
+    }
+
+    /// The local Sent copies of `message_id`.
+    fn sent_copies(store: &Store, message_id: &str) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE mailbox = 'sent' AND message_id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A drain files the copy of a row between the discard's read of it and
+    /// its write: the discard of an invitation leaves the row done rather
+    /// than waiting for a second APPEND, and the blob keeps the one reference
+    /// the local copy holds.
+    #[test]
+    fn a_discard_racing_the_drain_of_an_invitation_never_re_arms_a_filed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = invitation_raw("<race-1@example.com>");
+        let (store, blobs, id, hash) = appending(dir.path(), &raw);
+
+        let read = load(&store, id).unwrap().unwrap();
+        assert!(begin_append_attempt(&store, id, unix_now()).unwrap());
+        record_append(
+            &store,
+            &blobs,
+            id,
+            &AppendOutcome::Appended { uid: Some(100) },
+        )
+        .unwrap();
+        assert!(discard_loaded(&store, &blobs, read, false).unwrap());
+
+        let row = load(&store, id).unwrap().unwrap();
+        assert_eq!(row.state, OutboxState::Done, "the drain's verdict stands");
+        assert!(!row.is_filing());
+        assert_eq!(counts(&store, "alice").unwrap().filing, 0);
+        assert_eq!(sent_copies(&store, "<race-1@example.com>"), 1);
+        assert_eq!(
+            crate::store::blobs::refcount(store.conn(), &hash).unwrap(),
+            1
+        );
+        assert!(blobs.contains(&hash));
+    }
+
+    /// The same race on a plain mail: the discard deletes the row the drain
+    /// finished and releases nothing more, so the local copy keeps its bytes.
+    #[test]
+    fn a_discard_racing_the_drain_of_a_plain_mail_releases_its_bytes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = b"From: alice@example.com\r\nTo: bob@example.com\r\n\
+                    Message-ID: <race-2@example.com>\r\nSubject: hi\r\n\r\nbody\r\n";
+        let (store, blobs, id, hash) = appending(dir.path(), raw);
+
+        let read = load(&store, id).unwrap().unwrap();
+        assert!(begin_append_attempt(&store, id, unix_now()).unwrap());
+        record_append(
+            &store,
+            &blobs,
+            id,
+            &AppendOutcome::Appended { uid: Some(100) },
+        )
+        .unwrap();
+        assert!(!discard_loaded(&store, &blobs, read, false).unwrap());
+
+        assert!(load(&store, id).unwrap().is_none());
+        assert_eq!(sent_copies(&store, "<race-2@example.com>"), 1);
+        assert_eq!(
+            crate::store::blobs::refcount(store.conn(), &hash).unwrap(),
+            1
+        );
+        assert!(blobs.contains(&hash));
+    }
 
     /// A row as the discard read it, then moved by a drain before the
     /// discard writes it back: the discard keeps the attempt the drain
