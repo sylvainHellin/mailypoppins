@@ -1397,7 +1397,7 @@ The check runs again inside the operation, under the account's lock that calenda
 On an account with a backend it also drops the account's server cache, keeping the visibility preferences, syncs it afresh and publishes `calendar.changed`, and the settled fold gains `server`: `{calendars, upserts, removed, baselines, failed: [{calendar, error}]}`, or `{error: {code, message, data?}}` when the resync failed, the re-login prompt for a sign-in without the scope.
 The fold settles the operation either way, so `mp calendar rebuild` over every account still reports each account's fold.
 
-`message.invite` gained `event_id` on an account with a backend: the server event an invitation mail stands for, read from Graph's `eventMessage` once per mail and remembered, or `null` when the server names none or the mail has no Graph id.
+`message.invite` gained `event_id` on an account with a backend: the server event an invitation mail stands for, read once per mail and remembered, from Graph's `eventMessage` on a Graph account and from the `AssociatedCalendarItemId` of the meeting mail with the row's `Message-ID` on an EWS account, or `null` when the server names none or the mail has no Graph id, respectively no `Message-ID`.
 An account without a backend gets no such key.
 
 `calendar_backend = "ews"` reads the calendar of an on-premises Exchange (PERSO-256) through Exchange Web Services, logged in over NTLM with the stored password `[accounts.ews]` `password_from` names; an account with no such password stored is refused with the `mp config set-password` command that stores it.

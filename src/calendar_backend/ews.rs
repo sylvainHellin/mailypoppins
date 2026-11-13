@@ -745,8 +745,8 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
     /// invitation, and GetItem reads its `AssociatedCalendarItemId`. The
     /// restriction on `message:InternetMessageId` is built from the schema
     /// documentation and unverified live; the GetItem is the spike's.
-    /// `calendar_sync::invite_event` asks under a row's Graph id only, so an
-    /// EWS account reaches this once it passes the row's Message-ID.
+    /// `calendar_sync::invite_event` asks under the row's Message-ID on an
+    /// EWS account.
     async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<EventId>> {
         let bare = message_id
             .trim()

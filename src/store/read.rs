@@ -969,6 +969,23 @@ pub fn graph_id(store: &Store, id: i64) -> Result<Option<String>> {
     Ok(graph_id.flatten())
 }
 
+/// The `Message-ID` of row `id`, `None` for a row without one.
+pub fn message_id(store: &Store, id: i64) -> Result<Option<String>> {
+    let message_id = store
+        .conn()
+        .query_row(
+            "SELECT message_id FROM messages WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .context("reading a message's Message-ID")?;
+    Ok(message_id
+        .flatten()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty()))
+}
+
 /// The row id of one message addressed the way a client holds it: the account,
 /// the mailbox it was listed in and its UID.
 ///

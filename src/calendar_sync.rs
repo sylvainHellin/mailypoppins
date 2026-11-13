@@ -107,16 +107,15 @@ pub async fn poll_account(account: &AccountConfig, now: DateTime<Utc>) -> bool {
 
 /// The server event the invitation mail `row_id` of `account` stands for.
 ///
-/// Asked of the backend under the mail's server id (its Graph id) once, and
-/// remembered in the store, a miss included; a mail with no server id (an
-/// IMAP row, a row no listing has bound yet) stands for nothing known. A
-/// failed lookup is logged and not remembered, so the next `message.invite`
-/// asks again.
+/// Asked of the backend once under the key [`invite_server_key`] names, and
+/// remembered in the store, a miss included; a mail with no such key stands
+/// for nothing known. A failed lookup is logged and not remembered, so the
+/// next `message.invite` asks again.
 pub async fn invite_event(account: &AccountConfig, row_id: i64) -> Option<EventId> {
     let name = account.name.as_str();
     let server_id = {
         let store = Store::open(crate::config::store_path(name)).ok()?;
-        let server_id = crate::store::read::graph_id(&store, row_id).ok()??;
+        let server_id = invite_server_key(&store, account, row_id).ok()??;
         if let Ok(Some(known)) = cache::cached_invite_event(&store, name, row_id, &server_id) {
             return known;
         }
@@ -144,6 +143,21 @@ pub async fn invite_event(account: &AccountConfig, row_id: i64) -> Option<EventI
             None
         }
     }
+}
+
+/// What the backend of `account` looks the invitation mail `row_id` up
+/// under: the mail's Message-ID on an EWS account, whose mail comes over
+/// IMAP, and its Graph id otherwise, `None` on a row no listing has bound to
+/// one (an IMAP row of any other account).
+fn invite_server_key(
+    store: &Store,
+    account: &AccountConfig,
+    row_id: i64,
+) -> anyhow::Result<Option<String>> {
+    if account.calendar_backend() == crate::config::CalendarBackendKind::Ews {
+        return crate::store::read::message_id(store, row_id);
+    }
+    crate::store::read::graph_id(store, row_id)
 }
 
 /// Sync `account`'s calendars from `backend` into `store` as of `now`.
@@ -523,5 +537,53 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CalendarBackendError::MissingScope { .. }));
         assert!(cache::list_calendars(&store, "evoqs").unwrap().is_empty());
+    }
+
+    /// What an invitation mail is looked up under: its Graph id on a Graph
+    /// account, and its Message-ID on an EWS account, whose mail comes over
+    /// IMAP and so has no server id the backend knows; an EWS row without a
+    /// Message-ID, and an IMAP row on a Graph account, stand for nothing.
+    #[test]
+    fn an_invitation_is_looked_up_by_its_graph_id_or_its_message_id() {
+        let (_dir, store) = open();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO messages (account, mailbox, uid, message_id, subject)
+                 VALUES ('tum', 'inbox', 1, '<invite@tum.de>', 'Invitation'),
+                        ('tum', 'inbox', 2, '', 'No Message-ID')",
+                [],
+            )
+            .unwrap();
+        let row = |uid: i64| -> i64 {
+            store
+                .conn()
+                .query_row("SELECT id FROM messages WHERE uid = ?1", [uid], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let ews = crate::config::AccountConfig {
+            name: "tum".into(),
+            calendar_backend: Some(crate::config::CalendarBackendKind::Ews),
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ab12cde".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Imap),
+                delegate_calendars: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            invite_server_key(&store, &ews, row(1)).unwrap().as_deref(),
+            Some("<invite@tum.de>")
+        );
+        assert_eq!(invite_server_key(&store, &ews, row(2)).unwrap(), None);
+        let graph = crate::config::AccountConfig {
+            name: "tum".into(),
+            auth_method: crate::config::AuthMethod::Graph,
+            ..Default::default()
+        };
+        assert_eq!(invite_server_key(&store, &graph, row(1)).unwrap(), None);
     }
 }
