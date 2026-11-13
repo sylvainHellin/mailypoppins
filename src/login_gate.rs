@@ -18,65 +18,95 @@
 //! - a Graph account's token refresh, in [`crate::graph::access_token`],
 //!   refused by `invalid_grant` (the refresh token is revoked or expired).
 //!
-//! Each consults the list kept here. A refusal is recorded under the login
-//! identity and a hash of the refused secret, not under the login. The
-//! identity of a password login is its user name, compared ASCII-lowercased,
-//! and not its host or its account: an account's IMAP and SMTP logins that
-//! present one user and one password share one row on two hosts (the TUM's
-//! IMAP and SMTP servers are two hosts checking one password), and so do two
-//! configured accounts logging in as one user. Logins as two users are two
-//! rows even with one password, so a typo in one user name neither holds nor
-//! resets the other. A Graph sign-in's identity is its account, with the
-//! refresh token as its secret. While the row's hold runs, every login with
-//! that identity and secret fails at once with a [`LoginRejected`] without
-//! dialling, the SMTP login after an IMAP refusal included, and the answer
-//! says at which login the server refused it.
+//! Each asks the gate first ([`dial`]), and the gate keeps a row per
+//! refused secret. What each promise below rests on is named after it.
 //!
-//! The one case this keying gets wrong: two unrelated servers with one user
-//! name and one password share a row, so a refusal at one holds the other
-//! and a success at one resets the other's count. Mail user names are
-//! nearly always full addresses, and keying by host would split the TUM's
-//! two hosts, which is the case the schedule exists for.
+//! # What a row is
 //!
-//! The hold of a password grows with the refusals of it in a row, at either
-//! login ([`hold`]): 2 minutes after the first, 10 after the second, an hour
-//! from the third on. A server that refuses a correct password for a minute
-//! (the TUM server answered `NO LOGIN failed.` to one twice 30 s apart, and
-//! took it on the attempts around) stops the mail for minutes; a wrong
-//! password is sent to the server at most 3 times in the first hour and once
-//! an hour after, by the sync and the outbox drain together, until the user
-//! acts. A Graph sign-in is held an hour from the first refusal, since
-//! `invalid_grant` is Entra's final word on the refresh token. Two passwords
-//! (IMAP and SMTP passwords that differ, or one changed at one login only)
-//! are two rows with a schedule each. Dials that race each other
-//! past the gate as a hold ends are counted as one refusal.
+//! A row is a login identity and a hash of the refused secret, not a login.
+//! The identity of a password login is its user name, ASCII-lowercased, and
+//! not its host or its account, so these share one row:
 //!
-//! The hold ends
+//! - an account's IMAP and SMTP logins presenting one user and one password
+//!   on two hosts, the TUM's case (`one_user_and_password_on_two_hosts_is_one_row`);
+//! - two configured accounts logging in as one user with one password
+//!   (`two_accounts_as_one_user_are_one_row`).
 //!
-//! - when it runs out, and the next attempt asks the server;
-//! - when the user acts, through [`forget`] or [`forget_account`]: stores a
-//!   password (`config.set_password`), signs in again
-//!   (`config.oauth2_login`), or starts what needs the login (a sync for the
-//!   IMAP login and the Graph sign-in, a send for the SMTP login and the Graph
-//!   sign-in). That ends the hold of the secret the login dials with, read
-//!   where its dial reads it, for every login sharing the row, and of no
-//!   other secret: a send lets an IMAP password that differs from the SMTP
-//!   one stay held.
+//! Two user names are two rows even with one password, so a typo in one
+//! neither holds nor resets the other (`two_users_with_one_password_are_two_rows`),
+//! and two passwords are two rows (`a_password_changed_at_one_login_follows_its_own_row`).
+//! A Graph sign-in's identity is its account, its secret the refresh token.
+//! The case this keying gets wrong, and is accepted: two unrelated servers
+//! with one user name and one password share a row, so a refusal at one
+//! holds the other and a success at one resets the other's count. Mail user
+//! names are nearly always full addresses, and keying by host would split
+//! the TUM's two hosts, the case the schedule exists for.
 //!
-//! Neither resets the count: a refusal of the same secret after either is the
-//! next in the row. The row, count and all, ends
+//! # The hold
 //!
-//! - when a login with the identity succeeds with the secret, since the
-//!   server just took it, for the other logins of the row as well;
-//! - when no login is attempted with the identity and the secret any more;
-//! - when the daemon restarts, since the list lives in memory only.
+//! While a row's hold runs, every login of the row fails at once with a
+//! [`LoginRejected`] without dialling, the SMTP login after an IMAP refusal
+//! included, and the answer names the login the server refused it at and the
+//! time the server is asked again
+//! (`a_password_refused_at_the_imap_login_holds_the_smtp_login`,
+//! `a_held_refusal_names_the_time_the_server_is_asked_again`). The hold of a
+//! password is 2 minutes after its first refusal in a row, 10 after the
+//! second and an hour from the third on, counted at every login of the row
+//! (`a_password_is_held_two_minutes_then_ten_then_an_hour`,
+//! `a_refusal_at_either_login_counts_for_both`): a server that refuses a
+//! correct password for a minute (the TUM server answered `NO LOGIN failed.`
+//! to one twice 30 s apart, and took it on the attempts around) stops the
+//! mail for minutes. A Graph sign-in is held an hour from its first refusal,
+//! since `invalid_grant` is Entra's final word on the refresh token
+//! (`a_graph_sign_in_is_held_an_hour_from_the_first_refusal`).
 //!
-//! A new secret is not on the list, so it is asked at once, and its first
-//! refusal is the first of a new row. The health check and
-//! `account.credentials` read no secret: they report a login refused while
-//! the row of the secret it was last attempted with holds, so the SMTP login
-//! of a shared password is reported once it was attempted within the hold.
-//! `config.probe` dials past the gate: a probe is the user asking the server.
+//! When a hold ends, the first dial of the row marks it in flight and every
+//! other dial of the row is answered as held until it answers; the mark is a
+//! guard ([`Dial`]) that clears on a success, a refusal, any other error, a
+//! timeout and a cancelled task alike (`a_dial_in_flight_holds_the_others_of_its_row`,
+//! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`). So
+//! a wrong password reaches the server 3 times in the first hour after its
+//! first refusal and once an hour after, with the sync tick, the IDLE watcher
+//! and the outbox drain racing at every hold end, until the user acts
+//! (`one_wrong_password_is_asked_three_times_in_the_first_hour_and_once_an_hour_after`).
+//! A secret never refused carries no mark and is dialled by as many tasks
+//! as ask, as the pool opens its sessions (`a_secret_never_refused_is_dialled_concurrently`),
+//! so the first refusal of a new password may come back from every dial
+//! under way then, at most one per task that dials (the sync tick, the IDLE
+//! watcher, the outbox drain); they count as one refusal, and the next step
+//! is one dial (`the_first_refusal_of_a_new_password_is_met_by_the_dials_under_way`).
+//!
+//! The hold ends early when the user acts, through [`forget`] or
+//! [`forget_account`]: stores a password (`config.set_password`), signs in
+//! again (`config.oauth2_login`), or starts what needs the login (a sync for
+//! the IMAP login and the Graph sign-in, a send for the SMTP login and the
+//! Graph sign-in). That ends the hold of the secret the login dials with,
+//! read where its dial reads it, for every login of its row, and of no other
+//! secret: a send lets an IMAP password that differs from the SMTP one stay
+//! held (`the_user_acting_on_a_login_not_seen_yet_ends_only_its_own_secrets_hold`).
+//! The count stays, so a refusal right after is the next in the row
+//! (`the_user_acting_ends_the_hold_for_both_logins_and_keeps_the_row`).
+//!
+//! # The end of a row
+//!
+//! A row, count and all, ends when a login of the row succeeds with the
+//! secret, since the server just took it (`a_success_at_either_login_resets_both`;
+//! an SMTP login counts as a success once the server answered past it, even
+//! when every recipient is refused:
+//! `crate::send`'s `a_login_taken_with_every_recipient_refused_resets_the_count`),
+//! when no login is attempted with its identity and secret any more
+//! (`a_replaced_password_drops_its_row`), and when the daemon restarts, since
+//! the list lives in memory only. A new secret has no row, so it is asked at
+//! once.
+//!
+//! # What the clients read
+//!
+//! The health check and `account.credentials` read no secret: they report a
+//! login refused while the row of the secret it was last attempted with
+//! holds, so the SMTP login of a shared password is reported once it was
+//! attempted within the hold, and a dial in flight is not reported
+//! (`a_dial_in_flight_holds_the_others_of_its_row`). `config.probe` dials
+//! past the gate: a probe is the user asking the server.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -386,27 +416,74 @@ pub(crate) fn in_a_row_for_test(login: &Login, secret: &str) -> u32 {
         .map_or(0, |row| row.in_a_row)
 }
 
-/// The refusal a `login` with `secret` would get without dialling, if any.
-pub fn refused(login: &Login, secret: &str) -> Option<LoginRejected> {
-    refusals().refused(
-        login,
-        &fingerprint(secret),
-        Instant::now(),
-        SystemTime::now(),
-    )
+/// Ask the gate to dial `login` with `secret`: the refusal to answer at once
+/// when the row of the secret holds, or a dial in flight of a secret the
+/// server refused before, and else a [`Dial`] to report the answer through.
+///
+/// A dial of a secret the server refused before marks its row in flight
+/// until it answers or is dropped, so the tasks that come meanwhile (the sync
+/// tick, the IDLE watcher, the outbox drain, a held hold ending for all of
+/// them at once) are answered as held rather than dialling beside it. A
+/// secret never refused is dialled by as many tasks at once as ask, as the
+/// pool does.
+pub fn dial(login: &Login, secret: &str) -> Result<Dial, LoginRejected> {
+    let secret = fingerprint(secret);
+    let mark = refusals().begin(login, &secret, Instant::now(), SystemTime::now())?;
+    Ok(Dial {
+        login: login.clone(),
+        secret,
+        mark,
+    })
 }
 
-/// Record that the server refused `login` with `secret`, and answer the
-/// refusal with its entry.
-pub fn record(login: &Login, secret: &str, rejected: &LoginRejected) -> LoginRejected {
+/// One dial the gate let through. Report its answer with [`Dial::accepted`]
+/// or [`Dial::refused`]; dropped on any other outcome (another error, a
+/// timeout, a cancelled task), it frees the row it marked in flight.
+pub struct Dial {
+    login: Login,
+    secret: [u8; 32],
+    /// The token of the in-flight mark on the row of the secret, when it had
+    /// a row.
+    mark: Option<u64>,
+}
+
+impl Dial {
+    /// The server took the login, so whatever the list held about the
+    /// secret, the count of refusals in a row included, no longer describes
+    /// the server, for every login of its row.
+    pub fn accepted(&mut self) {
+        let mut list = refusals();
+        list.accept(&self.login, &self.secret);
+        if let Some(mark) = self.mark.take() {
+            list.end(&self.login, &self.secret, mark);
+        }
+    }
+
+    /// The server refused the login: record it, and answer the refusal with
+    /// its entry.
+    pub fn refused(&mut self, rejected: &LoginRejected) -> LoginRejected {
+        let mut list = refusals();
+        let recorded = list.record(self.login.clone(), self.secret, rejected, Instant::now());
+        if let Some(mark) = self.mark.take() {
+            list.end(&self.login, &self.secret, mark);
+        }
+        recorded
+    }
+}
+
+impl Drop for Dial {
+    fn drop(&mut self) {
+        if let Some(mark) = self.mark.take() {
+            refusals().end(&self.login, &self.secret, mark);
+        }
+    }
+}
+
+/// Record that the server refused `login` with `secret`, as a refused dial
+/// does, for a test outside this module.
+#[cfg(test)]
+pub(crate) fn record(login: &Login, secret: &str, rejected: &LoginRejected) -> LoginRejected {
     refusals().record(login.clone(), fingerprint(secret), rejected, Instant::now())
-}
-
-/// `login` succeeded with `secret`, so the server takes it: whatever the list
-/// held about it, the count of refusals in a row included, no longer
-/// describes the server, for the account's other login with it too.
-pub fn accepted(login: &Login, secret: &str) {
-    refusals().accept(login, &fingerprint(secret));
 }
 
 /// The refused secret, as the list compares it: never the secret itself.
@@ -469,6 +546,9 @@ struct Row {
     /// The login the server last refused the secret at, and its answer.
     refused_at: RejectedLogin,
     answer: String,
+    /// The token of the dial of the secret in flight since the hold ended,
+    /// which holds every other dial of the row until it answers.
+    in_flight: Option<u64>,
 }
 
 impl Row {
@@ -488,6 +568,7 @@ struct Refusals {
     /// login's row by.
     seen: HashMap<Login, [u8; 32]>,
     next_entry: u64,
+    next_mark: u64,
 }
 
 impl Refusals {
@@ -519,13 +600,45 @@ impl Refusals {
     ) -> Option<LoginRejected> {
         self.see(login, secret);
         let row = self.rows.get(&RowKey::of(login, secret))?;
-        row.holds(now).then(|| LoginRejected {
+        (row.holds(now) || row.in_flight.is_some()).then(|| LoginRejected {
             kind: login.kind(),
             refused_at: row.refused_at,
             answer: row.answer.clone(),
             entry: Some(row.entry),
+            // A dial in flight is asking the server now.
             asked_again_at: Some(wall + row.until.saturating_duration_since(now)),
         })
+    }
+
+    /// Let a dial of `login` with `secret` through at `now`, or answer it
+    /// as [`Refusals::refused`] does; a dial of a secret with a row marks the
+    /// row in flight and answers the mark's token.
+    fn begin(
+        &mut self,
+        login: &Login,
+        secret: &[u8; 32],
+        now: Instant,
+        wall: SystemTime,
+    ) -> Result<Option<u64>, LoginRejected> {
+        if let Some(held) = self.refused(login, secret, now, wall) {
+            return Err(held);
+        }
+        let Some(row) = self.rows.get_mut(&RowKey::of(login, secret)) else {
+            return Ok(None);
+        };
+        self.next_mark += 1;
+        row.in_flight = Some(self.next_mark);
+        Ok(Some(self.next_mark))
+    }
+
+    /// The dial marked `mark` answered or was dropped: its row, if it is
+    /// still the one it marked, is free for the next dial.
+    fn end(&mut self, login: &Login, secret: &[u8; 32], mark: u64) {
+        if let Some(row) = self.rows.get_mut(&RowKey::of(login, secret)) {
+            if row.in_flight == Some(mark) {
+                row.in_flight = None;
+            }
+        }
     }
 
     fn record(
@@ -553,6 +666,7 @@ impl Refusals {
                         entry: self.next_entry,
                         refused_at: login.kind(),
                         answer: rejected.answer.clone(),
+                        in_flight: None,
                     },
                 );
                 self.next_entry
@@ -881,6 +995,25 @@ mod tests {
         assert_eq!(dials_per_hour, [3, 1, 1]);
     }
 
+    /// A password no login is attempted with any more is a row nothing
+    /// reads, and it goes: the same password tried again later starts a new
+    /// row.
+    #[test]
+    fn a_replaced_password_drops_its_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let first = held_for(&mut list, &imap(), "old", at);
+        held_for(&mut list, &imap(), "old", at + first);
+        assert!(list
+            .refused(&imap(), &fingerprint("new"), at + first, wall())
+            .is_none());
+        assert_eq!(
+            held_for(&mut list, &imap(), "old", at + LONG_HOLD),
+            FIRST_HOLD,
+            "the old password's count went with its row"
+        );
+    }
+
     /// A password changed at one login only is a row of its own: the other
     /// login keeps its row and its count.
     #[test]
@@ -965,32 +1098,106 @@ mod tests {
         assert_eq!(held_for(&mut list, &graph, "revoked", at), LONG_HOLD);
     }
 
-    /// The worst case the module doc promises: one wrong password shared by
-    /// the IMAP and the SMTP login, with a sync tick dialling IMAP every
-    /// minute and the outbox drain dialling SMTP every 30 s, reaches the
-    /// server 3 times in the first hour and once an hour after.
+    /// The worst case the module doc promises, under the race: one wrong
+    /// password the IMAP and the SMTP login share, with the sync tick
+    /// dialling IMAP every minute, the IDLE watcher every 30 s and the
+    /// outbox drain dialling SMTP every 30 s, all three asking the gate
+    /// before any of them hears back, reaches the server 3 times in the
+    /// first hour after its first refusal and once an hour after.
     #[test]
     fn one_wrong_password_is_asked_three_times_in_the_first_hour_and_once_an_hour_after() {
         let mut list = Refusals::default();
         let start = Instant::now();
         let wrong = fingerprint("wrong");
-        let mut dials_per_hour = [0u32; 5];
-        let mut t = Duration::ZERO;
+        // The first refusal, which starts the row.
+        list.record(imap(), wrong, &rejected(&imap()), start);
+        let mut dials_per_hour = [1u32, 0, 0, 0, 0];
+        let mut t = 30 * SECOND;
         while t < 5 * LONG_HOLD {
             let now = start + t;
-            let mut attempts = vec![smtp()];
+            let mut racing = vec![imap(), smtp()];
             if t.as_secs().is_multiple_of(60) {
-                attempts.insert(0, imap());
+                racing.push(imap());
             }
-            for login in attempts {
-                if list.refused(&login, &wrong, now, wall()).is_none() {
-                    dials_per_hour[(t.as_secs() / 3600) as usize] += 1;
-                    list.record(login.clone(), wrong, &rejected(&login), now);
-                }
+            // Every task asks before any dial answers.
+            let through: Vec<(Login, u64)> = racing
+                .into_iter()
+                .filter_map(|login| match list.begin(&login, &wrong, now, wall()) {
+                    Ok(mark) => Some((login, mark.expect("the row is marked"))),
+                    Err(_) => None,
+                })
+                .collect();
+            for (login, mark) in through {
+                dials_per_hour[(t.as_secs() / 3600) as usize] += 1;
+                list.record(login.clone(), wrong, &rejected(&login), now);
+                list.end(&login, &wrong, mark);
             }
             t += 30 * SECOND;
         }
         assert_eq!(dials_per_hour, [3, 1, 1, 1, 1]);
+    }
+
+    /// A dial of a secret refused before marks its row in flight: every
+    /// other dial of the row, at either login, is held until it answers or
+    /// is dropped, and then the next one is let through.
+    #[test]
+    fn a_dial_in_flight_holds_the_others_of_its_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let wrong = fingerprint("wrong");
+        list.record(imap(), wrong, &rejected(&imap()), at);
+        let now = at + FIRST_HOLD;
+        let mark = list
+            .begin(&imap(), &wrong, now, wall())
+            .expect("the hold ended")
+            .expect("the row is marked");
+        for login in [imap(), smtp()] {
+            let held = list.begin(&login, &wrong, now, wall()).unwrap_err();
+            assert!(held.from_list(), "{held}");
+        }
+        assert!(
+            !list.holds(&imap(), now),
+            "a dial in flight is no refusal the health check reports"
+        );
+        list.end(&imap(), &wrong, mark);
+        assert!(list.begin(&smtp(), &wrong, now, wall()).is_ok());
+    }
+
+    /// A secret the server never refused is dialled by every task that
+    /// asks, unmarked, as the pool opens its sessions; so is a secret whose
+    /// row a success dropped.
+    #[test]
+    fn a_secret_never_refused_is_dialled_concurrently() {
+        let mut list = Refusals::default();
+        let now = Instant::now();
+        let right = fingerprint("right");
+        for _ in 0..4 {
+            assert_eq!(list.begin(&imap(), &right, now, wall()).unwrap(), None);
+        }
+    }
+
+    /// The race the mark cannot close: a password never refused before is
+    /// dialled by the tasks that ask together, so its first refusal may come
+    /// back from as many dials as were in flight. The step after is one dial.
+    #[test]
+    fn the_first_refusal_of_a_new_password_is_met_by_the_dials_under_way() {
+        let mut list = Refusals::default();
+        let now = Instant::now();
+        let wrong = fingerprint("wrong");
+        let through = [imap(), imap(), smtp()]
+            .iter()
+            .filter(|login| list.begin(login, &wrong, now, wall()).is_ok())
+            .count();
+        assert_eq!(through, 3);
+        let first = list.record(imap(), wrong, &rejected(&imap()), now);
+        let raced = list.record(smtp(), wrong, &rejected(&smtp()), now);
+        assert_eq!(first.entry(), raced.entry(), "counted as one refusal");
+        let then = now + FIRST_HOLD;
+        let next = [imap(), smtp()]
+            .iter()
+            .filter(|login| list.begin(login, &wrong, then, wall()).is_ok())
+            .count();
+        assert_eq!(next, 1);
     }
 
     /// Two refusals of one secret inside the hold are one entry, a new

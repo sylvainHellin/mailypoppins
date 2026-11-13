@@ -4965,25 +4965,22 @@ async fn submit_over(
         .context("Invalid 'from' address")?
         .email;
     let login = crate::login_gate::Login::Smtp(smtp_config.login());
-    if let Some(refused) = crate::login_gate::refused(&login, &smtp_config.password) {
-        return Err(refused.into());
-    }
+    let mut dial = crate::login_gate::dial(&login, &smtp_config.password)?;
     let Submitted {
         result,
         logged_in,
         login_refused,
     } = submit_through(built, &from_addr, mailer).await;
     if logged_in {
-        crate::login_gate::accepted(&login, &smtp_config.password);
+        dial.accepted();
     }
     let Some(answer) = login_refused else {
         return Ok(result);
     };
-    let rejected = crate::login_gate::record(
-        &login,
-        &smtp_config.password,
-        &crate::login_gate::LoginRejected::new(mp_protocol::account::RejectedLogin::Smtp, answer),
-    );
+    let rejected = dial.refused(&crate::login_gate::LoginRejected::new(
+        mp_protocol::account::RejectedLogin::Smtp,
+        answer,
+    ));
     if result.any_succeeded() {
         Ok(result)
     } else {

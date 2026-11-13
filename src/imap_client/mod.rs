@@ -230,18 +230,16 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// user.
 pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
     let login = Login::Imap(imap_config.login());
-    if let Some(refused) = login_gate::refused(&login, &imap_config.password) {
-        return Err(refused.into());
-    }
+    // Dropped on any other outcome, the timeout and a cancelled task
+    // included, it frees the row it held for this dial.
+    let mut dial = login_gate::dial(&login, &imap_config.password)?;
     match dial_imap_session(imap_config).await {
         Ok(session) => {
-            login_gate::accepted(&login, &imap_config.password);
+            dial.accepted();
             Ok(session)
         }
         Err(e) => match login_rejected(&e) {
-            Some(rejected) => {
-                Err(login_gate::record(&login, &imap_config.password, rejected).into())
-            }
+            Some(rejected) => Err(dial.refused(rejected).into()),
             None => Err(e),
         },
     }

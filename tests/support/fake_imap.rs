@@ -133,6 +133,9 @@ struct Shared {
     body_delay_ms: AtomicU64,
     /// How many `BODY.PEEK[]` fetches the server has answered.
     body_fetches: AtomicUsize,
+    /// How long the server waits before it answers a LOGIN, in milliseconds,
+    /// as a server delays a refused login.
+    login_delay_ms: AtomicU64,
 }
 
 /// One whole message of a folder a sync runs against: its UID and its bytes.
@@ -178,6 +181,7 @@ impl RejectingImapServer {
             mail: Mutex::new(std::collections::HashMap::new()),
             body_delay_ms: AtomicU64::new(0),
             body_fetches: AtomicUsize::new(0),
+            login_delay_ms: AtomicU64::new(0),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -269,6 +273,14 @@ impl RejectingImapServer {
         self.shared.body_delay_ms.store(millis, Ordering::SeqCst);
     }
 
+    /// Wait `delay` before answering each later LOGIN, as a server delays a
+    /// refused login by seconds: a login in flight that long, for a test of
+    /// the dials racing it (PERSO-296).
+    pub fn set_login_delay(&self, delay: std::time::Duration) {
+        let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.shared.login_delay_ms.store(millis, Ordering::SeqCst);
+    }
+
     /// How many `BODY.PEEK[]` fetches the server has answered so far.
     pub fn body_fetches(&self) -> usize {
         self.shared.body_fetches.load(Ordering::SeqCst)
@@ -350,6 +362,10 @@ async fn serve(
         let reply = match command.as_str() {
             "LOGIN" => {
                 shared.logins.fetch_add(1, Ordering::SeqCst);
+                let delay = shared.login_delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    async_std::task::sleep(std::time::Duration::from_millis(delay)).await;
+                }
                 shared
                     .passwords
                     .lock()

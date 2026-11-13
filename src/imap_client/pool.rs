@@ -474,6 +474,58 @@ mod tests {
         assert_eq!(server.logins(), 2, "a changed password is asked again");
     }
 
+    /// PERSO-296: when a hold ends, one dial asks the server and the others
+    /// that come while it is in flight are held, so four tasks racing at the
+    /// end of a hold, with the server slow to refuse, cost one refusal and
+    /// not four. A dial cancelled mid-flight frees the row for the next one.
+    #[test]
+    fn one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row() {
+        use super::super::fake_imap::RejectingImapServer;
+        use futures::future::{join_all, select, Either};
+
+        let server = RejectingImapServer::start();
+        let rejected = ImapConfig {
+            password: "wrong".into(),
+            accept_invalid_certs: true,
+            ..config(server.port())
+        };
+        let login = crate::login_gate::Login::Imap(rejected.login());
+        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
+        assert_eq!(server.logins(), 1);
+
+        // The hold ends, and four tasks dial while the server takes its time.
+        crate::login_gate::forget(&login);
+        server.set_login_delay(std::time::Duration::from_millis(400));
+        let answers =
+            futures::executor::block_on(join_all((0..4).map(|_| open_imap_session(&rejected))));
+        assert_eq!(server.logins(), 2, "one of the four asked the server");
+        let held = answers
+            .iter()
+            .filter_map(|answer| answer.as_ref().err())
+            .filter(|e| crate::login_gate::login_rejected(e).is_some_and(|r| r.from_list()))
+            .count();
+        assert_eq!(held, 3, "the three others were held, not queued");
+
+        // A dial cancelled after its LOGIN reached the server frees the row.
+        crate::login_gate::forget(&login);
+        server.set_login_delay(std::time::Duration::from_secs(5));
+        futures::executor::block_on(async {
+            let dial = Box::pin(open_imap_session(&rejected));
+            let sent = Box::pin(async {
+                while server.logins() < 3 {
+                    async_std::task::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            });
+            match select(dial, sent).await {
+                Either::Left(_) => panic!("the dial answered before it was cancelled"),
+                Either::Right(((), dial)) => drop(dial),
+            }
+        });
+        server.set_login_delay(std::time::Duration::ZERO);
+        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
+        assert_eq!(server.logins(), 4, "the cancelled dial left no mark behind");
+    }
+
     /// A `NO [UNAVAILABLE]` to LOGIN is the server down for maintenance, and
     /// Gmail's `NO [ALERT] Too many simultaneous connections.` the account
     /// over its connection limit, not answers about the password (RFC 5530):

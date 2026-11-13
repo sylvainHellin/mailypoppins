@@ -373,12 +373,10 @@ where
     let refresh = crate::oauth2::load_token_cache(account)
         .map(|cache| cache.refresh_token)
         .unwrap_or_default();
-    if let Some(refused) = login_gate::refused(&login, &refresh) {
-        return Err(refused.into());
-    }
+    let mut dial = login_gate::dial(&login, &refresh)?;
     match fetch().await {
         Ok(token) => {
-            login_gate::accepted(&login, &refresh);
+            dial.accepted();
             Ok(token)
         }
         Err(e) => match e.downcast_ref::<crate::oauth2::RefreshRejected>() {
@@ -388,7 +386,7 @@ where
                     mp_protocol::account::RejectedLogin::Graph,
                     refusal.to_string(),
                 );
-                Err(login_gate::record(&login, &refresh, &rejected).into())
+                Err(dial.refused(&rejected).into())
             }
             None => Err(e),
         },
