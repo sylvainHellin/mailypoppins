@@ -112,8 +112,9 @@ pub fn load_events_for_account(
 
     for invite in &invites {
         // Identity is (UID, RECURRENCE-ID): an occurrence override is its own
-        // agenda row, not a duplicate of the series.
-        let uid = invite.uid().map(|uid| match invite.recurrence_id() {
+        // agenda row, not a duplicate of the series, and one override named
+        // in UTC and with a TZID is one row (PERSO-302).
+        let uid = invite.uid().map(|uid| match invite.occurrence_key() {
             Some(rid) => format!("{uid}\u{0}{rid}"),
             None => uid.to_string(),
         });
@@ -325,10 +326,16 @@ mod tests {
     /// A single-occurrence payload: `RECURRENCE-ID` naming one instance of the
     /// `uid` series, with a start on that instance.
     fn occurrence_ics(method: &str, uid: &str, sequence: u32, recurrence_id: &str) -> String {
+        occurrence_ics_as(method, uid, sequence, &format!(":{recurrence_id}"))
+    }
+
+    /// [`occurrence_ics`] with the `RECURRENCE-ID` written as `written`, the
+    /// text that follows the property name (`;TZID=Europe/Berlin:...`).
+    fn occurrence_ics_as(method: &str, uid: &str, sequence: u32, written: &str) -> String {
         format!(
             "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:{uid}\r\n\
-             SEQUENCE:{sequence}\r\nDTSTAMP:20260701T090000Z\r\nRECURRENCE-ID:{recurrence_id}\r\n\
-             SUMMARY:Weekly (moved)\r\nDTSTART:{recurrence_id}\r\n\
+             SEQUENCE:{sequence}\r\nDTSTAMP:20260701T090000Z\r\nRECURRENCE-ID{written}\r\n\
+             SUMMARY:Weekly (moved)\r\nDTSTART{written}\r\n\
              ORGANIZER:mailto:org@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
         )
     }
@@ -711,6 +718,93 @@ mod tests {
         assert!(series_row.unwrap().event.cancelled_instances.is_empty());
         let override_row = events.iter().find(|e| e.subject == "Weekly (back)");
         assert!(!override_row.unwrap().cancelled);
+    }
+
+    /// The occurrence at 09:00 UTC on 2026-11-23, as UTC and as Berlin time.
+    const IN_UTC: &str = ":20261123T090000Z";
+    const IN_BERLIN: &str = ";TZID=Europe/Berlin:20261123T100000";
+
+    /// The agenda of a weekly series once the account also holds `others`.
+    fn series_with(others: &[(&str, &str, String)]) -> Vec<AgendaEvent> {
+        let fx = fixture();
+        let series = event_ics(
+            "REQUEST",
+            Some("uid-z"),
+            0,
+            "Weekly",
+            Some(":20261102T090000Z"),
+        );
+        fx.ingest_invite("inbox", 1, "Weekly", &series);
+        for (uid, (mailbox, subject, ics)) in (2..).zip(others) {
+            fx.ingest_invite(mailbox, uid, subject, ics);
+        }
+        agenda(&fx)
+    }
+
+    /// An override named in UTC and a cancellation naming the same instant
+    /// with a `TZID` are one occurrence: the cancellation ends the override,
+    /// and the series lists it once (PERSO-302).
+    #[test]
+    fn a_cancel_meets_an_override_written_in_another_form() {
+        let events = series_with(&[
+            (
+                "inbox",
+                "Moved",
+                occurrence_ics_as("REQUEST", "uid-z", 0, IN_UTC),
+            ),
+            (
+                "inbox",
+                "Cancelled",
+                occurrence_ics_as("CANCEL", "uid-z", 1, IN_BERLIN),
+            ),
+        ]);
+        assert_eq!(events.len(), 2, "{events:#?}");
+        let moved = events.iter().find(|e| e.subject == "Moved").unwrap();
+        assert!(moved.cancelled, "the override is cancelled");
+        let series = events.iter().find(|e| e.subject == "Weekly").unwrap();
+        assert_eq!(series.event.cancelled_instances.len(), 1);
+    }
+
+    /// A cancellation named with a `TZID` and a later override of the same
+    /// instant named in UTC are one occurrence: the override re-issues it,
+    /// and two copies of it in the two forms are one agenda row (PERSO-302).
+    #[test]
+    fn an_override_reissues_a_cancel_written_in_another_form() {
+        let cancel = (
+            "inbox",
+            "Cancelled",
+            occurrence_ics_as("CANCEL", "uid-z", 1, IN_BERLIN),
+        );
+        let events = series_with(&[
+            cancel.clone(),
+            (
+                "inbox",
+                "Moved",
+                occurrence_ics_as("REQUEST", "uid-z", 1, IN_UTC),
+            ),
+        ]);
+        let moved = events.iter().find(|e| e.subject == "Moved").unwrap();
+        assert!(
+            moved.cancelled,
+            "an override at the cancel's SEQUENCE is cancelled"
+        );
+
+        let events = series_with(&[
+            cancel,
+            (
+                "inbox",
+                "Back",
+                occurrence_ics_as("REQUEST", "uid-z", 2, IN_UTC),
+            ),
+            (
+                "archive",
+                "Back",
+                occurrence_ics_as("REQUEST", "uid-z", 2, IN_BERLIN),
+            ),
+        ]);
+        assert_eq!(subjects(&events), vec!["Weekly", "Back"], "{events:#?}");
+        assert!(!events[1].cancelled, "the override is live");
+        assert!(events[0].event.cancelled_instances.is_empty());
     }
 
     /// A malformed CANCEL costs itself and nothing else: the event it names

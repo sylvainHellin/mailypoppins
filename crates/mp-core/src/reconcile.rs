@@ -125,6 +125,22 @@ impl InviteMessage {
             .map(str::trim)
             .filter(|r| !r.is_empty())
     }
+
+    /// The occurrence the payload names, keyed by its instant (or its date)
+    /// rather than by the text of its `RECURRENCE-ID` ([`occurrence_key`]);
+    /// `None` for the whole series.
+    pub fn occurrence_key(&self) -> Option<String> {
+        self.recurrence_id().map(occurrence_key)
+    }
+}
+
+/// The key the fold gives the occurrence a `RECURRENCE-ID` in
+/// [`ParsedEvent::recurrence_id`]'s form names: one per instant, so the UTC
+/// form and the `TZID` form of one start meet (PERSO-302), one per date for
+/// an all-day value, and a floating time as written
+/// ([`crate::calendar_model::normalise_recurrence_id`]).
+pub fn occurrence_key(recurrence_id: &str) -> String {
+    crate::calendar_model::normalise_recurrence_id(recurrence_id)
 }
 
 /// A single REPLY observation: one attendee's `PARTSTAT` for one UID.
@@ -238,8 +254,18 @@ struct UidCancels {
     /// Each whole-series `METHOD:CANCEL` (no `RECURRENCE-ID`) seen for this
     /// UID.
     series: Vec<SeriesCancel>,
-    /// `RECURRENCE-ID` -> highest `SEQUENCE` of a single-occurrence CANCEL.
-    instances: std::collections::BTreeMap<String, u32>,
+    /// [`occurrence_key`] -> the single-occurrence CANCEL of it with the
+    /// highest `SEQUENCE`.
+    instances: std::collections::BTreeMap<String, InstanceCancel>,
+}
+
+/// The cancellation of one occurrence.
+#[derive(Debug, Clone)]
+struct InstanceCancel {
+    sequence: u32,
+    /// Its `RECURRENCE-ID` as the CANCEL writes it, in
+    /// [`ParsedEvent::recurrence_id`]'s form, the form a person reads.
+    named: String,
 }
 
 /// One whole-series `METHOD:CANCEL`.
@@ -315,8 +341,8 @@ fn roster<'a>(
 pub struct StatusIndex {
     /// UID -> its cancellations.
     cancels: HashMap<String, UidCancels>,
-    /// `(UID, RECURRENCE-ID or "")` -> the highest `(sequence, dtstamp)` seen
-    /// among the REQUESTs for that identity.
+    /// `(UID, occurrence_key or "")` -> the highest `(sequence, dtstamp)`
+    /// seen among the REQUESTs for that identity.
     latest: HashMap<(String, String), (u32, String)>,
 }
 
@@ -337,8 +363,21 @@ pub fn fold_status(invites: &[InviteMessage]) -> StatusIndex {
                     // A `RECURRENCE-ID` scopes the cancellation to that one
                     // occurrence; the rest of the series lives on.
                     Some(rid) => {
-                        let slot = entry.instances.entry(rid.to_string()).or_insert(seq);
-                        *slot = (*slot).max(seq);
+                        let cancel = InstanceCancel {
+                            sequence: seq,
+                            named: rid.to_string(),
+                        };
+                        let slot = entry
+                            .instances
+                            .entry(occurrence_key(rid))
+                            .or_insert_with(|| cancel.clone());
+                        // The highest SEQUENCE wins, and the form it is
+                        // named in, whatever the order of the rows.
+                        if (cancel.sequence, std::cmp::Reverse(&cancel.named))
+                            > (slot.sequence, std::cmp::Reverse(&slot.named))
+                        {
+                            *slot = cancel;
+                        }
                     }
                     None => entry.series.push(SeriesCancel {
                         sequence: seq,
@@ -353,10 +392,7 @@ pub fn fold_status(invites: &[InviteMessage]) -> StatusIndex {
                 }
             }
             "REQUEST" => {
-                let key = (
-                    uid.to_string(),
-                    invite.recurrence_id().unwrap_or_default().to_string(),
-                );
+                let key = (uid.to_string(), invite.occurrence_key().unwrap_or_default());
                 let rank = (seq, invite.dtstamp().to_string());
                 let slot = index.latest.entry(key).or_insert_with(|| rank.clone());
                 if rank > *slot {
@@ -398,7 +434,12 @@ impl StatusIndex {
         else {
             return;
         };
-        let rid = event.recurrence_id.clone();
+        let rid = event
+            .recurrence_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(occurrence_key);
         let seq = event.sequence;
         if let Some(cancels) = self.cancels.get(uid) {
             let invited = roster(
@@ -412,7 +453,7 @@ impl StatusIndex {
             let instance_cancelled = rid
                 .as_deref()
                 .and_then(|r| cancels.instances.get(r))
-                .is_some_and(|&c| c >= seq);
+                .is_some_and(|c| c.sequence >= seq);
             event.cancelled = series_cancelled || instance_cancelled;
             // Only the series row reports per-occurrence cancellations; an
             // occurrence payload reports its own state in `cancelled`.
@@ -445,13 +486,13 @@ impl StatusIndex {
         cancels
             .instances
             .iter()
-            .filter(|(rid, &cancelled)| {
-                let key = (uid.trim().to_string(), (*rid).clone());
+            .filter(|(key, cancel)| {
+                let key = (uid.trim().to_string(), (*key).clone());
                 self.latest
                     .get(&key)
-                    .is_none_or(|(reissued, _)| *reissued <= cancelled)
+                    .is_none_or(|(reissued, _)| *reissued <= cancel.sequence)
             })
-            .map(|(rid, _)| rid.clone())
+            .map(|(_, cancel)| cancel.named.clone())
             .collect()
     }
 }

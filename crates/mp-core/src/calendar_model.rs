@@ -1223,7 +1223,13 @@ impl EventKey {
     }
 }
 
-fn normalise_recurrence_id(raw: &str) -> String {
+/// The occurrence a `RECURRENCE-ID` names, in the canonical form
+/// [`EventKey`] keys it by: the UTC instant of a time with an offset, the
+/// date of an all-day value, and a floating time as written, a wall-clock
+/// time in the event's own zone. The iMIP fold keys occurrences by it too
+/// (PERSO-302), so `RECURRENCE-ID:20261123T090000Z` and
+/// `RECURRENCE-ID;TZID=Europe/Berlin:20261123T100000` are one occurrence.
+pub fn normalise_recurrence_id(raw: &str) -> String {
     let raw = raw.trim();
     if let Ok(instant) = DateTime::parse_from_rfc3339(raw) {
         return instant

@@ -28,10 +28,12 @@ pub struct ParsedAttendee {
 pub struct ParsedEvent {
     pub uid: Option<String>,
     /// `RECURRENCE-ID` when the payload addresses a single occurrence of a
-    /// recurring series rather than the whole series (#0031). Normalised the
-    /// same way `DTSTART` is, so a CANCEL naming the instance in UTC matches a
-    /// REQUEST naming it with a `TZID`. `None` means "the whole series", and
-    /// `(uid, recurrence_id)` is the identity a CANCEL/update applies to.
+    /// recurring series rather than the whole series (#0031). Rendered the
+    /// same way `DTSTART` is, which keeps the offset of a `TZID` time, so the
+    /// text of one instant differs between its UTC and its `TZID` forms; the
+    /// fold matches them by [`crate::reconcile::occurrence_key`] (PERSO-302).
+    /// `None` means "the whole series", and `(uid, recurrence_id)` is the
+    /// identity a CANCEL/update applies to.
     pub recurrence_id: Option<String>,
     pub method: Option<String>,
     pub sequence: u32,
