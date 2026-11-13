@@ -25,7 +25,10 @@
 //!   the store), a single event is read again and kept while it overlaps the
 //!   window, and a changed series master is read with its occurrences in the
 //!   window, which the CalendarView names by the series' `UID`, the series
-//!   being re-sent whole ([`SyncResult::resent_series`]).
+//!   being re-sent whole ([`SyncResult::resent_series`]). An item keeps its
+//!   ItemId when it turns from a single event into a series or back, so a
+//!   changed master is also removed as an event and a changed single event
+//!   is also a series re-sent with no occurrence.
 //!
 //! A state the server no longer knows (`ErrorInvalidSyncStateData`) starts a
 //! baseline. A view the server cuts at its item limit
@@ -451,12 +454,21 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
                     return Err(anyhow!("the Exchange server refused GetItem: {error}").into())
                 }
             };
+            // An item keeps its ItemId when it turns from a single event into
+            // a series or back, so each kind clears what the other left: a
+            // master is removed as an event (the store deletes removals
+            // before it writes the upserts and the series), and a single
+            // event is a series re-sent with no occurrence.
             if parse::item_type(&item) == Some(ItemType::RecurringMaster) {
-                masters.extend(self.series_of(calendar, &item));
+                if let Some(series) = self.series_of(calendar, &item) {
+                    result.removed.push(series.master_id.clone());
+                    masters.push(series);
+                }
                 continue;
             }
             match self.event_of(calendar, &item) {
                 Some(event) if event.overlaps(&window, chrono_tz::UTC) => {
+                    result.resent_series.push(event.id.clone());
                     result.upserts.push(event)
                 }
                 Some(event) => result.removed.push(event.id),

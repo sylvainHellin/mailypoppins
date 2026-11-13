@@ -247,8 +247,8 @@ async fn a_second_sync_applies_the_changes_and_resends_a_changed_series() {
     assert!(!result.full_resync);
     let ids: Vec<&str> = result.upserts.iter().map(|e| e.id.as_str()).collect();
     assert_eq!(ids, [SINGLE_ID, OCCURRENCE_ID]);
-    assert_eq!(result.removed, ["gone"]);
-    assert_eq!(result.resent_series, [MASTER_ID]);
+    assert_eq!(result.removed, ["gone", MASTER_ID]);
+    assert_eq!(result.resent_series, [SINGLE_ID, MASTER_ID]);
     assert_eq!(result.series.len(), 1);
     assert_eq!(
         result.upserts[1].series_master_id.as_deref(),
@@ -262,6 +262,117 @@ async fn a_second_sync_applies_the_changes_and_resends_a_changed_series() {
         "only the changed series' occurrences are read"
     );
     assert!(backend.fetch().exhausted());
+}
+
+/// The CalendarView fixture cut to its first item, the single event.
+fn view_of_first_item() -> String {
+    let second = VIEW.match_indices("<t:CalendarItem>").nth(1).unwrap().0;
+    let end = VIEW.find("</t:Items>").unwrap();
+    format!("{}{}", &VIEW[..second], &VIEW[end..])
+}
+
+/// A store holding the baseline `result` of the calendar, and the sync
+/// after it applied.
+fn store_after(
+    baseline: &crate::calendar_backend::SyncResult,
+    incremental: &crate::calendar_backend::SyncResult,
+) -> (tempfile::TempDir, crate::store::Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 11, 13, 8, 0, 0).unwrap();
+    for result in [baseline, incremental] {
+        crate::store::calendar::apply_sync(&store, "tum", CALENDAR_ID, result, window(), now)
+            .unwrap();
+    }
+    (dir, store)
+}
+
+/// The ids of the events the store holds for the account, sorted.
+fn stored_ids(store: &crate::store::Store) -> Vec<String> {
+    let mut ids: Vec<String> =
+        crate::store::calendar::events_in_range(store, &["tum"], window(), chrono_tz::UTC, false)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.id)
+            .collect();
+    ids.sort();
+    ids
+}
+
+/// A single event that became a series under the same ItemId leaves no row
+/// of its own: the series master is held with the series, and the cache
+/// shows its occurrences in the window instead.
+#[tokio::test]
+async fn a_single_event_that_became_a_series_leaves_no_stale_row() {
+    let was_single = SINGLE.replace(SINGLE_ID, MASTER_ID);
+    let first = backend(
+        ScriptedFetch::default()
+            .answer("SyncFolderItems", LAST_PAGE)
+            .answer(
+                "FindItem",
+                &view_of_first_item().replace(SINGLE_ID, MASTER_ID),
+            )
+            .answer("GetItem", &get_item(&[&was_single])),
+    );
+    let first_view = first
+        .sync_window(&calendar(), window(), None)
+        .await
+        .unwrap();
+    let changes = page_with(&format!(
+        "<t:Update><t:CalendarItem><t:ItemId Id=\"{MASTER_ID}\" ChangeKey=\"k\"/>\
+         <t:CalendarItemType>RecurringMaster</t:CalendarItemType></t:CalendarItem></t:Update>"
+    ));
+    let second = backend(
+        ScriptedFetch::default()
+            .answer("SyncFolderItems", &changes)
+            .answer("GetItem", &get_item(&[MASTER]))
+            .answer("FindItem", VIEW)
+            .answer("GetItem", &get_item(&[OCCURRENCE])),
+    );
+    let second_view = second
+        .sync_window(&calendar(), window(), Some(token("stored")))
+        .await
+        .unwrap();
+    assert!(second.fetch().exhausted());
+    let (_dir, store) = store_after(&first_view, &second_view);
+    assert_eq!(stored_ids(&store), [OCCURRENCE_ID]);
+    let series = crate::store::calendar::get_series(&store, "tum", MASTER_ID).unwrap();
+    assert_eq!(series.map(|series| series.uid).as_deref(), Some(SERIES_UID));
+}
+
+/// A series that became a single event under the same ItemId takes its
+/// cached occurrences along: the single event stands alone, and an
+/// exception of another series stays.
+#[tokio::test]
+async fn a_series_that_became_a_single_event_leaves_no_stale_occurrence() {
+    let first = backend(baseline_script(ScriptedFetch::default()));
+    let first_view = first
+        .sync_window(&calendar(), window(), None)
+        .await
+        .unwrap();
+    let changes = page_with(&format!(
+        "<t:Update><t:CalendarItem><t:ItemId Id=\"{MASTER_ID}\" ChangeKey=\"k\"/>\
+         <t:CalendarItemType>Single</t:CalendarItemType></t:CalendarItem></t:Update>"
+    ));
+    let now_single = SINGLE.replace(SINGLE_ID, MASTER_ID);
+    let second = backend(
+        ScriptedFetch::default()
+            .answer("SyncFolderItems", &changes)
+            .answer("GetItem", &get_item(&[&now_single])),
+    );
+    let second_view = second
+        .sync_window(&calendar(), window(), Some(token("stored")))
+        .await
+        .unwrap();
+    assert!(second.fetch().exhausted());
+    let (_dir, store) = store_after(&first_view, &second_view);
+    let mut expected = vec![SINGLE_ID, MASTER_ID, EXCEPTION_ID];
+    expected.sort();
+    assert_eq!(stored_ids(&store), expected);
+    let single = crate::store::calendar::get_event(&store, "tum", MASTER_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(single.kind, EventKind::Single);
 }
 
 /// A single event moved out of the window, or gone before it was read, is
