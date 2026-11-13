@@ -5020,17 +5020,24 @@ struct LoginWatch<'a> {
     /// The dial until the server took the login, `None` after it and for a
     /// test that submits past the gate.
     dial: Option<&'a mut crate::login_gate::Dial>,
-    /// How long a send may run with its login unanswered before the dial lets
-    /// go of its mark.
+    /// How long a send may run with its login unanswered before the dial
+    /// counts it unanswered, from the start of the send, connection included.
     deadline: std::time::Duration,
 }
 
 impl LoginWatch<'_> {
-    /// Await `send`. While the dial marks its row, a send still unanswered at
-    /// the deadline lets go of the mark and goes on: lettre bounds only the
-    /// TCP connect, and the login cannot be told apart from the first
-    /// recipient's upload, which a deadline must not cut, so the send keeps
-    /// running and the other dials of the row are free again.
+    /// Await `send`. While the dial marks its row (a password refused
+    /// before), a send whose login is still unanswered at the deadline,
+    /// counted from the start of the send with the connect, the greeting,
+    /// EHLO and TLS in it, counts as one more step of the row's hold
+    /// ([`crate::login_gate::Dial::unanswered`]) and goes on. lettre does not
+    /// say whether AUTH went out, so every unanswered deadline is taken as
+    /// possibly sent: on a slow link the row then holds before AUTH is
+    /// written, and the IMAP login of a shared password waits rather than
+    /// being refused beside it in the same step. The login cannot be told
+    /// apart from the first recipient's upload, which a deadline must not
+    /// cut, so the send keeps running, and its refusal or success, when it
+    /// comes, is reported as usual.
     async fn answer_of<T>(&mut self, send: impl std::future::Future<Output = T>) -> T {
         let Some(dial) = self.dial.as_deref_mut().filter(|dial| dial.marked()) else {
             return send.await;
@@ -5041,10 +5048,10 @@ impl LoginWatch<'_> {
             () = tokio::time::sleep(self.deadline) => {
                 warn!(
                     "[send] the SMTP login got no answer within {:?}; the send goes on, and \
-                     the other logins with its password are no longer held",
+                     the other logins with its password are held as after a refusal",
                     self.deadline
                 );
-                dial.let_go();
+                dial.unanswered();
                 send.await
             }
         }
@@ -5664,6 +5671,16 @@ mod smtp_durability_tests {
         auth: &'static [u8],
         rcpt: &'static [u8],
     ) -> (u16, std::sync::Arc<AtomicUsize>) {
+        smtp_server_greeting_after(std::time::Duration::ZERO, auth, rcpt).await
+    }
+
+    /// [`smtp_server`], greeting each connection only after `delay`: a slow
+    /// link or a slow server before the login.
+    async fn smtp_server_greeting_after(
+        delay: std::time::Duration,
+        auth: &'static [u8],
+        rcpt: &'static [u8],
+    ) -> (u16, std::sync::Arc<AtomicUsize>) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -5678,6 +5695,7 @@ mod smtp_durability_tests {
                 tokio::spawn(async move {
                     let (read, mut write) = stream.into_split();
                     let mut lines = BufReader::new(read);
+                    tokio::time::sleep(delay).await;
                     let _ = write.write_all(b"220 fake ESMTP\r\n").await;
                     let mut line = String::new();
                     loop {
@@ -5844,17 +5862,10 @@ mod smtp_durability_tests {
         sending.abort();
     }
 
-    /// PERSO-296: an SMTP login the server never answers lets go of the
-    /// gate's mark at the deadline, as no refusal, while the send goes on:
-    /// the other dials of the row (the IMAP tick and watcher of a shared
-    /// password) are free again. lettre bounds only the TCP connect, so the
-    /// mark used to last as long as the server kept quiet.
-    #[tokio::test]
-    async fn an_smtp_login_that_never_answers_lets_go_of_its_mark_at_the_deadline() {
+    /// A refused SMTP row for `config`'s user and password whose hold the
+    /// user just ended, so the next dial marks it in flight.
+    fn refused_and_released(config: &SmtpConfig) -> crate::login_gate::Login {
         use crate::login_gate::{self, Login, LoginRejected};
-        // An empty answer to AUTH is none at all.
-        let (port, logins) = smtp_server(b"", b"250 OK\r\n").await;
-        let config = refused_config(port);
         let login = Login::Smtp(config.login());
         let refusal = LoginRejected::new(
             mp_protocol::account::RejectedLogin::Smtp,
@@ -5862,6 +5873,21 @@ mod smtp_durability_tests {
         );
         login_gate::record(&login, &config.password, &refusal);
         login_gate::forget(&login);
+        login
+    }
+
+    /// PERSO-296: an SMTP login of a password refused before, unanswered by
+    /// the deadline, counts as one more step of the password's hold, while
+    /// the send goes on: the other dials of the row (the IMAP tick and
+    /// watcher of a shared password) are held from then on, as after a
+    /// refusal. It used to free the row with nothing counted.
+    #[tokio::test]
+    async fn an_smtp_login_unanswered_by_the_deadline_is_a_step_of_its_hold() {
+        use crate::login_gate;
+        // An empty answer to AUTH is none at all.
+        let (port, logins) = smtp_server(b"", b"250 OK\r\n").await;
+        let config = refused_config(port);
+        let login = refused_and_released(&config);
 
         let built = Outbox::built("<silent-auth@example.com>", Some("id:silent-auth"));
         let started = std::time::Instant::now();
@@ -5882,16 +5908,64 @@ mod smtp_durability_tests {
         );
         tokio::time::sleep_until((started + std::time::Duration::from_millis(1500)).into()).await;
         assert!(!sending.is_finished(), "the send goes on");
-        assert!(
-            login_gate::dial(&login, &config.password).is_ok(),
-            "past the deadline the row is free"
-        );
-        assert_eq!(
-            login_gate::in_a_row_for_test(&login, &config.password),
-            1,
-            "no answer is no refusal"
-        );
+        let held = login_gate::dial(&login, &config.password)
+            .err()
+            .expect("past the deadline the row holds as after a refusal");
+        assert!(held.from_list());
+        assert_eq!(login_gate::in_a_row_for_test(&login, &config.password), 2);
         sending.abort();
+    }
+
+    /// PERSO-296, the slow link: the SMTP deadline runs from the start of the
+    /// send, connection included, so a greeting that comes late can use it
+    /// up before AUTH is sent. The row then holds as after a refusal, so the
+    /// IMAP login of the shared password is held rather than sent beside the
+    /// late AUTH, and the server's refusal of that AUTH is the same step: one
+    /// wrong password is refused once per step. It used to free the row, and
+    /// the IMAP tick and the late AUTH were refused twice in one step.
+    #[tokio::test]
+    async fn a_slow_greeting_past_the_deadline_holds_the_imap_login_of_a_shared_password() {
+        use crate::login_gate::{self, login_rejected, Login};
+        let (port, logins) = smtp_server_greeting_after(
+            std::time::Duration::from_millis(800),
+            b"535 5.7.8 Authentication credentials invalid\r\n",
+            b"250 OK\r\n",
+        )
+        .await;
+        let config = refused_config(port);
+        let smtp = refused_and_released(&config);
+        let imap = Login::Imap(config.login());
+
+        let built = Outbox::built("<slow-greeting@example.com>", Some("id:slow-greeting"));
+        let sending = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                let mailer = server_mailer(&config);
+                submit_over_within(
+                    &built,
+                    &config,
+                    &mailer,
+                    std::time::Duration::from_millis(300),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(logins.load(Ordering::SeqCst), 0, "AUTH is not sent yet");
+        let held = login_gate::dial(&imap, &config.password)
+            .err()
+            .expect("the IMAP login of the shared password is held, not sent");
+        assert!(held.from_list());
+
+        let sent = sending.await.expect("the send ran");
+        let err = sent.expect_err("the server refused the login");
+        assert!(login_rejected(&err).is_some(), "{err:#}");
+        assert_eq!(logins.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            login_gate::in_a_row_for_test(&smtp, &config.password),
+            2,
+            "the late refusal is the step the unanswered login counted"
+        );
     }
 
     /// The SMTP configuration of `port`'s server, with a password it refuses.

@@ -568,15 +568,44 @@ mod tests {
         assert_eq!(server.logins(), 3);
     }
 
-    /// PERSO-296: a LOGIN the server never answers ends at the dial's
-    /// deadline, with an error naming the server and the step, and frees the
-    /// row it marked: no answer is no refusal, so the count stays and the
-    /// next dial of the row asks the server. Before the deadline, a hung dial
-    /// held every other dial of its row for as long as it hung.
-    #[test]
-    fn a_login_that_never_answers_ends_at_the_deadline_and_frees_the_row() {
-        use super::super::fake_imap::RejectingImapServer;
+    /// The dial of `config` with a 300 ms deadline, which must end at it
+    /// rather than at the server's answer, as no refusal, with an error
+    /// naming the server and `step`.
+    fn dial_past_the_deadline(config: &ImapConfig, step: &str) {
         use super::super::open_imap_session_within;
+        let started = Instant::now();
+        let err = match futures::executor::block_on(open_imap_session_within(
+            config,
+            Duration::from_millis(300),
+        )) {
+            Ok(_) => panic!("the dial got no answer"),
+            Err(e) => e,
+        };
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "the dial ended at its deadline, not at the server's answer: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            crate::login_gate::login_rejected(&err).is_none(),
+            "no answer is no refusal: {err:#}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("127.0.0.1:{}", config.port)) && text.contains(step),
+            "the error names the server and the step: {text}"
+        );
+    }
+
+    /// PERSO-296: a LOGIN of a password the server refused before, answered
+    /// only after the dial's deadline, counts as one more step of the
+    /// password's hold, since the late answer may well be a refusal: the row
+    /// holds from then on and the next dial is answered from the list. It
+    /// used to free the row with nothing counted, so a server slower than
+    /// the deadline to refuse was asked at tick and watcher cadence.
+    #[test]
+    fn a_login_of_a_refused_password_unanswered_by_the_deadline_is_a_step_of_its_hold() {
+        use super::super::fake_imap::RejectingImapServer;
         use crate::login_gate::{in_a_row_for_test, login_rejected, Login};
 
         let server = RejectingImapServer::start();
@@ -589,37 +618,76 @@ mod tests {
         assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
         crate::login_gate::forget(&login);
 
-        server.set_login_delay(Duration::from_secs(5));
-        let started = Instant::now();
-        let err = match futures::executor::block_on(open_imap_session_within(
-            &rejected,
-            Duration::from_millis(300),
-        )) {
+        server.set_login_delay(Duration::from_millis(800));
+        dial_past_the_deadline(&rejected, "login");
+        assert_eq!(in_a_row_for_test(&login, "wrong"), 2, "a step of the hold");
+        // The server's late NO comes and goes.
+        std::thread::sleep(Duration::from_millis(800));
+        server.set_login_delay(Duration::ZERO);
+        let err = match futures::executor::block_on(open_imap_session(&rejected)) {
             Ok(_) => panic!("the fake server accepts no login"),
             Err(e) => e,
         };
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the dial ended at its deadline, not at the server's answer: {:?}",
-            started.elapsed()
+            login_rejected(&err).is_some_and(|r| r.from_list()),
+            "the next dial is answered from the list: {err:#}"
         );
-        assert!(
-            login_rejected(&err).is_none(),
-            "no answer is no refusal: {err:#}"
-        );
-        let text = err.to_string();
-        assert!(
-            text.contains(&format!("127.0.0.1:{}", server.port())) && text.contains("login"),
-            "the error names the server and the step: {text}"
-        );
-        assert_eq!(in_a_row_for_test(&login, "wrong"), 1, "the count stayed");
+        assert_eq!(server.logins(), 2, "the refusal and the unanswered login");
+        assert_eq!(in_a_row_for_test(&login, "wrong"), 2);
+    }
+
+    /// PERSO-296: a LOGIN of a password never refused, unanswered by the
+    /// deadline, records nothing, and the next dial asks the server.
+    #[test]
+    fn a_login_of_a_password_never_refused_unanswered_by_the_deadline_records_nothing() {
+        use super::super::fake_imap::RejectingImapServer;
+        use crate::login_gate::{in_a_row_for_test, Login};
+
+        let server = RejectingImapServer::start();
+        let fresh = ImapConfig {
+            password: "fresh".into(),
+            accept_invalid_certs: true,
+            ..config(server.port())
+        };
+        let login = Login::Imap(fresh.login());
+        server.set_login_delay(Duration::from_millis(800));
+        dial_past_the_deadline(&fresh, "login");
+        assert_eq!(in_a_row_for_test(&login, "fresh"), 0, "nothing recorded");
 
         server.set_login_delay(Duration::ZERO);
-        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
-        assert_eq!(
-            server.logins(),
-            3,
-            "the next dial of the row asked the server"
+        assert!(futures::executor::block_on(open_imap_session(&fresh)).is_err());
+        assert_eq!(server.logins(), 2, "the next dial asked the server");
+    }
+
+    /// PERSO-296: a dial that runs out of time before its LOGIN was written
+    /// (a server that never greets) counts nothing, even for a password the
+    /// server refused before: the server was never asked, and the row is free
+    /// for the next dial.
+    #[test]
+    fn a_deadline_before_the_login_was_written_counts_nothing() {
+        use crate::login_gate::{in_a_row_for_test, Login, LoginRejected};
+
+        // Bound and never accepted: the kernel completes the connect, and no
+        // greeting ever comes.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("a localhost port");
+        let port = silent.local_addr().expect("its address").port();
+        let rejected = ImapConfig {
+            password: "wrong".into(),
+            ..config(port)
+        };
+        let login = Login::Imap(rejected.login());
+        let refusal = LoginRejected::new(
+            mp_protocol::account::RejectedLogin::Imap,
+            "no response: LOGIN failed.".into(),
+        );
+        crate::login_gate::record(&login, "wrong", &refusal);
+        crate::login_gate::forget(&login);
+
+        dial_past_the_deadline(&rejected, "greeting");
+        assert_eq!(in_a_row_for_test(&login, "wrong"), 1, "nothing counted");
+        assert!(
+            crate::login_gate::dial(&login, "wrong").is_ok(),
+            "the row is free for the next dial"
         );
     }
 

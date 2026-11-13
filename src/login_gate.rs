@@ -66,19 +66,38 @@
 //! (`a_dial_held_by_one_in_flight_says_a_login_is_being_tried`); the mark is a
 //! guard ([`Dial`]) that clears on a success, a refusal, any other error, a
 //! timeout and a cancelled task alike (`a_dial_in_flight_holds_the_others_of_its_row`,
-//! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`). No
-//! dial keeps its mark past [`LOGIN_DEADLINE`] after its connection opened:
-//! the IMAP dial and the Graph token refresh fail at it as no answer, which
-//! counts as no refusal (`imap_client::pool`'s
-//! `a_login_that_never_answers_ends_at_the_deadline_and_frees_the_row`,
-//! `crate::graph`'s `a_refresh_that_never_answers_ends_at_the_deadline_and_frees_the_row`),
-//! and an SMTP submission lets go of its mark at it and goes on
-//! (`crate::send`'s `an_smtp_login_that_never_answers_lets_go_of_its_mark_at_the_deadline`);
-//! a mark older than `MARK_LIFETIME` holds nothing whatever left it
-//! (`a_mark_older_than_any_dial_is_free`). So
-//! a wrong password reaches the server 3 times in the first hour after its
-//! first refusal and once an hour after, with the sync tick, the IDLE watcher
-//! and the outbox drain racing at every hold end, until the user acts
+//! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`).
+//!
+//! No dial keeps its mark past [`LOGIN_DEADLINE`]. A login that may have
+//! reached the server and got no answer by then, made with a secret the row
+//! holds a refusal of, counts as one more step of the row's hold, holding
+//! from then on exactly as a refusal would, since the missing answer may
+//! well have been one; the answer from the list then says the server has not
+//! answered a later login (`an_unanswered_login_of_a_refused_password_is_a_step_of_its_hold`).
+//! A secret never refused has no row, and its unanswered dial counts
+//! nothing. The deadline of each dial:
+//!
+//! - the IMAP dial has it from the end of its TCP connect; one that runs out
+//!   in the LOGIN counts, one that runs out before LOGIN is written (the
+//!   greeting, STARTTLS, the TLS handshake) counts nothing (`imap_client::pool`'s
+//!   `a_login_of_a_refused_password_unanswered_by_the_deadline_is_a_step_of_its_hold`,
+//!   `a_login_of_a_password_never_refused_unanswered_by_the_deadline_records_nothing`,
+//!   `a_deadline_before_the_login_was_written_counts_nothing`);
+//! - an SMTP submission has it from the start of the send, the connect, the
+//!   greeting, EHLO and TLS included, and since lettre does not say whether
+//!   AUTH went out, every unanswered deadline counts; the send goes on, and
+//!   its answer is reported when it comes (`crate::send`'s
+//!   `an_smtp_login_unanswered_by_the_deadline_is_a_step_of_its_hold`,
+//!   `a_slow_greeting_past_the_deadline_holds_the_imap_login_of_a_shared_password`);
+//! - the Graph token refresh has it for its whole request and counts at it
+//!   (`crate::graph`'s `a_refresh_unanswered_by_the_deadline_counts_only_for_a_refused_token`).
+//!
+//! A mark older than `MARK_LIFETIME` holds nothing whatever left it
+//! (`a_mark_older_than_any_dial_is_free`). So a wrong password reaches the
+//! server 3 times in the first hour after its first refusal and once an hour
+//! after, a server slower than the deadline to answer included, with the
+//! sync tick, the IDLE watcher and the outbox drain racing at every hold
+//! end, until the user acts
 //! (`one_wrong_password_is_asked_three_times_in_the_first_hour_and_once_an_hour_after`).
 //! A secret never refused carries no mark and is dialled by as many tasks
 //! as ask, as the pool opens its sessions (`a_secret_never_refused_is_dialled_concurrently`),
@@ -157,15 +176,16 @@ pub const SECOND_HOLD: Duration = Duration::from_secs(10 * 60);
 /// Graph sign-in from its first refusal.
 pub const LONG_HOLD: Duration = Duration::from_secs(60 * 60);
 
-/// How long a dial of a login may wait for the server once its connection is
-/// open, through the TLS handshake, STARTTLS and the login itself, before it
-/// is given up on as no answer, which is no refusal (PERSO-296).
+/// How long a dial of a login may wait for the server's answer before it is
+/// given up on as no answer, which is no refusal (PERSO-296), but counts as a
+/// step of the hold of a password refused before ([`Dial::unanswered`]).
 ///
-/// The IMAP dial fails at it; an SMTP submission, which cannot tell its login
-/// from the first recipient's upload, lets go of its mark at it and goes on;
-/// a Graph token refresh fails at it. Generous on purpose, as lettre's own
-/// 60 s command timeout is: a slow server on a bad link must not lose its
-/// login to it.
+/// The IMAP dial has it from the end of its TCP connect and fails at it; an
+/// SMTP submission, which cannot tell its login from the first recipient's
+/// upload, has it from the start of the send, connection included, and goes
+/// on past it; a Graph token refresh has it for its whole request and fails
+/// at it. Generous on purpose, as lettre's 60 s connect timeout is: a slow
+/// server on a bad link must not lose its login to it.
 pub const LOGIN_DEADLINE: Duration = Duration::from_secs(60);
 
 /// How long a dial's in-flight mark holds the other dials of its row: past
@@ -285,6 +305,9 @@ pub struct LoginRejected {
     /// Why the gate answered without dialling, `None` for an answer the
     /// server sent.
     held: Option<Held>,
+    /// The hold's last step is a login the server did not answer, after the
+    /// refusal `answer` is.
+    unanswered: bool,
 }
 
 /// Why the gate answered a dial without dialling.
@@ -305,6 +328,7 @@ impl LoginRejected {
             answer,
             entry: None,
             held: None,
+            unanswered: false,
         }
     }
 
@@ -363,20 +387,36 @@ impl fmt::Display for LoginRejected {
                 RejectedLogin::Graph => "the account signs in again",
                 _ => "the password is set again",
             };
+            // The step the hold is at may be a later login the server did not
+            // answer by its deadline, which counts as one but is no refusal.
+            let noun = attempt.trim_start_matches("a ");
+            let (refused, then) = match self.unanswered {
+                false => (format!("{who} refused {what}{elsewhere} earlier"), " and"),
+                true => (
+                    format!(
+                        "{who} refused {what}{elsewhere} earlier and has not answered a later \
+                         {noun}"
+                    ),
+                    "; it",
+                ),
+            };
             match held {
                 Held::Until(at) => {
                     let at = chrono::DateTime::<chrono::Local>::from(at).format("%H:%M");
                     write!(
                         f,
-                        " ({who} refused {what}{elsewhere} earlier and is asked again at {at}, or \
-                         at once after {set} or {again})"
+                        " ({refused}{then} is asked again at {at}, or at once after {set} or \
+                         {again})"
                     )?;
                 }
-                Held::Trying => write!(
-                    f,
-                    " ({who} refused {what}{elsewhere} earlier and {attempt} with it is being \
-                     tried right now; {who} is asked again at once after {set} or {again})"
-                )?,
+                Held::Trying => {
+                    let and = if self.unanswered { ", and" } else { " and" };
+                    write!(
+                        f,
+                        " ({refused}{and} {attempt} with it is being tried right now; {who} is \
+                         asked again at once after {set} or {again})"
+                    )?
+                }
             }
         }
         Ok(())
@@ -549,24 +589,26 @@ impl Dial {
         recorded
     }
 
+    /// The login got no answer by its deadline, once it may have reached the
+    /// server. A password the list holds a refusal of counts it as one more
+    /// step of the row's hold, since the missing answer may well have been
+    /// a refusal; a password never refused is only let go of.
+    pub fn unanswered(&mut self) {
+        let mark = self.mark.take();
+        refusals().unanswered(&self.login, &self.secret, mark, Instant::now());
+    }
+
     /// Whether the dial still marks its row in flight.
     pub fn marked(&self) -> bool {
         self.mark.is_some()
-    }
-
-    /// Free the row this dial marked without an answer, for a dial that goes
-    /// on past [`LOGIN_DEADLINE`]; its answer, when it comes, is still
-    /// reported.
-    pub fn let_go(&mut self) {
-        if let Some(mark) = self.mark.take() {
-            refusals().end(&self.login, &self.secret, mark);
-        }
     }
 }
 
 impl Drop for Dial {
     fn drop(&mut self) {
-        self.let_go();
+        if let Some(mark) = self.mark.take() {
+            refusals().end(&self.login, &self.secret, mark);
+        }
     }
 }
 
@@ -637,6 +679,9 @@ struct Row {
     /// The login the server last refused the secret at, and its answer.
     refused_at: RejectedLogin,
     answer: String,
+    /// The step is a login the server did not answer by the deadline, not a
+    /// refusal, which the answer from the list says.
+    unanswered: bool,
     /// The dial of the secret in flight since the hold ended, which holds
     /// every other dial of the row until it answers or its mark goes stale.
     in_flight: Option<Mark>,
@@ -713,6 +758,7 @@ impl Refusals {
             refused_at: row.refused_at,
             answer: row.answer.clone(),
             entry: Some(row.entry),
+            unanswered: row.unanswered,
             held: Some(if row.holds(now) {
                 Held::Until(wall + row.until.saturating_duration_since(now))
             } else {
@@ -764,33 +810,64 @@ impl Refusals {
         rejected: &LoginRejected,
         now: Instant,
     ) -> LoginRejected {
-        self.see(&login, &secret);
-        let key = RowKey::of(&login, &secret);
-        let entry = match self.rows.get(&key) {
-            // Two dials that raced each other past the gate, at one login or
-            // at both, were refused once: the second keeps the first's entry,
-            // so a caller logs the refusal once, and its hold.
-            Some(row) if row.holds(now) => row.entry,
-            previous => {
-                let in_a_row = previous.map_or(1, |row| row.in_a_row + 1);
-                self.next_entry += 1;
-                self.rows.insert(
-                    key,
-                    Row {
-                        until: now + hold(&login, in_a_row),
-                        in_a_row,
-                        entry: self.next_entry,
-                        refused_at: login.kind(),
-                        answer: rejected.answer.clone(),
-                        in_flight: None,
-                    },
-                );
-                self.next_entry
-            }
-        };
+        let entry = self.step(login, secret, Some(&rejected.answer), now);
         LoginRejected {
             entry: Some(entry),
             ..rejected.clone()
+        }
+    }
+
+    /// Move the row of `login`'s `secret` to its next step at `now`, for the
+    /// server's refusal `answer` or, with `None`, a login of a refused secret
+    /// it did not answer by the deadline; answer the row's entry.
+    ///
+    /// Two dials that raced each other past the gate, at one login or at
+    /// both, and were refused or went unanswered, are one step: the second
+    /// keeps the first's entry, so a caller logs it once, and its hold. A
+    /// dial's mark stays on the row it marked, for [`Refusals::end`] to
+    /// clear, so a step cannot take the mark of a later dial with it.
+    fn step(&mut self, login: Login, secret: [u8; 32], answer: Option<&str>, now: Instant) -> u64 {
+        self.see(&login, &secret);
+        let key = RowKey::of(&login, &secret);
+        let previous = self.rows.get(&key);
+        if let Some(row) = previous.filter(|row| row.holds(now)) {
+            return row.entry;
+        }
+        let in_a_row = previous.map_or(1, |row| row.in_a_row + 1);
+        let unanswered = answer.is_none();
+        let (refused_at, answer) = match (answer, previous) {
+            (Some(answer), _) => (login.kind(), answer.to_string()),
+            (None, Some(row)) => (row.refused_at, row.answer.clone()),
+            // An unanswered login steps only a row that exists.
+            (None, None) => (login.kind(), String::new()),
+        };
+        let row = Row {
+            until: now + hold(&login, in_a_row),
+            in_a_row,
+            entry: self.next_entry + 1,
+            refused_at,
+            answer,
+            unanswered,
+            in_flight: previous.and_then(|row| row.in_flight),
+        };
+        self.next_entry += 1;
+        self.rows.insert(key, row);
+        self.next_entry
+    }
+
+    /// The dial marked `mark` (if any) of `login` with `secret` got no answer
+    /// by its deadline at `now`.
+    ///
+    /// A secret with a row moves to the row's next step and holds from `now`,
+    /// as a refusal would ([`Refusals::step`]), keeping the answer the server
+    /// last refused it with; a secret with no row was never refused, and its
+    /// dial is only let go of.
+    fn unanswered(&mut self, login: &Login, secret: &[u8; 32], mark: Option<u64>, now: Instant) {
+        if self.rows.contains_key(&RowKey::of(login, secret)) {
+            self.step(login.clone(), *secret, None, now);
+        }
+        if let Some(mark) = mark {
+            self.end(login, secret, mark);
         }
     }
 
@@ -1334,6 +1411,58 @@ mod tests {
                  is set again or a message is sent)"
             ),
             "{text}"
+        );
+    }
+
+    /// A login unanswered by its deadline, with a password the list holds a
+    /// refusal of, is one more step of the row's hold, holding from then on,
+    /// and the answer from the list says the server did not answer; with a
+    /// password never refused it records nothing.
+    #[test]
+    fn an_unanswered_login_of_a_refused_password_is_a_step_of_its_hold() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let wrong = fingerprint("wrong");
+        let first = list.record(imap(), wrong, &rejected(&imap()), at);
+        let now = at + FIRST_HOLD;
+        let mark = list.begin(&smtp(), &wrong, now, wall()).unwrap();
+        list.unanswered(&smtp(), &wrong, mark, now);
+
+        let held = list
+            .begin(&imap(), &wrong, now + SECOND, wall())
+            .expect_err("the unanswered login holds the row");
+        assert_ne!(held.entry(), first.entry(), "a step of its own");
+        let again = chrono::DateTime::<chrono::Local>::from(wall() + SECOND_HOLD - SECOND)
+            .format("%H:%M")
+            .to_string();
+        assert!(
+            held.to_string().ends_with(&format!(
+                "(the server refused this password earlier and has not answered a later login; \
+                 it is asked again at {again}, or at once after the password is set again or a \
+                 sync is started)"
+            )),
+            "{held}"
+        );
+        assert!(list
+            .refused(&imap(), &wrong, now + SECOND_HOLD - SECOND, wall())
+            .is_some());
+        assert!(
+            list.refused(&imap(), &wrong, now + SECOND_HOLD, wall())
+                .is_none(),
+            "held for the second step, from the unanswered login on"
+        );
+        assert_eq!(
+            held_for(&mut list, &imap(), "wrong", now + SECOND_HOLD),
+            LONG_HOLD,
+            "a refusal after it is the third in the row"
+        );
+
+        let right = fingerprint("right");
+        let mark = list.begin(&imap(), &right, now, wall()).unwrap();
+        list.unanswered(&imap(), &right, mark, now);
+        assert!(
+            list.begin(&imap(), &right, now, wall()).is_ok(),
+            "a password never refused is not held for no answer"
         );
     }
 

@@ -371,7 +371,9 @@ pub async fn access_token(config: &GraphConfig) -> Result<String> {
 ///
 /// The refresh's HTTP client sets no timeout of its own, so the deadline
 /// bounds it here: a refresh the endpoint does not answer in time fails as
-/// no answer, which is no refusal, and frees the row its dial marked.
+/// no answer, which is no refusal; for a refresh token Entra refused before
+/// it counts as one more step of its hold, since the missing answer may well
+/// have been a refusal, and for one never refused it only frees the dial.
 async fn gated_token<F, Fut>(
     account: &str,
     deadline: std::time::Duration,
@@ -390,6 +392,9 @@ where
     let fetched = async_std::future::timeout(deadline, fetch())
         .await
         .unwrap_or_else(|_| {
+            // The request may have reached Entra, and its answer may have
+            // been a refusal on its way.
+            dial.unanswered();
             Err(anyhow::anyhow!(
                 "login.microsoftonline.com did not answer the token refresh of {account} within \
                  {deadline:?}"
@@ -4166,24 +4171,9 @@ mod tests {
     /// The deadline of the token refreshes in the tests that answer at once.
     const DEADLINE: std::time::Duration = crate::login_gate::LOGIN_DEADLINE;
 
-    /// PERSO-296: a token refresh the endpoint never answers ends at the
-    /// deadline, as no refusal, and frees the row it marked, so the next
-    /// refresh asks. Before the deadline the refresh, and with it the mark,
-    /// waited for as long as the endpoint did.
-    #[tokio::test]
-    async fn a_refresh_that_never_answers_ends_at_the_deadline_and_frees_the_row() {
-        use crate::login_gate::{self, Login, LoginRejected};
-        let _data = mp_core::config::test_env::TestDataDir::new();
-        let account = "silent-graph";
-        let login = Login::Graph(account.to_string());
-        let refusal = LoginRejected::new(
-            mp_protocol::account::RejectedLogin::Graph,
-            "invalid_grant".into(),
-        );
-        // No token cache: the refresh token the dial reads is empty.
-        login_gate::record(&login, "", &refusal);
-        login_gate::forget(&login);
-
+    /// A refresh of `account` the endpoint does not answer within a 200 ms
+    /// deadline: it ends at the deadline, as no refusal, naming the step.
+    async fn silent_refresh(account: &str) {
         let started = std::time::Instant::now();
         let silent = gated_token(account, std::time::Duration::from_millis(200), || async {
             async_std::task::sleep(std::time::Duration::from_secs(5)).await;
@@ -4195,17 +4185,46 @@ mod tests {
             "the refresh ended at its deadline: {:?}",
             started.elapsed()
         );
-        assert!(login_gate::login_rejected(&err).is_none(), "{err:#}");
+        assert!(crate::login_gate::login_rejected(&err).is_none(), "{err:#}");
         assert!(
             format!("{err:#}").contains("token refresh") && format!("{err:#}").contains(account),
             "{err:#}"
         );
-        assert_eq!(
-            login_gate::in_a_row_for_test(&login, ""),
-            1,
-            "the count stayed"
+    }
+
+    /// PERSO-296: a token refresh the endpoint does not answer by the
+    /// deadline, of a refresh token Entra refused before, counts as one more
+    /// step of its hold, so the next refresh is answered from the list; of a
+    /// refresh token never refused, it records nothing and the next refresh
+    /// asks. Before the deadline the refresh, and with it the mark, waited
+    /// for as long as the endpoint did.
+    #[tokio::test]
+    async fn a_refresh_unanswered_by_the_deadline_counts_only_for_a_refused_token() {
+        use crate::login_gate::{self, Login, LoginRejected};
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let account = "silent-graph";
+        let login = Login::Graph(account.to_string());
+        let refusal = LoginRejected::new(
+            mp_protocol::account::RejectedLogin::Graph,
+            "invalid_grant".into(),
         );
-        let token = gated_token(account, DEADLINE, || async { Ok("fresh".to_string()) })
+        // No token cache: the refresh token the dial reads is empty.
+        login_gate::record(&login, "", &refusal);
+        login_gate::forget(&login);
+        silent_refresh(account).await;
+        assert_eq!(login_gate::in_a_row_for_test(&login, ""), 2, "a step");
+        let held = gated_token(account, DEADLINE, || async {
+            panic!("a held refresh does not reach the endpoint")
+        })
+        .await
+        .unwrap_err();
+        assert!(login_gate::login_rejected(&held).is_some_and(|r| r.from_list()));
+
+        let fresh = "silent-graph-fresh";
+        silent_refresh(fresh).await;
+        let fresh_login = Login::Graph(fresh.to_string());
+        assert_eq!(login_gate::in_a_row_for_test(&fresh_login, ""), 0);
+        let token = gated_token(fresh, DEADLINE, || async { Ok("fresh".to_string()) })
             .await
             .expect("the next refresh asks");
         assert_eq!(token, "fresh");

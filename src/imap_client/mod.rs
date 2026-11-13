@@ -251,7 +251,16 @@ pub(crate) async fn open_imap_session_within(
         }
         Err(e) => match login_rejected(&e) {
             Some(rejected) => Err(dial.refused(rejected).into()),
-            None => Err(e),
+            None => {
+                // A LOGIN unanswered by the deadline may have been a refusal
+                // on its way; one that never went out was never asked.
+                if e.downcast_ref::<StepTimedOut>()
+                    .is_some_and(StepTimedOut::login_sent)
+                {
+                    dial.unanswered();
+                }
+                Err(e)
+            }
         },
     }
 }
@@ -267,7 +276,8 @@ pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Resul
 /// connect handed in: the greeting and STARTTLS, the TLS handshake and the
 /// login together have `deadline` from the moment the connection is open,
 /// and a step still waiting at its end fails with an error naming the server
-/// and the step, which is no refusal (PERSO-296).
+/// and the step, which is no refusal (PERSO-296); [`open_imap_session`]
+/// counts a LOGIN unanswered by then as a step of a refused password's hold.
 async fn dial_imap_session_within(
     imap_config: &ImapConfig,
     deadline: std::time::Duration,
@@ -307,7 +317,7 @@ async fn dial_imap_session_within(
 
     if imap_config.port == 993 {
         let tls_stream = by
-            .step("TLS handshake", async {
+            .step(Step::TlsHandshake, async {
                 tls.connect(&imap_config.host, tcp_stream)
                     .await
                     .map_err(|e| anyhow!("TLS handshake failed: {}", e))
@@ -317,7 +327,7 @@ async fn dial_imap_session_within(
 
         let client = async_imap::Client::new(ImapStream::passthrough(tls_stream));
         let session = by
-            .step("login", authenticate_client(client, imap_config))
+            .step(Step::Login, authenticate_client(client, imap_config))
             .await?;
         span.mark("login");
         Ok(session)
@@ -326,7 +336,7 @@ async fn dial_imap_session_within(
 
         let mut buf = [0u8; 4096];
         let n = by
-            .step("greeting", async {
+            .step(Step::Greeting, async {
                 tcp_stream
                     .read(&mut buf)
                     .await
@@ -341,7 +351,7 @@ async fn dial_imap_session_within(
         info!("IMAP STARTTLS: got greeting, sending STARTTLS");
 
         let n = by
-            .step("STARTTLS", async {
+            .step(Step::StartTls, async {
                 tcp_stream
                     .write_all(b"a0 STARTTLS\r\n")
                     .await
@@ -364,7 +374,7 @@ async fn dial_imap_session_within(
         info!("IMAP STARTTLS: upgrading to TLS");
 
         let tls_stream = by
-            .step("TLS handshake", async {
+            .step(Step::TlsHandshake, async {
                 tls.connect(&imap_config.host, tcp_stream)
                     .await
                     .map_err(|e| anyhow!("STARTTLS TLS handshake failed: {}", e))
@@ -374,7 +384,7 @@ async fn dial_imap_session_within(
 
         let client = async_imap::Client::new(ImapStream::with_greeting(tls_stream));
         let session = by
-            .step("login", authenticate_client(client, imap_config))
+            .step(Step::Login, authenticate_client(client, imap_config))
             .await?;
         span.mark("login");
         Ok(session)
@@ -392,25 +402,78 @@ struct Deadline<'a> {
 }
 
 impl Deadline<'_> {
-    /// Run `step`, named `name`, failing it once the deadline has passed.
+    /// Run `step`, failing it once the deadline has passed.
     async fn step<T>(
         &self,
-        name: &str,
-        step: impl std::future::Future<Output = anyhow::Result<T>>,
+        step: Step,
+        run: impl std::future::Future<Output = anyhow::Result<T>>,
     ) -> anyhow::Result<T> {
         let left = self
             .end
             .saturating_duration_since(std::time::Instant::now());
-        async_std::future::timeout(left, step).await.map_err(|_| {
-            anyhow!(
-                "IMAP server {} did not answer the {} within {:?} of the connection",
-                self.addr,
-                name,
-                self.deadline
-            )
-        })?
+        async_std::future::timeout(left, run)
+            .await
+            .map_err(|_| StepTimedOut {
+                addr: self.addr.to_string(),
+                step,
+                deadline: self.deadline,
+            })?
     }
 }
+
+/// The steps of a dial after its TCP connect, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// The plaintext greeting before STARTTLS.
+    Greeting,
+    /// The STARTTLS command and its answer.
+    StartTls,
+    /// The TLS handshake.
+    TlsHandshake,
+    /// The LOGIN command and its answer: from here on the password may have
+    /// reached the server.
+    Login,
+}
+
+impl fmt::Display for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Step::Greeting => "greeting",
+            Step::StartTls => "STARTTLS",
+            Step::TlsHandshake => "TLS handshake",
+            Step::Login => "login",
+        })
+    }
+}
+
+/// A dial step the server did not answer by the deadline.
+#[derive(Debug)]
+struct StepTimedOut {
+    /// The server, `host:port`.
+    addr: String,
+    step: Step,
+    deadline: std::time::Duration,
+}
+
+impl StepTimedOut {
+    /// Whether the LOGIN may have reached the server: the step that ran out
+    /// of time is the login itself, which writes the command first.
+    fn login_sent(&self) -> bool {
+        self.step == Step::Login
+    }
+}
+
+impl fmt::Display for StepTimedOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "IMAP server {} did not answer the {} within {:?} of the connection",
+            self.addr, self.step, self.deadline
+        )
+    }
+}
+
+impl std::error::Error for StepTimedOut {}
 
 #[cfg(test)]
 mod tests {
