@@ -118,13 +118,15 @@
 //! - the Graph token refresh has it for its whole request and counts at it
 //!   (`crate::graph`'s `a_refresh_unanswered_by_the_deadline_counts_only_for_a_refused_token`);
 //! - the EWS login has it from the end of its TCP connect, over the TLS
-//!   handshake and both NTLM legs; one that runs out once the type 3 was
-//!   written counts, one that runs out before counts nothing, since no
-//!   password reached the server (`calendar_backend::ews::http`'s
-//!   `an_unanswered_type_3_steps_the_hold_of_a_refused_password_only`). Any
-//!   other outcome after the type 3 that is neither a 401 nor an answer past
-//!   the login (another status, a reset, the call's timeout cancelling it)
-//!   counts as such a login too
+//!   handshake and both NTLM legs; one that runs out once the type 3's write
+//!   started counts, even with its body unsent, one that runs out before
+//!   counts nothing, since no password reached the server
+//!   (`calendar_backend::ews::http`'s
+//!   `an_unanswered_type_3_steps_the_hold_of_a_refused_password_only` and
+//!   `a_type_3_cut_off_after_its_head_steps_the_hold_of_a_refused_password`).
+//!   Any other outcome after the type 3 that is neither a 401 nor an answer
+//!   past the login (another status, a reset, the call's timeout cancelling
+//!   it) counts as such a login too
 //!   (`an_outcome_after_the_type_3_that_is_no_answer_steps_a_refused_password_only`);
 //!   the IMAP dial counts only its deadline.
 //!

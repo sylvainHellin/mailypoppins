@@ -152,6 +152,19 @@ fn serve(index: usize, stream: TcpStream, steps: Vec<Step>, seen: &Mutex<Vec<Req
 }
 
 fn read_request(connection: usize, reader: &mut BufReader<TcpStream>) -> Option<Request> {
+    let mut request = read_head(connection, reader)?;
+    let length: usize = request
+        .header("Content-Length")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).ok()?;
+    request.body = String::from_utf8(body).ok()?;
+    Some(request)
+}
+
+/// The request line and the headers of the next request, its body unread.
+fn read_head(connection: usize, reader: &mut BufReader<TcpStream>) -> Option<Request> {
     let mut line = String::new();
     if reader.read_line(&mut line).ok()? == 0 {
         return None;
@@ -167,18 +180,11 @@ fn read_request(connection: usize, reader: &mut BufReader<TcpStream>) -> Option<
         let (key, value) = header.split_once(':')?;
         headers.push((key.trim().to_string(), value.trim().to_string()));
     }
-    let length: usize = headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Content-Length"))
-        .and_then(|(_, value)| value.parse().ok())
-        .unwrap_or(0);
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).ok()?;
     Some(Request {
         connection,
         line: line.trim_end().to_string(),
         headers,
-        body: String::from_utf8(body).ok()?,
+        body: String::new(),
     })
 }
 
@@ -623,6 +629,69 @@ async fn an_unanswered_type_3_steps_the_hold_of_a_refused_password_only() {
         "nothing counted"
     );
     assert!(login_gate::dial(&login, "wrong").is_ok(), "the row is free");
+}
+
+/// A type 3 whose head went out and whose body the server never reads is
+/// counted: the head carries the password's proof, so a login cut off while
+/// the body is still being written (the deadline running out on a server
+/// that stopped reading) is the gate's unanswered login, a step of the hold
+/// of a password refused before.
+#[tokio::test]
+async fn a_type_3_cut_off_after_its_head_steps_the_hold_of_a_refused_password() {
+    // Larger than the loopback's socket buffers, so the client's write of
+    // the type 3's body blocks once the server stops reading.
+    let envelope = format!("<s:Envelope>{}</s:Envelope>", "x".repeat(32 * 1024 * 1024));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (heads, seen) = (
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let (record, count) = (Arc::clone(&heads), Arc::clone(&seen));
+    std::thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let Some(negotiate) = read_request(0, &mut reader) else {
+            return;
+        };
+        record.lock().unwrap().push(negotiate.ntlm_type());
+        if writer.write_all(challenge(&[]).as_bytes()).is_err() {
+            return;
+        }
+        let Some(authenticate) = read_head(0, &mut reader) else {
+            return;
+        };
+        record.lock().unwrap().push(authenticate.ntlm_type());
+        count.fetch_add(1, Ordering::SeqCst);
+        // Hold the connection open and read nothing more.
+        std::thread::sleep(Duration::from_secs(10));
+    });
+    let url = format!("http://127.0.0.1:{port}/EWS/Exchange.asmx");
+    let (user, login) = refused_once("cut-off");
+    let deadline = Timeouts {
+        login: Duration::from_secs(2),
+        ..timeouts(Duration::from_secs(10))
+    };
+    let err = EwsHttp::plain_for_test(&url, &user, "wrong", deadline)
+        .post(&envelope)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("did not answer the NTLM login within"),
+        "{err}"
+    );
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "the type 3's head went out");
+    assert_eq!(*heads.lock().unwrap(), [1, 3]);
+    assert_eq!(
+        login_gate::in_a_row_for_test(&login, "wrong"),
+        2,
+        "a step of the refused password's hold"
+    );
+    assert!(login_gate::dial(&login, "wrong").is_err(), "held");
 }
 
 /// A login the server takes ends the row of its password, count and all,

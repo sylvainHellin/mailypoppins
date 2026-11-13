@@ -219,12 +219,12 @@ impl Answer {
 }
 
 /// One login's dial, reported to the gate whatever ends it: dropped with
-/// its type 3 written and its outcome unreported (the call's timeout
+/// its type 3's write started and its outcome unreported (the call's timeout
 /// cancelling the login), it is the gate's unanswered login.
 struct Attempt {
     dial: login_gate::Dial,
-    /// Set once the type 3 went out whole, when the password may have
-    /// reached the server; atomic, as the call's future is `Send`.
+    /// Set as the type 3's write starts, when the password may reach the
+    /// server; atomic, as the call's future is `Send`.
     type3_written: AtomicBool,
     reported: bool,
 }
@@ -241,7 +241,8 @@ impl Attempt {
     }
 
     /// No answer to the login: [`login_gate::Dial::unanswered`] once the
-    /// type 3 went out, and nothing before, when the dial is only dropped.
+    /// type 3's write started, and nothing before, when the dial is only
+    /// dropped.
     fn unanswered(&mut self) {
         self.reported = true;
         if self.type3_written.load(Ordering::SeqCst) {
@@ -440,8 +441,10 @@ impl EwsHttp {
 
     /// The NTLM handshake on `tcp` with `envelope` as the request: the TLS
     /// handshake, the type 1 and, when the server challenges, the type 3.
-    /// `type3_written` is set once the type 3 went out whole, which is when
-    /// the password may have reached the server.
+    /// `type3_written` is set before the type 3's write starts: its head,
+    /// which carries the password's proof, may go out while the body or the
+    /// flush fails, and a login counted with its bytes unsent is the safe
+    /// side of one sent and never counted.
     async fn handshake(
         &self,
         tcp: async_std::net::TcpStream,
@@ -483,10 +486,10 @@ impl EwsHttp {
             ntlm::Nonces::random(),
         )
         .map_err(|error| transport(error.context("unreadable NTLM challenge")))?;
+        type3_written.store(true, Ordering::SeqCst);
         self.write_request(&mut connection, envelope, Some(&authenticate))
             .await
             .map_err(|error| transport(error.context("the NTLM login failed")))?;
-        type3_written.store(true, Ordering::SeqCst);
         let second = read_answer(&mut connection)
             .await
             .map_err(|error| transport(error.context("the NTLM login failed")))?;
@@ -497,13 +500,14 @@ impl EwsHttp {
     /// Log in on a new connection with `envelope` as the request, through
     /// the login gate, keeping the connection on success.
     ///
-    /// Once the type 3 went out, every outcome is reported to the gate: a 401
-    /// is a refusal, an answer past the login (a SOAP answer or fault) is the
-    /// server taking it, and anything else (another status, a reset with no
-    /// answer, the login's deadline, the call's timeout cancelling it) is no
-    /// answer ([`login_gate::Dial::unanswered`]), a step of the hold of a
-    /// password refused before and nothing for one never refused. Before the
-    /// type 3, nothing reached the server, and the dial is dropped.
+    /// Once the type 3's write started, every outcome is reported to the
+    /// gate: a 401 is a refusal, an answer past the login (a SOAP answer or
+    /// fault) is the server taking it, and anything else (another status, a
+    /// write or a read failing, a reset with no answer, the login's deadline,
+    /// the call's timeout cancelling it) is no answer
+    /// ([`login_gate::Dial::unanswered`]), a step of the hold of a password
+    /// refused before and nothing for one never refused. Before the type 3,
+    /// nothing reached the server, and the dial is dropped.
     async fn log_in(&self, state: &mut State, envelope: &str) -> Result<String, EwsFetchError> {
         let dial = login_gate::dial(&self.login, &self.password).map_err(|held| {
             let why = held.to_string();
