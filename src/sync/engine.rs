@@ -702,7 +702,7 @@ pub async fn run_sync(
 
         // The IMAP server states the whole flag set, so it is truth for all
         // three bits of the second axis (#TKT-0051), not just for `\Seen`.
-        result.flags_updated += ingest::apply_flags(
+        let flags = ingest::apply_flags(
             store,
             account,
             target.role.as_str(),
@@ -710,6 +710,7 @@ pub async fn run_sync(
                 .into_iter()
                 .map(|(uid, flags)| (uid as i64, flags)),
         );
+        result.flags_updated += flags.changed;
 
         // The other half of the same diff: the UIDs the store holds for this
         // mailbox that the server did not list. Held back until every target
@@ -755,7 +756,18 @@ pub async fn run_sync(
                 // modseq", not "clear it": the UPSERT COALESCEs, so a
                 // full-window pass leaves a CONDSTORE pass's resume point
                 // alone (#0041).
-                highest_modseq: covered.highest_modseq.filter(|_| bodies_complete),
+                //
+                // A body pass that ended short, at the pass's budget, at a
+                // stop between two batches or at a failure, has nothing to say
+                // either (#0113, PERSO-300): the stored mark, still true,
+                // stays. So does a pass whose flag write did not all land
+                // (PERSO-202 review): its flags may have come as a
+                // `CHANGEDSINCE` delta, and recording its modseq would tell
+                // the next pass never to ask about the change it dropped. The
+                // old mark stays, so the next delta reports it again.
+                highest_modseq: covered
+                    .highest_modseq
+                    .filter(|_| bodies_complete && flags.complete),
                 deltalink: None,
                 // What this pass owes the next one: the mark below which the
                 // gate must stay shut because an arrival the server lists is
@@ -983,6 +995,9 @@ mod tests {
         bodies: Vec<Option<FakeBodies>>,
         /// How many batches of bodies the engine has been handed.
         batches: usize,
+        /// The CONDSTORE mark the engine handed each fetch, in call order: the
+        /// `CHANGEDSINCE` a real backend would have asked (PERSO-202).
+        marks_asked: Vec<Option<ModseqMark>>,
         /// Opt-in fidelity: drop the scripted messages whose UID the store's
         /// skip list already holds, resolved against the scripted UIDVALIDITY
         /// exactly as [`crate::ingest::KnownUids::resolve`] does it.
@@ -1022,6 +1037,7 @@ mod tests {
             for (target, known) in targets.iter().zip(knowns) {
                 self.seen
                     .push((target.server_name.clone(), limit, known.uids.len()));
+                self.marks_asked.push(known.highest_modseq);
                 let next = self
                     .passes
                     .get_mut(&target.server_name)
@@ -1412,6 +1428,81 @@ mod tests {
         fx.run(&mut resumed, &targets());
         assert_eq!(fx.rows("inbox"), (1..=i64::from(top)).collect::<Vec<_>>());
         assert_eq!(fx.cursor_mark("inbox"), None);
+    }
+
+    /// A mailbox closed short after a batch keeps the CONDSTORE mark it
+    /// resumed from (PERSO-202, PERSO-300).
+    ///
+    /// Since PERSO-300 a mailbox can end its pass after any batch: a stop asked
+    /// between two batches, or the pass's body budget spent, which the backend
+    /// answers with `Done { complete: false }`. Either leaves bodies on the
+    /// server, and the mark the pass would record vouches for flags it read
+    /// off a listing whose new mail it never finished, so the engine keeps the
+    /// stored one, as it does on a deadline cut (#0113). The next complete
+    /// pass records its own.
+    #[test]
+    fn a_mailbox_closed_short_after_a_batch_keeps_the_mark_it_resumed_from() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
+        let message = |uid: u32| (uid, raw(&format!("m{uid}")));
+        let mut first = FakeBackend::default();
+        let mut history = fetch((1..=10).map(message).collect());
+        history.highest_modseq = Some(mark(100, 1));
+        first.script("INBOX", vec![Ok(history)]);
+        fx.run(&mut first, &targets);
+        assert_eq!(fx.modseq("inbox"), Some(mark(100, 1)));
+
+        let top = 10 + 3 * FAKE_BATCH as u32;
+        let arrivals = |modseq: u64| {
+            let mut inbox = fetch((11..=top).map(message).collect());
+            inbox.listed = (1..=top).collect();
+            inbox.highest_modseq = Some(mark(modseq, 1));
+            inbox
+        };
+
+        // A stop lands while the first batch is ingested.
+        let mut stopped = FakeBackend::default();
+        stopped.script("INBOX", vec![Ok(arrivals(200))]);
+        let (stop, _) = stop_from(StopPoint::Chunk);
+        let result = fx.run_until(&mut stopped, &targets, usize::MAX, false, Some(&stop));
+        assert_eq!(stopped.batches, 1);
+        assert_eq!(result.bodies_truncated, 1);
+        assert_eq!(
+            fx.modseq("inbox"),
+            Some(mark(100, 1)),
+            "a mailbox stopped after a batch keeps the stored mark"
+        );
+
+        // The pass's budget runs out after one batch: the backend hands over
+        // the newest batch and then ends the body pass short.
+        let mut budget = FakeBackend {
+            honour_skip_list: true,
+            ..FakeBackend::default()
+        };
+        let mut cut = arrivals(300);
+        cut.messages.truncate(2 * FAKE_BATCH);
+        cut.messages.drain(..FAKE_BATCH);
+        cut.bodies_complete = false;
+        budget.script("INBOX", vec![Ok(cut)]);
+        let result = fx.run(&mut budget, &targets);
+        assert_eq!(budget.batches, 1);
+        assert_eq!(result.bodies_truncated, 1);
+        assert_eq!(
+            fx.modseq("inbox"),
+            Some(mark(100, 1)),
+            "so does one whose body budget ran out"
+        );
+
+        // The pass that brings the rest in records its own.
+        let mut resumed = FakeBackend {
+            honour_skip_list: true,
+            ..FakeBackend::default()
+        };
+        resumed.script("INBOX", vec![Ok(arrivals(400))]);
+        let result = fx.run(&mut resumed, &targets);
+        assert_eq!(result.bodies_truncated, 0);
+        assert_eq!(fx.rows("inbox"), (1..=i64::from(top)).collect::<Vec<_>>());
+        assert_eq!(fx.modseq("inbox"), Some(mark(400, 1)));
     }
 
     /// A pass told to stop before its fetch asks the transport for nothing
@@ -2226,6 +2317,82 @@ mod tests {
                 .is_none(),
             "so the next pass does the full window rather than a delta"
         );
+    }
+
+    /// A flag change the server reported once and the store failed to write
+    /// is asked about again (PERSO-202 review).
+    ///
+    /// The mark is the resume point of every quick sync, and a pass that
+    /// recorded its own modseq after a failed flag write would tell the next
+    /// one to ask `CHANGEDSINCE` a sequence above the change it dropped: the
+    /// server never reports it again and the store keeps the old flag for
+    /// good, which is #0004. So the pass keeps the old mark, as a pass whose
+    /// bodies were cut short does.
+    #[test]
+    fn a_pass_whose_flag_write_fails_keeps_the_old_mark_and_the_next_asks_again() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
+        let mut backend = FakeBackend::default();
+        let seen = MessageFlags {
+            seen: true,
+            ..Default::default()
+        };
+
+        let mut first = fetch(vec![(40, raw("forty"))]);
+        first.highest_modseq = Some(mark(100, 1));
+        // Another client marks UID 40 read, and the delta from 100 reports it.
+        let delta = |modseq| {
+            let mut f = fetch(vec![]);
+            f.listed = vec![40];
+            f.known_flags = vec![(40, seen)];
+            f.highest_modseq = Some(mark(modseq, 1));
+            f
+        };
+        let (dropped, again) = (delta(150), delta(160));
+        backend.script("INBOX", vec![Ok(first), Ok(dropped), Ok(again)]);
+
+        fx.run(&mut backend, &targets);
+        assert_eq!(fx.modseq("inbox"), Some(mark(100, 1)));
+
+        // The store refuses the flag write of UID 40 for one pass.
+        fx.store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse_flags BEFORE UPDATE OF flags ON messages
+                 WHEN NEW.uid = 40 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+        fx.run(&mut backend, &targets);
+        let flags = |fx: &Fixture| -> String {
+            fx.store
+                .conn()
+                .query_row(
+                    "SELECT IFNULL(flags, '') FROM messages
+                     WHERE account = 'acct' AND mailbox = 'inbox' AND uid = 40",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(!flags(&fx).contains("\\Seen"), "the write did fail");
+        assert_eq!(
+            fx.modseq("inbox"),
+            Some(mark(100, 1)),
+            "a pass that dropped a flag change keeps the mark below it"
+        );
+
+        fx.store
+            .conn()
+            .execute_batch("DROP TRIGGER refuse_flags;")
+            .unwrap();
+        fx.run(&mut backend, &targets);
+        assert_eq!(
+            backend.marks_asked[2],
+            Some(mark(100, 1)),
+            "the next pass asks CHANGEDSINCE the old modseq again"
+        );
+        assert!(flags(&fx).contains("\\Seen"), "and applies the change");
+        assert_eq!(fx.modseq("inbox"), Some(mark(160, 1)));
     }
 
     // -----------------------------------------------------------------------

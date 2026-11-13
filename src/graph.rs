@@ -3329,7 +3329,8 @@ pub async fn sync_mailboxes_graph(
             server
                 .iter()
                 .map(|(mid, entry)| (crate::ingest::graph_uid(mid), server_flags(entry))),
-        );
+        )
+        .changed;
         span.mark(&format!("flags:{}", target.role));
 
         // The item each row stands for, which a move, delete or read toggle
@@ -5819,7 +5820,7 @@ mod tests {
                 server_flags(&listed(Some(LastVerb::Reply))),
             )],
         );
-        assert_eq!(updated, 1);
+        assert_eq!(updated.changed, 1);
         assert!(answered("<later@x>"));
 
         // A delta entry, or a forward after the reply, clears nothing.

@@ -1536,24 +1536,39 @@ pub fn apply_flag(
     Ok(changed > 0)
 }
 
-/// Apply a whole mailbox's worth of server flag sets in one transaction,
-/// returning how many rows actually changed. The IMAP entry point: the server
-/// listed every flag it holds, so what it listed is what the row carries.
+/// What a flag write left on disk: how many rows changed, and whether every
+/// update it was handed is there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlagsApplied {
+    /// The rows whose flags this write changed and committed.
+    pub changed: usize,
+    /// Every update was written and the transaction committed. `false` when a
+    /// row refused its update, the transaction would not open, or the commit
+    /// failed: some flag the server reported is not in the store.
+    pub complete: bool,
+}
+
+/// Apply a whole mailbox's worth of server flag sets in one transaction. The
+/// IMAP entry point: the server listed every flag it holds, so what it listed
+/// is what the row carries.
 ///
 /// Every sync pass hands over the flags of every message the server listed, so
 /// this is O(mailbox) `UPDATE`s per pass. In autocommit each one is its own
 /// fsync; one transaction makes the pass a single commit.
 ///
 /// Best-effort in the same sense as [`prune_vanished`]: a row that refuses to
-/// update is logged and the rest still go. A commit that fails loses the whole
-/// pass's flag updates, which the next sync recomputes from the server, so it
-/// is logged and reported as zero rather than returned as an error.
+/// update is logged and the rest still go, and a commit that fails loses the
+/// whole pass's flag updates, logged rather than returned as an error. Neither
+/// is recomputed for free: a pass that read its flags as a CONDSTORE delta
+/// will not be told about the same change again once a later modseq is
+/// recorded, so the caller holding a resume point keeps the old one unless
+/// [`FlagsApplied::complete`] says every update landed (PERSO-202).
 pub fn apply_flags(
     store: &Store,
     account: &str,
     mailbox: &str,
     flags: impl IntoIterator<Item = (i64, MessageFlags)>,
-) -> usize {
+) -> FlagsApplied {
     apply_flag_updates(
         store,
         account,
@@ -1573,7 +1588,7 @@ pub fn apply_seen_flags(
     account: &str,
     mailbox: &str,
     flags: impl IntoIterator<Item = (i64, bool)>,
-) -> usize {
+) -> FlagsApplied {
     apply_flag_updates(
         store,
         account,
@@ -1599,7 +1614,7 @@ pub fn apply_graph_flags(
     account: &str,
     mailbox: &str,
     flags: impl IntoIterator<Item = (i64, MessageFlags)>,
-) -> usize {
+) -> FlagsApplied {
     apply_flag_updates(
         store,
         account,
@@ -1620,30 +1635,40 @@ fn apply_flag_updates<F>(
     account: &str,
     mailbox: &str,
     updates: impl IntoIterator<Item = (i64, F)>,
-) -> usize
+) -> FlagsApplied
 where
     F: FnOnce(MessageFlags) -> MessageFlags,
 {
+    let failed = FlagsApplied {
+        changed: 0,
+        complete: false,
+    };
     let tx = match store.conn().unchecked_transaction() {
         Ok(tx) => tx,
         Err(e) => {
             warn!("Failed to open the flag transaction for '{mailbox}': {e:#}");
-            return 0;
+            return failed;
         }
     };
-    let mut updated = 0;
+    let mut applied = FlagsApplied {
+        changed: 0,
+        complete: true,
+    };
     for (uid, resolve) in updates {
         match apply_flag(store, account, mailbox, uid, resolve) {
-            Ok(true) => updated += 1,
+            Ok(true) => applied.changed += 1,
             Ok(false) => {}
-            Err(e) => warn!("Failed to apply the flags of UID {uid}: {e:#}"),
+            Err(e) => {
+                warn!("Failed to apply the flags of UID {uid}: {e:#}");
+                applied.complete = false;
+            }
         }
     }
     if let Err(e) = tx.commit() {
         warn!("Failed to commit the flags for '{mailbox}': {e:#}");
-        return 0;
+        return failed;
     }
-    updated
+    applied
 }
 
 /// Record on each Graph row of `mailbox` the Graph id its folder listed it

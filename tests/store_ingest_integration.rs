@@ -1751,7 +1751,13 @@ fn an_imap_pass_replaces_the_whole_flag_set() {
             },
         )],
     );
-    assert_eq!(updated, 1);
+    assert_eq!(
+        updated,
+        mailypoppins::ingest::FlagsApplied {
+            changed: 1,
+            complete: true
+        }
+    );
     let row = mailypoppins::store::read::list_mailbox(&f.store, "acct", "inbox").unwrap();
     assert_eq!(row[0].flags.as_deref(), Some("\\Seen $Forwarded"));
 }
@@ -1773,7 +1779,7 @@ fn a_graph_pass_updates_the_read_bit_without_erasing_the_history_bits() {
     f.ingest("inbox", uid, &message, None);
 
     let updated = mailypoppins::ingest::apply_seen_flags(&f.store, "acct", "inbox", [(uid, true)]);
-    assert_eq!(updated, 1);
+    assert_eq!(updated.changed, 1);
     let row = mailypoppins::store::read::list_mailbox(&f.store, "acct", "inbox").unwrap();
     assert_eq!(
         row[0].flags.as_deref(),
@@ -1994,7 +2000,7 @@ fn a_pass_of_server_read_flags_applies_in_one_transaction() {
             ),
         ],
     );
-    assert_eq!(updated, 1, "only the row whose flags changed");
+    assert_eq!(updated.changed, 1, "only the row whose flags changed");
 
     let flags: Vec<String> = mailypoppins::store::read::list_mailbox(&f.store, "acct", "inbox")
         .unwrap()
