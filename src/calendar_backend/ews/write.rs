@@ -13,8 +13,10 @@
 //!   A tentative or a decline may carry `ProposedStart` and `ProposedEnd`, a
 //!   new time the organizer receives as a proposal (`Exchange2013` and
 //!   later). A `SaveOnly` answer may leave the unsent response in Drafts:
-//!   when the CreateItem answer names the item it saved, it is deleted for
-//!   good (`HardDelete`); whether the server names it is unverified live.
+//!   when the CreateItem answer names it as a `MeetingResponse` or a
+//!   `Message`, it is deleted for good (`HardDelete`); an item of any other
+//!   kind, the calendar item above all, is never deleted, and an answer that
+//!   names none is logged. Whether the server names it is unverified live.
 //!
 //! - A create is a `CalendarItem` through `CreateItem` into the calendar's
 //!   folder, every field in the schema's order, which invites the attendees
@@ -69,7 +71,7 @@ use std::str::FromStr;
 use anyhow::anyhow;
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
-use log::{debug, warn};
+use log::{debug, info, warn};
 
 use super::fetch::EwsFetch;
 use super::parse::ItemType;
@@ -673,10 +675,17 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     ) -> BackendResult<()> {
         let body = response_body(event, response, comment, send_response, proposed);
         let answer = self.call("CreateItem", &body).await?;
-        let draft =
-            parse::first_saved_id(&answer).map_err(|error| answer_error(&error, "CreateItem"))?;
-        if let Some(draft) = draft.filter(|_| !send_response) {
-            self.delete_draft(&draft).await;
+        let draft = parse::saved_response_id(&answer)
+            .map_err(|error| answer_error(&error, "CreateItem"))?;
+        match draft {
+            _ if send_response => {}
+            Some(draft) => self.delete_draft(&draft).await,
+            // At info, so the live check of a SaveOnly answer reads it.
+            None => info!(
+                "[calendar] {}: the answer to {event} saved without telling the organizer names \
+                 no response item; nothing is deleted",
+                self.account
+            ),
         }
         Ok(())
     }

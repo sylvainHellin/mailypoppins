@@ -154,6 +154,45 @@ async fn an_answer_saved_only_deletes_the_draft_it_leaves() {
     assert!(backend.fetch().exhausted());
 }
 
+/// Only a response item is a draft to delete: a saved `Message` is one too,
+/// but an answer that names the calendar item (or any other kind) leaves
+/// everything alone, since a HardDelete aimed at it would delete the event.
+#[tokio::test]
+async fn an_answer_that_names_the_calendar_item_deletes_nothing() {
+    let saved = |element: &str, id: &str| {
+        built_answer(
+            "CreateItem",
+            &success_message(
+                "CreateItem",
+                &format!(
+                    "<m:Items><t:{element}><t:ItemId Id=\"{id}\" ChangeKey=\"k\"/>\
+                     </t:{element}></m:Items>"
+                ),
+            ),
+        )
+    };
+    let deleted = built_answer("DeleteItem", &success_message("DeleteItem", ""));
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("CreateItem", &saved("CalendarItem", SINGLE_ID))
+            .answer("CreateItem", &saved("MeetingRequest", "request"))
+            .answer("CreateItem", &saved("Message", "draft-3"))
+            .answer("DeleteItem", &deleted),
+    );
+    for _ in 0..3 {
+        backend
+            .respond(SINGLE_ID, Response::Accept, None, false, None)
+            .await
+            .unwrap();
+    }
+    let sent = backend.fetch().sent();
+    assert_eq!(sent.len(), 4, "only the Message is deleted");
+    assert!(!sent.iter().any(|sent| sent.contains("<m:DeleteItem")
+        && sent.contains(&format!("<t:ItemId Id=\"{SINGLE_ID}\"/>"))));
+    assert!(sent[3].contains("<t:ItemId Id=\"draft-3\"/>"));
+    assert!(backend.fetch().exhausted());
+}
+
 /// A decline carries its comment before the reference and the proposal
 /// after it, the schema's order; an accept never carries a proposal.
 #[tokio::test]

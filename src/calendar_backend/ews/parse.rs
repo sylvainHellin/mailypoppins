@@ -776,13 +776,27 @@ pub fn associated_event(body: &str) -> Result<Option<String>, AnswerError> {
         .map(str::to_string))
 }
 
-/// The ItemId of the first item a CreateItem answer names, whatever its
-/// kind: the response a `SaveOnly` answer left in Drafts. `None` when the
-/// answer names none, as a sent one does.
-pub fn first_saved_id(body: &str) -> Result<Option<String>, AnswerError> {
+/// The item kinds a response object saved only may be named as in a
+/// CreateItem answer: `MeetingResponse`, the element the spike's fixtures
+/// name an answer by (`getitem_meeting_response.xml`, from Sent Items), and
+/// `Message`, its base type, both members of the schema's
+/// `ArrayOfRealItemsType`. No CreateItem answer to a response was captured.
+const RESPONSE_ITEMS: [&str; 2] = ["MeetingResponse", "Message"];
+
+/// The ItemId of the response a `SaveOnly` answer left in Drafts, named as
+/// a `MeetingResponse` or a `Message` in the CreateItem answer. `None` when
+/// the answer names no such item, as a sent one does; an item of any other
+/// kind (the calendar item the answer is about) is never one.
+pub fn saved_response_id(body: &str) -> Result<Option<String>, AnswerError> {
     Ok(only_message(body, "CreateItem")?
         .child("Items")
-        .and_then(|items| items.children.iter().find_map(item_id))
+        .and_then(|items| {
+            items
+                .children
+                .iter()
+                .filter(|item| RESPONSE_ITEMS.contains(&item.name.as_str()))
+                .find_map(item_id)
+        })
         .map(str::to_string))
 }
 
