@@ -93,6 +93,13 @@ mp-core = { path = "crates/mp-core" }
 # `mp-core`, `mp-client` and `mp-protocol`, so the binary can launch the TUI and
 # the TUI cannot reach the engine.
 mp-tui = { path = "clients/tui" }
+# NTLMv2 for the EWS calendar backend (PERSO-256), written in
+# src/calendar_backend/ews/ntlm.rs: MD4 for the NT hash, HMAC-MD5 for the
+# response key, the NT proof and the MIC. `hmac` was already in the lockfile
+# through `hkdf`.
+md4 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
 
 [features]
 # Statically link OpenSSL (built from source). Required for the

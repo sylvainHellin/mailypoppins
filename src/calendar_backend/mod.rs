@@ -13,6 +13,7 @@
 //! backends a later phase builds. [`AccountBackend`] is the closed set they
 //! return, dispatched statically.
 
+pub mod ews;
 pub mod fake;
 pub mod graph;
 
