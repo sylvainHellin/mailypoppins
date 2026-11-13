@@ -867,6 +867,9 @@ pub fn retention_for(config: &GlobalConfig, account: &AccountConfig) -> Result<R
 
 #[derive(Clone)]
 pub struct SmtpConfig {
+    /// The account this login is made for, which the daemon's list of
+    /// refused logins keys a refused password by (PERSO-296).
+    pub account: String,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -877,6 +880,9 @@ pub struct SmtpConfig {
 
 #[derive(Clone)]
 pub struct ImapConfig {
+    /// The account this login is made for, which the daemon's list of
+    /// refused logins keys a refused password by (PERSO-296).
+    pub account: String,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -1474,11 +1480,13 @@ impl SmtpConfig {
         }
         let password = get_secret(&format!("smtp-password-{}", account.name))?;
         let ServerLogin {
+            account: _,
             host,
             port,
             username,
         } = ServerLogin::smtp(account);
         Ok(Self {
+            account: account.name.clone(),
             host,
             port,
             username,
@@ -1491,6 +1499,7 @@ impl SmtpConfig {
     /// The server and user this configuration logs in as.
     pub fn login(&self) -> ServerLogin {
         ServerLogin {
+            account: self.account.clone(),
             host: self.host.clone(),
             port: self.port,
             username: self.username.clone(),
@@ -1543,11 +1552,13 @@ impl ImapConfig {
         let password = imap_password(&account.name, get_secret)?;
 
         let ServerLogin {
+            account: _,
             host,
             port,
             username,
         } = ServerLogin::imap(account);
         Ok(Self {
+            account: account.name.clone(),
             host,
             port,
             username,
@@ -1561,6 +1572,7 @@ impl ImapConfig {
     /// The server and user this configuration logs in as.
     pub fn login(&self) -> ServerLogin {
         ServerLogin {
+            account: self.account.clone(),
             host: self.host.clone(),
             port: self.port,
             username: self.username.clone(),
@@ -1568,12 +1580,14 @@ impl ImapConfig {
     }
 }
 
-/// The server and user an account's IMAP or SMTP login goes to, without the
-/// password: what the daemon's list of refused logins is looked up by from a
-/// place that reads no secret, the health check and `account.credentials`
-/// (PERSO-296).
+/// The account, server and user an account's IMAP or SMTP login goes to,
+/// without the password: what the daemon's list of refused logins is looked
+/// up by from a place that reads no secret, the health check and
+/// `account.credentials` (PERSO-296).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServerLogin {
+    /// The configured account the login is made for.
+    pub account: String,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -1585,6 +1599,7 @@ impl ServerLogin {
     pub fn imap(account: &AccountConfig) -> Self {
         let pick = |imap: &str, smtp: &str| if imap.is_empty() { smtp } else { imap }.to_string();
         Self {
+            account: account.name.clone(),
             host: pick(&account.imap.host, &account.smtp.host),
             port: account.imap.port,
             username: pick(&account.imap.username, &account.smtp.username),
@@ -1594,6 +1609,7 @@ impl ServerLogin {
     /// The login [`SmtpConfig::load`] makes for `account`.
     pub fn smtp(account: &AccountConfig) -> Self {
         Self {
+            account: account.name.clone(),
             host: account.smtp.host.clone(),
             port: account.smtp.port,
             username: account.smtp.username.clone(),

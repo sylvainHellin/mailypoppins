@@ -4215,6 +4215,7 @@ async fn resubmit_pending(
     let smtp_config = match SmtpConfig::load(account) {
         Ok(c) => c,
         Err(_) if crate::daemon::fake_transport::armed() => SmtpConfig {
+            account: account.name.clone(),
             host: "fake.invalid".to_string(),
             port: 465,
             username: String::new(),
@@ -4973,7 +4974,7 @@ async fn submit_over(
     } = submit_through(built, &from_addr, mailer).await;
     let Some(answer) = login_refused else {
         if result.any_succeeded() {
-            crate::login_gate::accepted(&login);
+            crate::login_gate::accepted(&login, &smtp_config.password);
         }
         return Ok(result);
     };
@@ -5240,6 +5241,7 @@ mod smtp_durability_tests {
 
     fn smtp_config() -> SmtpConfig {
         SmtpConfig {
+            account: String::new(),
             host: "smtp.invalid".to_string(),
             port: 465,
             username: String::new(),
@@ -5624,6 +5626,9 @@ mod smtp_durability_tests {
     /// The SMTP configuration of `port`'s server, with a password it refuses.
     fn refused_config(port: u16) -> SmtpConfig {
         SmtpConfig {
+            // An account of its own per server, since the list keys a refused
+            // password by the account and tests run side by side.
+            account: format!("{ACCOUNT}-{port}"),
             host: "127.0.0.1".to_string(),
             port,
             username: format!("alice-{port}@example.com"),

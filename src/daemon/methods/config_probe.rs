@@ -230,6 +230,7 @@ fn token_name(account: &AccountConfig) -> String {
 /// The SMTP settings of the candidate.
 fn smtp_config(account: &AccountConfig, password: String) -> SmtpConfig {
     SmtpConfig {
+        account: account.name.clone(),
         host: account.smtp.host.clone(),
         port: account.smtp.port,
         username: account.smtp.username.clone(),
@@ -243,11 +244,13 @@ fn smtp_config(account: &AccountConfig, password: String) -> SmtpConfig {
 /// to the SMTP one as `ImapConfig::load` does.
 fn imap_config(account: &AccountConfig, password: String) -> ImapConfig {
     let ServerLogin {
+        account: name,
         host,
         port,
         username,
     } = ServerLogin::imap(account);
     ImapConfig {
+        account: name,
         host,
         port,
         username,

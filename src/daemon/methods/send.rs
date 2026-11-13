@@ -1059,6 +1059,7 @@ pub(crate) fn smtp_config(account: &AccountConfig) -> anyhow::Result<SmtpConfig>
     match SmtpConfig::load(account) {
         Ok(config) => Ok(config),
         Err(_) if crate::daemon::fake_transport::armed() => Ok(SmtpConfig {
+            account: account.name.clone(),
             host: "fake.invalid".to_string(),
             port: 465,
             username: String::new(),

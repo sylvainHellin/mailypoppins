@@ -6382,6 +6382,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
             eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
             eprintln!("  Some commands may not work without proper configuration.");
             SmtpConfig {
+                account: account_config.name.clone(),
                 host: "localhost".to_string(),
                 port: 465,
                 username: String::new(),

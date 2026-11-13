@@ -685,6 +685,7 @@ mod tests {
                 .collect(),
         );
         let config = ImapConfig {
+            account: String::new(),
             host: "127.0.0.1".into(),
             port: server.port(),
             username: "bounded@example.com".into(),
@@ -774,6 +775,7 @@ mod tests {
             }
         };
         let config = ImapConfig {
+            account: String::new(),
             host: "127.0.0.1".into(),
             port: server.port(),
             username: "budget@example.com".into(),
@@ -904,6 +906,7 @@ mod tests {
             },
         ]);
         let config = ImapConfig {
+            account: String::new(),
             host: "127.0.0.1".into(),
             port: server.port(),
             username: "probe@example.com".into(),

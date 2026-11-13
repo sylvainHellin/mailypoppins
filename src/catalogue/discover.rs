@@ -768,6 +768,7 @@ mod tests {
                 ..Default::default()
             };
             let imap = ImapConfig {
+                account: account.name.clone(),
                 host: "127.0.0.1".into(),
                 port: server.port(),
                 username: "tum@example.com".into(),

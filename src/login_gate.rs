@@ -9,7 +9,7 @@
 //! watcher and the outbox drain, and its health check still said the account
 //! was fine.
 //!
-//! Three logins go through the gate, each keyed by a [`Login`]:
+//! Three logins go through the gate, each named by a [`Login`]:
 //!
 //! - the IMAP login, in [`crate::imap_client::open_imap_session`], refused by
 //!   a `NO` about the password;
@@ -18,33 +18,51 @@
 //! - a Graph account's token refresh, in [`crate::graph::access_token`],
 //!   refused by `invalid_grant` (the refresh token is revoked or expired).
 //!
-//! Each consults the list kept here: a refusal is recorded under the login
-//! and a hash of the refused secret (the password, or the refresh token), and
-//! while its hold runs the same login fails at once with the same
-//! [`LoginRejected`] without dialling. The hold of a password grows with the
-//! refusals in a row ([`hold`]): 2 minutes after the first, 10 after the
-//! second, an hour from the third on, so a server that refuses a correct
-//! password for a minute (the TUM server answered `NO LOGIN failed.` to one
-//! twice 30 s apart, and took it on the attempts around) stops the mail for
-//! minutes, while a wrong password is asked at most three times in the first
-//! hour and once an hour after, far below any lockout threshold. A Graph
-//! sign-in is held an hour from the first refusal, since `invalid_grant` is
-//! Entra's final word on the refresh token. The hold ends
+//! Each consults the list kept here. A refusal is recorded under the
+//! account and a hash of the refused secret (the password, or the refresh
+//! token), not under the login: an account's IMAP and SMTP logins that use
+//! one password share one row, whatever their hosts (the TUM's IMAP and SMTP
+//! servers are two hosts checking one password). While the row's hold runs,
+//! every login of the account with that secret fails at once with a
+//! [`LoginRejected`] without dialling, the SMTP login after an IMAP refusal
+//! included, and the answer says at which login the server refused it.
+//!
+//! The hold of a password grows with the refusals of it in a row, at either
+//! login ([`hold`]): 2 minutes after the first, 10 after the second, an hour
+//! from the third on. A server that refuses a correct password for a minute
+//! (the TUM server answered `NO LOGIN failed.` to one twice 30 s apart, and
+//! took it on the attempts around) stops the mail for minutes; a wrong
+//! password is sent to the server at most 3 times in the first hour and once
+//! an hour after, by the sync and the outbox drain together, until the user
+//! acts. A Graph sign-in is held an hour from the first refusal, since
+//! `invalid_grant` is Entra's final word on the refresh token. Two passwords
+//! (an account whose IMAP and SMTP passwords differ, or one changed at one
+//! login only) are two rows with a schedule each. Dials that race each other
+//! past the gate as a hold ends are counted as one refusal.
+//!
+//! The hold ends
 //!
 //! - when it runs out, and the next attempt asks the server;
-//! - when the user acts, through [`forget`]: stores a password
-//!   (`config.set_password`), signs in again (`config.oauth2_login`), or
-//!   starts what needs the login (a sync for the IMAP login and the Graph
-//!   sign-in, a send for the SMTP login and the Graph sign-in).
+//! - when the user acts, through [`forget`] or [`forget_account`]: stores a
+//!   password (`config.set_password`), signs in again
+//!   (`config.oauth2_login`), or starts what needs the login (a sync for the
+//!   IMAP login and the Graph sign-in, a send for the SMTP login and the Graph
+//!   sign-in), which ends it for every login of the account sharing the
+//!   secret.
 //!
 //! Neither resets the count: a refusal of the same secret after either is the
-//! next in the row. The entry, count and all, ends
+//! next in the row. The row, count and all, ends
 //!
-//! - when the same login succeeds;
+//! - when a login of the account succeeds with the secret, since the server
+//!   just took it, for the other login as well;
+//! - when no login of the account is attempted with the secret any more;
 //! - when the daemon restarts, since the list lives in memory only.
 //!
-//! A new secret is not on the list, because the hash is part of the entry,
-//! so it is asked at once, and its first refusal is the first of a new row.
+//! A new secret is not on the list, so it is asked at once, and its first
+//! refusal is the first of a new row. The health check and
+//! `account.credentials` read no secret: they report a login refused while
+//! the row of the secret it was last attempted with holds, so the SMTP login
+//! of a shared password is reported once it was attempted within the hold.
 //! `config.probe` dials past the gate: a probe is the user asking the server.
 
 use std::collections::HashMap;
@@ -99,6 +117,15 @@ pub enum Login {
 }
 
 impl Login {
+    /// The account the login is made for, which a refused secret is kept
+    /// under.
+    pub fn account(&self) -> &str {
+        match self {
+            Login::Imap(server) | Login::Smtp(server) => &server.account,
+            Login::Graph(account) => account,
+        }
+    }
+
     /// What the user is told was refused.
     pub fn kind(&self) -> RejectedLogin {
         match self {
@@ -152,11 +179,16 @@ impl Login {
 ///
 /// Its text is the server's answer behind the words the failure has always
 /// surfaced as (`IMAP login failed`, `SMTP login failed`); one the gate
-/// answered from the list says so, and says when the server is asked again.
+/// answered from the list says so, says at which login the server refused the
+/// password when it was the account's other one, and says when the server is
+/// asked again.
 #[derive(Clone, Debug)]
 pub struct LoginRejected {
     /// Which login was refused.
     kind: RejectedLogin,
+    /// The login the server refused the secret at: `kind` itself, or the
+    /// account's other password login that shares the password.
+    refused_at: RejectedLogin,
     /// The server's answer.
     answer: String,
     /// Which entry of the list this refusal is, `None` until it is recorded.
@@ -170,6 +202,7 @@ impl LoginRejected {
     pub fn new(kind: RejectedLogin, answer: String) -> Self {
         Self {
             kind,
+            refused_at: kind,
             answer,
             entry: None,
             asked_again_at: None,
@@ -209,14 +242,20 @@ impl fmt::Display for LoginRejected {
                     ("Microsoft", "this sign-in", "a sync or a send is started")
                 }
             };
+            let elsewhere = match self.refused_at {
+                at if at == self.kind => "",
+                RejectedLogin::Imap => " at the IMAP login",
+                RejectedLogin::Smtp => " at the SMTP login",
+                RejectedLogin::Graph => "",
+            };
             let set = match self.kind {
                 RejectedLogin::Graph => "the account signs in again",
                 _ => "the password is set again",
             };
             write!(
                 f,
-                " ({who} refused {what} earlier and is asked again at {at}, or at once after \
-                 {set} or {again})"
+                " ({who} refused {what}{elsewhere} earlier and is asked again at {at}, or at \
+                 once after {set} or {again})"
             )?;
         }
         Ok(())
@@ -230,9 +269,11 @@ pub fn login_rejected(error: &anyhow::Error) -> Option<&LoginRejected> {
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 
-/// Whether the list holds a fresh refusal of `login`, whatever the secret:
-/// what the health check and `account.credentials` read, neither of which
-/// may read a secret.
+/// Whether the list holds a running refusal of the secret `login` was last
+/// attempted with: what the health check and `account.credentials` read,
+/// neither of which may read a secret. A login not yet attempted with a
+/// refused password is not reported, even when its next attempt would be
+/// held.
 pub fn is_refused(login: &Login) -> bool {
     refusals().holds(login, Instant::now())
 }
@@ -258,8 +299,8 @@ pub fn rejected_detail(account: &str, login: RejectedLogin) -> String {
     mp_core::mp_command::login_rejected_detail(account, login, shared)
 }
 
-/// The logins of `account` the list holds a fresh refusal of, in the order of
-/// [`RejectedLogin`].
+/// The logins of `account` the list holds a running refusal of, in the order
+/// of [`RejectedLogin`].
 pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
     [
         RejectedLogin::Imap,
@@ -273,8 +314,11 @@ pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
     .collect()
 }
 
-/// End the hold of `login`, so its next attempt asks the server; the count
-/// of refusals in a row stays, since the user acting is no success.
+/// End the hold of the secret `login` was last attempted with, for every
+/// login of the account that shares it, so the next attempt asks the server;
+/// the count of refusals in a row stays, since the user acting is no
+/// success. A login the gate has not seen attempted yet ends the hold of
+/// every secret of its kind (a password, or a sign-in) on its account.
 pub fn forget(login: &Login) {
     refusals().release(login, Instant::now());
 }
@@ -283,15 +327,7 @@ pub fn forget(login: &Login) {
 /// asks for: the IMAP login falls back to the SMTP password, so either
 /// password may be the one a refused login needed.
 pub fn forget_account(account: &AccountConfig) {
-    for kind in [
-        RejectedLogin::Imap,
-        RejectedLogin::Smtp,
-        RejectedLogin::Graph,
-    ] {
-        if let Some(login) = Login::of(account, kind) {
-            forget(&login);
-        }
-    }
+    refusals().release_account(&account.name, Instant::now());
 }
 
 /// Record a refusal of `login`, as a refused dial does, for a test outside
@@ -318,10 +354,11 @@ pub fn record(login: &Login, secret: &str, rejected: &LoginRejected) -> LoginRej
     refusals().record(login.clone(), fingerprint(secret), rejected, Instant::now())
 }
 
-/// `login` succeeded, so whatever the list held about it, the count of
-/// refusals in a row included, no longer describes the server.
-pub fn accepted(login: &Login) {
-    refusals().forget(login);
+/// `login` succeeded with `secret`, so the server takes it: whatever the list
+/// held about it, the count of refusals in a row included, no longer
+/// describes the server, for the account's other login with it too.
+pub fn accepted(login: &Login, secret: &str) {
+    refusals().accept(login, &fingerprint(secret));
 }
 
 /// The refused secret, as the list compares it: never the secret itself.
@@ -331,26 +368,54 @@ fn fingerprint(secret: &str) -> [u8; 32] {
 
 fn refusals() -> MutexGuard<'static, Refusals> {
     static REFUSALS: OnceLock<Mutex<Refusals>> = OnceLock::new();
-    // A panic while the lock was held cannot leave the map half written: every
-    // critical section is one map operation.
+    // A panic while the lock was held cannot leave the maps half written:
+    // every critical section leaves them consistent between its writes.
     REFUSALS
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// One refused login.
-struct Refusal {
+/// What a refused secret is kept under: the account and the secret, not the
+/// login, so an account's IMAP and SMTP logins that use one password share
+/// one row, whatever their hosts. `sign_in` keeps a Graph refresh token apart
+/// from a password.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RowKey {
+    account: String,
+    sign_in: bool,
     secret: [u8; 32],
+}
+
+impl RowKey {
+    fn of(login: &Login, secret: &[u8; 32]) -> Self {
+        Self {
+            account: login.account().to_string(),
+            sign_in: matches!(login, Login::Graph(_)),
+            secret: *secret,
+        }
+    }
+
+    fn is_family_of(&self, login: &Login) -> bool {
+        self.account == login.account() && self.sign_in == matches!(login, Login::Graph(_))
+    }
+}
+
+/// One refused secret of one account: its schedule, shared by every login of
+/// the account that uses it.
+struct Row {
     /// When the hold ends and the server is asked again.
     until: Instant,
-    /// The refusals of `secret` in a row, this one included.
+    /// The refusals of the secret in a row, at any of the account's logins,
+    /// this one included.
     in_a_row: u32,
     entry: u64,
+    /// The login the server last refused the secret at, and its answer.
+    refused_at: RejectedLogin,
     answer: String,
 }
 
-impl Refusal {
+impl Row {
     fn holds(&self, now: Instant) -> bool {
         now < self.until
     }
@@ -360,27 +425,54 @@ impl Refusal {
 /// without waiting for it.
 #[derive(Default)]
 struct Refusals {
-    entries: HashMap<Login, Refusal>,
+    /// The refused secrets, by account and secret.
+    rows: HashMap<RowKey, Row>,
+    /// The secret each login was last attempted with, which a caller that
+    /// reads no secret (the health check) and the user's action find the
+    /// login's row by.
+    seen: HashMap<Login, [u8; 32]>,
     next_entry: u64,
 }
 
 impl Refusals {
-    /// The answer the gate gives a `login` with `secret` at `now`, if its hold
-    /// runs; `wall` is the wall clock at `now`, which the answer's time is
-    /// told in.
+    /// Note that `login` is attempted with `secret`, and drop the rows of its
+    /// account no login is attempted with any more: a password replaced is
+    /// a row nothing reads.
+    fn see(&mut self, login: &Login, secret: &[u8; 32]) {
+        if self.seen.get(login) == Some(secret) {
+            return;
+        }
+        self.seen.insert(login.clone(), *secret);
+        let account = login.account().to_string();
+        let live: Vec<RowKey> = self
+            .seen
+            .iter()
+            .filter(|(seen, _)| seen.account() == account)
+            .map(|(seen, secret)| RowKey::of(seen, secret))
+            .collect();
+        self.rows
+            .retain(|key, _| key.account != account || live.contains(key));
+    }
+
+    /// The answer the gate gives a `login` with `secret` at `now`, if the hold
+    /// of the secret runs, whichever of the account's logins it was refused
+    /// at; `wall` is the wall clock at `now`, which the answer's time is told
+    /// in.
     fn refused(
-        &self,
+        &mut self,
         login: &Login,
         secret: &[u8; 32],
         now: Instant,
         wall: SystemTime,
     ) -> Option<LoginRejected> {
-        let refusal = self.entries.get(login)?;
-        (refusal.secret == *secret && refusal.holds(now)).then(|| LoginRejected {
+        self.see(login, secret);
+        let row = self.rows.get(&RowKey::of(login, secret))?;
+        row.holds(now).then(|| LoginRejected {
             kind: login.kind(),
-            answer: refusal.answer.clone(),
-            entry: Some(refusal.entry),
-            asked_again_at: Some(wall + refusal.until.saturating_duration_since(now)),
+            refused_at: row.refused_at,
+            answer: row.answer.clone(),
+            entry: Some(row.entry),
+            asked_again_at: Some(wall + row.until.saturating_duration_since(now)),
         })
     }
 
@@ -391,25 +483,23 @@ impl Refusals {
         rejected: &LoginRejected,
         now: Instant,
     ) -> LoginRejected {
-        let entry = match self.entries.get(&login) {
-            // Two dials that raced each other past the gate were refused once:
-            // the second keeps the first's entry, so a caller logs the refusal
-            // once, and its hold.
-            Some(refusal) if refusal.secret == secret && refusal.holds(now) => refusal.entry,
+        self.see(&login, &secret);
+        let key = RowKey::of(&login, &secret);
+        let entry = match self.rows.get(&key) {
+            // Two dials that raced each other past the gate, at one login or
+            // at both, were refused once: the second keeps the first's entry,
+            // so a caller logs the refusal once, and its hold.
+            Some(row) if row.holds(now) => row.entry,
             previous => {
-                let in_a_row = match previous {
-                    Some(refusal) if refusal.secret == secret => refusal.in_a_row + 1,
-                    _ => 1,
-                };
+                let in_a_row = previous.map_or(1, |row| row.in_a_row + 1);
                 self.next_entry += 1;
-                let until = now + hold(&login, in_a_row);
-                self.entries.insert(
-                    login,
-                    Refusal {
-                        secret,
-                        until,
+                self.rows.insert(
+                    key,
+                    Row {
+                        until: now + hold(&login, in_a_row),
                         in_a_row,
                         entry: self.next_entry,
+                        refused_at: login.kind(),
                         answer: rejected.answer.clone(),
                     },
                 );
@@ -422,22 +512,51 @@ impl Refusals {
         }
     }
 
-    /// End the hold of `login` at `now`, keeping its count.
+    /// End at `now` the hold of the secret `login` was last attempted with,
+    /// keeping its count; for a login not seen yet, of every row of its
+    /// family on its account.
     fn release(&mut self, login: &Login, now: Instant) {
-        if let Some(refusal) = self.entries.get_mut(login) {
-            refusal.until = refusal.until.min(now);
+        match self.seen.get(login) {
+            Some(secret) => {
+                if let Some(row) = self.rows.get_mut(&RowKey::of(login, secret)) {
+                    row.until = row.until.min(now);
+                }
+            }
+            None => {
+                for (_, row) in self
+                    .rows
+                    .iter_mut()
+                    .filter(|(key, _)| key.is_family_of(login))
+                {
+                    row.until = row.until.min(now);
+                }
+            }
         }
     }
 
-    /// Drop `login`'s entry, count and all.
-    fn forget(&mut self, login: &Login) {
-        self.entries.remove(login);
+    /// End at `now` the hold of every row of `account`, keeping the counts.
+    fn release_account(&mut self, account: &str, now: Instant) {
+        for (_, row) in self
+            .rows
+            .iter_mut()
+            .filter(|(key, _)| key.account == account)
+        {
+            row.until = row.until.min(now);
+        }
+    }
+
+    /// `login` succeeded with `secret`: drop its row, count and all, for
+    /// every login of the account that shares it.
+    fn accept(&mut self, login: &Login, secret: &[u8; 32]) {
+        self.see(login, secret);
+        self.rows.remove(&RowKey::of(login, secret));
     }
 
     fn holds(&self, login: &Login, now: Instant) -> bool {
-        self.entries
+        self.seen
             .get(login)
-            .is_some_and(|refusal| refusal.holds(now))
+            .and_then(|secret| self.rows.get(&RowKey::of(login, secret)))
+            .is_some_and(|row| row.holds(now))
     }
 }
 
@@ -445,47 +564,85 @@ impl Refusals {
 mod tests {
     use super::*;
 
-    fn server(port: u16) -> ServerLogin {
-        ServerLogin {
-            host: "imap.example.com".into(),
-            port,
+    /// The IMAP login of `account` on `host`.
+    fn imap_of(account: &str, host: &str) -> Login {
+        Login::Imap(ServerLogin {
+            account: account.into(),
+            host: host.into(),
+            port: 993,
             username: "alpha@example.com".into(),
-        }
+        })
     }
 
-    fn login(port: u16) -> Login {
-        Login::Imap(server(port))
+    /// The SMTP login of `account` on `host`.
+    fn smtp_of(account: &str, host: &str) -> Login {
+        Login::Smtp(ServerLogin {
+            account: account.into(),
+            host: host.into(),
+            port: 465,
+            username: "alpha@example.com".into(),
+        })
     }
 
-    fn rejected() -> LoginRejected {
-        LoginRejected::new(RejectedLogin::Imap, "no".into())
+    /// The IMAP and the SMTP login of the account `tum`, on two hosts as the
+    /// TUM's are.
+    fn imap() -> Login {
+        imap_of("tum", "imap.tum.test")
+    }
+
+    fn smtp() -> Login {
+        smtp_of("tum", "smtp.tum.test")
+    }
+
+    fn rejected(login: &Login) -> LoginRejected {
+        LoginRejected::new(login.kind(), "no response: LOGIN failed.".into())
     }
 
     const SECOND: Duration = Duration::from_secs(1);
+    const MINUTE: Duration = Duration::from_secs(60);
+
+    fn wall() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+    }
+
+    /// Refuse `login` with `secret` at `at` and answer how long the gate
+    /// then holds it: the first instant from `at` on, to the second, when
+    /// the same login with the same secret is asked again.
+    fn held_for(list: &mut Refusals, login: &Login, secret: &str, at: Instant) -> Duration {
+        list.record(login.clone(), fingerprint(secret), &rejected(login), at);
+        let mut held = Duration::ZERO;
+        while list
+            .refused(login, &fingerprint(secret), at + held, wall())
+            .is_some()
+        {
+            held += SECOND;
+        }
+        held
+    }
 
     /// A refusal holds the secret it refused for its hold and no longer;
-    /// another secret, or the same one after the hold, is asked.
+    /// another secret, or another account's login, is asked.
     #[test]
     fn a_refusal_holds_its_password_for_the_hold_and_then_lapses() {
         let mut list = Refusals::default();
         let now = Instant::now();
         let (wrong, other) = (fingerprint("wrong"), fingerprint("other"));
-        let recorded = list.record(login(993), wrong, &rejected(), now);
+        let recorded = list.record(imap(), wrong, &rejected(&imap()), now);
 
-        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let held = list
-            .refused(&login(993), &wrong, now + SECOND, wall)
+            .refused(&imap(), &wrong, now + SECOND, wall())
             .expect("the same password is refused from the list");
         assert_eq!(held.entry(), recorded.entry());
         assert!(held.from_list());
-        assert!(list.holds(&login(993), now + SECOND));
-        assert!(list.refused(&login(993), &other, now, wall).is_none());
-        assert!(list.refused(&login(143), &wrong, now, wall).is_none());
+        assert!(list.holds(&imap(), now + SECOND));
+        assert!(list.refused(&imap(), &other, now, wall()).is_none());
+        let elsewhere = imap_of("home", "imap.tum.test");
+        assert!(list.refused(&elsewhere, &wrong, now, wall()).is_none());
 
-        assert!(!list.holds(&login(993), now + FIRST_HOLD));
         assert!(list
-            .refused(&login(993), &wrong, now + FIRST_HOLD, wall)
+            .refused(&imap(), &wrong, now + FIRST_HOLD, wall())
             .is_none());
+        assert!(!list.holds(&imap(), now + FIRST_HOLD));
     }
 
     /// The answer from the list names the time the server is asked again,
@@ -494,12 +651,11 @@ mod tests {
     fn a_held_refusal_names_the_time_the_server_is_asked_again() {
         let mut list = Refusals::default();
         let now = Instant::now();
-        list.record(login(993), fingerprint("wrong"), &rejected(), now);
-        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        list.record(imap(), fingerprint("wrong"), &rejected(&imap()), now);
         let held = list
-            .refused(&login(993), &fingerprint("wrong"), now + 30 * SECOND, wall)
+            .refused(&imap(), &fingerprint("wrong"), now + 30 * SECOND, wall())
             .expect("held");
-        let again = chrono::DateTime::<chrono::Local>::from(wall + FIRST_HOLD - 30 * SECOND)
+        let again = chrono::DateTime::<chrono::Local>::from(wall() + FIRST_HOLD - 30 * SECOND)
             .format("%H:%M")
             .to_string();
         assert!(
@@ -512,27 +668,15 @@ mod tests {
         assert!(!held.to_string().contains("hour"), "{held}");
     }
 
-    /// Refuse `secret` at `at` and answer how long the gate then holds it:
-    /// the first instant from `at` on, to the second, when it asks again.
-    fn held_for(list: &mut Refusals, secret: &str, at: Instant) -> Duration {
-        list.record(login(993), fingerprint(secret), &rejected(), at);
-        let mut held = Duration::ZERO;
-        while list.holds(&login(993), at + held) {
-            held += SECOND;
-        }
-        held
-    }
-
     /// The hold of a password grows with its refusals in a row: 2 minutes
-    /// after the first, 10 after the second, an hour from the third on, so a
-    /// wrong password is asked at most three times in the first hour.
+    /// after the first, 10 after the second, an hour from the third on.
     #[test]
     fn a_password_is_held_two_minutes_then_ten_then_an_hour() {
         let mut list = Refusals::default();
         let mut at = Instant::now();
         let mut holds = Vec::new();
         for _ in 0..5 {
-            let held = held_for(&mut list, "wrong", at);
+            let held = held_for(&mut list, &imap(), "wrong", at);
             holds.push(held);
             at += held;
         }
@@ -540,128 +684,200 @@ mod tests {
             holds,
             [FIRST_HOLD, SECOND_HOLD, LONG_HOLD, LONG_HOLD, LONG_HOLD]
         );
-        assert_eq!(FIRST_HOLD, 2 * 60 * SECOND);
-        assert_eq!(SECOND_HOLD, 10 * 60 * SECOND);
-        assert_eq!(LONG_HOLD, 60 * 60 * SECOND);
-        let in_the_first_hour = holds
-            .iter()
-            .scan(Duration::ZERO, |start, held| {
-                let this = *start;
-                *start += *held;
-                Some(this)
-            })
-            .filter(|start| *start < LONG_HOLD)
-            .count();
-        assert_eq!(in_the_first_hour, 3);
+        assert_eq!(FIRST_HOLD, 2 * MINUTE);
+        assert_eq!(SECOND_HOLD, 10 * MINUTE);
+        assert_eq!(LONG_HOLD, 60 * MINUTE);
     }
 
-    /// A success ends the row: the next refusal of the same password is held
-    /// 2 minutes again.
+    /// One password the IMAP and the SMTP login of an account share is one
+    /// row: refused at the IMAP login, the SMTP login with it fails from the
+    /// list without dialling, on another host too, and says it was the IMAP
+    /// login the server refused it at.
     #[test]
-    fn a_success_resets_the_row() {
+    fn a_password_refused_at_the_imap_login_holds_the_smtp_login() {
+        let mut list = Refusals::default();
+        let now = Instant::now();
+        let wrong = fingerprint("wrong");
+        list.record(imap(), wrong, &rejected(&imap()), now);
+        assert!(
+            !list.holds(&smtp(), now),
+            "a login not yet attempted with the password is not reported refused"
+        );
+
+        let held = list
+            .refused(&smtp(), &wrong, now + SECOND, wall())
+            .expect("the SMTP login with the refused password is not dialled");
+        assert_eq!(held.kind(), RejectedLogin::Smtp);
+        let text = held.to_string();
+        assert!(
+            text.starts_with(
+                "SMTP login failed: no response: LOGIN failed. (the server refused \
+                 this password at the IMAP login earlier and is asked again at "
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("or a message is sent)"), "{text}");
+        assert!(
+            list.holds(&smtp(), now + SECOND),
+            "once attempted, the SMTP login is reported refused beside the IMAP one"
+        );
+        assert!(list
+            .refused(&smtp(), &fingerprint("its own"), now + SECOND, wall())
+            .is_none());
+    }
+
+    /// A refusal at either login is the next in the one row, and the hold it
+    /// sets holds both.
+    #[test]
+    fn a_refusal_at_either_login_counts_for_both() {
         let mut list = Refusals::default();
         let at = Instant::now();
-        let first = held_for(&mut list, "wrong", at);
-        let second = held_for(&mut list, "wrong", at + first);
-        assert_eq!(second, SECOND_HOLD);
-        list.forget(&login(993));
+        let first = held_for(&mut list, &imap(), "wrong", at);
+        assert_eq!(first, FIRST_HOLD);
+        let second = held_for(&mut list, &smtp(), "wrong", at + first);
         assert_eq!(
-            held_for(&mut list, "wrong", at + first + second),
-            FIRST_HOLD
+            second, SECOND_HOLD,
+            "the SMTP refusal is the second in the row"
+        );
+        let then = at + first + SECOND;
+        assert!(
+            list.refused(&imap(), &fingerprint("wrong"), then, wall())
+                .is_some(),
+            "the SMTP refusal holds the IMAP login too"
+        );
+        assert_eq!(
+            held_for(&mut list, &imap(), "wrong", at + first + second),
+            LONG_HOLD
         );
     }
 
-    /// A new password starts a row of its own, and asks at once.
+    /// A success at either login resets the row for both, since the server
+    /// just took that password.
     #[test]
-    fn a_changed_password_starts_its_own_row() {
+    fn a_success_at_either_login_resets_both() {
         let mut list = Refusals::default();
         let at = Instant::now();
-        let first = held_for(&mut list, "wrong", at);
-        held_for(&mut list, "wrong", at + first);
-        let now = at + first + SECOND;
+        let first = held_for(&mut list, &imap(), "wrong", at);
+        let second = held_for(&mut list, &smtp(), "wrong", at + first);
+        let now = at + first + second;
+        list.accept(&smtp(), &fingerprint("wrong"));
         assert!(list
-            .refused(&login(993), &fingerprint("new"), now, SystemTime::now())
+            .refused(&imap(), &fingerprint("wrong"), now, wall())
             .is_none());
-        assert_eq!(held_for(&mut list, "new", now), FIRST_HOLD);
+        assert_eq!(held_for(&mut list, &imap(), "wrong", now), FIRST_HOLD);
     }
 
-    /// The user acting ends the hold at once and keeps the row, so a refusal
-    /// right after is the next in it rather than the first of a new one.
+    /// A password changed at one login only is a row of its own: the other
+    /// login keeps its row and its count.
     #[test]
-    fn the_user_acting_ends_the_hold_and_keeps_the_row() {
+    fn a_password_changed_at_one_login_follows_its_own_row() {
         let mut list = Refusals::default();
         let at = Instant::now();
-        list.record(login(993), fingerprint("wrong"), &rejected(), at);
+        let first = held_for(&mut list, &imap(), "old", at);
+        let now = at + first;
+        assert_eq!(held_for(&mut list, &smtp(), "new", now), FIRST_HOLD);
+        assert!(list
+            .refused(&imap(), &fingerprint("old"), now + SECOND, wall())
+            .is_none());
+        assert_eq!(
+            held_for(&mut list, &imap(), "old", now + SECOND),
+            SECOND_HOLD,
+            "the old password's row kept its count"
+        );
+        assert!(list.holds(&smtp(), now + SECOND));
+    }
+
+    /// The user acting ends the hold at once, for both logins of the
+    /// password, and keeps the row, so a refusal right after is the next in
+    /// it rather than the first of a new one.
+    #[test]
+    fn the_user_acting_ends_the_hold_for_both_logins_and_keeps_the_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        list.record(imap(), fingerprint("wrong"), &rejected(&imap()), at);
         let now = at + SECOND;
-        list.release(&login(993), now);
-        assert!(!list.holds(&login(993), now));
+        list.release(&imap(), now);
+        assert!(!list.holds(&imap(), now));
+        for login in [imap(), smtp()] {
+            assert!(list
+                .refused(&login, &fingerprint("wrong"), now, wall())
+                .is_none());
+        }
+        assert_eq!(held_for(&mut list, &smtp(), "wrong", now), SECOND_HOLD);
+
+        // A login the gate has not seen yet lets go of every password row
+        // of its account: a sync started for an account whose SMTP login
+        // alone was refused asks the server at once.
+        let mut list = Refusals::default();
+        list.record(smtp(), fingerprint("wrong"), &rejected(&smtp()), at);
+        list.release(&imap(), now);
         assert!(list
-            .refused(&login(993), &fingerprint("wrong"), now, SystemTime::now())
+            .refused(&imap(), &fingerprint("wrong"), now, wall())
             .is_none());
-        assert_eq!(held_for(&mut list, "wrong", now), SECOND_HOLD);
     }
 
-    /// A Graph sign-in is held the hour from its first refusal: Entra's
+    /// A Graph sign-in is held an hour from its first refusal: Entra's
     /// `invalid_grant` does not change by being asked again.
     #[test]
     fn a_graph_sign_in_is_held_an_hour_from_the_first_refusal() {
         let graph = Login::Graph("hines".into());
         assert_eq!(hold(&graph, 1), LONG_HOLD);
         assert_eq!(hold(&graph, 2), LONG_HOLD);
-        assert_eq!(hold(&login(993), 1), FIRST_HOLD);
-        assert_eq!(hold(&Login::Smtp(server(465)), 1), FIRST_HOLD);
-        assert_eq!(hold(&Login::Smtp(server(465)), 2), SECOND_HOLD);
-        assert_eq!(hold(&Login::Smtp(server(465)), 3), LONG_HOLD);
+        assert_eq!(hold(&imap(), 1), FIRST_HOLD);
+        assert_eq!(hold(&smtp(), 2), SECOND_HOLD);
+        assert_eq!(hold(&smtp(), 3), LONG_HOLD);
         let mut list = Refusals::default();
         let at = Instant::now();
-        list.record(graph.clone(), fingerprint("revoked"), &rejected(), at);
-        assert!(list.holds(&graph, at + LONG_HOLD - SECOND));
-        assert!(!list.holds(&graph, at + LONG_HOLD));
+        assert_eq!(held_for(&mut list, &graph, "revoked", at), LONG_HOLD);
     }
 
-    /// The IMAP and the SMTP login of one server and user are two logins: a
-    /// refusal of one holds nothing of the other, and the answer from the
-    /// list names the login it holds.
+    /// The worst case the module doc promises: one wrong password shared by
+    /// the IMAP and the SMTP login, with a sync tick dialling IMAP every
+    /// minute and the outbox drain dialling SMTP every 30 s, reaches the
+    /// server 3 times in the first hour and once an hour after.
     #[test]
-    fn the_imap_and_the_smtp_login_are_held_apart() {
+    fn one_wrong_password_is_asked_three_times_in_the_first_hour_and_once_an_hour_after() {
         let mut list = Refusals::default();
-        let (now, wall) = (Instant::now(), SystemTime::now());
+        let start = Instant::now();
         let wrong = fingerprint("wrong");
-        let smtp = Login::Smtp(server(993));
-        list.record(
-            smtp.clone(),
-            wrong,
-            &LoginRejected::new(RejectedLogin::Smtp, "535 5.7.8".into()),
-            now,
-        );
-        assert!(list.refused(&login(993), &wrong, now, wall).is_none());
-        let held = list.refused(&smtp, &wrong, now, wall).expect("held");
-        assert_eq!(held.kind(), RejectedLogin::Smtp);
-        assert!(held.from_list());
-        assert!(
-            held.to_string()
-                .starts_with("SMTP login failed: 535 5.7.8 ("),
-            "{held}"
-        );
-        assert!(held.to_string().contains("a message is sent"), "{held}");
+        let mut dials_per_hour = [0u32; 5];
+        let mut t = Duration::ZERO;
+        while t < 5 * LONG_HOLD {
+            let now = start + t;
+            let mut attempts = vec![smtp()];
+            if t.as_secs().is_multiple_of(60) {
+                attempts.insert(0, imap());
+            }
+            for login in attempts {
+                if list.refused(&login, &wrong, now, wall()).is_none() {
+                    dials_per_hour[(t.as_secs() / 3600) as usize] += 1;
+                    list.record(login.clone(), wrong, &rejected(&login), now);
+                }
+            }
+            t += 30 * SECOND;
+        }
+        assert_eq!(dials_per_hour, [3, 1, 1, 1, 1]);
     }
 
     /// Two refusals of one secret inside the hold are one entry, a new
-    /// refusal after the entry was forgotten is a new one.
+    /// refusal after the hold was let go is a new one.
     #[test]
     fn a_second_refusal_of_the_same_password_keeps_its_entry() {
         let mut list = Refusals::default();
         let now = Instant::now();
-        let first = list.record(login(993), fingerprint("wrong"), &rejected(), now);
-        let raced = list.record(login(993), fingerprint("wrong"), &rejected(), now);
+        let wrong = fingerprint("wrong");
+        let first = list.record(imap(), wrong, &rejected(&imap()), now);
+        let raced = list.record(imap(), wrong, &rejected(&imap()), now);
+        let sibling = list.record(smtp(), wrong, &rejected(&smtp()), now);
         assert_eq!(first.entry(), raced.entry());
+        assert_eq!(first.entry(), sibling.entry());
         assert!(
-            !list.holds(&login(993), now + FIRST_HOLD),
+            !list.holds(&imap(), now + FIRST_HOLD),
             "the race kept the first refusal's hold"
         );
-        list.release(&login(993), now);
-        assert!(!list.holds(&login(993), now));
-        let again = list.record(login(993), fingerprint("wrong"), &rejected(), now);
+        list.release(&imap(), now);
+        assert!(!list.holds(&imap(), now));
+        let again = list.record(imap(), wrong, &rejected(&imap()), now);
         assert_ne!(first.entry(), again.entry());
     }
 
@@ -670,7 +886,7 @@ mod tests {
     #[test]
     fn a_refusal_is_found_under_a_context() {
         use anyhow::Context;
-        let error = Err::<(), _>(rejected())
+        let error = Err::<(), _>(rejected(&imap()))
             .context("listing the folders")
             .unwrap_err();
         assert!(login_rejected(&error).is_some());

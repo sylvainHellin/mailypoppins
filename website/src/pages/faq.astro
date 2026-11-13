@@ -52,8 +52,9 @@ import AccordionItem from '../components/AccordionItem.astro';
             Check your credentials with <code>mp config show</code> and re-run
             <code>mp config set-password</code> (or <code>mp config set-password smtp</code> when
             the SMTP password differs from the IMAP one) if needed. After the server refuses a
-            password, mailypoppins asks it again after 2 minutes, then 10, then once an hour, or at
-            once when you set the password or start a sync or a send.
+            password, mailypoppins asks it again after 2 minutes, then 10, then once an hour, for
+            sending and receiving together when they use one password, or at once when you set
+            the password or start a sync or a send.
           </p>
         </AccordionItem>
 

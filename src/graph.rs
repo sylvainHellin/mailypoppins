@@ -378,7 +378,7 @@ where
     }
     match fetch().await {
         Ok(token) => {
-            login_gate::accepted(&login);
+            login_gate::accepted(&login, &refresh);
             Ok(token)
         }
         Err(e) => match e.downcast_ref::<crate::oauth2::RefreshRejected>() {

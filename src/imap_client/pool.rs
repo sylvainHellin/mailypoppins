@@ -378,6 +378,9 @@ mod tests {
 
     fn config(port: u16) -> ImapConfig {
         ImapConfig {
+            // An account of its own per server, since the list keys a refused
+            // password by the account and tests run side by side.
+            account: format!("pool-{port}"),
             host: "127.0.0.1".into(),
             port,
             username: "nobody@example.com".into(),
@@ -532,6 +535,7 @@ mod tests {
     #[test]
     fn the_pool_key_is_the_server_and_the_user_and_not_the_credential() {
         let base = |user: &str, port: u16, password: &str| ImapConfig {
+            account: String::new(),
             host: "imap.example.com".into(),
             port,
             username: user.into(),

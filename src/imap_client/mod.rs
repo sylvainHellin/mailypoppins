@@ -235,7 +235,7 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
     }
     match dial_imap_session(imap_config).await {
         Ok(session) => {
-            login_gate::accepted(&login);
+            login_gate::accepted(&login, &imap_config.password);
             Ok(session)
         }
         Err(e) => match login_rejected(&e) {

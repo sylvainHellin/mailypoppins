@@ -708,6 +708,7 @@ mod store_backed_mutations {
         crate::send::SendContext {
             graph: None,
             smtp: Some(crate::config::SmtpConfig {
+                account: String::new(),
                 host: "127.0.0.1".to_string(),
                 port: 1,
                 username: String::new(),
