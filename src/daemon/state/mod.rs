@@ -222,12 +222,13 @@ pub struct EventQueue {
 }
 
 impl EventQueue {
-    /// The oldest queued change, or `None` when nothing is queued.
-    pub fn try_recv(&mut self) -> Option<(Revision, Change)> {
-        lock(&self.events).pop_front()
-    }
-
     /// Every queued change, oldest first, leaving the queue empty.
+    ///
+    /// The connection loop takes [`EventQueue::drain_all`]; this and
+    /// [`EventQueue::drain_lifecycle`] are the in-process contract's window
+    /// onto the two queues, because a bootstrap reconstruction reduces the
+    /// [`Change`]s themselves, which the wire projection no longer carries
+    /// whole (an `Invalidate` names a resource and drops its counts).
     pub fn drain(&mut self) -> Vec<(Revision, Change)> {
         lock(&self.events).drain(..).collect()
     }
@@ -268,17 +269,6 @@ impl EventQueue {
         items
     }
 
-    /// How many changes are queued. The lifecycle queue is counted separately,
-    /// because every caller of this reasons about committed changes.
-    pub fn len(&self) -> usize {
-        lock(&self.events).len()
-    }
-
-    /// Whether nothing is queued.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Resolve once the queue holds something, immediately if it already does.
     ///
     /// The async companion the socket writer selects on; the in-process
@@ -288,7 +278,7 @@ impl EventQueue {
     pub async fn ready(&self) {
         loop {
             let waiting = self.ready.notified();
-            if !self.is_empty() || !lock(&self.lifecycle).is_empty() {
+            if !lock(&self.events).is_empty() || !lock(&self.lifecycle).is_empty() {
                 return;
             }
             waiting.await;

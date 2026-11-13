@@ -776,7 +776,7 @@ fn assert_opening_and_zeroed(snapshot: &Value, label: &str) {
 #[test]
 fn a_fresh_bootstrap_has_the_documented_shape_with_opening_accounts() {
     let state = fresh_state();
-    let queue = state.subscribe(ConnectionId(1));
+    let mut queue = state.subscribe(ConnectionId(1));
     let (snapshot, revision, instance) = state.bootstrap(ConnectionId(1));
 
     let json = snapshot.to_json();
@@ -798,7 +798,7 @@ fn a_fresh_bootstrap_has_the_documented_shape_with_opening_accounts() {
         "revision 0 is the client's pre-bootstrap sentinel and never travels, got {revision:?}"
     );
     assert!(
-        queue.is_empty(),
+        queue.drain().is_empty(),
         "nothing has changed, so the subscriber's queue is empty"
     );
 
@@ -992,17 +992,13 @@ fn two_connections_bootstrapped_at_different_revisions_each_see_their_own_tail()
         "the later bootstrap captures the change's own revision"
     );
 
+    let first_events = first_queue.drain();
     assert_eq!(
-        first_queue.len(),
+        first_events.len(),
         1,
-        "the earlier connection has exactly the one change queued"
+        "the earlier connection is told about the change and nothing else"
     );
-    let head = first_queue
-        .try_recv()
-        .expect("the earlier connection is told about the change");
-    assert_eq!(head.0, committed);
-    assert!(first_queue.try_recv().is_none(), "and about nothing else");
-    let first_events = vec![head];
+    assert_eq!(first_events[0].0, committed);
     assert!(
         second_queue.drain().is_empty(),
         "the later connection has the change in its snapshot and needs no event"

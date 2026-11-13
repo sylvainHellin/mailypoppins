@@ -1091,14 +1091,13 @@ fn the_cli_lines_of_a_failed_tick_are_one_failure_line() {
 // Layer (a) - the change, the event, and the queue
 // ---------------------------------------------------------------------------
 
-/// The change is addressed to its account, travels as the plan's kind, and
-/// carries the payload verbatim.
+/// The change is addressed to its account and carries the payload verbatim;
+/// the kind it travels as is the event's, pinned by the test below.
 #[test]
-fn the_change_carries_the_account_the_kind_and_the_payload() {
+fn the_change_carries_the_account_and_the_payload() {
     let outcome = busy();
     let change = Change::SyncCompleted(outcome.clone());
     assert_eq!(change.account(), ACCOUNT);
-    assert_eq!(change.kind(), KIND_SYNC_COMPLETED);
     assert_eq!(
         change.payload(),
         serde_json::to_value(&outcome).expect("a payload serialises"),

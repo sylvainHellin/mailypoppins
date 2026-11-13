@@ -506,7 +506,6 @@ fn a_draft_change_commits_a_draft_upsert_keyed_by_account_and_id() {
         },
         "a parsed draft is valid by construction; `ready` is the second axis"
     );
-    assert_eq!(change.kind(), KIND_DRAFT_CHANGED);
     assert_keys(&change.payload(), &DRAFT_CHANGED_KEYS, "draft.changed");
 
     let wire = Event::from_change(&change);
@@ -538,7 +537,6 @@ fn an_invalid_draft_commits_a_change_on_the_same_resource() {
     let change = event
         .as_change()
         .expect("an invalid draft is a fact about a resource and reduces into the snapshot");
-    assert_eq!(change.kind(), KIND_DRAFT_INVALID);
     assert_eq!(change.account(), "alpha");
     assert_keys(&change.payload(), &DRAFT_INVALID_KEYS, "draft.invalid");
     assert_eq!(change.payload()["diagnostics"][0]["line"], json!(4));

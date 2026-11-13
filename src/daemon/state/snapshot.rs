@@ -14,10 +14,7 @@
 use std::collections::BTreeMap;
 
 use mp_protocol::diagnostic::HealthCheck;
-use mp_protocol::events::{
-    Diagnostic, MutationsRolledBack, SyncCompleted, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
-    KIND_MUTATIONS_ROLLED_BACK, KIND_SYNC_COMPLETED,
-};
+use mp_protocol::events::{Diagnostic, MutationsRolledBack, SyncCompleted};
 use mp_protocol::operation::OperationStatus;
 use mp_protocol::send::HoldStatus;
 use serde_json::{json, Value};
@@ -198,20 +195,6 @@ impl Change {
             | Change::OutboxCounts { account, .. } => account,
             Change::SyncCompleted(outcome) => &outcome.account,
             Change::MutationsRolledBack(outcome) => &outcome.account,
-        }
-    }
-
-    /// The `kind` of the `state.event` this change travels as.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Change::AccountReady { .. } | Change::AccountBlocked { .. } => "account.state_changed",
-            Change::MailboxCounts { .. } => "mailbox.counts_changed",
-            Change::DraftUpsert { .. } => KIND_DRAFT_CHANGED,
-            Change::DraftInvalid { .. } => KIND_DRAFT_INVALID,
-            Change::DraftRemoved { .. } => "draft.removed",
-            Change::OutboxCounts { .. } => "outbox.counts_changed",
-            Change::SyncCompleted(_) => KIND_SYNC_COMPLETED,
-            Change::MutationsRolledBack(_) => KIND_MUTATIONS_ROLLED_BACK,
         }
     }
 

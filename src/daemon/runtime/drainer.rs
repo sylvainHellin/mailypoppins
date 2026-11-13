@@ -333,7 +333,6 @@ mod tests {
                 failed: 3,
             })]
         );
-        assert_eq!(changes[0].kind(), "mutations.rolled_back");
         assert!(state.last_sync("alpha").is_none(), "a drain is not a sync");
     }
 
