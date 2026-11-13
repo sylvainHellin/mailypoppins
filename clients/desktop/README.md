@@ -179,7 +179,10 @@ To uninstall: `mp daemon stop`, quit the app, delete `/Applications/mailypoppins
 | `MP_DESKTOP_EDITOR` | The editor command for drafts and every other file the app opens in an editor, `{path}` standing for the file; else the `editor` key of `desktop.json`, `$VISUAL` or `$EDITOR`, a probed `code`, `zed`, `subl` or `cursor`, then `open -t`; a terminal editor runs drafts in the reader pane and opens every other file in a terminal window |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`, to stderr and `<data>/logs/mp-desktop.log` |
 
-The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, `MAILYPOPPINS_DAEMON_AUTOSTART`) apply as they do to `mp`.
+The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, `MAILYPOPPINS_PROFILE`, `MAILYPOPPINS_DAEMON_AUTOSTART`) apply as they do to `mp`.
+
+The launch argument `--profile <name>` runs the app on a profile, with its own accounts, store and daemon, as `mp --profile <name>` does: `open -n -a mailypoppins --args --profile demo` on the Mac, where an app opened from the Dock or Finder sees no shell variable; `-n` opens a second window beside a running app, which `open` would otherwise only bring forward with the arguments dropped.
+The window title becomes `mailypoppins (demo)` and the foot of the sidebar says `profile demo`; the daemon, the editor and every `mp` the app starts inherit the profile, and an invalid name or one beside `MAILYPOPPINS_DATA_DIR` or `MAILYPOPPINS_CONFIG_DIR` exits 2 before a window opens.
 
 ## Documentation
 

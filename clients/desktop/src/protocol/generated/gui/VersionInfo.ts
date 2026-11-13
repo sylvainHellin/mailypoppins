@@ -4,4 +4,4 @@ import type { Hello } from "./Hello";
 /**
  * Versions on both sides of the socket.
  */
-export type VersionInfo = { app_version: string, protocol_min: number, protocol_max: number, daemon: Hello | null, fixture: boolean, };
+export type VersionInfo = { app_version: string, protocol_min: number, protocol_max: number, daemon: Hello | null, fixture: boolean, profile: string | null, };

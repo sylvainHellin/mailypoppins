@@ -941,6 +941,7 @@ The resolvers read only `MAILYPOPPINS_PROFILE`; `mp` turns `--profile` into it i
 `--profile` wins over the variable, a name is 1 to 12 ASCII letters, digits, `-` or `_` (the macOS socket path limit), and a profile beside `MAILYPOPPINS_CONFIG_DIR` or `MAILYPOPPINS_DATA_DIR` is refused with exit 2 naming both.
 The legacy `~/.config/email` move is skipped on a profile, since that directory is the default profile's.
 The TUI's hint bar carries a `profile <name>` badge in every context (`App::profile`), so the demo profile cannot pass for the real mailbox.
+The desktop app reads the same `--profile` launch argument at the top of `run()` through `mp_core::profile::flag_in_args` and `apply`, so its sidecar daemon, editor and terminal inherit the profile; its window title and the foot of its sidebar (`version_info.profile`) name it, the foot being what shows on the Mac, where the title bar is hidden.
 Nothing walks the config or data root recursively, so `profiles/` is never read as the default profile's files.
 
 `retention` is parsed and validated in config but not enforced yet: the blob store grows without bound until #0060 lands.

@@ -198,6 +198,8 @@ export const UPDATE_STATUS_FIXTURE: UpdateStatus = { current: "0.1.0", enabled: 
 
 export const mock = {
   connection: { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true } as ConnectionStatus,
+  /** The profile `version_info` reports the app was launched on (PERSO-176), null for the default one. */
+  profile: null as string | null,
   channel: null as Channel<GuiEvent> | null,
   /**
    * Every app event handler `listen` registered and its unlisten has not
@@ -568,6 +570,7 @@ export const MOCK_FILES = [`${MOCK_HOME}/Documents/report.pdf`, `${MOCK_HOME}/Do
 
 export function resetMock(): void {
   mock.connection = { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true };
+  mock.profile = null;
   mock.channel = null;
   mock.listeners.clear();
   mock.calls = [];
@@ -1870,6 +1873,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         protocol_max: 1,
         fixture: true,
         daemon: mock.connection.state === "connected" ? { daemon_version: "0.0.0-fixture", protocol: 1, instance_id: "fixture-instance-1" } : null,
+        profile: mock.profile,
       } satisfies VersionInfo;
     case "list_accounts":
       return mock.accounts.map((a): AccountInfo => {

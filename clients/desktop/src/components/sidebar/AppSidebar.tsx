@@ -1,6 +1,6 @@
 import { useCallback } from "react";
-import { Mail } from "lucide-react";
-import { Sidebar, SidebarContent, SidebarHeader, SidebarSeparator } from "@/components/ui/sidebar";
+import { CircleUser, Mail } from "lucide-react";
+import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarSeparator } from "@/components/ui/sidebar";
 import { AccountGroup, type SidebarMailbox } from "@/components/sidebar/AccountGroup";
 import { ViewEntries } from "@/components/sidebar/ViewEntries";
 import { kindOfRole } from "@/components/sidebar/icons";
@@ -74,6 +74,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
   const update = updateLabel
     ? { label: updateLabel, restart: s.update.kind === "installed", onChoose: () => void installUpdate(s, dispatch) }
     : null;
+  const profile = s.version?.profile ?? null;
   return (
     <Sidebar variant="inset" collapsible={collapsible} className={collapsible === "none" ? "w-full" : undefined}>
       {/* The window has no title bar (PERSO-97): the header moves it. */}
@@ -116,6 +117,21 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
           <ViewEntries current={s.view} onOpen={onOpenView} onActivity={onActivity} update={update} />
         </nav>
       </SidebarContent>
+      {/* The profile the app runs on (PERSO-176): the Mac hides the title
+          bar that names it elsewhere, and the demo must not pass for the
+          real mailbox. Nothing on the default profile. */}
+      {profile && (
+        <SidebarFooter>
+          <div
+            data-testid="sidebar-profile"
+            title={`Running on profile ${profile}`}
+            className="flex h-6 items-center gap-2 px-2 text-xs font-semibold text-warning"
+          >
+            <CircleUser className="size-4 shrink-0" aria-hidden="true" />
+            <span className="truncate group-data-[collapsible=icon]:sr-only">profile {profile}</span>
+          </div>
+        </SidebarFooter>
+      )}
     </Sidebar>
   );
 }

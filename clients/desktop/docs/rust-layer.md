@@ -1054,6 +1054,7 @@ The picker hands back a path, and since no `fs:` permission is granted the webvi
 | `MP_DESKTOP_THEME` | Set by the desktop on the embedded editor's child, `dark` or `light`, the app's palette at spawn; see Terminal sessions, "The look" |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`; to stderr and `<data>/logs/mp-desktop.log` |
 | `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR` | The same overrides the binary reads |
+| `--profile <name>` (or `MAILYPOPPINS_PROFILE`) | The profile to run on (PERSO-176): `run()` reads the launch argument through `mp_core::profile::flag_in_args` and `apply` before logging and before any thread, which exports `MAILYPOPPINS_PROFILE` for every child; the window title and `version_info.profile` name it, and a refusal exits 2 |
 | `MAILYPOPPINS_DAEMON_AUTOSTART=0` | No on-demand start |
 | `MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS` | The start-and-connect budget, 12 s by default |
 

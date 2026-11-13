@@ -131,6 +131,16 @@ fn refuse(app: &tauri::AppHandle, url: &tauri::Url, source: InterceptSource) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The `--profile` launch argument (PERSO-176) picks the data and config
+    // roots, so it is settled before anything resolves a path, and before any
+    // thread, since it exports MAILYPOPPINS_PROFILE for the daemon, the editor
+    // and every `mp` this app spawns.
+    let profile = mp_core::profile::flag_in_args(std::env::args().skip(1))
+        .and_then(|flag| mp_core::profile::apply(flag.as_deref()))
+        .unwrap_or_else(|e| {
+            eprintln!("mp-desktop: {e}");
+            std::process::exit(2)
+        });
     let paths = paths::Paths::resolve();
     logging::init(&paths);
     let fixture = fixture_requested();
@@ -219,7 +229,7 @@ pub fn run() {
             // title keeps the window titled, and chrome.rs hides its buttons
             // (chrome.rs has the why).
             let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("mailypoppins")
+                .title(mp_core::profile::window_title(profile.as_deref()))
                 .inner_size(width, height)
                 .min_inner_size(480.0, 400.0)
                 .on_navigation(move |url| {

@@ -753,6 +753,8 @@ pub struct VersionInfo {
     pub protocol_max: u32,
     pub daemon: Option<connector::Hello>,
     pub fixture: bool,
+    // The profile the app was launched on, `None` for the default (PERSO-176).
+    pub profile: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2313,6 +2315,7 @@ pub fn version_info(app: AppHandle, session: State<'_, SessionHandle>) -> Versio
             connector::last_hello()
         },
         fixture: session.is_fixture(),
+        profile: mp_core::profile::active(),
     }
 }
 
