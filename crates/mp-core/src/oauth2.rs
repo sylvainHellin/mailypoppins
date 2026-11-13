@@ -726,42 +726,6 @@ pub async fn load_or_refresh_token(
     Ok(new_cache.access_token)
 }
 
-/// Blocking wrapper around `load_or_refresh_token` for use in config loading.
-pub fn load_or_refresh_token_blocking(
-    account_name: &str,
-    client_id: &str,
-    tenant_id: &str,
-    scopes: &str,
-) -> Result<String> {
-    // Try to use existing tokio runtime first (e.g., when called from async context)
-    let scopes = scopes.to_string();
-    if let Ok(_handle) = tokio::runtime::Handle::try_current() {
-        // We're inside an async runtime -- spawn a blocking task
-        let scopes = scopes.clone();
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(load_or_refresh_token(
-                    account_name,
-                    client_id,
-                    tenant_id,
-                    &scopes,
-                ))
-            })
-            .join()
-            .map_err(|_| anyhow!("OAuth2 token refresh thread panicked"))?
-        })
-    } else {
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(load_or_refresh_token(
-            account_name,
-            client_id,
-            tenant_id,
-            &scopes,
-        ))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

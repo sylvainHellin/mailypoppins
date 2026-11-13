@@ -290,27 +290,8 @@ pub struct GraphClient {
 }
 
 impl GraphClient {
-    /// Create a new GraphClient, loading/refreshing the OAuth2 token synchronously.
-    /// Panics if called from inside an async runtime (use `new_async` instead).
-    pub fn new(config: &GraphConfig) -> Result<Self> {
-        let access_token = gated_token(&config.account_name, || {
-            std::future::ready(crate::oauth2::load_or_refresh_token_blocking(
-                &config.account_name,
-                &config.client_id,
-                &config.tenant_id,
-                &config.scopes,
-            ))
-        });
-        let access_token = futures::executor::block_on(access_token)?;
-        Ok(Self {
-            client: http_client()?,
-            access_token,
-            username: config.username.clone(),
-            top_folders: std::sync::Mutex::new(None),
-        })
-    }
-
-    /// Create a new GraphClient from within an async context.
+    /// A client signed in with the account's access token, loaded or
+    /// refreshed through [`access_token`].
     pub async fn new_async(config: &GraphConfig) -> Result<Self> {
         let access_token = access_token(config).await?;
         Ok(Self {
