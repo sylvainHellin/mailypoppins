@@ -484,13 +484,27 @@ pub async fn run_sync<B: SyncBackend>(
     for target in targets {
         knowns.push(B::known(store, account, target)?);
     }
-    // What "new" means for the notification of a backend that drains by id:
-    // newer than anything the store held before this pass, read once so a
-    // target ingested earlier in the pass does not raise the bar for the
-    // inbox (PERSO-172).
+    // What "new" means for the notification (#0009, PERSO-186), read once
+    // before the pass so a target ingested earlier does not move the bar:
+    // the top each mailbox's cursor recorded, for a backend whose UIDs grow
+    // with arrival, and the newest date the account held, for one that drains
+    // by id (PERSO-172). A mailbox with no cursor has no top, so a first sync
+    // announces nothing under either.
     let new_mail = backend.new_mail();
+    let prior_tops: Vec<Option<i64>> = match new_mail {
+        NewMail::AboveTop => targets
+            .iter()
+            .map(|target| {
+                Ok(
+                    ingest::load_mailbox_cursor(store, account, target.role.as_str())?
+                        .map(|cursor| cursor.last_uid.unwrap_or(0)),
+                )
+            })
+            .collect::<Result<_>>()?,
+        NewMail::NewerThanHeld => vec![None; targets.len()],
+    };
     let newest_held = match new_mail {
-        NewMail::EveryInsert => None,
+        NewMail::AboveTop => None,
         NewMail::NewerThanHeld => ingest::newest_held_date(store, account),
     };
 
@@ -565,6 +579,11 @@ pub async fn run_sync<B: SyncBackend>(
             coverage: coverage_of,
         } = listing;
         result.skipped += skipped;
+        // New mail is what lands above the top the mailbox had before this
+        // pass (PERSO-186). A mailbox with no cursor yet is all backlog, a
+        // UID under the top is older mail a wider pass reached, and a
+        // renumbered mailbox is a refetch whose UIDs say nothing about age.
+        let announce_above = prior_tops[index].filter(|_| !uidvalidity_reset);
         if uidvalidity_reset {
             result.uidvalidity_resets += 1;
             // The retry counters are keyed by UID, and the server has just
@@ -791,7 +810,9 @@ pub async fn run_sync<B: SyncBackend>(
                             result.uid_rebound += 1;
                         }
                         let announced = match new_mail {
-                            NewMail::EveryInsert => true,
+                            NewMail::AboveTop => {
+                                announce_above.is_some_and(|top| message.uid > top)
+                            }
                             NewMail::NewerThanHeld => {
                                 ingest::arrived_after(newest_held, &email.date)
                             }
@@ -799,7 +820,7 @@ pub async fn run_sync<B: SyncBackend>(
                         if outcome.inserted && target.role.is_inbox() && announced {
                             result
                                 .new_inbox_mail
-                                .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
+                                .push(super::InboxArrival::of(outcome.row_id, &email));
                         }
                     }
                     // The copy a local move or delete is taking off the server
@@ -1343,7 +1364,7 @@ mod tests {
         }
 
         fn new_mail(&self) -> NewMail {
-            self.new_mail.unwrap_or(NewMail::EveryInsert)
+            self.new_mail.unwrap_or(NewMail::AboveTop)
         }
 
         async fn finish_target(&mut self, index: usize, finish: &Finish<'_>) {
@@ -1816,16 +1837,17 @@ mod tests {
 
     /// PERSO-172: a backend that drains a backlog by id, newest first, inserts
     /// mail that is old to its owner, so it announces only an inbox row dated
-    /// after everything the account held when the pass began; a first sync
-    /// announces nothing. A positional backend announces every inserted inbox
-    /// row, as it always has.
+    /// after everything the account held when the pass began. A backend whose
+    /// UIDs grow with arrival announces every inbox row above the mailbox's
+    /// previous top, whatever its date (PERSO-186). A first sync announces
+    /// nothing under either.
     #[test]
     fn a_backend_that_drains_by_id_announces_only_mail_newer_than_the_store() {
         let old = "Wed, 6 Aug 2025 10:00:00 +0000";
         let held = "Thu, 7 Aug 2025 10:00:00 +0000";
         let fresh = "Fri, 8 Aug 2025 10:00:00 +0000";
         for (new_mail, announced) in [
-            (NewMail::EveryInsert, vec!["old", "fresh"]),
+            (NewMail::AboveTop, vec!["old", "fresh"]),
             (NewMail::NewerThanHeld, vec!["fresh"]),
         ] {
             let fx = Fixture::new();
@@ -1835,10 +1857,9 @@ mod tests {
             };
             first.script("Inbox", vec![Ok(fetch(vec![(5, raw_dated("held", held))]))]);
             let result = fx.run(&mut first, &inbox_only());
-            assert_eq!(
+            assert!(
                 result.new_inbox_mail.is_empty(),
-                new_mail == NewMail::NewerThanHeld,
-                "a first sync announces under {new_mail:?} as it always did"
+                "a first sync announces nothing under {new_mail:?}"
             );
 
             let mut second = FakeBackend {
@@ -2335,6 +2356,64 @@ mod tests {
         assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
     }
 
+    /// PERSO-186: an inbox message is announced as new mail only when it lands
+    /// above the top the mailbox's cursor recorded before the pass. The first
+    /// pass has no top and is backlog, a UID under the top is older mail a
+    /// wider pass reached, a renumbered mailbox is a refetch, and an archive
+    /// arrival is never announced; each announcement names the row it wrote.
+    #[test]
+    fn only_inbox_mail_above_the_previous_top_is_announced() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        let mut renumbered = fetch(vec![(1, raw("r1")), (2, raw("r2"))]);
+        renumbered.uidvalidity_reset = true;
+        renumbered.state.uid_validity = Some(8);
+        backend.script(
+            "INBOX",
+            vec![
+                Ok(fetch(vec![(101, raw("one")), (102, raw("two"))])),
+                Ok(fetch(vec![(90, raw("older")), (103, raw("three"))])),
+                Ok(renumbered),
+            ],
+        );
+        backend.script(
+            "Archive",
+            vec![
+                Ok(fetch(vec![(55, raw("old"))])),
+                Ok(fetch(vec![(56, raw("filed"))])),
+                Ok(fetch(vec![])),
+            ],
+        );
+
+        let first = fx.run(&mut backend, &targets);
+        assert_eq!(first.saved, 3);
+        assert!(first.new_inbox_mail.is_empty(), "the first pass is backlog");
+
+        let second = fx.run(&mut backend, &targets);
+        assert_eq!(second.saved, 3);
+        let announced: Vec<(&str, i64)> = second
+            .new_inbox_mail
+            .iter()
+            .map(|mail| (mail.subject.as_str(), mail.row_id))
+            .collect();
+        let row_of_103 = fx
+            .row_ids("inbox")
+            .into_iter()
+            .find(|(_, uid)| *uid == 103)
+            .map(|(id, _)| id)
+            .unwrap();
+        assert_eq!(announced, vec![("three", row_of_103)]);
+
+        let reset = fx.run(&mut backend, &targets);
+        assert_eq!(reset.uidvalidity_resets, 1);
+        assert!(reset.saved > 0);
+        assert!(
+            reset.new_inbox_mail.is_empty(),
+            "a renumbered mailbox is a refetch"
+        );
+    }
+
     /// #0115: a UIDVALIDITY reset renumbered the mailbox, so the fingerprint
     /// the marker holds describes UIDs that no longer mean anything.
     #[test]
@@ -2437,7 +2516,10 @@ mod tests {
         let result = fx.run(&mut backend, &targets);
 
         assert_eq!(result.saved, 3);
-        assert_eq!(result.new_inbox_mail.len(), 2, "only inbox arrivals notify");
+        assert!(
+            result.new_inbox_mail.is_empty(),
+            "a first pass is backlog, not arrivals"
+        );
         assert_eq!(
             result.fresh_observations.len(),
             3,

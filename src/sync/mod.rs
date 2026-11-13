@@ -255,8 +255,34 @@ pub struct SyncResult {
     /// [`ObservationSink`]: the one its caller handed it, so a caller holding
     /// a clone reads them whether or not the pass returned this result.
     pub fresh_observations: ObservationSink,
-    /// Sender + subject of every genuinely new inbox message (#0009).
-    pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
+    /// Every inbox message this pass announces as new mail (#0009): inserted
+    /// above what the account held before the pass, never its backlog
+    /// (PERSO-186).
+    pub new_inbox_mail: Vec<InboxArrival>,
+}
+
+/// One inbox message a pass announced as new mail: the row it wrote, which
+/// the daemon reads again before it notifies anyone (PERSO-186), and the
+/// sender and subject a notification shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxArrival {
+    /// `messages.id` of the row the pass inserted.
+    pub row_id: i64,
+    /// The `From:` header as ingest stored it.
+    pub from: String,
+    /// The `Subject:` header as ingest stored it.
+    pub subject: String,
+}
+
+impl InboxArrival {
+    /// The arrival of `email`, written into row `row_id`.
+    pub fn of(row_id: i64, email: &crate::parse::FetchedEmail) -> InboxArrival {
+        InboxArrival {
+            row_id,
+            from: email.from.clone(),
+            subject: email.subject.clone(),
+        }
+    }
 }
 
 /// One message downloaded for ingest, with the identity the store keys on.
@@ -452,9 +478,11 @@ pub enum FlagScope {
 /// What counts as new mail when a pass inserts an inbox row (#0009).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewMail {
-    /// Every inserted inbox row: a positional window downloads the top of the
-    /// mailbox, which is where arrivals land.
-    EveryInsert,
+    /// An inserted inbox row whose UID is above the top the mailbox's cursor
+    /// recorded before the pass (PERSO-186): UIDs grow with arrival, so a UID
+    /// under the top is older mail a wider pass reached. A mailbox with no
+    /// cursor yet (a first sync) and a renumbered one announce nothing.
+    AboveTop,
     /// Only a row dated after everything the account held when the pass
     /// began ([`crate::ingest::arrived_after`], PERSO-172): a backend that
     /// drains a backlog by id, newest first, inserts mail that is old to its
@@ -647,7 +675,7 @@ pub trait SyncBackend {
 
     /// What counts as new mail when the pass inserts an inbox row.
     fn new_mail(&self) -> NewMail {
-        NewMail::EveryInsert
+        NewMail::AboveTop
     }
 
     /// The backend's own work on the target at `index`, once the engine has
