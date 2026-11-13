@@ -123,7 +123,8 @@ pub const SHARED_DRAFT: &str = "ba00000000000001";
 /// The refusal both received mutations make over an account with no
 /// credentials, before they touch the store.
 pub const CREDENTIALS_REFUSAL: &str =
-    "Secret 'smtp-password-alpha' not found. Run `mp config set-password`.";
+    "No IMAP password is stored for account 'alpha', nor an SMTP password to fall back to. \
+     Run `mp config set-password imap --account alpha`.";
 
 /// `<root>/accounts/<account>`.
 pub fn account_dir(root: &Path, account: &str) -> PathBuf {

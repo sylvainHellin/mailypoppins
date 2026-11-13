@@ -102,6 +102,99 @@ impl From<anyhow::Error> for SecretsError {
     }
 }
 
+/// A password the active backend does not hold (PERSO-199).
+///
+/// The one secrets error a first run meets on every path that reads a
+/// credential, so it names the password and the account in the user's words,
+/// where the keyring looked, and the command that stores it, with the profile
+/// the process runs on. [`is_missing`] tells it apart from a backend that
+/// failed, which the IMAP login's fallback to the SMTP password needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingSecret {
+    key: String,
+    backend: SecretsBackendKind,
+    profile: Option<String>,
+    /// Set on an IMAP password whose SMTP fallback is missing too.
+    smtp_fallback_missing: bool,
+}
+
+impl MissingSecret {
+    /// `key` missing from `backend`, on the profile this process runs on.
+    pub fn new(key: &str, backend: SecretsBackendKind) -> Self {
+        Self {
+            key: key.to_string(),
+            backend,
+            profile: crate::profile::active(),
+            smtp_fallback_missing: false,
+        }
+    }
+
+    /// The same password, its SMTP fallback missing as well.
+    pub fn with_no_smtp_fallback(mut self) -> Self {
+        self.smtp_fallback_missing = true;
+        self
+    }
+}
+
+impl std::fmt::Display for MissingSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let place = match self.backend {
+            SecretsBackendKind::EncryptedFile => String::new(),
+            SecretsBackendKind::Keyring => format!(
+                " in the system keyring (service '{}')",
+                keyring_service(self.profile.as_deref())
+            ),
+        };
+        let Some((kind, account)) = password_key_parts(&self.key) else {
+            return write!(f, "No secret '{}' is stored{place}.", self.key);
+        };
+        let fallback = if self.smtp_fallback_missing {
+            ", nor an SMTP password to fall back to"
+        } else {
+            ""
+        };
+        write!(
+            f,
+            "No {} password is stored for account '{account}'{place}{fallback}. Run `{}`.",
+            kind.to_uppercase(),
+            set_password_command(kind, account, self.profile.as_deref())
+        )
+    }
+}
+
+impl std::error::Error for MissingSecret {}
+
+/// Whether `error` is a [`MissingSecret`], however much context was added.
+pub fn is_missing(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MissingSecret>().is_some()
+}
+
+/// `smtp-password-<account>` or `imap-password-<account>` as the kind and the
+/// account, the two keys a credential is stored under.
+fn password_key_parts(key: &str) -> Option<(&str, &str)> {
+    let (kind, account) = key.split_once("-password-")?;
+    matches!(kind, "smtp" | "imap").then_some((kind, account))
+}
+
+/// The command that stores the `kind` password of `account` on `profile`.
+fn set_password_command(kind: &str, account: &str, profile: Option<&str>) -> String {
+    let profile = profile
+        .map(|name| format!(" --profile {name}"))
+        .unwrap_or_default();
+    format!("mp{profile} config set-password {kind} --account {account}")
+}
+
+/// `key` in words: "the SMTP password of account 'work'".
+fn secret_in_words(key: &str) -> String {
+    match password_key_parts(key) {
+        Some((kind, account)) => format!(
+            "the {} password of account '{account}'",
+            kind.to_uppercase()
+        ),
+        None => format!("the secret '{key}'"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SecretsBackend trait
 // ---------------------------------------------------------------------------
@@ -123,13 +216,23 @@ struct DerivedKey([u8; 32]);
 fn machine_id_bytes() -> Result<Vec<u8>> {
     // The `machine-uid` crate reads /etc/machine-id on Linux/WSL and
     // IOPlatformUUID on macOS via a shell-out to `ioreg`.
-    let id = machine_uid::get().map_err(|e| {
-        anyhow!(
-            "Failed to read machine ID (needed to derive secrets key): {}",
-            e
-        )
-    })?;
+    let id = machine_uid::get().map_err(|e| machine_id_error(&e.to_string()))?;
     Ok(id.into_bytes())
+}
+
+/// Why the encrypted file cannot be opened on a machine with no readable ID,
+/// and what to do instead (PERSO-199).
+fn machine_id_error(cause: &str) -> anyhow::Error {
+    let create = if cfg!(target_os = "linux") {
+        "create /etc/machine-id (`sudo systemd-machine-id-setup`), or "
+    } else {
+        ""
+    };
+    anyhow!(
+        "Could not read this machine's ID, from which the encrypted secrets file's key is \
+         derived ({cause}). To store passwords, {create}set `secrets_backend = \"keyring\"` \
+         in config.toml and restart the daemon (`mp daemon restart`)."
+    )
 }
 
 #[cfg(unix)]
@@ -421,12 +524,9 @@ impl SecretsBackend for EncryptedFileBackend {
             .write()
             .map_err(|_| anyhow!("secrets lock poisoned"))?;
         self.refresh_locked(&mut state)?;
-        state
-            .file
-            .entries
-            .get(key)
-            .cloned()
-            .with_context(|| format!("Secret '{}' not found. Run `mp config set-password`.", key))
+        state.file.entries.get(key).cloned().ok_or_else(|| {
+            anyhow::Error::new(MissingSecret::new(key, SecretsBackendKind::EncryptedFile))
+        })
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
@@ -518,37 +618,64 @@ impl KeyringBackend {
         }
     }
 
-    fn entry(&self, key: &str) -> Result<keyring::Entry> {
+    fn entry(&self, action: &str, key: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(&keyring_service(self.profile.as_deref()), key)
-            .context("Failed to create keyring entry")
+            .map_err(|e| keyring_failure(action, key, &e))
     }
+}
+
+/// What the keyring answered a read of `key` with, as the error a user reads:
+/// "no entry" is a [`MissingSecret`], anything else the keyring failing.
+fn keyring_read_error(key: &str, profile: Option<&str>, error: keyring::Error) -> anyhow::Error {
+    match error {
+        keyring::Error::NoEntry => anyhow::Error::new(MissingSecret {
+            profile: profile.map(str::to_string),
+            ..MissingSecret::new(key, SecretsBackendKind::Keyring)
+        }),
+        other => keyring_failure("read", key, &other),
+    }
+}
+
+/// A keyring that would not `action` (read, store or delete) `key`: its own
+/// reason, and what to do about a keyring that will not answer (PERSO-199).
+fn keyring_failure(action: &str, key: &str, error: &keyring::Error) -> anyhow::Error {
+    let preposition = match action {
+        "store" => "in",
+        _ => "from",
+    };
+    anyhow!(
+        "Could not {action} {} {preposition} the system keyring: {error}. Unlock the system \
+         keyring (on macOS, the login Keychain) and retry, or set \
+         `secrets_backend = \"encrypted-file\"` in config.toml, restart the daemon \
+         (`mp daemon restart`) and store the password again.",
+        secret_in_words(key)
+    )
 }
 
 impl SecretsBackend for KeyringBackend {
     fn get(&self, key: &str) -> Result<String> {
-        keyring_get_with_fallback(self.profile.as_deref(), key, |service, key| {
+        let profile = self.profile.as_deref();
+        keyring_get_with_fallback(profile, key, |service, key| {
             let entry =
-                keyring::Entry::new(service, key).context("Failed to create keyring entry")?;
-            entry.get_password().map_err(anyhow::Error::from)
-        })
-        .with_context(|| {
-            format!(
-                "Password '{}' not found in keyring. Run `mp config set-password`.",
-                key
-            )
+                keyring::Entry::new(service, key).map_err(|e| keyring_failure("read", key, &e))?;
+            entry
+                .get_password()
+                .map_err(|e| keyring_read_error(key, profile, e))
         })
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
-        self.entry(key)?
+        self.entry("store", key)?
             .set_password(value)
-            .with_context(|| format!("Failed to store '{}' in keyring", key))
+            .map_err(|e| keyring_failure("store", key, &e))
     }
 
+    /// Deleting a password that is not there is done, as it is in the file.
     fn delete(&self, key: &str) -> Result<()> {
-        self.entry(key)?
-            .delete_credential()
-            .with_context(|| format!("Failed to delete '{}' from keyring", key))
+        match self.entry("delete", key)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keyring_failure("delete", key, &e)),
+        }
     }
 }
 
@@ -708,6 +835,119 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEYRING_SERVICE), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // What a user reads (PERSO-199)
+    // -----------------------------------------------------------------------
+
+    /// A password the file does not hold is named as the password of an
+    /// account, with the command that stores it, and is recognisable as a
+    /// missing password rather than a broken backend.
+    #[test]
+    fn a_missing_password_in_the_file_names_the_account_and_the_command() {
+        let dir = tempdir().unwrap();
+        let backend =
+            EncryptedFileBackend::open_with_ikm_for_test(dir.path().join("s.enc"), b"ikm-missing")
+                .unwrap();
+        let err = backend.get("smtp-password-work").unwrap_err();
+        assert!(is_missing(&err), "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            "No SMTP password is stored for account 'work'. \
+             Run `mp config set-password smtp --account work`."
+        );
+    }
+
+    /// The keyring says where it looked, and a profile's command carries the
+    /// profile, since without it the command would store the default's.
+    #[test]
+    fn a_missing_password_in_the_keyring_names_the_service_and_the_profile() {
+        let missing = MissingSecret {
+            key: "imap-password-tum".to_string(),
+            backend: SecretsBackendKind::Keyring,
+            profile: Some("demo".to_string()),
+            smtp_fallback_missing: false,
+        };
+        assert_eq!(
+            missing.to_string(),
+            "No IMAP password is stored for account 'tum' in the system keyring \
+             (service 'mailypoppins-demo'). \
+             Run `mp --profile demo config set-password imap --account tum`."
+        );
+    }
+
+    /// The IMAP login falls back to the SMTP password, so when neither is
+    /// there the sentence says both are missing and names the IMAP command.
+    #[test]
+    fn a_missing_imap_password_with_no_smtp_fallback_says_both_are_missing() {
+        let missing = MissingSecret::new("imap-password-tum", SecretsBackendKind::EncryptedFile)
+            .with_no_smtp_fallback();
+        assert_eq!(
+            missing.to_string(),
+            "No IMAP password is stored for account 'tum', nor an SMTP password to fall back \
+             to. Run `mp config set-password imap --account tum`."
+        );
+    }
+
+    /// The keyring's "no entry" is a missing password; anything else is the
+    /// keyring failing, which is not reported as "not found": it names the
+    /// keyring's own reason and what to do about a keyring that will not
+    /// answer.
+    #[test]
+    fn a_keyring_failure_is_not_reported_as_a_missing_password() {
+        let missing = keyring_read_error("smtp-password-work", None, keyring::Error::NoEntry);
+        assert!(is_missing(&missing), "{missing:#}");
+
+        let locked = keyring_read_error(
+            "smtp-password-work",
+            None,
+            keyring::Error::NoStorageAccess("the keychain is locked".into()),
+        );
+        assert!(!is_missing(&locked), "{locked:#}");
+        let said = locked.to_string();
+        assert!(
+            said.starts_with(
+                "Could not read the SMTP password of account 'work' from the system keyring:"
+            ) && said.contains("the keychain is locked")
+                && said.contains("Unlock the system keyring")
+                && said.contains("secrets_backend = \"encrypted-file\""),
+            "{said}"
+        );
+        assert!(!said.contains("not found"), "{said}");
+    }
+
+    /// A failed store names the password, the account and the keyring's
+    /// reason, on one line.
+    #[test]
+    fn a_keyring_store_failure_carries_its_reason() {
+        let err = keyring_failure(
+            "store",
+            "imap-password-tum",
+            &keyring::Error::PlatformFailure("no session keyring".into()),
+        );
+        let said = err.to_string();
+        assert!(
+            said.starts_with(
+                "Could not store the IMAP password of account 'tum' in the system keyring:"
+            ) && said.contains("no session keyring"),
+            "{said}"
+        );
+    }
+
+    /// A machine with no readable ID cannot derive the file's key; the
+    /// sentence says so and what to do instead.
+    #[test]
+    fn an_unreadable_machine_id_says_what_to_do() {
+        let said = machine_id_error("No such file or directory").to_string();
+        assert!(
+            said.contains("this machine's ID")
+                && said.contains("No such file or directory")
+                && said.contains("secrets_backend = \"keyring\""),
+            "{said}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(said.contains("systemd-machine-id-setup"), "{said}");
     }
 
     #[test]

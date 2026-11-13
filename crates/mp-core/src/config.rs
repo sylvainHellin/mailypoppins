@@ -1499,6 +1499,33 @@ impl SmtpConfig {
     }
 }
 
+/// The IMAP password of `account`, falling back to the SMTP one, read through
+/// `get`.
+///
+/// When neither is stored the error says so of both and names the IMAP
+/// command, rather than reporting the SMTP key the fallback looked up last
+/// (PERSO-199). A backend that failed rather than missed a password is
+/// reported as itself, whichever of the two reads it failed.
+fn imap_password(account: &str, get: impl Fn(&str) -> Result<String>) -> Result<String> {
+    use crate::secrets::{is_missing, MissingSecret};
+    let imap_key = format!("imap-password-{account}");
+    let imap_error = match get(&imap_key) {
+        Ok(password) => return Ok(password),
+        Err(e) => e,
+    };
+    match get(&format!("smtp-password-{account}")) {
+        Ok(password) => Ok(password),
+        Err(_) if !is_missing(&imap_error) => Err(imap_error),
+        Err(smtp_error) if !is_missing(&smtp_error) => Err(smtp_error),
+        Err(_) => {
+            let missing = imap_error
+                .downcast::<MissingSecret>()
+                .expect("a missing password, by the guard above");
+            Err(anyhow::Error::new(missing.with_no_smtp_fallback()))
+        }
+    }
+}
+
 /// Build ImapConfig from AccountConfig + secrets-backend password (with SMTP fallback)
 impl ImapConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
@@ -1514,10 +1541,7 @@ impl ImapConfig {
             }
         }
 
-        // The IMAP password, falling back to the SMTP one.
-        let imap_key = format!("imap-password-{}", account.name);
-        let smtp_key = format!("smtp-password-{}", account.name);
-        let password = get_secret(&imap_key).or_else(|_| get_secret(&smtp_key))?;
+        let password = imap_password(&account.name, get_secret)?;
 
         let ServerLogin {
             host,
@@ -2268,6 +2292,59 @@ host = "imap.example.com"
             account.imap.username.clone()
         };
         assert_eq!(username, "smtp_user");
+    }
+
+    /// A fake backend over `stored`, missing every other key the way the
+    /// encrypted file misses one.
+    fn fake_secrets<'a>(stored: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Result<String> + 'a {
+        move |key: &str| {
+            stored
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::secrets::MissingSecret::new(
+                        key,
+                        crate::secrets::SecretsBackendKind::EncryptedFile,
+                    ))
+                })
+        }
+    }
+
+    /// The IMAP password wins, the SMTP one serves when it is missing, and
+    /// with neither the sentence names both and the IMAP command (PERSO-199).
+    #[test]
+    fn the_imap_password_falls_back_to_the_smtp_one_and_says_so_when_both_are_missing() {
+        let both = [("imap-password-a", "imap"), ("smtp-password-a", "smtp")];
+        assert_eq!(imap_password("a", fake_secrets(&both)).unwrap(), "imap");
+        let smtp = [("smtp-password-a", "smtp")];
+        assert_eq!(imap_password("a", fake_secrets(&smtp)).unwrap(), "smtp");
+
+        let err = imap_password("a", fake_secrets(&[])).unwrap_err();
+        assert!(crate::secrets::is_missing(&err), "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            "No IMAP password is stored for account 'a', nor an SMTP password to fall back to. \
+             Run `mp config set-password imap --account a`."
+        );
+    }
+
+    /// A backend that failed is reported as itself, not as a missing password.
+    #[test]
+    fn a_failing_backend_is_not_reported_as_a_missing_imap_password() {
+        let broken = |_: &str| -> Result<String> { Err(anyhow::anyhow!("the keychain is locked")) };
+        let err = imap_password("a", broken).unwrap_err();
+        assert_eq!(err.to_string(), "the keychain is locked");
+
+        let imap_missing_smtp_broken = |key: &str| -> Result<String> {
+            if key.starts_with("imap") {
+                fake_secrets(&[])(key)
+            } else {
+                Err(anyhow::anyhow!("the keychain is locked"))
+            }
+        };
+        let err = imap_password("a", imap_missing_smtp_broken).unwrap_err();
+        assert_eq!(err.to_string(), "the keychain is locked");
     }
 
     #[test]

@@ -269,7 +269,8 @@ use support::draft_fixture as fixture;
 use support::draft_fixture::Stash;
 use support::parity::{
     assert_byte_identical, mp_command, mp_no_daemon, oracle, oracle_command, pin_font_size,
-    socket_path, DaemonFixture, SandboxRoot, EXIT_UNAVAILABLE, REQUIRE_ENV,
+    socket_path, todays_password_refusals, DaemonFixture, SandboxRoot, EXIT_UNAVAILABLE,
+    REQUIRE_ENV,
 };
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
@@ -2126,12 +2127,14 @@ fn mp_edit_reports_an_editor_that_failed_identically() {
         .args(["edit", fixture::VALID])
         .output()
         .expect("run mp edit");
-    let direct = oracle_command(slice.root())
-        .env("EDITOR", &editor)
-        .env("MP_EDITOR_LOG", &log)
-        .args(["edit", fixture::VALID])
-        .output()
-        .expect("run mp edit");
+    let direct = todays_password_refusals(
+        oracle_command(slice.root())
+            .env("EDITOR", &editor)
+            .env("MP_EDITOR_LOG", &log)
+            .args(["edit", fixture::VALID])
+            .output()
+            .expect("run mp edit"),
+    );
     assert!(!routed.status.success(), "the stub editor exits 3");
     assert_byte_identical(&routed, &direct);
 }

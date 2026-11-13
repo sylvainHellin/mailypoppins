@@ -229,7 +229,8 @@ use support::draft_fixture::Stash;
 use support::mutation_fixture as fixture;
 use support::parity::{
     assert_byte_identical, graph_without_smtp_warning, mp_command, mp_no_daemon, oracle_command,
-    piped_since_0144, socket_path, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
+    piped_since_0144, socket_path, todays_password_refusals, DaemonFixture, EXIT_UNAVAILABLE,
+    REQUIRE_ENV,
 };
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
@@ -359,14 +360,14 @@ impl Slice {
 
     /// The pre-daemon binary, standing in `cwd`.
     fn oracle_in(&self, cwd: &Path, args: &[&str]) -> Output {
-        graph_without_smtp_warning(piped_since_0144(
+        todays_password_refusals(graph_without_smtp_warning(piped_since_0144(
             args,
             oracle_command(self.root())
                 .current_dir(cwd)
                 .args(args)
                 .output()
                 .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
-        ))
+        )))
     }
 
     /// Run a command that hands files to the opener, with the recording `open`
@@ -383,11 +384,17 @@ impl Slice {
         } else {
             oracle_command(self.root())
         };
-        cmd.env("PATH", path)
+        let out = cmd
+            .env("PATH", path)
             .env("MP_OPEN_LOG", log)
             .args(args)
             .output()
-            .unwrap_or_else(|e| panic!("run `mp {}` with a recording opener: {e}", args.join(" ")))
+            .unwrap_or_else(|e| panic!("run `mp {}` with a recording opener: {e}", args.join(" ")));
+        if routed {
+            out
+        } else {
+            todays_password_refusals(out)
+        }
     }
 
     /// Assert the two binaries agree byte for byte, and run `check` over each

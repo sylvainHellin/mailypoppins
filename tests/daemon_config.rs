@@ -2622,7 +2622,7 @@ async fn a_watcher_reads_its_password_without_a_client_opening_the_backend() {
         "the watcher ran before the backend was opened: {failure}"
     );
     assert!(
-        failure.contains("not found. Run `mp config set-password`"),
+        failure.contains("No IMAP password is stored for account 'alpha'"),
         "the watcher's failure is the missing password: {failure}"
     );
 }

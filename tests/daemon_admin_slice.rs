@@ -320,7 +320,7 @@ use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use support::admin_fixture as fixture;
 use support::parity::{
     assert_byte_identical, daemon_is_listening, graph_without_smtp_warning, mp_command,
-    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path,
+    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path, todays_password_refusals,
     without_retired_oauth2_mode, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
@@ -511,12 +511,12 @@ impl Slice {
 
     /// The pre-daemon binary over the same root: the definition of parity.
     fn oracle(&self, args: &[&str]) -> Output {
-        without_retired_oauth2_mode(graph_without_smtp_warning(
+        without_retired_oauth2_mode(todays_password_refusals(graph_without_smtp_warning(
             oracle_command(self.root())
                 .args(args)
                 .output()
                 .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
-        ))
+        )))
     }
 
     /// Assert the two binaries agree byte for byte, and hand the routed output
@@ -594,11 +594,11 @@ impl Slice {
 
     /// The same for the oracle.
     fn oracle_with_stdin(&self, args: &[&str], input: &str) -> Output {
-        without_retired_oauth2_mode(run_with_stdin(
+        without_retired_oauth2_mode(todays_password_refusals(run_with_stdin(
             &mut oracle_command(self.root()),
             args,
             input,
-        ))
+        )))
     }
 
     /// A connected, initialized client of this daemon.
@@ -2621,10 +2621,12 @@ fn without_folders_blocks(stdout: &str) -> String {
 fn mp_config_path_never_contacts_a_daemon() {
     let tmp = TempDir::new().expect("a temporary root");
     let ours = mp_no_daemon(&["config", "path"], tmp.path());
-    let theirs = oracle_command(tmp.path())
-        .args(["config", "path"])
-        .output()
-        .expect("run the oracle");
+    let theirs = todays_password_refusals(
+        oracle_command(tmp.path())
+            .args(["config", "path"])
+            .output()
+            .expect("run the oracle"),
+    );
 
     assert_byte_identical(&ours, &theirs);
     assert_eq!(ours.status.code(), Some(0), "printing a path cannot fail");
@@ -2676,10 +2678,12 @@ fn mp_config_add_account_refuses_without_a_configuration() {
     let daemon = DaemonFixture::start(tmp.path());
 
     let ours = daemon.mp_routed(&["config", "add-account"]);
-    let theirs = oracle_command(tmp.path())
-        .args(["config", "add-account"])
-        .output()
-        .expect("run the oracle");
+    let theirs = todays_password_refusals(
+        oracle_command(tmp.path())
+            .args(["config", "add-account"])
+            .output()
+            .expect("run the oracle"),
+    );
 
     assert_byte_identical(&ours, &theirs);
     assert_eq!(ours.status.code(), Some(1));

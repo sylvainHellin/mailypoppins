@@ -197,11 +197,15 @@ pub fn seed_secrets(root: &Path) -> bool {
 /// The sentence every command of this slice refuses an account with no
 /// credentials with, from the secret store itself.
 ///
-/// It names the *SMTP* key even on a purely IMAP path, because `ImapConfig`
-/// falls back to the SMTP password; that is today's behaviour and parity means
-/// reproducing it rather than improving it.
+/// It names both passwords, because `ImapConfig` falls back to the SMTP one,
+/// and the IMAP command (PERSO-199); the oracle's sentence named the SMTP key
+/// alone and is rewritten to this one by
+/// [`super::parity::todays_password_refusals`].
 pub fn secret_refusal(account: &str) -> String {
-    format!("Secret 'smtp-password-{account}' not found. Run `mp config set-password`.")
+    format!(
+        "No IMAP password is stored for account '{account}', nor an SMTP password to fall \
+         back to. Run `mp config set-password imap --account {account}`."
+    )
 }
 
 /// The line `mp sync` prints for an account that has nothing to sync.

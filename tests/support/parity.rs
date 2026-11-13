@@ -595,13 +595,66 @@ pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
     let args = without_sort_relevance(args);
     let args = args.as_slice();
-    without_retired_body_sentence(graph_without_smtp_warning(piped_since_0144(
-        args,
-        oracle_command(tmp)
-            .args(args)
-            .output()
-            .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+    without_retired_body_sentence(todays_password_refusals(graph_without_smtp_warning(
+        piped_since_0144(
+            args,
+            oracle_command(tmp)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+        ),
     )))
+}
+
+/// The oracle's output with a missing password named as today's binary names
+/// it.
+///
+/// The pre-daemon binary said `Secret 'smtp-password-<account>' not found.
+/// Run `mp config set-password`.` for a missing SMTP password and, since the
+/// IMAP login falls back to the SMTP password, for a missing IMAP password
+/// too. Since PERSO-199 the sentence names the password and the account and
+/// the whole command that stores it: the SMTP one where the client loads the
+/// SMTP configuration (the `Could not load SMTP config:` warning), the IMAP
+/// one, with both passwords missing, everywhere else this fixture reaches it.
+/// This takes that deliberate change out of a parity row the way
+/// [`graph_without_smtp_warning`] does.
+pub fn todays_password_refusals(mut out: Output) -> Output {
+    fn rewrite(text: &str) -> String {
+        const OPEN: &str = "Secret 'smtp-password-";
+        const CLOSE: &str = "' not found. Run `mp config set-password`.";
+        text.split_inclusive('\n')
+            .map(|line| {
+                let Some(start) = line.find(OPEN) else {
+                    return line.to_string();
+                };
+                let rest = &line[start + OPEN.len()..];
+                let Some(end) = rest.find(CLOSE) else {
+                    return line.to_string();
+                };
+                let account = &rest[..end];
+                let today = if line[..start].ends_with("Could not load SMTP config: ") {
+                    format!(
+                        "No SMTP password is stored for account '{account}'. \
+                         Run `mp config set-password smtp --account {account}`."
+                    )
+                } else {
+                    format!(
+                        "No IMAP password is stored for account '{account}', nor an SMTP \
+                         password to fall back to. \
+                         Run `mp config set-password imap --account {account}`."
+                    )
+                };
+                format!("{}{today}{}", &line[..start], &rest[end + CLOSE.len()..])
+            })
+            .collect()
+    }
+    for stream in [&mut out.stdout, &mut out.stderr] {
+        let text = String::from_utf8_lossy(stream);
+        if text.contains("' not found. Run `mp config set-password`.") {
+            *stream = rewrite(&text).into_bytes();
+        }
+    }
+    out
 }
 
 /// The oracle's stdout with `mp show`'s line for a message with no text body

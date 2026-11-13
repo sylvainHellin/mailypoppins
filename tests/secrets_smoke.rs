@@ -389,6 +389,47 @@ fn write_config(root: &Path, account: &str) {
     .expect("write config.toml");
 }
 
+/// A password that was never stored is named as the password of the account,
+/// with the command that stores it, on the SMTP path the client loads and on
+/// the IMAP path the daemon loads, where the SMTP password is the fallback.
+#[test]
+fn a_missing_password_names_the_account_and_the_command_that_stores_it() {
+    let tmp = root();
+    write_config(tmp.path(), "smoke");
+    let daemon = DaemonFixture::start(tmp.path());
+
+    let out = mp(daemon.root(), &["config", "show"]);
+    assert!(
+        stderr(&out).contains(
+            "Could not load SMTP config: No SMTP password is stored for account 'smoke'. \
+             Run `mp config set-password smtp --account smoke`."
+        ),
+        "the SMTP warning:\n{}",
+        stderr(&out)
+    );
+
+    let out = mp(daemon.root(), &["sync", "-A", "smoke"]);
+    assert!(!out.status.success(), "a sync with no password fails");
+    assert!(
+        stderr(&out).contains(
+            "No IMAP password is stored for account 'smoke', nor an SMTP password to fall back \
+             to. Run `mp config set-password imap --account smoke`."
+        ),
+        "the IMAP refusal:\n{}",
+        stderr(&out)
+    );
+
+    // An SMTP password alone serves IMAP too, so the refusal goes.
+    set_password(daemon.root(), "smtp", "smoke", SMTP_SET);
+    let out = mp(daemon.root(), &["sync", "-A", "smoke"]);
+    assert!(
+        !stderr(&out).contains("password is stored"),
+        "the IMAP login falls back to the SMTP password:\n{}",
+        stderr(&out)
+    );
+    daemon.stop();
+}
+
 /// A secrets file this machine cannot decrypt (copied from another machine,
 /// or another user's) is named with the command that recovers from it, and
 /// that command runs: the client used to refuse it with the very sentence
