@@ -22,8 +22,8 @@ use anyhow::Result;
 use log::{info, warn};
 
 use super::{
-    stops_at, BodyBatch, FetchedBody, FreshObservation, MailboxListing, ObservationSink, Observed,
-    ResumePoint, Stop, StopPoint, SyncBackend, SyncResult, SyncTarget,
+    stops_at, BodyBatch, FetchedBody, Finish, FlagScope, FreshObservation, MailboxListing, NewMail,
+    ObservationSink, Observed, ResumePoint, Stop, StopPoint, SyncBackend, SyncResult, SyncTarget,
 };
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
@@ -485,6 +485,15 @@ pub async fn run_sync<B: SyncBackend>(
     for target in targets {
         knowns.push(B::known(store, account, target)?);
     }
+    // What "new" means for the notification of a backend that drains by id:
+    // newer than anything the store held before this pass, read once so a
+    // target ingested earlier in the pass does not raise the bar for the
+    // inbox (PERSO-172).
+    let new_mail = backend.new_mail();
+    let newest_held = match new_mail {
+        NewMail::EveryInsert => None,
+        NewMail::NewerThanHeld => ingest::newest_held_date(store, account),
+    };
 
     // Phase 2: the listings. One per target, in target order, whatever order
     // the backend actually listed them in (see [`SyncBackend`]).
@@ -545,6 +554,7 @@ pub async fn run_sync<B: SyncBackend>(
             known_flags,
             observed,
             resume_stale: _,
+            flag_scope,
             vanished,
             listed,
             uidvalidity_reset,
@@ -660,6 +670,9 @@ pub async fn run_sync<B: SyncBackend>(
         // backend's coverage measures the download, and `unmet` above carries
         // what the ingest then failed to write.
         let mut downloaded: Vec<i64> = Vec::new();
+        // The messages the store now holds a row for, inserted or not: what
+        // tells a backlog window that moved the drain on (PERSO-172).
+        let mut written = 0usize;
         let bodies_complete;
         let mut stopped = false;
         let mut failure: Option<anyhow::Error> = None;
@@ -755,6 +768,7 @@ pub async fn run_sync<B: SyncBackend>(
                 );
                 match outcome {
                     Ok(outcome) => {
+                        written += 1;
                         // Whatever row now holds this UID is off limits to the rest
                         // of the pass: see the gate's comment above.
                         server_uids.insert(message.uid);
@@ -773,7 +787,13 @@ pub async fn run_sync<B: SyncBackend>(
                         if outcome.uid_rebound {
                             result.uid_rebound += 1;
                         }
-                        if outcome.inserted && target.role.is_inbox() {
+                        let announced = match new_mail {
+                            NewMail::EveryInsert => true,
+                            NewMail::NewerThanHeld => {
+                                ingest::arrived_after(newest_held, &email.date)
+                            }
+                        };
+                        if outcome.inserted && target.role.is_inbox() && announced {
                             result
                                 .new_inbox_mail
                                 .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
@@ -901,10 +921,31 @@ pub async fn run_sync<B: SyncBackend>(
                 || ((covered.download_incomplete || !bodies_complete)
                     && target.short_download_counts()),
         ));
-        // The IMAP server states the whole flag set, so it is truth for all
-        // three bits of the second axis (#TKT-0051), not just for `\Seen`.
-        let flags = ingest::apply_flags(store, account, target.role.as_str(), known_flags);
+        // One transaction for the mailbox's flags, written as far as the
+        // listing states them (`FlagScope`).
+        let flags = match flag_scope {
+            FlagScope::Whole => {
+                ingest::apply_flags(store, account, target.role.as_str(), known_flags)
+            }
+            FlagScope::ReadAndVerb => {
+                ingest::apply_graph_flags(store, account, target.role.as_str(), known_flags)
+            }
+        };
         result.flags_updated += flags.changed;
+
+        // PERSO-172: a window the cap alone cut short, that landed whole and
+        // wrote something, leaves the next window for the next pass, which
+        // the runtime runs at once. A message still owed a retry is the same
+        // doubt as a short batch, and a window that wrote nothing (every
+        // message given up on) would otherwise download the same bodies every
+        // few seconds for ever: both wait for the interval.
+        if covered.backlog && bodies_complete && unmet.is_empty() && written > 0 {
+            info!(
+                "[sync] '{}' left older new messages for the next pass",
+                target.server_name
+            );
+            result.backlogged.push(target.server_name.clone());
+        }
 
         // The other half of the same diff: the UIDs the store holds for this
         // mailbox that the server did not list. Held back until every target
@@ -959,6 +1000,19 @@ pub async fn run_sync<B: SyncBackend>(
             );
             return Err(failure.expect("a refused login is a failure"));
         }
+        backend
+            .finish_target(
+                index,
+                &Finish {
+                    store,
+                    blobs,
+                    account,
+                    target,
+                    stopped,
+                },
+            )
+            .await;
+        span.mark(&format!("finish:{}", target.role));
         // The mailbox the stop landed in is closed, rows, flags and cursor;
         // nothing after it is touched and the prune pass does not run.
         if stopped {
@@ -1039,7 +1093,8 @@ mod tests {
     use super::*;
     use crate::ingest::ModseqMark;
     use crate::sync::{
-        FetchedMessage, MailboxCoverage, MailboxState, Observed, ParsedMessage, ResumePoint,
+        FetchedMessage, Finish, FlagScope, MailboxCoverage, MailboxState, NewMail, Observed,
+        ParsedMessage, ResumePoint,
     };
     use crate::types::MessageFlags;
 
@@ -1080,6 +1135,10 @@ mod tests {
         delta_link: Option<String>,
         /// The stored resume point no longer describes the mailbox.
         resume_stale: bool,
+        /// Which flags `known_flags` states.
+        flag_scope: FlagScope,
+        /// The cap alone left new mail behind (PERSO-172).
+        backlog: bool,
     }
 
     /// What the store held for one target when the engine listed it: what the
@@ -1109,6 +1168,7 @@ mod tests {
                     .highest_modseq
                     .map(ResumePoint::Modseq)
                     .or(self.delta_link.map(ResumePoint::DeltaLink)),
+                backlog: self.backlog,
             };
             let scripted: Vec<i64> = self.messages.iter().map(|m| m.uid).collect();
             let listed: Vec<u32> = imap_uids(&self.listed).collect();
@@ -1136,6 +1196,7 @@ mod tests {
                         (computed, scripted) => computed.or(scripted),
                     },
                     resume: covered.resume,
+                    backlog: covered.backlog,
                 }
             });
             let listing = MailboxListing {
@@ -1143,6 +1204,7 @@ mod tests {
                 known_flags: self.known_flags,
                 observed: self.observed.unwrap_or(Observed::Selected(self.state)),
                 resume_stale: self.resume_stale,
+                flag_scope: self.flag_scope,
                 vanished: self.vanished,
                 listed: self.listed,
                 uidvalidity_reset: self.uidvalidity_reset,
@@ -1202,6 +1264,10 @@ mod tests {
         /// its skip lists and before it ingests: what the daemon commits while
         /// the server is being listed (PERSO-240).
         during_fetch: Option<Box<dyn FnOnce() + Send>>,
+        /// What counts as new mail: every insert unless set (PERSO-213).
+        new_mail: Option<NewMail>,
+        /// Every `(target index, stopped)` the engine finished, in order.
+        finished: Vec<(usize, bool)>,
     }
 
     impl FakeBackend {
@@ -1271,6 +1337,14 @@ mod tests {
                 }
             }
             out
+        }
+
+        fn new_mail(&self) -> NewMail {
+            self.new_mail.unwrap_or(NewMail::EveryInsert)
+        }
+
+        async fn finish_target(&mut self, index: usize, finish: &Finish<'_>) {
+            self.finished.push((index, finish.stopped));
         }
 
         async fn next_batch(&mut self, index: usize) -> Result<BodyBatch> {
@@ -1349,6 +1423,8 @@ mod tests {
             observed: None,
             delta_link: None,
             resume_stale: false,
+            flag_scope: FlagScope::Whole,
+            backlog: false,
         }
     }
 
@@ -1675,6 +1751,179 @@ mod tests {
         // A message downloaded and not written is as absent as one never
         // fetched, so the link would over-claim.
         assert!(!earns_delta_link(true, false, true, true));
+    }
+
+    fn raw_dated(name: &str, date: &str) -> Vec<u8> {
+        format!(
+            "From: a@example.com\r\nTo: b@example.com\r\nSubject: {name}\r\n\
+             Message-ID: <{name}@example.com>\r\nDate: {date}\r\n\r\n{name} body\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The flags the store holds for the row on `uid`.
+    fn flags_of(fx: &Fixture, uid: i64) -> MessageFlags {
+        let flags: Option<String> = fx
+            .store
+            .conn()
+            .query_row("SELECT flags FROM messages WHERE uid = ?1", [uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        MessageFlags::parse(flags.as_deref().unwrap_or_default())
+    }
+
+    /// A listing that states only the read state and the last verb (Graph's)
+    /// merges them: the server's read state replaces the row's, and an
+    /// answered bit it does not state is kept, where IMAP's whole flag set
+    /// replaces all three bits (#TKT-0051, PERSO-171).
+    #[test]
+    fn a_listing_that_states_only_the_read_state_keeps_the_answered_bit() {
+        for (scope, answered) in [(FlagScope::Whole, false), (FlagScope::ReadAndVerb, true)] {
+            let fx = Fixture::new();
+            let mut first = FakeBackend::default();
+            first.script("Inbox", vec![Ok(fetch(vec![(5, raw("held"))]))]);
+            fx.run(&mut first, &inbox_only());
+            let replied = MessageFlags {
+                answered: true,
+                ..MessageFlags::default()
+            };
+            fx.store
+                .conn()
+                .execute(
+                    "UPDATE messages SET flags = ?1 WHERE uid = 5",
+                    [replied.to_flag_string()],
+                )
+                .unwrap();
+
+            let mut listed = fetch(Vec::new());
+            listed.listed = vec![5];
+            listed.known_flags = vec![(5, MessageFlags::seen(true))];
+            listed.flag_scope = scope;
+            let mut second = FakeBackend::default();
+            second.script("Inbox", vec![Ok(listed)]);
+            let result = fx.run(&mut second, &inbox_only());
+
+            assert_eq!(result.flags_updated, 1, "{scope:?}");
+            let flags = flags_of(&fx, 5);
+            assert!(flags.seen, "{scope:?}");
+            assert_eq!(flags.answered, answered, "{scope:?}");
+        }
+    }
+
+    /// PERSO-172: a backend that drains a backlog by id, newest first, inserts
+    /// mail that is old to its owner, so it announces only an inbox row dated
+    /// after everything the account held when the pass began; a first sync
+    /// announces nothing. A positional backend announces every inserted inbox
+    /// row, as it always has.
+    #[test]
+    fn a_backend_that_drains_by_id_announces_only_mail_newer_than_the_store() {
+        let old = "Wed, 6 Aug 2025 10:00:00 +0000";
+        let held = "Thu, 7 Aug 2025 10:00:00 +0000";
+        let fresh = "Fri, 8 Aug 2025 10:00:00 +0000";
+        for (new_mail, announced) in [
+            (NewMail::EveryInsert, vec!["old", "fresh"]),
+            (NewMail::NewerThanHeld, vec!["fresh"]),
+        ] {
+            let fx = Fixture::new();
+            let mut first = FakeBackend {
+                new_mail: Some(new_mail),
+                ..FakeBackend::default()
+            };
+            first.script("Inbox", vec![Ok(fetch(vec![(5, raw_dated("held", held))]))]);
+            let result = fx.run(&mut first, &inbox_only());
+            assert_eq!(
+                result.new_inbox_mail.is_empty(),
+                new_mail == NewMail::NewerThanHeld,
+                "a first sync announces under {new_mail:?} as it always did"
+            );
+
+            let mut second = FakeBackend {
+                new_mail: Some(new_mail),
+                ..FakeBackend::default()
+            };
+            let mut drain = fetch(vec![
+                (6, raw_dated("old", old)),
+                (7, raw_dated("fresh", fresh)),
+            ]);
+            drain.listed = vec![5, 6, 7];
+            second.script("Inbox", vec![Ok(drain)]);
+            let result = fx.run(&mut second, &inbox_only());
+            assert_eq!(result.saved, 2);
+            let mut subjects: Vec<&str> = result
+                .new_inbox_mail
+                .iter()
+                .map(|m| m.subject.as_str())
+                .collect();
+            subjects.sort_unstable();
+            let mut announced = announced;
+            announced.sort_unstable();
+            assert_eq!(subjects, announced, "{new_mail:?}");
+        }
+    }
+
+    /// PERSO-172: a window the cap alone cut short owes the next one at once,
+    /// but only when it landed whole and moved the drain on: a window whose
+    /// every message failed, or one cut by its own body pass, waits for the
+    /// interval.
+    #[test]
+    fn only_a_capped_window_that_moved_the_drain_on_owes_a_follow_up() {
+        let window = |messages: Vec<(i64, Vec<u8>)>, complete: bool| {
+            let mut f = fetch(messages);
+            f.backlog = true;
+            f.download_incomplete = true;
+            f.bodies_complete = complete;
+            f
+        };
+        let cases = [
+            (vec![(1, raw("a")), (2, raw("b"))], true, true),
+            (vec![(1, unparsable()), (2, unparsable())], true, false),
+            (vec![(1, raw("a")), (2, unparsable())], true, false),
+            (vec![(1, raw("a"))], false, false),
+        ];
+        for (messages, complete, owed) in cases {
+            let fx = Fixture::new();
+            let mut backend = FakeBackend::default();
+            backend.script("Inbox", vec![Ok(window(messages, complete))]);
+            let result = fx.run(&mut backend, &inbox_only());
+            assert_eq!(
+                result.backlogged,
+                if owed {
+                    vec!["Inbox".to_string()]
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+    }
+
+    /// PERSO-213: the backend finishes every target whose pass the engine
+    /// closed, telling it whether the pass stops there, and none on a dry run
+    /// or whose listing failed.
+    #[test]
+    fn the_backend_finishes_each_closed_target() {
+        let fx = Fixture::new();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![(1, raw("a"))]))]);
+        fx.run(&mut backend, &targets());
+        assert_eq!(backend.finished, vec![(0, false)], "Archive did not list");
+
+        let mut dry = FakeBackend::default();
+        dry.script("INBOX", vec![Ok(fetch(vec![(2, raw("b"))]))]);
+        fx.run_with(&mut dry, &targets(), usize::MAX, true);
+        assert!(dry.finished.is_empty());
+
+        let mut stopped = FakeBackend::default();
+        stopped.script(
+            "INBOX",
+            vec![Ok(fetch(
+                (10..60).map(|uid| (uid, raw(&format!("m{uid}")))).collect(),
+            ))],
+        );
+        stopped.script("Archive", vec![Ok(fetch(vec![(3, raw("c"))]))]);
+        let (stop, _) = stop_from(StopPoint::Chunk);
+        fx.run_until(&mut stopped, &targets(), usize::MAX, false, Some(&stop));
+        assert_eq!(stopped.finished, vec![(0, true)]);
     }
 
     /// PERSO-213: a message a backend hands over already parsed, as Graph

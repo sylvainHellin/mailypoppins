@@ -13,7 +13,7 @@ use crate::ingest::{KnownUids, ModseqMark};
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
 use crate::sync::{
-    FetchedMessage, MailboxCoverage, MailboxListing, MailboxState, Observed, ResumePoint,
+    FetchedMessage, FlagScope, MailboxCoverage, MailboxListing, MailboxState, Observed, ResumePoint,
 };
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
@@ -947,6 +947,9 @@ where
             .collect(),
         observed: Observed::Selected(state),
         resume_stale: false,
+        // The IMAP server states the whole flag set, so it is truth for all
+        // three bits of the second axis (#TKT-0051), not just for `\Seen`.
+        flag_scope: FlagScope::Whole,
         vanished: vanished.into_iter().map(i64::from).collect(),
         listed: listed.iter().copied().map(i64::from).collect(),
         uidvalidity_reset,
@@ -974,6 +977,9 @@ where
                     bodies_complete,
                 )
                 .map(ResumePoint::Modseq),
+                // A quick window is positional and skips the backlog below it
+                // by design.
+                backlog: false,
             }
         }),
     };

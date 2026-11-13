@@ -410,6 +410,8 @@ pub struct MailboxListing {
     /// UIDVALIDITY reset reaches the same clear through
     /// [`uidvalidity_reset`](MailboxListing::uidvalidity_reset).
     pub resume_stale: bool,
+    /// Which flags [`known_flags`](MailboxListing::known_flags) state.
+    pub flag_scope: FlagScope,
     /// UIDs the store holds for this mailbox that the server no longer lists.
     /// See [`crate::imap_client::vanished_uids`].
     pub vanished: Vec<i64>,
@@ -435,6 +437,43 @@ pub struct MailboxListing {
     /// UID. Asked once, after the last batch, whichever way the pass ended: run
     /// to the end, cut by the backend's deadline, stopped or failed.
     pub coverage: CoverageOf,
+}
+
+/// Which of a held row's flags a listing states, and so which it may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagScope {
+    /// The whole set: IMAP's `FLAGS` answer for read, answered and forwarded
+    /// alike and replace the row's (#TKT-0051).
+    Whole,
+    /// The read state, and an answered or forwarded bit only ever added:
+    /// Graph's `isRead` and Outlook's last verb (PERSO-171), which hold the
+    /// last verb alone and none at all on a delta entry, so neither says a
+    /// message was never answered.
+    ReadAndVerb,
+}
+
+/// What counts as new mail when a pass inserts an inbox row (#0009).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewMail {
+    /// Every inserted inbox row: a positional window downloads the top of the
+    /// mailbox, which is where arrivals land.
+    EveryInsert,
+    /// Only a row dated after everything the account held when the pass
+    /// began ([`crate::ingest::arrived_after`], PERSO-172): a backend that
+    /// drains a backlog by id, newest first, inserts mail that is old to its
+    /// owner, and a first sync announces nothing.
+    NewerThanHeld,
+}
+
+/// What the engine hands [`SyncBackend::finish_target`].
+pub struct Finish<'a> {
+    pub store: &'a Store,
+    pub blobs: &'a crate::store::BlobStore,
+    pub account: &'a str,
+    pub target: &'a SyncTarget,
+    /// The pass stops after this target, at the user's stop: a backend does
+    /// what is local and leaves its network work for the next pass.
+    pub stopped: bool,
 }
 
 /// What a listing observed about its mailbox as a whole: the three shapes a
@@ -504,6 +543,13 @@ pub struct MailboxCoverage {
     /// could mint no link, and one that earned its claim drops the stored
     /// link, which is older than the listing it has just consumed (#0042).
     pub resume: Option<ResumePoint>,
+    /// True when the pass's `limit` alone left new mail behind, after a body
+    /// pass that brought everything it asked for (PERSO-172): a backend that
+    /// downloads by id takes the next window on the next pass, so the engine
+    /// reports the mailbox backlogged when the window also moved the drain on
+    /// ([`SyncResult::backlogged`]). Always false for a positional backend,
+    /// whose quick window skips the backlog by design.
+    pub backlog: bool,
 }
 
 /// One answer of [`SyncBackend::next_batch`].
@@ -579,4 +625,21 @@ pub trait SyncBackend {
     /// does not ask for one. An `Err` ends the target's body pass: what came
     /// before it is ingested, and the mailbox is closed as a short pass.
     fn next_batch(&mut self, index: usize) -> impl std::future::Future<Output = Result<BodyBatch>>;
+
+    /// What counts as new mail when the pass inserts an inbox row.
+    fn new_mail(&self) -> NewMail {
+        NewMail::EveryInsert
+    }
+
+    /// The backend's own work on the target at `index`, once the engine has
+    /// closed it: rows, flags and cursor written. Not asked on a dry run, for
+    /// a target whose listing failed, or once a refused login ends the pass.
+    fn finish_target(
+        &mut self,
+        index: usize,
+        finish: &Finish<'_>,
+    ) -> impl std::future::Future<Output = ()> {
+        let _ = (index, finish);
+        async {}
+    }
 }

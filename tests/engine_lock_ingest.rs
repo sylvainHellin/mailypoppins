@@ -72,8 +72,8 @@ use mailypoppins::ingest::KnownUids;
 use mailypoppins::store::{BlobStore, Store};
 use mailypoppins::sync::engine::{run_sync_guarded_at, SyncRun};
 use mailypoppins::sync::{
-    BodyBatch, FetchedMessage, MailboxCoverage, MailboxListing, MailboxState, ObservationSink,
-    Observed, ResumePoint, Stop, SyncBackend, SyncResult, SyncTarget,
+    BodyBatch, FetchedMessage, FlagScope, MailboxCoverage, MailboxListing, MailboxState,
+    ObservationSink, Observed, ResumePoint, Stop, SyncBackend, SyncResult, SyncTarget,
 };
 use mailypoppins::timing::TimingSpan;
 use mailypoppins::types::{MailboxRole, MessageFlags};
@@ -217,6 +217,7 @@ impl SyncBackend for ScriptedBackend {
                 download_incomplete: fetch.download_incomplete,
                 pending_arrival_mark: fetch.pending_arrival_mark,
                 resume: fetch.highest_modseq.map(ResumePoint::Modseq),
+                backlog: false,
             };
             // A scripted body the engine did not download leaves the mailbox
             // short, whatever the script says of a pass that got them all.
@@ -233,6 +234,7 @@ impl SyncBackend for ScriptedBackend {
                 known_flags: fetch.known_flags,
                 observed: Observed::Selected(fetch.state),
                 resume_stale: false,
+                flag_scope: FlagScope::Whole,
                 vanished: fetch.vanished,
                 listed: fetch.listed,
                 uidvalidity_reset: fetch.uidvalidity_reset,
