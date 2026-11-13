@@ -559,9 +559,8 @@ async fn a_refused_login_stops_the_pass_and_is_never_retried() {
     assert_eq!(backend.fetch().sent().len(), 3);
 }
 
-/// Free/busy and the reminders are not built on EWS: each is refused with
-/// a sentence before any request, and the backend lists no feature for
-/// them.
+/// The reminders are not built on EWS: each is refused with a sentence
+/// before any request, and the backend lists no feature for them.
 #[tokio::test]
 async fn the_calls_not_built_yet_are_refused_without_a_request() {
     use crate::calendar_model::CalendarFeature;
@@ -574,6 +573,10 @@ async fn the_calls_not_built_yet_are_refused_without_a_request() {
     assert!(backend.fetch().sent().is_empty());
     assert_eq!(
         super::super::FEATURES,
-        [CalendarFeature::Write, CalendarFeature::ProposeTime]
+        [
+            CalendarFeature::Write,
+            CalendarFeature::ProposeTime,
+            CalendarFeature::FreeBusy
+        ]
     );
 }

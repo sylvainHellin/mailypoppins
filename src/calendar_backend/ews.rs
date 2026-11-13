@@ -40,11 +40,12 @@
 //!
 //! An answer to an invitation, a proposed time included, a create, an update,
 //! a cancel and a delete go through [`write`], which also stamps a create
-//! with its transaction id. Free/busy and the server reminders are not built
-//! yet: [`FEATURES`] lists neither, and each such call is refused with a
-//! sentence.
+//! with its transaction id. Free/busy goes through [`freebusy`]. The server
+//! reminders are not built yet: [`FEATURES`] does not list them, and each
+//! such call is refused with a sentence.
 
 pub mod fetch;
+mod freebusy;
 pub mod ntlm;
 pub mod parse;
 mod write;
@@ -68,7 +69,11 @@ use fetch::{EwsFetch, EwsFetchError, EwsSession};
 use parse::{AnswerError, Change, ItemType, Message, SyncAnswer, ViewItem};
 
 /// What this build serves on an EWS calendar beyond reading and answering.
-pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::Write, CalendarFeature::ProposeTime];
+pub const FEATURES: &[CalendarFeature] = &[
+    CalendarFeature::Write,
+    CalendarFeature::ProposeTime,
+    CalendarFeature::FreeBusy,
+];
 
 /// The most changes one SyncFolderItems page may carry, the server's limit.
 const MAX_CHANGES: usize = 512;
@@ -658,8 +663,8 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
         Err(self.not_built("snooze a reminder on the server"))
     }
 
-    async fn free_busy(&self, _query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {
-        Err(self.not_built("read free/busy"))
+    async fn free_busy(&self, query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {
+        self.availability(query).await
     }
 }
 

@@ -75,8 +75,26 @@ impl AnswerError {
     }
 }
 
-fn malformed(why: impl Into<String>) -> AnswerError {
+pub fn malformed(why: impl Into<String>) -> AnswerError {
     AnswerError::Malformed(why.into())
+}
+
+/// The fault a SOAP `body` carries, the server's refusal of the request as a
+/// whole, with its `ResponseCode` (or `faultcode`) and `faultstring`.
+pub fn fault_of(body: &Element) -> Option<AnswerError> {
+    let fault = body.child("Fault")?;
+    let code = fault
+        .at(&["detail", "ResponseCode"])
+        .map(|code| code.text.trim().to_string())
+        .filter(|code| !code.is_empty())
+        .or_else(|| {
+            fault
+                .text_of("faultcode")
+                .map(|code| code.rsplit(':').next().unwrap_or(code).to_string())
+        })
+        .unwrap_or_else(|| "SOAP fault".to_string());
+    let message = fault.text_of("faultstring").unwrap_or_default().to_string();
+    Some(AnswerError::Fault(ResponseError { code, message }))
 }
 
 /// One response message: its payload element, or the error it carries.
@@ -94,19 +112,8 @@ pub fn messages(body: &str, operation: &str) -> Result<Vec<Message>, AnswerError
     let body = root
         .child("Body")
         .ok_or_else(|| malformed("no SOAP body"))?;
-    if let Some(fault) = body.child("Fault") {
-        let code = fault
-            .at(&["detail", "ResponseCode"])
-            .map(|code| code.text.trim().to_string())
-            .filter(|code| !code.is_empty())
-            .or_else(|| {
-                fault
-                    .text_of("faultcode")
-                    .map(|code| code.rsplit(':').next().unwrap_or(code).to_string())
-            })
-            .unwrap_or_else(|| "SOAP fault".to_string());
-        let message = fault.text_of("faultstring").unwrap_or_default().to_string();
-        return Err(AnswerError::Fault(ResponseError { code, message }));
+    if let Some(fault) = fault_of(body) {
+        return Err(fault);
     }
     let response_name = format!("{operation}Response");
     let response = body
