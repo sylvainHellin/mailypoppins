@@ -1,10 +1,10 @@
 //! The per-account blocked-senders runner (PERSO-261): after every tick that
 //! ran a body, move what arrived in the Inbox from a blocked sender to Junk.
 //!
-//! It waits on the record the scheduler and the hook runner wait on
-//! ([`AccountRuntime::completed_ticks`]), so a watcher tick, a scheduled tick,
-//! a client's `mp sync` and a startup fetch all wake it, and it scans once
-//! when it starts. The scan, the judged mark and the moves are
+//! It waits on the record the hook runner and the arrival runner wait on
+//! ([`AccountRuntime::judging`]), so a watcher tick, a scheduled tick, a
+//! client's `mp sync`, a startup fetch and a `mp sync --mailbox` that brought
+//! new inbox mail all wake it (PERSO-186), and it scans once when it starts. The scan, the judged mark and the moves are
 //! [`crate::daemon::senders`]; this module is the wake-up, and what follows a
 //! scan that moved something: a drain request, so the server half runs soon
 //! rather than at the next tick, the removal of each moved row and the Junk
@@ -49,7 +49,7 @@ pub fn spawn(
     Some(tokio::spawn(run(
         Arc::downgrade(runtime),
         runtime.retired(),
-        runtime.completed_ticks(),
+        runtime.judging(),
         canonical,
         cfg.clone(),
     )))

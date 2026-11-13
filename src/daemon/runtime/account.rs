@@ -380,14 +380,21 @@ pub struct AccountRuntime {
     /// counter rather than a unit so a receiver created after the first
     /// request can still tell it was made.
     drain_requests: watch::Sender<u64>,
-    /// The new inbox mail each tick announced, stamped with when it was
-    /// queued, until the arrival runner takes it (PERSO-186). Queued before
-    /// `ticked` moves, so a stamp is never later than the `ticked` value of
-    /// the tick that queued it.
+    /// The new inbox mail each tick or noted pass announced, stamped with
+    /// when it was queued, until the arrival runner takes it (PERSO-186).
+    /// Queued before `judging` moves, so a stamp is never later than the
+    /// `judging` value that announced it.
     arrivals: Mutex<Vec<(tokio::time::Instant, InboxArrival)>>,
-    /// The `ticked` value whose arrivals the blocked senders have judged.
+    /// When mail last arrived for the judges to look at (PERSO-186): moved
+    /// with `ticked`, to the same instant, by every tick that ran a body, and
+    /// on its own by a guarded pass that announced new inbox mail
+    /// ([`AccountRuntime::note_pass`]), which is no tick and so leaves the
+    /// scheduler's `ticked` alone. What the blocked senders, the mail hooks
+    /// and the arrival runner wait on.
+    judging: watch::Sender<tokio::time::Instant>,
+    /// The `judging` value whose arrivals the blocked senders have judged.
     judged_senders: watch::Sender<tokio::time::Instant>,
-    /// The `ticked` value whose arrivals the mail hooks have run for.
+    /// The `judging` value whose arrivals the mail hooks have run for.
     judged_hooks: watch::Sender<tokio::time::Instant>,
     /// Where the production hooks leave the engine's result. Empty for a
     /// runtime built with injected hooks, which report zeros.
@@ -517,6 +524,7 @@ impl AccountRuntime {
             backlog: AtomicBool::new(false),
             drain_requests: watch::channel(0).0,
             arrivals: Mutex::new(Vec::new()),
+            judging: watch::channel(started).0,
             judged_senders: watch::channel(started).0,
             judged_hooks: watch::channel(started).0,
             report: TickReport::default(),
@@ -600,6 +608,22 @@ impl AccountRuntime {
         self.ticked.subscribe()
     }
 
+    /// A receiver holding when mail last arrived for the judges (the runtime's
+    /// start until some has): moved by every tick that ran a body and by a
+    /// guarded pass that announced new inbox mail, and closing when the
+    /// runtime is dropped. What the blocked senders, the mail hooks and the
+    /// arrival runner wait on (PERSO-186).
+    pub fn judging(&self) -> watch::Receiver<tokio::time::Instant> {
+        self.judging.subscribe()
+    }
+
+    /// Move `ticked` and `judging` to one instant: a body ran.
+    fn ran_a_body(&self) {
+        let now = tokio::time::Instant::now();
+        self.ticked.send_replace(now);
+        self.judging.send_replace(now);
+    }
+
     /// When this runtime started, which [`AccountRuntime::completed_ticks`]
     /// holds until a tick finishes: what the scheduler's startup tick is
     /// measured from (PERSO-178).
@@ -608,7 +632,7 @@ impl AccountRuntime {
     }
 
     /// Record that `judge` is done with the arrivals of every tick up to
-    /// `through`, a value [`AccountRuntime::completed_ticks`] held. Never moves
+    /// `through`, a value [`AccountRuntime::judging`] held. Never moves
     /// backwards.
     pub fn judged(&self, judge: Judge, through: tokio::time::Instant) {
         self.judge(judge).send_if_modified(|done| {
@@ -620,7 +644,7 @@ impl AccountRuntime {
         });
     }
 
-    /// A receiver holding the `ticked` value whose arrivals `judge` is done
+    /// A receiver holding the `judging` value whose arrivals `judge` is done
     /// with, closing when the runtime is dropped.
     pub fn judged_through(&self, judge: Judge) -> watch::Receiver<tokio::time::Instant> {
         self.judge(judge).subscribe()
@@ -633,9 +657,9 @@ impl AccountRuntime {
         }
     }
 
-    /// Take the new mail every tick up to `through` announced, a value
-    /// [`AccountRuntime::completed_ticks`] held, oldest first; a later tick's
-    /// stays queued.
+    /// Take the new mail announced up to `through`, a value
+    /// [`AccountRuntime::judging`] held, oldest first; what came later stays
+    /// queued.
     pub fn take_arrivals(&self, through: tokio::time::Instant) -> Vec<InboxArrival> {
         let mut queued = lock(&self.arrivals);
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut *queued)
@@ -658,23 +682,29 @@ impl AccountRuntime {
     /// started.
     ///
     /// That pass ran a body for this account, so it moves
-    /// [`AccountRuntime::completed_ticks`] exactly as a tick of the runtime's
-    /// own would.
+    /// [`AccountRuntime::completed_ticks`] and [`AccountRuntime::judging`]
+    /// exactly as a tick of the runtime's own would.
     pub fn note_backlog(&self) {
         self.backlog.store(true, Ordering::SeqCst);
-        self.ticked.send_replace(tokio::time::Instant::now());
+        self.ran_a_body();
     }
 
-    /// Record that a pass this runtime did not run, a guarded `mp sync
-    /// --mailbox` of this account (PERSO-186), ran a body, with the new inbox
-    /// mail it announced: queued under a stamp, then
-    /// [`AccountRuntime::completed_ticks`] moves, as a tick of the runtime's
-    /// own does, so the blocked senders and the hooks judge what it brought
-    /// in and the arrival runner announces what survives.
+    /// Hand the judges the new inbox mail a pass this runtime did not run
+    /// announced, a guarded `mp sync --mailbox` of this account (PERSO-186):
+    /// queued under a stamp, then [`AccountRuntime::judging`] moves, so the
+    /// blocked senders and the hooks judge what it brought in and the arrival
+    /// runner announces what survives.
+    ///
+    /// [`AccountRuntime::completed_ticks`] stays where it is: the pass is no
+    /// tick, synced no other mailbox and drained no queue, so the scheduler
+    /// may not count it as one. A pass that announced nothing wakes nobody.
     pub fn note_pass(&self, arrivals: Vec<InboxArrival>) {
+        if arrivals.is_empty() {
+            return;
+        }
         let stamp = tokio::time::Instant::now();
         lock(&self.arrivals).extend(arrivals.into_iter().map(|arrival| (stamp, arrival)));
-        self.ticked.send_replace(tokio::time::Instant::now());
+        self.judging.send_replace(tokio::time::Instant::now());
     }
 
     /// Hand the runtime the daemon's draft watcher (#0143) and pass it the
@@ -917,8 +947,8 @@ impl AccountRuntime {
                 let outcome = self.run_tick(kind, stop).await;
                 // Whatever asked for it: a manual sync, the watcher, a
                 // client's startup fetch or the scheduler all push the next
-                // scheduled tick back (#0134).
-                self.ticked.send_replace(tokio::time::Instant::now());
+                // scheduled tick back (#0134), and wake the judges (PERSO-186).
+                self.ran_a_body();
                 outcome
             }
         };
@@ -1030,7 +1060,7 @@ impl AccountRuntime {
             Ordering::SeqCst,
         );
         let sync = from_sync_result(&self.account, &sync_result, failed_mutations, error.clone());
-        // Before `ticked` moves, so the arrival runner woken by it finds them
+        // Before `judging` moves, so the arrival runner woken by it finds them
         // (PERSO-186).
         let stamp = tokio::time::Instant::now();
         lock(&self.arrivals).extend(
@@ -1564,28 +1594,42 @@ mod tests {
     }
 
     /// A pass outside the tick (`mp sync --mailbox`, PERSO-186) hands its
-    /// arrivals to the judges as a tick would: queued under a stamp no later
-    /// than the `completed_ticks` value it moves, so the arrival runner woken
-    /// by it takes them once the judges are done with that value.
+    /// arrivals to the judges through the judging record, under a stamp no
+    /// later than the value it moves, and leaves the completed-tick record,
+    /// the scheduler's, alone; a pass with no arrivals moves neither.
     #[tokio::test]
-    async fn a_pass_outside_the_tick_queues_its_arrivals_and_moves_ticked() {
+    async fn a_noted_pass_moves_the_judging_record_and_not_the_tick_record() {
         let dir = tempfile::tempdir().unwrap();
         let runtime =
             AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 0), 1, quiet_hooks())
                 .unwrap();
-        let before = *runtime.completed_ticks().borrow();
+        let ticked = *runtime.completed_ticks().borrow();
+        let judging = *runtime.judging().borrow();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        runtime.note_pass(Vec::new());
+        assert_eq!(*runtime.judging().borrow(), judging, "nothing to judge");
+        assert_eq!(*runtime.completed_ticks().borrow(), ticked);
+
         let arrival = InboxArrival {
             row_id: 7,
             message_id: "<seven@example.com>".to_string(),
             from: "ada@example.com".to_string(),
             subject: "Engine".to_string(),
         };
-        tokio::time::sleep(Duration::from_millis(5)).await;
         runtime.note_pass(vec![arrival.clone()]);
-        let after = *runtime.completed_ticks().borrow();
-        assert!(after > before, "the pass moved ticked, so the judges run");
-        assert_eq!(runtime.take_arrivals(after), vec![arrival]);
-        assert!(runtime.take_arrivals(after).is_empty(), "taken once");
+        assert_eq!(*runtime.completed_ticks().borrow(), ticked, "not a tick");
+        let through = *runtime.judging().borrow();
+        assert!(through > judging, "the judges are woken");
+        assert_eq!(runtime.take_arrivals(through), vec![arrival]);
+        assert!(runtime.take_arrivals(through).is_empty(), "taken once");
+
+        runtime.tick(TickKind::Quick).await;
+        assert_eq!(
+            *runtime.judging().borrow(),
+            *runtime.completed_ticks().borrow(),
+            "a tick moves both, to one instant"
+        );
     }
 
     fn config(name: &str, deadline_secs: u64) -> AccountConfig {

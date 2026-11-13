@@ -491,6 +491,48 @@ mod tests {
         assert_eq!(gap(short, follow_up, true), short);
     }
 
+    /// A guarded pass is not a tick (PERSO-186): one that hands arrivals to
+    /// the runtime neither cancels the startup tick nor pushes the next one
+    /// back, since only a tick syncs the other mailboxes and drains the queues.
+    #[tokio::test]
+    async fn a_noted_pass_neither_cancels_nor_delays_the_scheduled_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let bodies = Arc::new(AtomicUsize::new(0));
+        let runtime = started(dir.path(), &bodies);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let cadence = Cadence {
+            startup: Duration::from_millis(300),
+            interval: Duration::from_millis(1500),
+            follow_up: Duration::from_millis(50),
+        };
+        let start = Instant::now();
+        let _task = scheduler_with(&runtime, &fired, cadence);
+        let arrival = || crate::sync::InboxArrival {
+            row_id: 1,
+            message_id: "<one@example.com>".to_string(),
+            from: "ada@example.com".to_string(),
+            subject: "Engine".to_string(),
+        };
+
+        tokio::time::sleep_until(start + Duration::from_millis(100)).await;
+        let before = *runtime.completed_ticks().borrow();
+        runtime.note_pass(vec![arrival()]);
+        assert_eq!(*runtime.completed_ticks().borrow(), before);
+        tokio::time::sleep_until(start + Duration::from_millis(550)).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the startup tick still fired"
+        );
+
+        tokio::time::sleep_until(start + Duration::from_millis(800)).await;
+        runtime.note_pass(vec![arrival()]);
+        // Due an interval after the startup tick (about 1.8 s), not after the
+        // pass (2.3 s).
+        tokio::time::sleep_until(start + Duration::from_millis(2050)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 2, "the interval held");
+    }
+
     /// A drain is not a tick: it does not move the deadline.
     #[tokio::test]
     async fn a_drain_does_not_push_the_scheduled_tick_back() {

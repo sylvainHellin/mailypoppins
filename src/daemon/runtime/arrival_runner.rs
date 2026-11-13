@@ -4,8 +4,10 @@
 //!
 //! A tick queues the mail its pass announced on the runtime
 //! ([`AccountRuntime::take_arrivals`]) before it moves
-//! [`AccountRuntime::completed_ticks`], the record this runner, the blocked
-//! senders and the mail hooks all wait on. Either judge may move a message
+//! [`AccountRuntime::judging`], the record this runner, the blocked senders
+//! and the mail hooks all wait on; a guarded `mp sync --mailbox` that
+//! announced mail does the same ([`AccountRuntime::note_pass`]) and leaves
+//! the scheduler's [`AccountRuntime::completed_ticks`] alone. Either judge may move a message
 //! that tick brought in to Junk, so the runner waits until every judge the
 //! account runs has reported that tick done ([`AccountRuntime::judged`]), then
 //! reads the queued rows again ([`crate::daemon::arrivals::worth_notifying`])
@@ -83,7 +85,7 @@ pub fn spawn(
     Some(tokio::spawn(run(
         Arc::downgrade(runtime),
         runtime.retired(),
-        runtime.completed_ticks(),
+        runtime.judging(),
         judges,
         announce,
     )))
@@ -283,7 +285,7 @@ mod tests {
         let task = tokio::spawn(run(
             Arc::downgrade(runtime),
             runtime.retired(),
-            runtime.completed_ticks(),
+            runtime.judging(),
             judges,
             announce,
         ));
@@ -372,6 +374,48 @@ mod tests {
         assert_eq!(
             (nobody.presenter, nobody.presenter_connection),
             (None, None)
+        );
+    }
+
+    /// A guarded pass's arrivals (PERSO-186) wake the real blocked-senders
+    /// runner through the judging record, and once it has judged them the
+    /// runner announces them; the completed-tick record, the scheduler's,
+    /// never moves.
+    #[tokio::test]
+    async fn a_noted_pass_is_judged_and_announced_without_a_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path(), Vec::new());
+        let judges = Judges {
+            senders: true,
+            hooks: false,
+        };
+        let (_task, announced) = runner(&runtime, judges);
+        let mut cfg = AccountConfig {
+            // No store under this name, so the scan finds nothing to move and
+            // reports the pass judged.
+            name: "zz-perso186-noted-pass".to_string(),
+            ..Default::default()
+        };
+        cfg.imap.host = "imap.example.com".to_string();
+        let canonical = Arc::new(CanonicalState::new(
+            crate::daemon::state::InstanceId::new("test"),
+            Vec::new(),
+        ));
+        let _senders = super::super::sender_runner::spawn(&runtime, canonical, &cfg)
+            .expect("a ready account with a server is judged");
+        settle().await;
+        let ticked = *runtime.completed_ticks().borrow();
+
+        runtime.note_pass(vec![arrival("guarded")]);
+        settle().await;
+        assert_eq!(
+            *announced.lock().unwrap(),
+            vec![vec!["guarded".to_string()]]
+        );
+        assert_eq!(
+            *runtime.completed_ticks().borrow(),
+            ticked,
+            "a pass is not a tick"
         );
     }
 

@@ -1,10 +1,10 @@
 //! The per-account hook runner (#0135): after every tick that ran a sync body,
 //! scan the account's hooks and run the ones a new message matched.
 //!
-//! It waits on the same record the scheduler does
-//! ([`AccountRuntime::completed_ticks`]), so a watcher tick, a scheduled tick,
-//! a client's `mp sync` and a startup fetch all wake it, and it scans once when
-//! it starts, which is what picks up a claim-free arrival a crashed daemon
+//! It waits on the record the blocked senders and the arrival runner wait on
+//! ([`AccountRuntime::judging`]), so a watcher tick, a scheduled tick, a
+//! client's `mp sync`, a startup fetch and a `mp sync --mailbox` that brought
+//! new inbox mail all wake it (PERSO-186), and it scans once when it starts, which is what picks up a claim-free arrival a crashed daemon
 //! ingested and never scanned. The scan and the cursor are
 //! [`crate::daemon::hooks`]; this module is only the wake-up and the order:
 //! claim everything first, then run the commands one at a time, in UID order.
@@ -74,7 +74,7 @@ pub fn spawn(runtime: &Arc<AccountRuntime>, cfg: &AccountConfig) -> Option<JoinH
     Some(tokio::spawn(run(
         Arc::downgrade(runtime),
         runtime.retired(),
-        runtime.completed_ticks(),
+        runtime.judging(),
         cfg.clone(),
         state_path,
     )))

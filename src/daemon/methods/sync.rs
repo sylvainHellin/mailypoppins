@@ -1157,7 +1157,7 @@ mod tests {
         };
         let queued = || {
             let runtime = runtimes.get("alpha").unwrap();
-            let through = *runtime.completed_ticks().borrow();
+            let through = *runtime.judging().borrow();
             runtime.take_arrivals(through)
         };
 
