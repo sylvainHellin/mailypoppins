@@ -4712,6 +4712,8 @@ mod tests {
         /// The stored resume point was found stale before the folder was
         /// walked: an expired, malformed or foreign delta link.
         stale: bool,
+        /// How many new messages the pass may download.
+        limit: usize,
         bodies: std::collections::VecDeque<GraphFetched>,
         pass: Option<backend::FolderPass>,
         /// Run once the engine has opened its departures watch, while the
@@ -4841,27 +4843,38 @@ mod tests {
         }
     }
 
-    /// One pass of the engine over `target`, its folder scripted.
-    #[allow(clippy::too_many_arguments)]
-    fn sync_folder<'a>(
+    impl<'a> ScriptedGraph<'a> {
+        /// A folder whose listing walked `view`, under `identity`, with
+        /// `messages` to answer its batches: a quick pass's limit, nothing
+        /// committed mid-listing, the store read as it is.
+        fn new(
+            view: Result<backend::FolderView>,
+            identity: Option<i64>,
+            messages: Vec<GraphFetched>,
+        ) -> Self {
+            ScriptedGraph {
+                script: Some((view, identity, messages)),
+                stale: false,
+                limit: 100,
+                bodies: Default::default(),
+                pass: None,
+                during_listing: None,
+                blind: false,
+            }
+        }
+    }
+
+    /// One quick pass of the engine over `target`, its folder scripted.
+    fn sync_folder(
         store: &crate::store::Store,
         blobs: &crate::store::BlobStore,
         target: &SyncTarget,
         view: backend::FolderView,
         identity: Option<i64>,
         messages: Vec<GraphFetched>,
-        limit: usize,
-        during_listing: Option<Box<dyn FnOnce() + 'a>>,
     ) -> SyncResult {
-        let graph = ScriptedGraph {
-            script: Some((Ok(view), identity, messages)),
-            stale: false,
-            bodies: Default::default(),
-            pass: None,
-            during_listing,
-            blind: false,
-        };
-        run_scripted(store, blobs, target, graph, limit)
+        let graph = ScriptedGraph::new(Ok(view), identity, messages);
+        run_scripted(store, blobs, target, graph)
     }
 
     /// [`sync_window`], listed as if the store held none of `messages`.
@@ -4872,14 +4885,10 @@ mod tests {
         messages: Vec<GraphFetched>,
     ) -> SyncResult {
         let graph = ScriptedGraph {
-            script: Some((Ok(changes(&messages)), None, messages)),
-            stale: false,
-            bodies: Default::default(),
-            pass: None,
-            during_listing: None,
             blind: true,
+            ..ScriptedGraph::new(Ok(changes(&messages)), None, messages)
         };
-        run_scripted(store, blobs, target, graph, 100)
+        run_scripted(store, blobs, target, graph)
     }
 
     /// A stale delta link is dropped even when the enumeration that was to
@@ -4894,21 +4903,13 @@ mod tests {
         crate::ingest::record_delta_token(&store, "acct", "inbox", 7, &expired);
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
         // The walk answered 410, and the enumeration after it 503.
+        let enumeration =
+            anyhow!("Fetch message IDs from 'Inbox' failed (HTTP 503 Service Unavailable)");
         let graph = ScriptedGraph {
-            script: Some((
-                Err(anyhow!(
-                    "Fetch message IDs from 'Inbox' failed (HTTP 503 Service Unavailable)"
-                )),
-                Some(7),
-                Vec::new(),
-            )),
             stale: true,
-            bodies: Default::default(),
-            pass: None,
-            during_listing: None,
-            blind: false,
+            ..ScriptedGraph::new(Err(enumeration), Some(7), Vec::new())
         };
-        let result = run_scripted(&store, &blobs, &inbox, graph, 100);
+        let result = run_scripted(&store, &blobs, &inbox, graph);
         assert_eq!(result.saved, 0);
         assert_eq!(stored_link(&store, "inbox"), None);
     }
@@ -4919,7 +4920,6 @@ mod tests {
         blobs: &crate::store::BlobStore,
         target: &SyncTarget,
         mut graph: ScriptedGraph<'_>,
-        limit: usize,
     ) -> SyncResult {
         let observations = crate::sync::ObservationSink::default();
         let run = crate::sync::engine::SyncRun {
@@ -4927,7 +4927,7 @@ mod tests {
             blobs,
             account: "acct",
             targets: std::slice::from_ref(target),
-            limit,
+            limit: graph.limit,
             dry_run: false,
             stop: None,
             observations: &observations,
@@ -5015,16 +5015,7 @@ mod tests {
         target: &SyncTarget,
         messages: Vec<GraphFetched>,
     ) -> SyncResult {
-        sync_folder(
-            store,
-            blobs,
-            target,
-            changes(&messages),
-            None,
-            messages,
-            100,
-            None,
-        )
+        sync_folder(store, blobs, target, changes(&messages), None, messages)
     }
 
     /// The delta link the store holds for `mailbox`.
@@ -5492,7 +5483,11 @@ mod tests {
                 delta_link: LINK.to_string(),
                 pages: 1,
             });
-            let result = sync_folder(&store, &blobs, &inbox, view, None, emails, 3, None);
+            let graph = ScriptedGraph {
+                limit: 3,
+                ..ScriptedGraph::new(Ok(view), None, emails)
+            };
+            let result = run_scripted(&store, &blobs, &inbox, graph);
             assert_eq!(result.saved, 0, "pass {pass} stored nothing");
             for i in 0..3 {
                 let uid = crate::ingest::graph_uid(&format!("<poison{i}@x>"));
@@ -5580,7 +5575,7 @@ mod tests {
         ];
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
         let view = whole_folder(&listed);
-        let result = sync_folder(&store, &blobs, &inbox, view, Some(7), listed, 100, None);
+        let result = sync_folder(&store, &blobs, &inbox, view, Some(7), listed);
         assert_eq!(held(&store, "inbox"), ["<new@x>"]);
         assert_eq!(held(&store, "archive"), ["<moving@x>"]);
         assert_eq!(result.saved, 1);
@@ -5611,14 +5606,11 @@ mod tests {
         // read, so the read no longer holds the row and the listing takes the
         // source item for new: the order the journal is there for.
         let graph = ScriptedGraph {
-            script: Some((Ok(view), Some(7), source)),
-            stale: false,
-            bodies: Default::default(),
-            pass: None,
             during_listing: Some(Box::new(commit)),
             blind: true,
+            ..ScriptedGraph::new(Ok(view), Some(7), source)
         };
-        run_scripted(&store, &blobs, &inbox, graph, 100);
+        run_scripted(&store, &blobs, &inbox, graph);
         assert!(held(&store, "inbox").is_empty());
         assert_eq!(stored_link(&store, "inbox"), None, "the item was withheld");
 
@@ -5626,7 +5618,7 @@ mod tests {
         twin.graph_id = "a-twin-item".to_string();
         let twins = vec![twin];
         let view = whole_folder(&twins);
-        sync_folder(&store, &blobs, &inbox, view, Some(7), twins, 100, None);
+        sync_folder(&store, &blobs, &inbox, view, Some(7), twins);
         assert_eq!(held(&store, "inbox"), ["<moving@x>"]);
         assert_eq!(
             stored_link(&store, "inbox").as_deref(),
@@ -7179,7 +7171,7 @@ mod tests {
             )
             .unwrap();
         let view = read_in_outlook();
-        let dropped = sync_folder(&store, &blobs, &inbox, view, Some(7), Vec::new(), 100, None);
+        let dropped = sync_folder(&store, &blobs, &inbox, view, Some(7), Vec::new());
         assert_eq!(dropped.flags_updated, 0, "the write did fail");
         assert!(!seen());
         assert_eq!(
@@ -7193,7 +7185,7 @@ mod tests {
             .execute_batch("DROP TRIGGER refuse_flags;")
             .unwrap();
         let view = read_in_outlook();
-        let landed = sync_folder(&store, &blobs, &inbox, view, Some(7), Vec::new(), 100, None);
+        let landed = sync_folder(&store, &blobs, &inbox, view, Some(7), Vec::new());
         assert_eq!(landed.flags_updated, 1, "the next pass applies the change");
         assert!(seen());
         assert_eq!(stored_link(&store, "inbox").as_deref(), Some(LINK));
