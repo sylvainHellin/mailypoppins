@@ -338,6 +338,16 @@ pub(crate) fn refuse_for_test(login: Login) {
     record(&login, "refused", &rejected);
 }
 
+/// The refusals in a row of `login`'s `secret`, 0 when the list holds none,
+/// for a test outside this module that needs the count.
+#[cfg(test)]
+pub(crate) fn in_a_row_for_test(login: &Login, secret: &str) -> u32 {
+    refusals()
+        .rows
+        .get(&RowKey::of(login, &fingerprint(secret)))
+        .map_or(0, |row| row.in_a_row)
+}
+
 /// The refusal a `login` with `secret` would get without dialling, if any.
 pub fn refused(login: &Login, secret: &str) -> Option<LoginRejected> {
     refusals().refused(

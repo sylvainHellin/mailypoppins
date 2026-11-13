@@ -4970,12 +4970,13 @@ async fn submit_over(
     }
     let Submitted {
         result,
+        logged_in,
         login_refused,
     } = submit_through(built, &from_addr, mailer).await;
+    if logged_in {
+        crate::login_gate::accepted(&login, &smtp_config.password);
+    }
     let Some(answer) = login_refused else {
-        if result.any_succeeded() {
-            crate::login_gate::accepted(&login, &smtp_config.password);
-        }
         return Ok(result);
     };
     let rejected = crate::login_gate::record(
@@ -4990,11 +4991,34 @@ async fn submit_over(
     }
 }
 
-/// What [`submit_through`] did: the verdict of each recipient, and the
-/// server's answer when it refused the login.
+/// What [`submit_through`] did: the verdict of each recipient, whether the
+/// server took the login, and its answer when it refused the login.
 struct Submitted {
     result: SendResult,
+    /// The server took the login: a recipient was delivered, or answered
+    /// with a reply only a logged-in session gets ([`answered_past_login`]).
+    logged_in: bool,
     login_refused: Option<String>,
+}
+
+/// Whether `err` comes from past the login, which the server then took: a
+/// reply RFC 5321 gives MAIL, RCPT or DATA and never the greeting, EHLO or
+/// AUTH (RFC 4954), or lettre's refusal of a message the server's EHLO does
+/// not cover, raised before MAIL on a logged-in session. A `554`, which the
+/// greeting may send, and a `421` or a lost connection, which may come
+/// before the login, say nothing about it; a `550` is taken as past the
+/// login, since only an EHLO refused outright gets one before it.
+fn answered_past_login(err: &lettre::transport::smtp::Error) -> bool {
+    if err.is_client() {
+        let text = err.to_string();
+        return text.contains("8BITMIME") || text.contains("SMTPUTF8");
+    }
+    err.status().is_some_and(|code| {
+        matches!(
+            u16::from(code),
+            450 | 451 | 452 | 455 | 550 | 551 | 552 | 553 | 555
+        )
+    })
 }
 
 /// Whether an SMTP error is the server refusing the login itself (PERSO-296):
@@ -5033,6 +5057,7 @@ async fn submit_through(
     let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
     let mut login_refused = None;
+    let mut logged_in = false;
 
     for (addr, role) in &built.recipients {
         if login_refused.is_some() {
@@ -5091,6 +5116,10 @@ async fn submit_through(
                 sent = mailer.send_raw(&envelope, seven_bit.insert(fallback)).await;
             }
         }
+        logged_in |= match &sent {
+            Ok(_) => true,
+            Err(e) => answered_past_login(e),
+        };
         match sent {
             Ok(_) => {
                 info!("Sent to {} ({})", addr, role);
@@ -5129,6 +5158,7 @@ async fn submit_through(
 
     Submitted {
         result: SendResult { results },
+        logged_in,
         login_refused,
     }
 }
@@ -5550,6 +5580,20 @@ mod smtp_durability_tests {
     /// refuses every login with `535 5.7.8`, as a server answers a wrong
     /// password, counting the logins it was asked.
     async fn refusing_smtp() -> (u16, std::sync::Arc<AtomicUsize>) {
+        smtp_server(
+            b"535 5.7.8 Authentication credentials invalid\r\n",
+            b"250 OK\r\n",
+        )
+        .await
+    }
+
+    /// A plain-TCP SMTP server on localhost that offers `AUTH PLAIN`, answers
+    /// every login with `auth` and every recipient with `rcpt`, counting the
+    /// logins it was asked.
+    async fn smtp_server(
+        auth: &'static [u8],
+        rcpt: &'static [u8],
+    ) -> (u16, std::sync::Arc<AtomicUsize>) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -5581,8 +5625,9 @@ mod smtp_durability_tests {
                             "EHLO" => b"250-fake\r\n250 AUTH PLAIN LOGIN\r\n",
                             "AUTH" => {
                                 logins.fetch_add(1, Ordering::SeqCst);
-                                b"535 5.7.8 Authentication credentials invalid\r\n"
+                                auth
                             }
+                            "RCPT" => rcpt,
                             "QUIT" => {
                                 let _ = write.write_all(b"221 bye\r\n").await;
                                 return;
@@ -5636,6 +5681,41 @@ mod smtp_durability_tests {
             default_from: "me@example.com".to_string(),
             accept_invalid_certs: false,
         }
+    }
+
+    /// PERSO-296: an SMTP login the server takes resets the count of its
+    /// refusals in a row even when every recipient is refused after it: the
+    /// server took the password, so its next refusal is the first of a new
+    /// row, held 2 minutes rather than 10.
+    #[tokio::test]
+    async fn a_login_taken_with_every_recipient_refused_resets_the_count() {
+        let (port, logins) = smtp_server(
+            b"235 2.7.0 Authentication successful\r\n",
+            b"550 5.1.1 No such user\r\n",
+        )
+        .await;
+        let config = refused_config(port);
+        let login = crate::login_gate::Login::Smtp(config.login());
+        let refusal = crate::login_gate::LoginRejected::new(
+            mp_protocol::account::RejectedLogin::Smtp,
+            "535 5.7.8".into(),
+        );
+        crate::login_gate::record(&login, &config.password, &refusal);
+        crate::login_gate::forget(&login);
+        assert_eq!(
+            crate::login_gate::in_a_row_for_test(&login, &config.password),
+            1
+        );
+
+        let built = Outbox::built("<all-refused@example.com>", Some("id:all-refused"));
+        let result = ServerSmtp.submit(&built, &config).await.expect("a result");
+        assert!(!result.any_succeeded(), "{:?}", result.results);
+        assert_eq!(logins.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            crate::login_gate::in_a_row_for_test(&login, &config.password),
+            0,
+            "the login the server took reset the count"
+        );
     }
 
     /// PERSO-296: a server that refuses the SMTP login is asked once, not
