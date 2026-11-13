@@ -2324,7 +2324,10 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                 dropped,
                 ..
             } = sent;
+            // A cancellation that waits in the outbox has not reached them
+            // yet, which the result names as it names every refusal.
             refused.extend(dropped.refused);
+            refused.extend(dropped.queued);
             match event {
                 Some(event) => settle(
                     &handle,
@@ -2378,6 +2381,12 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
         told.push(format!(
             "was not taken for {}",
             listed(&sent.dropped.refused)
+        ));
+    }
+    if !sent.dropped.queued.is_empty() {
+        told.push(format!(
+            "waits in the outbox for {}",
+            listed(&sent.dropped.queued)
         ));
     }
     let dropped = if told.is_empty() {
@@ -2449,20 +2458,25 @@ impl Reach {
         built: &crate::send::BuiltMessage,
         error: &anyhow::Error,
     ) -> Option<Self> {
-        let store = Store::open(crate::config::store_path(&account.name)).ok()?;
-        let row =
-            crate::outbox::load_by_message_id(&store, &account.name, &built.message_id).ok()??;
+        let pending = still_pending(account, built)?;
         let detail = Some(format!("{error:#}"));
-        Some(
-            if row.state == crate::outbox::OutboxState::PendingSend
-                && row.submission_started_at.is_none()
-            {
-                Reach::Queued(detail)
-            } else {
-                Reach::Unconfirmed(detail)
-            },
-        )
+        Some(if pending {
+            Reach::Queued(detail)
+        } else {
+            Reach::Unconfirmed(detail)
+        })
     }
+}
+
+/// Whether the outbox row that queued `built` waits for a later pass, still
+/// pending and never handed to the server; `None` when `built` has no row.
+fn still_pending(account: &AccountConfig, built: &crate::send::BuiltMessage) -> Option<bool> {
+    let store = Store::open(crate::config::store_path(&account.name)).ok()?;
+    let row =
+        crate::outbox::load_by_message_id(&store, &account.name, &built.message_id).ok()??;
+    Some(
+        row.state == crate::outbox::OutboxState::PendingSend && row.submission_started_at.is_none(),
+    )
 }
 
 /// What the cancellation of the attendees an update drops did.
@@ -2472,6 +2486,10 @@ struct Dropped {
     told: Vec<String>,
     /// The recipients it did not reach, with why.
     refused: Vec<RecipientOutcome>,
+    /// The recipients it has not reached yet, with why: the transport
+    /// failed before any took it and its outbox row goes out on a later
+    /// pass.
+    queued: Vec<RecipientOutcome>,
 }
 
 /// What the messages of one organizer's change did.
@@ -2549,8 +2567,8 @@ async fn send_itip(
                     dropped.told.extend(delivered_of(&report));
                     dropped.refused.extend(refused_of(&report));
                 }
-                Err(e) => dropped.refused.extend(
-                    message
+                Err(e) => {
+                    let recipients = message
                         .to
                         .iter()
                         .flat_map(|to| to.split(','))
@@ -2561,8 +2579,15 @@ async fn send_itip(
                             role: "To".to_string(),
                             delivered: false,
                             error: Some(format!("{e:#}")),
-                        }),
-                ),
+                        });
+                    // Read back as the change's own row is: one still
+                    // pending goes out on a later pass.
+                    if still_pending(account, follow) == Some(true) {
+                        dropped.queued.extend(recipients);
+                    } else {
+                        dropped.refused.extend(recipients);
+                    }
+                }
             }
         }
     }

@@ -2778,7 +2778,11 @@ async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
     assert!(
         error.contains("connection refused")
             && error.contains("waits in the outbox")
-            && error.contains("was not taken for bob@example.com"),
+            && error.contains(
+                "the cancellation to the attendees it drops waits in the outbox for \
+                 bob@example.com (connection refused)"
+            )
+            && !error.contains("was not taken"),
         "{status}"
     );
 
