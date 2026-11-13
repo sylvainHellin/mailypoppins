@@ -128,37 +128,9 @@ impl std::fmt::Display for OperationId {
 /// and the wire share one spelling.
 pub use mp_protocol::operation::OperationState;
 
-/// One progress report, as the plan fixes it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Progress {
-    /// What the operation is doing now.
-    pub phase: String,
-    /// How much of it is done.
-    pub done: u64,
-    /// How much there is, `None` when the total is not known yet.
-    pub total: Option<u64>,
-    /// One line for the user, when there is one.
-    pub message: Option<String>,
-}
-
-impl Progress {
-    /// The four members, with `null` rather than an absent key for the two that
-    /// may have nothing to say: a client reads `total` to draw a bar and has to
-    /// tell "unknown" from "missing field".
-    pub fn to_json(&self) -> Value {
-        serde_json::to_value(self.to_wire()).unwrap_or_else(|_| json!({}))
-    }
-
-    /// The report as the protocol crate types it.
-    pub fn to_wire(&self) -> mp_protocol::operation::Progress {
-        mp_protocol::operation::Progress {
-            phase: self.phase.clone(),
-            done: self.done,
-            total: self.total,
-            message: self.message.clone(),
-        }
-    }
-}
+/// One progress report: the protocol crate's type, so the registry holds what
+/// `operation.progress` and `operation.status` carry rather than a copy of it.
+pub use mp_protocol::operation::Progress;
 
 /// Everything the registry knows about one operation.
 #[derive(Clone, Debug, PartialEq)]
@@ -206,7 +178,7 @@ impl OperationStatus {
             method: self.method.to_string(),
             state: self.state,
             scope: self.scope,
-            progress: self.progress.as_ref().map(Progress::to_wire),
+            progress: self.progress.clone(),
             result: self.result.clone(),
             error: self.error.as_ref().map(rpc_error),
         }
@@ -319,9 +291,12 @@ impl OperationHandle {
     }
 }
 
-/// One progress event's payload: the operation and the report's four members.
+/// One progress event's payload: the operation and the report's four members,
+/// with `null` rather than an absent key for the two that may have nothing to
+/// say, because a client reads `total` to draw a bar and has to tell "unknown"
+/// from "missing field".
 fn progress_payload(id: &OperationId, progress: &Progress) -> Value {
-    let mut payload = progress.to_json();
+    let mut payload = serde_json::to_value(progress).unwrap_or_else(|_| json!({}));
     payload["operation_id"] = json!(id.as_str());
     payload
 }
@@ -819,6 +794,44 @@ fn u64_param(params: &Value, name: &str) -> Result<Option<u64>, DomainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A progress report travels in the same bytes as an `operation.progress`
+    /// payload and inside an `operation.status`, `null` for the two members
+    /// with nothing to say.
+    #[test]
+    fn a_progress_report_renders_its_four_members_and_the_operation() {
+        let id = OperationId::new("op-1");
+        let bare = Progress {
+            phase: "draft".to_string(),
+            done: 0,
+            total: None,
+            message: None,
+        };
+        assert_eq!(
+            progress_payload(&id, &bare).to_string(),
+            r#"{"done":0,"message":null,"operation_id":"op-1","phase":"draft","total":null}"#
+        );
+        let full = Progress {
+            phase: "body".to_string(),
+            done: 3,
+            total: Some(9),
+            message: Some("three of nine".to_string()),
+        };
+        assert_eq!(
+            progress_payload(&id, &full).to_string(),
+            r#"{"done":3,"message":"three of nine","operation_id":"op-1","phase":"body","total":9}"#
+        );
+
+        let registry = OperationRegistry::new();
+        let (started, handle) =
+            registry.start(ConnectionId(1), CancelScope::Durable, TEST_OPERATION);
+        handle.report(full);
+        let status = registry.status(&started).expect("a live operation");
+        assert_eq!(
+            status.to_json()["progress"].to_string(),
+            r#"{"done":3,"message":"three of nine","phase":"body","total":9}"#
+        );
+    }
 
     /// The hook is off in a process nobody set it in, so no real daemon serves
     /// the fake method.

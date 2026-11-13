@@ -919,7 +919,7 @@ fn the_status_json_is_the_documented_shape() {
         "every member is present, and the three that have nothing to say are null"
     );
     assert_eq!(
-        status.progress.as_ref().expect("progress").to_json(),
+        serde_json::to_value(status.progress.as_ref().expect("progress")).unwrap(),
         json!({"phase": "step", "done": 2, "total": 3, "message": null}),
         "the progress object renders the same four members it travels with in an event"
     );
