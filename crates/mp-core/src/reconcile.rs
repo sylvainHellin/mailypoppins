@@ -416,8 +416,10 @@ impl StatusIndex {
     /// - a CANCEL cancels a copy whose `SEQUENCE` is at or below its own; a
     ///   *stale* CANCEL (lower sequence than the surviving REQUEST) is a
     ///   cancellation of a version that was already replaced, and is ignored;
-    /// - a CANCEL of one occurrence stays on the series whatever the series'
-    ///   `SEQUENCE` ([`StatusIndex::cancelled_occurrences`]);
+    /// - a CANCEL of one occurrence counts on the series while its
+    ///   `SEQUENCE` is at or above the series' own, and not once a REQUEST
+    ///   for that occurrence re-issued it above it
+    ///   ([`StatusIndex::cancelled_occurrences`]);
     /// - a whole-event CANCEL the account sent as an update's uninvitation
     ///   (marked, or naming a strict subset of the copy's attendees)
     ///   uninvites the attendees it names and leaves the copy live
@@ -458,7 +460,7 @@ impl StatusIndex {
             // Only the series row reports per-occurrence cancellations; an
             // occurrence payload reports its own state in `cancelled`.
             if rid.is_none() {
-                event.cancelled_instances = self.cancelled_occurrences(uid);
+                event.cancelled_instances = self.cancelled_occurrences(uid, seq);
             }
         }
         let key = (uid.to_string(), rid.unwrap_or_default());
@@ -468,24 +470,31 @@ impl StatusIndex {
             .is_some_and(|latest| *latest > (seq, dtstamp.to_string()));
     }
 
-    /// The occurrences of the series `uid` a CANCEL names and no REQUEST
-    /// for that occurrence re-issued at a higher `SEQUENCE` since, in
-    /// [`ParsedEvent::recurrence_id`]'s form (PERSO-303).
+    /// The occurrences of the series `uid`, at version `sequence`, that a
+    /// CANCEL at that `SEQUENCE` or above names and no REQUEST for that
+    /// occurrence re-issued above the CANCEL's `SEQUENCE` since, in
+    /// [`ParsedEvent::recurrence_id`]'s form.
     ///
-    /// A later version of the whole series does not bring an occurrence
-    /// back, whatever its `SEQUENCE`, unless it lists the occurrence again
-    /// as its own `VEVENT`: RFC 5546 3.2.5 has the organizer cancel an
-    /// occurrence with a CANCEL naming it, and nothing in 3.2.2 has a
-    /// series update that omits the `EXDATE` mean to reinstate it, which is
-    /// what an organizer that forgets to carry its cancellations forward
-    /// sends.
-    pub fn cancelled_occurrences(&self, uid: &str) -> Vec<String> {
+    /// A version of the whole series above the CANCEL is its full current
+    /// state and brings the occurrence back unless it excludes it with an
+    /// `EXDATE`, RFC 5546 4.4.7: "Note that since this is an entire
+    /// rescheduling of the event, any instance-specific information will be
+    /// lost, unless explicitly included with the update "REQUEST"."
+    /// Thunderbird, Evolution and sabre/vobject read it so, and Outlook and
+    /// Google restore deleted occurrences on a change of the series' time
+    /// or pattern and send no `EXDATE` (PERSO-303, research note
+    /// `.agents/research/2026-11-13-imip-series-update-after-occurrence-cancel.md`).
+    /// A REQUEST for the occurrence itself obsoletes the CANCEL when its
+    /// `SEQUENCE` is higher, as RFC 5546 2.1.5 orders the components of one
+    /// `UID` and `RECURRENCE-ID`.
+    pub fn cancelled_occurrences(&self, uid: &str, sequence: u32) -> Vec<String> {
         let Some(cancels) = self.cancels.get(uid.trim()) else {
             return Vec::new();
         };
         cancels
             .instances
             .iter()
+            .filter(|(_, cancel)| cancel.sequence >= sequence)
             .filter(|(key, cancel)| {
                 let key = (uid.trim().to_string(), (*key).clone());
                 self.latest

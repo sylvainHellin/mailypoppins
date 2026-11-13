@@ -1109,12 +1109,12 @@ fn an_occurrence_the_organizer_cancels_leaves_the_attendees_series_live() {
     );
 }
 
-/// An occurrence the organizer cancelled stays cancelled for it after a
-/// later version of the series that lists no `EXDATE` for it (sent from
-/// another client): the agenda still lists it, and cancelling it again is
-/// refused (PERSO-303).
-#[test]
-fn a_later_series_version_keeps_the_organizers_cancelled_occurrence() {
+/// The organizer's series after it cancelled the occurrence on
+/// 2026-12-21, then a later version of the series at `SEQUENCE:2` sent from
+/// another client, its master carrying `extra` (an `EXDATE` or nothing).
+/// Answers the store, the later version's row and the zone the occurrence
+/// is named in.
+fn resent_after_an_occurrence_cancel(extra: &str) -> (Mailstore, i64, chrono_tz::Tz) {
     let organizer = Mailstore::new();
     let sent = organizer.ingest_raw(OWN_SERIES.as_bytes(), "sent", 1);
     let berlin: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
@@ -1136,31 +1136,62 @@ fn a_later_series_version_keeps_the_organizers_cancelled_occurrence() {
         mailypoppins::invite::cancel_message(&row.invite, row.next_sequence, Some(&rid), None)
             .unwrap();
     organizer.ingest_raw(&itip_raw(&cancel), "sent", 2);
-    let later = OWN_SERIES.replace("SEQUENCE:0", "SEQUENCE:2");
+    let later = OWN_SERIES.replace("SEQUENCE:0\r\n", &format!("SEQUENCE:2\r\n{extra}"));
     let resent = organizer.ingest_raw(later.as_bytes(), "sent", 3);
+    (organizer, resent, berlin)
+}
 
-    let agenda = agenda_of(&organizer, "me@example.com");
-    assert_eq!(agenda.len(), 1, "{agenda:#?}");
-    assert_eq!(agenda[0].event.sequence, 2);
-    assert_eq!(
-        agenda[0].event.cancelled_instances,
-        ["2026-12-21T09:00:00+01:00"]
-    );
+/// Whether the organizer's series on `row` still has the occurrence on
+/// 2026-12-21 to cancel: `Ok`, or the refusal's sentence.
+fn occurrence_on_the_21st(
+    organizer: &Mailstore,
+    row: i64,
+    berlin: chrono_tz::Tz,
+) -> Result<(), String> {
     let row = mailypoppins::invite::organized_row(
         &organizer.store,
         &organizer.blobs,
         &organizer_account(),
-        resent,
+        row,
     )
     .unwrap();
-    let err = mailypoppins::invite::occurrence_recurrence_id(
+    mailypoppins::invite::occurrence_recurrence_id(
         &row.invite,
         "2026-12-21T09:00",
         berlin,
         &row.cancelled_occurrences,
     )
-    .unwrap_err();
-    assert!(format!("{err:#}").contains("cancelled already"), "{err:#}");
+    .map(|_| ())
+    .map_err(|err| format!("{err:#}"))
+}
+
+/// A later version of the series with no `EXDATE` for an occurrence the
+/// organizer cancelled is the series' full state and brings the occurrence
+/// back (RFC 5546 4.4.7, PERSO-303): the agenda no longer lists it as
+/// cancelled, and it can be cancelled again.
+#[test]
+fn a_later_series_version_brings_back_the_organizers_cancelled_occurrence() {
+    let (organizer, resent, berlin) = resent_after_an_occurrence_cancel("");
+    let agenda = agenda_of(&organizer, "me@example.com");
+    assert_eq!(agenda.len(), 1, "{agenda:#?}");
+    assert_eq!(agenda[0].event.sequence, 2);
+    assert!(agenda[0].event.cancelled_instances.is_empty());
+    assert_eq!(occurrence_on_the_21st(&organizer, resent, berlin), Ok(()));
+}
+
+/// A later version of the series whose `EXDATE` excludes the occurrence
+/// keeps it out, whether the `EXDATE` is written in the series' zone or as
+/// the same instant in UTC (PERSO-303, PERSO-302).
+#[test]
+fn a_later_series_version_with_an_exdate_keeps_the_occurrence_out() {
+    for exdate in [
+        "EXDATE;TZID=W. Europe Standard Time:20261221T090000\r\n",
+        "EXDATE:20261221T080000Z\r\n",
+    ] {
+        let (organizer, resent, berlin) = resent_after_an_occurrence_cancel(exdate);
+        let err = occurrence_on_the_21st(&organizer, resent, berlin).unwrap_err();
+        assert!(err.contains("is not an occurrence"), "{exdate}: {err}");
+    }
 }
 
 #[test]
