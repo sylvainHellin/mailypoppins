@@ -356,9 +356,8 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
         BgResult::Fetch {
             account_index,
             result,
-            new_inbox_mail,
             rolled_back,
-        } => land_sync(app, account_index, result, new_inbox_mail, rolled_back),
+        } => land_sync(app, account_index, result, rolled_back),
 
         BgResult::Sync {
             account_index,
@@ -558,8 +557,9 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
     }
 }
 
-/// Land one finished quick pass: the status line, the account's health mark,
-/// the desktop notification and the refresh the rows owe.
+/// Land one finished quick pass: the status line, the account's health mark
+/// and the refresh the rows owe. The new mail it brought is notified by its
+/// own event, `mail.arrived` (PERSO-186).
 ///
 /// Two callers and one behaviour (P5-U8). A pass this client asked for arrives
 /// as [`BgResult::Fetch`] when its `operation.finished` lands; a pass the
@@ -578,7 +578,6 @@ pub(super) fn land_sync(
     app: &mut App,
     account_index: usize,
     result: Result<String, String>,
-    new_inbox_mail: Vec<mp_core::notify::NewMailMeta>,
     rolled_back: u64,
 ) {
     record_sync_health(
@@ -595,17 +594,6 @@ pub(super) fn land_sync(
             };
             let level = drained_sync_level(&text);
             app.set_status_level(text, level);
-            // Desktop notification for genuinely new inbox mail (#0009).
-            // Opt-in via `notifications = true` in config.toml; no-op when the
-            // list is empty (read-flag updates never populate it).
-            if app.global_config.notifications && !new_inbox_mail.is_empty() {
-                let account_name = app
-                    .accounts
-                    .get(account_index)
-                    .map(|a| a.account_config.name.as_str())
-                    .unwrap_or("");
-                mp_core::notify::notify_new_mail(account_name, &new_inbox_mail);
-            }
             refresh_after_server_sync(app, account_index);
         }
         Err(e) => {
@@ -1456,7 +1444,6 @@ mod tests {
             BgResult::Fetch {
                 account_index: 0,
                 result: Err("IMAP login failed: no such user".to_string()),
-                new_inbox_mail: Vec::new(),
                 rolled_back: 0,
             },
         );
@@ -1465,7 +1452,6 @@ mod tests {
             BgResult::Fetch {
                 account_index: 1,
                 result: Ok("Synced: 8 new, 0 existing".to_string()),
-                new_inbox_mail: Vec::new(),
                 rolled_back: 0,
             },
         );
@@ -1502,7 +1488,6 @@ mod tests {
             BgResult::Fetch {
                 account_index: 0,
                 result: Err("IMAP login failed".to_string()),
-                new_inbox_mail: Vec::new(),
                 rolled_back: 0,
             },
         );
@@ -1535,7 +1520,6 @@ mod tests {
                 BgResult::Fetch {
                     account_index: 0,
                     result: Err("IMAP login failed".to_string()),
-                    new_inbox_mail: Vec::new(),
                     rolled_back: 0,
                 },
             );

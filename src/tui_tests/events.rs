@@ -26,7 +26,8 @@
 //! enum events::Applied: Debug + PartialEq {
 //!     Rows,                                    // the open list moved
 //!     Counts,                                  // a sidebar count moved
-//!     NewMail(Vec<mp_protocol::events::Arrival>),  // a tick, and what it notified about
+//!     Tick,                                    // a tick landed
+//!     NewMail(Vec<mp_protocol::events::Arrival>),  // `mail.arrived`, and what it notified about
 //!     Operation(String),                       // the operation that finished, by id
 //!     Duplicate,                               // at or below the watermark
 //!     Refused,                                 // an unfamiliar instance
@@ -98,12 +99,12 @@
 //!   `graph_watcher_loop` leave `src/tui/`, which is the other scan in section
 //!   (e); that a runtime's tick reaches a subscribed client as an event is
 //!   `tests/tui_daemon_recovery.rs` again, through the fake sync outcome hook.
-//! - **A tick carries its arrivals.** `SyncCompleted` gains `new_inbox_mail`,
-//!   so the desktop notification of #0009 survives the watcher that used to
-//!   feed it. P5-U6 put the arrival list beside the *answer* to the client that
-//!   asked for a pass, and said so: *"that is P5-U8's to fix when the
-//!   notification moves onto the event stream"*. Nobody asks for a runtime's
-//!   tick, so the answer has no reader and the event is the only carrier left.
+//! - **New mail has an event of its own.** P5-U8 put the arrivals on
+//!   `SyncCompleted`, since nobody asks for a runtime's tick and its answer
+//!   has no reader. PERSO-186 moved them to `mail.arrived`, which the daemon
+//!   publishes after the blocked senders and the hooks are done with the
+//!   tick, naming the one client that presents it, so a tick and a pass's
+//!   answer notify nobody.
 //!
 //! ## Determinism
 //!
@@ -294,15 +295,16 @@ fn a_kind_the_tui_does_not_read_is_ignored() {
 // (b) the watcher's work, as events
 // ---------------------------------------------------------------------------
 
-/// A tick that ingested inbox mail notifies the user and refreshes the list.
+/// A tick that ingested inbox mail refreshes the list and the status line, and
+/// notifies nobody, whatever its payload lists.
 ///
 /// This is what `imap_watch` plus `BgResult::Fetch` did between them: the
-/// watcher noticed, a quick sync ran, and its result carried both the status
-/// line and the arrivals (#0009). The runtime does the first two now, and the
-/// arrivals ride the tick's own event because nobody asked for the pass and
-/// there is therefore no answer for them to ride.
+/// watcher noticed, a quick sync ran, and its result carried the status line.
+/// The notification is no longer the tick's (PERSO-186): the daemon announces
+/// new mail as `mail.arrived` once the blocked senders and the hooks are done
+/// with it, and only the client it names presents it.
 #[test]
-fn a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list() {
+fn a_tick_refreshes_the_list_and_leaves_new_mail_to_its_own_event() {
     let fixture = Fixture::new();
     seed_inbox();
     let mut app = app_on_inbox(&fixture);
@@ -314,29 +316,13 @@ fn a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list() {
         INSTANCE,
         WATERMARK + 1,
         "sync.completed",
-        tick(
-            2,
-            0,
-            &[("Ada <ada@example.com>", "Analytical engine")],
-            None,
-        ),
+        tick(2, 0, None),
     ));
 
-    assert_eq!(
-        applied,
-        Applied::NewMail(vec![Arrival {
-            from: "Ada <ada@example.com>".to_string(),
-            subject: "Analytical engine".to_string(),
-        }]),
-        "the arrivals the tick reported are the ones the notification renders"
-    );
-    assert_eq!(
-        notifications.shown(),
-        vec![(
-            "New email (alice)".to_string(),
-            "Ada <ada@example.com>: Analytical engine".to_string()
-        )],
-        "one notification, for the one arrival, through the sink and not the host"
+    assert_eq!(applied, Applied::Tick);
+    assert!(
+        notifications.shown().is_empty(),
+        "a tick is not the new-mail notification"
     );
     assert_eq!(
         app.status_message.as_deref(),
@@ -351,47 +337,79 @@ fn a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list() {
     );
 }
 
-/// `notifications = false` in `config.toml` notifies nobody, and the tick still
-/// lands.
-///
-/// The opt-in is #0009's and it is read where it was always read, on the way to
-/// the notifier rather than at the stream: an event this client dropped for a
-/// setting would also drop the status line and the reload with it.
+/// `mail.arrived` raises one notification, for the account's new mail, only
+/// when the daemon names this TUI's connection as the presenter and
+/// `notifications = true` (PERSO-186): not when it names the desktop app or
+/// another TUI, so clients open side by side notify once.
 #[test]
-fn notifications_off_notifies_nobody_and_still_syncs_the_view() {
+fn new_mail_notifies_only_as_the_presenter() {
     let fixture = Fixture::new();
     seed_inbox();
     let mut app = app_on_inbox(&fixture);
-    app.global_config.notifications = false;
+    app.global_config.notifications = true;
     watermarked(&mut app);
+    app.connection = Some(TUI_CONNECTION);
     let notifications = mp_core::notify::test_sink::capture();
-
-    let applied = app.apply_event(&envelope(
-        INSTANCE,
-        WATERMARK + 1,
-        "sync.completed",
-        tick(
-            2,
-            0,
-            &[("Ada <ada@example.com>", "Analytical engine")],
-            None,
-        ),
-    ));
+    let ada = ("Ada <ada@example.com>", "Analytical engine");
+    let mut revision = WATERMARK;
+    let mut arrived = |app: &mut App, arrivals: &[(&str, &str)], presenter| {
+        revision += 1;
+        app.apply_event(&envelope(
+            INSTANCE,
+            revision,
+            "mail.arrived",
+            mail_arrived(arrivals, presenter),
+        ))
+    };
 
     assert_eq!(
-        applied,
+        arrived(&mut app, &[ada], Some(("gui", TUI_CONNECTION + 1))),
         Applied::NewMail(Vec::new()),
-        "nothing was notified about, which is what the empty list says"
-    );
-    assert!(
-        notifications.shown().is_empty(),
-        "and nothing reached the notifier"
+        "the desktop app presents"
     );
     assert_eq!(
-        app.status_message.as_deref(),
-        Some("Synced: 2 new, 0 existing"),
-        "the line is not the notification and does not travel with it"
+        arrived(&mut app, &[ada], Some(("tui", TUI_CONNECTION + 2))),
+        Applied::NewMail(Vec::new()),
+        "another TUI presents"
     );
+    assert_eq!(
+        arrived(&mut app, &[ada], None),
+        Applied::NewMail(Vec::new()),
+        "nobody presents"
+    );
+    assert!(notifications.shown().is_empty());
+
+    assert_eq!(
+        arrived(&mut app, &[ada], Some(("tui", TUI_CONNECTION))),
+        Applied::NewMail(vec![Arrival {
+            from: ada.0.to_string(),
+            subject: ada.1.to_string(),
+        }])
+    );
+    arrived(
+        &mut app,
+        &[ada, ("Bob <bob@example.com>", "Difference engine")],
+        Some(("tui", TUI_CONNECTION)),
+    );
+    assert_eq!(
+        notifications.shown(),
+        vec![
+            (
+                "New email (alice)".to_string(),
+                "Ada <ada@example.com>: Analytical engine".to_string()
+            ),
+            ("New email (alice)".to_string(), "2 new emails".to_string()),
+        ],
+        "one notification per tick, through the sink and not the host"
+    );
+
+    app.global_config.notifications = false;
+    assert_eq!(
+        arrived(&mut app, &[ada], Some(("tui", TUI_CONNECTION))),
+        Applied::NewMail(Vec::new()),
+        "notifications are off"
+    );
+    assert_eq!(notifications.shown().len(), 2);
 }
 
 /// A failed tick marks the account it belongs to, not the shared status line.
@@ -411,7 +429,7 @@ fn a_failed_tick_marks_the_account_it_belongs_to() {
         INSTANCE,
         WATERMARK + 1,
         "sync.completed",
-        tick(0, 0, &[], Some("IMAP login failed: no such user")),
+        tick(0, 0, Some("IMAP login failed: no such user")),
     ));
 
     assert!(
@@ -519,7 +537,7 @@ fn the_finished_operation_lands_where_the_poll_landed() {
             "state": "succeeded",
             "result": {
                 "blocked": false,
-                "outcome": tick(3, 4, &[], None),
+                "outcome": tick(3, 4, None),
                 "new_inbox_mail": [{"from": "Ada <ada@example.com>", "subject": "Engine"}],
             },
         }),
@@ -531,13 +549,9 @@ fn the_finished_operation_lands_where_the_poll_landed() {
         Some("Synced: 3 new, 4 existing"),
         "the same line the polled answer produced, from the same pure function"
     );
-    assert_eq!(
-        notifications.shown(),
-        vec![(
-            "New email (alice)".to_string(),
-            "Ada <ada@example.com>: Engine".to_string()
-        )],
-        "the arrivals the answer carried notify, through the sink and not the host"
+    assert!(
+        notifications.shown().is_empty(),
+        "the pass's answer is not the new-mail notification either"
     );
 }
 
@@ -562,7 +576,7 @@ fn an_operation_this_client_never_started_is_ignored() {
         json!({
             "operation_id": "an-id-from-the-cli-window",
             "state": "succeeded",
-            "result": {"blocked": false, "outcome": tick(9, 9, &[], None)},
+            "result": {"blocked": false, "outcome": tick(9, 9, None)},
         }),
     ));
 
@@ -1449,12 +1463,31 @@ fn envelope(instance: &str, revision: u64, kind: &str, payload: Value) -> EventE
     }
 }
 
-/// One `sync.completed` payload, with its arrivals.
+/// The connection id the TUI's bootstrap answered, for `mail.arrived`.
+const TUI_CONNECTION: u64 = 3;
+
+/// One `mail.arrived` payload for [`ACCOUNT`], naming `presenter`.
+fn mail_arrived(arrivals: &[(&str, &str)], presenter: Option<(&str, u64)>) -> Value {
+    serde_json::to_value(mp_protocol::events::MailArrived {
+        account: ACCOUNT.to_string(),
+        arrivals: arrivals
+            .iter()
+            .map(|(from, subject)| Arrival {
+                from: (*from).to_string(),
+                subject: (*subject).to_string(),
+            })
+            .collect(),
+        presenter: presenter.map(|(kind, _)| kind.to_string()),
+        presenter_connection: presenter.map(|(_, connection)| connection),
+    })
+    .expect("a MailArrived serialises")
+}
+
+/// One `sync.completed` payload.
 ///
 /// Rendered through [`SyncCompleted`] itself rather than as a hand-written
-/// object, so a row cannot pin a payload the daemon could not produce and the
-/// new `new_inbox_mail` member travels the way every other member does.
-fn tick(saved: u64, skipped: u64, arrivals: &[(&str, &str)], error: Option<&str>) -> Value {
+/// object, so a row cannot pin a payload the daemon could not produce.
+fn tick(saved: u64, skipped: u64, error: Option<&str>) -> Value {
     let outcome = SyncCompleted {
         account: ACCOUNT.to_string(),
         severity: if error.is_some() {
@@ -1473,13 +1506,7 @@ fn tick(saved: u64, skipped: u64, arrivals: &[(&str, &str)], error: Option<&str>
         non_converging: Vec::new(),
         failed_mutations: 0,
         error: error.map(str::to_string),
-        new_inbox_mail: arrivals
-            .iter()
-            .map(|(from, subject)| Arrival {
-                from: (*from).to_string(),
-                subject: (*subject).to_string(),
-            })
-            .collect(),
+        new_inbox_mail: Vec::new(),
     };
     // Two readers: a `sync.completed` event's payload *is* the outcome, and an
     // `operation.finished` result carries the same object under `outcome`.

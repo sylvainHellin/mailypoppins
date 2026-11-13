@@ -1,10 +1,12 @@
 //! Desktop notifications for new mail (#0009) and calendar reminders
 //! (PERSO-255).
 //!
-//! Fired from the TUI when a background quick-sync saves genuinely new
-//! inbox emails, and when a calendar reminder falls due while no desktop app
-//! is connected (opt-in via the top-level `notifications = true` key in
-//! config.toml). Shells out to platform tools instead of pulling in a
+//! Fired from the TUI when the daemon names it the presenter of new mail
+//! (`mail.arrived`, PERSO-186) or of a calendar reminder, which it does only
+//! while no desktop app is connected (opt-in via the top-level
+//! `notifications = true` key in config.toml). The desktop app formats its
+//! own new-mail notification with [`format_new_mail_notification`] too.
+//! Shells out to platform tools instead of pulling in a
 //! notification crate: `osascript` on macOS, `notify-send` on Linux.
 //! Both degrade silently when the tool is missing or fails -- a lost
 //! notification is never worth an error in the TUI.
@@ -17,29 +19,10 @@
 //! control characters, caps the length, and neutralizes a leading `-`
 //! so the text can never be parsed as a CLI option by the helper tool.
 
-/// Sender + subject of one newly saved email. Produced by the sync
-/// backends (IMAP and Graph) for inbox saves only, so the notification
-/// body can show "sender: subject" when exactly one email arrived.
-#[derive(Debug, Clone)]
-pub struct NewMailMeta {
-    pub from: String,
-    pub subject: String,
-}
+use mp_protocol::events::Arrival;
 
 /// Maximum characters kept per sanitized field (sender, subject).
 const MAX_FIELD_CHARS: usize = 120;
-
-impl NewMailMeta {
-    /// Metadata for one newly-ingested message. Ingest reports exactly the
-    /// messages it wrote a row for, so there is no phantom-notification
-    /// filtering left to do here.
-    pub fn new(from: &str, subject: &str) -> Self {
-        Self {
-            from: from.to_string(),
-            subject: subject.to_string(),
-        }
-    }
-}
 
 /// Strip control characters, collapse surrounding whitespace, cap the
 /// length at `max_chars` (appending an ellipsis when truncated), and
@@ -61,12 +44,10 @@ pub fn sanitize_notification_text(s: &str, max_chars: usize) -> String {
 /// Build the `(title, body)` pair for a new-mail notification. Returns
 /// `None` when there is nothing to notify about. One email shows
 /// "sender: subject"; several are grouped into a single count line
-/// (this is also the anti-spam grouping: one notification per completed
-/// sync, however many emails it saved).
-pub fn format_new_mail_notification(
-    account: &str,
-    new: &[NewMailMeta],
-) -> Option<(String, String)> {
+/// (this is also the anti-spam grouping: one notification per
+/// `mail.arrived`, which the daemon publishes once per tick however many
+/// emails it brought).
+pub fn format_new_mail_notification(account: &str, new: &[Arrival]) -> Option<(String, String)> {
     let account = sanitize_notification_text(account, MAX_FIELD_CHARS);
     let title = if account.is_empty() {
         "New email".to_string()
@@ -103,7 +84,7 @@ pub fn format_new_mail_notification(
 /// suite turns on) the notification goes to [`test_sink`] instead and never
 /// reaches the host's notification centre; a test that did not open a
 /// capture panics here rather than post one.
-pub fn notify_new_mail(account: &str, new: &[NewMailMeta]) {
+pub fn notify_new_mail(account: &str, new: &[Arrival]) {
     let Some((title, body)) = format_new_mail_notification(account, new) else {
         return;
     };
@@ -249,8 +230,8 @@ fn send_desktop_notification(_title: &str, _body: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn meta(from: &str, subject: &str) -> NewMailMeta {
-        NewMailMeta {
+    fn meta(from: &str, subject: &str) -> Arrival {
+        Arrival {
             from: from.to_string(),
             subject: subject.to_string(),
         }
@@ -400,14 +381,5 @@ mod tests {
                 ("(no title)".to_string(), "now (10:00)".to_string()),
             ]
         );
-    }
-
-    // -- NewMailMeta::new ----------------------------------------------
-
-    #[test]
-    fn new_mail_meta_carries_sender_and_subject() {
-        let m = NewMailMeta::new("alice", "saved");
-        assert_eq!(m.from, "alice");
-        assert_eq!(m.subject, "saved");
     }
 }

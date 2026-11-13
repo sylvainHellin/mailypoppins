@@ -47,13 +47,14 @@ use serde_json::json;
 
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
-    AccountStateChanged, Arrival, MutationsRolledBack, SyncCompleted, KIND_ACCOUNT_STATE_CHANGED,
-    KIND_CALENDAR_CHANGED, KIND_CALENDAR_REMINDER, KIND_CALENDAR_REMINDERS_CHANGED,
-    KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
-    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MESSAGE_BODY_FETCHED, KIND_MUTATIONS_ROLLED_BACK,
-    KIND_OPERATION_FINISHED, KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
-    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
+    AccountStateChanged, Arrival, MailArrived, MutationsRolledBack, SyncCompleted,
+    KIND_ACCOUNT_STATE_CHANGED, KIND_CALENDAR_CHANGED, KIND_CALENDAR_REMINDER,
+    KIND_CALENDAR_REMINDERS_CHANGED, KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN,
+    KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MAIL_ARRIVED,
+    KIND_MESSAGE_BODY_FETCHED, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
+    KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED,
+    KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -83,9 +84,12 @@ pub enum Applied {
     Rows,
     /// A sidebar count moved.
     Counts,
-    /// A tick landed, and this is what it notified the user about: empty when
-    /// it notified about nothing, whether because nothing arrived or because
-    /// `notifications` is off.
+    /// A tick landed: the status line, the account's health mark and the
+    /// reload it owes.
+    Tick,
+    /// New mail arrived (`mail.arrived`, PERSO-186), and this is what it
+    /// notified the user about: empty when it notified about nothing, because
+    /// another client presents it or `notifications` is off.
     NewMail(Vec<Arrival>),
     /// The operation this client started, by id, finished.
     Operation(String),
@@ -431,6 +435,10 @@ impl App {
                 self.on_calendar_changed();
                 Applied::Ignored
             }
+            // New mail the daemon judged worth a notification (PERSO-186):
+            // raised when this TUI presents it. The list itself moved with
+            // the tick that brought the mail in.
+            KIND_MAIL_ARRIVED => self.apply_mail_arrived(&event.payload),
             // A reminder fell due (PERSO-255): the status line, the list the
             // hint bar counts, and the notification when this TUI presents.
             KIND_CALENDAR_REMINDER => {
@@ -468,13 +476,14 @@ impl App {
         }
     }
 
-    /// A finished tick: the status line, the account's health mark, the
-    /// desktop notification and the refresh the rows owe.
+    /// A finished tick: the status line, the account's health mark and the
+    /// refresh the rows owe. New mail is not the tick's to notify: the daemon
+    /// announces it as `mail.arrived` once its judges are done with it.
     ///
     /// A pass *this* client asked for is not landed here. Its
     /// `operation.finished` says the same thing to the one client that wants
     /// it, and the daemon publishes the tick to everyone first, so landing
-    /// both would notify twice and reload twice.
+    /// both would reload twice.
     fn apply_tick(&mut self, event: &EventEnvelope) -> Applied {
         let outcome: SyncCompleted = match serde_json::from_value(event.payload.clone()) {
             Ok(outcome) => outcome,
@@ -489,24 +498,33 @@ impl App {
         if self.events.awaits_a_pass_on(&outcome.account) {
             return Applied::Ignored;
         }
-        let arrivals = outcome.new_inbox_mail.clone();
-        let notified = if self.global_config.notifications {
-            arrivals.clone()
-        } else {
-            Vec::new()
-        };
         let result = match &outcome.error {
             Some(error) => Err(error.clone()),
             None => Ok(mp_client::format::sync_status_line(&outcome)),
         };
-        super::bg::land_sync(
-            self,
-            index,
-            result,
-            arrivals_as_meta(&arrivals),
-            outcome.failed_mutations,
-        );
-        Applied::NewMail(notified)
+        super::bg::land_sync(self, index, result, outcome.failed_mutations);
+        Applied::Tick
+    }
+
+    /// `mail.arrived` (PERSO-186): one notification for the account's new
+    /// mail, raised when the daemon names this TUI's connection as the
+    /// presenter and `notifications = true` in `config.toml`; the daemon has
+    /// already decided which mail deserves it.
+    fn apply_mail_arrived(&mut self, payload: &serde_json::Value) -> Applied {
+        let arrived: MailArrived = match serde_json::from_value(payload.clone()) {
+            Ok(arrived) => arrived,
+            Err(e) => {
+                log::warn!("[events] a mail.arrived did not decode: {e}");
+                return Applied::Ignored;
+            }
+        };
+        let presenting =
+            self.connection.is_some() && arrived.presenter_connection == self.connection;
+        if !(presenting && self.global_config.notifications) {
+            return Applied::NewMail(Vec::new());
+        }
+        mp_core::notify::notify_new_mail(&arrived.account, &arrived.arrivals);
+        Applied::NewMail(arrived.arrivals)
     }
 
     /// A drain outside a tick rolled queued mutations back (#0133): the
@@ -884,14 +902,6 @@ pub(super) fn land_check(app: &mut App, check: &HealthCheck) {
 /// that names something else.
 fn draft_resource_account(event: &EventEnvelope) -> Option<&str> {
     mp_client::queries::draft_resource_account(event.payload["resource"].as_str()?)
-}
-
-/// The notifier's shape for the arrivals a tick reported.
-fn arrivals_as_meta(arrivals: &[Arrival]) -> Vec<mp_core::notify::NewMailMeta> {
-    arrivals
-        .iter()
-        .map(|arrival| mp_core::notify::NewMailMeta::new(&arrival.from, &arrival.subject))
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

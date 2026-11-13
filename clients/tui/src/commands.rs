@@ -66,7 +66,6 @@ use super::app::{
 use super::events::Awaited;
 use super::helpers::SYNC_SKIPPED_MARKER;
 use super::queries::Queries;
-use mp_core::notify::NewMailMeta;
 use mp_core::selector::Selector;
 
 /// Where an [`Action`] does its work.
@@ -483,13 +482,11 @@ pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
             Ok(settled) => BgResult::Fetch {
                 account_index: *account_index,
                 result: Ok(sync_status_line(account, &settled)),
-                new_inbox_mail: new_inbox_mail(&settled),
                 rolled_back: rolled_back(&settled),
             },
             Err(e) => BgResult::Fetch {
                 account_index: *account_index,
                 result: Err(e),
-                new_inbox_mail: Vec::new(),
                 rolled_back: 0,
             },
         },
@@ -1062,23 +1059,6 @@ fn sync_status_line(account: &str, settled: &Value) -> String {
 fn rolled_back(settled: &Value) -> u64 {
     settled["outcome"]["failed_mutations"]
         .as_u64()
-        .unwrap_or_default()
-}
-
-/// The inbox arrivals a pass reported, for the desktop notification (#0009).
-fn new_inbox_mail(settled: &Value) -> Vec<NewMailMeta> {
-    settled["new_inbox_mail"]
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .map(|row| {
-                    NewMailMeta::new(
-                        row["from"].as_str().unwrap_or_default(),
-                        row["subject"].as_str().unwrap_or_default(),
-                    )
-                })
-                .collect()
-        })
         .unwrap_or_default()
 }
 
