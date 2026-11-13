@@ -21,6 +21,9 @@ mod write;
 /// Free/busy through the scripted seam.
 mod freebusy;
 
+/// The event of an invitation mail through the scripted seam.
+mod invite;
+
 const CALENDAR_VIEW: &str = include_str!("../../../tests/fixtures/ews/finditem_calendarview.xml");
 const GET_FOLDER: &str = include_str!("../../../tests/fixtures/ews/getfolder_calendar.xml");
 

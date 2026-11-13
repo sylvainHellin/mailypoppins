@@ -756,6 +756,26 @@ pub fn found_ids(body: &str) -> Result<Vec<String>, AnswerError> {
         .collect())
 }
 
+/// The calendar item a meeting mail (`MeetingRequest`,
+/// `MeetingCancellation`, `MeetingResponse`) of a GetItem answer is about,
+/// by its `AssociatedCalendarItemId`; `None` for a mail that is no meeting
+/// mail, or one gone since it was found.
+pub fn associated_event(body: &str) -> Result<Option<String>, AnswerError> {
+    let message = match only_message(body, "GetItem") {
+        Err(AnswerError::Refused(error)) if error.code == "ErrorItemNotFound" => return Ok(None),
+        other => other?,
+    };
+    let mail = message
+        .child("Items")
+        .and_then(|items| items.children.first())
+        .ok_or_else(|| malformed("a GetItem message without an item"))?;
+    Ok(mail
+        .child("AssociatedCalendarItemId")
+        .and_then(|id| id.attr("Id"))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string))
+}
+
 /// The ItemId of the calendar item a CreateItem or an UpdateItem saved.
 pub fn saved_id(body: &str, operation: &str) -> Result<String, AnswerError> {
     only_message(body, operation)?

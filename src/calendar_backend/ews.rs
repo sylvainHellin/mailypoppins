@@ -69,7 +69,9 @@ use super::{
     BackendResult, CalendarBackend, CalendarBackendError, Response, SeriesInfo, SyncResult, Written,
 };
 use crate::calendar_freebusy::{FreeBusyQuery, Schedule};
-use crate::calendar_model::{Calendar, CalendarFeature, CalendarWindow, Event, Recurrence};
+use crate::calendar_model::{
+    Calendar, CalendarFeature, CalendarWindow, Event, EventId, Recurrence,
+};
 use crate::calendar_write::{EventInput, EventPatch, ProposedTime};
 use crate::config::EwsPasswordSource;
 use fetch::{EwsFetch, EwsFetchError, EwsSession};
@@ -727,6 +729,46 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
 
     async fn free_busy(&self, query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {
         self.availability(query).await
+    }
+
+    /// The calendar item the meeting mail `message_id` is about. TUM's mail
+    /// goes over IMAP, so the mail is named by its Message-ID (angle
+    /// brackets optional) rather than by an EWS ItemId: FindItem finds it in
+    /// the Inbox or in Deleted Items, where Outlook moves an answered
+    /// invitation, and GetItem reads its `AssociatedCalendarItemId`. The
+    /// restriction on `message:InternetMessageId` is built from the schema
+    /// documentation and unverified live; the GetItem is the spike's.
+    /// `calendar_sync::invite_event` asks under a row's Graph id only, so an
+    /// EWS account reaches this once it passes the row's Message-ID.
+    async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<EventId>> {
+        let bare = message_id
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
+        if bare.is_empty() {
+            return Ok(None);
+        }
+        let body = format!(
+            "<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape>\
+             </m:ItemShape><m:Restriction><t:IsEqualTo>\
+             <t:FieldURI FieldURI=\"message:InternetMessageId\"/><t:FieldURIOrConstant>\
+             <t:Constant Value=\"{}\"/></t:FieldURIOrConstant></t:IsEqualTo></m:Restriction>\
+             <m:ParentFolderIds><t:DistinguishedFolderId Id=\"inbox\"/>\
+             <t:DistinguishedFolderId Id=\"deleteditems\"/></m:ParentFolderIds></m:FindItem>",
+            xml::escape(&format!("<{bare}>"))
+        );
+        let answer = self.call("FindItem", &body).await?;
+        let found = parse::found_ids(&answer).map_err(|error| answer_error(&error, "FindItem"))?;
+        let Some(mail) = found.first() else {
+            return Ok(None);
+        };
+        let body = format!(
+            "<m:GetItem><m:ItemShape><t:BaseShape>AllProperties</t:BaseShape></m:ItemShape>\
+             <m:ItemIds><t:ItemId Id=\"{}\"/></m:ItemIds></m:GetItem>",
+            xml::escape(mail)
+        );
+        let answer = self.call("GetItem", &body).await?;
+        parse::associated_event(&answer).map_err(|error| answer_error(&error, "GetItem"))
     }
 }
 

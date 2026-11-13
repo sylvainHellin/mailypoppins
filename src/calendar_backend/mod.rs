@@ -307,8 +307,10 @@ pub trait CalendarBackend {
     fn remember_series(&self, _known: Vec<SeriesInfo>) {}
 
     /// The server event an invitation mail stands for, by the mail's server
-    /// id (Graph: the `event` of an `eventMessage`); `None` when the mail is
-    /// no invitation or the backend cannot tell.
+    /// id (Graph: the `event` of an `eventMessage`), or by its Message-ID on
+    /// a backend whose account reads its mail over IMAP (EWS: the
+    /// `AssociatedCalendarItemId` of the meeting mail); `None` when the mail
+    /// is no invitation or the backend cannot tell.
     fn event_for_message(
         &self,
         _message_id: &str,
