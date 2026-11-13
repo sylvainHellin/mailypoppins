@@ -4112,7 +4112,9 @@ pub async fn drain_account_at(
             return crate::outbox::DrainResult::default();
         }
     };
-    if counts.open == 0 {
+    // A discarded row still filing its copy is no row the badge counts, and
+    // is one this pass owes an APPEND (PERSO-304).
+    if counts.open == 0 && counts.filing == 0 {
         return crate::outbox::DrainResult::default();
     }
 
@@ -4138,7 +4140,7 @@ pub async fn drain_account_at(
             log::warn!(
                 "[outbox] {} has {} row(s) waiting for an APPEND but no usable IMAP config: {e:#}",
                 account.name,
-                counts.open
+                counts.open + counts.filing
             );
             return crate::outbox::DrainResult::default();
         }

@@ -340,6 +340,12 @@ pub fn unsettled_change(
     uid: &str,
 ) -> Result<Option<UnsettledChange>> {
     for row in crate::outbox::undone_rows(store, account)? {
+        // A discarded row filed its version locally, where the agenda and
+        // the next `SEQUENCE` read it, and stays only to file its copy in
+        // the server's Sent folder (`outbox::discard`, PERSO-304).
+        if row.is_discarded() {
+            continue;
+        }
         let stage = match row.state {
             crate::outbox::OutboxState::PendingSend => Unsettled::Queued,
             crate::outbox::OutboxState::SentPendingAppend => Unsettled::Filing,

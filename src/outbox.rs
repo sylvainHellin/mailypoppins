@@ -40,7 +40,9 @@
 //!   not a crash leftover.
 //! - `sent_pending_append`: the server returned 250 and owns the message now.
 //!   SMTP must never run again for this row; only the APPEND is retried. A crash
-//!   between the 250 and the APPEND lands here.
+//!   between the 250 and the APPEND lands here, and so does a [`discard`] of
+//!   an invitation version some recipient may hold, from any state but `done`,
+//!   which keeps the row only to file its copy (PERSO-304).
 //! - `failed`: an *ambiguous* SMTP failure, where the message may or may not
 //!   have been accepted. Automatic recovery cannot be safe in either direction,
 //!   so the row stops here for a human. It is never auto re-sent.
@@ -247,6 +249,21 @@ pub struct OutboxRow {
     pub envelope: Option<Envelope>,
 }
 
+impl OutboxRow {
+    /// Whether the row was discarded and stays only to file its copy in
+    /// the server's Sent folder ([`Envelope::discarded`]).
+    pub fn is_discarded(&self) -> bool {
+        self.envelope
+            .as_ref()
+            .is_some_and(|envelope| envelope.discarded.is_some())
+    }
+}
+
+/// How long after its discard a row keeps trying to file its copy in the
+/// server's Sent folder: an APPEND that still fails a week on is given up,
+/// the copy staying in the local store only (PERSO-304).
+pub const DISCARDED_FILING_SECS: i64 = 7 * 24 * 3600;
+
 /// The SMTP envelope a resumed submission needs, and what became of each
 /// recipient in it.
 ///
@@ -288,6 +305,11 @@ pub struct Envelope {
     /// `pending_send` queues a delete of once every recipient holds the
     /// message. Carried across a store rebuild with the rest of the envelope.
     pub draft_copy: Option<(String, String)>,
+    /// When the row was discarded while some recipient may hold the
+    /// invitation version it carries, as a unix time: the row then stays in
+    /// `sent_pending_append` only to file its copy in the server's Sent
+    /// folder, out of every outbox view ([`discard`], PERSO-304).
+    pub discarded: Option<i64>,
 }
 
 /// Two recipient strings that name the same recipient.
@@ -352,6 +374,9 @@ impl Envelope {
             out.push('\t');
             out.push_str(&one_line(mailbox));
         }
+        if let Some(at) = self.discarded {
+            out.push_str(&format!("\ndiscarded:{at}"));
+        }
         out
     }
 
@@ -382,6 +407,7 @@ impl Envelope {
                         env.draft_copy = Some((mailbox.to_string(), message_id.to_string()));
                     }
                 }
+                "discarded" => env.discarded = addr.parse().ok(),
                 _ => {}
             }
         }
@@ -1247,6 +1273,14 @@ pub fn record_append(
             Ok(OutboxState::Done)
         }
         AppendOutcome::Failed(err) => {
+            let discarded = row
+                .envelope
+                .as_ref()
+                .and_then(|envelope| envelope.discarded);
+            if discarded.is_some_and(|at| now - at >= DISCARDED_FILING_SECS) {
+                give_up_filing(store, blobs, &row, err, now)?;
+                return Ok(OutboxState::Done);
+            }
             // `attempts` was already incremented by `begin_append_attempt`
             // before the request went out, so a failure only records what went
             // wrong and restarts the backoff clock.
@@ -1323,7 +1357,12 @@ fn finish_done(
     // `done` clears the error it took to get here, with one exception: a
     // message some recipients never got keeps that note for good, because it
     // is the only place the user is ever told (#0063).
-    let note = row.envelope.as_ref().and_then(Envelope::partial_note);
+    // A row the user discarded is not listed again for it.
+    let note = row
+        .envelope
+        .as_ref()
+        .filter(|_| !row.is_discarded())
+        .and_then(Envelope::partial_note);
     let tx = store
         .conn()
         .unchecked_transaction()
@@ -1377,6 +1416,18 @@ fn blind_recipients(row: &OutboxRow) -> Vec<crate::contacts::window::Owed> {
 /// organizer's agenda and a later change is built on it, at a higher
 /// `SEQUENCE` (PERSO-204). Whether it did is the answer, since the agenda
 /// then changed and the caller tells the clients so.
+///
+/// That local copy is the store's, and the store is a cache: a store rebuilt
+/// from the server would lose it, and the next change would reuse the
+/// `SEQUENCE` on the version before. On an account that APPENDs its own
+/// copies the row is therefore not dropped but kept in
+/// `sent_pending_append`, marked [`Envelope::discarded`], so the drain files
+/// the copy in the server's Sent folder like any sent message's
+/// ([`keep_for_filing`], PERSO-304). Such a row is out of every outbox view
+/// ([`unfinished_rows`], [`counts`]) and is not discarded a second time; an
+/// APPEND that still fails [`DISCARDED_FILING_SECS`] after the discard is
+/// given up, the copy staying local. An account whose server files its own
+/// copy (Gmail, Proton) or that keeps none drops the row as before.
 pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<bool> {
     discard_row(store, blobs, id, false)
 }
@@ -1387,6 +1438,10 @@ pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<bool> {
 /// Graph resume removes those drafts and the cleanup
 /// ([`crate::send::graph_submit::clear_server_cleanups`]), so the discard
 /// needs no network and leaves nothing on the server that nothing names.
+///
+/// A Graph row is always dropped: `sendMail` files its copy in Sent Items
+/// itself, and the drain APPENDs over IMAP, which a Graph account has none
+/// of.
 pub fn discard_graph(store: &Store, blobs: &BlobStore, id: i64) -> Result<bool> {
     discard_row(store, blobs, id, true)
 }
@@ -1395,9 +1450,19 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     let Some(row) = load(store, id)? else {
         return Ok(false);
     };
+    if row.is_discarded() {
+        anyhow::bail!(
+            "outbox row {id} was discarded already; its copy is filed in {} on its own",
+            row.target_mailbox.as_deref().unwrap_or("Sent")
+        );
+    }
     // Before the release, so the blob passes from the row's reference to
     // the copy's without touching zero, as in [`finish_done`].
     let kept = keep_the_version(store, blobs, &row)?;
+    if kept && !graph && row.target_mailbox.is_some() {
+        keep_for_filing(store, &row)?;
+        return Ok(true);
+    }
     let tx = store
         .conn()
         .unchecked_transaction()
@@ -1494,6 +1559,78 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
         )
     })?;
     Ok(true)
+}
+
+/// Turn the discarded `row`, whose invitation version [`keep_the_version`]
+/// filed locally, into one that only files its copy in the server's Sent
+/// folder ([`discard`]): `sent_pending_append`, marked
+/// [`Envelope::discarded`], its error cleared, its bytes held until the
+/// drain's [`finish_done`] releases them.
+///
+/// The mark also releases the draft the row was sent from, as dropping the
+/// row did: a send of that draft is the user's call again
+/// ([`refuse_a_second_submission`], [`refuse_a_finished_draft`]). An APPEND
+/// attempted before the discard may have landed, so a row already waiting
+/// for one keeps its attempt count, which has the drain search Sent first;
+/// any other row has started none.
+fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<()> {
+    let now = unix_now();
+    let mut envelope = row.envelope.clone().unwrap_or_default();
+    envelope.discarded = Some(now);
+    envelope.draft_key = None;
+    let attempts = match row.state {
+        OutboxState::SentPendingAppend => row.attempts,
+        _ => 0,
+    };
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET state = 'sent_pending_append', envelope = ?2, attempts = ?3,
+             last_error = NULL, updated = ?4 WHERE id = ?1",
+            rusqlite::params![row.id, envelope.encode(), attempts, now],
+        )
+        .context("keeping a discarded invitation row to file its copy")?;
+    info!(
+        "[outbox] row {} ({}) discarded; its invitation version is kept and its copy goes to {}",
+        row.id,
+        row.message_id,
+        row.target_mailbox.as_deref().unwrap_or("Sent")
+    );
+    Ok(())
+}
+
+/// End a discarded row whose copy the server's Sent folder kept refusing
+/// for [`DISCARDED_FILING_SECS`]: `done`, its bytes released, the local copy
+/// [`keep_the_version`] filed left as the only one, which the log says.
+fn give_up_filing(
+    store: &Store,
+    blobs: &BlobStore,
+    row: &OutboxRow,
+    err: &str,
+    now: i64,
+) -> Result<()> {
+    warn!(
+        "[outbox] row {} ({}) was discarded and its copy could not be filed in {} for a week \
+         ({err}); giving up: the copy stays in the local store only, and a store rebuilt from \
+         the server will not have it",
+        row.id,
+        row.message_id,
+        row.target_mailbox.as_deref().unwrap_or("Sent")
+    );
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the give-up of a discarded row")?;
+    tx.execute(
+        "UPDATE outbox SET state = 'done', last_error = NULL, updated = ?2 WHERE id = ?1",
+        rusqlite::params![row.id, now],
+    )
+    .context("ending a discarded row whose copy was never filed")?;
+    let unreferenced = blobs.release(&tx, &row.raw_blob)?;
+    tx.commit()
+        .context("committing the give-up of a discarded row")?;
+    unreferenced.remove();
+    Ok(())
 }
 
 /// The server drafts a discarded Graph row may have left, still to be removed
@@ -1600,12 +1737,18 @@ pub fn undone_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
 /// that kept a note (#0063): a message one of its recipients never got is
 /// exactly what an operator has to be told, and there is nowhere else to tell
 /// them, so it stays listed until it is discarded.
+///
+/// A row the user discarded that still files its copy in Sent is left out
+/// too: it is no message waiting to be sent, and there is nothing left to
+/// do with it ([`discard`]).
 pub fn unfinished_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
-    rows_in_states(
+    let mut rows = rows_in_states(
         store,
         account,
         "(state <> 'done' OR last_error IS NOT NULL)",
-    )
+    )?;
+    rows.retain(|row| !row.is_discarded());
+    Ok(rows)
 }
 
 fn rows_in_states(store: &Store, account: &str, predicate: &str) -> Result<Vec<OutboxRow>> {
@@ -1770,8 +1913,8 @@ pub fn retry(store: &Store, id: i64) -> Result<()> {
 
 /// How many rows are not `done`, split into "still working" and "parked".
 ///
-/// This is what the TUI badge renders, so it is one query rather than a load of
-/// every row.
+/// This is what the TUI badge renders, so it reads the rows `mp outbox list`
+/// would and no `done` row without a note, the boring majority.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OutboxCounts {
     pub open: usize,
@@ -1780,6 +1923,10 @@ pub struct OutboxCounts {
     /// not to every recipient it was addressed to (#0063). Parked in the sense
     /// that only a human can close them, by reading the row and discarding it.
     pub partial: usize,
+    /// Rows the user discarded that still file their copy in the server's
+    /// Sent folder ([`OutboxRow::is_discarded`]): work for the drain, which
+    /// no outbox view lists, so [`OutboxCounts::total`] leaves them out.
+    pub filing: usize,
 }
 
 impl OutboxCounts {
@@ -1789,25 +1936,18 @@ impl OutboxCounts {
 }
 
 pub fn counts(store: &Store, account: &str) -> Result<OutboxCounts> {
-    let mut stmt = store.conn().prepare(
-        "SELECT state, last_error IS NOT NULL, COUNT(*) FROM outbox
-         WHERE account = ?1 GROUP BY state, last_error IS NOT NULL",
-    )?;
-    let rows = stmt.query_map([account], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, bool>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
     let mut counts = OutboxCounts::default();
+    let rows = rows_in_states(
+        store,
+        account,
+        "(state <> 'done' OR last_error IS NOT NULL)",
+    )?;
     for row in rows {
-        let (state, noted, n) = row?;
-        match OutboxState::parse(&state) {
-            Some(OutboxState::Failed) => counts.failed += n as usize,
-            Some(OutboxState::Done) if noted => counts.partial += n as usize,
-            Some(s) if s.is_open() => counts.open += n as usize,
-            _ => {}
+        match row.state {
+            _ if row.is_discarded() => counts.filing += 1,
+            OutboxState::Failed => counts.failed += 1,
+            OutboxState::Done => counts.partial += 1,
+            OutboxState::PendingSend | OutboxState::SentPendingAppend => counts.open += 1,
         }
     }
     Ok(counts)

@@ -1728,3 +1728,362 @@ fn a_partial_send_or_a_draft_never_mirrored_queues_no_delete() {
     outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
     assert!(queued_draft_deletes(&plain).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// A discarded invitation version some recipient may hold (PERSO-304)
+// ---------------------------------------------------------------------------
+
+/// An update of an invitation `alice` organised, as the outbox queues it.
+fn invitation(message_id: &str) -> Vec<u8> {
+    format!(
+        "From: alice@example.com\r\n\
+         To: bob@example.com\r\n\
+         Subject: Budget review\r\n\
+         Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\
+         Message-ID: {message_id}\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/alternative; boundary=\"b\"\r\n\
+         \r\n\
+         --b\r\n\
+         Content-Type: text/plain; charset=UTF-8\r\n\
+         \r\n\
+         The invitation was updated.\r\n\
+         --b\r\n\
+         Content-Type: text/calendar; method=REQUEST; charset=UTF-8\r\n\
+         \r\n\
+         BEGIN:VCALENDAR\r\n\
+         VERSION:2.0\r\n\
+         PRODID:-//test//EN\r\n\
+         METHOD:REQUEST\r\n\
+         BEGIN:VEVENT\r\n\
+         UID:review-1@example.com\r\n\
+         SEQUENCE:1\r\n\
+         DTSTAMP:20240101T120000Z\r\n\
+         DTSTART:20240110T090000Z\r\n\
+         DTEND:20240110T100000Z\r\n\
+         SUMMARY:Budget review\r\n\
+         ORGANIZER:mailto:alice@example.com\r\n\
+         ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n\
+         END:VEVENT\r\n\
+         END:VCALENDAR\r\n\
+         --b--\r\n"
+    )
+    .into_bytes()
+}
+
+/// An invitation update queued for `target` (with `draft` as its draft key)
+/// whose submission came back with no verdict, so Bob may hold it: the row,
+/// parked in `failed`.
+fn parked_invitation(
+    account: &Account,
+    message_id: &str,
+    target: Option<&str>,
+    draft: Option<&str>,
+) -> i64 {
+    let (store, blobs) = account.open();
+    let id = outbox::enqueue(
+        &store,
+        &blobs,
+        ACCOUNT,
+        target,
+        message_id,
+        &invitation(message_id),
+        &Envelope {
+            draft_key: draft.map(str::to_string),
+            ..envelope()
+        },
+    )
+    .unwrap();
+    outbox::mark_submission_started(&store, id).unwrap();
+    outbox::record_submission(
+        &store,
+        &blobs,
+        id,
+        &SubmitOutcome::Ambiguous("connection reset".into()),
+    )
+    .unwrap();
+    assert_eq!(state_of(account, id), OutboxState::Failed);
+    id
+}
+
+/// The UIDs of the account's local Sent copies of `message_id`.
+fn local_sent_copies(store: &Store, message_id: &str) -> Vec<i64> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT uid FROM messages WHERE account = ?1 AND mailbox = 'sent'
+             AND message_id = ?2 ORDER BY uid",
+        )
+        .unwrap();
+    stmt.query_map(rusqlite::params![ACCOUNT, message_id], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<i64>, _>>()
+        .unwrap()
+}
+
+/// How many agenda rows the account's invitation makes.
+fn agenda_rows(store: &Store, blobs: &BlobStore) -> usize {
+    mailypoppins::agenda::load_events_for_account(store, blobs, ACCOUNT, "alice@example.com").len()
+}
+
+/// Whether `mp outbox list` and the outbox badge show nothing.
+fn outbox_looks_empty(store: &Store) -> bool {
+    outbox::unfinished_rows(store, ACCOUNT).unwrap().is_empty()
+        && outbox::counts(store, ACCOUNT).unwrap().total() == 0
+}
+
+/// A discarded invitation version Bob may hold stays on the agenda at once,
+/// leaves the outbox views, and the next pass files it in the server's Sent
+/// folder, where a store rebuilt from the server finds it; the server copy
+/// and the local one are one row, before and after the sync that lists it.
+#[tokio::test]
+async fn a_discarded_version_someone_may_hold_is_filed_in_sent_by_the_next_pass() {
+    let account = Account::new();
+    let mid = "<update-1@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    let (store, blobs) = account.open();
+
+    assert!(
+        outbox::discard(&store, &blobs, id).unwrap(),
+        "the version is kept"
+    );
+    let row = outbox::load(&store, id)
+        .unwrap()
+        .expect("the row stays to file its copy");
+    assert_eq!(row.state, OutboxState::SentPendingAppend);
+    assert!(row.is_discarded());
+    assert!(outbox_looks_empty(&store), "a discarded row is not listed");
+    assert_eq!(
+        local_sent_copies(&store, mid),
+        [mailypoppins::ingest::graph_uid(mid)]
+    );
+    assert_eq!(agenda_rows(&store, &blobs), 1);
+
+    let mut sent = FakeSent::new();
+    let drained = outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    assert_eq!(drained.completed, 1);
+    assert_eq!(sent.copies(mid), 1, "the server's Sent folder holds it");
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    assert_eq!(row.state, OutboxState::Done);
+    assert_eq!(row.last_error, None);
+    assert!(outbox_looks_empty(&store));
+    assert_eq!(
+        local_sent_copies(&store, mid),
+        [100],
+        "one row, on the server's UID"
+    );
+    assert!(
+        blobs.contains(&row.raw_blob),
+        "the local copy keeps its bytes"
+    );
+
+    // The next sync lists the server copy: it lands on the same row.
+    let raw = invitation(mid);
+    let email = mailypoppins::parse::parse_rfc822_to_fetched_email(&raw).unwrap();
+    let listed = std::collections::HashSet::from([100i64]);
+    let outcome = mailypoppins::ingest::ingest_message_with_policy(
+        &store,
+        &blobs,
+        &mailypoppins::ingest::IngestInput {
+            account: ACCOUNT,
+            mailbox: "sent",
+            uid: 100,
+            email: &email,
+            raw: Some(&raw),
+        },
+        &mailypoppins::ingest::RebindPolicy::UnlessListed(&listed),
+    )
+    .unwrap();
+    assert!(!outcome.inserted);
+    assert_eq!(local_sent_copies(&store, mid), [100]);
+    assert_eq!(agenda_rows(&store, &blobs), 1);
+
+    // A store rebuilt from the server finds the copy there.
+    let (fresh, fresh_blobs) = Account::new().open();
+    mailypoppins::ingest::ingest_message(
+        &fresh,
+        &fresh_blobs,
+        &mailypoppins::ingest::IngestInput {
+            account: ACCOUNT,
+            mailbox: "sent",
+            uid: i64::from(sent.appended.borrow()[SENT][0].0),
+            email: &email,
+            raw: Some(&raw),
+        },
+    )
+    .unwrap();
+    assert_eq!(agenda_rows(&fresh, &fresh_blobs), 1);
+}
+
+/// An APPEND attempted before the discard may have landed: the next pass
+/// searches first and files no second copy.
+#[tokio::test]
+async fn a_discarded_row_whose_append_may_have_landed_is_not_filed_twice() {
+    let account = Account::new();
+    let mid = "<update-2@example.com>";
+    let (store, blobs) = account.open();
+    let id = outbox::enqueue(
+        &store,
+        &blobs,
+        ACCOUNT,
+        Some(SENT),
+        mid,
+        &invitation(mid),
+        &envelope(),
+    )
+    .unwrap();
+    outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+    let mut sent = FakeSent::new();
+    *sent.swallow_ack_next.borrow_mut() = true;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    assert_eq!(sent.copies(mid), 1);
+
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+    let later = outbox::unix_now() + outbox::BACKOFF_MAX_SECS;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
+        .await
+        .unwrap();
+    assert_eq!(sent.copies(mid), 1);
+    assert_eq!(state_of(&account, id), OutboxState::Done);
+    assert_eq!(local_sent_copies(&store, mid), [100]);
+}
+
+/// A version nobody can hold, never submitted, is dropped whole as before:
+/// no local copy, nothing appended.
+#[tokio::test]
+async fn a_discarded_version_nobody_holds_is_dropped_and_never_filed() {
+    let account = Account::new();
+    let mid = "<update-3@example.com>";
+    let (store, blobs) = account.open();
+    let id = outbox::enqueue(
+        &store,
+        &blobs,
+        ACCOUNT,
+        Some(SENT),
+        mid,
+        &invitation(mid),
+        &envelope(),
+    )
+    .unwrap();
+    assert!(!outbox::discard(&store, &blobs, id).unwrap());
+    assert!(outbox::load(&store, id).unwrap().is_none());
+    assert!(local_sent_copies(&store, mid).is_empty());
+    let mut sent = FakeSent::new();
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    assert_eq!(*sent.appends.borrow(), 0);
+}
+
+/// On an account whose server files its own copy, or that keeps none, there
+/// is nothing to APPEND: the discard files the version locally and drops
+/// the row, as before.
+#[test]
+fn a_discarded_version_on_an_account_that_appends_nothing_is_kept_locally() {
+    let account = Account::new();
+    let mid = "<update-4@example.com>";
+    let id = parked_invitation(&account, mid, None, None);
+    let (store, blobs) = account.open();
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+    assert!(outbox::load(&store, id).unwrap().is_none());
+    assert_eq!(local_sent_copies(&store, mid).len(), 1);
+}
+
+/// A discarded row's copy that the server keeps refusing is given up a week
+/// after the discard: the row ends, the local copy stays, and nothing is
+/// tried again.
+#[tokio::test]
+async fn a_discarded_version_whose_append_keeps_failing_is_given_up_after_a_week() {
+    let account = Account::new();
+    let mid = "<update-5@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    let (store, blobs) = account.open();
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+
+    let mut sent = FakeSent::new();
+    *sent.fail_next.borrow_mut() = true;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    assert_eq!(state_of(&account, id), OutboxState::SentPendingAppend);
+    assert!(outbox_looks_empty(&store));
+
+    // A week on, the server still refuses it.
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    let mut envelope = row.envelope.unwrap();
+    let week_ago = outbox::unix_now() - outbox::DISCARDED_FILING_SECS - 1;
+    envelope.discarded = Some(week_ago);
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET envelope = ?2 WHERE id = ?1",
+            rusqlite::params![id, envelope.encode()],
+        )
+        .unwrap();
+    *sent.fail_next.borrow_mut() = true;
+    let later = outbox::unix_now() + outbox::BACKOFF_MAX_SECS;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
+        .await
+        .unwrap();
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    assert_eq!(row.state, OutboxState::Done, "given up");
+    assert_eq!(row.last_error, None);
+    assert_eq!(sent.copies(mid), 0);
+    assert_eq!(
+        local_sent_copies(&store, mid).len(),
+        1,
+        "the local copy stays"
+    );
+    assert!(blobs.contains(&row.raw_blob));
+
+    let appends = *sent.appends.borrow();
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later + 3600)
+        .await
+        .unwrap();
+    assert_eq!(*sent.appends.borrow(), appends, "nothing is tried again");
+}
+
+/// A discarded row is discarded once: a second discard is refused, and its
+/// draft is free to be sent anew, as a discard always made it.
+#[test]
+fn a_discarded_row_is_not_discarded_twice_and_releases_its_draft() {
+    let account = Account::new();
+    let mid = "<update-6@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), Some("id:draft-6"));
+    let (store, blobs) = account.open();
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+    let err = outbox::discard(&store, &blobs, id).unwrap_err();
+    assert!(format!("{err:#}").contains("discarded already"), "{err:#}");
+
+    outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:draft-6", None).unwrap();
+    let again = outbox::enqueue(
+        &store,
+        &blobs,
+        ACCOUNT,
+        Some(SENT),
+        "<update-6b@example.com>",
+        &invitation("<update-6b@example.com>"),
+        &Envelope {
+            draft_key: Some("id:draft-6".to_string()),
+            ..envelope()
+        },
+    );
+    assert!(again.is_ok(), "{again:?}");
+}
+
+/// The engine's drain trigger counts a discarded row still filing its copy,
+/// which the badge does not.
+#[test]
+fn the_counts_name_the_discarded_rows_still_filing_apart() {
+    let account = Account::new();
+    let id = parked_invitation(&account, "<update-7@example.com>", Some(SENT), None);
+    let (store, blobs) = account.open();
+    outbox::discard(&store, &blobs, id).unwrap();
+    let counts = outbox::counts(&store, ACCOUNT).unwrap();
+    assert_eq!(counts.total(), 0);
+    assert_eq!(counts.filing, 1);
+}
