@@ -559,12 +559,12 @@ pub async fn reconcile(
     for name in &plan.updated {
         stop_account(runtimes, name).await;
         if let Some(cfg) = of(name) {
-            start_account(runtimes, canonical, cfg, store.account_runtimes).await;
+            start_account(runtimes, canonical, store, cfg).await;
         }
     }
     for name in &plan.added {
         if let Some(cfg) = of(name) {
-            start_account(runtimes, canonical, cfg, store.account_runtimes).await;
+            start_account(runtimes, canonical, store, cfg).await;
         }
     }
     plan
@@ -613,25 +613,32 @@ async fn stop_account(runtimes: &Arc<RuntimeTable>, account: &str) {
 /// `sender.block` that came while the store was opening, in this daemon or
 /// one that stopped before the account turned ready, moves the account's
 /// Inbox mail from that sender to Junk here, before the state is committed
-/// ([`super::runtime::sender_runner::move_owed`]). `daemon.status` reports a
-/// startup start's account `opening` until then
+/// ([`super::runtime::sender_runner::move_owed`]), and the moves owed to an
+/// account `store` no longer configures are dropped. `daemon.status` reports
+/// a startup start's account `opening` until then
 /// ([`super::opening::committed`]), so a client that waited for no account to
 /// be opening finds it served, its seed whole and the owed move done.
 pub async fn start_account(
     runtimes: &Arc<RuntimeTable>,
     canonical: &Arc<CanonicalState>,
+    store: &ConfigStore,
     cfg: AccountConfig,
-    account_runtimes: bool,
 ) {
     let account = cfg.name.clone();
-    let change = start_runtime(runtimes, canonical, cfg.clone(), account_runtimes).await;
+    let change = start_runtime(runtimes, canonical, cfg.clone(), store.account_runtimes).await;
     super::opening::hold_commit(&account).await;
     super::opening::end(&account);
     let runtime = runtimes.get(&account);
     if change.is_some() && runtime.is_some() {
         super::runtime::publish::reseed_from_store(canonical, &cfg).await;
     }
-    super::runtime::sender_runner::move_owed(runtime.as_deref(), canonical, &cfg).await;
+    super::runtime::sender_runner::move_owed(
+        runtime.as_deref(),
+        canonical,
+        &cfg,
+        &store.accounts(),
+    )
+    .await;
     super::opening::committed(&account);
     if let Some(change) = change {
         canonical.apply(change);
@@ -795,7 +802,7 @@ pub async fn start_configured(
         debug!("[daemon] a configuration swap already started {account}");
         return false;
     }
-    start_account(runtimes, canonical, cfg, store.account_runtimes).await;
+    start_account(runtimes, canonical, store, cfg).await;
     true
 }
 
@@ -821,7 +828,7 @@ pub async fn start_after_first_sync(
         return false;
     }
     info!("[daemon] {account} has a local store now; starting its runtime");
-    start_account(runtimes, canonical, cfg, store.account_runtimes).await;
+    start_account(runtimes, canonical, store, cfg).await;
     true
 }
 

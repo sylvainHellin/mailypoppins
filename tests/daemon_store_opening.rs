@@ -711,6 +711,43 @@ async fn a_block_owed_to_an_opening_account_survives_a_daemon_restart() {
     );
 }
 
+/// The Inbox move a block owed an account that a later configuration no
+/// longer names is dropped when the next daemon reads the owed moves, rather
+/// than kept in the file for an account that will never start again
+/// (PERSO-109).
+#[tokio::test]
+async fn a_move_owed_to_an_account_no_longer_configured_is_dropped() {
+    let (sandbox, daemon, gate) = held().await;
+    let mut conn = connected(&sandbox).await;
+    block_while_opening(&mut conn).await;
+    drop(conn);
+    drop(daemon);
+    fs::remove_file(&gate).expect("release the hold");
+    let owed_file = sandbox
+        .data_dir()
+        .join(mailypoppins::daemon::senders::OWED_FILE);
+    let owed = || fs::read_to_string(&owed_file).expect("the owed moves");
+    assert!(owed().contains(LARGE), "the block owed {LARGE}: {}", owed());
+
+    let config = sandbox.config_dir().join("config.toml");
+    let only_small =
+        format!("[[accounts]]\nname = \"{SMALL}\"\ndefault_from = \"small@example.com\"\n");
+    fs::write(&config, only_small).expect("remove large from config.toml");
+    let _daemon = sandbox.spawn_daemon();
+    status_until(
+        &sandbox.socket(),
+        "daemon.status answered with small ready",
+        |answer| state_of(&answer["accounts"], SMALL, "state") == Some("ready"),
+    )
+    .await;
+    assert!(
+        !owed().contains(LARGE),
+        "the move owed to {LARGE}, which is no longer configured, is dropped: {}",
+        owed()
+    );
+    assert_eq!(large_mailbox(&sandbox), "inbox", "nothing moved");
+}
+
 /// A sender unblocked while the move its block owed an opening account is
 /// still pending keeps its mail in the Inbox once the account is ready
 /// (PERSO-109).

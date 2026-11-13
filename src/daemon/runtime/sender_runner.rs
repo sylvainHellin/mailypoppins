@@ -129,17 +129,22 @@ pub async fn scan_once(
 /// store is open by now, so its integrity check has run. A move that fails
 /// stays owed for the account's next start. A move asks `runtime` for a
 /// drain and publishes the rows that left the Inbox and the counts, as the
-/// block call does for an open account (PERSO-286).
+/// block call does for an open account (PERSO-286). The moves owed to an
+/// account `configured` no longer names are dropped on the way
+/// ([`senders::owed`]).
 pub async fn move_owed(
     runtime: Option<&AccountRuntime>,
     canonical: &Arc<CanonicalState>,
     cfg: &AccountConfig,
+    configured: &[AccountConfig],
 ) {
     let account = cfg.name.clone();
     let move_cfg = cfg.clone();
+    let configured: Vec<String> = configured.iter().map(|a| a.name.clone()).collect();
     let moved = tokio::task::spawn_blocking(move || {
         let list = senders::list_path();
-        if senders::owed(&list, &move_cfg.name)?.is_empty() {
+        let configured: Vec<&str> = configured.iter().map(String::as_str).collect();
+        if senders::owed(&list, &move_cfg.name, &configured)?.is_empty() {
             return Ok(senders::Moved::Rows {
                 mailbox: String::new(),
                 departed: Vec::new(),

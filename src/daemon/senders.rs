@@ -48,6 +48,8 @@
 //! account turned ready still owes it at its next start. Every start runs
 //! what it owes ([`move_owed`]) and settles an entry only once its move ran;
 //! an unblock settles the sender's entries in every account (PERSO-109).
+//! The read a start makes ([`owed`]) drops the entries of every account the
+//! configuration no longer names, which no start would ever settle.
 //!
 //! Every read-modify-write of the list or the owed moves and every scan or
 //! move holds one lock ([`LOCK`]), so a block call and a runner's scan never
@@ -297,12 +299,26 @@ pub fn owe(list: &Path, account: &str, entry: &str) -> Result<()> {
 }
 
 /// The entries whose Inbox move `account` is owed, beside the list at `list`.
-pub fn owed(list: &Path, account: &str) -> Result<Vec<String>> {
+///
+/// The read every start makes, so it is also where the moves owed to an
+/// account `configured` no longer names are dropped: that account never
+/// starts again to run them, and one added back later under the same name is
+/// a new account whose Inbox nobody blocked anything in.
+pub fn owed(list: &Path, account: &str, configured: &[&str]) -> Result<Vec<String>> {
     let _turn = locked();
-    Ok(load_owed(&owed_path(list))?
-        .accounts
-        .remove(account)
-        .unwrap_or_default())
+    let path = owed_path(list);
+    let mut owed = load_owed(&path)?;
+    let before = owed.accounts.len();
+    owed.accounts
+        .retain(|name, _| name == account || configured.contains(&name.as_str()));
+    if owed.accounts.len() != before {
+        info!(
+            "[senders] dropped the moves owed to {} account(s) no longer configured",
+            before - owed.accounts.len()
+        );
+        save_owed(&path, &owed)?;
+    }
+    Ok(owed.accounts.remove(account).unwrap_or_default())
 }
 
 /// Run the Inbox moves `account` is owed ([`owe`]) for the entries the list
@@ -1116,6 +1132,9 @@ mod tests {
         );
     }
 
+    /// The two accounts the owed-move tests configure.
+    const BOTH: &[&str] = &[ACCOUNT, "beta"];
+
     /// A move owed to an account is kept in the file beside the list until
     /// it ran: a failed one stays for the next start, a successful one is
     /// settled, and an unblock settles the sender's.
@@ -1130,13 +1149,13 @@ mod tests {
         }
         owe(&list, "beta", "x@spam.example").unwrap();
         assert_eq!(
-            owed(&list, ACCOUNT).unwrap(),
+            owed(&list, ACCOUNT, BOTH).unwrap(),
             ["x@spam.example", "@other.example"]
         );
 
         // An unblock settles the sender's debt in every account.
         unblock(&list, "@other.example").unwrap();
-        assert_eq!(owed(&list, ACCOUNT).unwrap(), ["x@spam.example"]);
+        assert_eq!(owed(&list, ACCOUNT, BOTH).unwrap(), ["x@spam.example"]);
 
         // A move that fails keeps its debt.
         fx.store
@@ -1144,7 +1163,7 @@ mod tests {
             .execute_batch("ALTER TABLE messages RENAME TO messages_away")
             .unwrap();
         assert!(move_owed(&fx.store, &account(), &list).is_err());
-        assert_eq!(owed(&list, ACCOUNT).unwrap(), ["x@spam.example"]);
+        assert_eq!(owed(&list, ACCOUNT, BOTH).unwrap(), ["x@spam.example"]);
 
         // The next one moves the mail and settles it, and only this account's.
         fx.store
@@ -1156,8 +1175,40 @@ mod tests {
             std::slice::from_ref(&spam)
         );
         assert_eq!(fx.mailbox_of(&spam), "Junk");
-        assert!(owed(&list, ACCOUNT).unwrap().is_empty());
-        assert_eq!(owed(&list, "beta").unwrap(), ["x@spam.example"]);
+        assert!(owed(&list, ACCOUNT, BOTH).unwrap().is_empty());
+        assert_eq!(owed(&list, "beta", BOTH).unwrap(), ["x@spam.example"]);
+    }
+
+    /// Reading the owed moves drops those of an account no longer
+    /// configured, keeps the reader's own and every configured account's, and
+    /// leaves a file with nothing to drop untouched.
+    #[test]
+    fn reading_the_owed_moves_drops_an_unconfigured_accounts() {
+        let fx = Fixture::new(true);
+        let list = fx.dir.path().join(LIST_FILE);
+        let owed_file = fx.dir.path().join(OWED_FILE);
+        for account in [ACCOUNT, "beta", "gone"] {
+            owe(&list, account, "x@spam.example").unwrap();
+        }
+
+        assert_eq!(owed(&list, ACCOUNT, BOTH).unwrap(), ["x@spam.example"]);
+        let kept = load_owed(&owed_file).unwrap();
+        assert_eq!(
+            kept.accounts.keys().collect::<Vec<_>>(),
+            [ACCOUNT, "beta"],
+            "the account no longer configured is dropped from the file"
+        );
+
+        // The reader's own entries are never dropped, configured or not.
+        assert_eq!(owed(&list, "beta", &[]).unwrap(), ["x@spam.example"]);
+        assert_eq!(
+            load_owed(&owed_file)
+                .unwrap()
+                .accounts
+                .keys()
+                .collect::<Vec<_>>(),
+            ["beta"]
+        );
     }
 
     #[test]
