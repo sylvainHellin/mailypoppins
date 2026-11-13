@@ -893,7 +893,10 @@ impl ImapConfig {
     /// The configured budget as a duration, or `None` for unbounded.
     ///
     /// `None` is also what the caller passes when the pass must not be cut
-    /// short whatever the config says (`mp sync`, the explicit recovery path).
+    /// short whatever the config says: the guarded pass of `mp sync --mailbox`,
+    /// `mp sync --dry-run` and an account's first sync. A `mp sync` of the
+    /// whole account runs as a tick of the account's runtime and carries the
+    /// configured budget.
     pub fn body_fetch_deadline(&self) -> Option<std::time::Duration> {
         (self.body_fetch_deadline_secs > 0)
             .then(|| std::time::Duration::from_secs(self.body_fetch_deadline_secs))

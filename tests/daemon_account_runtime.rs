@@ -150,9 +150,11 @@
 //!   keyring, which an offline test has none of, so the runtime reads the
 //!   budget from the [`AccountConfig`] it was started with
 //!   (`imap.body_fetch_deadline_secs`, `0` meaning unbounded) and reports the
-//!   `Duration` it handed the body. Both kinds of daemon tick carry it; the
-//!   explicit recovery sync, which is not a tick and does not go through this
-//!   type, stays unbounded.
+//!   `Duration` it handed the body. Both kinds of daemon tick carry it, and so
+//!   does a `mp sync` of the whole account, which runs as a tick while the
+//!   daemon is the account's engine. Only the guarded pass, which is not a
+//!   tick and does not go through this type (`mp sync --mailbox`,
+//!   `mp sync --dry-run`, an account's first sync), stays unbounded.
 //! - **`read_conn()` blocks and never fails.** The plan's signature returns
 //!   `PooledRead`, not `Result<PooledRead>` and not a future, so exhaustion is
 //!   a wait rather than an error. `ReadPool::try_get` is the non-blocking form,

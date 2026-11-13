@@ -766,9 +766,11 @@ async fn drain(
 /// The pass itself, guarded by the account's engine lock.
 ///
 /// `Ok(None)` means another engine holds that lock. No body-fetch deadline is
-/// passed on either transport (#0113): this is the explicit recovery path, and
-/// the pass a user runs to make the store converge is the one pass that must
-/// not stop early.
+/// passed on either transport (#0113): this is the guarded pass of
+/// `mp sync --mailbox`, `mp sync --dry-run` and an account's first sync, which
+/// the runtime's tick cannot carry and which must not stop early. A `mp sync`
+/// of the whole account on a daemon that is the account's engine runs as a
+/// tick instead and carries the budget.
 async fn body(
     request: &PassRequest,
     targets: &[SyncTarget],
