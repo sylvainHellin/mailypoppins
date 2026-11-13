@@ -185,6 +185,18 @@ fn a_tui_session_and_cli_commands_share_one_daemon_at_the_same_instant() {
     }
     check(running, &lone);
 
+    // The plan's runtime assertion (PERSO-223): the client process, here the
+    // one holding the TUI session, has no `store.lock` open. The daemon holds
+    // every account's, so taking one would fail rather than prove anything;
+    // the open descriptors are what a client that reached for it would show.
+    if let Ok(fds) = std::fs::read_dir("/proc/self/fd") {
+        let held: Vec<_> = fds
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .filter(|target| target.ends_with("store.lock"))
+            .collect();
+        assert!(held.is_empty(), "the client holds an engine lock: {held:?}");
+    }
+
     session.close();
     daemon.stop();
 }

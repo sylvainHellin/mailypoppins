@@ -975,7 +975,7 @@ A profile never falls back, to `email-cli` or to `mailypoppins`: profiles postda
 
 ## Testing
 
-- `cargo test --workspace` runs every test, the parity harness, the six daemon slice suites and the soak file included; the count is not kept here, since nothing would check it (`tests/test_selection_guard.rs` defends the floors that matter).
+- `cargo test --workspace` runs every test, the parity harness, the six daemon slice suites and the soak file included; the count is not kept here, since nothing would check it, and `tests/test_selection_guard.rs` is what fails when a workspace change silently stops compiling a file of tests.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`clients/tui/src/ui/golden_frames.rs`).
