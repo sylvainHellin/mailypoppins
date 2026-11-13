@@ -730,9 +730,16 @@ fn month_name(month: u32) -> Option<&'static str> {
 impl Recurrence {
     /// The rule an iCalendar `RRULE` value (`FREQ=WEEKLY;BYDAY=WE`) states,
     /// or `None` for a rule this model cannot hold: another frequency, a
-    /// list of month days or months, an hour or week-number part, weekdays
-    /// with different ordinals, both `UNTIL` and `COUNT`, or a part it does
-    /// not know.
+    /// list of month days or months, an hour or week-number part, several
+    /// weekdays each with its own ordinal, both `UNTIL` and `COUNT`, or a
+    /// part it does not know.
+    ///
+    /// Several weekdays with one `BYSETPOS` (Outlook's last weekday of the
+    /// month, `BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1`) are the model's
+    /// `week_index` over them, the day at that position among all of the
+    /// period's days on those weekdays, as Graph's relative patterns read.
+    /// Several weekdays each with an ordinal (`BYDAY=1MO,1TU`) place one day
+    /// for each weekday, which the model cannot hold.
     ///
     /// `zone` is the zone of the event's `DTSTART`, UTC when it names none:
     /// a UTC `UNTIL` (`20270630T035959Z`) is read on its day there, the
@@ -782,7 +789,7 @@ impl Recurrence {
                             "" => None,
                             raw => Some(raw.trim_start_matches('+').parse::<i8>().ok()?),
                         };
-                        if rule.weekdays.len() > 1 && position != ordinal {
+                        if rule.weekdays.len() > 1 && (position.is_some() || ordinal.is_some()) {
                             return None;
                         }
                         ordinal = position;
@@ -858,8 +865,13 @@ impl Recurrence {
     /// The rule with what an `RRULE` leaves to its `DTSTART` filled in
     /// from `first`, the series' first day (RFC 5545 3.3.10): a weekly rule
     /// without `BYDAY` repeats on `first`'s weekday, a monthly or yearly one
-    /// without a day on `first`'s day of the month, and a yearly one without
-    /// `BYMONTH` in `first`'s month.
+    /// without a day on `first`'s day of the month, and a yearly one on a
+    /// date without `BYMONTH` in `first`'s month.
+    ///
+    /// A yearly rule on a weekday without `BYMONTH` places its day among
+    /// the whole year's days on its weekdays: the first to fourth of them
+    /// fall in January, which holds at least four of every weekday, and the
+    /// last in December, so the rule takes that month.
     pub fn anchored(mut self, first: NaiveDate) -> Self {
         use chrono::Datelike;
         match self.frequency {
@@ -874,7 +886,11 @@ impl Recurrence {
                     self.day_of_month = Some(first.day());
                 }
                 if self.frequency == Frequency::Yearly && self.month.is_none() {
-                    self.month = Some(first.month());
+                    self.month = Some(match self.week_index {
+                        None => first.month(),
+                        Some(WeekIndex::Last) => 12,
+                        Some(_) => 1,
+                    });
                 }
             }
         }
@@ -883,6 +899,11 @@ impl Recurrence {
 
     /// Whether `date` is a day the rule places when the series starts on
     /// `first`, its end (`until`, `count`) left to [`Recurrence::dates`].
+    ///
+    /// A rule on a week index places the day at that position among all of
+    /// the month's days on its weekdays (`BYSETPOS` over the month's set),
+    /// which on one weekday is that weekday's ordinal: the last of Monday to
+    /// Friday is one day a month, never every weekday of its last week.
     pub fn places(&self, first: NaiveDate, date: NaiveDate) -> bool {
         use chrono::{Datelike, Days};
         let interval = i64::from(self.interval.max(1));
@@ -890,11 +911,20 @@ impl Recurrence {
         let on_day = || match self.week_index {
             None => Some(date.day()) == self.day_of_month,
             Some(index) => {
-                self.weekdays.contains(&weekday)
-                    && match index {
-                        WeekIndex::Last => (date + Days::new(7)).month() != date.month(),
-                        _ => (date.day() - 1) / 7 + 1 == index.position() as u32,
-                    }
+                if !self.weekdays.contains(&weekday) {
+                    return false;
+                }
+                let mut matching = date
+                    .with_day(1)
+                    .into_iter()
+                    .flat_map(|start| start.iter_days())
+                    .take_while(|day| day.month() == date.month())
+                    .filter(|day| self.weekdays.contains(&Weekday::of_date(*day)));
+                let chosen = match index {
+                    WeekIndex::Last => matching.last(),
+                    _ => matching.nth(index.position() as usize - 1),
+                };
+                chosen == Some(date)
             }
         };
         let months = |d: NaiveDate| i64::from(d.year()) * 12 + i64::from(d.month0());
@@ -1380,6 +1410,8 @@ mod tests {
             "BYDAY=MO",
             "FREQ=MONTHLY;BYDAY=MO",
             "FREQ=MONTHLY;BYDAY=1MO,-1FR",
+            "FREQ=MONTHLY;BYDAY=1MO,1TU",
+            "FREQ=YEARLY;BYMONTH=3;BYDAY=-1MO,-1FR",
             "FREQ=MONTHLY;BYMONTHDAY=1,15",
             "FREQ=MONTHLY;BYDAY=5MO",
             "FREQ=YEARLY;BYMONTH=1,7",
@@ -1393,6 +1425,124 @@ mod tests {
         ] {
             assert_eq!(read(beyond), None, "{beyond}");
         }
+    }
+
+    /// A monthly or yearly rule on several weekdays with one `BYSETPOS`
+    /// takes the day at that position among all the days of the month (or
+    /// of the year) on those weekdays, one a period: Outlook's "last weekday
+    /// of the month" falls on the Friday of a month ending on a weekend,
+    /// `COUNT` counts months, and `UNTIL` ends on the last such day.
+    #[test]
+    fn a_set_position_picks_one_day_among_the_periods_weekdays() {
+        let expand = |rrule: &str, first: NaiveDate, last: NaiveDate| {
+            Recurrence::from_rrule(rrule, Tz::UTC)
+                .unwrap()
+                .anchored(first)
+                .dates(first, last, usize::MAX)
+        };
+        let days = |list: &[(i32, u32, u32)]| -> Vec<NaiveDate> {
+            list.iter().map(|(y, m, d)| date(*y, *m, *d)).collect()
+        };
+        let far = date(2030, 1, 1);
+
+        // January, February, May and October 2026 end on a weekend.
+        let last_weekdays = days(&[
+            (2026, 1, 30),
+            (2026, 2, 27),
+            (2026, 3, 31),
+            (2026, 4, 30),
+            (2026, 5, 29),
+            (2026, 6, 30),
+            (2026, 7, 31),
+            (2026, 8, 31),
+            (2026, 9, 30),
+            (2026, 10, 30),
+            (2026, 11, 30),
+            (2026, 12, 31),
+        ]);
+        let last_weekday = "FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1";
+        assert_eq!(
+            expand(last_weekday, date(2026, 1, 1), date(2026, 12, 31)),
+            last_weekdays
+        );
+        assert_eq!(
+            expand(&format!("{last_weekday};COUNT=12"), date(2026, 1, 30), far),
+            last_weekdays
+        );
+        assert_eq!(
+            expand(
+                &format!("{last_weekday};UNTIL=20260629"),
+                date(2026, 1, 30),
+                far
+            ),
+            last_weekdays[..5]
+        );
+        let rule = Recurrence::from_rrule(last_weekday, Tz::UTC).unwrap();
+        assert!(!rule.places(date(2026, 1, 30), date(2026, 12, 28)));
+
+        let first_weekday = "FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=1;COUNT=12";
+        assert_eq!(
+            expand(first_weekday, date(2026, 1, 1), far),
+            days(&[
+                (2026, 1, 1),
+                (2026, 2, 2),
+                (2026, 3, 2),
+                (2026, 4, 1),
+                (2026, 5, 1),
+                (2026, 6, 1),
+                (2026, 7, 1),
+                (2026, 8, 3),
+                (2026, 9, 1),
+                (2026, 10, 1),
+                (2026, 11, 2),
+                (2026, 12, 1),
+            ])
+        );
+
+        let second_tuesday_or_thursday = "FREQ=MONTHLY;BYDAY=TU,TH;BYSETPOS=2";
+        assert_eq!(
+            expand(
+                &format!("{second_tuesday_or_thursday};COUNT=6"),
+                date(2026, 1, 6),
+                far
+            ),
+            days(&[
+                (2026, 1, 6),
+                (2026, 2, 5),
+                (2026, 3, 5),
+                (2026, 4, 7),
+                (2026, 5, 7),
+                (2026, 6, 4),
+            ])
+        );
+        assert_eq!(
+            expand(
+                &format!("{second_tuesday_or_thursday};UNTIL=20260930T235959Z"),
+                date(2026, 7, 7),
+                far
+            ),
+            days(&[(2026, 7, 7), (2026, 8, 6), (2026, 9, 3)])
+        );
+
+        // Over the year's days when the rule names no month: the last
+        // weekday of the year, and the first Monday of each year from a
+        // series that starts in June.
+        assert_eq!(
+            expand(
+                "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;COUNT=3",
+                date(2026, 12, 31),
+                far
+            ),
+            days(&[(2026, 12, 31), (2027, 12, 31), (2028, 12, 29)])
+        );
+        assert_eq!(
+            expand(
+                "FREQ=YEARLY;BYDAY=MO;BYSETPOS=1",
+                date(2026, 6, 15),
+                date(2028, 12, 31)
+            ),
+            days(&[(2027, 1, 4), (2028, 1, 3)])
+        );
     }
 
     /// A New York series ending at 23:59:59 local on 29 June has a UTC

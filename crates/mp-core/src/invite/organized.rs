@@ -1097,6 +1097,38 @@ mod tests {
         assert!(err(&hourly, "2026-12-07T13:00", &[]).contains("cannot read the rule"));
     }
 
+    /// Outlook's "last weekday of the month" has one occurrence a month: a
+    /// Monday in December's last week is not one, and `COUNT` runs over
+    /// months, `DTSTART` the first.
+    #[test]
+    fn a_last_weekday_series_has_one_occurrence_a_month() {
+        let berlin: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
+        let series = outlook_series(
+            "RRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;COUNT=4",
+            "",
+        );
+        let err = |when: &str| {
+            format!(
+                "{:#}",
+                occurrence_recurrence_id(&series, when, berlin, &[]).unwrap_err()
+            )
+        };
+        let ok = |when: &str| {
+            occurrence_recurrence_id(&series, when, berlin, &[])
+                .unwrap()
+                .value()
+                .to_string()
+        };
+        assert_eq!(
+            err("2026-12-28T09:00"),
+            "2026-12-28T09:00 is not an occurrence of Weekly sync: the nearest are \
+             2026-12-07T09:00 and 2026-12-31T09:00"
+        );
+        assert_eq!(ok("2026-12-31T09:00"), "20261231T090000");
+        assert_eq!(ok("2027-02-26T09:00"), "20270226T090000");
+        assert!(err("2027-03-31T09:00").contains("the last is 2027-02-26T09:00"));
+    }
+
     /// An all-day series is expanded by its days, a weekly one without
     /// BYDAY on its first day's weekday.
     #[test]
