@@ -362,8 +362,12 @@ fn validate(family: &ConfigFamily, params: &Value) -> Result<Value, DomainError>
 
 /// Store one password through the backend the configuration selects, or one
 /// value as both the IMAP and the SMTP password when no kind is named
-/// (PERSO-297): one call, so no client that exits between two calls leaves
-/// the account with one password new and the other old.
+/// (PERSO-297). Both in one call, so no client exiting between two calls
+/// leaves one password new and the other old, and [`write_passwords`] puts
+/// the IMAP password back when the SMTP write fails. Only a failure of that
+/// put-back too leaves the IMAP password new and the SMTP one old, which the
+/// error says, naming the command that sets the other, and the new IMAP
+/// password's hold is let go.
 ///
 /// A Graph account signs in and has no password, so it is refused with the
 /// command that signs it in.
@@ -407,29 +411,37 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         .collect();
     let backend = snapshot.config.secrets_backend;
     let stored = {
-        let keys = keys.clone();
+        let account = params.account().to_string();
+        let kinds = params.kinds().to_vec();
         let value = params.value().to_string();
         tokio::task::spawn_blocking(move || {
             // Startup opened the backend if a configuration had loaded; a
             // first run had none to select one from, so it opens here. The
             // opener is idempotent.
-            crate::secrets::init(backend).map_err(|e| e.to_string())?;
-            keys.iter()
-                .try_for_each(|key| crate::config::set_secret(key, &value))
-                .map_err(|e| format!("{e:#}"))
+            crate::secrets::init(backend).map_err(|e| WriteFailure::Unchanged(e.to_string()))?;
+            write_passwords(&ProcessSecrets, &account, &kinds, &value)
         })
         .await
     };
-    // Neither arm renders the value: the failure is about the backend, and the
+    // No arm renders the value: the failure is about the backend, and the
     // one thing that must not travel with it is what was being stored.
     match stored {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            return Err(DomainError::internal(format!(
-                "storing the {} password of {}: {e}",
-                params.kinds_words(),
-                params.account()
-            )))
+        Ok(Err(failure)) => {
+            if let WriteFailure::Partial { stored, .. } = &failure {
+                // The new password stands for these: their logins are asked
+                // about it at once, and what they held goes out.
+                release_written(account, stored);
+                if let Some(runtime) = family.runtimes.get(&account.name) {
+                    runtime.request_drain();
+                }
+                family.diagnostics.refresh();
+            }
+            return Err(DomainError::internal(failure_message(
+                params.account(),
+                params.kinds(),
+                &failure,
+            )));
         }
         Err(e) => return Err(DomainError::internal(format!("the secrets task {e}"))),
     }
@@ -469,6 +481,192 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         result,
         vec![ResourceId::new(format!("account:{}", params.account()))],
     ))
+}
+
+/// The secrets backend a password is written through: the process's, or a
+/// test's that fails on demand.
+trait PasswordStore {
+    fn get(&self, key: &str) -> anyhow::Result<String>;
+    fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+    fn delete(&self, key: &str) -> anyhow::Result<()>;
+}
+
+/// The backend [`crate::secrets::init`] opened for this process.
+struct ProcessSecrets;
+
+impl PasswordStore for ProcessSecrets {
+    fn get(&self, key: &str) -> anyhow::Result<String> {
+        crate::config::get_secret(key)
+    }
+
+    fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        crate::config::set_secret(key, value)
+    }
+
+    fn delete(&self, key: &str) -> anyhow::Result<()> {
+        crate::secrets::delete(key)
+    }
+}
+
+/// Why [`write_passwords`] did not store every password. Neither carries a
+/// value, the new one or an old one.
+#[derive(Debug)]
+enum WriteFailure {
+    /// Every password is as it was before the call, with the failure.
+    Unchanged(String),
+    /// A write failed and putting a password written before it back failed
+    /// too: `stored` hold the new value, the others their old one.
+    Partial {
+        stored: Vec<SecretKind>,
+        error: String,
+        undo: String,
+    },
+}
+
+/// Store `value` as each of `kinds`' password of `account`, in order, or
+/// leave every one as it was.
+///
+/// A write that fails puts back each password written before it, the one
+/// there before or none; only a put-back that fails too leaves a password
+/// changed, which [`WriteFailure::Partial`] names. A previous password the
+/// backend cannot read is a failure before anything is written, since it
+/// could not be put back.
+fn write_passwords(
+    store: &impl PasswordStore,
+    account: &str,
+    kinds: &[SecretKind],
+    value: &str,
+) -> Result<(), WriteFailure> {
+    let mut written: Vec<(SecretKind, Option<String>)> = Vec::new();
+    for (index, kind) in kinds.iter().enumerate() {
+        let key = kind.secret_key(account);
+        // The last write has nothing after it to fail, so nothing to undo.
+        let previous = if index + 1 < kinds.len() {
+            match store.get(&key) {
+                Ok(previous) => Some(previous),
+                Err(e) if crate::secrets::is_missing(&e) => None,
+                Err(e) => {
+                    let error = format!("reading the {} password: {e:#}", kind.as_str());
+                    return Err(undo(store, account, written, error));
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = store.set(&key, value) {
+            return Err(undo(store, account, written, format!("{e:#}")));
+        }
+        written.push((*kind, previous));
+    }
+    Ok(())
+}
+
+/// Put back the passwords in `written`, latest first, after `error`.
+fn undo(
+    store: &impl PasswordStore,
+    account: &str,
+    written: Vec<(SecretKind, Option<String>)>,
+    error: String,
+) -> WriteFailure {
+    let mut stored = Vec::new();
+    let mut failures = Vec::new();
+    for (kind, previous) in written.into_iter().rev() {
+        let key = kind.secret_key(account);
+        let label = kind.as_str().to_uppercase();
+        let restored = match &previous {
+            Some(previous) => store
+                .set(&key, previous)
+                .map_err(|e| format!("putting the previous {label} password back failed ({e:#})")),
+            None => store.delete(&key).map_err(|e| {
+                format!(
+                    "removing the new {label} password, as there was none before, failed ({e:#})"
+                )
+            }),
+        };
+        if let Err(failure) = restored {
+            stored.insert(0, kind);
+            failures.push(failure);
+        }
+    }
+    if stored.is_empty() {
+        WriteFailure::Unchanged(error)
+    } else {
+        WriteFailure::Partial {
+            stored,
+            error,
+            undo: failures.join(", and "),
+        }
+    }
+}
+
+/// What the caller of a `config.set_password` of `kinds` that failed is told.
+fn failure_message(account: &str, kinds: &[SecretKind], failure: &WriteFailure) -> String {
+    let words = |kinds: &[SecretKind]| {
+        kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ")
+    };
+    match failure {
+        WriteFailure::Unchanged(error) if kinds.len() > 1 => format!(
+            "storing the {} password of {account}: {error}; nothing was changed",
+            words(kinds)
+        ),
+        WriteFailure::Unchanged(error) => {
+            format!(
+                "storing the {} password of {account}: {error}",
+                words(kinds)
+            )
+        }
+        WriteFailure::Partial {
+            stored,
+            error,
+            undo,
+        } => {
+            let upper = |kinds: &[SecretKind]| words(kinds).to_uppercase();
+            let missing: Vec<SecretKind> = kinds
+                .iter()
+                .copied()
+                .filter(|kind| !stored.contains(kind))
+                .collect();
+            let commands: Vec<String> = missing
+                .iter()
+                .map(|kind| {
+                    mp_core::mp_command::here(&[
+                        "config",
+                        "set-password",
+                        "-A",
+                        account,
+                        kind.as_str(),
+                    ])
+                })
+                .collect();
+            format!(
+                "the new {} password of {account} is stored and the {} one is not: storing it \
+                 failed ({error}), and {undo}; set the {} password with {}",
+                upper(stored),
+                upper(&missing),
+                upper(&missing),
+                commands.join(" and ")
+            )
+        }
+    }
+}
+
+/// Let go of the hold of the logins whose password `kinds` now holds a new
+/// value, after a write that stood half done: the server is asked about the
+/// new password at once.
+fn release_written(account: &crate::config::AccountConfig, kinds: &[SecretKind]) {
+    for kind in kinds {
+        let login = match kind {
+            SecretKind::Imap => mp_protocol::account::RejectedLogin::Imap,
+            SecretKind::Smtp => mp_protocol::account::RejectedLogin::Smtp,
+        };
+        if let Some(login) = crate::login_gate::Login::of(account, login) {
+            crate::login_gate::forget(&login);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,6 +1421,197 @@ fn string_param(params: &Value, name: &str) -> Result<String, DomainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secrets backend in memory that fails a write or a removal of the
+    /// keys it is told to, as a keychain that refuses one write does.
+    #[derive(Default)]
+    struct FlakyStore {
+        entries: std::sync::Mutex<std::collections::HashMap<String, String>>,
+        refuse_set: Vec<String>,
+        refuse_delete: bool,
+    }
+
+    impl FlakyStore {
+        fn holding(entries: &[(&str, &str)]) -> Self {
+            let store = Self::default();
+            for (key, value) in entries {
+                store
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .insert(key.to_string(), value.to_string());
+            }
+            store
+        }
+
+        fn value(&self, key: &str) -> Option<String> {
+            self.entries.lock().unwrap().get(key).cloned()
+        }
+    }
+
+    impl PasswordStore for FlakyStore {
+        fn get(&self, key: &str) -> anyhow::Result<String> {
+            self.value(key).ok_or_else(|| {
+                anyhow::Error::new(crate::secrets::MissingSecret::new(
+                    key,
+                    crate::secrets::SecretsBackendKind::EncryptedFile,
+                ))
+            })
+        }
+
+        fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+            if self.refuse_set.iter().any(|refused| refused == key) {
+                anyhow::bail!("the keychain refused the write");
+            }
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(key.into(), value.into());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> anyhow::Result<()> {
+            if self.refuse_delete {
+                anyhow::bail!("the keychain refused the removal");
+            }
+            self.entries.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    const BOTH: [SecretKind; 2] = [SecretKind::Imap, SecretKind::Smtp];
+
+    /// PERSO-297: one password stored as both writes the IMAP key, then the
+    /// SMTP key.
+    #[test]
+    fn one_password_is_written_as_both() {
+        let store = FlakyStore::holding(&[("smtp-password-tum", "old")]);
+        assert!(write_passwords(&store, "tum", &BOTH, "new").is_ok());
+        assert_eq!(store.value("imap-password-tum").as_deref(), Some("new"));
+        assert_eq!(store.value("smtp-password-tum").as_deref(), Some("new"));
+    }
+
+    /// A failed SMTP write puts the IMAP password back as it was, the one
+    /// there before or none, so nothing changed and the error says so.
+    #[test]
+    fn a_failed_second_write_puts_the_first_back() {
+        for before in [Some("previous"), None] {
+            let mut entries = vec![("smtp-password-tum", "old")];
+            entries.extend(before.map(|value| ("imap-password-tum", value)));
+            let store = FlakyStore {
+                refuse_set: vec!["smtp-password-tum".into()],
+                ..FlakyStore::holding(&entries)
+            };
+            let failure = write_passwords(&store, "tum", &BOTH, "new").unwrap_err();
+            assert!(matches!(failure, WriteFailure::Unchanged(_)), "{before:?}");
+            assert_eq!(store.value("imap-password-tum").as_deref(), before);
+            assert_eq!(store.value("smtp-password-tum").as_deref(), Some("old"));
+            let message = failure_message("tum", &BOTH, &failure);
+            assert_eq!(
+                message,
+                "storing the imap and smtp password of tum: the keychain refused the write; \
+                 nothing was changed"
+            );
+            assert!(!message.contains("new") && !message.contains("previous"));
+        }
+    }
+
+    /// A failed SMTP write whose IMAP restore fails too, a put-back of the
+    /// previous IMAP password or the removal of the new one when there was
+    /// none, says which password is now stored and which is not, and how to
+    /// set the other.
+    #[test]
+    fn a_failed_restore_names_the_password_stored_and_the_one_not() {
+        // The previous IMAP password is there, and only the first write of
+        // the IMAP key goes through, so its put-back is refused.
+        let restored = FlakyStore {
+            refuse_set: vec!["smtp-password-tum".into(), "imap-password-tum".into()],
+            ..FlakyStore::holding(&[("imap-password-tum", "previous")])
+        };
+        let first = TakesFirstWrite(&restored, std::sync::atomic::AtomicBool::new(false));
+        let put_back = write_passwords(&first, "tum", &BOTH, "new").unwrap_err();
+        // No IMAP password was there, and the removal of the new one fails.
+        let removed = FlakyStore {
+            refuse_set: vec!["smtp-password-tum".into()],
+            refuse_delete: true,
+            ..FlakyStore::default()
+        };
+        let removal = write_passwords(&removed, "tum", &BOTH, "new").unwrap_err();
+
+        for (failure, store, undo) in [
+            (
+                put_back,
+                &restored,
+                "putting the previous IMAP password back failed (the keychain refused the write)",
+            ),
+            (
+                removal,
+                &removed,
+                "removing the new IMAP password, as there was none before, failed (the keychain \
+                 refused the removal)",
+            ),
+        ] {
+            let WriteFailure::Partial { stored, .. } = &failure else {
+                panic!("the restore failed, so the change stands ({undo})");
+            };
+            assert_eq!(stored, &[SecretKind::Imap]);
+            assert_eq!(store.value("imap-password-tum").as_deref(), Some("new"));
+            let message = failure_message("tum", &BOTH, &failure);
+            assert_eq!(
+                message,
+                format!(
+                    "the new IMAP password of tum is stored and the SMTP one is not: storing it \
+                     failed (the keychain refused the write), and {undo}; set the SMTP password \
+                     with mp config set-password -A tum smtp"
+                )
+            );
+        }
+    }
+
+    /// A store whose first write goes through whatever `0` refuses, as a
+    /// keychain that takes one write and then refuses the next ones.
+    struct TakesFirstWrite<'a>(&'a FlakyStore, std::sync::atomic::AtomicBool);
+
+    impl PasswordStore for TakesFirstWrite<'_> {
+        fn get(&self, key: &str) -> anyhow::Result<String> {
+            self.0.get(key)
+        }
+
+        fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+            if !self.1.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.0
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .insert(key.into(), value.into());
+                return Ok(());
+            }
+            self.0.set(key, value)
+        }
+
+        fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.0.delete(key)
+        }
+    }
+
+    /// The written half of a failed write lets go of its login's hold: the
+    /// password is new, so the server is asked about it at once.
+    #[test]
+    fn the_written_half_of_a_failed_write_lets_go_of_its_hold() {
+        use crate::login_gate::{self, Login};
+        use mp_protocol::account::RejectedLogin;
+        let config: GlobalConfig = toml::from_str(
+            "[[accounts]]\nname = \"half-written\"\n\
+             [accounts.imap]\nhost = \"imap.half-written.test\"\n\
+             [accounts.smtp]\nhost = \"smtp.half-written.test\"\nusername = \"u\"\n",
+        )
+        .unwrap();
+        let account = &config.accounts[0];
+        login_gate::refuse_for_test(Login::of(account, RejectedLogin::Imap).unwrap());
+        assert_eq!(login_gate::rejected_logins(account), [RejectedLogin::Imap]);
+        release_written(account, &[SecretKind::Imap]);
+        assert!(login_gate::rejected_logins(account).is_empty());
+    }
 
     /// PERSO-296: a stored password and a new sign-in are both the user's
     /// answer to a refused login, and answer it alike: every hold of the

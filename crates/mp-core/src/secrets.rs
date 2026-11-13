@@ -211,6 +211,8 @@ fn secret_in_words(key: &str) -> String {
 pub trait SecretsBackend: Send + Sync {
     fn get(&self, key: &str) -> Result<String>;
     fn set(&self, key: &str, value: &str) -> Result<()>;
+    /// Remove `key`; a key that is not there is no error.
+    fn delete(&self, key: &str) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +553,18 @@ impl SecretsBackend for EncryptedFileBackend {
             .insert(key.to_string(), value.to_string());
         self.save_locked(&mut state)
     }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| anyhow!("secrets lock poisoned"))?;
+        self.refresh_locked(&mut state)?;
+        if state.file.entries.remove(key).is_none() {
+            return Ok(());
+        }
+        self.save_locked(&mut state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +677,15 @@ impl SecretsBackend for KeyringBackend {
             .set_password(value)
             .map_err(|e| keyring_failure("store", key, &e))
     }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        let entry = keyring::Entry::new(&keyring_service(self.profile.as_deref()), key)
+            .map_err(|e| keyring_failure("remove", key, &e))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keyring_failure("remove", key, &e)),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +735,12 @@ pub fn get(key: &str) -> Result<String> {
 /// Set a secret in the active backend.
 pub fn set(key: &str, value: &str) -> Result<()> {
     backend()?.set(key, value)
+}
+
+/// Remove a secret from the active backend; one that is not there is no
+/// error.
+pub fn delete(key: &str) -> Result<()> {
+    backend()?.delete(key)
 }
 
 fn backend() -> Result<&'static (dyn SecretsBackend + 'static)> {
@@ -821,6 +850,25 @@ mod tests {
     // -----------------------------------------------------------------------
     // What a user reads (PERSO-199)
     // -----------------------------------------------------------------------
+
+    /// A removed password is missing, on disk too, and removing one that is
+    /// not there is no error (PERSO-297: a kind-less `config.set_password`
+    /// that could not finish removes the IMAP password it wrote).
+    #[test]
+    fn a_removed_password_is_missing_and_removing_a_missing_one_is_no_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.enc");
+        let backend =
+            EncryptedFileBackend::open_with_ikm_for_test(path.clone(), b"ikm-delete").unwrap();
+        backend.set("imap-password-work", "x").unwrap();
+        backend.set("smtp-password-work", "y").unwrap();
+        backend.delete("imap-password-work").unwrap();
+        assert!(is_missing(&backend.get("imap-password-work").unwrap_err()));
+        backend.delete("imap-password-work").unwrap();
+        let reopened = EncryptedFileBackend::open_with_ikm_for_test(path, b"ikm-delete").unwrap();
+        assert!(is_missing(&reopened.get("imap-password-work").unwrap_err()));
+        assert_eq!(reopened.get("smtp-password-work").unwrap(), "y");
+    }
 
     /// A password the file does not hold is named as the password of an
     /// account, with the command that stores it, and is recognisable as a
