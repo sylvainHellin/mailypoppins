@@ -105,20 +105,29 @@ fn calendar_backend_line(account: &AccountConfig) -> String {
 }
 
 /// The `[ews]` lines of an account whose calendar backend is EWS
-/// (PERSO-256): the endpoint, the login name and the stored password the
-/// login uses, or the sentence saying what `[accounts.ews]` lacks. Empty for
-/// every other backend.
+/// (PERSO-256): the endpoint, the login name, the stored password the login
+/// uses and the delegate calendars when it lists any, or the sentence saying
+/// what `[accounts.ews]` lacks. Empty for every other backend.
 fn ews_lines(account: &AccountConfig) -> Vec<String> {
     if account.calendar_backend() != crate::config::CalendarBackendKind::Ews {
         return Vec::new();
     }
     match crate::config::EwsLogin::of(account) {
-        Ok(login) => vec![
-            "[ews]".bold().to_string(),
-            format!("  endpoint      = {}", login.endpoint),
-            format!("  username      = {}", login.username),
-            format!("  password_from = {}", login.password_from.as_str()),
-        ],
+        Ok(login) => {
+            let mut lines = vec![
+                "[ews]".bold().to_string(),
+                format!("  endpoint      = {}", login.endpoint),
+                format!("  username      = {}", login.username),
+                format!("  password_from = {}", login.password_from.as_str()),
+            ];
+            if !login.delegate_calendars.is_empty() {
+                lines.push(format!(
+                    "  delegate_calendars = {}",
+                    login.delegate_calendars.join(", ")
+                ));
+            }
+            lines
+        }
         Err(err) => vec![format!("{} {err}", "\u{26a0}".yellow())],
     }
 }
@@ -473,6 +482,7 @@ mod tests {
                 endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
                 username: "ab12cde".into(),
                 password_from: Some(crate::config::EwsPasswordSource::Imap),
+                delegate_calendars: Vec::new(),
             }),
             ..bare
         };
@@ -484,6 +494,14 @@ mod tests {
                 "  username      = ab12cde",
                 "  password_from = imap",
             ]
+        );
+        let mut rooms = tum.clone();
+        if let Some(ews) = rooms.ews.as_mut() {
+            ews.delegate_calendars = vec!["room-1@tum.de".into(), "room-2@tum.de".into()];
+        }
+        assert_eq!(
+            ews_lines(&rooms).last().map(String::as_str),
+            Some("  delegate_calendars = room-1@tum.de, room-2@tum.de")
         );
         let graph = AccountConfig {
             ews: tum.ews.clone(),

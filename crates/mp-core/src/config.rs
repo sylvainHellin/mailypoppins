@@ -372,8 +372,9 @@ pub struct AccountConfig {
 }
 
 /// `[accounts.ews]` as written (PERSO-256): the endpoint, the login name and
-/// which of the account's stored passwords the login uses. Every field is
-/// needed; [`EwsLogin::of`] refuses a table that lacks one.
+/// which of the account's stored passwords the login uses, each needed
+/// ([`EwsLogin::of`] refuses a table that lacks one), and the mailboxes whose
+/// calendar the account reads as a delegate, which may be left out.
 #[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
 pub struct EwsSettings {
     /// The EWS URL, `https://mail.tum.de/ews/exchange.asmx` for TUM.
@@ -386,6 +387,10 @@ pub struct EwsSettings {
     /// `mp config set-password imap|smtp` stored.
     #[serde(default)]
     pub password_from: Option<EwsPasswordSource>,
+    /// The addresses of other mailboxes whose calendar the account reads as
+    /// a delegate (TUM's rooms), listed beside its own calendars.
+    #[serde(default)]
+    pub delegate_calendars: Vec<String>,
 }
 
 /// Which stored password an EWS login uses.
@@ -424,6 +429,9 @@ pub struct EwsLogin {
     pub host: String,
     pub username: String,
     pub password_from: EwsPasswordSource,
+    /// The delegate calendars' mailbox addresses, trimmed, each once
+    /// whatever its case, in the order written.
+    pub delegate_calendars: Vec<String>,
 }
 
 impl EwsLogin {
@@ -465,11 +473,29 @@ impl EwsLogin {
                  \"imap\" or \"smtp\""
             );
         };
+        let mut delegate_calendars: Vec<String> = Vec::new();
+        for entry in &settings.delegate_calendars {
+            let address = entry.trim();
+            if !address.contains('@') {
+                anyhow::bail!(
+                    "account {:?}: {entry:?} in delegate_calendars of [accounts.ews] is not a \
+                     mail address",
+                    account.name
+                );
+            }
+            if !delegate_calendars
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(address))
+            {
+                delegate_calendars.push(address.to_string());
+            }
+        }
         Ok(EwsLogin {
             endpoint: endpoint.to_string(),
             host,
             username: username.to_string(),
             password_from,
+            delegate_calendars,
         })
     }
 }
@@ -2764,6 +2790,7 @@ password_from = "smtp"
                 host: "mail.tum.de".into(),
                 username: "ab12cde".into(),
                 password_from: EwsPasswordSource::Imap,
+                delegate_calendars: Vec::new(),
             }
         );
         assert_eq!(login.password_from.secret_key("tum"), "imap-password-tum");
@@ -2778,6 +2805,36 @@ password_from = "smtp"
             "[[accounts]]\nname = \"x\"\n[accounts.ews]\npassword_from = \"keyring\"\n"
         )
         .is_err());
+    }
+
+    /// `delegate_calendars` lists the mailboxes whose calendar the account
+    /// reads as a delegate, trimmed and each once whatever its case, draws no
+    /// unknown-key warning, and an entry that is no mail address is refused
+    /// by name.
+    #[test]
+    fn an_ews_table_lists_its_delegate_calendars() {
+        let table = |calendars: &str| {
+            format!(
+                "[[accounts]]\nname = \"tum\"\ncalendar_backend = \"ews\"\n[accounts.ews]\n\
+                 endpoint = \"https://mail.tum.de/ews/exchange.asmx\"\nusername = \"ab12cde\"\n\
+                 password_from = \"imap\"\ndelegate_calendars = {calendars}\n"
+            )
+        };
+        let listed = table("[\" room-1@tum.de \", \"Room-1@TUM.de\", \"room-2@tum.de\"]");
+        assert!(config_warnings(&listed).is_empty());
+        let config: GlobalConfig = toml::from_str(&listed).unwrap();
+        assert_eq!(
+            EwsLogin::of(&config.accounts[0])
+                .unwrap()
+                .delegate_calendars,
+            ["room-1@tum.de", "room-2@tum.de"]
+        );
+        let config: GlobalConfig = toml::from_str(&table("[\"room-1\"]")).unwrap();
+        assert_eq!(
+            EwsLogin::of(&config.accounts[0]).unwrap_err().to_string(),
+            "account \"tum\": \"room-1\" in delegate_calendars of [accounts.ews] is not a mail \
+             address"
+        );
     }
 
     /// An `ews` account whose table is missing, or lacks a field, or names

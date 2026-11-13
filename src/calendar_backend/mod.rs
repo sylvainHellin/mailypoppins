@@ -628,6 +628,7 @@ mod tests {
                 endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
                 username: "ab12cde".into(),
                 password_from: Some(crate::config::EwsPasswordSource::Imap),
+                delegate_calendars: Vec::new(),
             }),
             ..account(AuthMethod::Password, Some(CalendarBackendKind::Ews))
         };

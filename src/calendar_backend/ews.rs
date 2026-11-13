@@ -6,7 +6,13 @@
 //! one SOAP envelope per call, and reads the answers in [`parse`].
 //!
 //! The calendars are the user's `IPF.Appointment` folders (FindFolder under
-//! `msgfolderroot`), the default one being GetFolder's `calendar`.
+//! `msgfolderroot`), the default one being GetFolder's `calendar`, then the
+//! `calendar` folder of each mailbox the user reads as a delegate
+//! (`delegate_calendars`, TUM's rooms), reached through a
+//! `DistinguishedFolderId` with the mailbox, as the spike read a room's. A
+//! delegate calendar is named by its mailbox, kept by its folder id like the
+//! user's own, and read-only unless its `EffectiveRights` let the user create
+//! items; it syncs and is written through that folder id as the others are.
 //!
 //! A calendar's window syncs in two parts, since `SyncFolderItems` reports
 //! single events and series masters only, never an occurrence or an
@@ -153,6 +159,9 @@ pub struct EwsCalendarBackend<F> {
     account: String,
     /// Which stored password the login uses, for the sentence of a refusal.
     password_from: EwsPasswordSource,
+    /// The mailboxes whose calendar the user reads as a delegate
+    /// (`delegate_calendars` of `[accounts.ews]`).
+    delegates: Vec<String>,
     session: EwsSession<F>,
 }
 
@@ -163,8 +172,61 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         EwsCalendarBackend {
             account: account.to_string(),
             password_from,
+            delegates: Vec::new(),
             session: EwsSession::new(fetch),
         }
+    }
+
+    /// The backend also listing the calendar of each mailbox of
+    /// `mailboxes`, which the user reads as a delegate.
+    pub fn with_delegate_calendars(mut self, mailboxes: Vec<String>) -> Self {
+        self.delegates = mailboxes;
+        self
+    }
+
+    /// The calendar of each delegate mailbox, in one GetFolder through each
+    /// mailbox's `calendar` folder; a mailbox the server refuses (gone, or
+    /// no longer shared) is left out with a log line while the others stand.
+    async fn delegate_calendars(&self, shape: &str) -> BackendResult<Vec<Calendar>> {
+        if self.delegates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: String = self
+            .delegates
+            .iter()
+            .map(|address| {
+                format!(
+                    "<t:DistinguishedFolderId Id=\"calendar\"><t:Mailbox>\
+                     <t:EmailAddress>{}</t:EmailAddress></t:Mailbox></t:DistinguishedFolderId>",
+                    xml::escape(address)
+                )
+            })
+            .collect();
+        let body = format!("<m:GetFolder>{shape}<m:FolderIds>{ids}</m:FolderIds></m:GetFolder>");
+        let answer = self.call("GetFolder", &body).await?;
+        let folders =
+            parse::folder_messages(&answer).map_err(|error| answer_error(&error, "GetFolder"))?;
+        if folders.len() != self.delegates.len() {
+            return Err(anyhow!(
+                "unreadable EWS answer to GetFolder: {} folders for {} mailboxes asked",
+                folders.len(),
+                self.delegates.len()
+            )
+            .into());
+        }
+        let mut calendars = Vec::new();
+        for (address, folder) in self.delegates.iter().zip(folders) {
+            match folder {
+                Ok(folder) => {
+                    calendars.push(parse::delegate_calendar_of(&self.account, address, &folder))
+                }
+                Err(error) => warn!(
+                    "[calendar] {}: leaving out the calendar of {address}: {error}",
+                    self.account
+                ),
+            }
+        }
+        Ok(calendars)
     }
 
     /// The seam, for a test that reads what was sent.
@@ -543,7 +605,8 @@ fn answer_error(error: &AnswerError, operation: &str) -> CalendarBackendError {
 
 impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
     /// The default calendar (GetFolder `calendar`) first, then every other
-    /// `IPF.Appointment` folder FindFolder finds under the mailbox root.
+    /// `IPF.Appointment` folder FindFolder finds under the mailbox root, then
+    /// the calendar of each delegate mailbox.
     async fn list_calendars(&self) -> BackendResult<Vec<Calendar>> {
         let shape = "<m:FolderShape><t:BaseShape>Default</t:BaseShape><t:AdditionalProperties>\
                      <t:FieldURI FieldURI=\"folder:EffectiveRights\"/></t:AdditionalProperties>\
@@ -578,6 +641,11 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
                     folder,
                     default_id.as_deref(),
                 ));
+            }
+        }
+        for delegate in self.delegate_calendars(shape).await? {
+            if !calendars.iter().any(|calendar| calendar.id == delegate.id) {
+                calendars.push(delegate);
             }
         }
         Ok(calendars)

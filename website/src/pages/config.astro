@@ -683,7 +683,10 @@ server = "sentitems"          # Not "Sent Items"`} />
         <code>"imap"</code> or <code>"smtp"</code> (the one
         <code>mp config set-password</code> stored). A table that lacks a field is
         refused with a line naming it, which <code>mp config show</code> prints
-        under the account.
+        under the account. An optional <code>delegate_calendars</code> lists the
+        addresses of other mailboxes whose calendar you hold as a delegate, such
+        as TUM's rooms: each is shown beside your own calendars under its
+        address, read-only unless Exchange lets you create items in it.
       </p>
       <ConfigExample title="EWS calendar config" code={`[[accounts]]
 name = "tum"
@@ -692,7 +695,8 @@ calendar_backend = "ews"
 [accounts.ews]
 endpoint = "https://mail.tum.de/ews/exchange.asmx"
 username = "ab12cde"           # the TUM ID
-password_from = "imap"         # the password mp config set-password imap stored`} />
+password_from = "imap"         # the password mp config set-password imap stored
+delegate_calendars = ["room-1@tum.de"]   # optional: calendars you hold as a delegate`} />
       <p>
         A Graph account signed in before the calendar arrived has a token without
         the calendar permission (<code>Calendars.ReadWrite</code>). Mail keeps

@@ -4,7 +4,7 @@
 
 use chrono::{TimeZone, Utc};
 
-use super::super::fetch::EwsFetchError;
+use super::super::fetch::{envelope, EwsFetchError};
 use super::super::{EwsCalendarBackend, EwsToken};
 use super::parse::{CALENDAR_ID, EXCEPTION_ID, OCCURRENCE_ID, SERIES_UID, SINGLE_ID};
 use super::ScriptedFetch;
@@ -13,6 +13,8 @@ use crate::calendar_model::{window_for, Calendar, CalendarWindow, EventKind};
 use crate::config::EwsPasswordSource;
 
 const GET_FOLDER: &str = include_str!("../../../../tests/fixtures/ews/getfolder_calendar.xml");
+const ROOM_FOLDER: &str =
+    include_str!("../../../../tests/fixtures/ews/getfolder_room_calendar.xml");
 const FIND_FOLDER: &str = include_str!("../../../../tests/fixtures/ews/findfolder_calendars.xml");
 const VIEW: &str = include_str!("../../../../tests/fixtures/ews/finditem_calendarview.xml");
 const SINGLE: &str = include_str!("../../../../tests/fixtures/ews/getitem_single_attendees.xml");
@@ -131,6 +133,84 @@ async fn the_calendars_are_the_appointment_folders_the_default_marked() {
     assert!(sent[1].contains("<m:FindFolder Traversal=\"Deep\">"));
     assert!(sent[1].contains("<t:Constant Value=\"IPF.Appointment\"/>"));
     assert!(sent[1].contains("<t:DistinguishedFolderId Id=\"msgfolderroot\"/>"));
+}
+
+/// Each delegate calendar is read in one GetFolder through the
+/// `calendar` folder of its mailbox and listed after the account's own,
+/// named by its mailbox and kept by its folder id: read-only unless its
+/// rights let the user create items, and a mailbox the server refuses left
+/// out while the others stand.
+#[tokio::test]
+async fn a_delegate_calendar_is_listed_by_its_mailbox_read_only_unless_its_rights_allow() {
+    let message = |answer: &str| {
+        let open = answer.find("<m:GetFolderResponseMessage").unwrap();
+        let close = "</m:GetFolderResponseMessage>";
+        answer[open..answer.find(close).unwrap() + close.len()].to_string()
+    };
+    let room_id = between(ROOM_FOLDER, "<t:FolderId Id=\"", "\"").to_string();
+    let writable = message(ROOM_FOLDER)
+        .replace(&room_id, "room-2-calendar")
+        .replace(
+        "</t:ChildFolderCount>",
+        "</t:ChildFolderCount><t:EffectiveRights><t:CreateAssociated>false</t:CreateAssociated>\
+         <t:CreateContents>true</t:CreateContents><t:CreateHierarchy>false</t:CreateHierarchy>\
+         <t:Delete>false</t:Delete><t:Modify>true</t:Modify><t:Read>true</t:Read>\
+         </t:EffectiveRights>",
+    );
+    let refused = "<m:GetFolderResponseMessage ResponseClass=\"Error\">\
+        <m:MessageText>The SMTP address has no mailbox associated with it.</m:MessageText>\
+        <m:ResponseCode>ErrorNonExistentMailbox</m:ResponseCode>\
+        <m:DescriptiveLinkKey>0</m:DescriptiveLinkKey></m:GetFolderResponseMessage>";
+    let delegates = ROOM_FOLDER.replace(
+        &message(ROOM_FOLDER),
+        &format!("{}{writable}{refused}", message(ROOM_FOLDER)),
+    );
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("GetFolder", GET_FOLDER)
+            .answer("FindFolder", FIND_FOLDER)
+            .answer("GetFolder", &delegates),
+    )
+    .with_delegate_calendars(vec![
+        "room-1@tum.de".into(),
+        "room-2@tum.de".into(),
+        "gone@tum.de".into(),
+    ]);
+    let calendars = backend.list_calendars().await.unwrap();
+    let delegate = |id: &str, name: &str, can_edit: bool| Calendar {
+        id: id.into(),
+        name: name.into(),
+        is_default: false,
+        can_edit,
+        ..calendar()
+    };
+    assert_eq!(
+        calendars,
+        [
+            calendar(),
+            delegate(&room_id, "room-1@tum.de", false),
+            delegate("room-2-calendar", "room-2@tum.de", true),
+        ]
+    );
+    let mailbox = |address: &str| {
+        format!(
+            "<t:DistinguishedFolderId Id=\"calendar\"><t:Mailbox>\
+             <t:EmailAddress>{address}</t:EmailAddress></t:Mailbox></t:DistinguishedFolderId>"
+        )
+    };
+    let sent = backend.fetch().sent();
+    assert_eq!(
+        sent[2],
+        envelope(&format!(
+            "<m:GetFolder><m:FolderShape><t:BaseShape>Default</t:BaseShape>\
+             <t:AdditionalProperties><t:FieldURI FieldURI=\"folder:EffectiveRights\"/>\
+             </t:AdditionalProperties></m:FolderShape><m:FolderIds>{}{}{}</m:FolderIds>\
+             </m:GetFolder>",
+            mailbox("room-1@tum.de"),
+            mailbox("room-2@tum.de"),
+            mailbox("gone@tum.de")
+        ))
+    );
 }
 
 /// A first sync takes the state from nothing over both pages, then reads

@@ -233,6 +233,22 @@ pub fn folders(body: &str, operation: &str) -> Result<Vec<Folder>, AnswerError> 
         .collect()
 }
 
+/// The calendar folder of each GetFolder response message, in the order
+/// the request named the folders, or the error the server answered for it.
+pub fn folder_messages(body: &str) -> Result<Vec<Result<Folder, ResponseError>>, AnswerError> {
+    messages(body, "GetFolder")?
+        .into_iter()
+        .map(|message| match message {
+            Ok(message) => message
+                .at(&["Folders", "CalendarFolder"])
+                .ok_or_else(|| malformed("a GetFolder message without a CalendarFolder"))
+                .and_then(folder_of)
+                .map(Ok),
+            Err(error) => Ok(Err(error)),
+        })
+        .collect()
+}
+
 /// A folder as the model's calendar: one of the user's own, which the user
 /// may write to unless the server says otherwise.
 pub fn calendar_of(account: &str, folder: &Folder, default_id: Option<&str>) -> Calendar {
@@ -243,6 +259,22 @@ pub fn calendar_of(account: &str, folder: &Folder, default_id: Option<&str>) -> 
         color: None,
         is_default: default_id == Some(folder.id.as_str()),
         can_edit: folder.can_create.unwrap_or(true),
+        visible: true,
+        online_meeting_providers: Vec::new(),
+    }
+}
+
+/// The calendar folder of the mailbox `address`, which the user reads as a
+/// delegate: named by the mailbox, never the default, and read-only unless
+/// the server says the user may create items in it.
+pub fn delegate_calendar_of(account: &str, address: &str, folder: &Folder) -> Calendar {
+    Calendar {
+        account: account.to_string(),
+        id: folder.id.clone(),
+        name: address.to_string(),
+        color: None,
+        is_default: false,
+        can_edit: folder.can_create.unwrap_or(false),
         visible: true,
         online_meeting_providers: Vec::new(),
     }

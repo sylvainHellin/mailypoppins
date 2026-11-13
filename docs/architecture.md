@@ -544,6 +544,7 @@ Graph names zones the Windows way, which `mp-core/windows_zones.rs` maps to IANA
 Its futures are `Send`, and `AccountBackend` is the closed set `backend_for` returns, dispatched statically.
 Which backend serves an account is the `calendar_backend` setting (`graph`, `ews`, `caldav`, `none`), defaulting to `graph` on an `auth_method = "graph"` account and to `none` elsewhere, independent of the mail transport; `ews` and `caldav` are refused as not supported yet and read as no backend.
 An `ews` account names its login in `[accounts.ews]` (`endpoint`, `username`, and `password_from`, the stored `imap` or `smtp` password), which `config::EwsLogin::of` checks without reading a secret, refusing a missing field or an endpoint that is no https URL by name before the not-supported refusal (PERSO-256).
+The optional `delegate_calendars` lists the mailboxes whose calendar the account reads as a delegate (TUM's rooms), each checked to be a mail address and kept once whatever its case.
 `fake.rs` is a server calendar in memory, which a daemon slice or CLI test arms through `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`.
 
 `src/calendar_backend/graph.rs` reads each calendar through `GET /me/calendars/{id}/calendarView/delta` over the window, falls back to the documented `GET /me/calendarView/delta` for the default calendar when that route answers 400 or 404, and to a plain `calendarView` read in full at every sync for any other calendar.
