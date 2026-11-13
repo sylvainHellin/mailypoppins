@@ -17,9 +17,10 @@
 //! - `config.reload` re-reads `config.toml` and swaps it, or refuses with
 //!   `-32007` and leaves the previous snapshot live.
 //! - `config.set_password` writes `smtp-password-<account>` /
-//!   `imap-password-<account>` through the backend the pre-daemon binary
-//!   already reads, publishes no event, and never lets the value reach a log
-//!   line, an error payload or `config.get`.
+//!   `imap-password-<account>`, or both from one value when no kind is named
+//!   (PERSO-297), through the backend the pre-daemon binary already reads,
+//!   publishes no event, and never lets the value reach a log line, an error
+//!   payload or `config.get`.
 //! - `config.add_account` appends one `[[accounts]]` block; `config.init`
 //!   writes a whole file. Both validate the candidate document *before* they
 //!   write it, so a refusal leaves the file byte-identical, and both carry no
@@ -143,16 +144,32 @@ impl SecretKind {
 #[derive(Clone)]
 pub struct SetPasswordParams {
     account: String,
-    kind: SecretKind,
+    kind: Option<SecretKind>,
     value: String,
 }
+
+/// The two passwords one value is stored as when no kind is named, the IMAP
+/// one first: the first password stored starts a new account's first sync,
+/// which would otherwise log in with the SMTP password the IMAP login falls
+/// back to (PERSO-199).
+const BOTH_KINDS: [SecretKind; 2] = [SecretKind::Imap, SecretKind::Smtp];
 
 impl SetPasswordParams {
     /// The parameters of one write.
     pub fn new(account: impl Into<String>, kind: SecretKind, value: impl Into<String>) -> Self {
         SetPasswordParams {
             account: account.into(),
-            kind,
+            kind: Some(kind),
+            value: value.into(),
+        }
+    }
+
+    /// The parameters of one password stored as both the IMAP and the SMTP
+    /// password (PERSO-297).
+    pub fn both(account: impl Into<String>, value: impl Into<String>) -> Self {
+        SetPasswordParams {
+            account: account.into(),
+            kind: None,
             value: value.into(),
         }
     }
@@ -160,17 +177,25 @@ impl SetPasswordParams {
     /// The parameters off the wire, or `-32602` naming what is wrong and
     /// echoing nothing: an error message is the single most likely place for a
     /// secret to escape, because it is rendered, logged and often pasted into
-    /// a bug report.
+    /// a bug report. An absent or null `kind` is both passwords.
     pub fn from_params(params: &Value) -> Result<Self, DomainError> {
         let account = string_param(params, "account")?;
-        let kind = string_param(params, "kind")?;
-        let kind = SecretKind::from_wire(&kind)
-            .ok_or_else(|| DomainError::invalid_params("kind is one of \"smtp\", \"imap\""))?;
+        let kind =
+            match params.get("kind") {
+                None | Some(Value::Null) => None,
+                Some(kind) => Some(kind.as_str().and_then(SecretKind::from_wire).ok_or_else(
+                    || DomainError::invalid_params("kind is one of \"smtp\", \"imap\", or absent"),
+                )?),
+            };
         let value = params
             .get("value")
             .and_then(Value::as_str)
             .ok_or_else(|| DomainError::invalid_params("value is a required string parameter"))?;
-        Ok(SetPasswordParams::new(account, kind, value))
+        Ok(SetPasswordParams {
+            account,
+            kind,
+            value: value.to_string(),
+        })
     }
 
     /// The account the password belongs to.
@@ -178,9 +203,28 @@ impl SetPasswordParams {
         &self.account
     }
 
-    /// Which credential it is.
-    pub fn kind(&self) -> SecretKind {
+    /// Which credential it is, `None` for one password stored as both.
+    pub fn kind(&self) -> Option<SecretKind> {
         self.kind
+    }
+
+    /// The credentials the value is stored as, in the order they are
+    /// written: the named one, or the IMAP and then the SMTP password.
+    pub fn kinds(&self) -> &[SecretKind] {
+        match &self.kind {
+            Some(kind) => std::slice::from_ref(kind),
+            None => &BOTH_KINDS,
+        }
+    }
+
+    /// The passwords in words, for a log line or an error: `imap`, `smtp`,
+    /// or `imap and smtp`.
+    fn kinds_words(&self) -> String {
+        self.kinds()
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ")
     }
 
     /// The value, readable by the one caller that stores it.
@@ -316,7 +360,13 @@ fn validate(family: &ConfigFamily, params: &Value) -> Result<Value, DomainError>
 // config.set_password
 // ---------------------------------------------------------------------------
 
-/// Store one password through the backend the configuration selects.
+/// Store one password through the backend the configuration selects, or one
+/// value as both the IMAP and the SMTP password when no kind is named
+/// (PERSO-297): one call, so no client that exits between two calls leaves
+/// the account with one password new and the other old.
+///
+/// A Graph account signs in and has no password, so it is refused with the
+/// command that signs it in.
 ///
 /// No event: a stored password changes nothing a client can observe, because
 /// `config.get` said `<redacted>` before and says `<redacted>` after. It is a
@@ -338,17 +388,35 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         ));
     };
 
-    let key = params.kind().secret_key(params.account());
+    if account.auth_method == crate::config::AuthMethod::Graph {
+        return Err(DomainError::invalid_params_with_data(
+            format!(
+                "account {} signs in with Microsoft (auth_method = \"graph\") and has no \
+                 password; sign it in with {}",
+                params.account(),
+                mp_core::mp_command::here(&["config", "oauth2-login", "-A", params.account()])
+            ),
+            json!({"account": params.account()}),
+        ));
+    }
+
+    let keys: Vec<String> = params
+        .kinds()
+        .iter()
+        .map(|kind| kind.secret_key(params.account()))
+        .collect();
     let backend = snapshot.config.secrets_backend;
     let stored = {
-        let key = key.clone();
+        let keys = keys.clone();
         let value = params.value().to_string();
         tokio::task::spawn_blocking(move || {
             // Startup opened the backend if a configuration had loaded; a
             // first run had none to select one from, so it opens here. The
             // opener is idempotent.
             crate::secrets::init(backend).map_err(|e| e.to_string())?;
-            crate::config::set_secret(&key, &value).map_err(|e| format!("{e:#}"))
+            keys.iter()
+                .try_for_each(|key| crate::config::set_secret(key, &value))
+                .map_err(|e| format!("{e:#}"))
         })
         .await
     };
@@ -359,7 +427,7 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         Ok(Err(e)) => {
             return Err(DomainError::internal(format!(
                 "storing the {} password of {}: {e}",
-                params.kind().as_str(),
+                params.kinds_words(),
                 params.account()
             )))
         }
@@ -367,7 +435,7 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
     }
     info!(
         "[daemon] stored the {} password of {}",
-        params.kind().as_str(),
+        params.kinds_words(),
         params.account()
     );
     // Even the password the server refused is asked about again: the user may
@@ -383,14 +451,22 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         &account.name,
     );
 
+    // `kinds` and `keys` always; `kind` and `key` as well for one named
+    // password, which is all a reader written before PERSO-297 looks for.
+    let kinds: Vec<&str> = params.kinds().iter().map(|kind| kind.as_str()).collect();
+    let mut result = json!({
+        "stored": true,
+        "account": params.account(),
+        "kinds": kinds,
+        "keys": keys,
+    });
+    if let (Some(kind), [key]) = (params.kind(), &keys[..]) {
+        result["kind"] = json!(kind.as_str());
+        result["key"] = json!(key);
+    }
     Ok(command(
         family,
-        json!({
-            "stored": true,
-            "account": params.account(),
-            "kind": params.kind().as_str(),
-            "key": key,
-        }),
+        result,
         vec![ResourceId::new(format!("account:{}", params.account()))],
     ))
 }

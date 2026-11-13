@@ -34,6 +34,9 @@ const ACCOUNT: &str = "home";
 #[derive(Clone, Default)]
 struct Daemon {
     rejected: Arc<Mutex<Option<RejectedLogin>>>,
+    /// What `shared_password` answers: the IMAP and SMTP logins use one
+    /// password (PERSO-297).
+    shared: Arc<Mutex<bool>>,
     diagnostics: Arc<Mutex<Vec<HealthCheck>>>,
     calls: Arc<Mutex<Vec<String>>>,
 }
@@ -51,6 +54,7 @@ impl crate::queries::Queries for Daemon {
                 },
                 "smtp_password": true,
                 "imap_password": true,
+                "shared_password": *self.shared.lock().unwrap(),
                 "token": null,
                 "missing_scopes": [],
                 "rejected_logins": self.rejected.lock().unwrap().iter().collect::<Vec<_>>(),
@@ -121,7 +125,7 @@ fn app() -> (App, Daemon) {
 fn account_check(status: CheckStatus) -> HealthCheck {
     let detail = match status {
         CheckStatus::Ok => "serving".to_string(),
-        _ => mp_core::mp_command::login_rejected_detail(ACCOUNT, RejectedLogin::Imap),
+        _ => mp_core::mp_command::login_rejected_detail(ACCOUNT, RejectedLogin::Imap, false),
     };
     HealthCheck {
         name: format!("account:{ACCOUNT}"),
@@ -227,6 +231,28 @@ fn a_rejected_smtp_login_names_the_smtp_password() {
     assert!(
         screen.contains("set-password -A home smtp"),
         "and the way out: {screen}"
+    );
+}
+
+/// An account whose IMAP and SMTP logins use one password (PERSO-297) is
+/// told the command without a kind, which sets that one password for both.
+#[test]
+fn a_rejected_shared_password_names_the_command_that_sets_both() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let (mut app, daemon) = app();
+
+    *daemon.shared.lock().unwrap() = true;
+    *daemon.rejected.lock().unwrap() = Some(RejectedLogin::Imap);
+    app.apply_event(&check_changed(2, &account_check(CheckStatus::Warn)));
+
+    let screen = drawn(&mut app);
+    assert!(
+        screen.contains("set-password -A home"),
+        "the sidebar names the way out: {screen}"
+    );
+    assert!(
+        !screen.contains("set-password -A home imap"),
+        "without a kind: {screen}"
     );
 }
 

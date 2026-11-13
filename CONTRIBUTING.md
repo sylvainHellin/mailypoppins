@@ -35,4 +35,4 @@ See `AGENTS.md` for the testing conventions.
 - `Cannot decrypt secrets store on this machine`: the encrypted secrets file was created on a different host (machine ID changed) or by a different user.
   Run `mp config reset-secrets` to wipe the file and re-enter passwords.
 - `Secrets store not initialized`: you have not configured any passwords yet.
-  Run `mp config init` (fresh install) or `mp config set-password <smtp|imap> -A <name>` to populate.
+  Run `mp config init` (fresh install) or `mp config set-password -A <name>` (one password for IMAP and SMTP; `imap` or `smtp` when they differ) to populate.

@@ -1732,11 +1732,13 @@ enum ConfigAction {
         #[command(flatten)]
         no_account: NoAccount,
     },
-    /// Store a password in the active secrets backend (for the first account
-    /// unless `-A` names one)
+    /// Store a password in the active secrets backend, one for both IMAP and
+    /// SMTP unless "imap" or "smtp" names one (for the first account unless
+    /// `-A` names one)
     SetPassword {
-        /// Which password to set: "smtp" or "imap"
-        which: String,
+        /// Which password to set when the two differ: "imap" or "smtp";
+        /// leave it out to set one password for both
+        which: Option<String>,
         /// Read the password from standard input instead of prompting: the
         /// first line, its newline removed and nothing else trimmed. Refused
         /// when standard input is a terminal or the line is empty
@@ -5764,21 +5766,26 @@ async fn routed_signature(account: &str, action: SignatureAction) -> Result<()> 
 /// `mp config set-password`: the prompt is this process's terminal's, or the
 /// line `--stdin` reads from a pipe; the value crosses the socket once, and
 /// nothing else about it is written here.
-async fn routed_set_password(which: &str, account: &str, stdin: bool) -> Result<()> {
-    mailypoppins::config_cmd::password::check_kind(which);
+///
+/// Without a kind the one value is stored as both the IMAP and the SMTP
+/// password, by one `config.set_password` that names no kind (PERSO-297).
+async fn routed_set_password(which: Option<&str>, account: &str, stdin: bool) -> Result<()> {
+    if let Some(which) = which {
+        mailypoppins::config_cmd::password::check_kind(which);
+    }
     let value = if stdin {
         mailypoppins::config_cmd::password::from_stdin()?
     } else {
         mailypoppins::config_cmd::password::prompt(which, account)?
     };
+    let mut params = serde_json::json!({"account": account, "value": value});
+    if let Some(which) = which {
+        params["kind"] = serde_json::json!(which);
+    }
     let mut connection = daemon_connection().await;
-    daemon_try_call(
-        &mut connection,
-        "config.set_password",
-        serde_json::json!({"account": account, "kind": which, "value": value}),
-    )
-    .await
-    .map_err(|error| anyhow!("{}", error.message))?;
+    daemon_try_call(&mut connection, "config.set_password", params)
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
     println!(
         "{}",
         mailypoppins::config_cmd::password::stored_line(which, account)
@@ -7327,7 +7334,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
                         .clone()
                         .or_else(|| global_config.accounts.first().map(|a| a.name.clone()))
                         .unwrap_or_else(|| "main".to_string());
-                    routed_set_password(&which, &acct_name, stdin).await?;
+                    routed_set_password(which.as_deref(), &acct_name, stdin).await?;
                 }
                 ConfigAction::AddAccount { .. } => {
                     let (path, exists, config) = routed_config_state().await?;

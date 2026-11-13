@@ -657,7 +657,7 @@ pub fn todays_password_refusals(mut out: Output) -> Output {
                 format!(
                     "No IMAP password is stored for account '{account}', nor an SMTP \
                      password to fall back to. \
-                     Run `mp config set-password imap --account {account}`."
+                     Run `mp config set-password --account {account}`."
                 )
             };
             kept.push_str(&line[..start]);

@@ -73,6 +73,7 @@ import type {
   MutationBatch,
   SearchForm,
   SearchPlan,
+  SecretStored,
   UpdateCheck,
   UpdateProgress,
   UpdateStatus,
@@ -370,8 +371,8 @@ export const mock = {
   configRevision: 0,
   /** fixture.rs's `config_invalid`: config.toml holds a line the next `config_reload` refuses. */
   configInvalid: false,
-  /** Every `config_set_password`, as fixture.rs journals it: the value redacted. */
-  passwords: [] as { account: string; kind: string; value: string }[],
+  /** Every `config_set_password`, as fixture.rs journals it: the value redacted, a null kind for one password stored as both. */
+  passwords: [] as { account: string; kind: string | null; value: string }[],
   /** The logins the server rejected (PERSO-296): `account_credentials` lists them in `rejected_logins`, and a `config_set_password` of the account lets go of them, as the daemon forgets its refusals. */
   loginRejected: [] as { account: string; login: RejectedLogin }[],
   /** What a fixture IMAP server's `config_probe` lists, null for `PROBE_IMAP_MAILBOXES`. */
@@ -499,7 +500,7 @@ export function retiredOauth2Message(account: string): string {
   return (
     `account "${account}" uses auth_method = "oauth2" (Microsoft sign-in over IMAP and SMTP), which mailypoppins no longer supports. ` +
     `For Microsoft 365, set auth_method = "graph" and run \`mp config oauth2-login --account ${shellWord(account)}\`; for on-premises Exchange, ` +
-    `remove the auth_method line and store the password with \`mp config set-password smtp --account ${shellWord(account)}\`.`
+    `remove the auth_method line and store the password with \`mp config set-password --account ${shellWord(account)}\`.`
   );
 }
 
@@ -2403,12 +2404,17 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         accounts: mock.config.accounts.map((a) => {
           const auth = a.auth_method || "password";
           const password = auth === "password";
-          const stored = (kind: string) => mock.passwords.some((p) => p.account === a.name && p.kind === kind);
+          const stored = (kind: string) => mock.passwords.some((p) => p.account === a.name && (p.kind === kind || p.kind === null));
+          // fixture.rs's `shared_password`: one is missing, or the last write was of both.
+          const writes = mock.passwords.filter((p) => p.account === a.name);
+          const last = writes[writes.length - 1];
+          const shared = !(stored("imap") && stored("smtp")) || last?.kind === null;
           return {
             account: a.name,
             auth_method: auth,
             smtp_password: password ? stored("smtp") : null,
             imap_password: password ? stored("imap") : null,
+            shared_password: password ? shared : null,
             token: auth === "graph" ? ("valid" as const) : null,
             missing_scopes: [],
             rejected_logins: mock.loginRejected.filter((r) => r.account === a.name).map((r) => r.login),
@@ -2509,13 +2515,24 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       return { added: [], updated: [], removed: [] };
     }
     case "config_set_password": {
-      const kind = String(args.kind);
-      if (!mock.config.accounts.some((a) => a.name === account)) {
+      // fixture.rs's: no kind is one password stored as both, the IMAP one first (PERSO-297).
+      const kind = args.kind == null ? null : String(args.kind);
+      const configured = mock.config.accounts.find((a) => a.name === account);
+      if (!configured) {
         throw { kind: "not_found", message: `no account named ${account} is configured`, code: -32005 };
+      }
+      if (configured.auth_method === "graph") {
+        throw {
+          kind: "protocol",
+          code: -32602,
+          message: `account ${account} signs in with Microsoft (auth_method = "graph") and has no password; sign it in with mp config oauth2-login -A ${account}`,
+        };
       }
       mock.passwords.push({ account, kind, value: REDACTED });
       mock.loginRejected = mock.loginRejected.filter((r) => r.account !== account);
-      return { stored: true, account, kind, key: `${kind}-password-${account}` };
+      const kinds = kind === null ? ["imap", "smtp"] : [kind];
+      const keys = kinds.map((k) => `${k}-password-${account}`);
+      return { stored: true, account, kind: kind ?? "", key: kind === null ? "" : keys[0], kinds, keys } satisfies SecretStored;
     }
     case "editor_setting_get":
     case "editor_setting_set": {

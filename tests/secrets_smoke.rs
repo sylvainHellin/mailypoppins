@@ -433,7 +433,7 @@ fn a_missing_password_names_the_account_and_the_command_that_stores_it() {
     assert!(
         stderr(&out).contains(
             "No IMAP password is stored for account 'smoke', nor an SMTP password to fall back \
-             to. Run `mp config set-password imap --account smoke`."
+             to. Run `mp config set-password --account smoke`."
         ),
         "the IMAP refusal:\n{}",
         stderr(&out)

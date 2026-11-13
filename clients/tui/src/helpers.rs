@@ -381,6 +381,7 @@ mod tests {
             smtp: false,
             calendar_scope_missing: false,
             rejected_login: None,
+            shared_password: false,
         });
         let unknown = account("perso", "me@perso.example");
         let mut graph = account("graph", "me@graph.example");

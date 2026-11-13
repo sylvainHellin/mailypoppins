@@ -2818,6 +2818,77 @@ fn mp_config_set_password_stdin_stores_the_piped_line_as_is() {
     );
 }
 
+/// PERSO-297: without `imap` or `smtp`, `mp config set-password` reads the
+/// password once and stores it as both, through one `config.set_password`.
+#[test]
+fn mp_config_set_password_without_a_kind_stores_one_password_as_both() {
+    use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+
+    let slice = Slice::start();
+    let secret = "one shared password";
+    let out = slice.routed_with_stdin(
+        &["config", "set-password", "-A", fixture::ACCOUNT, "--stdin"],
+        &format!("{secret}\n"),
+    );
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a kind-less set-password is accepted: {}",
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains(&format!(
+            "IMAP and SMTP password for '{}' stored",
+            fixture::ACCOUNT
+        )),
+        "the line names both passwords:\n{}",
+        stdout(&out)
+    );
+    assert!(!stdout(&out).contains(secret) && !stderr(&out).contains(secret));
+    let Ok(secrets) = EncryptedFileBackend::open(fixture::secrets_file(slice.root())) else {
+        return;
+    };
+    for kind in ["imap", "smtp"] {
+        assert_eq!(
+            secrets
+                .get(&format!("{kind}-password-{}", fixture::ACCOUNT))
+                .expect("both passwords are stored"),
+            secret,
+            "the {kind} password"
+        );
+    }
+}
+
+/// A Graph account signs in and has no password: `config.set_password` of
+/// any kind, or of none, is refused with the command that signs it in, and
+/// nothing is stored.
+#[tokio::test]
+async fn config_set_password_refuses_a_graph_account_with_the_sign_in_command() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    for params in [
+        json!({"account": fixture::GRAPH_ACCOUNT, "value": "x"}),
+        json!({"account": fixture::GRAPH_ACCOUNT, "kind": "smtp", "value": "x"}),
+    ] {
+        let refused = call_err(&mut conn, "config.set_password", params).await;
+        assert_eq!(refused.code, INVALID_PARAMS);
+        assert!(
+            refused.message.contains(&format!(
+                "mp config oauth2-login -A {}",
+                fixture::GRAPH_ACCOUNT
+            )),
+            "the refusal names the sign-in: {}",
+            refused.message
+        );
+        assert_eq!(data_of(&refused)["account"], fixture::GRAPH_ACCOUNT);
+    }
+    assert!(
+        !fixture::secrets_file(slice.root()).exists(),
+        "nothing was stored"
+    );
+}
+
 /// `--stdin` refuses an empty password, and a closed stdin is one: nothing is
 /// written and the daemon is never asked.
 #[test]

@@ -439,6 +439,7 @@ mod tests {
             auth_method: "graph".to_string(),
             smtp_password: None,
             imap_password: None,
+            shared_password: None,
             token: Some(mp_protocol::account::TokenState::Valid),
             missing_scopes: vec!["Calendars.ReadWrite".to_string()],
             rejected_logins: Vec::new(),

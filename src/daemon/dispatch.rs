@@ -414,6 +414,12 @@ impl DomainError {
         DomainError::raw(INVALID_PARAMS, message, None)
     }
 
+    /// `-32602` with a `data` payload naming what it is about, such as the
+    /// account.
+    pub fn invalid_params_with_data(message: impl Into<String>, data: Value) -> Self {
+        DomainError::raw(INVALID_PARAMS, message, Some(data))
+    }
+
     /// `-32601`: no method of that name is registered.
     pub fn method_not_found(method: &str) -> Self {
         DomainError::raw(METHOD_NOT_FOUND, format!("unknown method {method}"), None)

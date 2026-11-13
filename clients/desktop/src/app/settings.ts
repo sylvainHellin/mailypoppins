@@ -25,13 +25,13 @@ import {
 export const CONFIG_INVALID_CODE = -32007;
 
 
-/** The word a secret kind shows as. */
-export function kindLabel(kind: SecretKind): string {
-  return kind === "smtp" ? "SMTP" : "IMAP";
+/** The word a secret kind shows as; `null` is one password for both (PERSO-297). */
+export function kindLabel(kind: SecretKind | null): string {
+  return kind === null ? "IMAP and SMTP" : kind === "smtp" ? "SMTP" : "IMAP";
 }
 
 /** The notice a stored password leaves: which one, for which account, never the value. */
-export function storedLine(account: string, kind: SecretKind): string {
+export function storedLine(account: string, kind: SecretKind | null): string {
   return `Stored the ${kindLabel(kind)} password for ${account}`;
 }
 
@@ -189,7 +189,7 @@ export async function reloadConfig(dispatch: Dispatch<Action>): Promise<void> {
  * not the model, not a notice, not the log. Answers the refusal's sentence
  * for the dialog to show, or null once it is stored and the dialog closed.
  */
-export async function storePassword(dispatch: Dispatch<Action>, account: string, kind: SecretKind, value: string): Promise<string | null> {
+export async function storePassword(dispatch: Dispatch<Action>, account: string, kind: SecretKind | null, value: string): Promise<string | null> {
   try {
     await cmd.configSetPassword(account, kind, value);
     dispatch({ type: "close_password", account, kind });

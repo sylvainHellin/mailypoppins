@@ -26,8 +26,9 @@ import AccordionItem from '../components/AccordionItem.astro';
 
         <AccordionItem question="Secret not found">
           <p>
-            Run <code>mp config set-password smtp --account &lt;name&gt;</code> (or
-            <code>imap</code>) to store the password in the secrets store: by default an
+            Run <code>mp config set-password --account &lt;name&gt;</code>, which stores one
+            password for both IMAP and SMTP (add <code>imap</code> or <code>smtp</code> when the
+            two differ), to store the password in the secrets store: by default an
             encrypted file bound to this machine, or the OS keyring if you opted in with
             <code>secrets_backend = "keyring"</code>. Passwords are never stored in the config
             file. If the store cannot be decrypted at all, for example after a restore onto a new
@@ -49,7 +50,10 @@ import AccordionItem from '../components/AccordionItem.astro';
         <AccordionItem question="SMTP authentication failed">
           <p>
             Check your credentials with <code>mp config show</code> and re-run
-            <code>mp config set-password smtp</code> if needed.
+            <code>mp config set-password</code> (or <code>mp config set-password smtp</code> when
+            the SMTP password differs from the IMAP one) if needed. After the server refuses a
+            password, mailypoppins asks it again after 2 minutes, then 10, then once an hour, or at
+            once when you set the password or start a sync or a send.
           </p>
         </AccordionItem>
 
@@ -132,7 +136,7 @@ import AccordionItem from '../components/AccordionItem.astro';
             remove the <code>[accounts.smtp]</code> and <code>[accounts.imap]</code> tables and run
             <code>mp config oauth2-login --account &lt;name&gt;</code>. For on-premises Exchange,
             remove the <code>auth_method</code> line and store the password with
-            <code>mp config set-password smtp --account &lt;name&gt;</code>.
+            <code>mp config set-password --account &lt;name&gt;</code>.
           </p>
         </AccordionItem>
 

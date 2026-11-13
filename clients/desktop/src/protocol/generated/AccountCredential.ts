@@ -28,6 +28,16 @@ smtp_password: boolean | null,
  */
 imap_password: boolean | null,
 /**
+ * Whether the IMAP and the SMTP login use one password (PERSO-297): no
+ * IMAP password is stored, so the IMAP login falls back to the SMTP one,
+ * no SMTP one is, or the two are equal. A client names the kind-less
+ * `mp config set-password -A <name>`, which stores one password as both,
+ * when it is true, and the kind of the password otherwise. Compared in
+ * the daemon, so no value travels. `null` for any account but a password
+ * one, and when absent, so an older daemon's answer still parses.
+ */
+shared_password: boolean | null,
+/**
  * The token cache's verdict for a `graph` account, `null` for any
  * other.
  */

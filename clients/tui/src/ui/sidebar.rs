@@ -34,7 +34,11 @@ pub(super) fn account_alert(app: &App) -> Option<Alert> {
     if let Some(login) = app.login_rejected(app.active_account) {
         return Some(Alert {
             headline: "\u{26a0} login rejected".to_string(),
-            reason: mp_core::mp_command::login_rejected_detail(&acct.account_config.name, login),
+            reason: mp_core::mp_command::login_rejected_detail(
+                &acct.account_config.name,
+                login,
+                acct.credentials.is_some_and(|c| c.shared_password),
+            ),
             rows: LOGIN_REASON_ROWS,
         });
     }

@@ -34,18 +34,31 @@ pub fn here(args: &[&str]) -> String {
 /// stop, since each caller puts it after the account's name or inside a
 /// longer line.
 ///
+/// `shared_password` is whether the account's IMAP and SMTP logins use one
+/// password (`account.credentials`' `shared_password`, PERSO-297): then the
+/// command is the kind-less one, which sets that password for both, since a
+/// password changed on the server changed for both logins; else it names the
+/// refused login's kind, leaving the other password alone.
+///
 /// Here rather than in `mp_client::format` beside the other shared
 /// sentences, because its command is [`here`]'s, on this process's profile
 /// and quoted, and `mp-client` links `mp-protocol` alone.
-pub fn login_rejected_detail(account: &str, login: RejectedLogin) -> String {
+pub fn login_rejected_detail(account: &str, login: RejectedLogin, shared_password: bool) -> String {
+    let set_password = |kind: &str| {
+        let mut args = vec!["config", "set-password", "-A", account];
+        if !shared_password {
+            args.push(kind);
+        }
+        here(&args)
+    };
     match login {
         RejectedLogin::Imap => format!(
             "the server rejected the IMAP password; set it with {}",
-            here(&["config", "set-password", "-A", account, "imap"])
+            set_password("imap")
         ),
         RejectedLogin::Smtp => format!(
             "the server rejected the SMTP password; set it with {}",
-            here(&["config", "set-password", "-A", account, "smtp"])
+            set_password("smtp")
         ),
         RejectedLogin::Graph => format!(
             "the sign-in expired or was revoked; sign in again with {}",
@@ -108,16 +121,41 @@ mod tests {
     #[test]
     fn a_rejected_login_names_the_login_and_the_command_that_fixes_it() {
         assert_eq!(
-            login_rejected_detail("tum", RejectedLogin::Imap),
+            login_rejected_detail("tum", RejectedLogin::Imap, false),
             "the server rejected the IMAP password; set it with mp config set-password -A tum imap"
         );
         assert_eq!(
-            login_rejected_detail("tum", RejectedLogin::Smtp),
+            login_rejected_detail("tum", RejectedLogin::Smtp, false),
             "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
         );
         assert_eq!(
-            login_rejected_detail("hines", RejectedLogin::Graph),
+            login_rejected_detail("hines", RejectedLogin::Graph, false),
             "the sign-in expired or was revoked; sign in again with mp config oauth2-login -A hines"
+        );
+    }
+
+    /// An account whose IMAP and SMTP logins use one password (PERSO-297) is
+    /// told the kind-less command, which sets that password for both; a
+    /// Graph account has no password, so the flag changes nothing for it.
+    #[test]
+    fn a_rejected_shared_password_names_the_command_that_sets_both() {
+        assert_eq!(
+            login_rejected_detail("tum", RejectedLogin::Imap, true),
+            "the server rejected the IMAP password; set it with mp config set-password -A tum"
+        );
+        assert_eq!(
+            login_rejected_detail("tum", RejectedLogin::Smtp, true),
+            "the server rejected the SMTP password; set it with mp config set-password -A tum"
+        );
+        assert_eq!(
+            login_rejected_detail("hines", RejectedLogin::Graph, true),
+            login_rejected_detail("hines", RejectedLogin::Graph, false)
+        );
+        let _demo = crate::config::test_env::ProfileOverride::set(Some("demo"));
+        assert_eq!(
+            login_rejected_detail("TUM Mail", RejectedLogin::Imap, true),
+            "the server rejected the IMAP password; set it with \
+             mp --profile demo config set-password -A 'TUM Mail'"
         );
     }
 
@@ -127,17 +165,17 @@ mod tests {
     fn a_rejected_login_command_is_quoted_and_on_the_profile() {
         let _demo = crate::config::test_env::ProfileOverride::set(Some("demo"));
         assert_eq!(
-            login_rejected_detail("TUM Mail", RejectedLogin::Imap),
+            login_rejected_detail("TUM Mail", RejectedLogin::Imap, false),
             "the server rejected the IMAP password; set it with \
              mp --profile demo config set-password -A 'TUM Mail' imap"
         );
         assert_eq!(
-            login_rejected_detail("TUM Mail", RejectedLogin::Smtp),
+            login_rejected_detail("TUM Mail", RejectedLogin::Smtp, false),
             "the server rejected the SMTP password; set it with \
              mp --profile demo config set-password -A 'TUM Mail' smtp"
         );
         assert_eq!(
-            login_rejected_detail("Bob's", RejectedLogin::Graph),
+            login_rejected_detail("Bob's", RejectedLogin::Graph, false),
             "the sign-in expired or was revoked; sign in again with \
              mp --profile demo config oauth2-login -A 'Bob'\\''s'"
         );

@@ -54,10 +54,19 @@ describe("the health banner", () => {
   // so in the account's check, with the sentence mp daemon health prints.
   const REJECTED = "the server rejected the IMAP password; set it with mp config set-password -A work imap";
 
+  // Two passwords of their own, so the dialog is the refused one's (PERSO-297).
+  const apart = () => {
+    mock.passwords = [
+      { account: "work", kind: "imap", value: "<redacted>" },
+      { account: "work", kind: "smtp", value: "<redacted>" },
+    ];
+  };
+
   it("offers the IMAP password dialog on an account whose login the server rejected", async () => {
     const { user } = renderApp(undefined, () => {
       mock.bootstrap.snapshot.diagnostics = [];
       mock.loginRejected = [{ account: "work", login: "imap" }];
+      apart();
     });
     await shellReady();
     act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail: REJECTED }));
@@ -77,6 +86,7 @@ describe("the health banner", () => {
     const { user } = renderApp(undefined, () => {
       mock.bootstrap.snapshot.diagnostics = [];
       mock.loginRejected = [{ account: "work", login: "smtp" }];
+      apart();
     });
     await shellReady();
     act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail: smtp }));
@@ -88,6 +98,25 @@ describe("the health banner", () => {
     await user.click(await within(shown).findByRole("button", { name: "Set SMTP password for work" }));
     const dialog = await screen.findByRole("dialog", { name: "Set SMTP password" });
     expect(within(dialog).getByRole("form", { name: "SMTP password for work" })).toBeInTheDocument();
+  });
+
+  it("offers the one-password dialog on an account whose IMAP and SMTP logins share a password", async () => {
+    const shared = "the server rejected the IMAP password; set it with mp config set-password -A work";
+    const { user } = renderApp(undefined, () => {
+      mock.bootstrap.snapshot.diagnostics = [];
+      mock.loginRejected = [{ account: "work", login: "imap" }];
+      mock.passwords = [{ account: "work", kind: null, value: "<redacted>" }];
+    });
+    await shellReady();
+    act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail: shared }));
+    const shown = await waitFor(() => {
+      const el = line("account:work");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    await user.click(await within(shown).findByRole("button", { name: "Set password for work" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set password" });
+    expect(within(dialog).getByRole("form", { name: "Password for work" })).toBeInTheDocument();
   });
 
   it("offers a new sign-in on a Graph account whose sign-in Microsoft refused", async () => {

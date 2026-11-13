@@ -149,20 +149,22 @@ pub fn credentials(
         .map(|account| {
             // An account naming the retired `oauth2` mode holds no credential
             // anything reads, so it reports none.
-            let (smtp_password, imap_password, token) = match account.auth_method {
+            let (smtp_password, imap_password, shared_password, token) = match account.auth_method {
                 AuthMethod::Password => (
                     Some(present(format!("smtp-password-{}", account.name))),
                     Some(present(format!("imap-password-{}", account.name))),
+                    Some(crate::login_gate::shared_password(&account.name)),
                     None,
                 ),
-                AuthMethod::Graph => (None, None, Some(token_state(&account.name))),
-                AuthMethod::RetiredOAuth2 => (None, None, None),
+                AuthMethod::Graph => (None, None, None, Some(token_state(&account.name))),
+                AuthMethod::RetiredOAuth2 => (None, None, None, None),
             };
             AccountCredential {
                 account: account.name.clone(),
                 auth_method: auth_method_word(&account.auth_method).to_string(),
                 smtp_password,
                 imap_password,
+                shared_password,
                 token,
                 missing_scopes: crate::calendar_backend::missing_scopes(account),
                 rejected_logins: crate::login_gate::rejected_logins(account),

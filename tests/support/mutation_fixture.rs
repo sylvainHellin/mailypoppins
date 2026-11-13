@@ -124,7 +124,7 @@ pub const SHARED_DRAFT: &str = "ba00000000000001";
 /// credentials, before they touch the store.
 pub const CREDENTIALS_REFUSAL: &str =
     "No IMAP password is stored for account 'alpha', nor an SMTP password to fall back to. \
-     Run `mp config set-password imap --account alpha`.";
+     Run `mp config set-password --account alpha`.";
 
 /// `<root>/accounts/<account>`.
 pub fn account_dir(root: &Path, account: &str) -> PathBuf {

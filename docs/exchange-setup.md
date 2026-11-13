@@ -65,7 +65,7 @@ An organisation that does not want to consent to the shared app registers its ow
 
 An Exchange server the organisation runs itself is reached over IMAP and SMTP with a password.
 Choose option 1, "Standard IMAP/SMTP with a password", in `mp config init`, or "IMAP and SMTP" in the desktop wizard, and enter the server names and ports the organisation publishes.
-The password is stored with `mp config set-password smtp --account <name>` (and `imap` when it differs).
+The password is stored with `mp config set-password --account <name>`, once for both IMAP and SMTP (with `imap` or `smtp` when the two differ).
 
 ## Accounts that still say `auth_method = "oauth2"`
 
@@ -73,7 +73,7 @@ The mode that signed in to Microsoft and then spoke IMAP and SMTP with XOAUTH2 i
 A config that still names it loads, and that account stays blocked while every other account runs; `mp sync`, `mp config show`, the daemon log and the desktop Settings say how to switch:
 
 - for Microsoft 365, set `auth_method = "graph"`, remove the `[accounts.smtp]` and `[accounts.imap]` tables, keep `[accounts.oauth2]`, and run `mp config oauth2-login --account <name>`;
-- for on-premises Exchange, remove the `auth_method` line and `[accounts.oauth2]`, keep the server tables, and store the password with `mp config set-password smtp --account <name>`.
+- for on-premises Exchange, remove the `auth_method` line and `[accounts.oauth2]`, keep the server tables, and store the password with `mp config set-password --account <name>`.
 
 Then restart the daemon with `mp daemon restart`, or press Reload in the desktop Settings.
 

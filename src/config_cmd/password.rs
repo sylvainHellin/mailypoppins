@@ -23,20 +23,26 @@ pub fn check_kind(which: &str) {
     }
 }
 
-/// Read one password from this process's terminal.
+/// Read one password from this process's terminal: the `which` password,
+/// or with none the one password of both logins (PERSO-297).
 ///
 /// Client-side and nowhere else (P4-U14): there is no `MAILYPOPPINS_PASSWORD`
 /// environment variable and this slice does not invent one, because a secret in
 /// an environment variable is a secret in `/proc`. The value crosses the socket
 /// once, as `config.set_password`'s parameter.
-pub fn prompt(which: &str, account_name: &str) -> Result<String> {
+pub fn prompt(which: Option<&str>, account_name: &str) -> Result<String> {
     dialoguer::Password::new()
-        .with_prompt(format!(
-            "Enter {} password for account '{}'",
-            which, account_name
-        ))
+        .with_prompt(prompt_text(which, account_name))
         .interact()
         .context("Password input cancelled")
+}
+
+/// What the password prompt asks.
+pub fn prompt_text(which: Option<&str>, account_name: &str) -> String {
+    match which {
+        Some(which) => format!("Enter {which} password for account '{account_name}'"),
+        None => format!("Enter the password for account '{account_name}' (IMAP and SMTP)"),
+    }
 }
 
 /// Read one password from this process's standard input, for `--stdin`
@@ -75,12 +81,15 @@ pub fn read_piped(stdin_is_terminal: bool, mut input: impl BufRead) -> Result<St
     Ok(password.to_string())
 }
 
-/// The line a stored password prints.
-pub fn stored_line(which: &str, account_name: &str) -> String {
+/// The line a stored password prints: the `which` password, or with none
+/// the one password stored as both.
+pub fn stored_line(which: Option<&str>, account_name: &str) -> String {
+    let which = match which {
+        Some(which) => which.to_uppercase(),
+        None => "IMAP and SMTP".to_string(),
+    };
     format!(
-        "{} {} password for '{}' stored",
+        "{} {which} password for '{account_name}' stored",
         "\u{2713}".green(),
-        which.to_uppercase(),
-        account_name
     )
 }

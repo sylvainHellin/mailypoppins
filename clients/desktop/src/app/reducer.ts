@@ -528,8 +528,8 @@ export type Action =
   | { type: "config_failed"; gen: number; error: GuiError }
   /** A reload answered: the notice line says so, and the daemon's own event already logged it. */
   | { type: "config_reloaded"; text: string }
-  | { type: "open_password"; account: string; kind: SecretKind }
-  | { type: "close_password"; account: string; kind: SecretKind }
+  | { type: "open_password"; account: string; kind: SecretKind | null }
+  | { type: "close_password"; account: string; kind: SecretKind | null }
   | { type: "credentials_loaded"; gen: number; credentials: AccountCredentials }
   | { type: "credentials_failed"; gen: number; error: GuiError }
   | { type: "open_account_wizard"; preset?: AccountWizard["preset"] }

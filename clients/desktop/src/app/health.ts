@@ -69,6 +69,16 @@ export function loginRejected(s: Pick<AppState, "credentials">, account: string)
   return s.credentials.data?.accounts.find((c) => c.account === account)?.rejected_logins[0] ?? null;
 }
 
+/**
+ * Whether `account`'s IMAP and SMTP logins use one password, as
+ * `account.credentials` last answered (PERSO-297): the daemon's sentence
+ * then names `mp config set-password` without a kind, and the line offers
+ * the dialog that stores one password as both. False when it did not say.
+ */
+export function sharedPassword(s: Pick<AppState, "credentials">, account: string): boolean {
+  return s.credentials.data?.accounts.find((c) => c.account === account)?.shared_password ?? false;
+}
+
 /** Whether `account.credentials` last said any account's login is rejected. */
 function anyLoginRejected(s: Pick<AppState, "credentials">): boolean {
   return s.credentials.data?.accounts.some((c) => c.rejected_logins.length > 0) ?? false;

@@ -155,6 +155,7 @@ describe("the configuration in the model", () => {
 
   it("names the stored password without its value, and knows which accounts have passwords", () => {
     expect(storedLine("work", "smtp")).toBe("Stored the SMTP password for work");
+    expect(storedLine("work", null)).toBe("Stored the IMAP and SMTP password for work");
     expect(fixtures.config.accounts.map(usesPassword)).toEqual([true, false]);
   });
 });

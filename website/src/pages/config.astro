@@ -486,9 +486,14 @@ server = "sentitems"`} />
         <code>smtp-password-&lt;name&gt;</code> and <code>imap-password-&lt;name&gt;</code>.
         If the IMAP password is not set, it falls back to the SMTP password.
       </p>
-      <p>Set or update passwords with:</p>
+      <p>
+        Set or update the password with the command below, which asks once and stores the
+        password for both IMAP and SMTP, as almost every account uses one. For an account whose
+        two passwords differ, name the one to set: <code>mp config set-password imap</code> or
+        <code>smtp</code>.
+      </p>
       <div class="code-inline">
-        <Code code="mp config set-password smtp --account personal" lang="bash" theme={codeTheme} />
+        <Code code="mp config set-password --account personal" lang="bash" theme={codeTheme} />
       </div>
       <p>
         A script or a password manager can pipe the password in with <code>--stdin</code>
@@ -497,7 +502,7 @@ server = "sentitems"`} />
         and a standard input that is a terminal, and never prints the value.
       </p>
       <div class="code-inline">
-        <Code code="pass show mail/personal | mp config set-password smtp --account personal --stdin" lang="bash" theme={codeTheme} />
+        <Code code="pass show mail/personal | mp config set-password --account personal --stdin" lang="bash" theme={codeTheme} />
       </div>
       <p>
         An on-premises Exchange server, one your organisation runs itself, is a password
@@ -638,11 +643,14 @@ server = "sentitems"          # Not "Sent Items"`} />
       </ul>
       <p>To set or update a password:</p>
       <div class="code-inline">
-        <Code code="mp config set-password smtp --account personal" lang="bash" theme={codeTheme} />
+        <Code code="mp config set-password --account personal" lang="bash" theme={codeTheme} />
       </div>
       <p>
-        The argument is <code>smtp</code> or <code>imap</code>; without <code>--account</code>
-        the first account is used. The password is entered interactively and never echoed to
+        Without an argument the one password is stored as both the IMAP and the SMTP password;
+        <code>smtp</code> or <code>imap</code> sets only that one, for an account whose two
+        passwords differ. A Microsoft 365 (Graph) account has no password and signs in with
+        <code>mp config oauth2-login</code>. Without <code>--account</code> the first account
+        is used. The password is entered interactively and never echoed to
         the terminal.
       </p>
       <p>

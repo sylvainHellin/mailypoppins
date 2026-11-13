@@ -1600,6 +1600,7 @@ mod tests {
             smtp: true,
             calendar_scope_missing: false,
             rejected_login: None,
+            shared_password: false,
         };
         handle_bg_result(
             &mut app,

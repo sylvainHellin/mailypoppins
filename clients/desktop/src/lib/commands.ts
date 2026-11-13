@@ -333,7 +333,8 @@ export const accountCredentials = (): Promise<AccountCredentials> => invoke<Acco
 export const configReload = (): Promise<ConfigSwap> => invoke<ConfigSwap>("config_reload");
 
 /** Store the SMTP or IMAP password of `account` through the daemon's secrets backend. */
-export const configSetPassword = (account: string, kind: SecretKind, value: string): Promise<SecretStored> =>
+/** The `kind` password of `account`, or with `null` one password stored as both (PERSO-297). */
+export const configSetPassword = (account: string, kind: SecretKind | null, value: string): Promise<SecretStored> =>
   invoke<SecretStored>("config_set_password", { account, kind, value });
 
 /**

@@ -958,9 +958,14 @@ pub struct Credentials {
     /// granted (`missing_scopes`, PERSO-200): the Calendar view's banner.
     pub calendar_scope_missing: bool,
     /// The account's login the server rejected, whose refusal the daemon
-    /// still holds, so it is not making it again (the first of `rejected_logins`,
-    /// PERSO-296): the sidebar's and the account picker's mark.
+    /// still holds, so it is not making it again (the first of
+    /// `rejected_logins`, PERSO-296): the sidebar's and the account picker's
+    /// mark.
     pub rejected_login: Option<mp_protocol::account::RejectedLogin>,
+    /// The account's IMAP and SMTP logins use one password (PERSO-297), so
+    /// the command that sets it after a refusal names no kind. False when an
+    /// older daemon does not say, which names the kind, right in every case.
+    pub shared_password: bool,
 }
 
 impl Credentials {
@@ -975,6 +980,7 @@ impl Credentials {
                     smtp,
                     calendar_scope_missing,
                     rejected_login: entry.rejected_logins.first().copied(),
+                    shared_password: entry.shared_password.unwrap_or(false),
                 }
             }
             // A Graph account has neither transport; `graph_configured` is

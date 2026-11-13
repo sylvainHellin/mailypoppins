@@ -4103,13 +4103,24 @@ impl Fixture {
             // The daemon's `account.credentials`: presence only. A password is
             // there once this fixture stored it, a Graph account's token is
             // taken to be cached and valid, and an account naming the retired
-            // `oauth2` mode reports nothing.
+            // `oauth2` mode reports nothing. A kind-less write stored both
+            // passwords, and the two are one password (`shared_password`,
+            // PERSO-297) unless one is missing or a write of one kind came
+            // after it.
             "account.credentials" => {
                 only(method, &params, &["account"])?;
                 let stored = |account: &str, kind: &str| {
-                    s.password_writes
-                        .iter()
-                        .any(|w| w["account"] == account && w["kind"] == kind)
+                    s.password_writes.iter().any(|w| {
+                        w["account"] == account && (w["kind"] == kind || w["kind"].is_null())
+                    })
+                };
+                let shared = |account: &str| {
+                    !(stored(account, "imap") && stored(account, "smtp"))
+                        || s.password_writes
+                            .iter()
+                            .rev()
+                            .find(|w| w["account"] == account)
+                            .is_some_and(|w| w["kind"].is_null())
                 };
                 let accounts: Vec<Value> = s.config["accounts"]
                     .as_array()
@@ -4127,6 +4138,7 @@ impl Fixture {
                             "auth_method": auth,
                             "smtp_password": password.then(|| stored(name, "smtp")),
                             "imap_password": password.then(|| stored(name, "imap")),
+                            "shared_password": password.then(|| shared(name)),
                             "token": (auth == "graph").then_some("valid"),
                             "missing_scopes": [],
                             "rejected_logins": [],
@@ -4162,14 +4174,23 @@ impl Fixture {
                 Ok(swap)
             }
             // The daemon's `config.set_password`, its refusals in its order
-            // and words; the value is journaled redacted and goes nowhere.
+            // and words; the value is journaled redacted and goes nowhere. No
+            // kind is one password stored as both, the IMAP one first
+            // (PERSO-297), journaled once with a null kind.
             "config.set_password" => {
                 only(method, &params, &["account", "kind", "value"])?;
                 let account = param_str(method, &params, "account")?;
-                let kind = param_str(method, &params, "kind")?;
-                if kind != "smtp" && kind != "imap" {
-                    return Err(refused(method, -32602, "kind is one of \"smtp\", \"imap\""));
-                }
+                let kind = match &params["kind"] {
+                    Value::Null => None,
+                    Value::String(kind) if kind == "smtp" || kind == "imap" => Some(kind.clone()),
+                    _ => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            "kind is one of \"smtp\", \"imap\", or absent",
+                        ))
+                    }
+                };
                 if !params["value"].is_string() {
                     return Err(refused(
                         method,
@@ -4187,17 +4208,43 @@ impl Fixture {
                         &format!("no account named {account} is configured"),
                     ));
                 }
+                if s.config["accounts"].as_array().is_some_and(|a| {
+                    a.iter()
+                        .any(|c| c["name"] == account && c["auth_method"] == "graph")
+                }) {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "account {account} signs in with Microsoft (auth_method = \"graph\") \
+                             and has no password; sign it in with mp config oauth2-login -A {account}"
+                        ),
+                    ));
+                }
                 s.password_writes.push(json!({
                     "account": account,
                     "kind": kind,
                     "value": crate::configuration::REDACTED,
                 }));
-                Ok(json!({
+                let kinds: Vec<String> = match &kind {
+                    Some(kind) => vec![kind.clone()],
+                    None => vec!["imap".into(), "smtp".into()],
+                };
+                let keys: Vec<String> = kinds
+                    .iter()
+                    .map(|kind| format!("{kind}-password-{account}"))
+                    .collect();
+                let mut answer = json!({
                     "stored": true,
                     "account": account,
-                    "kind": kind,
-                    "key": format!("{kind}-password-{account}"),
-                }))
+                    "kinds": kinds,
+                    "keys": keys,
+                });
+                if let Some(kind) = kind {
+                    answer["kind"] = json!(kind);
+                    answer["key"] = json!(format!("{kind}-password-{account}"));
+                }
+                Ok(answer)
             }
             // The daemon's `config.add_account`: its refusals in its order
             // and words, then the block appended to config.toml and a swap
@@ -6885,7 +6932,8 @@ impl Fixture {
     }
 
     /// Every `config.set_password` the fixture took, oldest first, each
-    /// `{account, kind, value}` with the value [`crate::configuration::REDACTED`].
+    /// `{account, kind, value}` with the value [`crate::configuration::REDACTED`]
+    /// and a null `kind` for one password stored as both.
     pub fn password_writes(&self) -> Vec<Value> {
         self.state().password_writes.clone()
     }

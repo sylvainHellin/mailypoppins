@@ -207,10 +207,15 @@ impl SecretKind {
 pub struct SecretStored {
     pub stored: bool,
     pub account: String,
-    /// `smtp` or `imap`.
+    /// `smtp` or `imap`; empty for one password stored as both.
     pub kind: String,
-    /// The secrets backend's key.
+    /// The secrets backend's key; empty for one password stored as both.
     pub key: String,
+    /// Every password stored, in the order written: the named one, or
+    /// `imap` then `smtp` for one password stored as both (PERSO-297).
+    pub kinds: Vec<String>,
+    /// The secrets backend's key of each of `kinds`.
+    pub keys: Vec<String>,
 }
 
 /// How an account the wizard writes signs in, the daemon's `auth_method`.
@@ -436,12 +441,23 @@ pub struct OAuth2Stored {
 #[derive(Clone)]
 pub struct SetPassword {
     pub account: String,
-    pub kind: SecretKind,
+    /// The password to set, `None` for one password stored as both the IMAP
+    /// and the SMTP one (PERSO-297).
+    pub kind: Option<SecretKind>,
     value: String,
 }
 
 impl SetPassword {
     pub fn new(account: impl Into<String>, kind: SecretKind, value: impl Into<String>) -> Self {
+        Self::of(account, Some(kind), value)
+    }
+
+    /// The `kind` password, or with `None` one password for both.
+    pub fn of(
+        account: impl Into<String>,
+        kind: Option<SecretKind>,
+        value: impl Into<String>,
+    ) -> Self {
         SetPassword {
             account: account.into(),
             kind,
@@ -505,17 +521,23 @@ pub fn config_reload_on(door: &Door) -> Result<ConfigSwap, GuiError> {
     decode("config.reload", answer)
 }
 
-/// Store one password through the daemon's secrets backend.
+/// Store one password through the daemon's secrets backend, or one value as
+/// both the IMAP and the SMTP password by one `config.set_password` that
+/// names no kind (PERSO-297).
 pub fn config_set_password_on(
     door: &Door,
     password: &SetPassword,
 ) -> Result<SecretStored, GuiError> {
-    let kind = password.kind.as_str();
+    let kind = password.kind.map_or("imap and smtp", SecretKind::as_str);
     let account = password.account.as_str();
+    let mut params = json!({"account": account, "value": password.value});
+    if let Some(named) = password.kind {
+        params["kind"] = json!(named.as_str());
+    }
     let answer = call(
         door,
         "config.set_password",
-        json!({"account": account, "kind": kind, "value": password.value}),
+        params,
         SECRET_BUDGET,
         Addressing::Params,
     )
@@ -713,15 +735,16 @@ pub async fn config_reload(session: State<'_, SessionHandle>) -> Result<ConfigSw
     with_door(&session, |_, door| config_reload_on(door)).await
 }
 
-/// Store the SMTP or IMAP password of `account`.
+/// Store the SMTP or IMAP password of `account`, or with no kind one
+/// password as both (PERSO-297).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn config_set_password(
     session: State<'_, SessionHandle>,
     account: String,
-    kind: SecretKind,
+    kind: Option<SecretKind>,
     value: String,
 ) -> Result<SecretStored, GuiError> {
-    let password = SetPassword::new(account, kind, value);
+    let password = SetPassword::of(account, kind, value);
     with_door(&session, move |_, door| {
         config_set_password_on(door, &password)
     })
@@ -1368,7 +1391,33 @@ mod tests {
         let after = account_credentials_on(&door).expect("account.credentials");
         assert_eq!(after.accounts[0].smtp_password, Some(true));
         assert_eq!(after.accounts[0].imap_password, Some(false));
+        assert_eq!(after.accounts[0].shared_password, Some(true));
         assert!(!serde_json::to_string(&after).unwrap().contains("hunter2"));
+    }
+
+    /// PERSO-297: a password with no kind is one `config.set_password`
+    /// naming none, stored as both the IMAP and the SMTP password.
+    #[test]
+    fn a_password_without_a_kind_is_stored_as_both() {
+        let (door, f, _rx) = fixture_door();
+        let stored =
+            config_set_password_on(&door, &SetPassword::of("work", None, SECRET)).expect("stored");
+        assert_eq!(stored.kinds, ["imap", "smtp"]);
+        assert_eq!(stored.keys, ["imap-password-work", "smtp-password-work"]);
+        assert_eq!(
+            f.password_writes(),
+            vec![json!({"account": "work", "kind": null, "value": REDACTED})]
+        );
+        let after = account_credentials_on(&door).expect("account.credentials");
+        let work = &after.accounts[0];
+        assert_eq!(
+            (work.imap_password, work.smtp_password, work.shared_password),
+            (Some(true), Some(true), Some(true))
+        );
+        config_set_password_on(&door, &SetPassword::new("work", SecretKind::Imap, "other"))
+            .expect("stored");
+        let apart = account_credentials_on(&door).expect("account.credentials");
+        assert_eq!(apart.accounts[0].shared_password, Some(false));
     }
 
     #[test]
@@ -1459,6 +1508,8 @@ mod tests {
                 account: "work".into(),
                 kind: "imap".into(),
                 key: "imap-password-work".into(),
+                kinds: vec!["imap".into()],
+                keys: vec!["imap-password-work".into()],
             }
         );
         assert!(

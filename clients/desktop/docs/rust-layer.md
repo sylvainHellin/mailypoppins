@@ -132,7 +132,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_markdown_path` | `account`, `source` | `OpenedFile`, the rendition's file for `terminal_spawn`; `not_found` when the store no longer holds the row |
 | `config_get` | none | `ConfigSnapshot` |
 | `config_reload` | none | `ConfigSwap`; a file that does not load is `protocol` with code -32007 and the daemon's sentence |
-| `config_set_password` | `account`, `kind` (`"smtp"` or `"imap"`), `value` | `SecretStored` |
+| `config_set_password` | `account`, `kind` (`"smtp"`, `"imap"`, or `null` for one password stored as both, PERSO-297), `value` | `SecretStored` |
 | `config_add_account` | `account` (`AccountDraft`) | `ConfigSwap`; a refusal is the daemon's sentence |
 | `config_init` | `account` (`AccountDraft`) | `ConfigInitialised`; refused where a `config.toml` exists |
 | `config_oauth2_login` | `account`, `candidate` (`AccountDraft`, optional) | `OperationStarted`, awaited as `oauth2_login` |
@@ -1179,8 +1179,8 @@ Both refuse an unknown parameter with `-32602`.
 When it loads, `revision` goes up by one, `config.changed` is published with nothing added, updated or removed and that revision, and the answer is the three empty lists.
 `config_invalid` appends the line `this line is not toml` to the file, and the next reload publishes `config.invalid` with the path, that line's number and "key with no value, expected `=`", then refuses with `-32007` and the same message; `revision` and `state` stay.
 A reload succeeds again once that line is gone from the file.
-`config.set_password` refuses an unknown parameter, a `kind` other than `smtp` or `imap`, and a missing `value` with `-32602`, and an account `config.json` does not configure with `-32005` "no account named <name> is configured".
-Otherwise it journals `{account, kind, value: "<redacted>"}` and answers `{stored: true, account, kind, key}`, with the daemon's key `<kind>-password-<account>`.
+`config.set_password` refuses an unknown parameter, a `kind` other than `smtp`, `imap` or none, and a missing `value` with `-32602`, an account `config.json` does not configure with `-32005` "no account named <name> is configured", and a Graph account with `-32602` naming `mp config oauth2-login -A <name>`.
+Otherwise it journals `{account, kind, value: "<redacted>"}`, the kind `null` for one password stored as both, and answers `{stored: true, account, kinds, keys}` with `kind` and `key` too for one named password, with the daemon's key `<kind>-password-<account>`; `account.credentials` answers `shared_password` true while a password is missing or the account's last write named no kind.
 
 `config.add_account` refuses an unknown parameter, a missing `config.toml`, a missing `account` object or `name`, and a name `config.json` already has, each with the daemon's sentence and `-32602`.
 Otherwise it appends the daemon's `[[accounts]]` block for the object to `<root>/config.toml`, key for key what `account_block` writes, and serves the account at once.

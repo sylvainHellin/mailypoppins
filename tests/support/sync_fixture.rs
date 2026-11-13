@@ -198,13 +198,13 @@ pub fn seed_secrets(root: &Path) -> bool {
 /// credentials with, from the secret store itself.
 ///
 /// It names both passwords, because `ImapConfig` falls back to the SMTP one,
-/// and the IMAP command (PERSO-199); the oracle's sentence named the SMTP key
+/// and the command that stores one password as both (PERSO-199, PERSO-297); the oracle's sentence named the SMTP key
 /// alone and is rewritten to this one by
 /// [`super::parity::todays_password_refusals`].
 pub fn secret_refusal(account: &str) -> String {
     format!(
         "No IMAP password is stored for account '{account}', nor an SMTP password to fall \
-         back to. Run `mp config set-password imap --account {account}`."
+         back to. Run `mp config set-password --account {account}`."
     )
 }
 

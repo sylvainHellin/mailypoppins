@@ -1337,9 +1337,11 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
         text(&alpha, "detail"),
         mp_core::mp_command::login_rejected_detail(
             ALPHA,
-            mp_protocol::account::RejectedLogin::Imap
+            mp_protocol::account::RejectedLogin::Imap,
+            true
         ),
-        "in the sentence the TUI and the desktop app show"
+        "in the sentence the TUI and the desktop app show, without a kind: the \
+         account has no SMTP password of its own, so one password serves both (PERSO-297)"
     );
     let credentials = block_on(async {
         let mut conn = client(tmp.path()).await;
@@ -1348,6 +1350,11 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
     assert_eq!(
         credentials["accounts"][0]["rejected_logins"],
         json!(["imap"]),
+        "{credentials}"
+    );
+    assert_eq!(
+        credentials["accounts"][0]["shared_password"],
+        json!(true),
         "{credentials}"
     );
 

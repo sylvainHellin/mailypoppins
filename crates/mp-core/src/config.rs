@@ -74,7 +74,7 @@ pub fn retired_oauth2_message(account: &str) -> String {
          remove the auth_method line and store the password with \
          `{}`.",
         crate::mp_command::here(&["config", "oauth2-login", "--account", account]),
-        crate::mp_command::here(&["config", "set-password", "smtp", "--account", account])
+        crate::mp_command::here(&["config", "set-password", "--account", account])
     )
 }
 
@@ -2311,7 +2311,8 @@ host = "imap.example.com"
     }
 
     /// The IMAP password wins, the SMTP one serves when it is missing, and
-    /// with neither the sentence names both and the IMAP command (PERSO-199).
+    /// with neither the sentence names both and the command that stores one
+    /// password as both (PERSO-199, PERSO-297).
     #[test]
     fn the_imap_password_falls_back_to_the_smtp_one_and_says_so_when_both_are_missing() {
         let both = [("imap-password-a", "imap"), ("smtp-password-a", "smtp")];
@@ -2324,7 +2325,7 @@ host = "imap.example.com"
         assert_eq!(
             err.to_string(),
             "No IMAP password is stored for account 'a', nor an SMTP password to fall back to. \
-             Run `mp config set-password imap --account a`."
+             Run `mp config set-password --account a`."
         );
     }
 

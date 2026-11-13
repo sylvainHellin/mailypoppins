@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { CircleAlert, CloudOff, KeyRound, LogIn, RefreshCw, Power, SquarePen, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { bannerFor, type AppState } from "@/app/state";
-import { checkAccount, checkLabel, loginRejected, shownChecks } from "@/app/health";
+import { checkAccount, checkLabel, loginRejected, sharedPassword, shownChecks } from "@/app/health";
 import { openConfig } from "@/app/interop";
 import type { HealthCheck, RejectedLogin } from "@/protocol/types";
 import { queueDepth, queueText } from "@/app/outbox";
@@ -71,7 +71,7 @@ function HealthLine({ check, rejected }: { check: HealthCheck; rejected: Rejecte
           Sign in again
         </Button>
       ) : rejected ? (
-        <PasswordButton account={rejected.account} kind={rejected.kind} />
+        <PasswordButton account={rejected.account} kind={sharedPassword(s, rejected.account) ? null : rejected.kind} />
       ) : null}
       <Button
         size="icon-xs"
@@ -85,10 +85,14 @@ function HealthLine({ check, rejected }: { check: HealthCheck; rejected: Rejecte
   );
 }
 
-/** The button that opens the dialog setting the `kind` password `account`'s rejected login needs. */
-function PasswordButton({ account, kind }: { account: string; kind: "imap" | "smtp" }) {
+/**
+ * The button that opens the dialog setting the `kind` password `account`'s
+ * rejected login needs, or with `null` the one password both logins use
+ * (PERSO-297), the command the daemon's sentence names.
+ */
+function PasswordButton({ account, kind }: { account: string; kind: "imap" | "smtp" | null }) {
   const dispatch = useDispatch();
-  const label = `Set ${kind.toUpperCase()} password`;
+  const label = kind === null ? "Set password" : `Set ${kind.toUpperCase()} password`;
   return (
     <Button
       size="xs"

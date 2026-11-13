@@ -77,7 +77,7 @@ Each error a user can meet between `mp config init` and a login names what happe
 
 ```
 No SMTP password is stored for account 'tum'. Run `mp config set-password smtp --account tum`.
-No IMAP password is stored for account 'tum', nor an SMTP password to fall back to. Run `mp config set-password imap --account tum`.
+No IMAP password is stored for account 'tum', nor an SMTP password to fall back to. Run `mp config set-password --account tum`.
 No SMTP password is stored for account 'tum' in the system keyring (service 'mailypoppins'). Run `mp config set-password smtp --account tum`.
 Could not read the SMTP password of account 'tum' from the system keyring: <the keyring's reason>. Unlock the system keyring (on macOS, the login Keychain) and retry, or set `secrets_backend = "encrypted-file"` in /home/me/.config/mailypoppins/config.toml and restart the daemon (`mp daemon restart`), then store the password again.
 Could not read this machine's ID, from which the encrypted secrets file's key is derived (<reason>). To store passwords, create /etc/machine-id (`sudo systemd-machine-id-setup`), or set `secrets_backend = "keyring"` in /home/me/.config/mailypoppins/config.toml and restart the daemon (`mp daemon restart`).
@@ -116,8 +116,8 @@ secrets_backend = "keyring"
 ```
 
 This swaps the storage at startup. There is no automatic migration: you
-will need to re-set passwords via `mp config set-password <which>
---account <name>` after flipping the switch.
+will need to re-set passwords via `mp config set-password --account <name>`
+(add `smtp` or `imap` when the two differ) after flipping the switch.
 A running daemon that has already opened its backend refuses a `config.reload` that flips `secrets_backend` (`-32007`, "restart the daemon to apply"), so run `mp daemon restart` after the edit.
 
 The keyring service name is `mailypoppins`, and `mailypoppins-<name>` on a named profile (`mp --profile <name>`), so a profile keeps its passwords apart from the default profile's even for an account of the same name.

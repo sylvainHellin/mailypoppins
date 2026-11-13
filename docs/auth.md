@@ -23,7 +23,7 @@ No write takes a block naming it: the daemon's `account_block` refuses one.
 - IMAP falls back to the SMTP password if `imap-password-<account>` is missing.
 - Default backend: machine-bound encrypted file at `~/.config/mailypoppins/secrets.enc`.
   Opt into the OS keyring with `secrets_backend = "keyring"` in `config.toml`; both backends use the same keys (see [secrets.md](secrets.md)).
-- Set or rotate via `mp config set-password {smtp|imap} --account <name>`; `--stdin` reads the password from a pipe instead of the prompt (first line, newline removed, nothing else trimmed; refused on a terminal or an empty line).
+- Set or rotate via `mp config set-password --account <name>`, which stores one password as both the IMAP and the SMTP one (PERSO-297), or `mp config set-password {smtp|imap} --account <name>` for an account whose two differ; `--stdin` reads the password from a pipe instead of the prompt (first line, newline removed, nothing else trimmed; refused on a terminal or an empty line).
 
 ## Graph (Microsoft Graph REST)
 
@@ -71,6 +71,6 @@ See [exchange-setup.md](exchange-setup.md) for the Entra ID app-registration wal
 
 ## Recovery
 
-- Forgotten password: `mp config set-password {smtp|imap} --account <name>`.
+- Forgotten password: `mp config set-password --account <name>` (add `smtp` or `imap` when the two differ).
 - Expired Graph refresh token: `mp config oauth2-login --account <name>`.
 - Lost / corrupted secrets file (e.g. Time Machine restore on a new Mac): `mp config reset-secrets`. This wipes `secrets.enc` and `tokens/`, then walks each account prompting for re-entry.

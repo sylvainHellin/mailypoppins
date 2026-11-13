@@ -72,9 +72,11 @@
 //! pub struct SetPasswordParams;
 //! impl SetPasswordParams {
 //!     pub fn new(account: impl Into<String>, kind: SecretKind, value: impl Into<String>) -> Self;
+//!     pub fn both(account: impl Into<String>, value: impl Into<String>) -> Self; // PERSO-297
 //!     pub fn from_params(params: &Value) -> Result<Self, DomainError>;
 //!     pub fn account(&self) -> &str;
-//!     pub fn kind(&self) -> SecretKind;
+//!     pub fn kind(&self) -> Option<SecretKind>;         // None: one password for both
+//!     pub fn kinds(&self) -> &[SecretKind];              // IMAP first
 //!     pub fn value(&self) -> &str;
 //! }
 //! ```
@@ -548,7 +550,7 @@ fn a_secret_kind_travels_as_its_wire_word_and_names_the_existing_backend_key() {
 fn a_debug_of_the_set_password_params_prints_the_redaction_literal() {
     let params = SetPasswordParams::new("alpha", SecretKind::Smtp, SECRET);
     assert_eq!(params.account(), "alpha");
-    assert_eq!(params.kind(), SecretKind::Smtp);
+    assert_eq!(params.kind(), Some(SecretKind::Smtp));
     assert_eq!(
         params.value(),
         SECRET,
@@ -581,8 +583,21 @@ fn set_password_params_parse_from_the_wire_and_refuse_an_unknown_kind() {
     }))
     .expect("a well-formed params object parses");
     assert_eq!(parsed.account(), "alpha");
-    assert_eq!(parsed.kind(), SecretKind::Imap);
+    assert_eq!(parsed.kind(), Some(SecretKind::Imap));
+    assert_eq!(parsed.kinds(), [SecretKind::Imap]);
     assert_eq!(parsed.value(), SECRET);
+
+    // No kind is one password for both logins (PERSO-297), the IMAP one
+    // first, since the first stored starts a new account's first sync
+    // (PERSO-199).
+    let both = SetPasswordParams::from_params(&json!({"account": "alpha", "value": SECRET}))
+        .expect("a params object without a kind parses");
+    assert_eq!(both.kind(), None);
+    assert_eq!(both.kinds(), [SecretKind::Imap, SecretKind::Smtp]);
+    assert_eq!(
+        SetPasswordParams::both("alpha", SECRET).kinds(),
+        [SecretKind::Imap, SecretKind::Smtp]
+    );
 
     let refused = SetPasswordParams::from_params(&json!({
         "account": "alpha", "kind": "pop3", "value": SECRET
@@ -2158,12 +2173,17 @@ async fn config_set_password_stores_through_the_existing_backend() {
     .await;
     assert_keys(
         &result,
-        &["account", "key", "kind", "stored"],
+        &["account", "key", "keys", "kind", "kinds", "stored"],
         "a config.set_password result",
     );
     assert_eq!(result["stored"], json!(true));
     assert_eq!(result["account"], json!("alpha"));
     assert_eq!(result["kind"], json!("smtp"));
+    assert_eq!(result["kinds"], json!(["smtp"]));
+    assert_eq!(
+        result["keys"],
+        json!([SecretKind::Smtp.secret_key("alpha")])
+    );
     assert_eq!(
         result["key"],
         json!(SecretKind::Smtp.secret_key("alpha")),
@@ -2186,6 +2206,57 @@ async fn config_set_password_stores_through_the_existing_backend() {
     )
     .await;
     assert_eq!(imap["key"], json!(SecretKind::Imap.secret_key("alpha")));
+}
+
+/// PERSO-297: a `config.set_password` without a kind stores the one value as
+/// both the IMAP and the SMTP password, in one call, and `account.credentials`
+/// reports the account as one with a single password until the two differ.
+#[tokio::test]
+async fn config_set_password_without_a_kind_stores_one_password_as_both() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let result = call_ok(
+        &mut conn,
+        "config.set_password",
+        json!({"account": "alpha", "value": SECRET}),
+    )
+    .await;
+    assert_keys(
+        &result,
+        &["account", "keys", "kinds", "stored"],
+        "a config.set_password result for both passwords",
+    );
+    assert_eq!(result["kinds"], json!(["imap", "smtp"]), "IMAP first");
+    assert_eq!(
+        result["keys"],
+        json!([
+            SecretKind::Imap.secret_key("alpha"),
+            SecretKind::Smtp.secret_key("alpha")
+        ])
+    );
+
+    let shared = |credentials: &Value| {
+        let alpha = &credentials["accounts"][0];
+        (
+            alpha["imap_password"].clone(),
+            alpha["smtp_password"].clone(),
+            alpha["shared_password"].clone(),
+        )
+    };
+    let both = call_ok(&mut conn, "account.credentials", json!({})).await;
+    assert!(!both.to_string().contains(SECRET), "{both}");
+    assert_eq!(shared(&both), (json!(true), json!(true), json!(true)));
+
+    call_ok(
+        &mut conn,
+        "config.set_password",
+        json!({"account": "alpha", "kind": "imap", "value": "another one"}),
+    )
+    .await;
+    let apart = call_ok(&mut conn, "account.credentials", json!({})).await;
+    assert_eq!(shared(&apart), (json!(true), json!(true), json!(false)));
 }
 
 /// `config.probe` dials a candidate account's servers through the daemon and
@@ -2409,23 +2480,29 @@ async fn account_credentials_reports_presence_and_never_a_value() {
         before,
         json!({"accounts": [
             {"account": "alpha", "auth_method": "password",
-             "smtp_password": false, "imap_password": false, "token": null,
+             "smtp_password": false, "imap_password": false, "shared_password": true,
+             "token": null,
              "missing_scopes": [], "rejected_logins": []},
             {"account": "exchange", "auth_method": "graph",
-             "smtp_password": null, "imap_password": null, "token": "not_cached",
+             "smtp_password": null, "imap_password": null, "shared_password": null,
+             "token": "not_cached",
              "missing_scopes": [], "rejected_logins": []},
             {"account": "teams", "auth_method": "graph",
-             "smtp_password": null, "imap_password": null, "token": "invalid",
+             "smtp_password": null, "imap_password": null, "shared_password": null,
+             "token": "invalid",
              "missing_scopes": [], "rejected_logins": []},
             // The retired `oauth2` mode holds no credential anything reads.
             {"account": "office", "auth_method": "oauth2",
-             "smtp_password": null, "imap_password": null, "token": null,
+             "smtp_password": null, "imap_password": null, "shared_password": null,
+             "token": null,
              "missing_scopes": [], "rejected_logins": []},
             {"account": "outlook", "auth_method": "graph",
-             "smtp_password": null, "imap_password": null, "token": "valid",
+             "smtp_password": null, "imap_password": null, "shared_password": null,
+             "token": "valid",
              "missing_scopes": ["Calendars.ReadWrite"], "rejected_logins": []},
             {"account": "nocal", "auth_method": "graph",
-             "smtp_password": null, "imap_password": null, "token": "valid",
+             "smtp_password": null, "imap_password": null, "shared_password": null,
+             "token": "valid",
              "missing_scopes": [], "rejected_logins": []},
         ]}),
     );
@@ -2472,7 +2549,8 @@ async fn account_credentials_reports_presence_and_never_a_value() {
         after,
         json!({"accounts": [
             {"account": "alpha", "auth_method": "password",
-             "smtp_password": true, "imap_password": false, "token": null,
+             "smtp_password": true, "imap_password": false, "shared_password": true,
+             "token": null,
              "missing_scopes": [], "rejected_logins": []},
         ]}),
         "the account named, and only that one"

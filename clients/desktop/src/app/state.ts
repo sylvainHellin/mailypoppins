@@ -893,10 +893,11 @@ export type BlockDialog = {
 };
 
 /**
- * The password dialog: which password of which account it stores. The
- * value itself lives in the dialog's own state and never in the model.
+ * The password dialog: which password of which account it stores, `null`
+ * for one password stored as both the IMAP and the SMTP one (PERSO-297).
+ * The value itself lives in the dialog's own state and never in the model.
  */
-export type PasswordDialog = { account: string; kind: SecretKind };
+export type PasswordDialog = { account: string; kind: SecretKind | null };
 
 /**
  * The account wizard and the provider it starts on; its form lives in the

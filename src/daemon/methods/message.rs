@@ -4426,7 +4426,7 @@ mod tests {
             assert!(
                 err.message.contains(&format!(
                     "is still queued: {}; nothing was changed",
-                    mp_core::mp_command::login_rejected_detail(
+                    crate::login_gate::rejected_detail(
                         "alice",
                         mp_protocol::account::RejectedLogin::Imap
                     )

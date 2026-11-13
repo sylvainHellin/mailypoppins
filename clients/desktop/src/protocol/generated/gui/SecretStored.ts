@@ -5,10 +5,19 @@
  */
 export type SecretStored = { stored: boolean, account: string,
 /**
- * `smtp` or `imap`.
+ * `smtp` or `imap`; empty for one password stored as both.
  */
 kind: string,
 /**
- * The secrets backend's key.
+ * The secrets backend's key; empty for one password stored as both.
  */
-key: string, };
+key: string,
+/**
+ * Every password stored, in the order written: the named one, or
+ * `imap` then `smtp` for one password stored as both (PERSO-297).
+ */
+kinds: Array<string>,
+/**
+ * The secrets backend's key of each of `kinds`.
+ */
+keys: Array<string>, };

@@ -237,6 +237,27 @@ pub fn is_refused(login: &Login) -> bool {
     refusals().holds(login, Instant::now())
 }
 
+/// Whether the password account named `account` logs in to IMAP and SMTP
+/// with one password (PERSO-297): no IMAP password is stored (the IMAP login
+/// falls back to the SMTP one), no SMTP one is, or the two are equal. A
+/// password the backend cannot read counts as not stored. Read from the
+/// secrets backend, compared here, and never handed out.
+pub fn shared_password(account: &str) -> bool {
+    let stored = |kind: &str| crate::config::get_secret(&format!("{kind}-password-{account}")).ok();
+    match (stored("imap"), stored("smtp")) {
+        (Some(imap), Some(smtp)) => imap == smtp,
+        _ => true,
+    }
+}
+
+/// What every surface says about `account`'s refused `login`
+/// ([`mp_core::mp_command::login_rejected_detail`]), with the kind-less
+/// set-password command when the account uses one password for both logins.
+pub fn rejected_detail(account: &str, login: RejectedLogin) -> String {
+    let shared = login != RejectedLogin::Graph && shared_password(account);
+    mp_core::mp_command::login_rejected_detail(account, login, shared)
+}
+
 /// The logins of `account` the list holds a fresh refusal of, in the order of
 /// [`RejectedLogin`].
 pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {

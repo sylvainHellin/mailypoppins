@@ -143,7 +143,7 @@ The table is what routes and through what:
 | `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
 | `mp config show` | `config.get`, `account.credentials` | P4-U14, 2026-10-22 |
 | `mp config init`, `mp config add-account` | `config.get` before the first prompt, `config.probe` for each connection test and mailbox list, `config.oauth2_login` with a `candidate`, then `config.init` or `config.add_account` and `config.set_password` | P4-U14, 2026-10-22 |
-| `mp config set-password <smtp\|imap> [--account]` | `config.set_password`, with the `dialoguer` prompt in the client | P4-U14 |
+| `mp config set-password [smtp\|imap] [--account] [--stdin]` | `config.set_password`, with the `dialoguer` prompt in the client; without a kind one call with no `kind` stores the password as both (PERSO-297) | P4-U14 |
 | `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
 | `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |

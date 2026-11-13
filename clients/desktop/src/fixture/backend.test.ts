@@ -10,6 +10,6 @@ describe("the fixture's printed mp commands", () => {
     expect(shellWord("")).toBe("''");
     const message = retiredOauth2Message("TUM Mail");
     expect(message).toContain("`mp config oauth2-login --account 'TUM Mail'`");
-    expect(message).toContain("`mp config set-password smtp --account 'TUM Mail'`");
+    expect(message).toContain("`mp config set-password --account 'TUM Mail'`");
   });
 });

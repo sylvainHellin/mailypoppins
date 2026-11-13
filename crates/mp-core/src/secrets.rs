@@ -141,16 +141,20 @@ impl std::fmt::Display for MissingSecret {
         let Some((kind, account)) = password_key_parts(&self.key) else {
             return write!(f, "No secret '{}' is stored{place}.", self.key);
         };
-        let fallback = if self.smtp_fallback_missing {
-            ", nor an SMTP password to fall back to"
+        // With neither password stored there is none to differ from, and one
+        // password stored as both fixes the sync and the send (PERSO-297); a
+        // missing SMTP password alone is set alone, so an IMAP password of
+        // its own stays as it is.
+        let (fallback, command_kind) = if self.smtp_fallback_missing {
+            (", nor an SMTP password to fall back to", None)
         } else {
-            ""
+            ("", Some(kind))
         };
         write!(
             f,
             "No {} password is stored for account '{account}'{place}{fallback}. Run `{}`.",
             kind.to_uppercase(),
-            set_password_command(kind, account, self.profile.as_deref())
+            set_password_command(command_kind, account, self.profile.as_deref())
         )
     }
 }
@@ -169,12 +173,13 @@ fn password_key_parts(key: &str) -> Option<(&str, &str)> {
     matches!(kind, "smtp" | "imap").then_some((kind, account))
 }
 
-/// The command that stores the `kind` password of `account` on `profile`.
-fn set_password_command(kind: &str, account: &str, profile: Option<&str>) -> String {
-    crate::mp_command::on(
-        profile,
-        &["config", "set-password", kind, "--account", account],
-    )
+/// The command that stores the `kind` password of `account` on `profile`,
+/// or with no kind the one password of both logins.
+fn set_password_command(kind: Option<&str>, account: &str, profile: Option<&str>) -> String {
+    let mut args = vec!["config", "set-password"];
+    args.extend(kind);
+    args.extend(["--account", account]);
+    crate::mp_command::on(profile, &args)
 }
 
 /// The way back from a backend that cannot serve this process: name
@@ -871,7 +876,9 @@ mod tests {
     }
 
     /// The IMAP login falls back to the SMTP password, so when neither is
-    /// there the sentence says both are missing and names the IMAP command.
+    /// there the sentence says both are missing and names the command that
+    /// stores one password as both (PERSO-297): nothing is stored to differ
+    /// from, and one prompt fixes the sync and the send.
     #[test]
     fn a_missing_imap_password_with_no_smtp_fallback_says_both_are_missing() {
         let missing = MissingSecret::new("imap-password-tum", SecretsBackendKind::EncryptedFile)
@@ -879,7 +886,7 @@ mod tests {
         assert_eq!(
             missing.to_string(),
             "No IMAP password is stored for account 'tum', nor an SMTP password to fall back \
-             to. Run `mp config set-password imap --account tum`."
+             to. Run `mp config set-password --account tum`."
         );
     }
 

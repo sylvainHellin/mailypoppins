@@ -129,7 +129,7 @@ function AccountCard({
   credential: AccountCredential | undefined;
   conversations: boolean;
   onConversations: (on: boolean) => void;
-  onPassword: (kind: SecretKind) => void;
+  onPassword: (kind: SecretKind | null) => void;
   onSignIn: () => void;
 }) {
   const password = usesPassword(account);
@@ -161,12 +161,19 @@ function AccountCard({
       <ConversationViewSwitch account={account.name} on={conversations} onChange={onConversations} />
       <div className="mt-2 flex flex-wrap gap-2">
         {retired ? null : password ? (
-          (["smtp", "imap"] as const).map((kind) => (
-            <Button key={kind} size="xs" variant="outline" onClick={() => onPassword(kind)}>
+          <>
+            {/* One password for both logins first, as `mp config set-password` without a kind (PERSO-297). */}
+            <Button size="xs" variant="outline" onClick={() => onPassword(null)} title="One password for IMAP and SMTP">
               <KeyRound aria-hidden="true" />
-              {`Set ${kindLabel(kind)} password`}
+              Set password
             </Button>
-          ))
+            {(["smtp", "imap"] as const).map((kind) => (
+              <Button key={kind} size="xs" variant="outline" onClick={() => onPassword(kind)}>
+                <KeyRound aria-hidden="true" />
+                {`Set ${kindLabel(kind)} password`}
+              </Button>
+            ))}
+          </>
         ) : (
           <Button size="xs" variant="outline" onClick={onSignIn} title="Sign in with a device code">
             <LogIn aria-hidden="true" />

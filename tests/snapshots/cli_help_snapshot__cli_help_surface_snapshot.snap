@@ -621,7 +621,7 @@ Usage: mp config [OPTIONS] <COMMAND>
 Commands:
   init           Interactive setup wizard
   show           Show current configuration
-  set-password   Store a password in the active secrets backend (for the first account unless `-A` names one)
+  set-password   Store a password in the active secrets backend, one for both IMAP and SMTP unless "imap" or "smtp" names one (for the first account unless `-A` names one)
   reset-secrets  Wipe the encrypted secrets file (and Graph token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
   add-account    Add a new account to the existing config
   oauth2-login   Sign a Microsoft 365 (Graph) account in with the OAuth2 device code flow and cache its token (for the first Graph account unless `-A` names one)
@@ -652,12 +652,12 @@ Options:
   -h, --help            Print help
 
 $ mp config set-password --help
-Store a password in the active secrets backend (for the first account unless `-A` names one)
+Store a password in the active secrets backend, one for both IMAP and SMTP unless "imap" or "smtp" names one (for the first account unless `-A` names one)
 
-Usage: mp config set-password [OPTIONS] <WHICH>
+Usage: mp config set-password [OPTIONS] [WHICH]
 
 Arguments:
-  <WHICH>  Which password to set: "smtp" or "imap"
+  [WHICH]  Which password to set when the two differ: "imap" or "smtp"; leave it out to set one password for both
 
 Options:
       --stdin              Read the password from standard input instead of prompting: the first line, its newline removed and nothing else trimmed. Refused when standard input is a terminal or the line is empty

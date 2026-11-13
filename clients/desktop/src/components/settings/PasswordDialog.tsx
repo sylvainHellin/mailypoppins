@@ -1,5 +1,5 @@
-// The password dialog (ACC-05): one SMTP or IMAP password of one account,
-// stored through the daemon's secrets backend. The value lives in this
+// The password dialog (ACC-05): one SMTP or IMAP password of one account, or
+// one password stored as both (PERSO-297), through the daemon's secrets backend. The value lives in this
 // component's state only, never in the model, and is cleared on submit and
 // on close, whatever the answer.
 
@@ -35,10 +35,14 @@ export function PasswordDialog({ dialog, onOpenChange }: PasswordDialogProps) {
   const fieldRef = useRef<HTMLInputElement>(null);
   const open = dialog !== null;
   const account = dialog?.account ?? "";
-  const kind = dialog?.kind ?? "smtp";
+  const kind = dialog ? dialog.kind : "smtp";
   const label = kindLabel(kind);
   const configured = s.config.data?.config.accounts.find((a) => a.name === account);
-  const username = configured ? configured[kind].username : "";
+  // The IMAP username falls back to the SMTP one, as the daemon reads it.
+  const username = !configured ? "" : kind === null ? configured.imap.username || configured.smtp.username : configured[kind].username;
+  const title = kind === null ? "Set password" : `Set ${label} password`;
+  const form = kind === null ? `Password for ${account}` : `${label} password for ${account}`;
+  const both = kind === null ? "one password for IMAP and SMTP, " : "";
   const backend = s.config.data?.config.secrets_backend || "configured";
 
   // A new target, or none: nothing typed for another survives.
@@ -73,13 +77,13 @@ export function PasswordDialog({ dialog, onOpenChange }: PasswordDialogProps) {
     >
       <DialogContent initialFocus={fieldRef} data-slot="password-dialog">
         <DialogHeader>
-          <DialogTitle>{`Set ${label} password`}</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            {`For ${account}${username ? ` (${username})` : ""}; stored in the ${backend} secrets backend, never shown again.`}
+            {`For ${account}${username ? ` (${username})` : ""}; ${both}stored in the ${backend} secrets backend, never shown again.`}
           </DialogDescription>
         </DialogHeader>
         <form
-          aria-label={`${label} password for ${account}`}
+          aria-label={form}
           className="flex flex-col gap-2"
           onSubmit={(e) => {
             e.preventDefault();

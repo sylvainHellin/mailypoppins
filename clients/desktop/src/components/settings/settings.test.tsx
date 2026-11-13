@@ -123,6 +123,7 @@ describe("the Settings view", () => {
     expect(within(home).queryByRole("button", { name: /password/ })).toBeNull();
     const work = card(view, "work");
     expect(within(work).queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(within(work).getByRole("button", { name: "Set password" })).toBeEnabled();
     expect(within(work).getByRole("button", { name: "Set SMTP password" })).toBeEnabled();
     expect(within(work).getByRole("button", { name: "Set IMAP password" })).toBeEnabled();
 
@@ -259,6 +260,21 @@ describe("the password dialog", () => {
     expect(within(again).getByLabelText("Password")).toHaveValue("");
   });
 
+  // PERSO-297: one password for both logins is the default, as `mp config set-password` without a kind.
+  it("stores one password as both the IMAP and the SMTP password by default", async () => {
+    const { user, probe, view } = await openSettings();
+    await user.click(within(card(view, "work")).getByRole("button", { name: "Set password" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set password" });
+    expect(dialog).toHaveAccessibleDescription(/For work \(me@example.com\); one password for IMAP and SMTP, stored in the encrypted-file secrets backend/);
+    await user.type(within(dialog).getByLabelText("Password"), SECRET);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Set password" })).toBeNull());
+    expect(callsOf("config_set_password")).toEqual([{ account: "work", kind: null, value: REDACTED }]);
+    expect(mock.passwords).toEqual([{ account: "work", kind: null, value: REDACTED }]);
+    expect(probe.state.notice).toBe("Stored the IMAP and SMTP password for work");
+    expect(JSON.stringify(probe.state)).not.toContain(SECRET);
+  });
+
   it("says whether each password and token is stored, and reads it again once a password is stored", async () => {
     // With no account check up, nothing but Settings reads them (PERSO-296).
     resetMock();
@@ -284,7 +300,7 @@ describe("the password dialog", () => {
   });
 
   it("asks for a new sign-in when the token lacks the calendar scope", () => {
-    const graph = { account: "home", auth_method: "graph", smtp_password: null, imap_password: null, token: "valid" as const, rejected_logins: [] };
+    const graph = { account: "home", auth_method: "graph", smtp_password: null, imap_password: null, shared_password: null, token: "valid" as const, rejected_logins: [] };
     expect(calendarScopeLine({ ...graph, missing_scopes: ["Calendars.ReadWrite"] })).toBe("needs a new sign-in to grant calendar access");
     expect(calendarScopeLine({ ...graph, missing_scopes: [] })).toBeNull();
     expect(calendarScopeLine(undefined)).toBeNull();

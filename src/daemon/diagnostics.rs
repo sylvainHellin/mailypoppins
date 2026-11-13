@@ -504,7 +504,13 @@ impl Diagnostics {
             }
         };
         let check = account_check(account, health, opening_for);
-        with_rejected_logins(check, account, &crate::login_gate::rejected_logins(config))
+        let rejected = crate::login_gate::rejected_logins(config);
+        // The secrets are read only for a refused password, the rare case.
+        let shared = rejected
+            .first()
+            .is_some_and(|login| *login != mp_protocol::account::RejectedLogin::Graph)
+            && crate::login_gate::shared_password(account);
+        with_rejected_logins(check, account, &rejected, shared)
     }
 
     /// Pretend `account` has been opening since `ago` before now.
@@ -608,16 +614,19 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
 /// The first of `rejected`, in the order of
 /// [`mp_protocol::account::RejectedLogin`], is the one named, as in every
 /// client; a check that is not `ok` already says more than the login.
+/// `shared_password` is whether the account uses one password for both
+/// logins, which makes the command the kind-less one (PERSO-297).
 fn with_rejected_logins(
     check: Check,
     account: &str,
     rejected: &[mp_protocol::account::RejectedLogin],
+    shared_password: bool,
 ) -> Check {
     match rejected.first() {
         Some(&login) if check.status == Status::Ok => Check::new(
             format!("account:{account}"),
             Status::Warn,
-            mp_core::mp_command::login_rejected_detail(account, login),
+            mp_core::mp_command::login_rejected_detail(account, login, shared_password),
         ),
         _ => check,
     }
@@ -1265,21 +1274,27 @@ mod tests {
     fn a_rejected_login_warns_naming_the_login() {
         use mp_protocol::account::RejectedLogin;
         let serving = || account_check("tum", RuntimeHealth::Ready, std::time::Duration::ZERO);
-        let smtp = with_rejected_logins(serving(), "tum", &[RejectedLogin::Smtp]);
+        let smtp = with_rejected_logins(serving(), "tum", &[RejectedLogin::Smtp], false);
         assert_eq!(smtp.name, "account:tum");
         assert_eq!(smtp.status, Status::Warn);
         assert_eq!(
             smtp.detail,
             "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
         );
+        let shared = with_rejected_logins(serving(), "tum", &[RejectedLogin::Smtp], true);
+        assert_eq!(
+            shared.detail,
+            "the server rejected the SMTP password; set it with mp config set-password -A tum"
+        );
         let both = with_rejected_logins(
             serving(),
             "tum",
             &[RejectedLogin::Imap, RejectedLogin::Smtp],
+            false,
         );
         assert!(both.detail.contains("IMAP password"), "{}", both.detail);
         assert_eq!(
-            with_rejected_logins(serving(), "tum", &[]).status,
+            with_rejected_logins(serving(), "tum", &[], false).status,
             Status::Ok
         );
         let blocked = account_check(
@@ -1287,7 +1302,7 @@ mod tests {
             RuntimeHealth::Blocked("held".into()),
             std::time::Duration::ZERO,
         );
-        let kept = with_rejected_logins(blocked, "tum", &[RejectedLogin::Smtp]);
+        let kept = with_rejected_logins(blocked, "tum", &[RejectedLogin::Smtp], false);
         assert_eq!(kept.detail, "blocked: held");
     }
 

@@ -3134,7 +3134,7 @@ async fn submit_durably<S: SmtpSubmit>(
             if crate::login_gate::login_rejected(&e).is_none() {
                 return Err(e);
             }
-            let detail = mp_core::mp_command::login_rejected_detail(
+            let detail = crate::login_gate::rejected_detail(
                 account,
                 mp_protocol::account::RejectedLogin::Smtp,
             );
@@ -5731,7 +5731,7 @@ mod smtp_durability_tests {
         let message = format!("{refused:#}");
         assert!(
             message.contains("the message waits in the outbox")
-                && message.contains(&mp_core::mp_command::login_rejected_detail(
+                && message.contains(&crate::login_gate::rejected_detail(
                     ACCOUNT,
                     mp_protocol::account::RejectedLogin::Smtp
                 )),
