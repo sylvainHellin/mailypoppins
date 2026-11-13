@@ -198,17 +198,17 @@ fn flag_tokens(flags: crate::types::MessageFlags) -> Vec<String> {
     out
 }
 
-/// The record `message.get` answers for a server-search hit the store holds
-/// no row for, parsed from the server's copy found in `mailbox` (a mailbox
-/// key): the record a stored row of `mailbox` would print, under the selector
-/// a fetch of it would land as.
-///
 /// The selector of a server-search hit with no row: the one a fetch of it
 /// into the mailbox keyed `mailbox` would land it under.
 pub fn fetched_selector(account: &str, mailbox: &str, message_id: &str) -> String {
     Selector::new(account, mailbox, crate::selector::message_key(message_id)).to_string()
 }
 
+/// The record `message.get` answers for a server-search hit the store holds
+/// no row for, parsed from the server's copy found in `mailbox` (a mailbox
+/// key): the record a stored row of `mailbox` would print, under the selector
+/// a fetch of it would land as.
+///
 /// The attachments are [`fetched_attachments`], whose order is the `part`
 /// `message.materialise_attachment`'s `hit` address takes.
 pub fn shown_fetched(
