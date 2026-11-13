@@ -66,8 +66,6 @@ pub enum SecretsBackendKind {
 
 #[derive(Debug)]
 pub enum SecretsError {
-    /// Secrets file does not exist yet. Caller should run `mp config init`.
-    NotInitialized(PathBuf),
     /// File exists but cannot be decrypted (wrong machine, wrong user,
     /// corrupt, or tampered). Caller should run `mp config reset-secrets`.
     Undecryptable(PathBuf, String),
@@ -78,11 +76,6 @@ pub enum SecretsError {
 impl std::fmt::Display for SecretsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotInitialized(p) => write!(
-                f,
-                "Secrets store not initialized at {}. Run `mp config init` (fresh install) or `mp config set-password` to add credentials.",
-                p.display()
-            ),
             Self::Undecryptable(p, why) => write!(
                 f,
                 "Cannot decrypt secrets store at {} ({}). This usually means the file was created on a different machine or by a different user. Run `mp config reset-secrets` to wipe and re-enter passwords.",

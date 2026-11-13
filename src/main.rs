@@ -6286,11 +6286,6 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
     let mut secrets_open = true;
     if let Err(e) = secrets {
         match &e {
-            mailypoppins::secrets::SecretsError::NotInitialized(_) => {
-                // Empty store at startup is fine -- `mp config init` or
-                // `set-password` will populate it. The actual missing-key
-                // error surfaces later when `SmtpConfig::load` is called.
-            }
             mailypoppins::secrets::SecretsError::Undecryptable(_, _) if resets_secrets => {
                 secrets_open = false;
             }

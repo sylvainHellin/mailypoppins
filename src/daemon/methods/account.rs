@@ -138,13 +138,10 @@ pub fn credentials(
     backend: crate::secrets::SecretsBackendKind,
     accounts: &[AccountConfig],
 ) -> Result<AccountCredentials, DomainError> {
-    match crate::secrets::init(backend) {
-        Ok(()) | Err(crate::secrets::SecretsError::NotInitialized(_)) => {}
-        Err(e) => {
-            return Err(DomainError::internal(format!(
-                "opening the secrets backend: {e}"
-            )))
-        }
+    if let Err(e) = crate::secrets::init(backend) {
+        return Err(DomainError::internal(format!(
+            "opening the secrets backend: {e}"
+        )));
     }
     let present = |key: String| crate::config::get_secret(&key).is_ok();
     let accounts = accounts

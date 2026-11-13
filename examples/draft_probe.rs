@@ -139,11 +139,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let global = load_global_config().context("loading config.toml")?;
     if let Err(e) = init_secrets_backend(&global) {
-        // An empty store is not fatal here either; the missing secret surfaces
-        // from `ImapConfig::load` with a better message.
-        if !matches!(e, mailypoppins::secrets::SecretsError::NotInitialized(_)) {
-            bail!("initialising the secrets backend: {e}");
-        }
+        bail!("initialising the secrets backend: {e}");
     }
     let account_name = match &args.cmd {
         Cmd::Append { account, .. } | Cmd::Dump { account, .. } | Cmd::List { account, .. } => {

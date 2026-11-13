@@ -39,9 +39,7 @@ fn main() -> Result<()> {
 
     let global = load_global_config().context("loading config.toml")?;
     if let Err(e) = init_secrets_backend(&global) {
-        if !matches!(e, mailypoppins::secrets::SecretsError::NotInitialized(_)) {
-            bail!("initialising the secrets backend: {e}");
-        }
+        bail!("initialising the secrets backend: {e}");
     }
     let account = global
         .accounts
