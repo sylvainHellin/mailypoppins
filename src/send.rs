@@ -5721,10 +5721,12 @@ mod smtp_durability_tests {
     }
 
     /// Takes every message, but only once released: the few seconds a live
-    /// SMTP session spends between `MAIL FROM` and the final 250.
+    /// SMTP session spends between `MAIL FROM` and the final 250. Each
+    /// submission passes its [`crate::gate::Gate`], which says when it
+    /// arrived and lets it through on a permit (PERSO-222).
+    #[derive(Default)]
     struct HeldSmtp {
-        started: tokio::sync::Notify,
-        release: tokio::sync::Notify,
+        gate: crate::gate::Gate,
     }
 
     impl SmtpSubmit for HeldSmtp {
@@ -5745,8 +5747,7 @@ mod smtp_durability_tests {
                 })
                 .collect();
             async move {
-                self.started.notify_one();
-                self.release.notified().await;
+                self.gate.pass().await;
                 Ok(SendResult { results })
             }
         }
@@ -5772,18 +5773,15 @@ mod smtp_durability_tests {
             account: account.clone(),
             row_id,
         };
-        let smtp = HeldSmtp {
-            started: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        };
+        let smtp = HeldSmtp::default();
 
         let config = smtp_config();
         let send = submit_durably(ACCOUNT, Some(durable), &built, &config, &smtp);
         let tick = async {
             // The sync tick lands inside the session, as at 12:01:56.
-            smtp.started.notified().await;
+            smtp.gate.arrived(1).await;
             resubmit_pending(&outbox.store, &outbox.blobs, &account, outbox::unix_now()).await;
-            smtp.release.notify_one();
+            smtp.gate.open(1);
         };
         let (report, ()) = tokio::join!(send, tick);
 
@@ -5821,15 +5819,12 @@ mod smtp_durability_tests {
             account,
             row_id,
         };
-        let smtp = HeldSmtp {
-            started: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        };
+        let smtp = HeldSmtp::default();
 
         let config = smtp_config();
         let send = submit_durably(ACCOUNT, Some(durable), &built, &config, &smtp);
         let discard = async {
-            smtp.started.notified().await;
+            smtp.gate.arrived(1).await;
             let refused = crate::daemon::methods::send::discard_in(
                 &outbox.store,
                 &outbox.blobs,
@@ -5837,7 +5832,7 @@ mod smtp_durability_tests {
                 false,
                 row_id,
             );
-            smtp.release.notify_one();
+            smtp.gate.open(1);
             refused
         };
         let (report, refused) = tokio::join!(send, discard);

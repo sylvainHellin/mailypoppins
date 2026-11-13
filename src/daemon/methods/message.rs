@@ -4268,7 +4268,10 @@ mod tests {
             let log: Arc<Mutex<Vec<String>>> = Arc::default();
             // The store and the blob root, known once the daemon is seeded.
             let paths: Arc<OnceLock<(PathBuf, PathBuf)>> = Arc::default();
-            let entered = Arc::new(tokio::sync::Notify::new());
+            // The body passes it on the one permit opened up front, which
+            // records that the tick is inside its body (PERSO-222).
+            let entered = Arc::new(crate::gate::Gate::new());
+            entered.open(1);
             let drain: DrainHook = {
                 let (log, paths) = (Arc::clone(&log), Arc::clone(&paths));
                 Arc::new(move |_ctx| {
@@ -4301,7 +4304,7 @@ mod tests {
                 Arc::new(move |_ctx| {
                     let entered = Arc::clone(&entered);
                     async move {
-                        entered.notify_one();
+                        entered.pass().await;
                         tokio::time::sleep(Duration::from_millis(1500)).await;
                         Ok(())
                     }
@@ -4325,7 +4328,7 @@ mod tests {
             star["settle"] = json!(false);
 
             let mutations = async {
-                entered.notified().await;
+                entered.arrived(1).await;
                 daemon.call(Kind::SetFlag, star, no_server).await.unwrap();
                 daemon
                     .call_within(

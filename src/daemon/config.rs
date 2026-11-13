@@ -873,16 +873,11 @@ pub(crate) fn blocked_by_failure(runtimes: &RuntimeTable, account: &str, reason:
     }
 }
 
-/// The gate the daemon tests hold a tick body at (PERSO-222).
-#[cfg(test)]
-#[path = "../../tests/support/gate.rs"]
-mod gate;
-
 #[cfg(test)]
 mod tests {
     use super::super::server::RuntimeHealth;
-    use super::gate;
     use super::*;
+    use crate::gate;
 
     fn parse(text: &str) -> GlobalConfig {
         validate_document(text, Path::new("/c/config.toml")).expect("a valid document")

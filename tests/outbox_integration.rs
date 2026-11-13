@@ -7,6 +7,9 @@
 //! which is exactly what a `kill -9` leaves behind: WAL-committed rows and
 //! nothing in memory.
 
+#[path = "support/gate.rs"]
+mod gate;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,7 +26,8 @@ use mailypoppins::outbox::{
 use mailypoppins::send::RecipientRole;
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
-use tokio::sync::Notify;
+
+use gate::Gate;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -155,34 +159,21 @@ impl Ledger {
     }
 }
 
-/// What a session does inside its first APPEND, after the server has filed the
-/// copy and before the acknowledgement comes back. The window a second drain
-/// slips into, and the window a `kill -9` lands in.
-enum Hold {
-    /// Park until released: a slow APPEND, the 19.7 MB message that took 5.8 s.
-    Until {
-        started: Arc<Notify>,
-        release: Arc<Notify>,
-    },
-    /// Never come back: the process died holding the request.
-    Forever { started: Arc<Notify> },
-}
-
 /// One drain's session onto a [`Ledger`], as the live path gives every drain
 /// its own `ImapSentMailbox` onto one server mailbox.
 struct SharedSent {
     ledger: Arc<Ledger>,
-    hold: Option<Hold>,
+    /// Where its first APPEND waits, after the server has filed the copy and
+    /// before the acknowledgement comes back: the window a second drain slips
+    /// into, and the window a `kill -9` lands in (PERSO-222). A test that
+    /// opens the gate is a slow APPEND, the 19.7 MB message that took 5.8 s;
+    /// one that never does is a process that died holding the request.
+    hold: Option<Arc<Gate>>,
 }
 
 impl SharedSent {
-    fn held_until(mut self, started: Arc<Notify>, release: Arc<Notify>) -> Self {
-        self.hold = Some(Hold::Until { started, release });
-        self
-    }
-
-    fn held_forever(mut self, started: Arc<Notify>) -> Self {
-        self.hold = Some(Hold::Forever { started });
+    fn held_at(mut self, gate: Arc<Gate>) -> Self {
+        self.hold = Some(gate);
         self
     }
 }
@@ -203,16 +194,8 @@ impl SentMailbox for SharedSent {
         let uid = self.ledger.file(mailbox, &message_id);
         // The hold is one-shot: the same session goes on to serve the rest of
         // the drain at full speed, exactly as one IMAP session does.
-        match self.hold.take() {
-            Some(Hold::Until { started, release }) => {
-                started.notify_one();
-                release.notified().await;
-            }
-            Some(Hold::Forever { started }) => {
-                started.notify_one();
-                std::future::pending::<()>().await;
-            }
-            None => {}
+        if let Some(gate) = self.hold.take() {
+            gate.pass().await;
         }
         Ok(Some(uid))
     }
@@ -682,11 +665,8 @@ async fn two_racing_drains_append_each_row_exactly_once() {
     outbox::record_submission(&store, &blobs, first_id, &SubmitOutcome::Accepted).unwrap();
 
     let ledger = Ledger::new();
-    let started = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let mut slow = ledger
-        .session()
-        .held_until(Arc::clone(&started), Arc::clone(&release));
+    let gate = Arc::new(Gate::new());
+    let mut slow = ledger.session().held_at(Arc::clone(&gate));
     let mut quick = ledger.session();
     let lock = account.lock_path();
     // What the live caller captured, before the lock and before the slow
@@ -699,7 +679,7 @@ async fn two_racing_drains_append_each_row_exactly_once() {
     let racer = async {
         // The first drain is inside its APPEND now, which is where the 5.8 s
         // one was when the next five started.
-        started.notified().await;
+        gate.arrived(1).await;
 
         // A second send lands, commits its own row and drains for it. Nothing
         // backdates this one: `record_submission` stamps `updated` with the
@@ -715,7 +695,7 @@ async fn two_racing_drains_append_each_row_exactly_once() {
             .await
             .unwrap();
 
-        release.notify_one();
+        gate.open(1);
         (second_id, refused)
     };
     let (holder, (second_id, refused)) = tokio::join!(holder, racer);
@@ -760,8 +740,9 @@ async fn a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped() {
     outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
 
     let ledger = Ledger::new();
-    let started = Arc::new(Notify::new());
-    let mut dying = ledger.session().held_forever(Arc::clone(&started));
+    // Never opened: the APPEND never comes back.
+    let gate = Arc::new(Gate::new());
+    let mut dying = ledger.session().held_at(Arc::clone(&gate));
     let lock = account.lock_path();
     let now = outbox::unix_now() + 5;
 
@@ -771,7 +752,7 @@ async fn a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped() {
         ));
         tokio::select! {
             _ = &mut drain => panic!("the drain should still be inside its APPEND"),
-            _ = started.notified() => {}
+            _ = gate.arrived(1) => {}
         }
         // ---- kill -9 here: the APPEND never returns and nothing is recorded. ----
     }

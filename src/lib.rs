@@ -55,3 +55,9 @@ pub mod daemon;
 /// way for.
 #[cfg(test)]
 mod tui_tests;
+
+/// The counting gate the unit tests hold a hooked future at, the one
+/// `tests/support/gate.rs` gives the integration tests (PERSO-222).
+#[cfg(test)]
+#[path = "../tests/support/gate.rs"]
+pub(crate) mod gate;

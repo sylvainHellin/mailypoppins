@@ -11,8 +11,8 @@
 //! [`Gate::arrived`] says when the held futures got there, without a sleep.
 //!
 //! A test target includes it by path (`#[path = "support/gate.rs"] mod
-//! gate;`), and a library unit test by `#[path =
-//! "../../tests/support/gate.rs"]`, as `fake_imap` is.
+//! gate;`), and the library includes it once, as `crate::gate`, for its unit
+//! tests (`src/lib.rs`).
 
 #![allow(dead_code)]
 
