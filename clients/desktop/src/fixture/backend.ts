@@ -497,9 +497,18 @@ export function settleSignIn(opts: { deny?: boolean } = {}): string {
 export function retiredOauth2Message(account: string): string {
   return (
     `account "${account}" uses auth_method = "oauth2" (Microsoft sign-in over IMAP and SMTP), which mailypoppins no longer supports. ` +
-    `For Microsoft 365, set auth_method = "graph" and run \`mp config oauth2-login --account ${account}\`; for on-premises Exchange, ` +
-    `remove the auth_method line and store the password with \`mp config set-password smtp --account ${account}\`.`
+    `For Microsoft 365, set auth_method = "graph" and run \`mp config oauth2-login --account ${shellWord(account)}\`; for on-premises Exchange, ` +
+    `remove the auth_method line and store the password with \`mp config set-password smtp --account ${shellWord(account)}\`.`
   );
+}
+
+/**
+ * `mp_core::mp_command::quote`: `word` as a POSIX shell reads it back, as is when it is made of letters, digits and `_.@-` alone,
+ * else in single quotes, each `'` in it closed, escaped and reopened, so a printed command pastes as printed.
+ */
+export function shellWord(word: string): string {
+  if (/^[A-Za-z0-9_.@-]+$/.test(word)) return word;
+  return `'${word.replace(/'/g, "'\\''")}'`;
 }
 
 /** fixture.rs's `configure_account`: the account is served at once, ready, with Inbox, Archive and Sent. */

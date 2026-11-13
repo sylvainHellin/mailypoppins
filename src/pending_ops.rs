@@ -1693,7 +1693,7 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
                  was changed, try again once that is done",
                 queued.id,
                 queued.kind,
-                mp_client::format::login_rejected_detail(&row.account, login)
+                mp_core::mp_command::login_rejected_detail(&row.account, login)
             );
         }
         if let Some(refused) = ahead.iter().find(|op| op.attempts > 0) {

@@ -604,7 +604,7 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
 /// An account's `check` with the logins the server refused within the hold
 /// (PERSO-296): a runtime that serves the store but moves no mail, or sends
 /// none, until the user acts is `warn`, with the command that fixes it in the
-/// sentence every client shows ([`mp_client::format::login_rejected_detail`]).
+/// sentence every client shows ([`mp_core::mp_command::login_rejected_detail`]).
 /// The first of `rejected`, in the order of
 /// [`mp_protocol::account::RejectedLogin`], is the one named, as in every
 /// client; a check that is not `ok` already says more than the login.
@@ -617,7 +617,7 @@ fn with_rejected_logins(
         Some(&login) if check.status == Status::Ok => Check::new(
             format!("account:{account}"),
             Status::Warn,
-            mp_client::format::login_rejected_detail(account, login),
+            mp_core::mp_command::login_rejected_detail(account, login),
         ),
         _ => check,
     }

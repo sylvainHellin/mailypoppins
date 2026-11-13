@@ -1335,7 +1335,10 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
     assert_eq!(text(&alpha, "status"), "warn", "{alpha}");
     assert_eq!(
         text(&alpha, "detail"),
-        mp_client::format::login_rejected_detail(ALPHA, mp_protocol::account::RejectedLogin::Imap),
+        mp_core::mp_command::login_rejected_detail(
+            ALPHA,
+            mp_protocol::account::RejectedLogin::Imap
+        ),
         "in the sentence the TUI and the desktop app show"
     );
     let credentials = block_on(async {

@@ -121,7 +121,7 @@ fn app() -> (App, Daemon) {
 fn account_check(status: CheckStatus) -> HealthCheck {
     let detail = match status {
         CheckStatus::Ok => "serving".to_string(),
-        _ => mp_client::format::login_rejected_detail(ACCOUNT, RejectedLogin::Imap),
+        _ => mp_core::mp_command::login_rejected_detail(ACCOUNT, RejectedLogin::Imap),
     };
     HealthCheck {
         name: format!("account:{ACCOUNT}"),

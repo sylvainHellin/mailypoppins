@@ -1154,7 +1154,10 @@ impl State {
         Err(refused(
             method,
             -32006,
-            &format!("{account} has no local store to read yet; run `mp sync -A {account}`"),
+            &format!(
+                "{account} has no local store to read yet; run `{}`",
+                mp_core::mp_command::here(&["sync", "-A", account])
+            ),
         ))
     }
 
