@@ -37,8 +37,11 @@
         "work": [
           {
             "id": "2026-07-02-angebot",
-            "status": "parsed",
+            "path": "/home/alice/.local/share/mailypoppins/accounts/work/drafts/2026-07-02-angebot.md",
+            "ready": true,
+            "status": "draft",
             "subject": "Angebot",
+            "to": "robin@example.com",
             "valid": true
           }
         ]

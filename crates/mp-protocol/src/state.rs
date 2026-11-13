@@ -483,30 +483,41 @@ mod tests {
             OutboxCounts::default()
         );
         assert!(bootstrap.snapshot.mailboxes_of("nobody").is_empty());
-    }
-
-    /// The fixture's draft row predates `path`, `to` and `ready`, and decodes
-    /// anyway: a section a client does not read yet may not stop it starting.
-    #[test]
-    fn a_draft_row_missing_the_later_fields_still_decodes() {
-        let raw = include_str!("../fixtures/state.bootstrap.response.json");
-        let response: Value = serde_json::from_str(raw).expect("the fixture is JSON");
-        let bootstrap: Bootstrap =
-            serde_json::from_value(response["result"].clone()).expect("the result decodes");
 
         let drafts = bootstrap.snapshot.drafts_of("work");
         assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].id, "2026-07-02-angebot");
-        assert_eq!(drafts[0].subject, "Angebot");
-        assert!(drafts[0].valid);
-        assert!(
-            !drafts[0].ready,
-            "an absent `ready` is not a sendable draft"
-        );
-        assert_eq!(drafts[0].path, "");
-        assert_eq!(drafts[0].to, None);
-        assert_eq!(drafts[0].server, None, "it predates the mirror too");
+        assert!(drafts[0].path.ends_with("/drafts/2026-07-02-angebot.md"));
+        assert_eq!(drafts[0].to.as_deref(), Some("robin@example.com"));
+        assert!(drafts[0].ready);
+        assert_eq!(drafts[0].server, None, "it predates the mirror");
         assert!(bootstrap.snapshot.drafts_of("perso").is_empty());
+
+        assert_eq!(
+            serde_json::to_value(&bootstrap).expect("it serialises"),
+            response["result"],
+            "every row is in its current shape, so nothing moves on the way through"
+        );
+    }
+
+    /// A draft row from a daemon that predates `path`, `to` and `ready` decodes
+    /// anyway: a section a client does not read yet may not stop it starting.
+    #[test]
+    fn a_draft_row_missing_the_later_fields_still_decodes() {
+        let row: DraftRow = serde_json::from_value(json!({
+            "id": "2026-07-02-angebot",
+            "status": "draft",
+            "subject": "Angebot",
+            "valid": true,
+        }))
+        .expect("the row decodes");
+
+        assert_eq!(row.id, "2026-07-02-angebot");
+        assert_eq!(row.subject, "Angebot");
+        assert!(row.valid);
+        assert!(!row.ready, "an absent `ready` is not a sendable draft");
+        assert_eq!(row.path, "");
+        assert_eq!(row.to, None);
+        assert_eq!(row.server, None, "it predates the mirror too");
     }
 
     /// The `server` member (#0143) travels as `{state, synced_at}` with the
