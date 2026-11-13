@@ -93,7 +93,7 @@ pub struct MessageListRow {
     /// renders its own placeholder; the wire does not invent one.
     #[serde(default)]
     pub subject: String,
-    /// The UTC sort key every stack orders by, `tui::app::resolve_date`'s.
+    /// The UTC sort key every stack orders by, `mp_core::parse::resolve_date`'s.
     #[serde(default)]
     pub date_sort: String,
     /// The `Date:` header as the store holds it, which is the column a listing

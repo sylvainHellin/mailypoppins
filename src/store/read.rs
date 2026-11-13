@@ -80,7 +80,7 @@ pub struct MessageRow {
     pub subject: Option<String>,
     /// The `Date:` header verbatim, as ingest stored it. The display and sort
     /// strings the TUI and the dump use are derived from it by
-    /// `tui::app::resolve_date`, so both stacks apply the same rule.
+    /// `parse::resolve_date`, so both stacks apply the same rule.
     pub date_display: Option<String>,
     /// IMAP flag string: the tokens of [`MessageFlags`], space separated.
     pub flags: Option<String>,

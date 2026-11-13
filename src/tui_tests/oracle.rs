@@ -26,11 +26,12 @@ use std::path::Path;
 
 use mp_protocol::listing::MessageListRow;
 
+use crate::parse::resolve_date;
 use crate::store::open_store;
 use crate::store::read;
 use crate::tui::app::{
-    entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, resolve_date,
-    status_for_mailbox, EmailEntry, MailboxInfo, MessageRef,
+    entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox, EmailEntry,
+    MailboxInfo, MessageRef,
 };
 
 /// Load one mailbox of one account from the store, newest first.

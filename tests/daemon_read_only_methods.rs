@@ -60,7 +60,7 @@
 //!   (angle brackets included), `from` and `subject` as stored with an absent
 //!   header travelling as `""` (the shape says `str`, not `str|null`),
 //!   `has_attachments`, and `date_sort` from the same
-//!   `mailypoppins::tui::app::resolve_date` the TUI and `mp dump-mailbox` use.
+//!   `mailypoppins::parse::resolve_date` the TUI and `mp dump-mailbox` use.
 //! - **Order is the store's order**, `date_sort DESC, id DESC`, which is both
 //!   the "newest first" the plan asks for and the order
 //!   `tests/cli_read_surface_integration.rs` already pins for
@@ -119,10 +119,10 @@ use tempfile::TempDir;
 
 use mailypoppins::engine_lock::EngineLock;
 use mailypoppins::ingest::{ingest_message, IngestInput};
+use mailypoppins::parse::resolve_date;
 use mailypoppins::parse::{AttachmentData, FetchedEmail};
 use mailypoppins::selector;
 use mailypoppins::store::{read, BlobStore, Store};
-use mailypoppins::tui::app::resolve_date;
 use mailypoppins::types::MessageFlags;
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};

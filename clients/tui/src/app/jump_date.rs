@@ -126,7 +126,7 @@ fn parse_year_digits(s: &str) -> Option<i32> {
 }
 
 /// The day a list row falls on, from its `date_sort` key
-/// (`YYYY-MM-DDTHH:MM:SS`, UTC; see `types::resolve_date`).
+/// (`YYYY-MM-DDTHH:MM:SS`, UTC; see `mp_core::parse::resolve_date`).
 ///
 /// `None` for a row with no usable date, which the jump skips rather than
 /// treats as the epoch.

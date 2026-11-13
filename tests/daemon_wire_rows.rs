@@ -70,9 +70,9 @@ use mp_client::{ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::draft::DraftListing;
 use mp_protocol::listing::{MessageListRow, MessageListing};
 
+use mailypoppins::parse::resolve_date;
 use mailypoppins::selector::Selector;
 use mailypoppins::store::read;
-use mailypoppins::tui::app::resolve_date;
 
 use support::draft_fixture;
 use support::parity::{socket_path, DaemonFixture};

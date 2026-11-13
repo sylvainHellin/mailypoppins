@@ -1429,7 +1429,7 @@ mod tests {
 
     fn server_hit(subject: &str, date: &str, body: &str) -> mp_protocol::listing::ServerSearchHit {
         let (_, date_sort) =
-            crate::tui::app::resolve_date(&Some(date.to_string()), &None, std::path::Path::new(""));
+            crate::parse::resolve_date(&Some(date.to_string()), &None, std::path::Path::new(""));
         mp_protocol::listing::ServerSearchHit {
             account: "acct".into(),
             mailbox: "Archive".into(),

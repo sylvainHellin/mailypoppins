@@ -2335,6 +2335,74 @@ fn char_at(raw: &str, at: usize) -> char {
     raw[at..].chars().next().unwrap_or_default()
 }
 
+/// A row's two date strings, `(display, sort)`, from its `Date:` header, else
+/// a draft's `sent_at`, else a `YYYY-MM-DD[-HHMM]` filename prefix.
+///
+/// The sort key is always formatted in UTC so that emails from different
+/// timezones on the same calendar day order by actual instant, not by
+/// sender-local wallclock (#0024). Display stays in the sender's local time
+/// so dates match what the user sees in other clients. The daemon's listings,
+/// `mp dump-mailbox` and the TUI's rows all derive their `date_sort` here, so
+/// every stack orders by one rule.
+pub fn resolve_date(
+    date_field: &Option<String>,
+    sent_at_field: &Option<String>,
+    path: &Path,
+) -> (String, String) {
+    if let Some(date_str) = date_field {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(date_str) {
+            let display = dt.format("%Y-%m-%d").to_string();
+            let sort = dt
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string();
+            return (display, sort);
+        }
+    }
+
+    if let Some(sent_str) = sent_at_field {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(sent_str) {
+            let display = dt.format("%Y-%m-%d").to_string();
+            let sort = dt
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string();
+            return (display, sort);
+        }
+        // Trailing 'Z' means UTC, so the naive value is already in UTC.
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(sent_str, "%Y-%m-%dT%H:%M:%SZ") {
+            let display = dt.format("%Y-%m-%d").to_string();
+            let sort = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+            return (display, sort);
+        }
+    }
+
+    let filename = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // `get` rather than slicing: a draft named `réponse-à-Hélène.md` has a
+    // multi-byte char across byte 10, and a slice there panics the list build.
+    if let Some(date_part) = filename.get(..10) {
+        if chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d").is_ok() {
+            if filename.as_bytes().get(10) == Some(&b'-') {
+                if let Some(time_part) = filename
+                    .get(11..15)
+                    .filter(|t| t.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    let sort = format!("{}T{}:{}:00", date_part, &time_part[..2], &time_part[2..4]);
+                    return (date_part.to_string(), sort);
+                }
+            }
+            return (date_part.to_string(), format!("{date_part}T00:00:00"));
+        }
+    }
+
+    ("".to_string(), "".to_string())
+}
+
 /// The parenthesis after `Fetched Emails`: the count, then `note` when there
 /// is one (`mp search` names the terms the local store answered there).
 pub fn fetched_emails_count(count: usize, note: Option<&str>) -> String {
@@ -2686,6 +2754,104 @@ fn walk_cid_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_date_survives_multibyte_draft_filenames() {
+        let empty = (String::new(), String::new());
+        assert_eq!(
+            resolve_date(
+                &None,
+                &None,
+                Path::new("r\u{e9}ponse-\u{e0}-H\u{e9}l\u{e8}ne.md")
+            ),
+            empty
+        );
+        // A valid date with a multi-byte char across the time slot keeps the date.
+        assert_eq!(
+            resolve_date(&None, &None, Path::new("2024-01-02-123\u{e9}.md")),
+            ("2024-01-02".to_string(), "2024-01-02T00:00:00".to_string())
+        );
+        assert_eq!(
+            resolve_date(&None, &None, Path::new("2024-01-02-1430_x.md")),
+            ("2024-01-02".to_string(), "2024-01-02T14:30:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_date_rfc2822() {
+        let date = Some("Mon, 01 Jan 2024 12:00:00 +0000".to_string());
+        let (display, sort) = resolve_date(&date, &None, Path::new("test.md"));
+        assert_eq!(display, "2024-01-01");
+        assert_eq!(sort, "2024-01-01T12:00:00");
+    }
+
+    #[test]
+    fn test_resolve_date_rfc3339_sent_at() {
+        let sent = Some("2024-06-15T14:30:00+02:00".to_string());
+        let (display, sort) = resolve_date(&None, &sent, Path::new("test.md"));
+        // Display is in sender-local time, sort key is normalised to UTC.
+        assert_eq!(display, "2024-06-15");
+        assert_eq!(sort, "2024-06-15T12:30:00");
+    }
+
+    /// Two emails on the same day from different timezones must sort by the
+    /// actual instant, not by sender-local wallclock. Regression test for
+    /// ticket #0024.
+    #[test]
+    fn test_resolve_date_sort_normalises_timezone() {
+        // 10:00 +0200 == 08:00 UTC (earlier instant)
+        let early = Some("Mon, 06 May 2024 10:00:00 +0200".to_string());
+        // 09:30 +0000 == 09:30 UTC (later instant)
+        let late = Some("Mon, 06 May 2024 09:30:00 +0000".to_string());
+        let (_, sort_early) = resolve_date(&early, &None, Path::new("a.md"));
+        let (_, sort_late) = resolve_date(&late, &None, Path::new("b.md"));
+        assert!(
+            sort_late > sort_early,
+            "expected later UTC instant to sort higher: late={sort_late} early={sort_early}"
+        );
+
+        // Same check for the RFC3339 sent_at branch.
+        let early_rfc3339 = Some("2024-05-06T10:00:00+02:00".to_string());
+        let late_rfc3339 = Some("2024-05-06T09:30:00+00:00".to_string());
+        let (_, sort_early) = resolve_date(&None, &early_rfc3339, Path::new("a.md"));
+        let (_, sort_late) = resolve_date(&None, &late_rfc3339, Path::new("b.md"));
+        assert!(
+            sort_late > sort_early,
+            "expected later UTC instant to sort higher: late={sort_late} early={sort_early}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_date_naive_sent_at() {
+        let sent = Some("2024-06-15T14:30:00Z".to_string());
+        let (display, sort) = resolve_date(&None, &sent, Path::new("test.md"));
+        assert_eq!(display, "2024-06-15");
+        assert_eq!(sort, "2024-06-15T14:30:00");
+    }
+
+    #[test]
+    fn test_resolve_date_filename_fallback() {
+        let path = Path::new("2024-03-15-1430_sender_subject.md");
+        let (display, sort) = resolve_date(&None, &None, path);
+        assert_eq!(display, "2024-03-15");
+        assert_eq!(sort, "2024-03-15T14:30:00");
+    }
+
+    #[test]
+    fn test_resolve_date_filename_date_only() {
+        let path = Path::new("2024-03-15_sender_subject.md");
+        let (display, sort) = resolve_date(&None, &None, path);
+        assert_eq!(display, "2024-03-15");
+        assert_eq!(sort, "2024-03-15T00:00:00");
+    }
+
+    #[test]
+    fn test_resolve_date_all_missing() {
+        let path = Path::new("random-name.md");
+        let (display, sort) = resolve_date(&None, &None, path);
+        assert_eq!(display, "");
+        assert_eq!(sort, "");
+    }
 
     #[test]
     fn system_opener_matches_the_platform() {

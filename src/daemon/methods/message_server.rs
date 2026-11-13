@@ -83,11 +83,11 @@ use mp_protocol::RpcError;
 use crate::config::{AccountConfig, AuthMethod};
 use crate::daemon::state::events::Event;
 use crate::daemon::state::{CanonicalState, Change};
+use crate::parse::resolve_date;
 use crate::parse::FetchedEmail;
 use crate::selector::Selector;
 use crate::server_search::{two_phase, Cut, GraphSearch, ImapSearch, Scope, SearchSink};
 use crate::store::{read, BlobStore, Store};
-use crate::tui::app::resolve_date;
 
 use super::super::config::ConfigStore;
 use super::super::dispatch::{

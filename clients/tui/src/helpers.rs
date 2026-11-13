@@ -134,7 +134,7 @@ pub(crate) const SYNC_SKIPPED_MARKER: &str = "Sync skipped: another engine is sy
 /// mapping, unchanged, so the overlay's row is derived by the same rule it
 /// always was.
 ///
-/// `date_sort` is [`resolve_date`](super::app::resolve_date)'s key, the one
+/// `date_sort` is [`resolve_date`](mp_core::parse::resolve_date)'s key, the one
 /// the daemon gives a server hit and renders a stored row's with: the store
 /// stamps a row with the unix time of its `Date:` (`0` when it does not
 /// parse), the wire spells that instant in UTC, and an unparsable `Date:` is
@@ -146,7 +146,7 @@ pub(super) fn fetched_to_email_entry(
     fetched: &FetchedEmail,
 ) -> EmailEntry {
     let (date_display, date_sort) =
-        super::app::resolve_date(&Some(fetched.date.clone()), &None, Path::new(""));
+        mp_core::parse::resolve_date(&Some(fetched.date.clone()), &None, Path::new(""));
     let date_display = if date_display.is_empty() {
         fetched.date.chars().take(10).collect()
     } else {

@@ -25,7 +25,7 @@
 //!   absent. A stored empty string is treated as absent: the store cannot
 //!   tell "header missing" from "header empty" and the file build's `null` is
 //!   the far commoner of the two.
-//! - `date_sort`: the sort key `tui::app::resolve_date` derives from the
+//! - `date_sort`: the sort key `parse::resolve_date` derives from the
 //!   stored `Date:` header (UTC `%Y-%m-%dT%H:%M:%S`), empty when the header is
 //!   missing or unparseable. The file build had a filename-derived fallback in
 //!   between; see the allow-list.
@@ -70,9 +70,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::config::AccountConfig;
+use crate::parse::resolve_date;
 use crate::store::read::{self, MessageRow};
 use crate::store::{open_store, Store};
-use crate::tui::app::resolve_date;
 
 /// One attachment, name and size only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

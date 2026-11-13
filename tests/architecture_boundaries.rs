@@ -1212,3 +1212,34 @@ fn strip_test_modules_removes_the_block_and_nothing_else() {
     assert!(stripped.contains("fn real()"), "{stripped}");
     assert!(stripped.contains("fn after()"), "{stripped}");
 }
+
+/// The spellings a call into the terminal client takes from the root crate.
+const TUI_CRATE_PATHS: [&str; 3] = ["crate::tui::", "mailypoppins::tui::", "mp_tui::"];
+
+/// The daemon's production code calls into no client (PERSO-225): the arrow
+/// points from a client to the server, and the pure helpers both need live in
+/// `mp-core`. `daemon/client.rs` is the one exception, because it is the
+/// client half of the module: `tui_connector` builds the TUI's own connect
+/// routine, run in the TUI's process.
+#[test]
+fn the_daemon_calls_into_no_client_crate() {
+    let root = repo_root().join("src/daemon");
+    let mut found = BTreeSet::new();
+    for file in rust_files(&root) {
+        let rel = relative(&root, &file);
+        if rel == "client.rs" {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        let source = strip_test_modules(&strip_line_comments(&source));
+        for path in TUI_CRATE_PATHS {
+            if source.contains(path) {
+                found.insert((rel.clone(), path));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "src/daemon/ calls into the terminal client: {found:?}; lift the helper into mp-core"
+    );
+}

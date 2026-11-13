@@ -357,7 +357,7 @@ The row is `mp_protocol::listing::MessageListRow`, so a client decodes a listing
 The order is the store's, `date_sort DESC, id DESC`, the same rows `mp list-messages` and the TUI list show.
 `message_id` is verbatim as ingest stored it, angle brackets included; `from`, `to`, `subject` and `date_display` travel as `""` when the header was absent, because the shape says `str`.
 `cc`, `reply_to` and `bcc` are `str|null` instead: a client renders each of them only when the message carried one, and a flattened `""` would make an absent Cc indistinguishable from an empty one.
-The two dates are both carried because neither can be derived from the other: `date_sort` is `tui::app::resolve_date`'s UTC sort key, so every stack orders the same way, and `date_display` is the `Date:` header as the store holds it, which is the column a listing prints.
+The two dates are both carried because neither can be derived from the other: `date_sort` is `mp_core::parse::resolve_date`'s UTC sort key, so every stack orders the same way, and `date_display` is the `Date:` header as the store holds it, which is the column a listing prints.
 `flags` carries the four axes of the store, `\Flagged` included since P5-U4, because the star is a marker of its own in a list rather than a state of the read/answered/forwarded axis.
 `is_invite` says the row carries an iMIP payload, which is what draws the badge without reading a blob.
 `id` is `messages.id`, the synthetic row key: it is the identity a TUI holds for a listed row and the address `message.get` takes back as `row_id`.

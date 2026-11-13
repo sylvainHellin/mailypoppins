@@ -28,7 +28,7 @@
 //! The rows are [`crate::store::read::list_mailbox`]'s, so the daemon answers
 //! from the same query, in the same order (`date_sort DESC, id DESC`), as
 //! `mp list-messages` and the TUI list. `date_sort` is
-//! [`crate::tui::app::resolve_date`]'s sort key, so all three stacks derive a
+//! [`crate::parse::resolve_date`]'s sort key, so all three stacks derive a
 //! date the same way rather than each parsing the header again, and
 //! `date_display` is the `Date:` header as the store holds it, which is the
 //! column a listing prints.
@@ -55,11 +55,11 @@ use mp_protocol::{RpcError, MAX_RESPONSE_BYTES};
 
 use crate::config::AccountConfig;
 use crate::ops::Backend;
+use crate::parse::resolve_date;
 use crate::pending_ops::{self, OpExecutor};
 use crate::selector::{Namespace, Selector, Twins, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
-use crate::tui::app::resolve_date;
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,

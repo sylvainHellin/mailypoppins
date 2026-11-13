@@ -1914,7 +1914,7 @@ impl App {
                     msg: MessageRef::new(r.id),
                     mailbox: r.mailbox.clone(),
                     from: super::extract_display_name(&r.from),
-                    date_display: super::resolve_date(
+                    date_display: mp_core::parse::resolve_date(
                         &Some(r.date_display.clone()),
                         &None,
                         std::path::Path::new(""),

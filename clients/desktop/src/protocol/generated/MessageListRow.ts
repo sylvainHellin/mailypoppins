@@ -55,7 +55,7 @@ bcc: string | null,
  */
 subject: string,
 /**
- * The UTC sort key every stack orders by, `tui::app::resolve_date`'s.
+ * The UTC sort key every stack orders by, `mp_core::parse::resolve_date`'s.
  */
 date_sort: string,
 /**
