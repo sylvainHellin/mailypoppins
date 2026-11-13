@@ -88,7 +88,11 @@
 //!   AUTH went out, every unanswered deadline counts; the send goes on, and
 //!   its answer is reported when it comes (`crate::send`'s
 //!   `an_smtp_login_unanswered_by_the_deadline_is_a_step_of_its_hold`,
-//!   `a_slow_greeting_past_the_deadline_holds_the_imap_login_of_a_shared_password`);
+//!   `a_slow_greeting_past_the_deadline_holds_the_imap_login_of_a_shared_password`).
+//!   A connect that never completes fails first, at the transport's 30 s
+//!   connect timeout, as an error that counts nothing, since nothing reached
+//!   the server; a greeting or EHLO stalled after the connect still counts
+//!   (`an_smtp_connect_that_never_completes_is_no_step_of_the_hold`);
 //! - the Graph token refresh has it for its whole request and counts at it
 //!   (`crate::graph`'s `a_refresh_unanswered_by_the_deadline_counts_only_for_a_refused_token`).
 //!

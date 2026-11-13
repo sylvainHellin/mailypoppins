@@ -2542,6 +2542,28 @@ pub async fn test_smtp_connection(smtp_config: &SmtpConfig) -> Result<()> {
 /// `accept_invalid_certs` opt-in. The single transport builder behind [`submit`], so every SMTP
 /// submission applies identical transport policy.
 fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+    build_smtp_transport_with(smtp_config, SMTP_CONNECT_TIMEOUT)
+}
+
+/// How long the TCP connect of an SMTP transport may take, per address the
+/// host resolves to, before it is given up on, as the IMAP connect's 30 s.
+///
+/// lettre's transport `timeout` bounds only that: each resolved address's
+/// connect, after the DNS lookup and before the greeting, TLS, EHLO and AUTH,
+/// none of which it bounds. It defaults to 60 s, the login deadline of the
+/// gate ([`crate::login_gate::LOGIN_DEADLINE`]), which starts before the
+/// lookup and so outran it: a black-holed connect counted as an unanswered
+/// login, a step of a refused password's hold, though nothing reached the
+/// server (PERSO-296). At 30 s the connect fails first, as an error the gate
+/// does not count, on a host with one address.
+const SMTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// [`build_smtp_transport`] with its connect timeout handed in, so a test
+/// need not wait it out.
+fn build_smtp_transport_with(
+    smtp_config: &SmtpConfig,
+    connect_timeout: std::time::Duration,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     if smtp_config.accept_invalid_certs {
         crate::config::ensure_invalid_certs_allowed(&smtp_config.host)?;
     }
@@ -2557,7 +2579,11 @@ fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<T
                     .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
         }
-        transport.port(smtp_config.port).credentials(creds).build()
+        transport
+            .port(smtp_config.port)
+            .timeout(Some(connect_timeout))
+            .credentials(creds)
+            .build()
     } else {
         // STARTTLS
         let mut transport =
@@ -2569,7 +2595,11 @@ fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<T
                     .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
         }
-        transport.port(smtp_config.port).credentials(creds).build()
+        transport
+            .port(smtp_config.port)
+            .timeout(Some(connect_timeout))
+            .credentials(creds)
+            .build()
     };
     Ok(mailer)
 }
@@ -5874,6 +5904,62 @@ mod smtp_durability_tests {
         login_gate::record(&login, &config.password, &refusal);
         login_gate::forget(&login);
         login
+    }
+
+    /// A localhost port whose connects never complete: a listener with no
+    /// backlog that accepts nothing, its queue filled, so the kernel drops
+    /// the SYN of every later connect as a black-holed host does. The
+    /// returned sockets keep it so.
+    fn black_holed_port() -> (u16, Vec<std::net::TcpStream>, tokio::net::TcpListener) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(0).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut queued = Vec::new();
+        loop {
+            match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
+            {
+                Ok(stream) => queued.push(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+                Err(e) => panic!("filling the backlog: {e}"),
+            }
+            assert!(queued.len() < 16, "the backlog never filled");
+        }
+        (addr.port(), queued, listener)
+    }
+
+    /// PERSO-296: an SMTP connect that never completes fails at the
+    /// transport's connect timeout, before the login deadline, so it counts
+    /// as no step of a refused password's hold: nothing reached the server.
+    /// The transport kept lettre's 60 s default, which the login deadline,
+    /// started before the DNS lookup, outran, and a link down stepped the
+    /// hold of the shared IMAP password to 10 minutes and then an hour.
+    #[tokio::test]
+    async fn an_smtp_connect_that_never_completes_is_no_step_of_the_hold() {
+        use crate::login_gate;
+        let (port, _queued, _listener) = black_holed_port();
+        let config = refused_config(port);
+        let login = refused_and_released(&config);
+
+        let built = Outbox::built("<black-hole@example.com>", Some("id:black-hole"));
+        let sending = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                let mailer =
+                    build_smtp_transport_with(&config, std::time::Duration::from_millis(300))
+                        .unwrap();
+                submit_over_within(&built, &config, &mailer, std::time::Duration::from_secs(1))
+                    .await
+            })
+        };
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(3), sending).await;
+        assert!(finished.is_ok(), "the connect failed at its own timeout");
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            1,
+            "a connect that never completed counts nothing"
+        );
+        assert!(login_gate::dial(&login, &config.password).is_ok());
     }
 
     /// PERSO-296: an SMTP login of a password refused before, unanswered by
