@@ -7,8 +7,10 @@
 //! is what tells it whether to keep that write or put it back.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use anyhow::{anyhow, Result};
+use futures::io::{AsyncRead, AsyncWrite};
 use futures::TryStreamExt;
 use log::{info, warn};
 
@@ -31,16 +33,20 @@ use crate::ops::ServerCopy;
 ///   that the next borrower would misread as its own answer;
 /// - the session is *not* logged out; dropping the guard returns it.
 ///
+/// The op is handed what the server advertised at login, for the commands
+/// an extension changes (a move's `UID EXPUNGE` under UIDPLUS).
+///
 /// The typed [`crate::ops::NotFoundOnServer`] travels through as an ordinary
 /// error. That does poison a perfectly healthy connection, which costs one
 /// reconnect on a path that is already rare (a replayed op whose target has
 /// moved), and is the conservative side of the trade.
 async fn with_pooled<F, T>(imap_config: &ImapConfig, op: F) -> Result<T>
 where
-    F: AsyncFnOnce(&mut ImapSession) -> Result<T>,
+    F: AsyncFnOnce(&mut ImapSession, pool::ServerCaps) -> Result<T>,
 {
     let mut pooled = pool::checkout(imap_config).await?;
-    let out = op(pooled.session()).await;
+    let caps = pooled.caps();
+    let out = op(pooled.session(), caps).await;
     pooled.check(out)
 }
 
@@ -52,21 +58,29 @@ pub async fn move_email_on_server(
     copy: Option<&ServerCopy>,
     dest_mailbox: &str,
 ) -> Result<()> {
-    with_pooled(imap_config, async |s: &mut ImapSession| {
-        move_email_on_session(s, message_id, source_mailbox, copy, dest_mailbox).await
+    with_pooled(imap_config, async |s: &mut ImapSession, caps| {
+        move_email_on_session(
+            s,
+            message_id,
+            source_mailbox,
+            copy,
+            dest_mailbox,
+            caps.uidplus,
+        )
+        .await
     })
     .await
 }
 
-/// Delete an email on the server: SELECT, find the copy, \Deleted, EXPUNGE.
+/// Delete an email on the server: SELECT, find the copy, \Deleted, expunge.
 pub async fn delete_email_on_server(
     imap_config: &ImapConfig,
     message_id: &str,
     source_mailbox: &str,
     copy: Option<&ServerCopy>,
 ) -> Result<()> {
-    with_pooled(imap_config, async |s: &mut ImapSession| {
-        delete_email_on_session(s, message_id, source_mailbox, copy).await
+    with_pooled(imap_config, async |s: &mut ImapSession, caps| {
+        delete_email_on_session(s, message_id, source_mailbox, copy, caps.uidplus).await
     })
     .await
 }
@@ -78,7 +92,7 @@ pub async fn mark_read_on_server(
     mailbox: &str,
     copy: Option<&ServerCopy>,
 ) -> Result<()> {
-    with_pooled(imap_config, async |s: &mut ImapSession| {
+    with_pooled(imap_config, async |s: &mut ImapSession, _| {
         store_flags_on_session(s, message_id, mailbox, copy, "+FLAGS (\\Seen)").await
     })
     .await
@@ -91,7 +105,7 @@ pub async fn mark_unread_on_server(
     mailbox: &str,
     copy: Option<&ServerCopy>,
 ) -> Result<()> {
-    with_pooled(imap_config, async |s: &mut ImapSession| {
+    with_pooled(imap_config, async |s: &mut ImapSession, _| {
         store_flags_on_session(s, message_id, mailbox, copy, "-FLAGS (\\Seen)").await
     })
     .await
@@ -112,7 +126,7 @@ pub async fn add_flag_on_server(
     flag: &str,
 ) -> Result<()> {
     let store = format!("+FLAGS ({flag})");
-    with_pooled(imap_config, async |s: &mut ImapSession| {
+    with_pooled(imap_config, async |s: &mut ImapSession, _| {
         store_flags_on_session(s, message_id, mailbox, copy, &store).await
     })
     .await
@@ -128,7 +142,7 @@ pub async fn remove_flag_on_server(
     flag: &str,
 ) -> Result<()> {
     let store = format!("-FLAGS ({flag})");
-    with_pooled(imap_config, async |s: &mut ImapSession| {
+    with_pooled(imap_config, async |s: &mut ImapSession, _| {
         store_flags_on_session(s, message_id, mailbox, copy, &store).await
     })
     .await
@@ -146,7 +160,10 @@ pub(super) trait UidSearch {
     async fn holds(&mut self, mailbox: &str, message_id: &str) -> Result<bool>;
 }
 
-impl UidSearch for ImapSession {
+impl<T> UidSearch for async_imap::Session<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
     async fn search_uids(&mut self, query: &str) -> Result<HashSet<u32>> {
         self.uid_search(query)
             .await
@@ -280,7 +297,10 @@ fn same_uidvalidity(recorded: Option<u32>, selected: Option<u32>) -> bool {
 }
 
 /// SELECT `mailbox`, returning its UIDVALIDITY.
-async fn select(session: &mut ImapSession, mailbox: &str) -> Result<Option<u32>> {
+async fn select<T>(session: &mut async_imap::Session<T>, mailbox: &str) -> Result<Option<u32>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
     let selected = session
         .select(mailbox)
         .await
@@ -379,17 +399,21 @@ pub(super) async fn copy_to_delete<S: UidSearch>(
 /// Move an email to a different mailbox on the IMAP server (#0018).
 ///
 /// SELECTs `source_mailbox`, resolves the copy ([`copy_to_move`]), then
-/// UID COPY + \Deleted + EXPUNGE -- the same machinery as archiving
-/// (which is a move with a fixed destination). COPY+EXPUNGE is used
-/// instead of MOVE so servers without the MOVE extension work too;
-/// COPY preserves flags, so read/unread state survives the move.
-async fn move_email_on_session(
-    session: &mut ImapSession,
+/// UID COPY + \Deleted + expunge ([`mark_deleted_and_expunge`]) -- the same
+/// machinery as archiving (which is a move with a fixed destination).
+/// COPY+EXPUNGE is used instead of MOVE so servers without the MOVE extension
+/// work too; COPY preserves flags, so read/unread state survives the move.
+async fn move_email_on_session<T>(
+    session: &mut async_imap::Session<T>,
     message_id: &str,
     source_mailbox: &str,
     copy: Option<&ServerCopy>,
     dest_mailbox: &str,
-) -> Result<()> {
+    uidplus: bool,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
     info!(
         "Moving email on server: Message-ID={} {} -> {}",
         message_id, source_mailbox, dest_mailbox
@@ -404,51 +428,81 @@ async fn move_email_on_session(
         dest_mailbox,
     )
     .await?;
-    let uid_str = uid.to_string();
-
     session
-        .uid_copy(&uid_str, dest_mailbox)
+        .uid_copy(uid.to_string(), dest_mailbox)
         .await
         .map_err(|e| anyhow!("Failed to copy email to {}: {}", dest_mailbox, e))?;
 
-    mark_deleted_and_expunge(session, &uid_str).await
+    mark_deleted_and_expunge(session, uid, uidplus).await
 }
 
-/// Delete an email on the server: SELECT, resolve the copy, \Deleted, EXPUNGE.
+/// Delete an email on the server: SELECT, resolve the copy, \Deleted, expunge
+/// ([`mark_deleted_and_expunge`]).
 ///
 /// `source_mailbox` is the server-side folder the message is in. It used to be
 /// hardcoded to `INBOX`, which was only ever right because the file build could
 /// not tell where a message lived; the store row knows its mailbox, so the
 /// caller passes the folder it maps to.
-async fn delete_email_on_session(
-    session: &mut ImapSession,
+async fn delete_email_on_session<T>(
+    session: &mut async_imap::Session<T>,
     message_id: &str,
     source_mailbox: &str,
     copy: Option<&ServerCopy>,
-) -> Result<()> {
+    uidplus: bool,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
     info!("Deleting email on server: Message-ID={}", message_id);
     let uidvalidity = select(session, source_mailbox).await?;
     let uid = copy_to_delete(session, message_id, source_mailbox, copy, uidvalidity).await?;
-    mark_deleted_and_expunge(session, &uid.to_string()).await
+    mark_deleted_and_expunge(session, uid, uidplus).await
 }
 
-/// The tail a move and a delete share: `\Deleted` on one UID, then EXPUNGE.
-async fn mark_deleted_and_expunge(session: &mut ImapSession, uid: &str) -> Result<()> {
+/// The tail a move and a delete share: `\Deleted` on one UID, then the expunge
+/// that removes it.
+///
+/// A plain `EXPUNGE` removes every message in the folder flagged `\Deleted`,
+/// those another client flagged and meant to keep recoverable included (a
+/// client that marks deletes and expunges later, or never). Where the server
+/// offers UIDPLUS, `UID EXPUNGE <uid>` removes this op's copy and nothing
+/// else. A server without it gets the plain `EXPUNGE`, with that risk: the
+/// copy left flagged instead would still be listed, and the next sync would
+/// bring back the message the user moved or deleted.
+async fn mark_deleted_and_expunge<T>(
+    session: &mut async_imap::Session<T>,
+    uid: u32,
+    uidplus: bool,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let uid = uid.to_string();
     session
-        .uid_store(uid, "+FLAGS (\\Deleted)")
+        .uid_store(&uid, "+FLAGS (\\Deleted)")
         .await
         .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?
         .try_collect::<Vec<_>>()
         .await
         .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
 
-    session
-        .expunge()
-        .await
-        .map_err(|e| anyhow!("Failed to expunge: {}", e))?
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow!("Failed to collect expunge response: {}", e))?;
+    if uidplus {
+        session
+            .uid_expunge(&uid)
+            .await
+            .map_err(|e| anyhow!("Failed to expunge {uid}: {e}"))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| anyhow!("Failed to collect expunge response: {e}"))?;
+    } else {
+        session
+            .expunge()
+            .await
+            .map_err(|e| anyhow!("Failed to expunge: {e}"))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| anyhow!("Failed to collect expunge response: {e}"))?;
+    }
 
     Ok(())
 }
@@ -1103,6 +1157,109 @@ mod tests {
             );
             assert!(server.moved.is_empty(), "{:?}", server.moved);
             assert_eq!(server.folder("INBOX"), [2]);
+        }
+    }
+
+    /// The expunge a move and a delete end with, on the wire.
+    mod expunge {
+        use super::super::super::scripted;
+        use super::*;
+
+        const LOGIN: &str = "A0001 OK logged in\r\n";
+        const SELECTED: &str = "* 9 EXISTS\r\n* OK [UIDVALIDITY 7] UIDs valid\r\n\
+                                A0002 OK [READ-WRITE] SELECT completed\r\n";
+        const FOUND: &str = "* SEARCH 42\r\nA0003 OK SEARCH completed\r\n";
+
+        fn own_copy() -> Option<ServerCopy> {
+            copy(42, Some(7))
+        }
+
+        /// A move under UIDPLUS removes its own copy and nothing else: a
+        /// message another client flagged `\Deleted` in the source folder
+        /// stays where that client left it.
+        #[tokio::test]
+        async fn a_move_under_uidplus_expunges_only_its_own_copy() {
+            let (mut session, turns) = scripted::session(&[
+                LOGIN,
+                SELECTED,
+                FOUND,
+                "A0004 OK [COPYUID 3 42 17] COPY completed\r\n",
+                "* 5 FETCH (FLAGS (\\Deleted) UID 42)\r\nA0005 OK STORE completed\r\n",
+                "* 5 EXPUNGE\r\nA0006 OK UID EXPUNGE completed\r\n",
+            ])
+            .await;
+
+            move_email_on_session(
+                &mut session,
+                DUP,
+                "INBOX",
+                own_copy().as_ref(),
+                "Archive",
+                true,
+            )
+            .await
+            .unwrap();
+
+            let sent = scripted::after_login(&turns);
+            assert_eq!(
+                sent[2..],
+                [
+                    "A0004 UID COPY 42 \"Archive\"\r\n".to_string(),
+                    "A0005 UID STORE 42 +FLAGS (\\Deleted)\r\n".to_string(),
+                    "A0006 UID EXPUNGE 42\r\n".to_string(),
+                ],
+                "{sent:#?}"
+            );
+        }
+
+        /// A delete under UIDPLUS is the same tail.
+        #[tokio::test]
+        async fn a_delete_under_uidplus_expunges_only_its_own_copy() {
+            let (mut session, turns) = scripted::session(&[
+                LOGIN,
+                SELECTED,
+                FOUND,
+                "* 5 FETCH (FLAGS (\\Deleted) UID 42)\r\nA0004 OK STORE completed\r\n",
+                "* 5 EXPUNGE\r\nA0005 OK UID EXPUNGE completed\r\n",
+            ])
+            .await;
+
+            delete_email_on_session(&mut session, DUP, "INBOX", own_copy().as_ref(), true)
+                .await
+                .unwrap();
+
+            let sent = scripted::after_login(&turns);
+            assert_eq!(
+                sent.last().map(String::as_str),
+                Some("A0005 UID EXPUNGE 42\r\n"),
+                "{sent:#?}"
+            );
+        }
+
+        /// A server without UIDPLUS has no command that removes one copy, so
+        /// the plain `EXPUNGE` stays: the copy left flagged would come back
+        /// with the next sync.
+        #[tokio::test]
+        async fn without_uidplus_the_plain_expunge_stays() {
+            let (mut session, turns) = scripted::session(&[
+                LOGIN,
+                SELECTED,
+                FOUND,
+                "* 5 FETCH (FLAGS (\\Deleted) UID 42)\r\nA0004 OK STORE completed\r\n",
+                "* 5 EXPUNGE\r\nA0005 OK EXPUNGE completed\r\n",
+            ])
+            .await;
+
+            delete_email_on_session(&mut session, DUP, "INBOX", own_copy().as_ref(), false)
+                .await
+                .unwrap();
+
+            let sent = scripted::after_login(&turns);
+            assert_eq!(
+                sent.last().map(String::as_str),
+                Some("A0005 EXPUNGE\r\n"),
+                "{sent:#?}"
+            );
         }
     }
 }
