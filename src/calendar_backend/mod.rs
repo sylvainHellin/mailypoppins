@@ -131,6 +131,10 @@ pub enum CalendarBackendError {
     /// issued before `Calendars.ReadWrite` joined `GRAPH_SCOPES`); the clients
     /// prompt for a new sign-in instead of showing a failing call.
     MissingScope { scope: String },
+    /// The server refused the backend's own login (EWS's NTLM), with the
+    /// sentence a client shows. The sync pass stops at once: asking again
+    /// with the same password counts against the account's lockout.
+    LoginRefused(String),
     /// Anything else: transport, server refusal, unparseable answer.
     Other(anyhow::Error),
 }
@@ -141,6 +145,7 @@ impl fmt::Display for CalendarBackendError {
             CalendarBackendError::MissingScope { scope } => {
                 write!(f, "the account's sign-in lacks the {scope} permission")
             }
+            CalendarBackendError::LoginRefused(sentence) => write!(f, "{sentence}"),
             CalendarBackendError::Other(err) => write!(f, "{err:#}"),
         }
     }
@@ -149,7 +154,9 @@ impl fmt::Display for CalendarBackendError {
 impl std::error::Error for CalendarBackendError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            CalendarBackendError::MissingScope { .. } => None,
+            CalendarBackendError::MissingScope { .. } | CalendarBackendError::LoginRefused(_) => {
+                None
+            }
             CalendarBackendError::Other(err) => Some(err.as_ref()),
         }
     }

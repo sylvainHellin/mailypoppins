@@ -1817,13 +1817,19 @@ fn bound_to(selector: &str, account: &AccountConfig) -> Result<(), RpcError> {
 }
 
 /// A backend failure as the error a client shows: the re-login prompt for a
-/// missing scope, the failure itself otherwise.
+/// missing scope, the refusal's sentence for a refused login, the failure
+/// itself otherwise.
 pub(super) fn backend_error(account: &str, error: CalendarBackendError) -> RpcError {
     match error {
         CalendarBackendError::MissingScope { scope } => RpcError {
             code: INTERNAL_ERROR,
             message: crate::oauth2::calendar_relogin_prompt(account),
             data: Some(json!({"account": account, "missing_scopes": [scope]})),
+        },
+        CalendarBackendError::LoginRefused(sentence) => RpcError {
+            code: INTERNAL_ERROR,
+            message: sentence,
+            data: Some(json!({"account": account})),
         },
         CalendarBackendError::Other(e) => server_error(account, &e),
     }

@@ -12,6 +12,9 @@ use super::fetch::{envelope, EwsFetch, EwsFetchError, EwsSession, REQUEST_SERVER
 /// The answer readers on the fixtures.
 mod parse;
 
+/// The read path through the scripted seam.
+mod sync;
+
 const CALENDAR_VIEW: &str = include_str!("../../../tests/fixtures/ews/finditem_calendarview.xml");
 const GET_FOLDER: &str = include_str!("../../../tests/fixtures/ews/getfolder_calendar.xml");
 

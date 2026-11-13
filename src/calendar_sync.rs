@@ -149,9 +149,10 @@ pub async fn invite_event(account: &AccountConfig, row_id: i64) -> Option<EventI
 /// Sync `account`'s calendars from `backend` into `store` as of `now`.
 ///
 /// A missing scope fails the whole account, so the clients can prompt for a
-/// new sign-in; any other failure of one calendar is reported in
-/// [`SyncReport::failed`] and leaves that calendar's cache and token as they
-/// were.
+/// new sign-in, and so does a refused login, which no later calendar of the
+/// pass may ask the server again; any other failure of one calendar is
+/// reported in [`SyncReport::failed`] and leaves that calendar's cache and
+/// token as they were.
 pub async fn sync_account<B: CalendarBackend>(
     store: &Store,
     backend: &B,
@@ -183,7 +184,10 @@ pub async fn sync_account<B: CalendarBackend>(
                 report.removed += result.removed.len();
                 report.baselines += usize::from(result.full_resync);
             }
-            Err(err @ CalendarBackendError::MissingScope { .. }) => return Err(err),
+            Err(
+                err @ (CalendarBackendError::MissingScope { .. }
+                | CalendarBackendError::LoginRefused(_)),
+            ) => return Err(err),
             Err(err) => {
                 warn!(
                     "[calendar] {account}: syncing {} failed: {err}",
