@@ -29,6 +29,7 @@ With a login service installed for this data directory, the start goes through t
 
 `mp daemon status` reports whether a daemon answers against this data directory.
 It prints the instance id, the application version, the protocol range, the pid, the start time and both directories, plus one line per account the daemon reports.
+A `backlog:` line follows for each client that is behind, one whose event queue holds events or has overflowed (PERSO-221), naming its connection, its kind and what is queued; a client that keeps up drains its queue within a frame, so a healthy daemon prints no such line, and `--json` lists every bootstrapped connection under `connections`.
 `--json` prints the same fields as one object with a leading `"running"`, and the key set never changes with the answer, so a client branches on `running` alone rather than on which fields exist.
 The round trip carries no `initialize`, which is what lets `status` describe a daemon whose protocol range this build cannot negotiate.
 

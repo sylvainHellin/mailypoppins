@@ -462,6 +462,11 @@ impl Outbound {
         self.queue.is_empty()
     }
 
+    /// How many queued items are events, the control message left out.
+    pub fn events(&self) -> usize {
+        self.events
+    }
+
     /// What the queued events weigh, which never exceeds
     /// [`Subscriber::max_bytes`].
     pub fn bytes(&self) -> usize {

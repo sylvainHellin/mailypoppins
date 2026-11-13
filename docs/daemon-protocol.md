@@ -150,6 +150,7 @@ Every other method, known or unknown, is gated.
   "data_dir": "/home/alice/.local/share/mailypoppins",
   "config_dir": "/home/alice/.config/mailypoppins",
   "accounts": [{"name": "work", "state": "opening"}],
+  "connections": [{"connection": 7, "client": "tui", "events": 0, "bytes": 0, "overflowed": false}],
   "stopping": false
 }
 ```
@@ -158,6 +159,9 @@ The fields are the daemon's own `daemon.json` metadata plus the live account lis
 `stopping` turns `true` once the daemon has accepted a stop: it still answers `daemon.status` and refuses every handshake with `-32009`, so a start that meets it waits for it to go instead of counting it as running (PERSO-176); a daemon that predates the key is taken as running.
 `accounts` lists the configured accounts, and a state is one of `opening`, `ready`, `blocked`: `opening` while its runtime is still starting, then whichever the runtime reported (`blocked` covers both a lock held elsewhere and an account with no local store yet).
 The shape does not change with the opt-in, only which states appear in it.
+`connections` lists every connection that has bootstrapped, in connection order, with its outbound event queue (`mp_protocol::daemon::ConnectionQueue`): `connection` is the id its `state.bootstrap` answered, `client` the kind its `initialize` announced, `events` and `bytes` what is queued for it and not yet written, and `overflowed` whether the queue overflowed and the daemon is dropping domain events for it until it bootstraps again (PERSO-221).
+A client that reads keeps its queue empty, so a queue that holds events, or one that overflowed, is the client that has fallen behind; a connection that never bootstrapped is fed no events and is not listed, which leaves out the `mp daemon status` asking.
+A daemon that predates the member omits it, and a client reads its absence as no connections.
 `mp daemon status --json` prints this object with a leading `"running": true`, or the same keys with null values and `"running": false` when nothing answers.
 
 `daemon.stop` takes `{grace_secs?}` and returns `{stopping: true, grace_secs, pending}`.
@@ -1968,3 +1972,6 @@ PERSO-222 added `message.attachments`, one query, additively; no field was renam
 
 PERSO-215 added two members to a `draft.attachments`, `draft.attach` and `draft.detach` entry (`mp_protocol::draft::DraftAttachment`), additively: `folder`, whether the entry names a folder, and `files`, the files its send attaches, the entry's own file or a folder's regular files directly inside it, sorted, dotfiles skipped, none when nothing is there to send.
 Both default when absent, so an older daemon's answer decodes with no folder and no files; the TUI's `o` and the desktop's `to` open these files rather than resolving an entry themselves.
+
+PERSO-221 added `connections` to the `daemon.status` result, one member, optional and additive: every bootstrapped connection's outbound event queue as `mp_protocol::daemon::ConnectionQueue` `{connection, client, events, bytes, overflowed}`, which a client of an older daemon reads as absent.
+The fixtures are `crates/mp-protocol/fixtures/daemon.status.{request,response}.json`; no field was renamed, none was dropped, `mp daemon status --json` gained the key (`[]` when nothing answers), and the human-readable block gains a `backlog:` line only for a connection whose queue holds events or has overflowed.

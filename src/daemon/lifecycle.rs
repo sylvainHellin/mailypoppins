@@ -1118,6 +1118,9 @@ async fn status(as_json: bool) -> Result<i32> {
                     );
                 }
             }
+            for line in backlog_lines(&object["connections"]) {
+                println!("  backlog:    {line}");
+            }
         }
         None => {
             println!("{} no daemon running", "\u{2717}".red());
@@ -1145,6 +1148,8 @@ fn status_object(running: Option<&Value>) -> Value {
             "data_dir": status["data_dir"],
             "config_dir": status["config_dir"],
             "accounts": status.get("accounts").cloned().unwrap_or_else(|| json!([])),
+            // An older daemon answers no `connections`, which reads as none.
+            "connections": status.get("connections").cloned().unwrap_or_else(|| json!([])),
         }),
         None => json!({
             "running": false,
@@ -1156,8 +1161,40 @@ fn status_object(running: Option<&Value>) -> Value {
             "data_dir": canonical(&crate::config::mailypoppins_data_dir()).display().to_string(),
             "config_dir": canonical(&crate::config::config_dir()).display().to_string(),
             "accounts": json!([]),
+            "connections": json!([]),
         }),
     }
+}
+
+/// The `backlog:` lines of the human-readable block: one per connection whose
+/// outbound queue holds events or has overflowed (PERSO-221).
+///
+/// A client that reads keeps its queue empty within a frame, so an empty one
+/// is the healthy case and says nothing: a daemon with every client keeping up
+/// prints the block it always printed, and a line appears only for the client
+/// that is falling behind or has fallen behind. `--json` lists every
+/// connection.
+fn backlog_lines(connections: &Value) -> Vec<String> {
+    let Ok(connections) =
+        serde_json::from_value::<Vec<mp_protocol::daemon::ConnectionQueue>>(connections.clone())
+    else {
+        return Vec::new();
+    };
+    connections
+        .iter()
+        .filter(|queue| queue.events > 0 || queue.overflowed)
+        .map(|queue| {
+            let plural = if queue.events == 1 { "" } else { "s" };
+            let mut line = format!(
+                "connection {} ({}): {} event{plural} queued, {} bytes",
+                queue.connection, queue.client, queue.events, queue.bytes
+            );
+            if queue.overflowed {
+                line.push_str(", overflowed: waiting for the client to bootstrap again");
+            }
+            line
+        })
+        .collect()
 }
 
 /// A JSON string without its quotes, for the human-readable block.
@@ -2023,6 +2060,7 @@ mod tests {
             "data_dir",
             "config_dir",
             "accounts",
+            "connections",
         ] {
             assert!(object.get(key).is_some(), "{key} is present");
         }
@@ -2051,6 +2089,35 @@ mod tests {
         assert_eq!(object["running"], json!(true));
         assert_eq!(object["data_dir"], json!("/elsewhere/data"));
         assert_eq!(object["accounts"][0]["state"], json!("opening"));
+        assert_eq!(
+            object["connections"],
+            json!([]),
+            "a daemon that predates `connections` reads as having none"
+        );
+    }
+
+    /// The human-readable block names only the connections that are behind:
+    /// an empty queue is a client keeping up and prints nothing.
+    #[test]
+    fn the_backlog_lines_name_only_a_connection_that_is_behind() {
+        let connections = json!([
+            {"connection": 3, "client": "tui", "events": 0, "bytes": 0, "overflowed": false},
+            {"connection": 5, "client": "cli", "events": 1, "bytes": 90, "overflowed": false},
+            {"connection": 7, "client": "gui", "events": 0, "bytes": 0, "overflowed": true},
+        ]);
+        assert_eq!(
+            backlog_lines(&connections),
+            [
+                "connection 5 (cli): 1 event queued, 90 bytes",
+                "connection 7 (gui): 0 events queued, 0 bytes, overflowed: waiting for the client \
+                 to bootstrap again",
+            ]
+        );
+        assert!(backlog_lines(&json!([])).is_empty());
+        assert!(
+            backlog_lines(&Value::Null).is_empty(),
+            "an older daemon's answer has no connections"
+        );
     }
 
     /// The opt-in variables are read the same way everywhere: unset, empty,

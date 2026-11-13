@@ -281,6 +281,13 @@ impl Diagnostics {
                     json!({"name": name, "state": state})
                 })
                 .collect::<Vec<_>>(),
+            // Every bootstrapped connection's outbound queue (PERSO-221), so an
+            // operator can see which client has fallen behind.
+            "connections": self
+                .canonical
+                .upgrade()
+                .map(|canonical| canonical.connection_queues())
+                .unwrap_or_default(),
         })
     }
 

@@ -36,6 +36,7 @@ export type { CancelScope } from "./CancelScope";
 export type { CheckStatus } from "./CheckStatus";
 export type { ConfigChanged } from "./ConfigChanged";
 export type { ConfigInvalid } from "./ConfigInvalid";
+export type { ConnectionQueue } from "./ConnectionQueue";
 export type { ContactChanged } from "./ContactChanged";
 export type { ConversationListing } from "./ConversationListing";
 export type { ConversationRow } from "./ConversationRow";

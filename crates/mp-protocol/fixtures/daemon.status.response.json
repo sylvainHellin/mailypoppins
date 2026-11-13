@@ -1,0 +1,39 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "accounts": [
+      {
+        "name": "work",
+        "state": "ready"
+      }
+    ],
+    "app_version": "0.12.0",
+    "config_dir": "/home/alice/.config/mailypoppins",
+    "connections": [
+      {
+        "bytes": 0,
+        "client": "tui",
+        "connection": 3,
+        "events": 0,
+        "overflowed": false
+      },
+      {
+        "bytes": 412,
+        "client": "gui",
+        "connection": 7,
+        "events": 2,
+        "overflowed": true
+      }
+    ],
+    "data_dir": "/home/alice/.local/share/mailypoppins",
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "pid": 40321,
+    "protocol": {
+      "max": 1,
+      "min": 1
+    },
+    "started_at": "2026-07-02T09:12:44.512Z",
+    "stopping": false
+  }
+}

@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mp_protocol::{
-    account, attachment, calendar, contact, diagnostic, draft, events, listing, operation,
+    account, attachment, calendar, contact, daemon, diagnostic, draft, events, listing, operation,
     reminder, rendition, send, sender, signature, state,
 };
 use ts_rs::{Config, TS};
@@ -93,6 +93,7 @@ fn export_into(dir: &Path) -> usize {
         calendar::EventDeleteParams,
         calendar::EventDeleteResult,
         calendar::CalendarChanged,
+        daemon::ConnectionQueue,
         diagnostic::CheckStatus,
         diagnostic::HealthCheck,
         draft::DraftSource,

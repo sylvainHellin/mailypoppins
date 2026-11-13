@@ -215,10 +215,28 @@ pub struct EventQueue {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
     lifecycle: Arc<Mutex<VecDeque<(Revision, events::Event)>>>,
     ready: Arc<Notify>,
+    /// What the connection task last recorded of its outbound queue, which
+    /// `daemon.status` reports ([`CanonicalState::connection_queues`]).
+    depth: Arc<Mutex<QueueDepth>>,
     /// The RAII half of the subscription: the endpoint stays in the fan-out
     /// until the last handle of this queue drops. Never read, which is the
     /// point of an owner.
     _subscription: Arc<Subscription>,
+}
+
+/// One connection's outbound queue as its task last saw it (PERSO-221).
+///
+/// The [`Outbound`](events::Outbound) lives in the connection task and is
+/// nobody else's to read, so the task copies these three numbers here as it
+/// pushes and pops, and `daemon.status` reads the copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueueDepth {
+    /// Events queued and not yet written.
+    pub events: usize,
+    /// What they weigh.
+    pub bytes: usize,
+    /// Whether the queue overflowed and waits for a bootstrap.
+    pub overflowed: bool,
 }
 
 impl EventQueue {
@@ -269,6 +287,12 @@ impl EventQueue {
         items
     }
 
+    /// Record what this connection's outbound queue holds now, for
+    /// `daemon.status`.
+    pub fn record_depth(&self, depth: QueueDepth) {
+        *lock(&self.depth) = depth;
+    }
+
     /// Resolve once the queue holds something, immediately if it already does.
     ///
     /// The async companion the socket writer selects on; the in-process
@@ -296,6 +320,8 @@ struct Endpoint {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
     lifecycle: Arc<Mutex<VecDeque<(Revision, events::Event)>>>,
     ready: Arc<Notify>,
+    /// The connection task's record of its outbound queue.
+    depth: Arc<Mutex<QueueDepth>>,
     /// False between `subscribe` and `bootstrap`: the endpoint exists, but the
     /// fan-out does not write to it yet.
     attached: bool,
@@ -697,12 +723,14 @@ impl CanonicalState {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let lifecycle = Arc::new(Mutex::new(VecDeque::new()));
         let ready = Arc::new(Notify::new());
+        let depth = Arc::new(Mutex::new(QueueDepth::default()));
         lock(&self.inner).subscribers.insert(
             conn,
             Endpoint {
                 events: Arc::clone(&events),
                 lifecycle: Arc::clone(&lifecycle),
                 ready: Arc::clone(&ready),
+                depth: Arc::clone(&depth),
                 attached: false,
                 kind: None,
                 bootstrapped: 0,
@@ -712,6 +740,7 @@ impl CanonicalState {
             events,
             lifecycle,
             ready,
+            depth,
             _subscription: Arc::new(Subscription {
                 conn,
                 inner: Arc::downgrade(&self.inner),
@@ -748,6 +777,33 @@ impl CanonicalState {
         } else {
             latest(ClientKind::Tui).map(|conn| (conn, mp_protocol::reminder::PRESENTER_TUI))
         }
+    }
+
+    /// Every bootstrapped connection's outbound queue, in connection order:
+    /// the `connections` of `daemon.status` (PERSO-221).
+    ///
+    /// A connection that never bootstrapped is fed nothing and is left out,
+    /// which is also what keeps the `mp daemon status` asking from listing
+    /// itself.
+    pub fn connection_queues(&self) -> Vec<mp_protocol::daemon::ConnectionQueue> {
+        lock(&self.inner)
+            .subscribers
+            .iter()
+            .filter(|(_, subscriber)| subscriber.attached)
+            .map(|(conn, subscriber)| {
+                let depth = *lock(&subscriber.depth);
+                mp_protocol::daemon::ConnectionQueue {
+                    connection: conn.0,
+                    client: subscriber
+                        .kind
+                        .map_or("unknown", ClientKind::as_str)
+                        .to_string(),
+                    events: depth.events as u64,
+                    bytes: depth.bytes as u64,
+                    overflowed: depth.overflowed,
+                }
+            })
+            .collect()
     }
 
     /// How many connections the fan-out writes to, attached or not.

@@ -1634,6 +1634,62 @@ async fn a_stalled_reader_is_told_to_resync_and_sees_no_domain_event_after_it() 
     .await;
 }
 
+/// What an operator sees of a stalled reader (PERSO-221): `daemon.status`
+/// lists every bootstrapped connection with its outbound queue, and the
+/// stalled one reads as overflowed, waiting for a bootstrap, while a client
+/// that never bootstrapped is not listed at all.
+#[tokio::test]
+async fn daemon_status_reports_a_stalled_readers_queue() {
+    let sandbox = Sandbox::single_account();
+    let _daemon = sandbox.start_daemon_bursting(BURST).await;
+
+    let (mut stalled, _) = connect_initialized(&sandbox).await;
+    let bootstrap = within(
+        "state.bootstrap",
+        stalled.call("state.bootstrap", json!({})),
+    )
+    .await
+    .expect("state.bootstrap answers an initialized connection");
+    let stalled_id = bootstrap["connection"].as_u64().expect("a connection id");
+
+    let (mut healthy, _) = connect_initialized(&sandbox).await;
+    let entry = within("the stalled queue to overflow", async {
+        loop {
+            let status = healthy
+                .call("daemon.status", json!({}))
+                .await
+                .expect("the daemon answers a healthy client");
+            let connections = status["connections"]
+                .as_array()
+                .unwrap_or_else(|| panic!("daemon.status lists the connections: {status}"))
+                .clone();
+            assert!(
+                connections
+                    .iter()
+                    .all(|c| c["connection"] == json!(stalled_id)),
+                "only a bootstrapped connection has a queue to report: {connections:?}"
+            );
+            if let Some(entry) = connections.into_iter().next() {
+                if entry["overflowed"] == json!(true) {
+                    return entry;
+                }
+            }
+            tokio::time::sleep(TICK).await;
+        }
+    })
+    .await;
+
+    let entry: mp_protocol::daemon::ConnectionQueue =
+        serde_json::from_value(entry).expect("the entry decodes");
+    assert_eq!(entry.client, "gui", "the kind its initialize announced");
+    let limits = Subscriber::default();
+    assert!(
+        entry.events <= limits.max_events as u64 && entry.bytes <= limits.max_bytes as u64,
+        "the queue is held to its caps: {entry:?}"
+    );
+    drop(stalled);
+}
+
 /// And the exit: a fresh bootstrap ends the poison, and the client is served
 /// domain events again, above the revision its new snapshot was captured at.
 #[tokio::test]

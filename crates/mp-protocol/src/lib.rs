@@ -14,6 +14,7 @@ pub mod account;
 pub mod attachment;
 pub mod calendar;
 pub mod contact;
+pub mod daemon;
 pub mod diagnostic;
 pub mod draft;
 pub mod events;

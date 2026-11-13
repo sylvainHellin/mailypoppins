@@ -48,7 +48,8 @@ use super::runtime::InstanceMeta;
 use super::session::Session;
 use super::state::events::{Event, Outbound, Outgoing, Subscriber};
 use super::state::{
-    config_seeds, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, Revision,
+    config_seeds, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, QueueDepth,
+    Revision,
 };
 use crate::sync::Stop;
 
@@ -857,6 +858,15 @@ async fn serve_connection(
                 }
             }
         }
+
+        // Every push and pop of the outbound queue happens in one pass of this
+        // loop, so recording here, after the pick, keeps `daemon.status`'s copy
+        // current to within one frame.
+        queue.record_depth(QueueDepth {
+            events: outbound.events(),
+            bytes: outbound.bytes(),
+            overflowed: outbound.is_poisoned(),
+        });
 
         let writing = written < frame_out.len();
         let reading = after_flush.is_none() && replies.len() < MAX_PENDING_REPLIES;

@@ -25,8 +25,13 @@
 //! {"running":bool,"instance_id":str|null,"app_version":str|null,
 //!  "protocol":{"min":u32,"max":u32}|null,"pid":u32|null,"started_at":str|null,
 //!  "data_dir":str,"config_dir":str,
-//!  "accounts":[{"name":str,"state":"opening"|"ready"|"blocked"}]}
+//!  "accounts":[{"name":str,"state":"opening"|"ready"|"blocked"}],
+//!  "connections":[{"connection":u64,"client":str,"events":u64,"bytes":u64,
+//!                  "overflowed":bool}]}
 //! ```
+//!
+//! `connections` joined in PERSO-221: every bootstrapped connection's outbound
+//! event queue, `[]` when nothing answers or the daemon predates the member.
 //!
 //! Exit codes (plan section 3.0): `0` success, `1` generic error, `3`
 //! incompatible daemon, `4` daemon unavailable / failed to start. `status` on a
@@ -347,6 +352,7 @@ fn assert_status_shape(v: &Value) {
         "data_dir",
         "config_dir",
         "accounts",
+        "connections",
     ];
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     keys.sort_unstable();
@@ -371,6 +377,13 @@ fn assert_status_shape(v: &Value) {
             matches!(state, "opening" | "ready" | "blocked"),
             "account.state is one of opening/ready/blocked, got {state:?}"
         );
+    }
+    let connections = v["connections"]
+        .as_array()
+        .expect("connections is an array");
+    for queue in connections {
+        let _: mp_protocol::daemon::ConnectionQueue = serde_json::from_value(queue.clone())
+            .unwrap_or_else(|e| panic!("a connection entry decodes: {e}: {queue}"));
     }
 
     if v["running"].as_bool().unwrap() {
