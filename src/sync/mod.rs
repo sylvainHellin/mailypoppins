@@ -402,14 +402,15 @@ pub struct MailboxCoverage {
     /// this pass's own ingest raised (#0072).
     pub pending_arrival_mark: Option<u32>,
     /// The CONDSTORE `HIGHESTMODSEQ` to record as the next pass's resume point,
-    /// or `None` for "this fetch cannot vouch for one", which the cursor UPSERT
-    /// reads as "keep whatever is stored" (#0041).
+    /// with the lowest UID it vouches for, or `None` for "this fetch cannot
+    /// vouch for one", which the cursor UPSERT reads as "keep whatever is
+    /// stored" (#0041, PERSO-202).
     ///
     /// `None` is the answer for every backend and every path without CONDSTORE,
-    /// and for a CONDSTORE pass whose window did not cover the whole mailbox:
-    /// a modseq claims every flag in the mailbox was correct as of that point,
-    /// and only a pass that looked at all of them may claim it.
-    pub highest_modseq: Option<i64>,
+    /// and for a CONDSTORE pass that looked at no flag or was cut short: a
+    /// mark claims every flag at or above its UID was correct as of its
+    /// modseq, and only a pass that looked at all of them may claim it.
+    pub highest_modseq: Option<crate::ingest::ModseqMark>,
 }
 
 /// One answer of [`SyncBackend::next_batch`].

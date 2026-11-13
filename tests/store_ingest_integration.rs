@@ -1092,7 +1092,7 @@ fn mailbox_cursors_round_trip() {
         last_uid: Some(1234),
         uidnext: Some(1235),
         exists: Some(56),
-        highest_modseq: Some(7),
+        highest_modseq: Some(mark(7, 1200)),
         deltalink: None,
         arrival_mark: None,
     };
@@ -1103,7 +1103,7 @@ fn mailbox_cursors_round_trip() {
         .unwrap();
     assert_eq!(loaded.uidvalidity, Some(42));
     assert_eq!(loaded.last_uid, Some(1234));
-    assert_eq!(loaded.highest_modseq, Some(7));
+    assert_eq!(loaded.highest_modseq, Some(mark(7, 1200)));
 
     // The UID and the modseq live in their own columns (#0054): a UID written
     // into `highest_modseq` would make a later CHANGEDSINCE fetch return
@@ -2008,10 +2008,15 @@ fn a_pass_of_server_read_flags_applies_in_one_transaction() {
 // The cursor's carry-forward columns (#0041)
 // ---------------------------------------------------------------------------
 
+/// A CONDSTORE mark: `modseq`, vouching for every UID from `from_uid` up.
+fn mark(modseq: u64, from_uid: u32) -> mailypoppins::ingest::ModseqMark {
+    mailypoppins::ingest::ModseqMark { modseq, from_uid }
+}
+
 /// A cursor carrying nothing but the columns this test cares about.
 fn cursor(
     last_uid: i64,
-    highest_modseq: Option<i64>,
+    highest_modseq: Option<mailypoppins::ingest::ModseqMark>,
     deltalink: Option<&str>,
 ) -> mailypoppins::ingest::MailboxCursor {
     mailypoppins::ingest::MailboxCursor {
@@ -2046,7 +2051,7 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
         "inbox",
         &cursor(
             10,
-            Some(90_060_115_205_545_359),
+            Some(mark(90_060_115_205_545_359, 4)),
             Some("https://graph/delta?$t=abc"),
         ),
     )
@@ -2062,8 +2067,9 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
         .expect("the cursor row exists");
     assert_eq!(
         after.highest_modseq,
-        Some(90_060_115_205_545_359),
-        "a pass with nothing to say about the modseq must not erase it"
+        Some(mark(90_060_115_205_545_359, 4)),
+        "a pass with nothing to say about the modseq must not erase it, \
+         nor the lowest UID it vouches for (PERSO-202)"
     );
     assert_eq!(
         after.deltalink.as_deref(),
@@ -2084,7 +2090,7 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
         "inbox",
         &cursor(
             12,
-            Some(90_060_115_205_545_400),
+            Some(mark(90_060_115_205_545_400, 9)),
             Some("https://graph/delta?$t=def"),
         ),
     )
@@ -2092,7 +2098,11 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
     let after = mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox")
         .unwrap()
         .unwrap();
-    assert_eq!(after.highest_modseq, Some(90_060_115_205_545_400));
+    assert_eq!(
+        after.highest_modseq,
+        Some(mark(90_060_115_205_545_400, 9)),
+        "and replacing the modseq replaces its bound with it"
+    );
     assert_eq!(
         after.deltalink.as_deref(),
         Some("https://graph/delta?$t=def")
@@ -2109,7 +2119,7 @@ fn a_uidvalidity_reset_can_still_clear_the_modseq() {
         &f.store,
         "acct",
         "inbox",
-        &cursor(10, Some(4242), None),
+        &cursor(10, Some(mark(4242, 5)), None),
     )
     .unwrap();
 
@@ -2120,7 +2130,43 @@ fn a_uidvalidity_reset_can_still_clear_the_modseq() {
         .unwrap();
     assert_eq!(after.highest_modseq, None);
     assert_eq!(after.last_uid, Some(10), "and nothing else is disturbed");
+    let from_uid: Option<i64> = f
+        .store
+        .conn()
+        .query_row(
+            "SELECT modseq_from_uid FROM sync_cursors WHERE account = 'acct' AND mailbox = 'inbox'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        from_uid, None,
+        "the bound goes with the modseq, so no later modseq can inherit it"
+    );
 
     // A mailbox with no cursor row at all is a no-op, not an error.
     mailypoppins::ingest::clear_mailbox_modseq(&f.store, "acct", "archive");
+}
+
+/// PERSO-202: a modseq recorded by a build that predates its lower bound.
+///
+/// Those builds wrote a modseq only off a pass that saw every message, so the
+/// claim it makes is the whole mailbox, and that is how it reads back: the
+/// additive column comes up NULL beside it, and NULL is UID 1. A modseq of 0
+/// is a column nobody wrote and is no mark at all.
+#[test]
+fn a_modseq_an_earlier_build_recorded_vouches_for_the_whole_mailbox() {
+    let f = Fixture::new();
+    let conn = f.store.conn();
+    conn.execute(
+        "INSERT INTO sync_cursors (account, mailbox, uidvalidity, last_uid, highest_modseq)
+         VALUES ('acct', 'inbox', 1, 10, 4242), ('acct', 'archive', 1, 10, 0)",
+        [],
+    )
+    .unwrap();
+
+    let known = mailypoppins::ingest::known_uids_with_cursor(&f.store, "acct", "inbox").unwrap();
+    assert_eq!(known.highest_modseq, Some(mark(4242, 1)));
+    let known = mailypoppins::ingest::known_uids_with_cursor(&f.store, "acct", "archive").unwrap();
+    assert_eq!(known.highest_modseq, None);
 }

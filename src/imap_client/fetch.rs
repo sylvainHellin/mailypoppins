@@ -9,7 +9,7 @@ use super::{
     search::{build_imap_search_query, FetchCriteria},
     ImapSession,
 };
-use crate::ingest::KnownUids;
+use crate::ingest::{KnownUids, ModseqMark};
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
 use crate::sync::{FetchedRaw, MailboxCoverage, MailboxListing, MailboxState};
@@ -500,55 +500,128 @@ pub(crate) fn flag_pass(
     }
 }
 
-/// The modseq this pass may leave behind as the next one's resume point, or
-/// `None` to keep whatever is stored (the cursor UPSERT carries it forward).
-///
-/// The load-bearing condition is `window_is_whole_mailbox`. A recorded modseq
-/// asserts "every flag in this mailbox was correct as of `n`", and only a pass
-/// that looked at every message can assert that. A quick sync sees the last 50
-/// UIDs; recording its modseq would tell the next pass not to ask about changes
-/// that predate it on the 8000 messages below the window, and a later full sync
-/// would skip exactly the flag changes it exists to catch.
-///
-/// The consequence is deliberate and worth stating: on a large mailbox the
-/// delta only starts working after a full sync, and quick syncs consume the
-/// resume point without advancing it. Correctness over speed, which is the
-/// ticket's own ranking. Advancing it on a capped pass is PERSO-202.
-///
-/// `enumeration_complete` is the second half: if `UID SEARCH ALL` came back
-/// short, "the window is the whole mailbox" is a statement about a listing that
-/// is already known to be untrustworthy.
-///
-/// `bodies_complete` is the third (#0113): a pass that stopped at its body
-/// deadline looked at every flag in the window and at only part of the mail, so
-/// the next `CHANGEDSINCE` would skip the flag changes made in between on the
-/// messages it never downloaded. A truncated pass vouches for nothing.
-pub(crate) fn modseq_to_record(
-    server: Option<u64>,
-    window_is_whole_mailbox: bool,
-    enumeration_complete: bool,
-    bodies_complete: bool,
-) -> Option<i64> {
-    if !window_is_whole_mailbox || !enumeration_complete || !bodies_complete {
-        return None;
-    }
-    server
-        .filter(|&m| m > 0)
-        .and_then(|m| i64::try_from(m).ok())
+/// The `CHANGEDSINCE` half of a [`FlagPlan`]: every UID from `from` to `to`
+/// whose flags changed after mod-sequence `since`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlagDelta {
+    pub since: u64,
+    pub from: u32,
+    pub to: u32,
 }
 
-/// Did this pass's window cover the whole listing?
+impl FlagDelta {
+    /// The UID set the delta's `UID FETCH` names.
+    pub(crate) fn uid_set(&self) -> String {
+        if self.from == self.to {
+            self.from.to_string()
+        } else {
+            format!("{}:{}", self.from, self.to)
+        }
+    }
+}
+
+/// How pass 1 asks the server for flags, and what the answer will vouch for
+/// (PERSO-202).
 ///
-/// The one rule both return paths ask, so neither can answer it its own way.
-/// The subtlety is the empty window: `mp sync -n 0` computes a whole vanished
-/// set and returns before pass 1 with `window.len() == 0` while `listed` is the
-/// entire (non-empty) mailbox, so it saw *no* flags and must not vouch for any.
-/// Hardcoding `true` there recorded the server's HIGHESTMODSEQ off a pass that
-/// fetched nothing, and the next `CHANGEDSINCE` skipped every flag change in
-/// between (#0041 review blocker). A genuinely empty mailbox is `0 == 0` and
-/// still records, which is correct: there is nothing to have missed.
-pub(crate) fn window_is_whole_mailbox(window_len: usize, listed_len: usize) -> bool {
-    window_len == listed_len
+/// A stored [`ModseqMark`] covers the UIDs at or above its `from_uid`, so the
+/// pass splits there: the window's UIDs below the mark get every flag, and
+/// everything the server lists from the mark up gets a `CHANGEDSINCE`. The
+/// delta reaches *below* the window when the mark does, which is the point:
+/// it costs one line per changed message rather than one per message, so a
+/// quick sync over the newest 50 still hears about a flag changed elsewhere on
+/// a message from last year.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlagPlan {
+    /// The window's UIDs whose every flag is fetched, ascending.
+    pub full: Vec<u32>,
+    /// The `CHANGEDSINCE` fetch, when there is a mark to resume from and the
+    /// server lists anything at or above it.
+    pub delta: Option<FlagDelta>,
+    /// The lowest UID at and above which the plan, run to the end, has seen
+    /// every flag change the server made up to the SELECT that started it:
+    /// the `from_uid` of the mark the pass may record.
+    pub covered_from: u32,
+}
+
+/// The [`FlagPlan`] for a non-empty, ascending `window` whose server listing
+/// tops out at `listed_top`, given the gate's decision `pass` and the stored
+/// `mark` that decision was taken on.
+///
+/// Why `covered_from` is sound, case by case:
+///
+/// - No delta ([`FlagPass::Full`]): every flag in the window was fetched, and
+///   the window is the top of the listing, so every listed UID at or above its
+///   lowest is covered.
+/// - A delta from mark `(m, L)`: the stored mark already vouched for every
+///   flag at or above `L` as of `m`, and the delta fetched every change after
+///   `m` from `L` to the top, so from `L` up the store is current. The window's
+///   UIDs below `L` were fetched in full. Together that is everything from the
+///   lower of `L` and the window's bottom.
+///
+/// A UID the server lists at or above `covered_from` that the store does not
+/// hold is not a gap: it has no flags to be wrong, and whichever pass
+/// downloads it reads its flags with its body.
+pub(crate) fn flag_plan(
+    window: &[u32],
+    listed_top: u32,
+    mark: Option<ModseqMark>,
+    pass: FlagPass,
+) -> FlagPlan {
+    let bottom = window.first().copied().unwrap_or(1);
+    let (FlagPass::ChangedSince(since), Some(mark)) = (pass, mark) else {
+        return FlagPlan {
+            full: window.to_vec(),
+            delta: None,
+            covered_from: bottom,
+        };
+    };
+    let from = mark.from_uid.max(1);
+    FlagPlan {
+        full: window.iter().copied().filter(|&uid| uid < from).collect(),
+        delta: (from <= listed_top).then_some(FlagDelta {
+            since,
+            from,
+            to: listed_top,
+        }),
+        covered_from: bottom.min(from),
+    }
+}
+
+/// The mark this pass may leave behind as the next one's resume point, or
+/// `None` to keep whatever is stored (the cursor UPSERT carries it forward).
+///
+/// `covered_from` is the lowest UID the pass saw every flag change at or above
+/// ([`FlagPlan::covered_from`]), and `None` for a pass that looked at no flag:
+/// `mp sync -n 0` over a populated mailbox computes a whole vanished set and
+/// returns before pass 1, and recording the server's HIGHESTMODSEQ off it made
+/// the next `CHANGEDSINCE` skip every flag change in between (#0041 review
+/// blocker). An empty mailbox has nothing to have missed and covers from 1.
+///
+/// The bound is what lets a capped pass record (PERSO-202). Until it existed a
+/// mark claimed the whole mailbox, so only a pass that saw every message could
+/// write one, and on a mailbox bigger than the quick-sync window the delta ran
+/// only after a full sync and quick syncs consumed the resume point without
+/// advancing it.
+///
+/// `enumeration_complete` is the second condition: if `UID SEARCH ALL` came
+/// back short, the window and the listing's top are read off a listing already
+/// known to be untrustworthy, and a UID it left out may sit inside the range.
+///
+/// `bodies_complete` is the third (#0113): a pass that stopped at its body
+/// deadline looked at every flag in the window and at only part of the mail. A
+/// truncated pass vouches for nothing, and the stored mark, still true, stays.
+pub(crate) fn modseq_to_record(
+    server: Option<u64>,
+    covered_from: Option<u32>,
+    enumeration_complete: bool,
+    bodies_complete: bool,
+) -> Option<ModseqMark> {
+    if !enumeration_complete || !bodies_complete {
+        return None;
+    }
+    let from_uid = covered_from?.max(1);
+    let modseq = server.filter(|&m| m > 0 && i64::try_from(m).is_ok())?;
+    Some(ModseqMark { modseq, from_uid })
 }
 
 /// Which UIDs in the window the store does not hold.
@@ -659,13 +732,20 @@ pub(crate) struct BodyPlan {
 /// arithmetic needs, so the engine asks it once the body pass has ended,
 /// whichever way it ended: run to the end, cut at the budget, stopped or
 /// failed.
-pub(crate) async fn list_mailbox_on_session(
-    session: &mut ImapSession,
+///
+/// On a CONDSTORE server with a stored mark, pass 1 is the [`FlagPlan`] rather
+/// than the whole window (#0041, PERSO-202). Generic over the transport so a
+/// test can drive it against a scripted server.
+pub(crate) async fn list_mailbox_on_session<T>(
+    session: &mut async_imap::Session<T>,
     mailbox: &str,
     limit: Option<usize>,
     known: KnownUids,
     caps: ServerCaps,
-) -> Result<(MailboxListing, BodyPlan)> {
+) -> Result<(MailboxListing, BodyPlan)>
+where
+    T: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
     let mut span = TimingSpan::with_context("list_mailbox", mailbox.to_string());
 
     // `SELECT (CONDSTORE)` only where the server advertised CONDSTORE: it is
@@ -749,7 +829,7 @@ pub(crate) async fn list_mailbox_on_session(
     // readable expression rather than a condition spread over the two passes.
     let pass = flag_pass(
         caps.condstore,
-        known_modseq,
+        known_modseq.map(|mark| mark.modseq),
         server_modseq,
         uidvalidity_reset,
     );
@@ -760,22 +840,49 @@ pub(crate) async fn list_mailbox_on_session(
     };
     window.sort_unstable();
 
-    // Pass 1: flags over the window (~40 bytes per message on the full form).
-    // An empty window, an empty mailbox or `mp sync -n 0`, asks for none and
-    // has nothing new; it still answers the coverage question below, because
+    // Pass 1: flags, every one over the part of the window no mark covers
+    // (~40 bytes per message) and only the changed ones from the mark up. An
+    // empty window, an empty mailbox or `mp sync -n 0`, asks for none and has
+    // nothing new; it still answers the coverage question below, because
     // `mp sync -n 0` computes a whole vanished set and hardcoding "complete"
     // would force the gate open on a prune-only pass (#0072 review note 3).
     let mut new_uids: Vec<u32> = Vec::new();
     let mut known_flags: Vec<(u32, MessageFlags)> = Vec::new();
     let mut skipped = 0;
+    // The lowest UID this pass saw every flag change at or above, `None` when
+    // it looked at no flag. An empty window covers the mailbox only when the
+    // mailbox is itself empty: `mp sync -n 0` over a populated mailbox fetched
+    // no flags and may not advance the resume point (#0041 review).
+    let mut covered_from = listed.is_empty().then_some(1);
     if !window.is_empty() {
-        let flagged: Vec<_> = session
-            .uid_fetch(compress_uid_set(&window), flag_query(pass))
-            .await
-            .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?
-            .try_collect()
-            .await
-            .map_err(|e| anyhow!("Failed to collect flags: {}", e))?;
+        let listed_top = listed.last().copied().unwrap_or(0);
+        let flags = flag_plan(&window, listed_top, known_modseq, pass);
+        let mut flagged = Vec::new();
+        if !flags.full.is_empty() {
+            flagged.extend(
+                session
+                    .uid_fetch(compress_uid_set(&flags.full), flag_query(FlagPass::Full))
+                    .await
+                    .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(|e| anyhow!("Failed to collect flags: {}", e))?,
+            );
+        }
+        if let Some(delta) = flags.delta {
+            flagged.extend(
+                session
+                    .uid_fetch(
+                        delta.uid_set(),
+                        flag_query(FlagPass::ChangedSince(delta.since)),
+                    )
+                    .await
+                    .map_err(|e| anyhow!("Failed to fetch changed flags: {}", e))?
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(|e| anyhow!("Failed to collect changed flags: {}", e))?,
+            );
+        }
         span.mark("pass1_flags");
 
         for msg in flagged.iter() {
@@ -786,24 +893,29 @@ pub(crate) async fn list_mailbox_on_session(
                 new_uids.push(uid);
             }
         }
-        skipped = if matches!(pass, FlagPass::ChangedSince(_)) {
+        skipped = if let Some(delta) = flags.delta {
             // A delta answers only for messages whose flags changed, so what
             // came back says nothing about which UIDs are new: an unchanged
-            // message the store has never seen would look like an absence. The
-            // window and the skip list, both of which this pass already holds,
-            // say it exactly. Getting this backwards would silently stop
-            // downloading new mail.
+            // message the store has never seen would look like an absence, and
+            // one it answers for below the window is not this pass's to
+            // download. The window and the skip list, both of which this pass
+            // already holds, say it exactly. Getting this backwards would
+            // silently stop downloading new mail.
             new_uids = new_uids_in_window(&window, &known_uids);
             info!(
-                "Store fetch for '{}': CONDSTORE delta since {:?} returned {} changed flag(s)",
+                "Store fetch for '{}': CONDSTORE delta since {} over {} returned {} changed \
+                 flag(s), {} UID(s) fetched in full",
                 mailbox,
-                known_modseq,
-                known_flags.len()
+                delta.since,
+                delta.uid_set(),
+                known_flags.len(),
+                flags.full.len()
             );
             window.len() - new_uids.len()
         } else {
             known_flags.len()
         };
+        covered_from = Some(flags.covered_from);
     }
     if !new_uids.is_empty() {
         info!(
@@ -813,11 +925,6 @@ pub(crate) async fn list_mailbox_on_session(
             skipped
         );
     }
-    // An empty window covers the mailbox only when the mailbox is itself
-    // empty: `mp sync -n 0` over a populated mailbox fetched no flags and may
-    // not advance the resume point (#0041 review).
-    let window_whole = window_is_whole_mailbox(window.len(), listed.len());
-
     let plan = BodyPlan {
         mailbox: mailbox.to_string(),
         uid_validity: state.uid_validity,
@@ -850,7 +957,7 @@ pub(crate) async fn list_mailbox_on_session(
                 pending_arrival_mark: coverage.pending_mark,
                 highest_modseq: modseq_to_record(
                     server_modseq,
-                    window_whole,
+                    covered_from,
                     enumeration_complete,
                     bodies_complete,
                 ),
@@ -1298,41 +1405,300 @@ mod tests {
         );
     }
 
-    /// What a pass may leave behind. The claim a stored modseq makes is "every
-    /// flag in this mailbox was correct as of n", so only a pass that looked at
-    /// every message may make it; a quick sync that saw the last 50 of 8000
-    /// must not, or the next full sync would skip exactly the old-message flag
-    /// changes it exists to catch (#0004 again).
+    /// A CONDSTORE mark: `modseq`, vouching for every UID from `from_uid` up.
+    fn mark(modseq: u64, from_uid: u32) -> ModseqMark {
+        ModseqMark { modseq, from_uid }
+    }
+
+    /// What a pass may leave behind. A mark claims "every flag at or above
+    /// `from_uid` was correct as of `modseq`", so a pass records the lowest UID
+    /// it covered and no lower: a quick sync that saw the last 50 of 8000 and
+    /// claimed all of them would make the next full sync skip exactly the
+    /// old-message flag changes it exists to catch (#0004 again). A capped
+    /// pass does record, for what it covered (PERSO-202).
     #[test]
-    fn only_a_pass_that_saw_the_whole_mailbox_may_record_a_modseq() {
+    fn a_pass_records_its_modseq_for_the_uids_it_covered_and_no_lower() {
         let server = Some(90_060_115_205_545_359u64);
         assert_eq!(
-            modseq_to_record(server, true, true, true),
-            Some(90_060_115_205_545_359),
+            modseq_to_record(server, Some(1), true, true),
+            Some(mark(90_060_115_205_545_359, 1)),
             "a full pass over a completely enumerated mailbox"
         );
         assert_eq!(
-            modseq_to_record(server, false, true, true),
-            None,
-            "a capped window may not vouch for the messages below it"
+            modseq_to_record(server, Some(7_951), true, true),
+            Some(mark(90_060_115_205_545_359, 7_951)),
+            "a capped window vouches for itself and not for the messages below it"
         );
         assert_eq!(
-            modseq_to_record(server, true, false, true),
+            modseq_to_record(server, None, true, true),
+            None,
+            "a pass that looked at no flag vouches for nothing"
+        );
+        assert_eq!(
+            modseq_to_record(server, Some(1), false, true),
             None,
             "nor may a pass whose own enumeration came back short"
         );
         assert_eq!(
-            modseq_to_record(server, true, true, false),
+            modseq_to_record(server, Some(1), true, false),
             None,
             "nor may a pass that stopped at its body deadline (#0113)"
         );
         // Nothing to record is not a failure; the cursor UPSERT carries the
         // stored value forward on None.
-        assert_eq!(modseq_to_record(None, true, true, true), None);
-        assert_eq!(modseq_to_record(Some(0), true, true, true), None);
+        assert_eq!(modseq_to_record(None, Some(1), true, true), None);
+        assert_eq!(modseq_to_record(Some(0), Some(1), true, true), None);
         // A modseq beyond i64 is a server the store cannot represent; it gets
         // the full window forever rather than a truncated resume point.
-        assert_eq!(modseq_to_record(Some(u64::MAX), true, true, true), None);
+        assert_eq!(modseq_to_record(Some(u64::MAX), Some(1), true, true), None);
+    }
+
+    /// PERSO-202: how a pass splits around a stored mark.
+    #[test]
+    fn the_flag_plan_splits_the_window_at_the_marks_lower_bound() {
+        let window: Vec<u32> = (7_951..=8_000).collect();
+
+        // No mark (or no CONDSTORE): every flag in the window, and the window
+        // is what the next mark may claim.
+        let plan = flag_plan(&window, 8_000, None, FlagPass::Full);
+        assert_eq!(plan.full, window);
+        assert_eq!(plan.delta, None);
+        assert_eq!(plan.covered_from, 7_951);
+
+        // A mark over the whole mailbox: the quick sync is a delta from UID 1
+        // up, below its own window, and fetches no flag in full. This is the
+        // common path the ticket is about.
+        let whole = Some(mark(1_000, 1));
+        let plan = flag_plan(&window, 8_000, whole, FlagPass::ChangedSince(1_000));
+        assert!(plan.full.is_empty());
+        assert_eq!(
+            plan.delta,
+            Some(FlagDelta {
+                since: 1_000,
+                from: 1,
+                to: 8_000
+            })
+        );
+        assert_eq!(plan.delta.unwrap().uid_set(), "1:8000");
+        assert_eq!(
+            plan.covered_from, 1,
+            "so the next mark still covers everything"
+        );
+
+        // A mark left by an earlier capped pass, above this window's bottom
+        // (new mail moved nothing, the window grew, or this is a full sync):
+        // what the mark does not cover is fetched in full.
+        let capped = Some(mark(1_000, 7_990));
+        let plan = flag_plan(&window, 8_000, capped, FlagPass::ChangedSince(1_000));
+        assert_eq!(plan.full, (7_951..7_990).collect::<Vec<u32>>());
+        assert_eq!(plan.delta.unwrap().uid_set(), "7990:8000");
+        assert_eq!(plan.covered_from, 7_951);
+
+        // A mark above everything the server lists (its messages were all
+        // expunged since): nothing to ask a delta about.
+        let above = Some(mark(1_000, 9_000));
+        let plan = flag_plan(&window, 8_000, above, FlagPass::ChangedSince(1_000));
+        assert_eq!(plan.full, window);
+        assert_eq!(plan.delta, None);
+        assert_eq!(plan.covered_from, 7_951);
+
+        // The gate said no (a UIDVALIDITY reset, a server gone backwards):
+        // the mark is ignored entirely.
+        let plan = flag_plan(&window, 8_000, whole, FlagPass::Full);
+        assert_eq!(plan.full, window);
+        assert_eq!(plan.delta, None);
+        assert_eq!(plan.covered_from, 7_951);
+
+        // A one-UID delta names the UID, not a range.
+        let plan = flag_plan(
+            &[8_000],
+            8_000,
+            Some(mark(5, 8_000)),
+            FlagPass::ChangedSince(5),
+        );
+        assert_eq!(plan.delta.unwrap().uid_set(), "8000");
+    }
+
+    /// A mailbox on a CONDSTORE server, as the delta sees it: each message's
+    /// flag and the mod-sequence of its last change.
+    #[derive(Default)]
+    struct ModelServer {
+        messages: std::collections::BTreeMap<u32, (bool, u64)>,
+        highest_modseq: u64,
+        uid_next: u32,
+    }
+
+    impl ModelServer {
+        fn bump(&mut self) -> u64 {
+            self.highest_modseq += 1;
+            self.highest_modseq
+        }
+
+        fn arrive(&mut self, seen: bool) {
+            self.uid_next += 1;
+            let modseq = self.bump();
+            self.messages.insert(self.uid_next, (seen, modseq));
+        }
+
+        /// One change made in another client: a flag toggled, a message
+        /// arrived or one expunged.
+        fn change(&mut self, rng: &mut impl rand::Rng) {
+            let roll = rng.gen_range(0..10);
+            if self.messages.is_empty() || roll < 2 {
+                self.arrive(rng.gen_bool(0.5));
+                return;
+            }
+            let uids: Vec<u32> = self.messages.keys().copied().collect();
+            let uid = uids[rng.gen_range(0..uids.len())];
+            if roll < 3 {
+                self.messages.remove(&uid);
+                self.bump();
+            } else {
+                let modseq = self.bump();
+                let entry = self.messages.get_mut(&uid).unwrap();
+                *entry = (!entry.0, modseq);
+            }
+        }
+    }
+
+    /// One pass of `list_mailbox_on_session` plus the engine's writes, against
+    /// the model: the same gate, plan and record the real pass runs, with the
+    /// server answering the full fetch with every flag and the delta with only
+    /// what changed since. `meanwhile` happen after the SELECT and before the
+    /// flag fetch, which is the race a mark taken at SELECT has to survive.
+    fn model_pass(
+        server: &mut ModelServer,
+        store: &mut std::collections::BTreeMap<u32, bool>,
+        stored: &mut Option<ModseqMark>,
+        limit: Option<usize>,
+        meanwhile: &mut dyn FnMut(&mut ModelServer),
+    ) {
+        let at_select = server.highest_modseq;
+        let listed: Vec<u32> = server.messages.keys().copied().collect();
+        let known: HashSet<i64> = store.keys().map(|&uid| uid as i64).collect();
+        // A change between the SELECT and the flag fetch, which the fetch sees.
+        meanwhile(server);
+        // Vanished rows go (the listing is complete in the model).
+        store.retain(|uid, _| listed.contains(uid));
+        let mut window: Vec<u32> = match limit {
+            Some(n) => listed.iter().rev().take(n).copied().collect(),
+            None => listed.clone(),
+        };
+        window.sort_unstable();
+        if window.is_empty() {
+            if listed.is_empty() {
+                *stored = modseq_to_record(Some(at_select), Some(1), true, true).or(*stored);
+            }
+            return;
+        }
+        let pass = flag_pass(true, stored.map(|m| m.modseq), Some(at_select), false);
+        let plan = flag_plan(&window, *listed.last().unwrap(), *stored, pass);
+        for uid in &plan.full {
+            if let (Some(row), Some((seen, _))) = (store.get_mut(uid), server.messages.get(uid)) {
+                *row = *seen;
+            }
+        }
+        if let Some(delta) = plan.delta {
+            for (uid, (seen, modseq)) in server.messages.range(delta.from..=delta.to) {
+                if *modseq > delta.since {
+                    if let Some(row) = store.get_mut(uid) {
+                        *row = *seen;
+                    }
+                }
+            }
+        }
+        // And one after the flag fetch, which it does not.
+        meanwhile(server);
+        for uid in new_uids_in_window(&window, &known) {
+            if let Some((seen, _)) = server.messages.get(&uid) {
+                store.insert(uid, *seen);
+            }
+        }
+        if let Some(mark) = modseq_to_record(Some(at_select), Some(plan.covered_from), true, true) {
+            *stored = Some(mark);
+        }
+    }
+
+    /// PERSO-202, the property the mark exists to keep: no flag change made
+    /// elsewhere is ever lost.
+    ///
+    /// A row may disagree with the server only where the next pass is still
+    /// bound to look: below the mark's lower bound, which a pass that reaches
+    /// there fetches in full, or on a message whose mod-sequence is above the
+    /// mark's, which the next `CHANGEDSINCE` returns. A row that disagrees
+    /// anywhere else is a flag the delta will skip for good, which is #0004.
+    /// Capped quick syncs, full syncs and changes landing mid-pass are mixed
+    /// at random over many seeds, and a full sync at the end has to leave the
+    /// store equal to the server.
+    ///
+    /// Recording a capped pass's mark from UID 1, or running its delta over the
+    /// window alone while claiming the mark's bound, both fail this test.
+    #[test]
+    fn no_flag_change_made_elsewhere_is_lost_across_capped_and_full_passes() {
+        use rand::{Rng, SeedableRng};
+
+        for seed in 0..200u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let mut server = ModelServer::default();
+            for _ in 0..rng.gen_range(0..40) {
+                server.arrive(rng.gen_bool(0.5));
+            }
+            // A store an earlier build filled, with no mark and flags that
+            // may have changed since: what a server gaining CONDSTORE, or a
+            // mark the gate refused, leaves for the next pass.
+            let mut store = std::collections::BTreeMap::new();
+            for &uid in server.messages.keys() {
+                if rng.gen_bool(0.7) {
+                    store.insert(uid, rng.gen_bool(0.5));
+                }
+            }
+            let mut stored: Option<ModseqMark> = None;
+
+            for step in 0..60 {
+                for _ in 0..rng.gen_range(0..4) {
+                    server.change(&mut rng);
+                }
+                if rng.gen_bool(0.05) {
+                    stored = None;
+                }
+                let limit = if rng.gen_bool(0.2) {
+                    None
+                } else {
+                    Some(rng.gen_range(0..8))
+                };
+                let racing = rng.gen_bool(0.3);
+                let mut meanwhile_rng = rand::rngs::StdRng::seed_from_u64(seed * 1_000 + step);
+                model_pass(&mut server, &mut store, &mut stored, limit, &mut |s| {
+                    if racing {
+                        s.change(&mut meanwhile_rng);
+                    }
+                });
+
+                if let Some(mark) = stored {
+                    for (uid, seen) in &store {
+                        let Some((truth, modseq)) = server.messages.get(uid) else {
+                            continue;
+                        };
+                        assert!(
+                            seen == truth || *uid < mark.from_uid || *modseq > mark.modseq,
+                            "seed {seed} step {step}: UID {uid} reads {seen} and the server \
+                             holds {truth} since modseq {modseq}, which mark {mark:?} will \
+                             never ask about again"
+                        );
+                    }
+                }
+            }
+
+            model_pass(&mut server, &mut store, &mut stored, None, &mut |_| {});
+            for (uid, seen) in &store {
+                assert_eq!(
+                    Some(*seen),
+                    server.messages.get(uid).map(|(truth, _)| *truth),
+                    "seed {seed}: a full sync leaves UID {uid} as the server holds it"
+                );
+            }
+            assert_eq!(store.len(), server.messages.len());
+        }
     }
 
     /// #0113: the body pass is cut into commands, and the cut is from the top.
@@ -1427,39 +1793,21 @@ mod tests {
             "a CONDSTORE server with a stored resume point runs the delta"
         );
 
-        // The pass fetched nothing, so it vouches for nothing.
-        assert!(
-            !window_is_whole_mailbox(window_len, listed_len),
-            "an empty window over 12 listed messages is not whole-mailbox coverage"
-        );
+        // The pass fetched nothing, so it vouches for nothing: the empty
+        // return covers from 1 only when the listing is itself empty.
+        assert_eq!(window_len, 0);
+        let covered = (listed_len == 0).then_some(1);
         assert_eq!(
-            modseq_to_record(
-                server,
-                window_is_whole_mailbox(window_len, listed_len),
-                true,
-                true
-            ),
+            modseq_to_record(server, covered, true, true),
             None,
             "`mp sync -n 0` must leave the stored modseq where it is"
         );
 
         // A genuinely empty mailbox still may advance: nothing was missed.
-        assert!(window_is_whole_mailbox(0, 0));
         assert_eq!(
-            modseq_to_record(server, window_is_whole_mailbox(0, 0), true, true),
-            Some(2_000),
+            modseq_to_record(server, Some(1), true, true),
+            Some(mark(2_000, 1)),
             "an empty mailbox has no flags to have skipped"
-        );
-
-        // And an uncapped pass over the same populated mailbox still records.
-        assert_eq!(
-            modseq_to_record(
-                server,
-                window_is_whole_mailbox(listed_len, listed_len),
-                true,
-                true
-            ),
-            Some(2_000)
         );
     }
 
@@ -1548,6 +1896,147 @@ mod tests {
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    /// One store listing of `INBOX` over a CONDSTORE server played from
+    /// `replies` (the first answers the `LOGIN`), the store holding UIDs 1 to
+    /// 5 under UIDVALIDITY 7 and `stored` as its mark: the listing, its body
+    /// plan, and what the client wrote before each read, the `LOGIN` turn
+    /// dropped.
+    async fn condstore_fetch(
+        limit: usize,
+        stored: Option<ModseqMark>,
+        replies: &[&'static str],
+    ) -> (MailboxListing, BodyPlan, Vec<String>) {
+        let turns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = ScriptedServer {
+            replies: replies.iter().copied().collect(),
+            reply: Vec::new(),
+            written: Vec::new(),
+            turns: turns.clone(),
+        };
+        let mut session = async_imap::Client::new(server)
+            .login("user", "secret")
+            .await
+            .map_err(|e| e.0)
+            .unwrap();
+        let known = KnownUids {
+            uids: (1..=5).collect(),
+            uidvalidity: Some(7),
+            arrival_mark: None,
+            prior_high_water: Some(5),
+            highest_modseq: stored,
+        };
+        let caps = ServerCaps {
+            condstore: true,
+            ..ServerCaps::default()
+        };
+        let (listing, plan) =
+            list_mailbox_on_session(&mut session, "INBOX", Some(limit), known, caps)
+                .await
+                .unwrap();
+        let turns = turns.lock().unwrap().split_off(1);
+        (listing, plan, turns)
+    }
+
+    /// The mark a listing leaves once a body pass with nothing to download
+    /// has run to its end.
+    fn mark_left(listing: MailboxListing) -> Option<ModseqMark> {
+        (listing.coverage)(&[], true).highest_modseq
+    }
+
+    /// What a CONDSTORE server answers to `SELECT "INBOX" (CONDSTORE)` for a
+    /// mailbox of UIDs 1 to 5 at HIGHESTMODSEQ 1200.
+    const CONDSTORE_SELECT: &str = "* 5 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n\
+         * OK [UIDNEXT 6] ok\r\n* OK [HIGHESTMODSEQ 1200] ok\r\n\
+         A0002 OK [READ-WRITE] selected\r\n";
+
+    /// PERSO-202, the common path: a quick sync whose window is the newest two
+    /// messages, over a mailbox a mark covers whole, asks the server what
+    /// changed from UID 1 up and nothing else. A flag changed elsewhere on UID
+    /// 2, below the window, arrives on this pass, and the pass records a mark
+    /// that still covers the whole mailbox at the newer modseq.
+    #[tokio::test]
+    async fn a_capped_pass_hears_of_a_flag_change_below_its_window_and_advances_the_mark() {
+        let (fetched, plan, turns) = condstore_fetch(
+            2,
+            Some(mark(1_000, 1)),
+            &[
+                "A0001 OK logged in\r\n",
+                CONDSTORE_SELECT,
+                "* SEARCH 1 2 3 4 5\r\nA0003 OK done\r\n",
+                "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (1100))\r\nA0004 OK done\r\n",
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            turns,
+            vec![
+                "A0002 SELECT \"INBOX\" (CONDSTORE)\r\n".to_string(),
+                "A0003 UID SEARCH ALL\r\n".to_string(),
+                "A0004 UID FETCH 1:5 (UID FLAGS) (CHANGEDSINCE 1000)\r\n".to_string(),
+            ]
+        );
+        assert_eq!(fetched.known_flags.len(), 1);
+        assert_eq!(fetched.known_flags[0].0, 2);
+        assert!(fetched.known_flags[0].1.seen);
+        assert!(plan.chunks.is_empty());
+        assert_eq!(fetched.skipped, 2);
+        assert_eq!(mark_left(fetched), Some(mark(1_200, 1)));
+    }
+
+    /// The first CONDSTORE pass has no mark to resume from: it fetches every
+    /// flag in its window, and records a mark for the window and no lower,
+    /// which the next pass resumes from instead of waiting for a full sync.
+    #[tokio::test]
+    async fn a_capped_pass_without_a_mark_records_one_for_its_window() {
+        let (fetched, _, turns) = condstore_fetch(
+            2,
+            None,
+            &[
+                "A0001 OK logged in\r\n",
+                CONDSTORE_SELECT,
+                "* SEARCH 1 2 3 4 5\r\nA0003 OK done\r\n",
+                "* 4 FETCH (UID 4 FLAGS () MODSEQ (900))\r\n\
+                 * 5 FETCH (UID 5 FLAGS (\\Seen) MODSEQ (1200))\r\nA0004 OK done\r\n",
+            ],
+        )
+        .await;
+
+        assert_eq!(turns[2], "A0004 UID FETCH 4:5 (UID FLAGS)\r\n");
+        assert_eq!(fetched.known_flags.len(), 2);
+        assert_eq!(mark_left(fetched), Some(mark(1_200, 4)));
+    }
+
+    /// A window that reaches below the stored mark: the part below it is
+    /// fetched in full, the part from it up as a delta, and the new mark
+    /// covers from the window's bottom.
+    #[tokio::test]
+    async fn a_window_below_the_mark_fetches_that_part_in_full() {
+        let (fetched, _, turns) = condstore_fetch(
+            3,
+            Some(mark(1_000, 5)),
+            &[
+                "A0001 OK logged in\r\n",
+                CONDSTORE_SELECT,
+                "* SEARCH 1 2 3 4 5\r\nA0003 OK done\r\n",
+                "* 3 FETCH (UID 3 FLAGS () MODSEQ (10))\r\n\
+                 * 4 FETCH (UID 4 FLAGS (\\Seen) MODSEQ (20))\r\nA0004 OK done\r\n",
+                "A0005 OK done\r\n",
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            turns[2..],
+            [
+                "A0004 UID FETCH 3:4 (UID FLAGS)\r\n".to_string(),
+                "A0005 UID FETCH 5 (UID FLAGS) (CHANGEDSINCE 1000)\r\n".to_string(),
+            ]
+        );
+        assert_eq!(fetched.known_flags.len(), 2);
+        assert_eq!(mark_left(fetched), Some(mark(1_200, 3)));
     }
 
     /// The search pass of `mp search <query> --server` on a plain IMAP server,

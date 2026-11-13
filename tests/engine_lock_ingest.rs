@@ -142,7 +142,7 @@ struct MailboxFetch {
     download_incomplete: bool,
     bodies_complete: bool,
     pending_arrival_mark: Option<u32>,
-    highest_modseq: Option<i64>,
+    highest_modseq: Option<mailypoppins::ingest::ModseqMark>,
 }
 
 /// Hands back scripted fetches per target, one per pass, ignoring the skip

@@ -851,8 +851,14 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::ingest::ModseqMark;
     use crate::sync::{FetchedRaw, MailboxCoverage, MailboxState};
     use crate::types::MessageFlags;
+
+    /// A CONDSTORE mark: `modseq`, vouching for every UID from `from_uid` up.
+    fn mark(modseq: u64, from_uid: u32) -> ModseqMark {
+        ModseqMark { modseq, from_uid }
+    }
 
     // -----------------------------------------------------------------------
     // The fake backend (#0059)
@@ -878,7 +884,7 @@ mod tests {
         /// Whether the scripted body pass asks for every new UID, as a pass
         /// cut at its deadline does not (#0113).
         bodies_complete: bool,
-        highest_modseq: Option<i64>,
+        highest_modseq: Option<ModseqMark>,
     }
 
     /// What the store held for one target when the engine listed it: what the
@@ -1244,7 +1250,7 @@ mod tests {
             out
         }
 
-        fn modseq(&self, mailbox: &str) -> Option<i64> {
+        fn modseq(&self, mailbox: &str) -> Option<ModseqMark> {
             ingest::load_mailbox_cursor(&self.store, "acct", mailbox)
                 .unwrap()
                 .and_then(|c| c.highest_modseq)
@@ -1786,11 +1792,11 @@ mod tests {
         truncated.download_incomplete = true;
         truncated.listed = vec![90, 91, 92];
         truncated.vanished = vec![90];
-        truncated.highest_modseq = Some(4_000);
+        truncated.highest_modseq = Some(mark(4_000, 90));
         let mut rest = fetch(vec![(91, raw("older"))]);
         rest.listed = vec![91, 92];
         rest.vanished = vec![90];
-        rest.highest_modseq = Some(4_100);
+        rest.highest_modseq = Some(mark(4_100, 91));
         backend.script(
             "INBOX",
             vec![
@@ -1836,7 +1842,7 @@ mod tests {
         assert_eq!(fx.rows("inbox"), vec![91, 92]);
         assert_eq!(
             fx.modseq("inbox"),
-            Some(4_100),
+            Some(mark(4_100, 91)),
             "a complete pass records its resume point"
         );
     }
@@ -2147,42 +2153,64 @@ mod tests {
     ///
     /// This is the loop's half of the carry-forward hazard. The engine writes
     /// whatever the fetch reported, `None` included, and `None` has to mean
-    /// "nothing to say" rather than "clear it": a quick sync reports `None` on
-    /// every mailbox bigger than its window, so the unconditional write would
-    /// have erased the resume point on the very next pass and the delta would
-    /// have flapped in and out of use forever, silently.
+    /// "nothing to say" rather than "clear it": a pass that cannot vouch for a
+    /// mark (`mp sync -n 0`, a server without CONDSTORE) reports `None`, so the
+    /// unconditional write would have erased the resume point on the very next
+    /// pass and the delta would have flapped in and out of use forever,
+    /// silently.
+    ///
+    /// The mark is one claim, the modseq and its lowest UID (PERSO-202): a
+    /// capped pass replaces both, and a pass with nothing to say keeps both.
     #[test]
     fn a_condstore_modseq_survives_the_passes_that_cannot_vouch_for_one() {
         let fx = Fixture::new();
         let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
 
-        // Pass 1 is a full pass over a CONDSTORE server: it records a modseq.
+        // Pass 1 is a full pass over a CONDSTORE server: it records a mark
+        // over the whole mailbox.
         let mut condstore = fetch(vec![(101, raw("one"))]);
-        condstore.highest_modseq = Some(90_060_115_205_545_359);
-        // Pass 2 is an ordinary capped pass, which reports no modseq at all.
-        let quick = fetch(vec![(102, raw("two"))]);
-        // Pass 3 is the renumbering.
-        let mut renumbered = fetch(vec![(1, raw("three"))]);
+        condstore.highest_modseq = Some(mark(90_060_115_205_545_359, 1));
+        // Pass 2 is a capped pass whose window started at 102 and whose
+        // delta did not reach below it: its mark covers from 102.
+        let mut capped = fetch(vec![(102, raw("two"))]);
+        capped.highest_modseq = Some(mark(90_060_115_205_545_400, 102));
+        // Pass 3 has nothing to say about the modseq at all.
+        let quiet = fetch(vec![(103, raw("three"))]);
+        // Pass 4 is the renumbering.
+        let mut renumbered = fetch(vec![(1, raw("four"))]);
         renumbered.uidvalidity_reset = true;
-        backend.script("INBOX", vec![Ok(condstore), Ok(quick), Ok(renumbered)]);
+        backend.script(
+            "INBOX",
+            vec![Ok(condstore), Ok(capped), Ok(quiet), Ok(renumbered)],
+        );
 
         fx.run(&mut backend, &targets);
         assert_eq!(
             fx.modseq("inbox"),
-            Some(90_060_115_205_545_359),
+            Some(mark(90_060_115_205_545_359, 1)),
             "the CONDSTORE pass records its resume point"
         );
 
         fx.run(&mut backend, &targets);
         assert_eq!(
             fx.modseq("inbox"),
-            Some(90_060_115_205_545_359),
-            "and a pass with nothing to say about it must not erase it"
+            Some(mark(90_060_115_205_545_400, 102)),
+            "a capped pass replaces the modseq and its lower bound together"
+        );
+
+        fx.run(&mut backend, &targets);
+        assert_eq!(
+            fx.modseq("inbox"),
+            Some(mark(90_060_115_205_545_400, 102)),
+            "and a pass with nothing to say about it must not erase either"
         );
         // ...and the next fetch is handed it back as its resume point.
         let known = ingest::known_uids_with_cursor(&fx.store, "acct", "inbox").unwrap();
-        assert_eq!(known.highest_modseq, Some(90_060_115_205_545_359));
+        assert_eq!(
+            known.highest_modseq,
+            Some(mark(90_060_115_205_545_400, 102))
+        );
 
         fx.run(&mut backend, &targets);
         assert_eq!(

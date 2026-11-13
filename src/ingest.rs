@@ -1114,10 +1114,10 @@ pub struct MailboxCursor {
     pub last_uid: Option<i64>,
     pub uidnext: Option<i64>,
     pub exists: Option<i64>,
-    /// CONDSTORE `HIGHESTMODSEQ`, and never anything else: it held a UID until
-    /// #0054 split the column, which would have made `CHANGEDSINCE` return
-    /// nothing and no error. Unused until #0041 issues that fetch.
-    pub highest_modseq: Option<i64>,
+    /// CONDSTORE `HIGHESTMODSEQ` and the UIDs it vouches for (PERSO-202), and
+    /// never anything else: the column held a UID until #0054 split it, which
+    /// would have made `CHANGEDSINCE` return nothing and no error.
+    pub highest_modseq: Option<ModseqMark>,
     /// Graph `deltaLink`: the resume point of `/messages/delta` for this
     /// folder (#0042). Written only by a Graph pass that covered the whole
     /// folder and wrote every message it found, so the token's meaning is
@@ -1130,6 +1130,47 @@ pub struct MailboxCursor {
     /// reaches through it. `None` means nothing is owed. Always `None` on the
     /// Graph path, whose coverage is by-id rather than positional.
     pub arrival_mark: Option<i64>,
+}
+
+/// A CONDSTORE resume point and the part of the mailbox it vouches for
+/// (PERSO-202).
+///
+/// The claim is "every message at or above `from_uid` that the store holds
+/// carried the flags the server gave it as of `modseq`", so a later pass may
+/// ask `CHANGEDSINCE modseq` about those UIDs and nothing it misses can be a
+/// change the store has not seen. Below `from_uid` the mark says nothing, and
+/// a pass that reaches there fetches every flag.
+///
+/// The two numbers are one claim and travel as one value: a modseq recorded
+/// with another pass's lower bound would vouch for messages that pass never
+/// looked at, which is #0004 (a flag changed elsewhere that never arrives).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModseqMark {
+    /// The `HIGHESTMODSEQ` the recording pass's SELECT reported. Always above
+    /// 0 and within `i64`, the column's range.
+    pub modseq: u64,
+    /// The lowest UID the claim covers; 1 is the whole mailbox.
+    pub from_uid: u32,
+}
+
+impl ModseqMark {
+    /// The mark a stored pair of columns describes, or `None` when they make
+    /// no claim a delta could rest on.
+    ///
+    /// A modseq of 0 or below is a column nobody wrote (RFC 7162 sequences
+    /// start at 1). A modseq without a lower bound is what every build before
+    /// PERSO-202 wrote, and those builds recorded one only off a pass that saw
+    /// the whole mailbox, so it covers everything from UID 1. A bound the
+    /// column cannot hold as a UID makes the pair unreadable, and an unreadable
+    /// claim is no claim.
+    fn from_columns(modseq: Option<i64>, from_uid: Option<i64>) -> Option<Self> {
+        let modseq = u64::try_from(modseq?).ok().filter(|&m| m > 0)?;
+        let from_uid = match from_uid {
+            None => 1,
+            Some(uid) => u32::try_from(uid).ok()?.max(1),
+        };
+        Some(Self { modseq, from_uid })
+    }
 }
 
 /// Record what ingest knows about a mailbox: the `mailboxes` row the read path
@@ -1158,6 +1199,10 @@ pub struct MailboxCursor {
 /// calls when a UIDVALIDITY reset makes the stored modseq meaningless. Every
 /// other column keeps its unconditional `SET`: they are observations, and an
 /// absent one is genuinely absent.
+///
+/// The modseq's lower bound (`modseq_from_uid`, PERSO-202) is carried with it
+/// rather than on its own: it is replaced exactly when the modseq is, so the
+/// pair on disk is always one pass's claim ([`ModseqMark`]).
 pub fn record_mailbox_cursor(
     store: &Store,
     account: &str,
@@ -1182,13 +1227,22 @@ pub fn record_mailbox_cursor(
     )
     .context("recording the mailbox row")?;
 
+    // A modseq the column cannot hold is no claim, and is written as none.
+    let modseq = cursor.highest_modseq.and_then(|mark| {
+        i64::try_from(mark.modseq)
+            .ok()
+            .map(|m| (m, i64::from(mark.from_uid)))
+    });
     conn.execute(
         "INSERT INTO sync_cursors
-            (account, mailbox, uidvalidity, last_uid, highest_modseq, deltalink, arrival_mark)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            (account, mailbox, uidvalidity, last_uid, highest_modseq, modseq_from_uid,
+             deltalink, arrival_mark)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT (account, mailbox) DO UPDATE SET
             uidvalidity = excluded.uidvalidity,
             last_uid = excluded.last_uid,
+            modseq_from_uid = CASE WHEN excluded.highest_modseq IS NULL
+                THEN modseq_from_uid ELSE excluded.modseq_from_uid END,
             highest_modseq = COALESCE(excluded.highest_modseq, highest_modseq),
             deltalink = COALESCE(excluded.deltalink, deltalink),
             arrival_mark = excluded.arrival_mark",
@@ -1197,7 +1251,8 @@ pub fn record_mailbox_cursor(
             mailbox,
             cursor.uidvalidity,
             cursor.last_uid,
-            cursor.highest_modseq,
+            modseq.map(|(m, _)| m),
+            modseq.map(|(_, from)| from),
             cursor.deltalink,
             cursor.arrival_mark
         ],
@@ -1218,7 +1273,8 @@ pub fn record_mailbox_cursor(
 /// here costs a full-window pass, not correctness.
 pub fn clear_mailbox_modseq(store: &Store, account: &str, mailbox: &str) {
     if let Err(e) = store.conn().execute(
-        "UPDATE sync_cursors SET highest_modseq = NULL WHERE account = ?1 AND mailbox = ?2",
+        "UPDATE sync_cursors SET highest_modseq = NULL, modseq_from_uid = NULL
+         WHERE account = ?1 AND mailbox = ?2",
         (account, mailbox),
     ) {
         log::warn!("could not clear the modseq for {account}/{mailbox}: {e}");
@@ -1391,7 +1447,8 @@ pub fn load_mailbox_cursor(
     let cursor = store
         .conn()
         .query_row(
-            "SELECT uidvalidity, last_uid, highest_modseq, deltalink, arrival_mark
+            "SELECT uidvalidity, last_uid, highest_modseq, modseq_from_uid, deltalink,
+                    arrival_mark
              FROM sync_cursors
              WHERE account = ?1 AND mailbox = ?2",
             [account, mailbox],
@@ -1401,9 +1458,9 @@ pub fn load_mailbox_cursor(
                     last_uid: row.get(1)?,
                     uidnext: None,
                     exists: None,
-                    highest_modseq: row.get(2)?,
-                    deltalink: row.get(3)?,
-                    arrival_mark: row.get(4)?,
+                    highest_modseq: ModseqMark::from_columns(row.get(2)?, row.get(3)?),
+                    deltalink: row.get(4)?,
+                    arrival_mark: row.get(5)?,
                 })
             },
         )
@@ -2760,19 +2817,20 @@ pub struct KnownUids {
     /// A recorded top of 0 is history too, so this is `Some(0)` rather than
     /// `None` when the cursor exists but recorded no UID.
     pub prior_high_water: Option<u32>,
-    /// The CONDSTORE `HIGHESTMODSEQ` a previous pass recorded for this mailbox,
-    /// which is what a `CHANGEDSINCE` flag fetch resumes from (#0041).
+    /// The CONDSTORE `HIGHESTMODSEQ` a previous pass recorded for this mailbox
+    /// and the UIDs it vouches for, which is what a `CHANGEDSINCE` flag fetch
+    /// resumes from (#0041, PERSO-202).
     ///
     /// `None` means "no delta is possible", and every path that cannot vouch
     /// for a modseq produces it: no cursor row, a server without CONDSTORE, a
-    /// pass whose window did not cover the whole mailbox, or a UIDVALIDITY
-    /// reset (which clears the column outright). The fetch then does the full
-    /// window, which is the #0004-safe behaviour.
+    /// pass that looked at no flag, or a UIDVALIDITY reset (which clears the
+    /// column outright). The fetch then does the full window, which is the
+    /// #0004-safe behaviour.
     ///
-    /// A stored 0 is treated as absent: RFC 7162 mod-sequences start at 1, so
-    /// 0 is either a server that answered nothing or a column that was never
-    /// written, and neither is a resume point.
-    pub highest_modseq: Option<u64>,
+    /// A stored 0 is treated as absent ([`ModseqMark`]): RFC 7162
+    /// mod-sequences start at 1, so 0 is either a server that answered nothing
+    /// or a column that was never written, and neither is a resume point.
+    pub highest_modseq: Option<ModseqMark>,
 }
 
 impl KnownUids {
@@ -2819,11 +2877,7 @@ pub fn known_uids_with_cursor(store: &Store, account: &str, mailbox: &str) -> Re
                 .and_then(|uid| u32::try_from(uid).ok())
                 .unwrap_or(0)
         }),
-        highest_modseq: cursor
-            .as_ref()
-            .and_then(|c| c.highest_modseq)
-            .and_then(|m| u64::try_from(m).ok())
-            .filter(|&m| m > 0),
+        highest_modseq: cursor.as_ref().and_then(|c| c.highest_modseq),
     })
 }
 

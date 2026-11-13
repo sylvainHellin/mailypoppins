@@ -179,9 +179,10 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[];
 ///   first contact, where everything the server lists is backlog and no mark
 ///   may be persisted, while a row recording a top of 100 means a message
 ///   above 100 is an arrival even when the store holds nothing (#0072).
-///   `highest_modseq` stays NULL until #0041 issues
-///   `CHANGEDSINCE`, as does `deltalink` (Graph's `deltaLink`, waiting on
-///   #0042). They were one column until #0054, which stored a UID in
+///   `highest_modseq` is the CONDSTORE resume point the IMAP pull's
+///   `CHANGEDSINCE` starts from (#0041), with the lowest UID it vouches for
+///   beside it in the additive `modseq_from_uid` (PERSO-202), and `deltalink`
+///   is Graph's `deltaLink` (#0042). They were one column until #0054, which stored a UID in
 ///   `highest_modseq`: a UID-sized number read as a modseq makes the server
 ///   return nothing and no error, which is the #0004 failure mode with no
 ///   symptom.
@@ -544,7 +545,15 @@ pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
 /// in place and keep the mark, so a message the user moved back to the Inbox
 /// is not judged again; a row an older build wrote is marked when the scan
 /// first arms on the store, without being judged.
-const ADDITIVE_COLUMNS: [(&str, &str, &str); 7] = [
+///
+/// `sync_cursors.modseq_from_uid` is the lowest UID the recorded
+/// `highest_modseq` vouches for (PERSO-202, [`crate::ingest::ModseqMark`]),
+/// which is what lets a pass whose window did not reach the oldest message
+/// record one. `NULL` beside a modseq is what every earlier build wrote, and
+/// those builds recorded a modseq only off a pass that saw the whole mailbox,
+/// so it reads as UID 1; a bump would have dropped every store for a claim the
+/// old rows already make.
+const ADDITIVE_COLUMNS: [(&str, &str, &str); 8] = [
     ("drafts", "in_reply_to", "TEXT"),
     ("drafts", "forwarded_from", "TEXT"),
     ("messages", "conversation_id", "TEXT"),
@@ -552,6 +561,7 @@ const ADDITIVE_COLUMNS: [(&str, &str, &str); 7] = [
     ("messages", "sender_judged", "INTEGER"),
     ("message_blobs", "content_id", "TEXT"),
     ("message_blobs", "is_inline", "INTEGER"),
+    ("sync_cursors", "modseq_from_uid", "INTEGER"),
 ];
 
 /// Add the columns created after [`SCHEMA_VERSION`] was last bumped, beside
