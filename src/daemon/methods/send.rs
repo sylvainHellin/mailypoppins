@@ -107,7 +107,6 @@ use crate::daemon::hold::{HoldPlan, HoldScheduler};
 use crate::daemon::runtime::account::off_thread;
 use crate::outbox::{self, OutboxState};
 use crate::store::drafts::DraftRow;
-use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus};
 
 use super::super::config::ConfigStore;
 use super::super::dispatch::{
@@ -1167,53 +1166,15 @@ async fn send_invite(
     email: &EmailSettings,
     token: &CancelToken,
 ) -> anyhow::Result<Option<(SendOutcome, Option<usize>)>> {
-    let ics = crate::invite::build_invite_ics(&plan.spec)?;
-    let event =
-        crate::calendar::parse_ics(ics.as_bytes()).map(|p| crate::calendar::event_frontmatter(&p));
-
-    // A synthetic draft, used only to build the message: nothing is written to
-    // disk on this path (the Sent copy is the outbox's, #0037).
-    let sent_at = chrono::Utc::now();
-    let draft = EmailDraft {
-        path: std::path::PathBuf::from(format!(
-            "{}-invite-{}.md",
-            sent_at.format("%Y%m%d-%H%M%S"),
-            crate::parse::slugify_subject(&plan.subject)
-        )),
-        frontmatter: EmailFrontmatter {
-            id: None,
-            date: None,
-            to: plan.to_field.clone(),
-            cc: plan.cc_field.clone(),
-            bcc: None,
-            subject: plan.subject.clone(),
-            status: EmailStatus::Approved,
-            from: Some(account.default_from.clone()),
-            reply_to: None,
-            attachments: None,
-            sent_at: None,
-            sent_via: None,
-            message_id: None,
-            in_reply_to: None,
-            forwarded_from: None,
-            signature: None,
-            event,
-            server_message_id: None,
-            conflict_of: None,
-        },
-        body_markdown: plan.body.clone(),
+    let message = crate::invite::ItipMessage {
+        subject: plan.subject.clone(),
+        to: plan.to_field.clone(),
+        cc: plan.cc_field.clone(),
+        body: plan.body.clone(),
+        ics: crate::invite::build_invite_ics(&plan.spec)?,
     };
-
     let smtp = smtp_config(account)?;
-    // An invite is a fresh message, never a reply: no parent to thread under.
-    let built = crate::send::build_draft_message(
-        &draft,
-        &smtp.default_from,
-        email,
-        signature,
-        Some(&ics),
-        None,
-    )?;
+    let built = crate::invite::itip_built(account, &smtp.default_from, email, signature, &message)?;
     if !commit_point("send.invite", token).await {
         return Ok(None);
     }

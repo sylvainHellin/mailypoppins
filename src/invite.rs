@@ -6,9 +6,16 @@
 //! this file held all of it. What stayed is the one function that needs an
 //! account: `plan_invite` reads the account's auth method to refuse Graph, its
 //! `default_from` for the `ORGANIZER`, and `send::split_addresses` for the
-//! attendee list.
+//! attendee list. Beside it, the organizer's changes to an invitation already
+//! sent (PERSO-204): the sent copy read back out of the store, the messages
+//! an update or a cancellation sends, and the iMIP message every one of them
+//! (the first invitation included) is built into.
 
 use anyhow::{anyhow, Result};
+
+use crate::calendar_model::EventTime;
+use crate::calendar_write::EventPatch;
+use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus};
 
 pub use mp_core::invite::*;
 
@@ -146,6 +153,211 @@ pub fn plan_invite(
         },
         body,
     })
+}
+
+/// One iTIP message an organizer sends: an invitation, an update or a
+/// cancellation, before it is built into MIME by [`itip_built`].
+#[derive(Debug, Clone)]
+pub struct ItipMessage {
+    pub subject: String,
+    /// The `To:` header, as typed for a first invitation, the attendees
+    /// joined for a change.
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    /// The human-readable body.
+    pub body: String,
+    /// The `VCALENDAR`, whose `METHOD` names the MIME part's `method`.
+    pub ics: String,
+}
+
+/// The iMIP message `message` is, from `account`, built by the one MIME
+/// builder every send uses: `multipart/mixed` around the text, the HTML and
+/// the inline `text/calendar` part, with the same bytes as `invite.ics`.
+///
+/// The draft it goes through is synthetic and never written: the Sent copy
+/// is the outbox's (#0037).
+pub fn itip_built(
+    account: &crate::config::AccountConfig,
+    default_from: &str,
+    email: &crate::config::EmailSettings,
+    signature: Option<&str>,
+    message: &ItipMessage,
+) -> Result<crate::send::BuiltMessage> {
+    let event = crate::calendar::parse_ics(message.ics.as_bytes())
+        .map(|p| crate::calendar::event_frontmatter(&p));
+    let draft = EmailDraft {
+        path: std::path::PathBuf::from(format!(
+            "{}-invite-{}.md",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+            crate::parse::slugify_subject(&message.subject)
+        )),
+        frontmatter: EmailFrontmatter {
+            id: None,
+            date: None,
+            to: message.to.clone(),
+            cc: message.cc.clone(),
+            bcc: None,
+            subject: message.subject.clone(),
+            status: EmailStatus::Approved,
+            from: Some(account.default_from.clone()),
+            reply_to: None,
+            attachments: None,
+            sent_at: None,
+            sent_via: None,
+            message_id: None,
+            in_reply_to: None,
+            forwarded_from: None,
+            signature: None,
+            event,
+            server_message_id: None,
+            conflict_of: None,
+        },
+        body_markdown: message.body.clone(),
+    };
+    // An invitation is a fresh message, never a reply: no parent to thread
+    // under.
+    crate::send::build_draft_message(
+        &draft,
+        default_from,
+        email,
+        signature,
+        Some(&message.ics),
+        None,
+    )
+}
+
+/// An invitation the account organised, as one stored row holds it, and the
+/// `SEQUENCE` its next version goes out with.
+#[derive(Debug, Clone)]
+pub struct OrganizedRow {
+    pub invite: OrganizedInvite,
+    /// Above every REQUEST and CANCEL of the `UID` the account holds
+    /// ([`crate::reconcile::next_sequence`]).
+    pub next_sequence: u32,
+}
+
+/// The invitation on row `row_id` of `account`'s store, refused unless the
+/// account organised it: its `ORGANIZER` is the account's primary address,
+/// the address an update or a cancellation goes out from (Exchange drops a
+/// mismatch).
+pub fn organized_row(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &crate::config::AccountConfig,
+    row_id: i64,
+) -> Result<OrganizedRow> {
+    let ics = crate::store::read::load_invite_ics(store, blobs, row_id).ok_or_else(|| {
+        anyhow!(
+            "Row {row_id} of {} carries no invitation to change",
+            account.name
+        )
+    })?;
+    let invite = organized_from_ics(&ics)?;
+    let own = crate::parse::extract_email_address(&account.default_from);
+    if !invite.organizer.eq_ignore_ascii_case(&own) {
+        return Err(anyhow!(
+            "{} was organised by {}, not by {}: only its organizer changes or cancels it; \
+             answer it instead",
+            invite.title(),
+            invite.organizer,
+            account.name
+        ));
+    }
+    let held = crate::reconcile::load_invites(store, blobs, &account.name);
+    let next_sequence = crate::reconcile::next_sequence(&held, &invite.uid, invite.sequence);
+    Ok(OrganizedRow {
+        invite,
+        next_sequence,
+    })
+}
+
+/// The messages an update of `invite` sends: the update to every attendee
+/// it invites, and, when it drops attendees, a cancellation to those first.
+///
+/// The cancellation takes `next_sequence` and the update the one above it.
+/// The organizer's own sent copies are folded like any other
+/// ([`crate::reconcile::fold_status`]), and a CANCEL at or above the update's
+/// sequence would tombstone the update on the organizer's own agenda; one
+/// below it is a stale CANCEL there, while a dropped attendee's copy, at most
+/// at `next_sequence - 1`, is cancelled by it.
+pub fn update_messages(
+    invite: &OrganizedInvite,
+    current: &EventTime,
+    patch: &EventPatch,
+    next_sequence: u32,
+) -> Result<(InviteSpec, Vec<ItipMessage>), String> {
+    let InviteUpdate { mut spec, removed } = updated_invite(invite, current, patch, next_sequence)?;
+    let mut messages = Vec::new();
+    if !removed.is_empty() {
+        spec.sequence = next_sequence.saturating_add(1);
+        let ics = build_cancel_ics(invite, next_sequence, None, &removed)
+            .map_err(|e| format!("{e:#}"))?;
+        messages.push(cancellation(invite.title(), &removed, ics, None, None));
+    }
+    let ics = build_invite_ics(&spec).map_err(|e| format!("{e:#}"))?;
+    let body = spec
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("The invitation to {} was updated.", spec.summary));
+    messages.push(ItipMessage {
+        subject: spec.summary.clone(),
+        to: Some(spec.attendees.join(", ")),
+        cc: None,
+        body,
+        ics,
+    });
+    Ok((spec, messages))
+}
+
+/// The cancellation of `invite` at `sequence`, told to every attendee: of
+/// the whole event, or of the occurrence `occurrence` names, with the
+/// organizer's `comment` after the body's first line.
+pub fn cancel_message(
+    invite: &OrganizedInvite,
+    sequence: u32,
+    occurrence: Option<&icalendar::Property>,
+    comment: Option<&str>,
+) -> Result<ItipMessage> {
+    let ics = build_cancel_ics(invite, sequence, occurrence, &invite.attendees)?;
+    // The occurrence as the receive side names it, which is how a person
+    // reads it too (`2026-12-21T09:00:00+01:00`).
+    let when = match occurrence {
+        Some(_) => crate::calendar::parse_ics(ics.as_bytes()).and_then(|p| p.recurrence_id),
+        None => None,
+    };
+    Ok(cancellation(
+        invite.title(),
+        &invite.attendees,
+        ics,
+        when.as_deref(),
+        comment,
+    ))
+}
+
+/// A cancellation message: `Cancelled: <summary>`, the occurrence named on
+/// the body's first line when it is one, then the comment.
+fn cancellation(
+    title: &str,
+    attendees: &[String],
+    ics: String,
+    occurrence: Option<&str>,
+    comment: Option<&str>,
+) -> ItipMessage {
+    let mut body = match occurrence {
+        Some(when) => format!("Cancelled: {title}, the occurrence of {when}"),
+        None => format!("Cancelled: {title}"),
+    };
+    if let Some(comment) = comment.map(str::trim).filter(|c| !c.is_empty()) {
+        body.push_str("\n\n");
+        body.push_str(comment);
+    }
+    ItipMessage {
+        subject: format!("Cancelled: {title}"),
+        to: Some(attendees.join(", ")),
+        cc: None,
+        body,
+        ics,
+    }
 }
 
 #[cfg(test)]

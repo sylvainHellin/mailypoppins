@@ -2440,10 +2440,15 @@ mod tests {
 /// part carrying the `VEVENT`. This inline calendar part is the contract
 /// (`.agents/plans/calendar-invites.md`, §2) — Outlook and Gmail render it as an
 /// actionable Accept / Tentative / Decline invite.
+///
+/// The part's `method` is the calendar's own `METHOD` (RFC 6047 §2.4 has the
+/// two agree), so an organizer's cancellation goes out as
+/// `method=CANCEL` through the same tree (PERSO-204).
 fn build_invite_alternative(plain: &str, html: String, ics: &str) -> MultiPart {
-    let calendar_ct: ContentType = "text/calendar; method=REQUEST; charset=UTF-8"
-        .parse()
-        .expect("static calendar content-type");
+    let calendar_ct: ContentType =
+        format!("text/calendar; method={}; charset=UTF-8", itip_method(ics))
+            .parse()
+            .expect("a calendar content-type over an ASCII token");
     MultiPart::alternative()
         .singlepart(
             SinglePart::builder()
@@ -2460,6 +2465,25 @@ fn build_invite_alternative(plain: &str, html: String, ics: &str) -> MultiPart {
                 .header(calendar_ct)
                 .body(ics.to_string()),
         )
+}
+
+/// The `METHOD` of an iTIP calendar's text, upper-cased; `REQUEST` when it
+/// names none or one that is not a plain token.
+fn itip_method(ics: &str) -> String {
+    ics.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("METHOD")
+                .then_some(value.trim())
+        })
+        .filter(|method| {
+            !method.is_empty()
+                && method
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        .map_or_else(|| "REQUEST".to_string(), str::to_uppercase)
 }
 
 /// Build the optional `application/ics; name="invite.ics"` attachment carrying

@@ -796,3 +796,330 @@ fn an_rsvp_reply_reconciles_against_the_stored_invite() {
         first
     );
 }
+
+// ---------------------------------------------------------------------------
+// The organizer's update and cancellation, as an attendee receives them
+// (PERSO-204)
+//
+// Each row builds the change on the organizer's side exactly as the daemon
+// does (the sent copy read back, the next SEQUENCE over the store, the iMIP
+// message), then ingests that message into the attendee's own store and reads
+// the attendee's agenda: what mp sends is what its receive half accepts.
+// ---------------------------------------------------------------------------
+
+/// The organizer's account: `Me <me@example.com>`.
+fn organizer_account() -> mailypoppins::config::AccountConfig {
+    mailypoppins::config::AccountConfig {
+        name: "acct".to_string(),
+        default_from: "Me <me@example.com>".to_string(),
+        ..Default::default()
+    }
+}
+
+/// The raw message one organizer change sends, built as the daemon builds it.
+fn itip_raw(message: &mailypoppins::invite::ItipMessage) -> Vec<u8> {
+    mailypoppins::invite::itip_built(
+        &organizer_account(),
+        "me@example.com",
+        &mailypoppins::config::EmailSettings::default(),
+        None,
+        message,
+    )
+    .unwrap()
+    .raw
+}
+
+fn review() -> mailypoppins::invite::InviteSpec {
+    use chrono::{TimeZone, Utc};
+    mailypoppins::invite::InviteSpec {
+        uid: "review-1@example.com".to_string(),
+        sequence: 0,
+        organizer: "me@example.com".to_string(),
+        attendees: vec!["ada@example.com".to_string(), "bob@example.com".to_string()],
+        summary: "Budget review".to_string(),
+        span: mailypoppins::invite::EventSpan::Timed {
+            start: Utc.with_ymd_and_hms(2026, 12, 14, 9, 0, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 12, 14, 10, 0, 0).unwrap(),
+        },
+        location: Some("Room 4.12".to_string()),
+        description: None,
+    }
+}
+
+/// The attendee `address`'s agenda over `store`.
+fn agenda_of(store: &Mailstore, address: &str) -> Vec<mp_protocol::calendar::AgendaEvent> {
+    mailypoppins::agenda::load_events_for_account(&store.store, &store.blobs, "acct", address)
+}
+
+#[test]
+fn an_update_the_organizer_sends_moves_the_attendees_event() {
+    use chrono::{TimeZone, Utc};
+    use mailypoppins::calendar_model::EventTime;
+    use mailypoppins::calendar_write::{AttendeeInput, EventPatch};
+
+    let organizer = Mailstore::new();
+    let sent = organizer.ingest_raw(
+        &sent_invite_raw(&review(), "<review-0@example.com>"),
+        "sent",
+        1,
+    );
+    let ada = Mailstore::new();
+    ada.ingest_raw(
+        &sent_invite_raw(&review(), "<review-0@example.com>"),
+        "inbox",
+        1,
+    );
+    let bob = Mailstore::new();
+    bob.ingest_raw(
+        &sent_invite_raw(&review(), "<review-0@example.com>"),
+        "inbox",
+        1,
+    );
+
+    let row = mailypoppins::invite::organized_row(
+        &organizer.store,
+        &organizer.blobs,
+        &organizer_account(),
+        sent,
+    )
+    .unwrap();
+    assert_eq!(row.invite.uid, "review-1@example.com");
+    assert_eq!(row.next_sequence, 1);
+
+    // A new time and room, and Bob no longer invited.
+    let current = EventTime::timed(
+        Utc.with_ymd_and_hms(2026, 12, 14, 9, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2026, 12, 14, 10, 0, 0).unwrap(),
+        "UTC",
+    )
+    .unwrap();
+    let patch = EventPatch {
+        time: Some(
+            EventTime::timed(
+                Utc.with_ymd_and_hms(2026, 12, 15, 14, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2026, 12, 15, 15, 0, 0).unwrap(),
+                "UTC",
+            )
+            .unwrap(),
+        ),
+        location: Some(Some("Room 1.01".to_string())),
+        attendees: Some(vec![AttendeeInput {
+            email: "ada@example.com".to_string(),
+            name: None,
+            role: mailypoppins::calendar_model::AttendeeRole::Required,
+        }]),
+        ..Default::default()
+    };
+    let (spec, messages) =
+        mailypoppins::invite::update_messages(&row.invite, &current, &patch, row.next_sequence)
+            .unwrap();
+    // The cancellation of the dropped attendee goes first, one version
+    // below the update, so the organizer's own sent copy of it is a stale
+    // CANCEL that leaves the update standing.
+    assert_eq!(spec.sequence, 2);
+    let [cancel, update] = messages.as_slice() else {
+        panic!("a cancellation and an update: {messages:#?}")
+    };
+    assert_eq!(cancel.to.as_deref(), Some("bob@example.com"));
+    assert!(cancel.ics.contains("METHOD:CANCEL") && cancel.ics.contains("SEQUENCE:1"));
+    assert_eq!(update.to.as_deref(), Some("ada@example.com"));
+    assert!(update.ics.contains("METHOD:REQUEST") && update.ics.contains("SEQUENCE:2"));
+
+    let update_raw = itip_raw(update);
+    let text = String::from_utf8_lossy(&update_raw).to_lowercase();
+    assert!(text.contains("text/calendar; method=request"), "{text}");
+    ada.ingest_raw(&update_raw, "inbox", 2);
+    let agenda = agenda_of(&ada, "ada@example.com");
+    assert_eq!(
+        agenda.len(),
+        1,
+        "the update replaces the invitation: {agenda:#?}"
+    );
+    let event = &agenda[0].event;
+    assert_eq!(event.sequence, 2);
+    assert_eq!(event.start.as_deref(), Some("2026-12-15T14:00:00Z"));
+    assert_eq!(event.location.as_deref(), Some("Room 1.01"));
+    assert!(!event.superseded && !event.cancelled);
+
+    let cancel_raw = itip_raw(cancel);
+    let text = String::from_utf8_lossy(&cancel_raw).to_lowercase();
+    assert!(text.contains("text/calendar; method=cancel"), "{text}");
+    bob.ingest_raw(&cancel_raw, "inbox", 2);
+    let agenda = agenda_of(&bob, "bob@example.com");
+    assert_eq!(agenda.len(), 1);
+    assert!(agenda[0].cancelled, "Bob's copy is cancelled: {agenda:#?}");
+
+    // The organizer's own agenda, once both sent copies are filed: the
+    // update, live.
+    organizer.ingest_raw(&cancel_raw, "sent", 2);
+    organizer.ingest_raw(&update_raw, "sent", 3);
+    let own = agenda_of(&organizer, "me@example.com");
+    assert_eq!(own.len(), 1);
+    assert!(own[0].is_organizer && !own[0].cancelled, "{own:#?}");
+    assert_eq!(own[0].event.sequence, 2);
+    let next = mailypoppins::invite::organized_row(
+        &organizer.store,
+        &organizer.blobs,
+        &organizer_account(),
+        own[0].row_id,
+    )
+    .unwrap();
+    assert_eq!(next.next_sequence, 3, "the next change goes above both");
+}
+
+#[test]
+fn a_cancel_the_organizer_sends_tombstones_the_attendees_event() {
+    let organizer = Mailstore::new();
+    let sent = organizer.ingest_raw(
+        &sent_invite_raw(&review(), "<review-0@example.com>"),
+        "sent",
+        1,
+    );
+    let ada = Mailstore::new();
+    ada.ingest_raw(
+        &sent_invite_raw(&review(), "<review-0@example.com>"),
+        "inbox",
+        1,
+    );
+
+    let row = mailypoppins::invite::organized_row(
+        &organizer.store,
+        &organizer.blobs,
+        &organizer_account(),
+        sent,
+    )
+    .unwrap();
+    let cancel = mailypoppins::invite::cancel_message(
+        &row.invite,
+        row.next_sequence,
+        None,
+        Some("The numbers are not in yet."),
+    )
+    .unwrap();
+    assert_eq!(cancel.subject, "Cancelled: Budget review");
+    assert_eq!(
+        cancel.to.as_deref(),
+        Some("ada@example.com, bob@example.com")
+    );
+    assert!(
+        cancel.body.contains("The numbers are not in yet."),
+        "{}",
+        cancel.body
+    );
+
+    let raw = itip_raw(&cancel);
+    ada.ingest_raw(&raw, "inbox", 2);
+    let agenda = agenda_of(&ada, "ada@example.com");
+    assert_eq!(agenda.len(), 1);
+    assert!(agenda[0].cancelled, "{agenda:#?}");
+
+    // On the organizer's own agenda too, once the sent copy is filed.
+    organizer.ingest_raw(&raw, "sent", 2);
+    assert!(agenda_of(&organizer, "me@example.com")[0].cancelled);
+}
+
+/// A weekly series this account organised, sent from Outlook in a Windows
+/// zone, as its sent copy holds it.
+const OWN_SERIES: &str = "\
+From: Me <me@example.com>\r
+To: ada@example.com\r
+Subject: Weekly sync\r
+Date: Mon, 30 Nov 2026 09:00:00 +0000\r
+Message-ID: <weekly-1@example.com>\r
+MIME-Version: 1.0\r
+Content-Type: text/calendar; method=REQUEST; charset=UTF-8\r
+Content-Transfer-Encoding: 7bit\r
+\r
+BEGIN:VCALENDAR\r
+METHOD:REQUEST\r
+PRODID:Microsoft Exchange Server 2010\r
+VERSION:2.0\r
+BEGIN:VTIMEZONE\r
+TZID:W. Europe Standard Time\r
+BEGIN:STANDARD\r
+DTSTART:16010101T030000\r
+TZOFFSETFROM:+0200\r
+TZOFFSETTO:+0100\r
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10\r
+END:STANDARD\r
+BEGIN:DAYLIGHT\r
+DTSTART:16010101T020000\r
+TZOFFSETFROM:+0100\r
+TZOFFSETTO:+0200\r
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3\r
+END:DAYLIGHT\r
+END:VTIMEZONE\r
+BEGIN:VEVENT\r
+ORGANIZER;CN=Me:mailto:me@example.com\r
+ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ada@example.com\r
+RRULE:FREQ=WEEKLY;UNTIL=20270131T080000Z;INTERVAL=1;BYDAY=MO;WKST=MO\r
+UID:weekly-1@example.com\r
+SUMMARY:Weekly sync\r
+DTSTART;TZID=W. Europe Standard Time:20261207T090000\r
+DTEND;TZID=W. Europe Standard Time:20261207T093000\r
+SEQUENCE:0\r
+DTSTAMP:20261130T090000Z\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+
+#[test]
+fn an_occurrence_the_organizer_cancels_leaves_the_attendees_series_live() {
+    let organizer = Mailstore::new();
+    let sent = organizer.ingest_raw(OWN_SERIES.as_bytes(), "sent", 1);
+    let ada = Mailstore::new();
+    ada.ingest_raw(OWN_SERIES.as_bytes(), "inbox", 1);
+
+    let row = mailypoppins::invite::organized_row(
+        &organizer.store,
+        &organizer.blobs,
+        &organizer_account(),
+        sent,
+    )
+    .unwrap();
+    let berlin: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
+    let rid =
+        mailypoppins::invite::occurrence_recurrence_id(&row.invite, "2026-12-21T09:00", berlin)
+            .unwrap();
+    let cancel =
+        mailypoppins::invite::cancel_message(&row.invite, row.next_sequence, Some(&rid), None)
+            .unwrap();
+    ada.ingest_raw(&itip_raw(&cancel), "inbox", 2);
+
+    let agenda = agenda_of(&ada, "ada@example.com");
+    assert_eq!(agenda.len(), 1, "{agenda:#?}");
+    assert!(!agenda[0].cancelled, "the series lives on");
+    assert_eq!(
+        agenda[0].event.cancelled_instances,
+        ["2026-12-21T09:00:00+01:00"]
+    );
+}
+
+#[test]
+fn only_an_invitation_the_account_organised_is_changed() {
+    let store = Mailstore::new();
+    let received = store.ingest_raw(OUTLOOK_INLINE_REQUEST.as_bytes(), "inbox", 1);
+    let err = mailypoppins::invite::organized_row(
+        &store.store,
+        &store.blobs,
+        &organizer_account(),
+        received,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("organised by chair@tum.de"),
+        "{err:#}"
+    );
+    let plain = store.ingest_raw(PLAIN_MULTIPART.as_bytes(), "sent", 2);
+    let err = mailypoppins::invite::organized_row(
+        &store.store,
+        &store.blobs,
+        &organizer_account(),
+        plain,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("carries no invitation"),
+        "{err:#}"
+    );
+}
