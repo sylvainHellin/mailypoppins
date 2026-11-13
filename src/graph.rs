@@ -4897,6 +4897,76 @@ mod tests {
             .unwrap()
     }
 
+    /// What the Graph listing hands the engine (PERSO-213): a whole
+    /// enumeration observes the folder's count and may prune, a change set or
+    /// a short enumeration observes neither, and the coverage is the download
+    /// by id, where only the cap owes a follow-up.
+    #[test]
+    fn the_graph_listing_maps_a_folder_onto_the_engine() {
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let messages = vec![
+            received("<a@x>", "2026-08-06T03:00:00Z"),
+            received("<b@x>", "2026-08-06T02:00:00Z"),
+            received("<c@x>", "2026-08-06T01:00:00Z"),
+        ];
+        let held = known(&["<c@x>", "<gone@x>"]);
+
+        let (listing, pass) =
+            backend::folder_listing(&inbox, 1, &held, whole_folder(&messages), Some(7), false);
+        assert_eq!(
+            listing.observed,
+            crate::sync::Observed::Folder {
+                identity: Some(7),
+                exists: 3
+            }
+        );
+        assert_eq!(listing.skipped, 1);
+        assert_eq!(listing.vanished, vec![crate::ingest::graph_uid("<gone@x>")]);
+        assert!(
+            listing.listed.is_empty(),
+            "a content hash is no UID listing"
+        );
+        assert_eq!(listing.known_flags.len(), 3);
+        assert_eq!(pass.queue, ["id-of-<a@x>"], "the newest new one");
+        let got_it = (listing.coverage)(&[crate::ingest::graph_uid("<a@x>")], true);
+        assert!(got_it.download_incomplete, "the cap left <b@x> behind");
+        assert!(got_it.backlog, "and the next window is owed at once");
+        assert_eq!(
+            got_it.resume,
+            Some(crate::sync::ResumePoint::DeltaLink(LINK.to_string()))
+        );
+
+        let (listing, _) =
+            backend::folder_listing(&inbox, 1, &held, whole_folder(&messages), Some(7), false);
+        let lost_it = (listing.coverage)(&[], true);
+        assert!(lost_it.download_incomplete);
+        assert!(!lost_it.backlog, "a short batch waits for the interval");
+
+        let (listing, _) =
+            backend::folder_listing(&inbox, 100, &held, changes(&messages), Some(7), false);
+        assert_eq!(
+            listing.observed,
+            crate::sync::Observed::Partial { identity: Some(7) }
+        );
+        assert!(listing.vanished.is_empty(), "a change set prunes nothing");
+        assert_eq!(listing.skipped, 0);
+
+        let short = backend::FolderView::Enumeration {
+            enumeration: FolderEnumeration {
+                entries: entries_of(&messages),
+                complete: false,
+            },
+            minted: None,
+        };
+        let (listing, _) = backend::folder_listing(&inbox, 100, &held, short, Some(7), false);
+        assert!(!listing.enumeration_complete);
+        assert_eq!(
+            listing.observed,
+            crate::sync::Observed::Partial { identity: Some(7) },
+            "a short enumeration records no count"
+        );
+    }
+
     /// A quick pass that downloads `messages` as new arrivals in `target`:
     /// a change set naming them, so nothing held is listed or pruned.
     fn sync_window(
