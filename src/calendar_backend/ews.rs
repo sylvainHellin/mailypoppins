@@ -40,9 +40,10 @@
 //!
 //! An answer to an invitation, a proposed time included, a create, an update,
 //! a cancel and a delete go through [`write`], which also stamps a create
-//! with its transaction id. Free/busy goes through [`freebusy`]. The server
-//! reminders are not built yet: [`FEATURES`] does not list them, and each
-//! such call is refused with a sentence.
+//! with its transaction id, and the server reminders' dismissal and snooze.
+//! Free/busy goes through [`freebusy`]. An online meeting is the one
+//! feature [`FEATURES`] leaves out: on-premises Exchange makes no Teams
+//! link.
 
 pub mod fetch;
 mod freebusy;
@@ -73,6 +74,7 @@ pub const FEATURES: &[CalendarFeature] = &[
     CalendarFeature::Write,
     CalendarFeature::ProposeTime,
     CalendarFeature::FreeBusy,
+    CalendarFeature::ServerReminders,
 ];
 
 /// The most changes one SyncFolderItems page may carry, the server's limit.
@@ -518,14 +520,6 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         }
         Ok(result)
     }
-
-    /// The refusal of a call this build does not make on EWS yet.
-    fn not_built(&self, what: &str) -> CalendarBackendError {
-        CalendarBackendError::Other(anyhow!(
-            "the EWS calendar of {} cannot {what} yet",
-            self.account
-        ))
-    }
 }
 
 /// Hang each occurrence and exception among `events` from its series in
@@ -655,12 +649,12 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
         self.delete_item(event).await
     }
 
-    async fn dismiss_reminder(&self, _event: &str) -> BackendResult<()> {
-        Err(self.not_built("dismiss a reminder on the server"))
+    async fn dismiss_reminder(&self, event: &str) -> BackendResult<()> {
+        self.reminder_action(event, None).await
     }
 
-    async fn snooze_reminder(&self, _event: &str, _until: DateTime<Utc>) -> BackendResult<()> {
-        Err(self.not_built("snooze a reminder on the server"))
+    async fn snooze_reminder(&self, event: &str, until: DateTime<Utc>) -> BackendResult<()> {
+        self.reminder_action(event, Some(until)).await
     }
 
     async fn free_busy(&self, query: &FreeBusyQuery) -> BackendResult<Vec<Schedule>> {

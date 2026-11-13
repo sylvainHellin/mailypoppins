@@ -23,6 +23,13 @@
 //!   the attendees the update. A change to one occurrence goes to the
 //!   occurrence's own ItemId, which makes it an exception; a change to the
 //!   series goes to the master's.
+//! - A reminder dismissed or snoozed is a `PerformReminderAction`
+//!   (`Exchange2013` and later) on the event's ItemId, an occurrence's own
+//!   included, the snooze with its new reminder time. Turning
+//!   `ReminderIsSet` off through UpdateItem would dismiss every later
+//!   occurrence of a series and make an exception of an occurrence, where
+//!   the reminder action dismisses the one reminder, as Outlook does. An
+//!   event already gone has no reminder left, which counts as done.
 //! - A cancel is a `CancelCalendarItem` response object on a meeting the
 //!   user organizes, with the comment as its body; a delete is a
 //!   `DeleteItem` into Deleted Items that tells nobody. An event already
@@ -777,6 +784,43 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         );
         let answer = self.call("CreateItem", &request).await?;
         self.done_or_gone("CreateItem", event, &answer)
+    }
+
+    /// Dismiss the reminder of `event` (`Dismiss`), or snooze it until
+    /// `until` (`Snooze`). Built from the schema documentation, unverified
+    /// live; the item is named by its id alone, without the change key
+    /// mp does not keep.
+    pub(super) async fn reminder_action(
+        &self,
+        event: &str,
+        until: Option<DateTime<Utc>>,
+    ) -> BackendResult<()> {
+        const OPERATION: &str = "PerformReminderAction";
+        let (action, time) = match until {
+            Some(until) => (
+                "Snooze",
+                format!("<t:NewReminderTime>{}</t:NewReminderTime>", utc_text(until)),
+            ),
+            None => ("Dismiss", String::new()),
+        };
+        let request = format!(
+            "<m:{OPERATION}><m:ReminderItemActions><t:ReminderItemAction>\
+             <t:ActionType>{action}</t:ActionType><t:ItemId Id=\"{}\"/>{time}\
+             </t:ReminderItemAction></m:ReminderItemActions></m:{OPERATION}>",
+            xml::escape(event)
+        );
+        let answer = self.call(OPERATION, &request).await?;
+        match parse::bare_response(&answer, OPERATION) {
+            Ok(_) => Ok(()),
+            Err(parse::AnswerError::Refused(error)) if error.code == ITEM_NOT_FOUND => {
+                debug!(
+                    "[calendar] {}: item {event} is gone already; its reminder is no more",
+                    self.account
+                );
+                Ok(())
+            }
+            Err(error) => Err(answer_error(&error, OPERATION)),
+        }
     }
 
     /// Delete `event` into Deleted Items, telling nobody. Built from the

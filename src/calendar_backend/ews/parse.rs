@@ -145,6 +145,36 @@ pub fn messages(body: &str, operation: &str) -> Result<Vec<Message>, AnswerError
     Ok(found)
 }
 
+/// The answer of an operation whose response carries its class and code
+/// itself, with no list of messages (GetReminders, PerformReminderAction):
+/// the response element, or its error as [`AnswerError::Refused`].
+pub fn bare_response(body: &str, operation: &str) -> Result<Element, AnswerError> {
+    let root = xml::parse(body).map_err(|err| malformed(format!("{err:#}")))?;
+    let body = root
+        .child("Body")
+        .ok_or_else(|| malformed("no SOAP body"))?;
+    if let Some(fault) = fault_of(body) {
+        return Err(fault);
+    }
+    let name = format!("{operation}Response");
+    let response = body
+        .child(&name)
+        .ok_or_else(|| malformed(format!("no {name}")))?;
+    match response.attr("ResponseClass") {
+        Some("Success") => Ok(response.clone()),
+        _ => Err(AnswerError::Refused(ResponseError {
+            code: response
+                .text_of("ResponseCode")
+                .unwrap_or("an error without a ResponseCode")
+                .to_string(),
+            message: response
+                .text_of("MessageText")
+                .unwrap_or_default()
+                .to_string(),
+        })),
+    }
+}
+
 /// The single response message of `operation`'s answer, its error as
 /// [`AnswerError::Refused`].
 pub fn only_message(body: &str, operation: &str) -> Result<Element, AnswerError> {

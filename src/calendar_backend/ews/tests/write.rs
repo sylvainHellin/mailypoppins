@@ -772,3 +772,87 @@ async fn a_delete_tells_nobody_and_a_gone_event_counts_as_deleted() {
         ))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reminders
+// ---------------------------------------------------------------------------
+
+/// What the server answers a PerformReminderAction with, in the frame of
+/// the spike's GetReminders answer (the response itself carries its class
+/// and code): the items it changed, or its error.
+fn reminder_answer(class: &str, code: &str, payload: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope \
+         xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+         <PerformReminderActionResponse ResponseClass=\"{class}\" \
+         xmlns=\"http://schemas.microsoft.com/exchange/services/2006/messages\">\
+         <ResponseCode>{code}</ResponseCode>{payload}</PerformReminderActionResponse>\
+         </s:Body></s:Envelope>"
+    )
+}
+
+/// A dismissal and a snooze are reminder actions on the event's ItemId, an
+/// occurrence's own included, the snooze carrying the new reminder time;
+/// an event already gone has none to dismiss.
+#[tokio::test]
+async fn a_dismissal_and_a_snooze_are_reminder_actions_on_the_item() {
+    let updated = format!(
+        "<UpdatedItemIds><ItemId xmlns=\"http://schemas.microsoft.com/exchange/services/2006/types\" \
+         Id=\"{OCCURRENCE_ID}\" ChangeKey=\"k\"/></UpdatedItemIds>"
+    );
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer(
+                "PerformReminderAction",
+                &reminder_answer("Success", "NoError", &updated),
+            )
+            .answer(
+                "PerformReminderAction",
+                &reminder_answer("Success", "NoError", &updated),
+            )
+            .answer(
+                "PerformReminderAction",
+                &reminder_answer(
+                    "Error",
+                    "ErrorItemNotFound",
+                    "<MessageText>The specified object was not found in the store.</MessageText>",
+                ),
+            )
+            .answer(
+                "PerformReminderAction",
+                &reminder_answer(
+                    "Error",
+                    "ErrorInvalidRequest",
+                    "<MessageText>The request is invalid.</MessageText>",
+                ),
+            ),
+    );
+    backend.dismiss_reminder(OCCURRENCE_ID).await.unwrap();
+    let until = Utc.with_ymd_and_hms(2026, 11, 20, 8, 55, 0).unwrap();
+    backend.snooze_reminder(OCCURRENCE_ID, until).await.unwrap();
+    backend.dismiss_reminder(SINGLE_ID).await.unwrap();
+    let err = backend.dismiss_reminder(SINGLE_ID).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "the Exchange server refused PerformReminderAction: ErrorInvalidRequest: The request is \
+         invalid."
+    );
+    let sent = backend.fetch().sent();
+    assert_eq!(
+        sent[0],
+        envelope(&format!(
+            "<m:PerformReminderAction><m:ReminderItemActions><t:ReminderItemAction>\
+             <t:ActionType>Dismiss</t:ActionType><t:ItemId Id=\"{OCCURRENCE_ID}\"/>\
+             </t:ReminderItemAction></m:ReminderItemActions></m:PerformReminderAction>"
+        ))
+    );
+    assert_eq!(
+        sent[1],
+        envelope(&format!(
+            "<m:PerformReminderAction><m:ReminderItemActions><t:ReminderItemAction>\
+             <t:ActionType>Snooze</t:ActionType><t:ItemId Id=\"{OCCURRENCE_ID}\"/>\
+             <t:NewReminderTime>2026-11-20T08:55:00Z</t:NewReminderTime>\
+             </t:ReminderItemAction></m:ReminderItemActions></m:PerformReminderAction>"
+        ))
+    );
+}
