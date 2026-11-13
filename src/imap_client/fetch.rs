@@ -380,7 +380,7 @@ fn arrival_mark(
 /// nothing on. The pass is still reported short whenever it could not take the
 /// whole listing, which costs one conservative pass and nothing more, because
 /// the cursor it writes gives the next pass a real floor to stand on.
-fn arrival_coverage(
+pub(crate) fn arrival_coverage(
     listed: &[u32],
     known: &std::collections::HashSet<i64>,
     ceiling: u32,
@@ -425,7 +425,7 @@ fn enumeration_complete(listed_len: usize, exists: u32) -> bool {
 /// a server that withholds both leaves 0, which prunes nothing at all.
 ///
 /// `listed` must be sorted ascending, as it is at every call site.
-fn ceiling(uid_next: Option<u32>, listed: &[u32]) -> u32 {
+pub(crate) fn ceiling(uid_next: Option<u32>, listed: &[u32]) -> u32 {
     uid_next
         .map(|n| n.saturating_sub(1))
         .or_else(|| listed.last().copied())

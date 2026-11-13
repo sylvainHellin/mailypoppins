@@ -12,6 +12,10 @@ mod store_sync;
 mod watch;
 
 pub use batch::add_flag_in_mailboxes;
+/// The arrival arithmetic, so the engine's fake backend answers a pass that
+/// ended partway the way this transport would (PERSO-300).
+#[cfg(test)]
+pub(crate) use fetch::{arrival_coverage, ceiling};
 pub use fetch::{
     fetch_raw_by_message_id, fetch_uids_on_session, search_stubs_on_session, vanished_uids,
 };

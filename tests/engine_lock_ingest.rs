@@ -155,10 +155,14 @@ struct ScriptedBackend {
     /// How many times the engine asked for a fetch, so a test can say "no pass
     /// ran" as well as "no session opened".
     calls: usize,
-    /// The bodies of each target of the last listing, by index, handed over
-    /// in one batch, and whether the scripted pass asked for every new UID.
+    /// The bodies of each target of the last listing, by index, still to be
+    /// handed over, and whether the scripted pass asked for every new UID.
     bodies: Vec<Option<(Vec<FetchedRaw>, bool)>>,
 }
+
+/// How many bodies [`ScriptedBackend`] hands over per batch: the IMAP
+/// backend's chunk size.
+const BATCH: usize = 20;
 
 impl ScriptedBackend {
     fn with(server_name: &str, passes: Vec<MailboxFetch>) -> Self {
@@ -200,6 +204,14 @@ impl SyncBackend for ScriptedBackend {
                 pending_arrival_mark: fetch.pending_arrival_mark,
                 highest_modseq: fetch.highest_modseq,
             };
+            // A scripted body the engine did not download leaves the mailbox
+            // short, whatever the script says of a pass that got them all.
+            let scripted: Vec<u32> = fetch.messages.iter().map(|m| m.uid).collect();
+            let coverage = move |downloaded: &[u32], _: bool| MailboxCoverage {
+                download_incomplete: covered.download_incomplete
+                    || scripted.iter().any(|uid| !downloaded.contains(uid)),
+                ..covered
+            };
             self.bodies
                 .push(Some((fetch.messages, fetch.bodies_complete)));
             out.push(Ok(MailboxListing {
@@ -210,7 +222,7 @@ impl SyncBackend for ScriptedBackend {
                 listed: fetch.listed,
                 uidvalidity_reset: fetch.uidvalidity_reset,
                 enumeration_complete: fetch.enumeration_complete,
-                coverage: Box::new(move |_, _| covered),
+                coverage: Box::new(coverage),
             }));
         }
         out
@@ -225,7 +237,10 @@ impl SyncBackend for ScriptedBackend {
                 complete: *complete,
             });
         }
-        Ok(BodyBatch::Bodies(std::mem::take(messages)))
+        // Newest first, as the IMAP backend takes its chunks off the end of
+        // the ascending new UIDs; a script lists them oldest first.
+        let newest = messages.len().saturating_sub(BATCH);
+        Ok(BodyBatch::Bodies(messages.split_off(newest)))
     }
 }
 

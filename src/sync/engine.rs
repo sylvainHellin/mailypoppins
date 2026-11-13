@@ -881,14 +881,58 @@ mod tests {
         highest_modseq: Option<i64>,
     }
 
+    /// What the store held for one target when the engine listed it: what the
+    /// real backend's arrival arithmetic stands on.
+    struct StoreHeld {
+        /// The skip list, resolved against the scripted UIDVALIDITY.
+        uids: std::collections::HashSet<i64>,
+        /// The arrival mark the last pass left, `None` across a reset.
+        carried: Option<u32>,
+        /// The top the last pass recorded, `None` across a reset.
+        prior: Option<u32>,
+    }
+
     impl MailboxFetch {
         /// The listing the engine sees first, and the body pass behind it.
-        fn split(self) -> (MailboxListing, FakeBodies) {
+        ///
+        /// The scripted coverage is what the backend reports once every
+        /// scripted body has been handed over. A pass that ended before that
+        /// (a stop between two batches) is answered with the real backend's
+        /// arrival arithmetic over what was downloaded, so a test sees the
+        /// mark production would write rather than one fixed in the script.
+        fn split(self, held: StoreHeld) -> (MailboxListing, FakeBodies) {
             let covered = MailboxCoverage {
                 download_incomplete: self.download_incomplete,
                 pending_arrival_mark: self.pending_arrival_mark,
                 highest_modseq: self.highest_modseq,
             };
+            let scripted: Vec<u32> = self.messages.iter().map(|m| m.uid).collect();
+            let listed = self.listed.clone();
+            let ceiling = crate::imap_client::ceiling(self.state.uid_next, &listed);
+            let coverage: crate::sync::CoverageOf = Box::new(move |downloaded: &[u32], _| {
+                if scripted.iter().all(|uid| downloaded.contains(uid)) {
+                    return covered;
+                }
+                let arrivals = crate::imap_client::arrival_coverage(
+                    &listed,
+                    &held.uids,
+                    ceiling,
+                    downloaded,
+                    held.carried,
+                    held.prior,
+                );
+                MailboxCoverage {
+                    download_incomplete: covered.download_incomplete || arrivals.incomplete,
+                    pending_arrival_mark: match (
+                        arrivals.pending_mark,
+                        covered.pending_arrival_mark,
+                    ) {
+                        (Some(computed), Some(scripted)) => Some(computed.min(scripted)),
+                        (computed, scripted) => computed.or(scripted),
+                    },
+                    highest_modseq: covered.highest_modseq,
+                }
+            });
             let listing = MailboxListing {
                 skipped: self.skipped,
                 known_flags: self.known_flags,
@@ -897,7 +941,7 @@ mod tests {
                 listed: self.listed,
                 uidvalidity_reset: self.uidvalidity_reset,
                 enumeration_complete: self.enumeration_complete,
-                coverage: Box::new(move |_, _| covered),
+                coverage,
             };
             let bodies = FakeBodies {
                 messages: self.messages.into(),
@@ -907,7 +951,10 @@ mod tests {
         }
     }
 
-    /// One target's scripted body pass, handed over [`FAKE_BATCH`] at a time.
+    /// One target's scripted body pass, handed over [`FAKE_BATCH`] at a time,
+    /// newest first: a script lists a mailbox's messages oldest first, as the
+    /// listing does, and the real backend takes its chunks off the end
+    /// (`body_chunks`).
     struct FakeBodies {
         messages: std::collections::VecDeque<FetchedRaw>,
         complete: bool,
@@ -969,7 +1016,7 @@ mod tests {
             for (target, known) in targets.iter().zip(knowns) {
                 self.seen
                     .push((target.server_name.clone(), limit, known.uids.len()));
-                let mut next = self
+                let next = self
                     .passes
                     .get_mut(&target.server_name)
                     .and_then(|queue| {
@@ -980,15 +1027,19 @@ mod tests {
                         }
                     })
                     .unwrap_or_else(|| Err(anyhow::anyhow!("nothing scripted")));
-                if self.honour_skip_list {
-                    if let Ok(fetch) = next.as_mut() {
-                        let (skip, _) = known.resolve(fetch.state.uid_validity);
-                        fetch.messages.retain(|m| !skip.contains(&(m.uid as i64)));
-                    }
-                }
                 match next {
-                    Ok(fetch) => {
-                        let (listing, bodies) = fetch.split();
+                    Ok(mut fetch) => {
+                        let (carried, prior) = (known.arrival_mark, known.prior_high_water);
+                        let (skip, reset) = known.resolve(fetch.state.uid_validity);
+                        if self.honour_skip_list {
+                            fetch.messages.retain(|m| !skip.contains(&(m.uid as i64)));
+                        }
+                        let held = StoreHeld {
+                            uids: skip,
+                            carried: carried.filter(|_| !reset),
+                            prior: prior.filter(|_| !reset),
+                        };
+                        let (listing, bodies) = fetch.split(held);
                         self.bodies.push(Some(bodies));
                         out.push(Ok(listing));
                     }
@@ -1010,9 +1061,9 @@ mod tests {
                     complete: bodies.complete,
                 });
             }
-            let take = bodies.messages.len().min(FAKE_BATCH);
+            let newest = bodies.messages.len().saturating_sub(FAKE_BATCH);
             self.batches += 1;
-            Ok(BodyBatch::Bodies(bodies.messages.drain(..take).collect()))
+            Ok(BodyBatch::Bodies(bodies.messages.drain(newest..).collect()))
         }
     }
 
@@ -1281,17 +1332,33 @@ mod tests {
     /// downloaded, the mailbox is closed with what it wrote, its cursor
     /// included, and nothing after it is touched.
     ///
+    /// The batch in hand is the newest, so the cursor's top is the top of the
+    /// mailbox, and what keeps the older arrivals the stop left on the server
+    /// from passing for backlog is the arrival mark: it stays below them
+    /// until a pass brings them in.
+    ///
     /// Before PERSO-300 a mailbox's ingest was never interrupted, and the
     /// daemon kept writing a 6,360-message folder for about three minutes
     /// after the cancel was acknowledged.
     #[test]
     fn a_stop_during_a_mailbox_ingest_ends_the_pass_after_the_batch_in_hand() {
         let fx = Fixture::new();
+        let message = |uid: u32| (uid, raw(&format!("m{uid}")));
+        // History: the mailbox's first ten messages, so the arrivals below
+        // have a recorded top to arrive above.
+        let mut first = FakeBackend::default();
+        first.script("INBOX", vec![Ok(fetch((1..=10).map(message).collect()))]);
+        fx.run(&mut first, &targets());
+        assert_eq!(fx.cursor_mark("inbox"), None, "the history pass caught up");
+
+        let top = 10 + 5 * FAKE_BATCH as u32;
+        let arrivals = || {
+            let mut inbox = fetch((11..=top).map(message).collect());
+            inbox.listed = (1..=top).collect();
+            inbox
+        };
         let mut backend = FakeBackend::default();
-        let inbox: Vec<(u32, Vec<u8>)> = (1..=5 * FAKE_BATCH as u32)
-            .map(|uid| (uid, raw(&format!("m{uid}"))))
-            .collect();
-        backend.script("INBOX", vec![Ok(fetch(inbox))]);
+        backend.script("INBOX", vec![Ok(arrivals())]);
         backend.script("Archive", vec![Ok(fetch(vec![(201, raw("arch"))]))]);
         // The cancel lands while the first batch is being ingested: the
         // first question the engine asks after it is the next batch's.
@@ -1299,17 +1366,26 @@ mod tests {
         let result = fx.run_until(&mut backend, &targets(), usize::MAX, false, Some(&stop));
 
         assert_eq!(backend.batches, 1, "no batch is downloaded after the stop");
+        let newest = top - FAKE_BATCH as u32 + 1;
         assert_eq!(
             fx.rows("inbox"),
-            (1..=FAKE_BATCH as i64).collect::<Vec<_>>(),
-            "the batch in hand is written, and nothing after it"
+            (1..=10)
+                .chain(newest..=top)
+                .map(i64::from)
+                .collect::<Vec<_>>(),
+            "the batch in hand, the newest, is written, and nothing after it"
         );
         assert_eq!(result.saved, FAKE_BATCH);
         assert_eq!(result.bodies_truncated, 1, "the mailbox is closed short");
         let cursor = ingest::load_mailbox_cursor(&fx.store, "acct", "inbox")
             .unwrap()
             .expect("the mailbox the stop landed in records its cursor");
-        assert_eq!(cursor.last_uid, Some(FAKE_BATCH as i64));
+        assert_eq!(cursor.last_uid, Some(i64::from(top)));
+        assert_eq!(
+            fx.cursor_mark("inbox"),
+            Some(10),
+            "the mark stays below the arrivals the stop left on the server"
+        );
         assert!(
             fx.rows("archive").is_empty(),
             "the next mailbox is untouched"
@@ -1319,6 +1395,17 @@ mod tests {
             vec![StopPoint::Fetch, StopPoint::Mailbox(0), StopPoint::Chunk],
             "the stop is the last question the pass asks"
         );
+
+        // The next pass downloads what the stop left, and the mark lets go.
+        let mut resumed = FakeBackend {
+            honour_skip_list: true,
+            ..FakeBackend::default()
+        };
+        resumed.script("INBOX", vec![Ok(arrivals())]);
+        resumed.script("Archive", vec![Ok(fetch(vec![(201, raw("arch"))]))]);
+        fx.run(&mut resumed, &targets());
+        assert_eq!(fx.rows("inbox"), (1..=i64::from(top)).collect::<Vec<_>>());
+        assert_eq!(fx.cursor_mark("inbox"), None);
     }
 
     /// A pass told to stop before its fetch asks the transport for nothing
