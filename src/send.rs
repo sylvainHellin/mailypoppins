@@ -4989,7 +4989,6 @@ async fn submit_over_within(
     let mut dial = crate::login_gate::dial(&login, &smtp_config.password)?;
     let Submitted {
         result,
-        logged_in,
         login_refused,
     } = submit_through(
         built,
@@ -5001,9 +5000,6 @@ async fn submit_over_within(
         },
     )
     .await;
-    if logged_in {
-        dial.accepted();
-    }
     let Some(answer) = login_refused else {
         return Ok(result);
     };
@@ -5021,7 +5017,8 @@ async fn submit_over_within(
 /// The gate's dial of an SMTP submission, which [`submit_through`] keeps
 /// told of the login while the conversation runs (PERSO-296).
 struct LoginWatch<'a> {
-    /// The dial, `None` for a test that submits past the gate.
+    /// The dial until the server took the login, `None` after it and for a
+    /// test that submits past the gate.
     dial: Option<&'a mut crate::login_gate::Dial>,
     /// How long a send may run with its login unanswered before the dial lets
     /// go of its mark.
@@ -5052,15 +5049,25 @@ impl LoginWatch<'_> {
             }
         }
     }
+
+    /// The server answered past the login, so it took the password: the
+    /// dial reports it at once, which resets the count and ends the mark,
+    /// rather than after the last recipient, so the other logins of the
+    /// password are not held while the rest of the send uploads.
+    fn logged_in(&mut self) {
+        if let Some(dial) = self.dial.take() {
+            dial.accepted();
+        }
+    }
 }
 
-/// What [`submit_through`] did: the verdict of each recipient, whether the
-/// server took the login, and its answer when it refused the login.
+/// What [`submit_through`] did: the verdict of each recipient, and the
+/// server's answer when it refused the login. That the server took the login
+/// (a recipient was delivered, or answered with a reply only a logged-in
+/// session gets, [`answered_past_login`]) goes to the dial as it happens,
+/// through [`LoginWatch::logged_in`].
 struct Submitted {
     result: SendResult,
-    /// The server took the login: a recipient was delivered, or answered
-    /// with a reply only a logged-in session gets ([`answered_past_login`]).
-    logged_in: bool,
     login_refused: Option<String>,
 }
 
@@ -5121,7 +5128,6 @@ async fn submit_through(
     let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
     let mut login_refused = None;
-    let mut logged_in = false;
 
     for (addr, role) in &built.recipients {
         if login_refused.is_some() {
@@ -5182,10 +5188,9 @@ async fn submit_through(
                     .await;
             }
         }
-        logged_in |= match &sent {
-            Ok(_) => true,
-            Err(e) => answered_past_login(e),
-        };
+        if sent.as_ref().map_or_else(answered_past_login, |_| true) {
+            watch.logged_in();
+        }
         match sent {
             Ok(_) => {
                 info!("Sent to {} ({})", addr, role);
@@ -5224,7 +5229,6 @@ async fn submit_through(
 
     Submitted {
         result: SendResult { results },
-        logged_in,
         login_refused,
     }
 }
@@ -5738,6 +5742,106 @@ mod smtp_durability_tests {
                 lettre::transport::smtp::authentication::Mechanism::Plain,
             ])
             .build()
+    }
+
+    /// A plain-TCP SMTP server on localhost that takes every login and the
+    /// first recipient and never answers a recipient after it, counting the
+    /// recipients it was given: a send still uploading once its login was
+    /// answered.
+    async fn stalling_smtp() -> (u16, std::sync::Arc<AtomicUsize>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rcpts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = rcpts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let rcpts = counted.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read);
+                    let _ = write.write_all(b"220 fake ESMTP\r\n").await;
+                    let mut line = String::new();
+                    let mut data = false;
+                    loop {
+                        line.clear();
+                        if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if data {
+                            if line == ".\r\n" {
+                                data = false;
+                                let _ = write.write_all(b"250 queued\r\n").await;
+                            }
+                            continue;
+                        }
+                        let verb = line.split(' ').next().unwrap_or("").trim();
+                        let reply: &[u8] = match verb.to_ascii_uppercase().as_str() {
+                            "EHLO" => b"250-fake\r\n250 AUTH PLAIN LOGIN\r\n",
+                            "AUTH" => b"235 2.7.0 Authentication successful\r\n",
+                            "RCPT" if rcpts.fetch_add(1, Ordering::SeqCst) > 0 => b"",
+                            "DATA" => {
+                                data = true;
+                                b"354 go ahead\r\n"
+                            }
+                            "QUIT" => b"221 bye\r\n",
+                            _ => b"250 OK\r\n",
+                        };
+                        if write.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, rcpts)
+    }
+
+    /// PERSO-296: an SMTP submission ends its dial's mark, and resets the
+    /// count, at the first reply past the login, not after the last
+    /// recipient, so the IMAP tick and watcher of a shared password are not
+    /// held while the rest of a large send uploads.
+    #[tokio::test]
+    async fn an_smtp_login_answered_ends_the_mark_before_the_last_recipient() {
+        use crate::login_gate::{self, Login, LoginRejected};
+        let (port, rcpts) = stalling_smtp().await;
+        let config = refused_config(port);
+        let login = Login::Smtp(config.login());
+        let refusal = LoginRejected::new(
+            mp_protocol::account::RejectedLogin::Smtp,
+            "535 5.7.8".into(),
+        );
+        login_gate::record(&login, &config.password, &refusal);
+        login_gate::forget(&login);
+
+        let mut built = Outbox::built("<two-recipients@example.com>", Some("id:two"));
+        built
+            .recipients
+            .push(("carol@example.com".to_string(), RecipientRole::Cc));
+        let sending = {
+            let config = config.clone();
+            tokio::spawn(async move { ServerSmtp.submit(&built, &config).await })
+        };
+        while rcpts.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !sending.is_finished(),
+            "the second recipient is still under way"
+        );
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            0,
+            "the login the server took reset the count"
+        );
+        assert!(
+            login_gate::dial(&login, &config.password).is_ok(),
+            "the row is free while the send goes on"
+        );
+        sending.abort();
     }
 
     /// PERSO-296: an SMTP login the server never answers lets go of the

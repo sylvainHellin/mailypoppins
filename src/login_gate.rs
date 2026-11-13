@@ -108,8 +108,10 @@
 //! A row, count and all, ends when a login of the row succeeds with the
 //! secret, since the server just took it (`a_success_at_either_login_resets_both`;
 //! an SMTP login counts as a success once the server answered past it, even
-//! when every recipient is refused:
-//! `crate::send`'s `a_login_taken_with_every_recipient_refused_resets_the_count`),
+//! when every recipient is refused, and at that first reply, so its mark
+//! ends there and not after the last recipient's upload:
+//! `crate::send`'s `a_login_taken_with_every_recipient_refused_resets_the_count`
+//! and `an_smtp_login_answered_ends_the_mark_before_the_last_recipient`),
 //! when no login is attempted with its identity and secret any more
 //! (`a_replaced_password_drops_its_row`), and when the daemon restarts, since
 //! the list lives in memory only. A new secret has no row, so it is asked at
