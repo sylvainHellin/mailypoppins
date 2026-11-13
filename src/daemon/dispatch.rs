@@ -192,33 +192,9 @@ impl MethodKind {
 /// The declaration the plan means by "a client disconnect does not cancel
 /// durable work unless the method's `MethodSpec` declares client-scoped
 /// cancellation": a field a caller reads, not a behaviour it discovers by
-/// calling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CancelScope {
-    /// The work outlives the connection that asked for it.
-    Durable,
-    /// The work is cancelled when its connection closes.
-    ClientScoped,
-}
-
-impl CancelScope {
-    /// The string this scope travels as.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CancelScope::Durable => "durable",
-            CancelScope::ClientScoped => "client_scoped",
-        }
-    }
-
-    /// The scope a wire string names, or `None` for anything else.
-    pub fn from_wire(value: &str) -> Option<CancelScope> {
-        match value {
-            "durable" => Some(CancelScope::Durable),
-            "client_scoped" => Some(CancelScope::ClientScoped),
-            _ => None,
-        }
-    }
-}
+/// calling. The protocol crate's type, so the scope a `MethodSpec` declares
+/// and the one an `operation.status` reports are one spelling.
+pub use mp_protocol::operation::CancelScope;
 
 /// A method's declaration: its name, its kind, the first protocol version that
 /// served it, and what a disconnect does to it.

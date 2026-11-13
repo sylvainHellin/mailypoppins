@@ -9,7 +9,7 @@
 //! `socket_owner`, `log_writable` - then one `account:<name>` per configured
 //! account in configuration order, each followed by a `calendar:<name>` when
 //! the account's calendar is Graph's (PERSO-200), which warns while its
-//! sign-in lacks the calendar scope. A [`Status`] is `ok`, `warn` or `fail`, and
+//! sign-in lacks the calendar scope. A [`CheckStatus`] is `ok`, `warn` or `fail`, and
 //! a detail is never empty, including on a passing check: the sentence is what
 //! a support case is read with and it is also what the TUI renders into its
 //! activity ring.
@@ -53,6 +53,7 @@ use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, Offset, TimeZone, Utc}
 use log::Level;
 use serde_json::{json, Value};
 
+use mp_protocol::diagnostic::CheckStatus;
 use mp_protocol::events::KIND_DIAGNOSTIC_CHECK_CHANGED;
 
 use super::config::{validate_document, ConfigStore};
@@ -113,28 +114,6 @@ pub const OPENING_GRACE: std::time::Duration = std::time::Duration::from_secs(30
 // One check
 // ---------------------------------------------------------------------------
 
-/// A check's verdict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
-    /// Nothing to do.
-    Ok,
-    /// Something a user would want to know about and can live with.
-    Warn,
-    /// Something the daemon cannot do its job through.
-    Fail,
-}
-
-impl Status {
-    /// The word this status travels as.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Ok => "ok",
-            Status::Warn => "warn",
-            Status::Fail => "fail",
-        }
-    }
-}
-
 /// One check, as the report, the snapshot and the event all carry it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
@@ -142,13 +121,13 @@ pub struct Check {
     /// `account:<name>`.
     pub name: String,
     /// The verdict.
-    pub status: Status,
+    pub status: CheckStatus,
     /// One sentence, never empty.
     pub detail: String,
 }
 
 impl Check {
-    fn new(name: impl Into<String>, status: Status, detail: impl Into<String>) -> Check {
+    fn new(name: impl Into<String>, status: CheckStatus, detail: impl Into<String>) -> Check {
         Check {
             name: name.into(),
             status,
@@ -164,14 +143,9 @@ impl Check {
     /// The check as the protocol crate types it, which is what the bootstrap
     /// snapshot carries.
     pub fn to_wire(&self) -> mp_protocol::diagnostic::HealthCheck {
-        use mp_protocol::diagnostic::CheckStatus;
         mp_protocol::diagnostic::HealthCheck {
             name: self.name.clone(),
-            status: match self.status {
-                Status::Ok => CheckStatus::Ok,
-                Status::Warn => CheckStatus::Warn,
-                Status::Fail => CheckStatus::Fail,
-            },
+            status: self.status,
             detail: self.detail.clone(),
         }
     }
@@ -199,9 +173,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// otherwise log a recovery that never happened.
 fn is_news(previous: Option<&Check>, check: &Check) -> bool {
     match previous {
-        None => check.status != Status::Ok,
+        None => check.status != CheckStatus::Ok,
         Some(previous) if previous.status != check.status => true,
-        Some(previous) => check.status != Status::Ok && previous.detail != check.detail,
+        Some(previous) => check.status != CheckStatus::Ok && previous.detail != check.detail,
     }
 }
 
@@ -353,7 +327,7 @@ impl Diagnostics {
     pub fn not_ok(&self) -> Vec<mp_protocol::diagnostic::HealthCheck> {
         self.checks()
             .iter()
-            .filter(|check| check.status != Status::Ok)
+            .filter(|check| check.status != CheckStatus::Ok)
             .map(Check::to_wire)
             .collect()
     }
@@ -442,7 +416,7 @@ impl Diagnostics {
         if !path.exists() {
             return Check::new(
                 "config_loaded",
-                Status::Warn,
+                CheckStatus::Warn,
                 format!("no config.toml at {shown}; the daemon is serving no accounts"),
             );
         }
@@ -451,7 +425,7 @@ impl Diagnostics {
             Err(e) => {
                 return Check::new(
                     "config_loaded",
-                    Status::Fail,
+                    CheckStatus::Fail,
                     format!("cannot read {shown}: {e}"),
                 )
             }
@@ -467,16 +441,16 @@ impl Diagnostics {
                 if warnings.is_empty() {
                     Check::new(
                         "config_loaded",
-                        Status::Ok,
+                        CheckStatus::Ok,
                         format!("{shown} loaded, {} account(s)", config.accounts.len()),
                     )
                 } else {
-                    Check::new("config_loaded", Status::Warn, warnings.join("; "))
+                    Check::new("config_loaded", CheckStatus::Warn, warnings.join("; "))
                 }
             }
             Err(diagnostic) => Check::new(
                 "config_loaded",
-                Status::Fail,
+                CheckStatus::Fail,
                 match diagnostic.line {
                     Some(line) => format!("{}, at line {line} of {shown}", diagnostic.message),
                     None => format!("{}, in {shown}", diagnostic.message),
@@ -587,23 +561,25 @@ pub fn log_file() -> PathBuf {
 fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::Duration) -> Check {
     let name = format!("account:{account}");
     match health {
-        RuntimeHealth::Ready => Check::new(name, Status::Ok, "serving"),
+        RuntimeHealth::Ready => Check::new(name, CheckStatus::Ok, "serving"),
         RuntimeHealth::Opening if opening_for <= OPENING_GRACE => {
-            Check::new(name, Status::Ok, "opening its store")
+            Check::new(name, CheckStatus::Ok, "opening its store")
         }
         RuntimeHealth::Opening => Check::new(
             name,
-            Status::Warn,
+            CheckStatus::Warn,
             format!("still opening its store after {}s", opening_for.as_secs()),
         ),
         // A lock held elsewhere is a normal state of a developer's machine:
         // the daemon still serves this account's reads.
         RuntimeHealth::Blocked(reason) => {
-            Check::new(name, Status::Warn, format!("blocked: {reason}"))
+            Check::new(name, CheckStatus::Warn, format!("blocked: {reason}"))
         }
-        RuntimeHealth::Failed(reason) => {
-            Check::new(name, Status::Fail, format!("no runtime at all: {reason}"))
-        }
+        RuntimeHealth::Failed(reason) => Check::new(
+            name,
+            CheckStatus::Fail,
+            format!("no runtime at all: {reason}"),
+        ),
     }
 }
 
@@ -623,9 +599,9 @@ fn with_rejected_logins(
     shared_password: bool,
 ) -> Check {
     match rejected.first() {
-        Some(&login) if check.status == Status::Ok => Check::new(
+        Some(&login) if check.status == CheckStatus::Ok => Check::new(
             format!("account:{account}"),
-            Status::Warn,
+            CheckStatus::Warn,
             mp_core::mp_command::login_rejected_detail(account, login, shared_password),
         ),
         _ => check,
@@ -640,11 +616,11 @@ fn with_rejected_logins(
 fn calendar_check(account: &str, missing_scopes: &[String]) -> Check {
     let name = format!("calendar:{account}");
     if missing_scopes.is_empty() {
-        Check::new(name, Status::Ok, "no calendar scope is missing")
+        Check::new(name, CheckStatus::Ok, "no calendar scope is missing")
     } else {
         Check::new(
             name,
-            Status::Warn,
+            CheckStatus::Warn,
             crate::oauth2::calendar_relogin_prompt(account),
         )
     }
@@ -659,7 +635,7 @@ fn store_open(accounts: &[crate::config::AccountConfig]) -> Check {
     if total == 0 {
         return Check::new(
             "store_open",
-            Status::Ok,
+            CheckStatus::Ok,
             "no accounts are configured, so there is no store to open",
         );
     }
@@ -672,9 +648,9 @@ fn store_open(accounts: &[crate::config::AccountConfig]) -> Check {
         accounts_dir().display()
     );
     let status = match open {
-        _ if open == total => Status::Ok,
-        0 => Status::Fail,
-        _ => Status::Warn,
+        _ if open == total => CheckStatus::Ok,
+        0 => CheckStatus::Fail,
+        _ => CheckStatus::Warn,
     };
     Check::new("store_open", status, detail)
 }
@@ -688,7 +664,7 @@ fn socket_owner() -> Check {
         Err(e) => {
             return Check::new(
                 "socket_owner",
-                Status::Fail,
+                CheckStatus::Fail,
                 format!("{shown} cannot be read: {e}"),
             )
         }
@@ -696,7 +672,7 @@ fn socket_owner() -> Check {
     if !meta.file_type().is_socket() {
         return Check::new(
             "socket_owner",
-            Status::Fail,
+            CheckStatus::Fail,
             format!("{shown} is not a socket"),
         );
     }
@@ -705,7 +681,7 @@ fn socket_owner() -> Check {
     if meta.uid() != us {
         return Check::new(
             "socket_owner",
-            Status::Fail,
+            CheckStatus::Fail,
             format!("{shown} is owned by uid {}, not by uid {us}", meta.uid()),
         );
     }
@@ -713,13 +689,13 @@ fn socket_owner() -> Check {
     if mode != 0o600 {
         return Check::new(
             "socket_owner",
-            Status::Warn,
+            CheckStatus::Warn,
             format!("{shown} is mode {mode:04o}, not 0600"),
         );
     }
     Check::new(
         "socket_owner",
-        Status::Ok,
+        CheckStatus::Ok,
         format!("{shown} is this daemon's, mode 0600"),
     )
 }
@@ -729,10 +705,10 @@ fn log_writable() -> Check {
     let path = log_file();
     let shown = path.display();
     match fs::OpenOptions::new().append(true).create(true).open(&path) {
-        Ok(_) => Check::new("log_writable", Status::Ok, format!("writing {shown}")),
+        Ok(_) => Check::new("log_writable", CheckStatus::Ok, format!("writing {shown}")),
         Err(e) => Check::new(
             "log_writable",
-            Status::Fail,
+            CheckStatus::Fail,
             format!("cannot append to {shown}: {e}"),
         ),
     }
@@ -1214,8 +1190,8 @@ mod tests {
     /// unchanged check, or a new sentence under `ok`, publishes nothing.
     #[test]
     fn a_new_detail_is_news_only_while_the_check_is_not_ok() {
-        let warn = |detail: &str| Check::new("config_loaded", Status::Warn, detail);
-        let ok = |detail: &str| Check::new("config_loaded", Status::Ok, detail);
+        let warn = |detail: &str| Check::new("config_loaded", CheckStatus::Warn, detail);
+        let ok = |detail: &str| Check::new("config_loaded", CheckStatus::Ok, detail);
         assert!(is_news(None, &warn("a")), "a check first seen warning");
         assert!(!is_news(None, &ok("a")), "a check first seen ok");
         assert!(is_news(Some(&ok("a")), &warn("a")), "a status that moved");
@@ -1224,7 +1200,7 @@ mod tests {
             is_news(Some(&warn("one key")), &warn("two keys")),
             "a new detail under warn"
         );
-        let fail = |detail: &str| Check::new("config_loaded", Status::Fail, detail);
+        let fail = |detail: &str| Check::new("config_loaded", CheckStatus::Fail, detail);
         assert!(
             is_news(Some(&fail("line 1")), &fail("line 3")),
             "a new detail under fail"
@@ -1242,14 +1218,14 @@ mod tests {
     fn an_opening_account_is_ok_until_its_start_overruns_the_grace() {
         use std::time::Duration;
         let opening = |for_: Duration| account_check("b", RuntimeHealth::Opening, for_);
-        assert_eq!(opening(Duration::ZERO).status, Status::Ok);
+        assert_eq!(opening(Duration::ZERO).status, CheckStatus::Ok);
         assert_eq!(opening(Duration::ZERO).detail, "opening its store");
-        assert_eq!(opening(OPENING_GRACE).status, Status::Ok);
+        assert_eq!(opening(OPENING_GRACE).status, CheckStatus::Ok);
         let stuck = opening(OPENING_GRACE + Duration::from_secs(1));
-        assert_eq!(stuck.status, Status::Warn);
+        assert_eq!(stuck.status, CheckStatus::Warn);
         assert_eq!(stuck.detail, "still opening its store after 31s");
         let failed = account_check("b", RuntimeHealth::Failed("boom".into()), Duration::ZERO);
-        assert_eq!(failed.status, Status::Fail);
+        assert_eq!(failed.status, CheckStatus::Fail);
     }
 
     /// A Graph calendar account whose sign-in lacks the calendar scope warns
@@ -1258,12 +1234,12 @@ mod tests {
     fn a_missing_calendar_scope_warns_with_the_relogin_prompt() {
         let missing = calendar_check("work", &["Calendars.ReadWrite".to_string()]);
         assert_eq!(missing.name, "calendar:work");
-        assert_eq!(missing.status, Status::Warn);
+        assert_eq!(missing.status, CheckStatus::Warn);
         assert_eq!(
             missing.detail,
             "calendar needs a re-login (mp config oauth2-login -A work)"
         );
-        assert_eq!(calendar_check("work", &[]).status, Status::Ok);
+        assert_eq!(calendar_check("work", &[]).status, CheckStatus::Ok);
     }
 
     /// A serving account whose SMTP login the server refused warns, naming
@@ -1276,7 +1252,7 @@ mod tests {
         let serving = || account_check("tum", RuntimeHealth::Ready, std::time::Duration::ZERO);
         let smtp = with_rejected_logins(serving(), "tum", &[RejectedLogin::Smtp], false);
         assert_eq!(smtp.name, "account:tum");
-        assert_eq!(smtp.status, Status::Warn);
+        assert_eq!(smtp.status, CheckStatus::Warn);
         assert_eq!(
             smtp.detail,
             "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
@@ -1295,7 +1271,7 @@ mod tests {
         assert!(both.detail.contains("IMAP password"), "{}", both.detail);
         assert_eq!(
             with_rejected_logins(serving(), "tum", &[], false).status,
-            Status::Ok
+            CheckStatus::Ok
         );
         let blocked = account_check(
             "tum",
@@ -1403,7 +1379,7 @@ mod tests {
     /// A status is one of three words and a check always says why.
     #[test]
     fn a_check_renders_its_three_keys() {
-        let check = Check::new("store_open", Status::Warn, "one of two");
+        let check = Check::new("store_open", CheckStatus::Warn, "one of two");
         assert_eq!(
             check.to_json(),
             json!({"name": "store_open", "status": "warn", "detail": "one of two"})

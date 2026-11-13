@@ -28,6 +28,17 @@ pub enum CheckStatus {
     Fail,
 }
 
+impl CheckStatus {
+    /// The word this status travels as, serde's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "fail",
+        }
+    }
+}
+
 /// One health check.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -58,6 +69,14 @@ mod tests {
         assert_eq!(typed.len(), 6);
         assert_eq!(typed[5].status, CheckStatus::Warn);
         assert_eq!(serde_json::to_value(&typed).expect("it serialises"), checks);
+    }
+
+    /// `as_str` spells every status exactly as serde does.
+    #[test]
+    fn the_string_spelling_is_the_serde_one() {
+        for status in [CheckStatus::Ok, CheckStatus::Warn, CheckStatus::Fail] {
+            assert_eq!(json!(status.as_str()), json!(status));
+        }
     }
 
     /// A status outside the three is a decode error.

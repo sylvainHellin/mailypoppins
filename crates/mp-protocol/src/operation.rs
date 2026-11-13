@@ -36,6 +36,29 @@ pub enum OperationState {
 }
 
 impl OperationState {
+    /// The string this state travels as, serde's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OperationState::Queued => "queued",
+            OperationState::Running => "running",
+            OperationState::Succeeded => "succeeded",
+            OperationState::Failed => "failed",
+            OperationState::Cancelled => "cancelled",
+        }
+    }
+
+    /// The state a wire string names, or `None` for anything else.
+    pub fn from_wire(value: &str) -> Option<OperationState> {
+        match value {
+            "queued" => Some(OperationState::Queued),
+            "running" => Some(OperationState::Running),
+            "succeeded" => Some(OperationState::Succeeded),
+            "failed" => Some(OperationState::Failed),
+            "cancelled" => Some(OperationState::Cancelled),
+            _ => None,
+        }
+    }
+
     /// Whether nothing can move this operation any further.
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -46,7 +69,7 @@ impl OperationState {
 }
 
 /// What a disconnect of the starting connection does to an operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CancelScope {
@@ -54,6 +77,25 @@ pub enum CancelScope {
     Durable,
     /// The work is cancelled when its connection closes.
     ClientScoped,
+}
+
+impl CancelScope {
+    /// The string this scope travels as, serde's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CancelScope::Durable => "durable",
+            CancelScope::ClientScoped => "client_scoped",
+        }
+    }
+
+    /// The scope a wire string names, or `None` for anything else.
+    pub fn from_wire(value: &str) -> Option<CancelScope> {
+        match value {
+            "durable" => Some(CancelScope::Durable),
+            "client_scoped" => Some(CancelScope::ClientScoped),
+            _ => None,
+        }
+    }
 }
 
 /// One progress report: the `progress` member of a status and the body of an
@@ -149,6 +191,29 @@ mod tests {
         let decoded: OperationStatus = serde_json::from_value(encoded).expect("it decodes");
         assert_eq!(decoded, status);
         assert!(decoded.state.is_terminal());
+    }
+
+    /// `as_str` and `from_wire` spell every variant exactly as serde does, so
+    /// a payload the daemon builds by hand and one it serialises agree, and a
+    /// near miss is refused rather than guessed.
+    #[test]
+    fn the_string_spellings_are_the_serde_ones() {
+        for state in [
+            OperationState::Queued,
+            OperationState::Running,
+            OperationState::Succeeded,
+            OperationState::Failed,
+            OperationState::Cancelled,
+        ] {
+            assert_eq!(json!(state.as_str()), json!(state));
+            assert_eq!(OperationState::from_wire(state.as_str()), Some(state));
+        }
+        for scope in [CancelScope::Durable, CancelScope::ClientScoped] {
+            assert_eq!(json!(scope.as_str()), json!(scope));
+            assert_eq!(CancelScope::from_wire(scope.as_str()), Some(scope));
+        }
+        assert_eq!(OperationState::from_wire("stopped"), None);
+        assert_eq!(CancelScope::from_wire("client-scoped"), None);
     }
 
     /// A state outside the five is a decode error rather than a silent guess.

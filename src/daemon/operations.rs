@@ -124,65 +124,9 @@ impl std::fmt::Display for OperationId {
     }
 }
 
-/// The five states of the machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationState {
-    /// Accepted, not started.
-    Queued,
-    /// Working.
-    Running,
-    /// Finished with a result.
-    Succeeded,
-    /// Finished with an error.
-    Failed,
-    /// Stopped, by a client or by its owner's disconnect.
-    Cancelled,
-}
-
-impl OperationState {
-    /// The string this state travels as.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            OperationState::Queued => "queued",
-            OperationState::Running => "running",
-            OperationState::Succeeded => "succeeded",
-            OperationState::Failed => "failed",
-            OperationState::Cancelled => "cancelled",
-        }
-    }
-
-    /// The state a wire string names, or `None` for anything else.
-    pub fn from_wire(value: &str) -> Option<OperationState> {
-        match value {
-            "queued" => Some(OperationState::Queued),
-            "running" => Some(OperationState::Running),
-            "succeeded" => Some(OperationState::Succeeded),
-            "failed" => Some(OperationState::Failed),
-            "cancelled" => Some(OperationState::Cancelled),
-            _ => None,
-        }
-    }
-
-    /// Whether nothing can move this operation any further.
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
-        )
-    }
-
-    /// The protocol crate's spelling of this state.
-    pub fn to_wire(self) -> mp_protocol::operation::OperationState {
-        use mp_protocol::operation::OperationState as Wire;
-        match self {
-            OperationState::Queued => Wire::Queued,
-            OperationState::Running => Wire::Running,
-            OperationState::Succeeded => Wire::Succeeded,
-            OperationState::Failed => Wire::Failed,
-            OperationState::Cancelled => Wire::Cancelled,
-        }
-    }
-}
+/// The five states of the machine, the protocol crate's type, so the registry
+/// and the wire share one spelling.
+pub use mp_protocol::operation::OperationState;
 
 /// One progress report, as the plan fixes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -257,15 +201,11 @@ impl OperationStatus {
     /// The status as the protocol crate types it, which is what the bootstrap
     /// snapshot carries and what [`OperationStatus::to_json`] serialises.
     pub fn to_wire(&self) -> mp_protocol::operation::OperationStatus {
-        use mp_protocol::operation::CancelScope as WireScope;
         mp_protocol::operation::OperationStatus {
             operation_id: self.id.as_str().to_string(),
             method: self.method.to_string(),
-            state: self.state.to_wire(),
-            scope: match self.scope {
-                CancelScope::Durable => WireScope::Durable,
-                CancelScope::ClientScoped => WireScope::ClientScoped,
-            },
+            state: self.state,
+            scope: self.scope,
             progress: self.progress.as_ref().map(Progress::to_wire),
             result: self.result.clone(),
             error: self.error.as_ref().map(rpc_error),

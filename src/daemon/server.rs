@@ -1480,7 +1480,7 @@ mod tests {
             .install(ConfigState::Ok, config_with(&["alpha"]));
         assert_eq!(
             alpha_status(&state),
-            Some(super::super::diagnostics::Status::Ok),
+            Some(mp_protocol::diagnostic::CheckStatus::Ok),
             "the re-added account is within a fresh grace"
         );
     }
