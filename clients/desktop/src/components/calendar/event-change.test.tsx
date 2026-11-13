@@ -528,11 +528,48 @@ describe("a settled change of an invitation mail", () => {
   const run = (kind: EventChangeRun["kind"]): EventChangeRun => ({ token: 1, account: "home", summary: "Budget", kind, dialog: null, removal: null, operation_id: "op" });
   const refused = [{ address: "cy@example.com", role: "To", delivered: false, error: "550 no such user" }];
 
-  it("names the attendees the server refused it for, as a partly delivered send does", () => {
-    expect(changedText(run("update"), { account: "home", event: event(), refused })).toBe("Updated Budget; failed: cy@example.com (550 no such user)");
+  it("names the attendees the server refused it for good, with its reason", () => {
+    expect(changedText(run("update"), { account: "home", event: event(), refused })).toBe("Updated Budget; refused for good: cy@example.com (550 no such user)");
     expect(changedText(run("cancel"), { account: "home", event: "imip:4", notified: ["ada@example.com"], refused })).toBe(
-      "Cancelled Budget; told ada@example.com; failed: cy@example.com (550 no such user)",
+      "Cancelled Budget; told ada@example.com; refused for good: cy@example.com (550 no such user)",
     );
     expect(changedText(run("update"), { account: "home", event: event() })).toBe("Updated Budget");
+  });
+
+  it("names who it waits in the outbox for and who is parked there, never as failed", () => {
+    const queued = [{ address: "bob@example.com", role: "To", delivered: false, error: "451 4.7.1 try again later" }];
+    const parked = [{ address: "eve@example.com", role: "To", delivered: false, error: "connection reset" }];
+    expect(changedText(run("update"), { account: "home", event: event(), queued, parked, refused })).toBe(
+      "Updated Budget; waits in the outbox for bob@example.com (451 4.7.1 try again later), goes out with a later sync; " +
+        "parked with no verdict for eve@example.com (connection reset), check, then retry or discard it in the outbox; " +
+        "refused for good: cy@example.com (550 no such user)",
+    );
+  });
+
+  it("a cancel the server deferred for one attendee and refused for another says so on the notice", async () => {
+    const r = await calendarOn("imip:1008", () => {
+      const mail = mock.events.find((e) => e.id === "imip:1008");
+      if (!mail) throw new Error("the fixture's invitation mail");
+      Object.assign(mail, {
+        is_organizer: true,
+        own_response: "organizer",
+        organizer: { email: "me@example.com" },
+        attendees: [
+          { email: "ada@example.com", role: "required", status: "accepted" },
+          { email: "bob@queued.example", role: "required", status: "needs-action" },
+          { email: "cy@refused.example", role: "required", status: "needs-action" },
+        ],
+      });
+    });
+    await r.user.keyboard("D");
+    const dialog = await screen.findByRole("dialog", { name: "Cancel the meeting?" });
+    await r.user.type(within(dialog).getByLabelText("Comment"), "Postponed{Enter}");
+    await waitFor(() => expect(callsOf("event_cancel")).toHaveLength(1));
+    act(() => void settleEventChange());
+    // A change some attendee did not get yet stays up as a partly delivered send does.
+    const text =
+      "Cancelled Steering committee; told ada@example.com; waits in the outbox for bob@queued.example (451 4.7.1 fixture: try again later), " +
+      "goes out with a later sync; refused for good: cy@refused.example (550 5.1.1 fixture: no such mailbox)";
+    await waitFor(() => expect(screen.getAllByRole("alert").some((e) => e.textContent?.includes(text))).toBe(true));
   });
 });

@@ -359,24 +359,33 @@ export function isEventChangeOperation(s: AppState, operationId: string): boolea
 
 const VERB = { update: ["Updating", "Updated"], cancel: ["Cancelling", "Cancelled"], delete: ["Deleting", "Deleted"] } as const;
 
-/** The attendees an invitation mail's change did not reach, with the server's reason. */
-function refusedOf(result: unknown): RecipientOutcome[] {
-  return (result as EventUpdateResult | EventCancelResult | null)?.refused ?? [];
+/** The attendees an invitation mail's change did not reach yet, under what became of them, each with the server's reason (PERSO-204). */
+function unreachedOf(result: unknown): { queued: RecipientOutcome[]; parked: RecipientOutcome[]; refused: RecipientOutcome[] } {
+  const settled = result as EventUpdateResult | EventCancelResult | null;
+  return { queued: settled?.queued ?? [], parked: settled?.parked ?? [], refused: settled?.refused ?? [] };
+}
+
+/** Recipients with the server's reason, as a partly delivered send names them. */
+function named(recipients: RecipientOutcome[]): string {
+  return recipients.map((r) => (r.error ? `${r.address} (${r.error})` : r.address)).join(", ");
 }
 
 /**
  * What a settled change says: what was done, for a cancel who was told,
- * and for an invitation mail's change the attendees the server refused it
- * for, as a partly delivered send names them.
+ * and for an invitation mail's change each attendee it did not reach yet:
+ * waiting in the outbox for a later sync, parked there with no verdict, or
+ * refused for good.
  */
 export function changedText(run: EventChangeRun, result: unknown): string {
   let text = `${VERB[run.kind][1]} ${run.summary}`;
   const told = run.kind === "cancel" ? ((result as EventCancelResult | null)?.notified ?? []) : [];
   if (told.length === 1) text = `${text}; told ${told[0]}`;
   else if (told.length > 1) text = `${text}; told ${told.length} people`;
-  const refused = refusedOf(result);
-  if (refused.length === 0) return text;
-  return `${text}; failed: ${refused.map((r) => (r.error ? `${r.address} (${r.error})` : r.address)).join(", ")}`;
+  const { queued, parked, refused } = unreachedOf(result);
+  if (queued.length > 0) text = `${text}; waits in the outbox for ${named(queued)}, goes out with a later sync`;
+  if (parked.length > 0) text = `${text}; parked with no verdict for ${named(parked)}, check, then retry or discard it in the outbox`;
+  if (refused.length > 0) text = `${text}; refused for good: ${named(refused)}`;
+  return text;
 }
 
 /** An update's form back with `error`, over the view when nothing else is open; else kept for Edit on the event, which the notice says. */
@@ -412,7 +421,8 @@ function eventChangeEnded(s: AppState, run: EventChangeRun, end: OperationEnd): 
     if (run.removal) return reopenRemove(next, run.removal, `${VERB[run.kind][0]} ${run.summary} failed: ${error}`, run.kind);
     return pushNotice(next, { kind: "failed", account: run.account, text: `${VERB[run.kind][0]} ${run.summary} failed: ${error}` });
   }
-  const kind = refusedOf(end.result ?? null).length > 0 ? "send_partial" : "applied";
+  const unreached = unreachedOf(end.result ?? null);
+  const kind = unreached.queued.length + unreached.parked.length + unreached.refused.length > 0 ? "send_partial" : "applied";
   return pushNotice(next, { kind, account: run.account, text: changedText(run, end.result ?? null) });
 }
 

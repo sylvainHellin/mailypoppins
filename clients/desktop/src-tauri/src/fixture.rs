@@ -289,6 +289,70 @@ const SERVER_WINDOW: (&str, &str) = ("2099-09-14T00:00:00Z", "2100-10-14T00:00:0
 /// Why a `send_partial` send's last recipient was refused.
 pub const SEND_REFUSED_REASON: &str = "550 5.1.1 fixture: no such mailbox";
 
+/// Why the server deferred an invitation mail's attendee on
+/// `queued.example` ([`imip_reached`]).
+pub const IMIP_DEFERRED_REASON: &str = "451 4.7.1 fixture: try again later";
+
+/// Why an invitation mail's attendee on `parked.example` has no verdict
+/// ([`imip_reached`]).
+pub const IMIP_NO_VERDICT_REASON: &str = "fixture: connection reset before the 250";
+
+/// What an invitation mail's change did for each recipient, as the daemon's
+/// `EventUpdateResult` and `EventCancelResult` name them (PERSO-204).
+#[derive(Debug, Default, PartialEq)]
+struct ImipReached {
+    told: Vec<String>,
+    queued: Vec<RecipientOutcome>,
+    parked: Vec<RecipientOutcome>,
+    refused: Vec<RecipientOutcome>,
+}
+
+impl ImipReached {
+    /// Writes `queued`, `parked` and `refused` into a settled change's
+    /// `result`, each left out when empty, as the daemon writes them.
+    fn fill(self, result: &mut Value) {
+        for (key, list) in [
+            ("queued", self.queued),
+            ("parked", self.parked),
+            ("refused", self.refused),
+        ] {
+            if !list.is_empty() {
+                result[key] = serde_json::to_value(list).unwrap_or_default();
+            }
+        }
+    }
+}
+
+/// What an invitation mail's change did for each of `recipients`, read off
+/// its domain as the daemon reads the server's verdicts, the TypeScript
+/// fixture's `imipReached`: `queued.example` deferred (it waits in the
+/// outbox), `parked.example` with no verdict (parked there),
+/// `refused.example` refused for good, any other told.
+fn imip_reached(recipients: &[String]) -> ImipReached {
+    let mut reached = ImipReached::default();
+    let outcome = |address: &str, error: &str| RecipientOutcome {
+        address: address.to_string(),
+        role: "To".into(),
+        delivered: false,
+        error: Some(error.into()),
+    };
+    for address in recipients {
+        let domain = address
+            .rsplit_once('@')
+            .map_or("", |(_, domain)| domain)
+            .to_ascii_lowercase();
+        match domain.as_str() {
+            "queued.example" => reached.queued.push(outcome(address, IMIP_DEFERRED_REASON)),
+            "parked.example" => reached
+                .parked
+                .push(outcome(address, IMIP_NO_VERDICT_REASON)),
+            "refused.example" => reached.refused.push(outcome(address, SEND_REFUSED_REASON)),
+            _ => reached.told.push(address.clone()),
+        }
+    }
+    reached
+}
+
 /// The recipient a `send_partial` send adds when its draft names only one,
 /// so one recipient can be refused while another gets it.
 pub const SEND_REFUSED_EXTRA: &str = "nobody@refused.example";
@@ -1376,7 +1440,13 @@ impl State {
                         *slot = changed.clone();
                     }
                 }
-                json!({"account": account, "event": changed})
+                let mut result = json!({"account": account, "event": changed});
+                if imip {
+                    let recipients: Vec<String> =
+                        changed.attendees.iter().map(|a| a.email.clone()).collect();
+                    imip_reached(&recipients).fill(&mut result);
+                }
+                result
             }
             "event.cancel" => {
                 if !event.is_organizer {
@@ -1404,9 +1474,17 @@ impl State {
                 } else {
                     self.take_off(account, &event.id, series);
                 }
-                let notified: Vec<String> =
+                let recipients: Vec<String> =
                     event.attendees.iter().map(|a| a.email.clone()).collect();
-                json!({"account": account, "event": id, "notified": notified})
+                if imip {
+                    let reached = imip_reached(&recipients);
+                    let mut result =
+                        json!({"account": account, "event": id, "notified": reached.told});
+                    reached.fill(&mut result);
+                    result
+                } else {
+                    json!({"account": account, "event": id, "notified": recipients})
+                }
             }
             _ => {
                 let meeting = !event.attendees.is_empty();
@@ -7436,6 +7514,36 @@ mod tests {
     fn fixture() -> (Arc<Fixture>, std::sync::mpsc::Receiver<Incoming>) {
         let (tx, rx) = channel();
         (Arc::new(Fixture::load(tx).expect("fixtures load")), rx)
+    }
+
+    /// An invitation mail's change names each attendee it did not reach yet
+    /// under what became of them, read off the domain as the TypeScript
+    /// fixture's `imipReached` reads it, and leaves out an empty list.
+    #[test]
+    fn an_invitation_change_names_who_waits_in_the_outbox_and_who_was_refused() {
+        let recipients = [
+            "ada@example.com".to_string(),
+            "bob@queued.example".to_string(),
+            "cy@refused.example".to_string(),
+        ];
+        let reached = imip_reached(&recipients);
+        assert_eq!(reached.told, ["ada@example.com"]);
+        let mut result = json!({"account": "work", "event": "imip:1008"});
+        reached.fill(&mut result);
+        assert_eq!(
+            result,
+            json!({"account": "work", "event": "imip:1008",
+                   "queued": [{"address": "bob@queued.example", "role": "To",
+                               "delivered": false, "error": IMIP_DEFERRED_REASON}],
+                   "refused": [{"address": "cy@refused.example", "role": "To",
+                                "delivered": false, "error": SEND_REFUSED_REASON}]})
+        );
+        let parked = imip_reached(&["eve@parked.example".to_string()]);
+        assert_eq!(
+            parked.parked[0].error.as_deref(),
+            Some(IMIP_NO_VERDICT_REASON)
+        );
+        assert!(parked.told.is_empty());
     }
 
     /// `config.get` names the `config.toml` written at load, whose accounts

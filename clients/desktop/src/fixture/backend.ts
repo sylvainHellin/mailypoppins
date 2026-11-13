@@ -46,6 +46,7 @@ import type {
   MessageListRow,
   OutboxListing,
   OutboxRow,
+  RecipientOutcome,
   SearchOrder,
   ThreadListing,
   ThreadMessage,
@@ -725,7 +726,7 @@ export function settleInvite(opts: { fail?: boolean; refused?: number } = {}): s
         address,
         role: "To",
         delivered: i < run.to.length - refused,
-        error: i < run.to.length - refused ? null : "550 5.1.1 fixture: no such mailbox",
+        error: i < run.to.length - refused ? null : SEND_REFUSED_REASON,
       })),
       sent_copy: "filed",
       settle_error: null,
@@ -815,11 +816,13 @@ export function settleEventChange(opts: { fail?: boolean; dropped?: boolean } = 
   }
   emitEnvelope("calendar.changed", { account: run.account });
   const scoped = scope ? { scope } : {};
+  const recipients = ((run.kind === "update" ? run.event : before)?.attendees ?? []).map((a) => a.email);
+  const reached = run.id.startsWith("imip:") ? imipReached(recipients) : { told: recipients };
   const result =
     run.kind === "update"
-      ? { account: run.account, event: run.event, ...scoped }
+      ? { account: run.account, event: run.event, ...scoped, ...unreachedFields(reached) }
       : run.kind === "cancel"
-        ? { account: run.account, event: run.id, notified: (before?.attendees ?? []).map((a) => a.email), ...scoped }
+        ? { account: run.account, event: run.id, notified: reached.told, ...scoped, ...unreachedFields(reached) }
         : { account: run.account, event: run.id, ...scoped };
   if (run.kind !== "update") {
     mock.removedEvents = mock.removedEvents.filter((r) => !(r.account === run.account && r.id === run.id));
@@ -831,6 +834,45 @@ export function settleEventChange(opts: { fail?: boolean; dropped?: boolean } = 
   }
   emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "succeeded", result });
   return run.operation_id;
+}
+
+/** fixture.rs's `IMIP_DEFERRED_REASON`: why the server deferred an attendee on `queued.example`. */
+export const IMIP_DEFERRED_REASON = "451 4.7.1 fixture: try again later";
+/** fixture.rs's `IMIP_NO_VERDICT_REASON`: why an attendee on `parked.example` has no verdict. */
+export const IMIP_NO_VERDICT_REASON = "fixture: connection reset before the 250";
+/** fixture.rs's `SEND_REFUSED_REASON`: why the server refused an attendee on `refused.example` for good. */
+export const SEND_REFUSED_REASON = "550 5.1.1 fixture: no such mailbox";
+
+type ImipReached = { told: string[]; queued?: RecipientOutcome[]; parked?: RecipientOutcome[]; refused?: RecipientOutcome[] };
+
+/**
+ * fixture.rs's `imip_reached`: what an invitation mail's change did for each
+ * of `recipients`, read off its domain as the daemon reads the server's
+ * verdicts: `queued.example` deferred (it waits in the outbox), `parked.example`
+ * with no verdict (parked there), `refused.example` refused for good, any
+ * other told.
+ */
+function imipReached(recipients: string[]): ImipReached {
+  const out: Required<ImipReached> = { told: [], queued: [], parked: [], refused: [] };
+  const outcome = (address: string, error: string): RecipientOutcome => ({ address, role: "To", delivered: false, error });
+  for (const address of recipients) {
+    const domain = address.slice(address.lastIndexOf("@") + 1).toLowerCase();
+    if (domain === "queued.example") out.queued.push(outcome(address, IMIP_DEFERRED_REASON));
+    else if (domain === "parked.example") out.parked.push(outcome(address, IMIP_NO_VERDICT_REASON));
+    else if (domain === "refused.example") out.refused.push(outcome(address, SEND_REFUSED_REASON));
+    else out.told.push(address);
+  }
+  return out;
+}
+
+/** The `queued`, `parked` and `refused` of a settled change, each absent when empty, as the daemon writes them. */
+function unreachedFields(reached: ImipReached): Partial<Record<"queued" | "parked" | "refused", RecipientOutcome[]>> {
+  const out: Partial<Record<"queued" | "parked" | "refused", RecipientOutcome[]>> = {};
+  for (const key of ["queued", "parked", "refused"] as const) {
+    const list = reached[key] ?? [];
+    if (list.length > 0) out[key] = list;
+  }
+  return out;
 }
 
 /** The event row `rowId` of `account` carries: its agenda row's, else the version an email delivered. */
