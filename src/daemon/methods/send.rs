@@ -1106,7 +1106,9 @@ fn outcome_of(
 }
 
 /// `send.approved`: every approved draft of one account, in listing order, with
-/// one progress report each so a batch of nine is visible while it runs.
+/// two progress reports each so a batch of nine is visible while it runs:
+/// phase `draft` with the draft's selector before it is sent, and phase
+/// `draft_done` with the line `mp send-approved` prints for it once it was.
 async fn send_approved(
     account: AccountConfig,
     email: EmailSettings,
@@ -1172,6 +1174,15 @@ async fn send_approved(
         } else {
             outcome.failed += 1;
         }
+        // The draft's own line as it settles, a failure included, so a client
+        // prints the batch as it goes rather than at the end (PERSO-223); the
+        // line is the one the settled outcome renders to.
+        handle.report(Progress {
+            phase: "draft_done".to_string(),
+            done: index as u64 + 1,
+            total: Some(total),
+            message: Some(mp_client::format::send_approved_line(&result)),
+        });
         outcome.results.push(result);
     }
     // One refresh for the whole batch rather than one per draft, which is what

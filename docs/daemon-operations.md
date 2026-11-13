@@ -121,7 +121,7 @@ The table is what routes and through what:
 | `mp watch [--mailbox] [--timeout N]` | `sync.watch`, with the wait and the timeout in the client | P4-U10 |
 | `mp send <selector> [-y]` | `draft.preview` for the echo and the preview, then `send.draft` | P4-U12 |
 | `mp send --invite …` | `send.invite`, with the preview, the `UID` and the prompt in the client | P4-U12 |
-| `mp send-approved [-y] [--all-accounts]` | `draft.list` for the batch listing, then one `send.approved` per account, in configuration order | P4-U12 |
+| `mp send-approved [-y] [--all-accounts]` | `draft.list` for the batch listing, then one `send.approved` per account, in configuration order, each draft's line printed from its `draft_done` progress as it settles (PERSO-223) | P4-U12 |
 | `mp outbox list` | `send.outbox_list` | P4-U12 |
 | `mp outbox retry <id>` | `send.outbox_list`, then `send.outbox_retry` | P4-U12 |
 | `mp outbox discard <id>` | `send.outbox_list`, then `send.outbox_discard` | P4-U12 |

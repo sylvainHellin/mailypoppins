@@ -3137,3 +3137,138 @@ async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
     assert!(submitted.is_empty(), "nothing went out: {submitted:?}");
     assert!(path.exists(), "the draft stays");
 }
+
+/// `mp send-approved` prints a line per message as it goes (PERSO-223): each
+/// draft of the batch is announced by an `operation.progress` of phase
+/// `draft` before it is sent and closed by one of phase `draft_done` once it
+/// was, whose `message` is the line the CLI prints for it, a failure
+/// included, and both come before the operation's finish.
+///
+/// Routed side only (fake transport): one draft partly delivered and one
+/// refused by its only recipient.
+#[tokio::test]
+async fn send_approved_reports_each_draft_as_it_settles() {
+    let slice = Slice::with_transport(|log| {
+        fixture::fake_transport_rejecting(log, &[(fixture::REJECTED, fixture::REJECTION)])
+    });
+    std::fs::write(
+        fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join("abgelehnt.md"),
+        support::draft_fixture::document(
+            "d-refused",
+            fixture::REJECTED,
+            "Abgelehnt",
+            "approved",
+            "Nobody will take this.\n",
+        ),
+    )
+    .expect("write a second approved draft");
+
+    let mut conn = slice.connect().await;
+    call(&mut conn, "state.bootstrap", json!({})).await;
+    let started = call(
+        &mut conn,
+        "send.approved",
+        json!({"account": fixture::ACCOUNT}),
+    )
+    .await;
+    let id = operation_id(&started);
+
+    let mut reports = Vec::new();
+    let result = within("the batch to finish", async {
+        loop {
+            let notification = conn
+                .next_notification()
+                .await
+                .expect("the daemon keeps the connection open");
+            let payload = &notification.params["payload"];
+            if payload["operation_id"] != json!(id) {
+                continue;
+            }
+            match notification.params["kind"].as_str() {
+                Some("operation.progress") => reports.push(payload.clone()),
+                Some("operation.finished") => return payload["result"].clone(),
+                _ => {}
+            }
+        }
+    })
+    .await;
+    let outcome: ApprovedOutcome = serde_json::from_value(result).expect("an ApprovedOutcome");
+    assert_eq!(outcome.results.len(), 2, "{outcome:?}");
+
+    let phases: Vec<(&str, u64)> = reports
+        .iter()
+        .map(|r| (r["phase"].as_str().unwrap(), r["done"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            ("draft", 0),
+            ("draft_done", 1),
+            ("draft", 1),
+            ("draft_done", 2)
+        ],
+        "each draft is opened and closed before the next one starts"
+    );
+    for (index, result) in outcome.results.iter().enumerate() {
+        let opened = &reports[2 * index];
+        let closed = &reports[2 * index + 1];
+        assert_eq!(opened["message"].as_str(), result.selector.as_deref());
+        assert_eq!(
+            closed["message"],
+            json!(send_approved_line(result)),
+            "the line printed as it settles is the line the outcome renders to"
+        );
+    }
+    assert!(
+        reports
+            .iter()
+            .filter(|r| r["phase"] == "draft_done")
+            .any(|r| r["message"].as_str().unwrap().starts_with('\u{2717}')),
+        "a draft that failed is reported as it fails: {reports:?}"
+    );
+}
+
+/// `mp send-approved -y` through a pipe: one whole line per draft, each said
+/// once, the failure among them, then the summary with the counts alone.
+///
+/// Routed side only (fake transport).
+#[test]
+fn a_routed_send_approved_prints_each_draft_once_and_the_counts_after() {
+    let slice = Slice::with_transport(|log| {
+        fixture::fake_transport_rejecting(log, &[(fixture::REJECTED, fixture::REJECTION)])
+    });
+    std::fs::write(
+        fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join("abgelehnt.md"),
+        support::draft_fixture::document(
+            "d-refused",
+            fixture::REJECTED,
+            "Abgelehnt",
+            "approved",
+            "Nobody will take this.\n",
+        ),
+    )
+    .expect("write a second approved draft");
+
+    let out = slice.routed(&["send-approved", "-y"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    let sending: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("Sending to "))
+        .collect();
+    assert_eq!(sending.len(), 2, "one line per draft, each once:\n{text}");
+    assert!(
+        sending.iter().any(|line| line.starts_with(&format!(
+            "Sending to {}... \u{2717} all recipients failed",
+            fixture::REJECTED
+        ))),
+        "the refused draft says so on its own line:\n{text}"
+    );
+    assert!(
+        text.ends_with(&format!(
+            "\n\n{}\n",
+            fixture::approved_summary(fixture::ACCOUNT, 1, 1)
+        )),
+        "the summary closes the batch with the counts:\n{text}"
+    );
+}

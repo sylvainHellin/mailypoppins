@@ -2215,31 +2215,172 @@ async fn routed_send_approved(
     .await
     .map_err(|e| refusal(account, e))?;
     let operation = wire_str(&started["operation_id"]).to_string();
+    let mut batch = BatchLines::new(&approved, io::stdout().is_terminal());
     let outcome: mp_protocol::send::ApprovedOutcome =
-        match await_operation(&mut connection, &operation, |_| {}).await {
+        match await_operation(&mut connection, &operation, |payload| {
+            print_pieces(&batch.progress(payload));
+        })
+        .await
+        {
             Settled::Done(result) => serde_json::from_value(result)
                 .context("reading the daemon's send.approved answer")?,
             Settled::Failed(message) => return Err(anyhow!("{message}")),
         };
 
-    for result in &outcome.results {
-        // The recipient is the listing's, because it is the listing the user
-        // just read: the outcome names addresses, not the `to:` line.
-        let to = result
-            .selector
-            .as_deref()
-            .and_then(|selector| approved.iter().find(|entry| entry.selector == selector))
-            .and_then(|entry| entry.to.as_deref())
-            .unwrap_or("(bcc only)");
-        print!("Sending to {to}... ");
-        io::stdout().flush()?;
-        println!("{}", paint(&mp_client::format::send_approved_line(result)));
-    }
+    print_pieces(&batch.settle(&outcome));
     println!(
         "\n{}",
         paint(&mp_client::format::send_approved_summary(&outcome))
     );
     Ok(())
+}
+
+/// One thing [`BatchLines`] has `mp send-approved` print.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BatchPiece {
+    /// `Sending to <to>... `, left open while the draft is sent.
+    Opened(String),
+    /// The draft's line, closing the one left open.
+    Closed(String),
+    /// `Sending to <to>... <line>`, whole.
+    Whole(String, String),
+}
+
+/// Print what [`BatchLines`] produced, flushing an open line so a terminal
+/// shows it while the draft is sent.
+fn print_pieces(pieces: &[BatchPiece]) {
+    for piece in pieces {
+        match piece {
+            BatchPiece::Opened(to) => {
+                print!("Sending to {to}... ");
+                let _ = io::stdout().flush();
+            }
+            BatchPiece::Closed(line) => println!("{}", paint(line)),
+            BatchPiece::Whole(to, line) => println!("Sending to {to}... {}", paint(line)),
+        }
+    }
+}
+
+/// The per-draft lines of `mp send-approved`, printed as the batch goes
+/// (PERSO-223) rather than once it has settled.
+///
+/// The daemon reports each draft twice: phase `draft` with its selector before
+/// the send, and phase `draft_done` with its line once it settled, a failure
+/// included. The line is the detail; the summary after the batch carries only
+/// the counts, so nothing is said twice.
+///
+/// On a terminal the `Sending to …` half appears when the draft starts and the
+/// line completes it when it settles, as the pre-daemon binary printed it. Off
+/// a terminal each line is written whole when its draft settles, so a pipe or
+/// a log never holds half a line; the bytes are the same either way.
+///
+/// A daemon that predates `draft_done` reports none, and then every line not
+/// yet printed is printed at the settle, as before; the half line a terminal
+/// opened for the first draft is completed there rather than left dangling,
+/// and no other is opened until a `draft_done` has proved the daemon sends
+/// them.
+struct BatchLines<'a> {
+    approved: &'a [&'a mp_protocol::draft::DraftEntry],
+    terminal: bool,
+    /// The selector each `draft` report named, by its index in the batch.
+    started: Vec<Option<String>>,
+    /// The index whose half line is on screen.
+    open: Option<usize>,
+    /// The indices whose line is printed.
+    printed: Vec<bool>,
+    /// Whether the daemon has sent a `draft_done`.
+    reports_done: bool,
+}
+
+impl<'a> BatchLines<'a> {
+    fn new(approved: &'a [&'a mp_protocol::draft::DraftEntry], terminal: bool) -> Self {
+        BatchLines {
+            approved,
+            terminal,
+            started: Vec::new(),
+            open: None,
+            printed: Vec::new(),
+            reports_done: false,
+        }
+    }
+
+    /// The recipient the listing named for `selector`, because it is the
+    /// listing the user just read: the outcome names addresses, not the `to:`
+    /// line.
+    fn to_of(&self, selector: Option<&str>) -> String {
+        selector
+            .and_then(|selector| {
+                self.approved
+                    .iter()
+                    .find(|entry| entry.selector == selector)
+            })
+            .and_then(|entry| entry.to.as_deref())
+            .unwrap_or("(bcc only)")
+            .to_string()
+    }
+
+    fn mark(&mut self, index: usize) {
+        if self.printed.len() <= index {
+            self.printed.resize(index + 1, false);
+        }
+        self.printed[index] = true;
+    }
+
+    /// The line for draft `index`: closing its half line when it is the one
+    /// open, whole otherwise.
+    fn close(&mut self, index: usize, selector: Option<&str>, line: String) -> BatchPiece {
+        self.mark(index);
+        if self.open == Some(index) {
+            self.open = None;
+            BatchPiece::Closed(line)
+        } else {
+            BatchPiece::Whole(self.to_of(selector), line)
+        }
+    }
+
+    /// What one `operation.progress` of the batch prints.
+    fn progress(&mut self, payload: &serde_json::Value) -> Vec<BatchPiece> {
+        let Some(done) = payload["done"].as_u64().map(|done| done as usize) else {
+            return Vec::new();
+        };
+        match payload["phase"].as_str() {
+            Some("draft") => {
+                if self.started.len() <= done {
+                    self.started.resize(done + 1, None);
+                }
+                let selector = payload["message"].as_str().map(str::to_string);
+                self.started[done] = selector.clone();
+                if self.terminal && self.open.is_none() && (done == 0 || self.reports_done) {
+                    self.open = Some(done);
+                    return vec![BatchPiece::Opened(self.to_of(selector.as_deref()))];
+                }
+                Vec::new()
+            }
+            Some("draft_done") if done > 0 => {
+                self.reports_done = true;
+                let Some(line) = payload["message"].as_str() else {
+                    return Vec::new();
+                };
+                let index = done - 1;
+                let selector = self.started.get(index).cloned().flatten();
+                vec![self.close(index, selector.as_deref(), line.to_string())]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The lines the batch's progress did not print, from the settled outcome.
+    fn settle(&mut self, outcome: &mp_protocol::send::ApprovedOutcome) -> Vec<BatchPiece> {
+        let mut pieces = Vec::new();
+        for (index, result) in outcome.results.iter().enumerate() {
+            if self.printed.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            let line = mp_client::format::send_approved_line(result);
+            pieces.push(self.close(index, result.selector.as_deref(), line));
+        }
+        pieces
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7412,6 +7553,142 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod batch_lines {
+        use super::super::{BatchLines, BatchPiece};
+        use mp_protocol::draft::DraftEntry;
+        use mp_protocol::send::{ApprovedOutcome, SendOutcome, SentCopy};
+        use serde_json::json;
+
+        fn entry(selector: &str, to: &str) -> DraftEntry {
+            DraftEntry {
+                id: selector.to_string(),
+                selector: selector.to_string(),
+                path: format!("/d/{selector}.md"),
+                status: "approved".to_string(),
+                to: Some(to.to_string()),
+                cc: None,
+                bcc: None,
+                subject: None,
+                date: None,
+                valid: true,
+                ready: true,
+                server: None,
+            }
+        }
+
+        fn failed(selector: &str, reason: &str) -> SendOutcome {
+            SendOutcome {
+                account: "work".to_string(),
+                selector: Some(selector.to_string()),
+                message_id: String::new(),
+                status_line: reason.to_string(),
+                recipients: Vec::new(),
+                sent_copy: SentCopy::NotRequested,
+                settle_error: None,
+            }
+        }
+
+        fn outcome() -> ApprovedOutcome {
+            ApprovedOutcome {
+                account: "work".to_string(),
+                results: vec![failed("a", "no a"), failed("b", "no b")],
+                sent: 0,
+                failed: 2,
+            }
+        }
+
+        fn started(done: u64, selector: &str) -> serde_json::Value {
+            json!({"phase": "draft", "done": done, "total": 2, "message": selector})
+        }
+
+        fn settled(done: u64, line: &str) -> serde_json::Value {
+            json!({"phase": "draft_done", "done": done, "total": 2, "message": line})
+        }
+
+        /// On a terminal a draft's half line opens as it starts and its line,
+        /// a failure included, closes it as it settles; nothing is left for
+        /// the settle, so no line is printed twice.
+        #[test]
+        fn a_terminal_opens_each_line_and_closes_it_as_the_draft_settles() {
+            let (a, b) = (
+                entry("a", "ivana@example.com"),
+                entry("b", "robin@example.com"),
+            );
+            let approved = [&a, &b];
+            let mut batch = BatchLines::new(&approved, true);
+            assert_eq!(
+                batch.progress(&started(0, "a")),
+                [BatchPiece::Opened("ivana@example.com".into())]
+            );
+            assert_eq!(
+                batch.progress(&settled(1, "\u{2717} no a")),
+                [BatchPiece::Closed("\u{2717} no a".into())]
+            );
+            assert_eq!(
+                batch.progress(&started(1, "b")),
+                [BatchPiece::Opened("robin@example.com".into())]
+            );
+            assert_eq!(
+                batch.progress(&settled(2, "\u{2717} no b")),
+                [BatchPiece::Closed("\u{2717} no b".into())]
+            );
+            assert_eq!(batch.settle(&outcome()), []);
+        }
+
+        /// Off a terminal each line is written whole when its draft settles.
+        #[test]
+        fn a_pipe_gets_each_line_whole_as_the_draft_settles() {
+            let (a, b) = (
+                entry("a", "ivana@example.com"),
+                entry("b", "robin@example.com"),
+            );
+            let approved = [&a, &b];
+            let mut batch = BatchLines::new(&approved, false);
+            assert_eq!(batch.progress(&started(0, "a")), []);
+            assert_eq!(
+                batch.progress(&settled(1, "\u{2717} no a")),
+                [BatchPiece::Whole(
+                    "ivana@example.com".into(),
+                    "\u{2717} no a".into()
+                )]
+            );
+            assert_eq!(batch.progress(&started(1, "b")), []);
+            assert_eq!(
+                batch.progress(&settled(2, "\u{2717} no b")),
+                [BatchPiece::Whole(
+                    "robin@example.com".into(),
+                    "\u{2717} no b".into()
+                )]
+            );
+            assert_eq!(batch.settle(&outcome()), []);
+        }
+
+        /// A daemon that predates `draft_done` gets the lines at the settle,
+        /// the first one closing the half line the terminal opened and no
+        /// second one opened behind it.
+        #[test]
+        fn an_older_daemon_gets_every_line_at_the_settle() {
+            let (a, b) = (
+                entry("a", "ivana@example.com"),
+                entry("b", "robin@example.com"),
+            );
+            let approved = [&a, &b];
+            let mut batch = BatchLines::new(&approved, true);
+            assert_eq!(
+                batch.progress(&started(0, "a")),
+                [BatchPiece::Opened("ivana@example.com".into())]
+            );
+            assert_eq!(batch.progress(&started(1, "b")), []);
+            assert_eq!(
+                batch.settle(&outcome()),
+                [
+                    BatchPiece::Closed("\u{2717} no a".into()),
+                    BatchPiece::Whole("robin@example.com".into(), "\u{2717} no b".into()),
+                ]
+            );
+        }
+    }
+
     use super::{handed_back, is_drafts_selector, search_params, server_search_params};
 
     /// A server search over every mailbox names none, so the daemon runs its
