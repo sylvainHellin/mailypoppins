@@ -1581,10 +1581,9 @@ The one trace it leaves in a later bootstrap is the account's `sync_health` verd
 | `non_converging` | array of string | mailboxes that downloaded the same UIDs again, sorted and deduplicated |
 | `failed_mutations` | u64 | queued mutations that failed and were rolled back |
 | `error` | string or null | the engine's error rendered with `{:#}`, `null` on a tick that ran |
-| `new_inbox_mail` | array of `{from, subject}` | what the tick inserted into an inbox above what the account held before it, `[]` when none |
 
 Every key is present on every payload, so a client never branches on an absent one, and a tick that did not fail carries `"error": null` rather than an empty string.
-`new_inbox_mail` is a sender and a subject per message and nothing else, taken before the blocked senders and the hooks judged the mail; a client notifies from `mail.arrived` instead (PERSO-186).
+The payload does not list the mail the tick brought in: a client notifies from `mail.arrived`, published once the blocked senders and the hooks have judged it (PERSO-186, PERSO-306).
 
 The severity is decided in this order: an `error` that is not null is `error` whatever else the tick did; otherwise a non-empty `non_converging` **or** a `failed_mutations` above zero is `warning`; otherwise the tick is `ok`.
 `bodies_truncated` and `prunes_deferred` never raise it: a deadline stop is progress, because the mailbox has more mail on the server and the next tick resumes from the same cursor, and a deferred prune is a suspended deletion rather than a failure.
@@ -1983,5 +1982,7 @@ The fixtures are `crates/mp-protocol/fixtures/daemon.status.{request,response}.j
 PERSO-223 added a second `operation.progress` report per draft to `send.approved`, phase `draft_done`, after the phase `draft` report it already sent, and one optional member to `Progress`, `outcome`, which that report fills with the draft's `SendOutcome` and every other report leaves absent; no field was renamed or dropped, `message` is null on the new report, and the settled `ApprovedOutcome` is the one it was.
 `mp send-approved` prints each draft's line as it settles instead of all of them at the end, with the same bytes, the same summary and the same exit code.
 
-PERSO-306 dropped `new_inbox_mail` from the `sync.quick` and `sync.full` answers, which are `{blocked, outcome}` now; no client read it since PERSO-186 moved the new-mail notification onto `mail.arrived`, and a client that predates PERSO-186 reads its absence as a pass that brought nothing in.
+PERSO-306 dropped `new_inbox_mail` from the `sync.completed` payload (`mp_protocol::events::SyncCompleted`) and from the `sync.quick` and `sync.full` answers, which are `{blocked, outcome}` now; no client read either since PERSO-186 moved the new-mail notification onto `mail.arrived`.
+A client that predates PERSO-186 decoded the field as `default` and read the answer's list as `[]` when absent, so against this daemon it decodes every tick and every answer and raises no new-mail notification; a client of this build ignores the list an older daemon still sends.
+`crates/mp-protocol/fixtures/notification.sync_completed.json` lost the member, `tests/daemon_sync_outcome.rs`'s payload key list is thirteen names and pins the fixture too, and the regenerated `SyncCompleted.ts` has no `new_inbox_mail`.
 No method was added or renamed, and no command's output moved.

@@ -295,18 +295,17 @@ const FORMATTED_FRAGMENTS: [&str; 4] = [
     SYNC_SKIPPED_MARKER,
 ];
 
-/// The fourteen keys the payload has, and no others.
+/// The thirteen keys the payload has, and no others.
 ///
-/// P5-U8 edit: `new_inbox_mail` joined them, because a runtime's tick is a pass
-/// nobody asked for and the event is the only carrier the desktop notification
-/// of #0009 has left. The protocol changelog carries the entry.
-const PAYLOAD_KEYS: [&str; 14] = [
+/// P5-U8 added `new_inbox_mail` and PERSO-306 dropped it again: new mail worth
+/// a notification travels as `mail.arrived` since PERSO-186, and no client read
+/// the tick's own list. The protocol changelog carries both entries.
+const PAYLOAD_KEYS: [&str; 13] = [
     "account",
     "bodies_truncated",
     "error",
     "failed_mutations",
     "flags_updated",
-    "new_inbox_mail",
     "non_converging",
     "pruned",
     "prunes_deferred",
@@ -337,7 +336,6 @@ fn clean() -> SyncCompleted {
         non_converging: Vec::new(),
         failed_mutations: 0,
         error: None,
-        new_inbox_mail: Vec::new(),
     }
 }
 
@@ -482,7 +480,7 @@ fn severity_travels_as_ok_warning_or_error() {
     );
 }
 
-/// The payload is exactly the documented object: those fourteen keys, those
+/// The payload is exactly the documented object: those thirteen keys, those
 /// types, `error` null when there is none, and nothing else.
 #[test]
 fn the_payload_is_exactly_the_documented_object() {
@@ -503,14 +501,43 @@ fn the_payload_is_exactly_the_documented_object() {
             "non_converging": ["INBOX", "Sent"],
             "failed_mutations": 2,
             "error": null,
-            "new_inbox_mail": [],
         }),
         "the payload is the documented object, field for field"
     );
     assert_eq!(
         sorted_keys(&encoded),
         PAYLOAD_KEYS.to_vec(),
-        "no field beyond the fourteen the protocol lists"
+        "no field beyond the thirteen the protocol lists"
+    );
+}
+
+/// The committed fixture is the documented payload too, key for key, and it
+/// decodes (PERSO-306).
+#[test]
+fn the_committed_fixture_carries_exactly_the_payload_keys() {
+    let raw = include_str!("../crates/mp-protocol/fixtures/notification.sync_completed.json");
+    let frame: Value = serde_json::from_str(raw).expect("the fixture is JSON");
+    let payload = &frame["params"]["payload"];
+    assert_eq!(
+        sorted_keys(payload),
+        PAYLOAD_KEYS.to_vec(),
+        "the fixture shows the payload the daemon sends"
+    );
+    serde_json::from_value::<SyncCompleted>(payload.clone()).expect("the fixture decodes");
+}
+
+/// A payload from a daemon that predates PERSO-306 still carries
+/// `new_inbox_mail`; a client of this build decodes it and drops the list.
+#[test]
+fn a_payload_that_still_carries_new_inbox_mail_decodes() {
+    let mut older = serde_json::to_value(busy()).expect("a payload serialises");
+    older["new_inbox_mail"] = json!([{"from": "Ada <ada@example.com>", "subject": "Engine"}]);
+    let decoded: SyncCompleted =
+        serde_json::from_value(older).expect("an older daemon's payload decodes");
+    assert_eq!(
+        decoded,
+        busy(),
+        "the extra list is ignored, nothing else moves"
     );
 }
 
@@ -535,7 +562,6 @@ fn a_clean_payload_carries_every_key_with_its_empty_value() {
             "non_converging": [],
             "failed_mutations": 0,
             "error": null,
-            "new_inbox_mail": [],
         })
     );
     assert!(

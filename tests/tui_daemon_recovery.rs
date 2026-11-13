@@ -12,9 +12,10 @@
 //!    child it spawns, so a fixture here cannot accidentally be given the
 //!    opt-in plan section 3.7 says this unit drops.
 //! 2. **The watcher lives in the runtime and publishes what it found.** A tick
-//!    reaches a subscribed client as a `sync.completed` event carrying
-//!    `new_inbox_mail`, which is where the desktop notification of #0009 comes
-//!    from once `imap_watch` and the Graph poller have left `src/tui/`.
+//!    reaches a subscribed client as a `sync.completed` event, now that
+//!    `imap_watch` and the Graph poller have left `src/tui/`. The event carried
+//!    the tick's `new_inbox_mail` until PERSO-306 dropped it: new mail worth a
+//!    notification travels as `mail.arrived` since PERSO-186.
 //! 3. **A killed daemon is survived.** A real `mp daemon run` is killed with
 //!    `SIGKILL`, a real [`Session`] notices, a second daemon is started, and
 //!    the session reconnects and bootstraps again against the new instance.
@@ -31,13 +32,12 @@
 //! behaviour P5-U8 has to build:
 //!
 //! - the account stays `opening` for ever without the environment variable;
-//! - a `sync.completed` payload carries no `new_inbox_mail` member;
+//! - a runtime's tick never reaches a subscribed client;
 //! - a session whose daemon died never calls again, because nothing reconnects.
 //!
-//! The `new_inbox_mail` assertion reads the raw payload rather than a decoded
-//! [`SyncCompleted`] for the same reason: the field is the contract and does
-//! not exist yet, so naming it in Rust would turn this file into the compile
-//! error it may not be.
+//! The tick's assertions read the raw payload rather than a decoded
+//! `SyncCompleted`, because the wire shape is the contract: a member the type
+//! no longer has would vanish in the decode.
 //!
 //! # No direct fallback
 //!
@@ -131,11 +131,11 @@ fn an_account_comes_up_ready_without_the_runtimes_environment_variable() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. The watcher lives in the runtime, and its tick carries the arrivals
+// 2. The watcher lives in the runtime, and its tick reaches the client
 // ---------------------------------------------------------------------------
 
 /// A runtime's tick reaches a subscribed client as an event, and the event
-/// carries what arrived.
+/// carries the tick's counts and no list of arrivals.
 ///
 /// The fixture has no IMAP server (`tests/support/sync_fixture.rs` explains
 /// why there is none anywhere in this repository), so the tick is forced
@@ -148,14 +148,13 @@ fn an_account_comes_up_ready_without_the_runtimes_environment_variable() {
 /// itself on that variable today and must stop, because after this unit there
 /// is no variable to gate on.
 ///
-/// `new_inbox_mail` is the contract. Before this unit the TUI learnt about new
-/// mail from its own `imap_watch` thread, and P5-U6 put the arrival list on the
-/// *answer* to whoever asked for a pass, recording that *"a pass through an
-/// account runtime's tick reports `[]` ... that is P5-U8's to fix when the
-/// notification moves onto the event stream"*. Nobody asks for a runtime's
-/// tick, so the event is the only carrier the notification has left.
+/// P5-U8 put the tick's `new_inbox_mail` on this event, because nobody asks for
+/// a runtime's tick and its answer has no reader. PERSO-186 moved the new-mail
+/// notification onto `mail.arrived`, published once the blocked senders and
+/// the hooks have judged the mail, and PERSO-306 dropped the list no client
+/// read any more, so the payload is pinned without it.
 #[test]
-fn a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals() {
+fn a_runtime_tick_reaches_a_subscribed_client() {
     let tmp = tempfile::tempdir().expect("tempdir");
     sync_fixture::seed(tmp.path());
     let outcome = json!([{
@@ -172,7 +171,6 @@ fn a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals() {
         "non_converging": [],
         "failed_mutations": 0,
         "error": null,
-        "new_inbox_mail": [{"from": "Ada <ada@example.com>", "subject": "Analytical engine"}],
     }]);
     let daemon = DaemonFixture::start_with(
         tmp.path(),
@@ -205,10 +203,10 @@ fn a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals() {
         payload["account"], ACCOUNT,
         "the tick names the account it belongs to"
     );
-    assert_eq!(
-        payload["new_inbox_mail"],
-        json!([{"from": "Ada <ada@example.com>", "subject": "Analytical engine"}]),
-        "the arrivals ride the tick's own event, because nobody asked for the pass"
+    assert_eq!(payload["saved"], 1, "the tick carries its own counts");
+    assert!(
+        payload.get("new_inbox_mail").is_none(),
+        "new mail travels as mail.arrived, never on the tick: {payload}"
     );
 
     daemon.stop();

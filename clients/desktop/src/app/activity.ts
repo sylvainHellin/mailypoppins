@@ -117,7 +117,6 @@ const ZERO_TICK: SyncCompleted = {
   non_converging: [],
   failed_mutations: 0,
   error: null,
-  new_inbox_mail: [],
 };
 
 /**

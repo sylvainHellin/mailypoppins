@@ -6363,7 +6363,7 @@ impl Fixture {
             "saved": 0, "skipped": 0, "flags_updated": 0, "pruned": 0,
             "prunes_deferred": 0, "uid_rebound": 0, "uidvalidity_resets": 0,
             "bodies_truncated": 0, "non_converging": [], "failed_mutations": 0,
-            "error": error, "new_inbox_mail": []
+            "error": error
         });
         self.emit(KIND_SYNC_COMPLETED, outcome.clone());
         match error {

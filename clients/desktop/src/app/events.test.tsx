@@ -225,7 +225,6 @@ describe("new mail from a watcher tick", () => {
     non_converging: [],
     failed_mutations: 0,
     error: null,
-    new_inbox_mail: subjects.map((subject) => ({ from: "Nina <nina@example.com>", subject })),
   });
   /** The watcher's ingest: a new row at the top of a mailbox. */
   const arrive = (account: string, mailbox: string, id: number, subject: string) => {

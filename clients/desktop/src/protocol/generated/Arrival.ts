@@ -2,7 +2,7 @@
 
 /**
  * One message a tick ingested into an inbox, as the new-mail notification
- * reads it (#0009, P5-U8, PERSO-186).
+ * ([`MailArrived`]) reads it (#0009, PERSO-186).
  *
  * Two fields and no more: the notifier prints a sender and a subject, and a
  * payload that carried a row id or a uid would invite a client to treat an

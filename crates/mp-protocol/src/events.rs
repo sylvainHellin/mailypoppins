@@ -37,7 +37,7 @@ pub struct AccountStateChanged {
 }
 
 /// One message a tick ingested into an inbox, as the new-mail notification
-/// reads it (#0009, P5-U8, PERSO-186).
+/// ([`MailArrived`]) reads it (#0009, PERSO-186).
 ///
 /// Two fields and no more: the notifier prints a sender and a subject, and a
 /// payload that carried a row id or a uid would invite a client to treat an
@@ -113,15 +113,6 @@ pub struct SyncCompleted {
     /// The engine's error, rendered with `{:#}`, or `null` on a tick that ran.
     /// The one free-text field there is, and never a status line.
     pub error: Option<String>,
-    /// What this tick inserted into an inbox above what the account held
-    /// before it (P5-U8, PERSO-186), before the blocked senders and the hooks
-    /// judged it.
-    ///
-    /// No client notifies from it: new mail worth a notification is
-    /// [`MailArrived`], published once those judges are done. `default` so a
-    /// payload written by a daemon that predates the field still decodes.
-    #[serde(default)]
-    pub new_inbox_mail: Vec<Arrival>,
 }
 
 /// New mail in an account's Inbox that the daemon judged worth a system

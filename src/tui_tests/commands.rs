@@ -387,7 +387,7 @@ fn a_started_operation_is_remembered_until_its_finish_lands() {
                 "account": ACCOUNT, "severity": "ok", "saved": 1, "skipped": 2,
                 "flags_updated": 0, "pruned": 0, "prunes_deferred": 0, "uid_rebound": 0,
                 "uidvalidity_resets": 0, "bodies_truncated": 0, "non_converging": [],
-                "failed_mutations": 0, "error": null, "new_inbox_mail": [],
+                "failed_mutations": 0, "error": null,
             }},
         }),
     );

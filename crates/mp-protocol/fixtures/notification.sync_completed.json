@@ -10,12 +10,6 @@
       "error": null,
       "failed_mutations": 0,
       "flags_updated": 3,
-      "new_inbox_mail": [
-        {
-          "from": "Ada Lovelace <ada@example.com>",
-          "subject": "The analytical engine"
-        }
-      ],
       "non_converging": [],
       "pruned": 0,
       "prunes_deferred": 0,

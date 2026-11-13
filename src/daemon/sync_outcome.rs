@@ -12,7 +12,7 @@
 //! `usize` to `u64`, canonicalises `non_converging` once so both formatters are
 //! a straight walk over it, and decides the severity so no client has to.
 
-use mp_protocol::events::{Arrival, Severity, SyncCompleted};
+use mp_protocol::events::{Severity, SyncCompleted};
 
 use crate::sync::SyncResult;
 
@@ -76,18 +76,6 @@ pub fn from_sync_result(
         non_converging,
         failed_mutations,
         error,
-        // The list the engine already keeps, widened onto the wire (P5-U8):
-        // the runtime's tick is the only carrier the desktop notification of
-        // #0009 has left, because nobody asked for it and nobody reads its
-        // answer.
-        new_inbox_mail: result
-            .new_inbox_mail
-            .iter()
-            .map(|mail| Arrival {
-                from: mail.from.clone(),
-                subject: mail.subject.clone(),
-            })
-            .collect(),
     }
 }
 

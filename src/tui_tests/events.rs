@@ -44,7 +44,6 @@
 //! impl Session { pub fn events(&mut self) -> Option<events::Subscription> }
 //!
 //! mp_protocol::events::Arrival { from: String, subject: String }   // Debug + PartialEq + Serde
-//! mp_protocol::events::SyncCompleted::new_inbox_mail: Vec<Arrival>
 //! ```
 //!
 //! Eight names, and nothing else. Every other type below is the TUI's own, the
@@ -1502,7 +1501,6 @@ fn tick(saved: u64, skipped: u64, error: Option<&str>) -> Value {
         non_converging: Vec::new(),
         failed_mutations: 0,
         error: error.map(str::to_string),
-        new_inbox_mail: Vec::new(),
     };
     // Two readers: a `sync.completed` event's payload *is* the outcome, and an
     // `operation.finished` result carries the same object under `outcome`.

@@ -1906,7 +1906,6 @@ mod tests {
             non_converging: Vec::new(),
             failed_mutations: failed,
             error: None,
-            new_inbox_mail: Vec::new(),
         }
     }
 

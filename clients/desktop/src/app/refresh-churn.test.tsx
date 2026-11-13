@@ -106,7 +106,6 @@ const tick = (account: string) => ({
   non_converging: [],
   failed_mutations: 0,
   error: null,
-  new_inbox_mail: [],
 });
 
 /** What the watcher publishes when the other fixture draft is written, by a save or by a server sync. */

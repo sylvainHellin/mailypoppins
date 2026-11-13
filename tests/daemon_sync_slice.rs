@@ -572,8 +572,6 @@ fn loud_outcome() -> SyncCompleted {
         non_converging: vec![fixture::INBOX.to_string()],
         failed_mutations: 1,
         error: None,
-        // P5-U8: a tick carries what arrived, and this one arrived at nothing.
-        new_inbox_mail: Vec::new(),
     }
 }
 

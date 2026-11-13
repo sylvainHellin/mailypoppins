@@ -191,7 +191,7 @@ describe("the reducer", () => {
     const key = listKey("work", "inbox");
     const tick = (revision: number): Action => ({
       type: "gui_event",
-      event: { type: "event", event: { instance_id: "fixture-instance-1", revision, kind: "sync.completed", payload: { account: "work", severity: "ok", error: null, saved: 0, new_inbox_mail: [] } } },
+      event: { type: "event", event: { instance_id: "fixture-instance-1", revision, kind: "sync.completed", payload: { account: "work", severity: "ok", error: null, saved: 0 } } },
     });
     let s = run(booted(), tick(101), tick(102), tick(103));
     // A read asked now, slow to answer: it holds the inbox as it was.
@@ -272,7 +272,7 @@ describe("the reducer", () => {
       gen: s.accounts.gen,
       accounts: [{ name: "work", default: true, backend: "imap", store_state: "ready", runtime_state: "ready", sync_health: "ok", outbox: { queued: 0, failed: 0 } }],
     });
-    s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 101, kind: "sync.completed", payload: { account: "work", severity: "error", error: "login refused", saved: 0, new_inbox_mail: [] } } } });
+    s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 101, kind: "sync.completed", payload: { account: "work", severity: "error", error: "login refused", saved: 0 } } } });
     expect(s.accounts.data?.[0].sync_health).toBe("failed");
     s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 102, kind: "account.state_changed", payload: { account: "work", state: "blocked", reason: "x" } } } });
     expect(s.accounts.data?.[0].runtime_state).toBe("blocked");
@@ -764,7 +764,7 @@ describe("mutations and pending state", () => {
     it("logs a failed sync of this window once: the tick's line, and the notice without a second line", () => {
       let s = run(booted(), { type: "sync_requested" }, { type: "sync_started", operation_id: "op-1", account: "work", mode: "quick" });
       const before = s.activityLog.length;
-      const tick = { account: "work", severity: "error", error: "login refused", saved: 0, new_inbox_mail: [] };
+      const tick = { account: "work", severity: "error", error: "login refused", saved: 0 };
       s = run(s, envelope("sync.completed", tick, 501));
       s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "failed", error: { code: -32000, message: "login refused" } }, 502));
       expect(last(s)).toMatchObject({ kind: "sync_failed", text: "Sync of work failed: login refused" });

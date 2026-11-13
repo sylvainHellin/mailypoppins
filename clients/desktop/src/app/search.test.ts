@@ -355,7 +355,7 @@ describe("a hit whose message left its mailbox (PERSO-286)", () => {
           instance_id: fixtures.bootstrap.instance_id,
           revision: revision + 1,
           kind: "sync.completed",
-          payload: { account, severity: failed > 0 ? "warning" : "ok", error: null, saved: 0, failed_mutations: failed, new_inbox_mail: [] },
+          payload: { account, severity: failed > 0 ? "warning" : "ok", error: null, saved: 0, failed_mutations: failed },
         },
       },
     });

@@ -105,7 +105,7 @@ describe("the account picker", () => {
     expect(home.querySelector('[data-slot="sync-failed"]')).toHaveClass("text-warning");
     expect(row(/^work, /)).not.toHaveAccessibleName(/last sync failed/);
     expect(within(dialog).getAllByTitle("Last sync failed")).toHaveLength(1);
-    act(() => emitEnvelope("sync.completed", { account: "home", error: null, new_inbox_mail: [] }));
+    act(() => emitEnvelope("sync.completed", { account: "home", error: null }));
     await waitFor(() => expect(row(/^home, /)).not.toHaveAccessibleName(/last sync failed/));
   });
 
