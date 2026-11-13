@@ -693,7 +693,9 @@ async fn read_chunks(connection: &mut Connection) -> Result<Vec<u8>> {
             while !line(connection).await?.is_empty() {}
             return Ok(body);
         }
-        if body.len() + size > MAX_BODY {
+        // `body.len() + size` would overflow on a hostile size; `body` never
+        // holds more than the cap, so the difference cannot.
+        if size > MAX_BODY - body.len() {
             bail!("an answer over the {MAX_BODY} bytes the transport reads");
         }
         body.extend(take(connection, size).await?);

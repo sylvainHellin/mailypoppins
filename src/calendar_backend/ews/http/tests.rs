@@ -645,3 +645,44 @@ async fn an_accepted_ews_login_ends_the_row_of_its_password() {
     assert_eq!(http.post(ENVELOPE).await.unwrap(), "<taken/>");
     assert_eq!(login_gate::in_a_row_for_test(&login, "right"), 0);
 }
+
+/// The answer `raw` as a connection would read it.
+fn answer_of(raw: &[u8]) -> Result<Answer> {
+    let mut connection = Connection {
+        stream: Box::new(futures::io::Cursor::new(raw.to_vec())),
+        buffered: Vec::new(),
+        last_used: std::time::Instant::now(),
+    };
+    futures::executor::block_on(read_answer(&mut connection))
+}
+
+/// A hostile chunk size after a first chunk is refused before anything is
+/// read for it, where the sum of the body read and the size overflowed (a
+/// panic in a debug build, a read until the server closes in a release
+/// one); a Content-Length past the cap, or one no `usize` holds, is refused
+/// the same way.
+#[test]
+fn a_hostile_body_size_is_refused_before_it_is_read() {
+    let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    1\r\na\r\nffffffffffffffff\r\n";
+    let err = answer_of(chunked).err().expect("refused");
+    assert_eq!(
+        err.to_string(),
+        format!("an answer over the {MAX_BODY} bytes the transport reads")
+    );
+    let past_cap = format!(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n{:x}\r\n",
+        MAX_BODY
+    );
+    assert!(answer_of(past_cap.as_bytes()).is_err());
+    let at_cap = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                   1\r\na\r\n2\r\nbc\r\n0\r\n\r\n";
+    assert_eq!(answer_of(at_cap).unwrap().body, b"abc");
+    for length in [
+        format!("{}", MAX_BODY + 1),
+        "99999999999999999999999".to_string(),
+    ] {
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n");
+        assert!(answer_of(raw.as_bytes()).is_err(), "{length}");
+    }
+}
