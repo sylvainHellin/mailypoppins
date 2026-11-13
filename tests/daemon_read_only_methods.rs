@@ -738,6 +738,84 @@ async fn account_list_reports_every_configured_account_in_config_order() {
 }
 
 // ---------------------------------------------------------------------------
+// The committed fixtures, against a live daemon
+// ---------------------------------------------------------------------------
+
+/// A fixture of `crates/mp-protocol/fixtures/`, parsed.
+fn fixture(name: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/mp-protocol/fixtures")
+        .join(name);
+    let raw = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
+}
+
+/// Require `live` to have the structure of `pinned`, with the example values
+/// ignored: the same keys at every depth, every array element shaped like the
+/// fixture's elements, and a scalar of the fixture's type. A `null` on either
+/// side matches any scalar, because a nullable field shows one of its two
+/// spellings in the fixture and possibly the other on the wire.
+fn assert_same_shape(live: &Value, pinned: &Value, path: &str) {
+    match (live, pinned) {
+        (Value::Object(live), Value::Object(pinned)) => {
+            let live_keys: Vec<&String> = live.keys().collect();
+            let pinned_keys: Vec<&String> = pinned.keys().collect();
+            assert_eq!(
+                live_keys, pinned_keys,
+                "{path}: the live answer's keys differ from the fixture's"
+            );
+            for (key, value) in live {
+                assert_same_shape(value, &pinned[key], &format!("{path}.{key}"));
+            }
+        }
+        (Value::Array(live), Value::Array(pinned)) => {
+            assert!(
+                !live.is_empty() && !pinned.is_empty(),
+                "{path}: an empty array on either side compares no element shape"
+            );
+            for (index, element) in live.iter().enumerate() {
+                for exemplar in pinned {
+                    assert_same_shape(element, exemplar, &format!("{path}[{index}]"));
+                }
+            }
+        }
+        (Value::Null, other) | (other, Value::Null) => assert!(
+            !other.is_object() && !other.is_array(),
+            "{path}: null stands only for a scalar, against {other}"
+        ),
+        (Value::String(_), Value::String(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::Bool(_), Value::Bool(_)) => {}
+        (live, pinned) => panic!("{path}: live {live} has another type than fixture {pinned}"),
+    }
+}
+
+/// The read-only twin of `initialize_request_matches_the_pinned_fixture_shape`
+/// (PERSO-221): each read-only request fixture, pointed at this sandbox's
+/// account, is accepted by a live daemon, and the answer has the shape the
+/// response fixture pins. `tests/daemon_protocol_fixtures.rs` checks the same
+/// fixtures for canonical form and documented fields, which a fixture and a
+/// daemon could each satisfy while disagreeing with each other.
+#[tokio::test]
+async fn the_read_only_fixtures_match_a_live_daemons_answers() {
+    let sandbox = Sandbox::new();
+    let _daemon = sandbox.start_daemon().await;
+    let mut conn = connected(&sandbox).await;
+
+    for method in ["account.list", "mailbox.list", "message.list"] {
+        let request = fixture(&format!("{method}.request.json"));
+        assert_eq!(request["method"], json!(method));
+        let mut params = request["params"].clone();
+        if params.get("account").is_some() {
+            params["account"] = json!("alpha");
+        }
+        let live = call(&mut conn, method, params).await;
+        let pinned = fixture(&format!("{method}.response.json"));
+        assert_same_shape(&live, &pinned["result"], method);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // message.list
 // ---------------------------------------------------------------------------
 
