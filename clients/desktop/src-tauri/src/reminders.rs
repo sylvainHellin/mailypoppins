@@ -142,11 +142,16 @@ fn to_open(target: ReminderTarget) -> Option<ReminderTarget> {
 }
 
 /// Handle the clicks on this app's notifications: the window comes forward
-/// on the reminder's event. Registered once, before the first notification,
+/// on the reminder's event, and on its own for new mail
+/// ([`crate::new_mail`]). Registered once, before the first notification,
 /// since the plugin reports nothing about one shown before a handler existed.
 pub fn install<R: Runtime>(app: &AppHandle<R>) {
     let handle = app.clone();
     let registered = app.notification().on_action(move |performed| {
+        if crate::new_mail::is_new_mail(performed) {
+            bring_forward(&handle);
+            return tracing::info!("[mail] a new-mail notification brought the window forward");
+        }
         let Some(target) = clicked(performed) else {
             return;
         };

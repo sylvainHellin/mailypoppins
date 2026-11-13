@@ -1420,11 +1420,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `crates/mp-core/src/notify.rs`, using osascript on macOS and notify-send on Linux with sanitized payloads; a test build records into `notify::test_sink` instead and panics without a capture, so no test reaches the host's notification centre
-- Daemon surface: the daemon decides a notification is warranted and emits `state.event`; the client holding the entitlement presents it
-- GUI location: clients/desktop (M6, #0132)
-- Validation: unit tests in `crates/mp-core/src/notify.rs`; `a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list` (`src/tui_tests/events.rs`), `a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals` (`tests/tui_daemon_recovery.rs`)
-- Status: routed (P5-U8); GUI not started
-- Note: the daemon decides *what arrived* and the client decides whether to notify. `sync.completed` carries `new_inbox_mail`, `[{from, subject}]` per ingested inbox message, and the TUI reads `notifications = true` on the way to `crate::notify` exactly where it always did (#0009). A client that dropped the event for that setting would drop the status line and the reload with it, so the opt-in is at the notifier and not at the stream.
+- Daemon surface: `mail.arrived {account, arrivals, presenter, presenter_connection}` (PERSO-186), published by the account's arrival runner (`src/daemon/runtime/arrival_runner.rs`) once per tick that brought mail worth a notification, after the blocked senders and the hooks are done with it: unread, still in the Inbox, from neither a blocked sender nor the account's own address, and above what the account held before the tick (`src/sync/engine.rs`, `src/graph.rs`, `src/daemon/arrivals.rs`); the presenter is elected as a reminder's is
+- GUI location: clients/desktop: `src-tauri/src/new_mail.rs` raises the notification through `tauri-plugin-notification` with the TUI's text when the event names this app's connection; a click brings the window forward
+- Validation: unit tests in `crates/mp-core/src/notify.rs`, `src/daemon/arrivals.rs` and `src/daemon/runtime/arrival_runner.rs`; `only_inbox_mail_above_the_previous_top_is_announced` (`src/sync/engine.rs`), `only_mail_newer_than_the_store_is_announced` (`src/graph.rs`); `new_mail_notifies_only_as_the_presenter` and `a_tick_refreshes_the_list_and_leaves_new_mail_to_its_own_event` (`src/tui_tests/events.rs`); `clients/desktop/src-tauri/src/new_mail.rs` and `simulated_new_mail_is_announced_for_this_app_to_present` (`src-tauri/src/fixture.rs`)
+- Status: shipped in the TUI and the desktop (PERSO-186); the CLI never notifies
+- Note: the daemon decides which mail deserves a notification and which client presents it; a client only shows it. The TUI notifies only with `notifications = true`; the desktop app always does, as for reminders, and the system's notification settings silence it.
 
 ### INT-06 Editor suspension and resume around an external `$EDITOR`
 

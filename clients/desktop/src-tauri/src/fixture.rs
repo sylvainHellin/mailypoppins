@@ -6667,7 +6667,7 @@ impl Fixture {
                 });
             }
             "new_mail" => {
-                {
+                let subject = {
                     let mut s = self.state();
                     let id = s.next_row;
                     s.next_row += 1;
@@ -6686,10 +6686,22 @@ impl Fixture {
                     {
                         inbox.insert(0, row);
                     }
-                }
+                    format!("New fixture message {id}")
+                };
                 self.emit(
                     "state.invalidate",
                     json!({"resource": "mailbox:work/inbox", "scope": {"query": "counts"}}),
+                );
+                // What the daemon's arrival runner says of it once its judges
+                // are done (PERSO-186), presented by this app.
+                self.emit(
+                    "mail.arrived",
+                    json!({
+                        "account": "work",
+                        "arrivals": [{"from": "Fixture <fixture@example.com>", "subject": subject}],
+                        "presenter": PRESENTER_GUI,
+                        "presenter_connection": CONNECTION,
+                    }),
                 );
             }
             "shutdown" => {
@@ -8328,6 +8340,26 @@ mod tests {
             "a written index is announced"
         );
         assert_eq!(next_event(&rx).payload["result"]["saved"], "written");
+    }
+
+    /// `new_mail` delivers a message to `work`'s inbox, announces its counts,
+    /// and then the new mail itself as the daemon's `mail.arrived` would,
+    /// presented by this app (PERSO-186).
+    #[test]
+    fn simulated_new_mail_is_announced_for_this_app_to_present() {
+        let (f, rx) = fixture();
+        f.simulate("new_mail").expect("new mail");
+        assert_eq!(next_event(&rx).kind, "state.invalidate");
+        let arrived = next_event(&rx);
+        assert_eq!(arrived.kind, "mail.arrived");
+        let arrived: mp_protocol::events::MailArrived =
+            serde_json::from_value(arrived.payload).expect("a MailArrived");
+        assert_eq!(arrived.account, "work");
+        assert_eq!(arrived.presenter_connection, Some(CONNECTION));
+        assert_eq!(arrived.arrivals.len(), 1);
+        assert!(arrived.arrivals[0]
+            .subject
+            .starts_with("New fixture message "));
     }
 
     /// `reminder` fires the first timed server event's reminder as the

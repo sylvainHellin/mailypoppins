@@ -680,7 +680,7 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | `src/daemon/reminders.rs` | The calendar reminders: the due minutes, the firing and the decisions over the cache, the reminder clock, and the task that sleeps until the next due minute (PERSO-255) |
 | `src/store/reminders.rs` | `calendar_reminders`, what fired, was dismissed or is snoozed per account and event, kept apart from the disposable cache (PERSO-255) |
 | `src/calendar_view.rs` | The merged view `calendar.view` and `event.get` serve: the cached server events and the invitation mails' events, deduplicated on `UID` plus `RECURRENCE-ID`, filtered by visibility (PERSO-200) |
-| `mp-core/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
+| `mp-core/notify.rs` | The new-mail and reminder notification text both clients show, and the TUI's notifier, shelling out to `osascript` / `notify-send` |
 | `mp-core/sync_health.rs` | `SyncHealth`, the per-account outcome of the last sync, plus the `mp sync` failure summary and exit code (#0071) |
 | `mp-core/timing.rs` | `TimingSpan`, which emits `[TIMING]` log lines with millisecond precision. Filter logs with `rg '\[TIMING\]'`. |
 | `src/tui_tests/actions_store.rs` | The store-backed TUI action flows (#0052 A, B, C) over a real ingested store: drafting, the send/approve/mark-draft mutations and the file flows; root-crate tests since #0126 because they reach the ingest API |

@@ -54,7 +54,8 @@ The `fixture_simulate` command, answered only in fixture mode, takes these:
 - `config_invalid`: the next reload finds a broken config.toml; `config_absent`: a daemon restarted on an empty configuration directory.
 - `oauth_approve` and `oauth_deny`: the waiting device-code sign-in is approved or declined.
 - `reminder`: the first timed server event's reminder fires, presented by the app, as the daemon's `calendar.reminder` would say it.
-- `hold`, `rollback`, `rollback:<n>`, `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown`, as before.
+- `new_mail`: a message lands in `work`'s inbox and is announced, presented by the app, as the daemon's `mail.arrived` would say it, which raises the new-mail notification.
+- `hold`, `rollback`, `rollback:<n>`, `disconnect`, `reconnect`, `restart`, `resync` and `shutdown`, as before.
 
 [docs/rust-layer.md](docs/rust-layer.md), "Fixture mode", has the details.
 

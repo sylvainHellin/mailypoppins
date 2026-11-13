@@ -437,6 +437,10 @@ The palette's test notification names no account, so a click on it only brings t
 Snooze and Dismiss live in the frontend's reminder banner, which lists every waiting reminder over every view, since macOS shows no notification banner for the frontmost app.
 `reminder_notify_test` raises the notification of a made-up reminder five minutes out, the palette's "Show a test reminder notification", which tells whether macOS shows this app's notifications; nothing reaches the daemon.
 
+`src/new_mail.rs` raises the new-mail notification the same way (PERSO-186): a `mail.arrived` whose `presenter_connection` is this app's connection is one notification, titled `New email (<account>)`, its body `sender: subject` for one message and `N new emails` for several (`mp_core::notify::format_new_mail_notification`, the TUI's text).
+The daemon has already chosen the mail: unread, still in the Inbox once the blocked senders and the hooks ran, from neither a blocked sender nor the account itself, and none of a first sync's backlog; the layer filters nothing.
+A click on its body (`tap`, with `{account}` under the extra key `mail`) brings the main window forward and opens nothing; the `notifications` key of `config.toml` is the TUI's and is not read here.
+
 ## The contacts
 
 `contact_search` is `contact.search {account, query, limit}`: the account's contacts a query fuzzy-matches, best first, or for an empty query the whole index in rank order (sent To, then Cc, then received, then recency), at most `limit`.

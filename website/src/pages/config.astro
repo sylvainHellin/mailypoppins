@@ -120,20 +120,26 @@ policy = "ignore"           # sync | status-only | ignore`} />
       <!-- notifications -->
       <h3 id="notifications-section">notifications</h3>
       <p>
-        Opt-in desktop notifications for new mail while the TUI is running
+        Opt-in TUI notifications for new mail and calendar reminders
         (default: <code>false</code>). Like <code>theme</code>, the key is
         top-level, so it must appear before the first <code>[section]</code>
-        header. When a background sync (including the automatic IDLE-triggered
-        fetches) saves new emails to the inbox, one notification is shown per
-        sync: <code>sender: subject</code> for a single new email, or
-        <code>N new emails</code> when several arrive at once. Read-status
-        updates, duplicate cleanup, and mailboxes other than the inbox never
-        trigger a notification.
+        header.
       </p>
       <p>
-        The same key turns on the TUI's notification of a calendar reminder
-        that fires while no desktop app is open; the desktop app always
-        notifies of reminders, so a TUI and the app open together notify once.
+        The daemon decides which new mail deserves a notification, the same
+        way for every client: mail a sync brings into an inbox that is still
+        unread once the blocked senders and your mail hooks have had their
+        turn, from neither a blocked sender nor the account's own address.
+        The first sync of an account, older mail a later sync reaches, and
+        mail a hook or a block moved to Junk never notify. One notification is
+        shown per sync: <code>sender: subject</code> for a single new email,
+        or <code>N new emails</code> when several arrive at once.
+      </p>
+      <p>
+        One client raises it, as for a calendar reminder: the desktop app
+        when it is open, which always notifies (turn it off in the system's
+        notification settings), else the TUI when this key is
+        <code>true</code>. A TUI and the app open together notify once.
       </p>
       <p>
         Notifications use the platform's native tooling &mdash;

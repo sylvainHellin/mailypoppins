@@ -39,6 +39,7 @@ pub mod fixture;
 pub mod logging;
 pub mod menu;
 pub mod navigation;
+pub mod new_mail;
 pub mod paths;
 pub mod reader;
 pub mod reminders;
@@ -206,13 +207,16 @@ pub fn run() {
             if let Some(file) = updates::record_file(app.handle()) {
                 connector::set_update_record(file);
             }
-            // Before the session starts, so the first reminder it hears is
-            // notified and a click on it is reported (src/reminders.rs).
+            // Before the session starts, so the first reminder or new mail it
+            // hears is notified and a click on it is reported
+            // (src/reminders.rs, src/new_mail.rs).
             reminders::install(app.handle());
             let notify_app = app.handle().clone();
             let notify_session = setup_session.clone();
             setup_session.observe(Box::new(move |event| {
-                reminders::on_event(&notify_app, notify_session.connection(), event)
+                let connection = notify_session.connection();
+                reminders::on_event(&notify_app, connection, event);
+                new_mail::on_event(&notify_app, connection, event);
             }));
             setup_session.start();
             reminders::notify_waiting(app.handle(), setup_session.clone());
