@@ -100,7 +100,12 @@
 //!   the task cancelled) counts as such a login too, for the same reason,
 //!   unless lettre raised it before AUTH for certain: a connect, TLS or
 //!   client error (PERSO-307: `an_smtp_login_ending_without_an_answer_is_a_step_of_its_hold`,
-//!   `an_smtp_send_cancelled_after_auth_is_a_step_of_its_hold`).
+//!   `an_smtp_send_cancelled_after_auth_is_a_step_of_its_hold`). A send
+//!   whose login was counted so and then ended without an answer stops
+//!   there, its later recipients left retryable, so one send to many
+//!   recipients sends the password once per step and not once per
+//!   recipient (`an_smtp_login_of_a_refused_password_ending_without_an_answer_stops_the_send`,
+//!   `an_smtp_login_past_the_deadline_ending_without_an_answer_stops_the_send`).
 //!   A connect that never completes fails first, at the transport's 30 s
 //!   connect timeout, as an error that counts nothing, since nothing reached
 //!   the server; a greeting or EHLO stalled after the connect still counts

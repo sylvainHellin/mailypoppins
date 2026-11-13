@@ -5055,6 +5055,9 @@ struct LoginWatch<'a> {
     deadline: std::time::Duration,
     /// A send is under way, so AUTH may have gone out.
     sending: bool,
+    /// The dial was counted unanswered, at the deadline or after the send:
+    /// the row holds from then on, so no later recipient may log in again.
+    stepped: bool,
 }
 
 impl<'a> LoginWatch<'a> {
@@ -5063,8 +5066,10 @@ impl<'a> LoginWatch<'a> {
             dial,
             deadline,
             sending: false,
+            stepped: false,
         }
     }
+
     /// Await `send`. While the dial marks its row (a password refused
     /// before), a send whose login is still unanswered at the deadline,
     /// counted from the start of the send with the connect, the greeting,
@@ -5093,6 +5098,7 @@ impl<'a> LoginWatch<'a> {
                             self.deadline
                         );
                         dial.unanswered();
+                        self.stepped = true;
                         send.await
                     }
                 }
@@ -5109,10 +5115,18 @@ impl<'a> LoginWatch<'a> {
     /// lettre does not say whether AUTH went out, so a reply or a lost
     /// connection at the greeting or EHLO counts as well; only what it raises
     /// before AUTH for certain does not ([`raised_before_auth`]).
-    fn unanswered(&mut self) {
+    ///
+    /// Answers whether the dial was counted unanswered, now or at the
+    /// send's deadline: the row then holds, and [`submit_through`] stops
+    /// rather than log in again with the password for each later
+    /// recipient. A password never refused has no mark, and its send goes
+    /// on.
+    fn unanswered(&mut self) -> bool {
         if let Some(dial) = self.dial.as_deref_mut().filter(|dial| dial.marked()) {
             dial.unanswered();
+            self.stepped = true;
         }
+        self.stepped
     }
 
     /// The server answered past the login, so it took the password: the
@@ -5129,7 +5143,7 @@ impl<'a> LoginWatch<'a> {
 impl Drop for LoginWatch<'_> {
     fn drop(&mut self) {
         if self.sending {
-            self.unanswered();
+            let _ = self.unanswered();
         }
     }
 }
@@ -5197,7 +5211,11 @@ fn is_login_refusal(err: &lettre::transport::smtp::Error) -> bool {
 ///
 /// A login the server refuses ends the loop: the login is the same for every
 /// recipient, so the one refused and every one after it is left retryable
-/// without asking the server again, and the refusal is handed back.
+/// without asking the server again, and the refusal is handed back. So does
+/// a login of a password refused before that got no answer, at the deadline
+/// or when the send ended ([`LoginWatch::unanswered`], PERSO-307): the row
+/// holds from then on, and every later recipient is left retryable rather
+/// than sending the password again past the hold, one AUTH per recipient.
 ///
 /// A server whose EHLO offers no `8BITMIME` gets the 7bit bytes of
 /// [`seven_bit_fallback`] once lettre refuses the 8bit ones. lettre refuses
@@ -5213,14 +5231,22 @@ async fn submit_through(
     let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
     let mut login_refused = None;
+    let mut login_unanswered = false;
 
     for (addr, role) in &built.recipients {
-        if login_refused.is_some() {
+        let stopped = if login_refused.is_some() {
+            Some("not sent: the server refused the SMTP login")
+        } else if login_unanswered {
+            Some("not sent: the SMTP login got no answer")
+        } else {
+            None
+        };
+        if let Some(why) = stopped {
             results.push(RecipientResult {
                 address: addr.clone(),
                 role: *role,
                 success: false,
-                error: Some("not sent: the server refused the SMTP login".to_string()),
+                error: Some(why.to_string()),
                 verdict: RecipientVerdict::Retryable,
             });
             continue;
@@ -5276,8 +5302,17 @@ async fn submit_through(
         match &sent {
             Ok(_) => watch.logged_in(),
             Err(e) if answered_past_login(e) => watch.logged_in(),
-            Err(e) if !is_login_refusal(e) && !raised_before_auth(e) => watch.unanswered(),
-            Err(_) => {}
+            Err(e) if is_login_refusal(e) => {}
+            // Nothing went out with it, but a deadline run out during the
+            // send counted the login all the same.
+            Err(e) if raised_before_auth(e) => login_unanswered = watch.stepped,
+            Err(_) => login_unanswered = watch.unanswered(),
+        }
+        if login_unanswered {
+            warn!(
+                "[send] the SMTP login of a password the server refused before got no answer; \
+                 the recipients after {addr} are left for a later send"
+            );
         }
         match sent {
             Ok(_) => {
@@ -6153,8 +6188,99 @@ mod smtp_durability_tests {
         }
     }
 
+    /// A message to three recipients, bob, carol and dave.
+    fn three_recipients(message_id: &str) -> BuiltMessage {
+        let mut built = Outbox::built(message_id, Some(message_id));
+        built.recipients.extend([
+            ("carol@example.com".to_string(), RecipientRole::Cc),
+            ("dave@example.com".to_string(), RecipientRole::Cc),
+        ]);
+        built
+    }
+
+    /// The verdicts of recipients 2 and 3 when the send stopped at the
+    /// first one's unanswered login: retryable, with nothing sent.
+    fn assert_stopped_after_the_first(result: &SendResult) {
+        assert_eq!(result.results.len(), 3);
+        for later in &result.results[1..] {
+            assert_eq!(later.verdict, RecipientVerdict::Retryable, "{later:?}");
+            assert_eq!(
+                later.error.as_deref(),
+                Some("not sent: the SMTP login got no answer"),
+                "{later:?}"
+            );
+        }
+    }
+
+    /// PERSO-307 review: a send to three recipients whose login of a
+    /// password refused before ends without an answer stops there, as a
+    /// refused login does: the step was counted once, and asking again with
+    /// the same password for each later recipient would only send it past
+    /// the hold it just started. Recipients 2 and 3 stay retryable.
+    #[tokio::test]
+    async fn an_smtp_login_of_a_refused_password_ending_without_an_answer_stops_the_send() {
+        use crate::login_gate;
+        let (port, logins) = smtp_server(HANG_UP, b"250 OK\r\n").await;
+        let config = refused_config(port);
+        let login = refused_and_released(&config);
+
+        let built = three_recipients("<stopped@example.com>");
+        let mailer = server_mailer(&config);
+        let result = submit_over(&built, &config, &mailer)
+            .await
+            .expect("no refusal");
+        assert_eq!(logins.load(Ordering::SeqCst), 1, "one login reached it");
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            2,
+            "one step of the hold"
+        );
+        assert_ne!(
+            result.results[0].error.as_deref(),
+            Some("not sent: the SMTP login got no answer"),
+            "the first recipient keeps its own error"
+        );
+        assert_stopped_after_the_first(&result);
+    }
+
+    /// PERSO-307 review, the deadline: a login of a password refused before
+    /// still unanswered at the deadline is a step of its hold, and when the
+    /// send then ends without an answer the loop stops there too, rather
+    /// than logging in again for each later recipient.
+    #[tokio::test]
+    async fn an_smtp_login_past_the_deadline_ending_without_an_answer_stops_the_send() {
+        use crate::login_gate;
+        let (port, logins) = smtp_server_greeting_after(
+            std::time::Duration::from_millis(500),
+            HANG_UP,
+            b"250 OK\r\n",
+        )
+        .await;
+        let config = refused_config(port);
+        let login = refused_and_released(&config);
+
+        let built = three_recipients("<stopped-late@example.com>");
+        let mailer = server_mailer(&config);
+        let result = submit_over_within(
+            &built,
+            &config,
+            &mailer,
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect("no refusal");
+        assert_eq!(logins.load(Ordering::SeqCst), 1, "one login reached it");
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            2,
+            "one step of the hold"
+        );
+        assert_stopped_after_the_first(&result);
+    }
+
     /// An SMTP login of a password never refused that ends with no answer
-    /// records nothing.
+    /// records nothing, and the send goes on to the next recipient, which
+    /// logs in again.
     #[tokio::test]
     async fn an_smtp_login_of_a_password_never_refused_ending_without_an_answer_records_nothing() {
         use crate::login_gate::{self, Login};
@@ -6162,10 +6288,17 @@ mod smtp_durability_tests {
         let config = refused_config(port);
         let login = Login::Smtp(config.login());
 
-        let built = Outbox::built("<fresh-cut-off@example.com>", Some("id:fresh-cut-off"));
+        let built = three_recipients("<fresh-cut-off@example.com>");
         let mailer = server_mailer(&config);
-        let _ = submit_over(&built, &config, &mailer).await;
-        assert_eq!(logins.load(Ordering::SeqCst), 1);
+        let result = submit_over(&built, &config, &mailer)
+            .await
+            .expect("no refusal");
+        assert_eq!(logins.load(Ordering::SeqCst), 3, "one login per recipient");
+        assert!(
+            result.results.iter().all(|r| !r.success
+                && r.error.as_deref() != Some("not sent: the SMTP login got no answer")),
+            "{result:?}"
+        );
         assert_eq!(
             login_gate::in_a_row_for_test(&login, &config.password),
             0,
