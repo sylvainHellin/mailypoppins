@@ -1840,65 +1840,7 @@ mod tests {
         assert_eq!(ceiling(Some(0), &[1, 2, 9]), 0);
     }
 
-    /// An IMAP server played from a script, since the repository has no
-    /// in-process one: each read that finds the current reply used up hands
-    /// out the next, and records what the client wrote since the previous
-    /// one, so a test sees which bytes went out before which answer came back.
-    #[derive(Debug)]
-    struct ScriptedServer {
-        replies: std::collections::VecDeque<&'static str>,
-        reply: Vec<u8>,
-        written: Vec<u8>,
-        turns: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    }
-
-    impl futures::io::AsyncRead for ScriptedServer {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-            buf: &mut [u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            if self.reply.is_empty() {
-                let sent = String::from_utf8_lossy(&std::mem::take(&mut self.written)).into_owned();
-                self.turns.lock().unwrap().push(sent);
-                let Some(next) = self.replies.pop_front() else {
-                    return std::task::Poll::Ready(Ok(0));
-                };
-                self.reply = next.as_bytes().to_vec();
-            }
-            let n = self.reply.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.reply[..n]);
-            self.reply.drain(..n);
-            std::task::Poll::Ready(Ok(n))
-        }
-    }
-
-    impl futures::io::AsyncWrite for ScriptedServer {
-        fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            self.written.extend_from_slice(buf);
-            std::task::Poll::Ready(Ok(buf.len()))
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-
-        fn poll_close(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-    }
-
-    /// One store listing of `INBOX` over a CONDSTORE server played from
+    /// One store fetch of `INBOX` over a CONDSTORE server played from
     /// `replies` (the first answers the `LOGIN`), the store holding UIDs 1 to
     /// 5 under UIDVALIDITY 7 and `stored` as its mark: the listing, its body
     /// plan, and what the client wrote before each read, the `LOGIN` turn
@@ -1908,18 +1850,7 @@ mod tests {
         stored: Option<ModseqMark>,
         replies: &[&'static str],
     ) -> (MailboxListing, BodyPlan, Vec<String>) {
-        let turns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let server = ScriptedServer {
-            replies: replies.iter().copied().collect(),
-            reply: Vec::new(),
-            written: Vec::new(),
-            turns: turns.clone(),
-        };
-        let mut session = async_imap::Client::new(server)
-            .login("user", "secret")
-            .await
-            .map_err(|e| e.0)
-            .unwrap();
+        let (mut session, turns) = super::super::scripted::session(replies).await;
         let known = KnownUids {
             uids: (1..=5).collect(),
             uidvalidity: Some(7),
@@ -1935,7 +1866,7 @@ mod tests {
             list_mailbox_on_session(&mut session, "INBOX", Some(limit), known, caps)
                 .await
                 .unwrap();
-        let turns = turns.lock().unwrap().split_off(1);
+        let turns = super::super::scripted::after_login(&turns);
         (listing, plan, turns)
     }
 
@@ -2046,18 +1977,7 @@ mod tests {
         query: &str,
         replies: &[&'static str],
     ) -> (Result<MailboxStubs<u32>>, Vec<String>) {
-        let turns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let server = ScriptedServer {
-            replies: replies.iter().copied().collect(),
-            reply: Vec::new(),
-            written: Vec::new(),
-            turns: turns.clone(),
-        };
-        let mut session = async_imap::Client::new(server)
-            .login("user", "secret")
-            .await
-            .map_err(|e| e.0)
-            .unwrap();
+        let (mut session, turns) = super::super::scripted::session(replies).await;
         let search = crate::search::to_imap(&crate::search::parse(query).unwrap())
             .unwrap()
             .search;
@@ -2070,7 +1990,7 @@ mod tests {
             crate::server_search::SearchOrder::Newest,
         )
         .await;
-        let turns = turns.lock().unwrap().split_off(1);
+        let turns = super::super::scripted::after_login(&turns);
         (result, turns)
     }
 

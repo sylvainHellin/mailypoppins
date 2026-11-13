@@ -157,15 +157,23 @@ pub async fn push<F: DraftsFolder>(
         &message_id,
         &local.bytes,
     )?;
-    folder.append(&raw).await?;
-    let after = folder.uids_of(&message_id).await?;
-    let new_uid = after
-        .iter()
-        .copied()
-        .filter(|uid| !before.contains(uid))
-        .max()
-        .or_else(|| after.last().copied())
-        .ok_or_else(|| anyhow!("the copy of {draft_id} was appended and is not in {mailbox}"))?;
+    // The server names the new copy with UIDPLUS (PERSO-202); without it the
+    // copy is the newest one a search finds that was not there before.
+    let new_uid = match folder.append(&raw).await? {
+        Some(uid) => uid,
+        None => {
+            let after = folder.uids_of(&message_id).await?;
+            after
+                .iter()
+                .copied()
+                .filter(|uid| !before.contains(uid))
+                .max()
+                .or_else(|| after.last().copied())
+                .ok_or_else(|| {
+                    anyhow!("the copy of {draft_id} was appended and is not in {mailbox}")
+                })?
+        }
+    };
 
     // The copy the row named; any other is the reconcile's.
     let replaced: Vec<u32> = match &row {

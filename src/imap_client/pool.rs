@@ -95,8 +95,9 @@ pub struct ServerCaps {
     pub condstore: bool,
     /// RFC 7162 QRESYNC. Implies CONDSTORE. Not used yet (#0081).
     pub qresync: bool,
-    /// RFC 4315 UIDPLUS: APPENDUID/COPYUID on our own writes. Not used yet
-    /// (#0081).
+    /// RFC 4315 UIDPLUS: `UID EXPUNGE` of exactly the named copies, which the
+    /// draft mirror's delete and claim rest on. The `APPENDUID` an append
+    /// reads (PERSO-202) needs no gate: a server without UIDPLUS sends none.
     pub uidplus: bool,
     /// RFC 2177 IDLE, which the watcher already relies on.
     pub idle: bool,

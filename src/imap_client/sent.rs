@@ -8,16 +8,11 @@
 //!
 //! ## APPENDUID
 //!
-//! `APPENDUID` is the definitive acknowledgement, and `async-imap` 0.11 does
-//! not hand it over: [`async_imap::Session::append`] returns `Result<()>` and
-//! its tagged-`OK` response code (where `APPENDUID` lives) is dropped inside
-//! `check_done_ok`, with the stream private so it cannot be re-implemented from
-//! outside the crate. What survives is just as definitive for the state
-//! machine, because `async-imap` turns any non-`OK` tagged response into an
-//! error: a successful return *is* the server's acknowledgement. The UID is
-//! then recovered with the same `UID SEARCH HEADER MESSAGE-ID` the dedup path
-//! runs, and stored on the row. Recovering the real `APPENDUID` needs a patched
-//! or vendored `async-imap`; the seam is here when that happens.
+//! The tagged `OK` is the acknowledgement the state machine rests on, and on a
+//! server with UIDPLUS it carries the new message's UID as `APPENDUID`, which
+//! [`super::uidplus::append`] reads off it and stores on the row (PERSO-202).
+//! A server without UIDPLUS answers a plain `OK`, and the UID is then recovered
+//! with the same `UID SEARCH HEADER MESSAGE-ID` the dedup path runs.
 
 use anyhow::{anyhow, Result};
 use log::{info, warn};
@@ -95,21 +90,26 @@ impl SentMailbox for ImapSentMailbox {
         let message_id = crate::send::message_id_of(raw);
         let appended = async {
             let session = self.session().await?;
-            session
-                .append(mailbox, Some("(\\Seen)"), None, raw)
+            super::uidplus::append(session, mailbox, "(\\Seen)", raw)
                 .await
                 .map_err(|e| anyhow!("Failed to APPEND to '{mailbox}': {e}"))
         }
         .await;
-        if let Err(e) = appended {
-            self.invalidate();
-            return Err(e);
-        }
+        let appended = match appended {
+            Ok(appended) => appended,
+            Err(e) => {
+                self.invalidate();
+                return Err(e);
+            }
+        };
         span.mark("appended");
         info!("[outbox] appended {message_id} to '{mailbox}'");
+        if let Some(new) = appended {
+            return Ok(Some(new.uid));
+        }
 
-        // The tagged OK above is the acknowledgement; this only recovers the
-        // UID that APPENDUID would have carried (see the module docs).
+        // The tagged OK above is the acknowledgement; without UIDPLUS this
+        // recovers the UID that APPENDUID would have carried.
         match self.search_message_id(mailbox, &message_id).await {
             Ok(uids) => Ok(uids.last().copied()),
             Err(e) => {

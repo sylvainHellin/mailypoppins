@@ -6,9 +6,12 @@ pub(crate) mod fake_imap;
 mod fetch;
 mod ops;
 pub mod pool;
+#[cfg(test)]
+mod scripted;
 pub mod search;
 mod sent;
 mod store_sync;
+mod uidplus;
 mod watch;
 
 pub use batch::add_flag_in_mailboxes;
@@ -33,6 +36,7 @@ pub use store_sync::{
     folder_identities, list_mailboxes_detailed, status_counts, sync_mailboxes, FolderIdentity,
     ImapBackend, ServerMailbox,
 };
+pub(crate) use uidplus::append as append_with_uid;
 // The sync types moved to `crate::sync` with the engine (#0059); re-exported
 // here so the call sites that name them through this module keep compiling.
 pub use crate::sync::{FetchedRaw, FreshObservation, MailboxState, SyncResult, SyncTarget};

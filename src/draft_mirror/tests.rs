@@ -261,6 +261,33 @@ fn an_edit_replaces_the_copy_and_leaves_the_file_alone() {
     );
 }
 
+/// PERSO-202: with UIDPLUS the push records the UID the server's `APPENDUID`
+/// names, and does not need a search to find its copy: a listing that does
+/// not show the new copy yet changes nothing. Without UIDPLUS the same
+/// listing is all the push has, and it cannot tell where its copy went.
+#[test]
+fn a_push_records_the_uid_appenduid_names_without_searching_for_it() {
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    let appended = folder.next_uid;
+    folder.hidden = vec![appended];
+
+    block_on(push::push(&fx.mirror(1000), &mut folder, "d1")).unwrap();
+
+    assert_eq!(fx.row("d1").unwrap().uid, appended);
+
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder {
+        uidplus: false,
+        ..FakeFolder::default()
+    };
+    folder.hidden = vec![folder.next_uid];
+    let error = block_on(push::push(&fx.mirror(1000), &mut folder, "d1")).unwrap_err();
+    assert!(error.to_string().contains("is not in"), "{error}");
+}
+
 /// Without UIDPLUS the old copy is only flagged deleted, which every read of
 /// the folder skips.
 #[test]

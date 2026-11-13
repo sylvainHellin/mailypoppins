@@ -63,9 +63,11 @@ pub trait DraftsFolder {
     fn select(&mut self, mailbox: &str) -> impl Future<Output = Result<FolderInfo>>;
 
     /// `APPEND` a copy with `(\Draft \Seen)`. Success is the server's
-    /// acknowledgement; the new UID is read back with
-    /// [`DraftsFolder::uids_of`], since `async-imap` drops `APPENDUID`.
-    fn append(&mut self, raw: &[u8]) -> impl Future<Output = Result<()>>;
+    /// acknowledgement, and the answer is the new copy's UID when the server
+    /// named it with `APPENDUID` under the selected folder's UIDVALIDITY
+    /// (PERSO-202); `None` from a server without UIDPLUS, whose new copy is
+    /// found with [`DraftsFolder::uids_of`].
+    fn append(&mut self, raw: &[u8]) -> impl Future<Output = Result<Option<u32>>>;
 
     /// The UIDs of every copy carrying `message_id`, ascending.
     fn uids_of(&mut self, message_id: &str) -> impl Future<Output = Result<Vec<u32>>>;
@@ -125,6 +127,7 @@ pub struct ImapDraftsFolder {
     session: Option<PooledSession>,
     mailbox: Option<String>,
     uidplus: bool,
+    uidvalidity: u32,
 }
 
 impl ImapDraftsFolder {
@@ -134,6 +137,7 @@ impl ImapDraftsFolder {
             session: None,
             mailbox: None,
             uidplus: false,
+            uidvalidity: 0,
         }
     }
 
@@ -180,21 +184,24 @@ impl DraftsFolder for ImapDraftsFolder {
         let info = self.settle(result)?;
         self.mailbox = Some(mailbox.to_string());
         self.uidplus = info.uidplus;
+        self.uidvalidity = info.uidvalidity;
         Ok(info)
     }
 
-    async fn append(&mut self, raw: &[u8]) -> Result<()> {
+    async fn append(&mut self, raw: &[u8]) -> Result<Option<u32>> {
         let mailbox = self.mailbox()?;
         let result = async {
-            self.pooled()
-                .await?
-                .session()
-                .append(&mailbox, Some("(\\Draft \\Seen)"), None, raw)
+            let session = self.pooled().await?.session();
+            crate::imap_client::append_with_uid(session, &mailbox, "(\\Draft \\Seen)", raw)
                 .await
                 .map_err(|e| anyhow!("Failed to APPEND to '{mailbox}': {e}"))
         }
         .await;
-        self.settle(result)
+        let uidvalidity = self.uidvalidity;
+        Ok(self
+            .settle(result)?
+            .filter(|new| new.uidvalidity == uidvalidity)
+            .map(|new| new.uid))
     }
 
     async fn uids_of(&mut self, message_id: &str) -> Result<Vec<u32>> {
@@ -737,13 +744,13 @@ pub mod fake {
             })
         }
 
-        async fn append(&mut self, raw: &[u8]) -> Result<()> {
+        async fn append(&mut self, raw: &[u8]) -> Result<Option<u32>> {
             if self.fail_append {
                 return Err(anyhow!("the fake server refused APPEND"));
             }
             self.log.push("append".to_string());
-            self.put(raw);
-            Ok(())
+            let uid = self.put(raw);
+            Ok(self.uidplus.then_some(uid))
         }
 
         async fn uids_of(&mut self, message_id: &str) -> Result<Vec<u32>> {
