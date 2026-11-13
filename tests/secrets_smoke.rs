@@ -430,6 +430,25 @@ fn a_missing_password_names_the_account_and_the_command_that_stores_it() {
     daemon.stop();
 }
 
+/// Before any configuration, `mp config set-password` says to run
+/// `mp config init` and nothing about an SMTP password of an account with no
+/// name, which is what the client's SMTP load used to warn about.
+#[test]
+fn set_password_before_any_configuration_points_at_mp_config_init() {
+    let tmp = root();
+    let daemon = DaemonFixture::start(tmp.path());
+    let out = mp_with_stdin(
+        daemon.root(),
+        &["config", "set-password", "smtp", "--stdin"],
+        "pw\n",
+    );
+    assert!(!out.status.success(), "there is no account to store it for");
+    let said = stderr(&out);
+    assert!(said.contains("Run `mp config init`"), "{said}");
+    assert!(!said.contains("Could not load SMTP config"), "{said}");
+    daemon.stop();
+}
+
 /// A secrets file this machine cannot decrypt (copied from another machine,
 /// or another user's) is named with the command that recovers from it, and
 /// that command runs: the client used to refuse it with the very sentence

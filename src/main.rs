@@ -6330,24 +6330,29 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
     // P4-U15. The call itself stays: the two warning lines it prints when there
     // are no credentials are part of what every command has always printed.
     // A Graph account sends through Graph and has no SMTP transport by design,
-    // so it skips the load and its warning.
-    let _smtp_config =
-        if launches_tui || !secrets_open || account_config.auth_method == AuthMethod::Graph {
-            None
-        } else {
-            Some(SmtpConfig::load(&account_config).unwrap_or_else(|e| {
-                eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
-                eprintln!("  Some commands may not work without proper configuration.");
-                SmtpConfig {
-                    host: "localhost".to_string(),
-                    port: 465,
-                    username: String::new(),
-                    password: String::new(),
-                    default_from: "user@example.com".to_string(),
-                    accept_invalid_certs: false,
-                }
-            }))
-        };
+    // so it skips the load and its warning, and so does the nameless stand-in
+    // for no account at all: no configuration, or an `-A` naming none, which
+    // the lines above have already said (PERSO-199).
+    let _smtp_config = if launches_tui
+        || !secrets_open
+        || account_config.name.is_empty()
+        || account_config.auth_method == AuthMethod::Graph
+    {
+        None
+    } else {
+        Some(SmtpConfig::load(&account_config).unwrap_or_else(|e| {
+            eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
+            eprintln!("  Some commands may not work without proper configuration.");
+            SmtpConfig {
+                host: "localhost".to_string(),
+                port: 465,
+                username: String::new(),
+                password: String::new(),
+                default_from: "user@example.com".to_string(),
+                accept_invalid_certs: false,
+            }
+        }))
+    };
 
     match cli.command {
         Some(Commands::Send {

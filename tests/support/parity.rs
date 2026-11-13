@@ -616,37 +616,55 @@ pub fn oracle(args: &[&str], tmp: &Path) -> Output {
 /// the whole command that stores it: the SMTP one where the client loads the
 /// SMTP configuration (the `Could not load SMTP config:` warning), the IMAP
 /// one, with both passwords missing, everywhere else this fixture reaches it.
+/// With no account at all (no configuration, or an `-A` naming none) today's
+/// binary skips the SMTP load, so the oracle's warning about the nameless
+/// account goes, with the line that follows it.
 /// This takes that deliberate change out of a parity row the way
 /// [`graph_without_smtp_warning`] does.
 pub fn todays_password_refusals(mut out: Output) -> Output {
     fn rewrite(text: &str) -> String {
         const OPEN: &str = "Secret 'smtp-password-";
         const CLOSE: &str = "' not found. Run `mp config set-password`.";
-        text.split_inclusive('\n')
-            .map(|line| {
-                let Some(start) = line.find(OPEN) else {
-                    return line.to_string();
-                };
+        const SMTP_WARNING: &str = "Could not load SMTP config: ";
+        const FOLLOW_UP: &str = "  Some commands may not work without proper configuration.";
+        let mut kept = String::new();
+        let mut lines = text.split_inclusive('\n').peekable();
+        while let Some(line) = lines.next() {
+            let Some((start, rest, end)) = line.find(OPEN).and_then(|start| {
                 let rest = &line[start + OPEN.len()..];
-                let Some(end) = rest.find(CLOSE) else {
-                    return line.to_string();
-                };
-                let account = &rest[..end];
-                let today = if line[..start].ends_with("Could not load SMTP config: ") {
-                    format!(
-                        "No SMTP password is stored for account '{account}'. \
-                         Run `mp config set-password smtp --account {account}`."
-                    )
-                } else {
-                    format!(
-                        "No IMAP password is stored for account '{account}', nor an SMTP \
-                         password to fall back to. \
-                         Run `mp config set-password imap --account {account}`."
-                    )
-                };
-                format!("{}{today}{}", &line[..start], &rest[end + CLOSE.len()..])
-            })
-            .collect()
+                rest.find(CLOSE).map(|end| (start, rest, end))
+            }) else {
+                kept.push_str(line);
+                continue;
+            };
+            let account = &rest[..end];
+            let smtp = line[..start].ends_with(SMTP_WARNING);
+            if smtp && account.is_empty() {
+                if lines
+                    .peek()
+                    .is_some_and(|next| next.trim_end() == FOLLOW_UP)
+                {
+                    lines.next();
+                }
+                continue;
+            }
+            let today = if smtp {
+                format!(
+                    "No SMTP password is stored for account '{account}'. \
+                     Run `mp config set-password smtp --account {account}`."
+                )
+            } else {
+                format!(
+                    "No IMAP password is stored for account '{account}', nor an SMTP \
+                     password to fall back to. \
+                     Run `mp config set-password imap --account {account}`."
+                )
+            };
+            kept.push_str(&line[..start]);
+            kept.push_str(&today);
+            kept.push_str(&rest[end + CLOSE.len()..]);
+        }
+        kept
     }
     for stream in [&mut out.stdout, &mut out.stderr] {
         let text = String::from_utf8_lossy(stream);
