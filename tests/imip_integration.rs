@@ -1078,9 +1078,13 @@ fn an_occurrence_the_organizer_cancels_leaves_the_attendees_series_live() {
     )
     .unwrap();
     let berlin: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
-    let rid =
-        mailypoppins::invite::occurrence_recurrence_id(&row.invite, "2026-12-21T09:00", berlin)
-            .unwrap();
+    let rid = mailypoppins::invite::occurrence_recurrence_id(
+        &row.invite,
+        "2026-12-21T09:00",
+        berlin,
+        &row.cancelled_occurrences,
+    )
+    .unwrap();
     let cancel =
         mailypoppins::invite::cancel_message(&row.invite, row.next_sequence, Some(&rid), None)
             .unwrap();

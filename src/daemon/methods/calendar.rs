@@ -1150,8 +1150,13 @@ fn plan_imip_cancel(
     let (account, found, row) = organised(&request.account, &request.event, row_id, snapshot)?;
     let title = found.event.summary.as_str();
     let named = |when: &str| {
-        crate::invite::occurrence_recurrence_id(&row.invite, when, local_zone())
-            .map_err(|e| invalid_params(format!("{e:#}")))
+        crate::invite::occurrence_recurrence_id(
+            &row.invite,
+            when,
+            local_zone(),
+            &row.cancelled_occurrences,
+        )
+        .map_err(|e| invalid_params(format!("{e:#}")))
     };
     let (recurrence_id, scope) = if let Some(own) = &row.invite.recurrence_id {
         if occurrence.is_some() {

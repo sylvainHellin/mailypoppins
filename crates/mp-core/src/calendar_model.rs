@@ -855,6 +855,87 @@ impl Recurrence {
         Some(rule)
     }
 
+    /// The rule with what an `RRULE` leaves to its `DTSTART` filled in
+    /// from `first`, the series' first day (RFC 5545 3.3.10): a weekly rule
+    /// without `BYDAY` repeats on `first`'s weekday, a monthly or yearly one
+    /// without a day on `first`'s day of the month, and a yearly one without
+    /// `BYMONTH` in `first`'s month.
+    pub fn anchored(mut self, first: NaiveDate) -> Self {
+        use chrono::Datelike;
+        match self.frequency {
+            Frequency::Daily => {}
+            Frequency::Weekly => {
+                if self.weekdays.is_empty() {
+                    self.weekdays.push(Weekday::of_date(first));
+                }
+            }
+            Frequency::Monthly | Frequency::Yearly => {
+                if self.week_index.is_none() && self.day_of_month.is_none() {
+                    self.day_of_month = Some(first.day());
+                }
+                if self.frequency == Frequency::Yearly && self.month.is_none() {
+                    self.month = Some(first.month());
+                }
+            }
+        }
+        self
+    }
+
+    /// Whether `date` is a day the rule places when the series starts on
+    /// `first`, its end (`until`, `count`) left to [`Recurrence::dates`].
+    pub fn places(&self, first: NaiveDate, date: NaiveDate) -> bool {
+        use chrono::{Datelike, Days};
+        let interval = i64::from(self.interval.max(1));
+        let weekday = Weekday::of_date(date);
+        let on_day = || match self.week_index {
+            None => Some(date.day()) == self.day_of_month,
+            Some(index) => {
+                self.weekdays.contains(&weekday)
+                    && match index {
+                        WeekIndex::Last => (date + Days::new(7)).month() != date.month(),
+                        _ => (date.day() - 1) / 7 + 1 == index.position() as u32,
+                    }
+            }
+        };
+        let months = |d: NaiveDate| i64::from(d.year()) * 12 + i64::from(d.month0());
+        match self.frequency {
+            Frequency::Daily => (date - first).num_days() % interval == 0,
+            Frequency::Weekly => {
+                let start_of_week = |d: NaiveDate| {
+                    let from = self.first_day_of_week.unwrap_or(Weekday::Monday);
+                    let day = |w: Weekday| Weekday::ALL.iter().position(|x| *x == w).unwrap_or(0);
+                    let offset = (day(Weekday::of_date(d)) + 7 - day(from)) % 7;
+                    d - Days::new(offset as u64)
+                };
+                let weeks = (start_of_week(date) - start_of_week(first)).num_days() / 7;
+                self.weekdays.contains(&weekday) && weeks % interval == 0
+            }
+            Frequency::Monthly => (months(date) - months(first)) % interval == 0 && on_day(),
+            Frequency::Yearly => {
+                i64::from(date.year() - first.year()) % interval == 0
+                    && Some(date.month()) == self.month
+                    && on_day()
+            }
+        }
+    }
+
+    /// The days the rule places from `first` through `last`, within its own
+    /// end (`until`, `count`) and at most `limit` of them.
+    pub fn dates(&self, first: NaiveDate, last: NaiveDate, limit: usize) -> Vec<NaiveDate> {
+        let last = self.until.map_or(last, |until| until.min(last));
+        let limit = self.count.map_or(limit, |count| count as usize).min(limit);
+        let mut dates = Vec::new();
+        let mut date = first;
+        while date <= last && dates.len() < limit {
+            if self.places(first, date) {
+                dates.push(date);
+            }
+            let Some(next) = date.succ_opt() else { break };
+            date = next;
+        }
+        dates
+    }
+
     /// Whether `other` repeats the same way: the same pattern and the same
     /// end. The range start and the first day of the week are left out,
     /// since a server moves the one to the first day the pattern names and

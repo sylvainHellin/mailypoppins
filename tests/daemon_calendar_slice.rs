@@ -2490,7 +2490,17 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
         ),
         (
             json!({"account": IMIP, "event": series_id, "occurrence": at(13, 9).to_rfc3339()}),
-            "is not one of them",
+            "is not an occurrence of Weekly planning",
+        ),
+        // The next day at the series' time of day, and a week past its
+        // four occurrences.
+        (
+            json!({"account": IMIP, "event": series_id, "occurrence": at(14, 8).to_rfc3339()}),
+            "is not an occurrence of Weekly planning",
+        ),
+        (
+            json!({"account": IMIP, "event": series_id, "occurrence": at(34, 8).to_rfc3339()}),
+            "is not an occurrence of Weekly planning",
         ),
         // A blank occurrence or scope names nothing, and is never read as
         // the whole series.
@@ -2579,6 +2589,18 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
     );
     let after = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_SERIES_UID).await;
     assert_eq!(after["cancelled"], false, "the series lives on: {after}");
+    // The occurrence cancelled is no longer one to cancel.
+    let twice = call_err(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": series_id, "occurrence": occurrence}),
+    )
+    .await;
+    assert!(
+        twice.message.contains("is cancelled already"),
+        "{}",
+        twice.message
+    );
     let store = read_fixture::store(slice.root(), IMIP);
     let blobs = mailypoppins::store::BlobStore::new(
         send_fixture::account_dir(slice.root(), IMIP).join("blobs"),

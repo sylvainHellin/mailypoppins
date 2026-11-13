@@ -74,8 +74,7 @@ use super::{
 use crate::calendar_freebusy::{FreeBusyQuery, Schedule, ScheduleItem};
 use crate::calendar_model::{
     Attendee, AttendeeRole, Calendar, CalendarFeature, CalendarWindow, Event, EventKind, EventTime,
-    Frequency, OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus, Sensitivity,
-    ShowAs, WeekIndex, Weekday,
+    OnlineMeetingProvider, OwnResponse, Person, Recurrence, ResponseStatus, Sensitivity, ShowAs,
 };
 use crate::calendar_write::{AttendeeInput, EventInput, EventPatch, ProposedTime};
 
@@ -626,66 +625,14 @@ const FAKE_MAX_OCCURRENCES: usize = 60;
 /// How far past its first day the fake expands a series without end.
 const FAKE_HORIZON_DAYS: u64 = 3 * 366;
 
-/// Whether `date` is a day `rule` places when the series starts on `first`.
-fn on_rule(rule: &Recurrence, first: NaiveDate, date: NaiveDate) -> bool {
-    use chrono::Datelike;
-    let interval = i64::from(rule.interval.max(1));
-    let weekday = Weekday::of_date(date);
-    let on_day = || match rule.week_index {
-        None => Some(date.day()) == rule.day_of_month,
-        Some(index) => {
-            rule.weekdays.contains(&weekday)
-                && match index {
-                    WeekIndex::Last => (date + Days::new(7)).month() != date.month(),
-                    _ => (date.day() - 1) / 7 + 1 == index.position() as u32,
-                }
-        }
-    };
-    let months = |d: NaiveDate| i64::from(d.year()) * 12 + i64::from(d.month0());
-    match rule.frequency {
-        Frequency::Daily => (date - first).num_days() % interval == 0,
-        Frequency::Weekly => {
-            let start_of_week = |d: NaiveDate| {
-                let from = rule.first_day_of_week.unwrap_or(Weekday::Monday);
-                let offset = (Weekday::ALL
-                    .iter()
-                    .position(|w| *w == Weekday::of_date(d))
-                    .unwrap()
-                    + 7
-                    - Weekday::ALL.iter().position(|w| *w == from).unwrap())
-                    % 7;
-                d - Days::new(offset as u64)
-            };
-            let weeks = (start_of_week(date) - start_of_week(first)).num_days() / 7;
-            rule.weekdays.contains(&weekday) && weeks % interval == 0
-        }
-        Frequency::Monthly => (months(date) - months(first)) % interval == 0 && on_day(),
-        Frequency::Yearly => {
-            i64::from(date.year() - first.year()) % interval == 0
-                && Some(date.month()) == rule.month
-                && on_day()
-        }
-    }
-}
-
 /// The days `rule` places from `first` on, within its end and the fake's
 /// bounds.
 fn occurrence_dates(rule: &Recurrence, first: NaiveDate) -> Vec<NaiveDate> {
-    let horizon = first + Days::new(FAKE_HORIZON_DAYS);
-    let last = rule.until.map_or(horizon, |until| until.min(horizon));
-    let limit = rule
-        .count
-        .map_or(FAKE_MAX_OCCURRENCES, |count| count as usize)
-        .min(FAKE_MAX_OCCURRENCES);
-    let mut dates = Vec::new();
-    let mut date = first;
-    while date <= last && dates.len() < limit {
-        if on_rule(rule, first, date) {
-            dates.push(date);
-        }
-        date = date + Days::new(1);
-    }
-    dates
+    rule.dates(
+        first,
+        first + Days::new(FAKE_HORIZON_DAYS),
+        FAKE_MAX_OCCURRENCES,
+    )
 }
 
 /// `time` moved to `date`, keeping its wall clock in its zone and its
@@ -1199,6 +1146,7 @@ impl CalendarBackend for FakeCalendarBackend {
 mod tests {
     use super::*;
     use crate::calendar_model::window_for;
+    use crate::calendar_model::{Frequency, Weekday};
 
     fn november() -> CalendarWindow {
         window_for(Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap())
