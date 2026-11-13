@@ -262,12 +262,18 @@ impl RuntimeTable {
         }
     }
 
-    /// Take `account` out of the table, so dropping what comes back releases
-    /// its engine lock and closes its store (P3b-U8).
+    /// Take `account` out of the table and hand back the table's own clone of
+    /// its runtime (P3b-U8).
     ///
-    /// The drop is the caller's, on `spawn_blocking`: it closes SQLite, and a
-    /// reload promises the lock is free by the time it answers. A start that
-    /// only ever failed has nothing to hand back and is simply forgotten.
+    /// The removal ends the table's ownership and nothing else: a clone taken
+    /// earlier through [`RuntimeTable::get`] (a tick or a method in flight)
+    /// keeps the runtime, its store and its engine lock alive until it drops.
+    /// The background tasks hold only `Weak` handles and end at the first
+    /// upgrade that fails. A caller that needs the lock free waits for the
+    /// in-flight work with [`AccountRuntime::retire`] before dropping what
+    /// comes back, on
+    /// `spawn_blocking` because the last drop closes SQLite. A start that only
+    /// ever failed has nothing to hand back and is simply forgotten.
     pub fn remove(&self, account: &str) -> Option<Arc<AccountRuntime>> {
         match lock(&self.entries).remove(account)? {
             RuntimeEntry::Live(runtime) => Some(runtime),

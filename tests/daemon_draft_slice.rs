@@ -658,17 +658,17 @@ fn collect_path_fields(value: &Value, found: &mut Vec<String>) {
 // 1. The methods themselves
 // ---------------------------------------------------------------------------
 
-/// The nine declarations, and the four facts each one fixes: the wire name,
+/// The ten declarations, and the four facts each one fixes: the wire name,
 /// the kind, the first protocol version and what a disconnect does to it.
 ///
-/// Four are queries and five are commands, which is the split between "reads
-/// the directory" and "writes a file". All nine are durable: a draft written
+/// Four are queries and six are commands, which is the split between "reads
+/// the directory" and "writes a file". All ten are durable: a draft written
 /// half way because its caller hung up is exactly what the family must never
 /// produce, and none of them runs long enough to be worth cancelling.
 #[test]
-fn the_draft_slice_declares_four_queries_and_five_commands() {
+fn the_draft_slice_declares_four_queries_and_six_commands() {
     let names: Vec<&str> = DRAFT_METHOD_SPECS.iter().map(|s| s.name).collect();
-    assert_eq!(names, DRAFT_METHODS, "the slice serves exactly these nine");
+    assert_eq!(names, DRAFT_METHODS, "the slice serves exactly these ten");
 
     let mut sorted = names.clone();
     sorted.sort_unstable();
@@ -692,7 +692,7 @@ fn the_draft_slice_declares_four_queries_and_five_commands() {
 }
 
 /// A method may not be served without being advertised: the handshake derives
-/// the capability list from the dispatcher, so the nine names appearing there
+/// the capability list from the dispatcher, so the ten names appearing there
 /// is what says they are registered rather than merely declared.
 #[tokio::test]
 async fn the_daemon_advertises_every_draft_method() {
