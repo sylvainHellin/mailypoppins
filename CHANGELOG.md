@@ -136,6 +136,7 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- An RSVP (`calendar.rsvp`, the mail reply of `event.respond`) asks the server again about a refused SMTP login like every other send the user starts, and a fresh sign-in (`mp config oauth2-login`) lifts a held refusal and sends the queued mail as `set-password` does (PERSO-296).
 - A command that reaches a daemon while it is shutting down waits for it to go and starts a fresh one instead of failing after 5 s; under an installed service the start goes through the manager's restart, and two commands racing send one restart between them (PERSO-176).
 - The desktop app shows a folder attached to a draft as a folder with its file count and opens the files a send attaches, instead of calling the entry missing; the TUI's `o` on a draft opens the same files from the daemon's answer (PERSO-215).
 - The desktop app's version-mismatch screen offers Restart daemon only when the daemon is not the newer side; with a newer daemon it says which app version to update to (PERSO-277).
