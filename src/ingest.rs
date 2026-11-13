@@ -1120,8 +1120,9 @@ pub struct MailboxCursor {
     pub highest_modseq: Option<ModseqMark>,
     /// Graph `deltaLink`: the resume point of `/messages/delta` for this
     /// folder (#0042). Written only by a Graph pass that covered the whole
-    /// folder and wrote every message it found, so the token's meaning is
-    /// "at this point the store held everything the folder listed"; cleared
+    /// folder and wrote every message and every read state it found
+    /// (PERSO-202), so the token's meaning is "at this point the store held
+    /// everything the folder listed"; cleared
     /// by [`clear_mailbox_deltalink`] on expiry, on any doubt about the token
     /// chain, and on a folder-identity change.
     pub deltalink: Option<String>,

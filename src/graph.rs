@@ -2538,8 +2538,18 @@ fn ingest_window(
 /// path: `ingest_failed` is false once a poisoned message has been given up
 /// on, so a message the store will never accept cannot wedge the delta chain
 /// for good.
-fn may_record_delta_token(covered: bool, download_incomplete: bool, ingest_failed: bool) -> bool {
-    covered && !download_incomplete && !ingest_failed
+///
+/// `flags_written` is [`crate::ingest::FlagsApplied::complete`] for the pass's
+/// read-state write (PERSO-202): the token vouches for the flags too, and a
+/// delta from a token minted over a dropped flag change never reports that
+/// change again, so the older token stays and the next delta replays it.
+fn may_record_delta_token(
+    covered: bool,
+    download_incomplete: bool,
+    ingest_failed: bool,
+    flags_written: bool,
+) -> bool {
+    covered && !download_incomplete && !ingest_failed && flags_written
 }
 
 /// Fold one page of an enumeration into the map.
@@ -3322,15 +3332,15 @@ pub async fn sync_mailboxes_graph(
         // Read status, and the reply or forward Outlook recorded (PERSO-171),
         // for messages the store already holds, one transaction for the whole
         // folder.
-        result.flags_updated += crate::ingest::apply_graph_flags(
+        let flags = crate::ingest::apply_graph_flags(
             &store,
             account_name,
             target.role.as_str(),
             server
                 .iter()
                 .map(|(mid, entry)| (crate::ingest::graph_uid(mid), server_flags(entry))),
-        )
-        .changed;
+        );
+        result.flags_updated += flags.changed;
         span.mark(&format!("flags:{}", target.role));
 
         // The item each row stands for, which a move, delete or read toggle
@@ -3392,10 +3402,14 @@ pub async fn sync_mailboxes_graph(
         // A withheld copy (PERSO-245) is listed and not held, so the token
         // could not claim the store held the folder: a twin the departure
         // covered by its Message-ID would never be listed by a delta again.
+        // A read state the store failed to write is the same over-claim
+        // (PERSO-202): the next delta from the new token would never report
+        // that change again.
         let earned = may_record_delta_token(
             complete,
             download_incomplete,
             ingest_failed || window.withheld,
+            flags.complete,
         );
         let minted_a_token = token.is_some();
         let token_to_store = if earned { token } else { None };
@@ -5423,7 +5437,7 @@ mod tests {
             }
             let capped = found > new.len();
             owed.push(backlog_owed(None, found, new.len(), false));
-            if may_record_delta_token(true, capped, false) {
+            if may_record_delta_token(true, capped, false, true) {
                 token = Some(format!("{GRAPH_BASE}/me/mailFolders('A')/messages/delta?t"));
             }
             for entry in new {
@@ -7744,14 +7758,77 @@ mod tests {
     #[test]
     fn a_resume_point_is_only_minted_by_a_pass_that_covered_the_folder() {
         // covered, nothing left behind, everything written.
-        assert!(may_record_delta_token(true, false, false));
+        assert!(may_record_delta_token(true, false, false, true));
+        // A read state the store failed to write (PERSO-202).
+        assert!(!may_record_delta_token(true, false, false, false));
         // An enumeration that did not see the whole folder.
-        assert!(!may_record_delta_token(false, false, false));
+        assert!(!may_record_delta_token(false, false, false, true));
         // A pass that left new messages undownloaded.
-        assert!(!may_record_delta_token(true, true, false));
+        assert!(!may_record_delta_token(true, true, false, true));
         // A message downloaded and not written is as absent as one never
         // fetched, so the token would over-claim.
-        assert!(!may_record_delta_token(true, false, true));
+        assert!(!may_record_delta_token(true, false, true, true));
+    }
+
+    /// PERSO-202: a read-state change the store failed to write mints no
+    /// token, so the next delta, from the older one, reports it again.
+    ///
+    /// The token claims the store holds the folder as of its minting, flags
+    /// included. A pass whose flag write did not land and that stored the new
+    /// token would never hear about the dropped change again: the delta from
+    /// that token lists only what changed after it, which is the IMAP modseq
+    /// mark's rule and the #0004 failure on Graph.
+    #[test]
+    fn a_pass_whose_flag_write_failed_mints_no_delta_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let mut result = SyncResult::default();
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[received("<read@x>", "2026-10-21T20:12:00Z")],
+            None,
+            &quiet(&store),
+            &mut result,
+        );
+        let read_in_outlook = || {
+            [(
+                crate::ingest::graph_uid("<read@x>"),
+                server_flags(&FolderEntry {
+                    graph_id: "AAA".into(),
+                    is_read: true,
+                    received: None,
+                    last_verb: None,
+                }),
+            )]
+        };
+
+        // The store refuses the write of the read state for one pass.
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse_flags BEFORE UPDATE OF flags ON messages
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+        let dropped = crate::ingest::apply_graph_flags(&store, "acct", "inbox", read_in_outlook());
+        assert!(!dropped.complete, "the write did fail");
+        assert!(
+            !may_record_delta_token(true, false, false, dropped.complete),
+            "a pass that dropped a read state keeps the older token"
+        );
+
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER refuse_flags;")
+            .unwrap();
+        let landed = crate::ingest::apply_graph_flags(&store, "acct", "inbox", read_in_outlook());
+        assert_eq!(landed.changed, 1, "the next pass applies the change");
+        assert!(may_record_delta_token(true, false, false, landed.complete));
     }
 
     #[test]
@@ -7773,7 +7850,7 @@ mod tests {
                 "the store will not take it",
             );
             assert!(
-                !may_record_delta_token(true, false, ingest_failed),
+                !may_record_delta_token(true, false, ingest_failed, true),
                 "pass {pass} has not written everything, so it mints no token"
             );
         }
@@ -7788,7 +7865,7 @@ mod tests {
         );
         assert!(!ingest_failed);
         assert!(
-            may_record_delta_token(true, false, ingest_failed),
+            may_record_delta_token(true, false, ingest_failed, true),
             "a message the store will never accept must not freeze the delta for ever"
         );
     }
