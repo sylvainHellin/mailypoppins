@@ -936,6 +936,7 @@ Nothing under `accounts/<name>/` is created eagerly: `mp config init` makes the 
 Override the root via the `MAILYPOPPINS_DATA_DIR` env var, which tests use and which doubles as the escape hatch for a portable location.
 
 Named profiles (PERSO-176, `crates/mp-core/src/profile.rs`) move both roots: on profile `<name>`, `config_dir()` is `~/.config/mailypoppins/profiles/<name>` and `mailypoppins_data_dir()` is `<data_dir>/profiles/<name>`, so the store, drafts, tokens, `secrets.enc`, logs, runtime directory and socket of a profile are its own and a second daemon serves it.
+The OS keyring is not under a root, so its service name carries the profile instead (below).
 No profile, an empty `MAILYPOPPINS_PROFILE` or the name `default` are the paths above, unchanged.
 The resolvers read only `MAILYPOPPINS_PROFILE`; `mp` turns `--profile` into it in a synchronous `main`, before the tokio runtime and the logger exist, so every process it spawns inherits the profile.
 `--profile` wins over the variable, a name is 1 to 12 ASCII letters, digits, `-` or `_` (the macOS socket path limit), and a profile beside `MAILYPOPPINS_CONFIG_DIR` or `MAILYPOPPINS_DATA_DIR` is refused with exit 2 naming both.
@@ -946,8 +947,9 @@ Nothing walks the config or data root recursively, so `profiles/` is never read 
 
 `retention` is parsed and validated in config but not enforced yet: the blob store grows without bound until #0060 lands.
 
-The OS keyring service name (when the keyring backend is opted into) is `mailypoppins` (constant `KEYRING_SERVICE` in `crates/mp-core/src/secrets.rs`).
-It was `email-cli` before #0022, and `get` falls back to that name so a user who opted in before the rename is not locked out of stored credentials; `set` and `delete` touch the new service only, so the next `mp config set-password` migrates the credential and leaves a harmless stale entry behind.
+The OS keyring service name (when the keyring backend is opted into) is `mailypoppins` on the default profile (constant `KEYRING_SERVICE` in `crates/mp-core/src/secrets.rs`) and `mailypoppins-<name>` on profile `<name>` (`keyring_service`), so a profile can neither read nor overwrite the default profile's passwords.
+It was `email-cli` before #0022, and on the default profile `get` falls back to that name so a user who opted in before the rename is not locked out of stored credentials; `set` and `delete` touch the new service only, so the next `mp config set-password` migrates the credential and leaves a harmless stale entry behind.
+A profile never falls back, to `email-cli` or to `mailypoppins`: profiles postdate the rename, and an entry under either name is the default profile's.
 
 ## Testing
 

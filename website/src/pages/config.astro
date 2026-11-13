@@ -245,7 +245,7 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
 
       <h3 id="profiles-section">Profiles</h3>
       <p>
-        A profile is a separate setup with its own accounts, store and daemon, for a demo,
+        A profile is a separate setup with its own accounts, passwords, store and daemon, for a demo,
         a test or a work setup that must never show your other mail. Run any command on one
         with <code>mp --profile demo</code> or <code>MAILYPOPPINS_PROFILE=demo</code>; the
         flag wins over the variable. The profile keeps its config in
@@ -651,7 +651,9 @@ server = "sentitems"          # Not "Sent Items"`} />
       <ConfigExample code={`secrets_backend = "keyring"`} />
       <p>
         The keyring entries use the service name <code>mailypoppins</code> and the same keys
-        as above. Nothing is migrated: set each password again with
+        as above; on a <a href="#profiles-section">profile</a> the service is
+        <code>mailypoppins-demo</code> for the profile <code>demo</code>, so a profile never
+        reads or replaces the passwords of your other setup. Nothing is migrated: set each password again with
         <code>mp config set-password</code> after the switch, and run
         <code>mp daemon restart</code> so a running daemon picks up the new backend. On macOS
         a build signed with a different identity, which every <code>cargo install</code>

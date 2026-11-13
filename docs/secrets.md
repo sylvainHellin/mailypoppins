@@ -105,8 +105,9 @@ will need to re-set passwords via `mp config set-password <which>
 --account <name>` after flipping the switch.
 A running daemon that has already opened its backend refuses a `config.reload` that flips `secrets_backend` (`-32007`, "restart the daemon to apply"), so run `mp daemon restart` after the edit.
 
-The keyring service name is `mailypoppins`.
-It was `email-cli` before #0022, so a lookup that misses under `mailypoppins` retries under `email-cli` and nobody who opted in before the rename loses access to a stored password.
+The keyring service name is `mailypoppins`, and `mailypoppins-<name>` on a named profile (`mp --profile <name>`), so a profile keeps its passwords apart from the default profile's even for an account of the same name.
+It was `email-cli` before #0022, so on the default profile a lookup that misses under `mailypoppins` retries under `email-cli` and nobody who opted in before the rename loses access to a stored password.
+A profile reads, writes and deletes under its own service alone, never under `mailypoppins` or `email-cli`.
 Writes and deletes go to `mailypoppins` only, so the next `mp config set-password` moves the credential across and leaves a stale, harmless `email-cli` entry behind.
 Clear those by hand if you want them gone (Keychain Access on macOS, `secret-tool` / Seahorse on Linux).
 

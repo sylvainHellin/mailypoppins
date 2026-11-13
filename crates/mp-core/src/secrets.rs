@@ -459,36 +459,74 @@ impl SecretsBackend for EncryptedFileBackend {
 // KeyringBackend (opt-in via `secrets_backend = "keyring"`)
 // ---------------------------------------------------------------------------
 
+/// The default profile's keyring service.
 const KEYRING_SERVICE: &str = "mailypoppins";
 
 /// The pre-#0022 keyring service name.
 ///
-/// Read-only, and only as a fallback: a user who opted into the keyring backend
-/// before the rename still has credentials filed under it, and orphaning them
-/// is the one dangerous direction in a cosmetic rename. `set` and `delete`
-/// operate on [`KEYRING_SERVICE`] alone, so the next `mp config set-password`
-/// migrates the credential naturally and leaves a harmless stale entry behind.
+/// Read-only, and only as a fallback on the default profile: a user who opted
+/// into the keyring backend before the rename still has credentials filed under
+/// it, and orphaning them is the one dangerous direction in a cosmetic rename.
+/// `set` and `delete` operate on the current service alone, so the next
+/// `mp config set-password` migrates the credential naturally and leaves a
+/// harmless stale entry behind.
 const LEGACY_KEYRING_SERVICE: &str = "email-cli";
 
-/// Look `key` up under the current service name, then the legacy one.
+/// The keyring service a profile's passwords are filed under:
+/// [`KEYRING_SERVICE`] on the default profile, `mailypoppins-<name>` on a
+/// profile, so a profile can neither read nor overwrite the default's
+/// (PERSO-176).
+fn keyring_service(profile: Option<&str>) -> String {
+    match profile {
+        Some(name) => format!("{KEYRING_SERVICE}-{name}"),
+        None => KEYRING_SERVICE.to_string(),
+    }
+}
+
+/// Look `key` up under the profile's service, then, on the default profile
+/// alone, under the legacy one: a profile postdates the rename, so its
+/// passwords were never filed under [`LEGACY_KEYRING_SERVICE`], and an entry
+/// there is the default profile's.
 ///
 /// Parameterised over the lookup so the order is testable without a real
 /// keyring daemon.
 fn keyring_get_with_fallback(
+    profile: Option<&str>,
     key: &str,
     lookup: impl Fn(&str, &str) -> Result<String>,
 ) -> Result<String> {
-    match lookup(KEYRING_SERVICE, key) {
+    match lookup(&keyring_service(profile), key) {
         Ok(v) => Ok(v),
-        Err(current_err) => lookup(LEGACY_KEYRING_SERVICE, key).map_err(|_| current_err),
+        Err(current_err) if profile.is_none() => {
+            lookup(LEGACY_KEYRING_SERVICE, key).map_err(|_| current_err)
+        }
+        Err(current_err) => Err(current_err),
     }
 }
 
-pub struct KeyringBackend;
+/// The OS keyring, on the service of the profile the process runs on.
+pub struct KeyringBackend {
+    /// The active profile when the backend was opened, `None` for the default.
+    profile: Option<String>,
+}
+
+impl KeyringBackend {
+    /// The backend for the profile this process runs on.
+    fn for_active_profile() -> Self {
+        Self {
+            profile: crate::profile::active(),
+        }
+    }
+
+    fn entry(&self, key: &str) -> Result<keyring::Entry> {
+        keyring::Entry::new(&keyring_service(self.profile.as_deref()), key)
+            .context("Failed to create keyring entry")
+    }
+}
 
 impl SecretsBackend for KeyringBackend {
     fn get(&self, key: &str) -> Result<String> {
-        keyring_get_with_fallback(key, |service, key| {
+        keyring_get_with_fallback(self.profile.as_deref(), key, |service, key| {
             let entry =
                 keyring::Entry::new(service, key).context("Failed to create keyring entry")?;
             entry.get_password().map_err(anyhow::Error::from)
@@ -502,17 +540,13 @@ impl SecretsBackend for KeyringBackend {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
-        let entry =
-            keyring::Entry::new(KEYRING_SERVICE, key).context("Failed to create keyring entry")?;
-        entry
+        self.entry(key)?
             .set_password(value)
             .with_context(|| format!("Failed to store '{}' in keyring", key))
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        let entry =
-            keyring::Entry::new(KEYRING_SERVICE, key).context("Failed to create keyring entry")?;
-        entry
+        self.entry(key)?
             .delete_credential()
             .with_context(|| format!("Failed to delete '{}' from keyring", key))
     }
@@ -549,7 +583,7 @@ pub fn init(kind: SecretsBackendKind) -> std::result::Result<(), SecretsError> {
     }
     let backend: Box<dyn SecretsBackend> = match kind {
         SecretsBackendKind::EncryptedFile => Box::new(EncryptedFileBackend::open(secrets_path())?),
-        SecretsBackendKind::Keyring => Box::new(KeyringBackend),
+        SecretsBackendKind::Keyring => Box::new(KeyringBackend::for_active_profile()),
     };
     if BACKEND.set(backend).is_ok() {
         let _ = ACTIVE_KIND.set(kind);
@@ -610,8 +644,46 @@ mod tests {
     #[test]
     fn keyring_get_falls_back_to_the_legacy_service() {
         let entries = [(LEGACY_KEYRING_SERVICE, "smtp-password-work", "old-secret")];
-        let got = keyring_get_with_fallback("smtp-password-work", fake_keyring(&entries)).unwrap();
+        let got =
+            keyring_get_with_fallback(None, "smtp-password-work", fake_keyring(&entries)).unwrap();
         assert_eq!(got, "old-secret");
+    }
+
+    /// The default profile keeps the service its passwords were filed under,
+    /// and a profile gets its own, so `set` and `delete` on a profile can never
+    /// reach the default profile's entries (PERSO-176).
+    #[test]
+    fn the_keyring_service_is_mailypoppins_on_the_default_profile_and_its_own_on_a_profile() {
+        assert_eq!(keyring_service(None), "mailypoppins");
+        assert_eq!(keyring_service(Some("demo")), "mailypoppins-demo");
+    }
+
+    /// A profile reads its own service alone: an account named like one of the
+    /// default profile's must not be handed the default's password, from the
+    /// current service or the legacy one (PERSO-176).
+    #[test]
+    fn a_profile_never_reads_the_default_profiles_or_the_legacy_keyring_entries() {
+        let default_only = [
+            (KEYRING_SERVICE, "imap-password-work", "real-secret"),
+            (LEGACY_KEYRING_SERVICE, "imap-password-work", "old-secret"),
+        ];
+        let err = keyring_get_with_fallback(
+            Some("demo"),
+            "imap-password-work",
+            fake_keyring(&default_only),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("mailypoppins-demo"), "{err}");
+
+        let both = [
+            (KEYRING_SERVICE, "imap-password-work", "real-secret"),
+            ("mailypoppins-demo", "imap-password-work", "demo-secret"),
+        ];
+        let got =
+            keyring_get_with_fallback(Some("demo"), "imap-password-work", fake_keyring(&both))
+                .unwrap();
+        assert_eq!(got, "demo-secret");
     }
 
     /// The other lookup order: once a credential exists under the new service
@@ -622,7 +694,8 @@ mod tests {
             (KEYRING_SERVICE, "smtp-password-work", "new-secret"),
             (LEGACY_KEYRING_SERVICE, "smtp-password-work", "old-secret"),
         ];
-        let got = keyring_get_with_fallback("smtp-password-work", fake_keyring(&entries)).unwrap();
+        let got =
+            keyring_get_with_fallback(None, "smtp-password-work", fake_keyring(&entries)).unwrap();
         assert_eq!(got, "new-secret");
     }
 
@@ -631,7 +704,7 @@ mod tests {
     #[test]
     fn keyring_get_missing_everywhere_reports_the_current_service() {
         let entries: [(&str, &str, &str); 0] = [];
-        let err = keyring_get_with_fallback("smtp-password-work", fake_keyring(&entries))
+        let err = keyring_get_with_fallback(None, "smtp-password-work", fake_keyring(&entries))
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEYRING_SERVICE), "{err}");
