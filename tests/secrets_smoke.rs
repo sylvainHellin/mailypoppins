@@ -161,8 +161,14 @@ impl Servers {
 }
 
 /// `mp config init`, answered through the pipe, against a daemon with no
-/// configuration yet: both probes log in with the typed passwords and both
-/// passwords are stored.
+/// configuration yet: both probes log in with the typed passwords, both
+/// passwords are stored, and the account's first sync runs once they are,
+/// logging in with the IMAP password (PERSO-199).
+///
+/// The write starts no sync of an account with no password to log in with;
+/// the first password stored starts it, and the wizard stores the IMAP one
+/// first. A sync started by the write logged in with no password, or with the
+/// SMTP password the IMAP login falls back to before the IMAP one arrived.
 fn run_wizard(root: &Path, servers: &Servers, account: &str) {
     let out = mp_with_stdin(
         root,
@@ -188,6 +194,24 @@ fn run_wizard(root: &Path, servers: &Servers, account: &str) {
         "the IMAP probe logged in with the typed password: {:?}",
         servers.imap.passwords()
     );
+
+    let start = Instant::now();
+    loop {
+        let listed = stdout(&mp(root, &["account", "list"]));
+        if listed.contains("ready") {
+            break;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the first sync did not bring the account up within {DEADLINE:?}:\n{listed}"
+        );
+        std::thread::sleep(TICK);
+    }
+    assert!(
+        servers.imap.passwords().iter().all(|p| p == IMAP_AT_INIT),
+        "every IMAP login, the first sync's included, carried the IMAP password: {:?}",
+        servers.imap.passwords()
+    );
 }
 
 /// `mp config set-password <kind> -A <account> --stdin`.
@@ -208,44 +232,42 @@ fn set_password(root: &Path, kind: &str, account: &str, value: &str) {
     );
 }
 
-/// The read-back through both configurations.
+/// The read-back through both configurations, on a daemon started after the
+/// last `set-password`.
 ///
-/// IMAP: the daemon logs in with the password the store holds now. The
-/// account's first sync, which `config.init` starts before the wizard has
-/// stored the passwords, may still hold a session, and so may the watcher,
-/// so the fake cuts every session before each `mp sync` until a login after
-/// the last `set-password` arrives. SMTP: the client's own `SmtpConfig::load`
-/// for the first account, which every non-TUI command runs and which warns
-/// when it fails.
-fn assert_read_back(root: &Path, servers: &Servers, account: &str) {
+/// IMAP: `mp sync` logs in with the password the store holds now, the only
+/// one the restarted daemon can read. The daemon that ran the first sync
+/// keeps the sessions it opened with the wizard's password, as it would on a
+/// server that has not seen the password change, so it is the restart that
+/// makes the next login a new one; a LOGIN that daemon sent just before it
+/// was stopped may still reach the fake after the restart, which is why the
+/// check is that the new password arrived rather than that nothing else did.
+/// SMTP: the client's own `SmtpConfig::load` for
+/// the first account, which every non-TUI command runs and which warns when
+/// it fails.
+fn assert_read_back(daemon: DaemonFixture, servers: &Servers, account: &str) {
+    let root = daemon.root().to_path_buf();
+    daemon.stop();
     servers.imap.set_folders(vec![FakeFolder::empty("INBOX")]);
     let before = servers.imap.passwords().len();
-    let start = Instant::now();
-    loop {
-        servers.imap.drop_sessions();
-        let out = mp(root, &["sync", "-A", account]);
-        assert_success(&out, "mp sync");
-        if servers.imap.passwords()[before..]
-            .iter()
-            .any(|p| p == IMAP_SET)
-        {
-            break;
-        }
-        assert!(
-            start.elapsed() < DEADLINE,
-            "no IMAP login used the password set last within {DEADLINE:?}: {:?}",
-            &servers.imap.passwords()[before..]
-        );
-        std::thread::sleep(TICK);
-    }
+    let daemon = DaemonFixture::start(&root);
 
-    let out = mp(root, &["config", "show"]);
+    let out = mp(&root, &["sync", "-A", account]);
+    assert_success(&out, "mp sync");
+    let logins = &servers.imap.passwords()[before..];
+    assert!(
+        logins.iter().any(|p| p == IMAP_SET),
+        "an IMAP login of the restarted daemon carried the password set last: {logins:?}"
+    );
+
+    let out = mp(&root, &["config", "show"]);
     assert_success(&out, "mp config show");
     assert!(
         !stderr(&out).contains("Could not load SMTP config"),
         "the client loaded the SMTP configuration with its password:\n{}",
         stderr(&out)
     );
+    daemon.stop();
 }
 
 /// The encrypted-file backend, the default: the wizard writes the file, the
@@ -282,8 +304,7 @@ fn init_then_set_password_then_load_on_the_encrypted_file_backend() {
         IMAP_SET
     );
 
-    assert_read_back(daemon.root(), &servers, account);
-    daemon.stop();
+    assert_read_back(daemon, &servers, account);
 }
 
 /// The keyring backend. The wizard has no backend question, so it writes the
@@ -327,8 +348,7 @@ fn init_then_set_password_then_load_on_the_keyring_backend() {
         "the keyring backend writes no secrets file"
     );
 
-    assert_read_back(daemon.root(), &servers, &account);
-    daemon.stop();
+    assert_read_back(daemon, &servers, &account);
 
     // The kernel keyring is this process's too, so the values are read here
     // directly; on the Mac a read from this binary would ask for Keychain

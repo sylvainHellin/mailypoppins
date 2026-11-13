@@ -243,7 +243,8 @@ describe("the account wizard", () => {
     await next(user, dialog);
     await next(user, dialog);
     await user.click(within(dialog).getByRole("button", { name: "Add account" }));
-    await waitFor(() => expect(mock.passwords.map((p) => p.kind)).toEqual(["smtp", "imap"]));
+    // IMAP first: the first password stored starts the account's first sync (PERSO-199).
+    await waitFor(() => expect(mock.passwords.map((p) => p.kind)).toEqual(["imap", "smtp"]));
     expect(probe.state.notice).toBe("Added the account fastmail; its SMTP and IMAP passwords are stored");
   });
 

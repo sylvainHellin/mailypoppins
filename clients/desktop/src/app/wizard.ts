@@ -501,10 +501,13 @@ export function accountDraft(form: WizardForm): AccountDraft {
   return draft;
 }
 
-/** The passwords a password preset stores once written: the SMTP one, and the IMAP one when it has its own. */
+/**
+ * The passwords a password preset stores once written, in the order they are stored: the IMAP one when it has its own, then the SMTP one.
+ * IMAP first, as the CLI wizard does: the first password stored starts the account's first sync, which would otherwise log in with the SMTP password the IMAP login falls back to (PERSO-199).
+ */
 export function passwordKinds(preset: Preset, sameImap: boolean): SecretKind[] {
   if (signsIn(preset)) return [];
-  return sameImap ? ["smtp"] : ["smtp", "imap"];
+  return sameImap ? ["smtp"] : ["imap", "smtp"];
 }
 
 /** The notice a written account leaves. */

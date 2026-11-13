@@ -310,7 +310,7 @@ describe("the account wizard's mailbox defaults", () => {
 describe("the account wizard's write", () => {
   it("stores the passwords the test used, and says what it stored or did not", () => {
     expect(passwordKinds("imap", true)).toEqual(["smtp"]);
-    expect(passwordKinds("proton", false)).toEqual(["smtp", "imap"]);
+    expect(passwordKinds("proton", false)).toEqual(["imap", "smtp"]);
     expect(passwordKinds("graph", false)).toEqual([]);
     expect(writtenLine("a", "imap", false, true)).toBe("Added the account a; its password is stored");
     expect(writtenLine("a", "imap", true, false)).toBe("Wrote config.toml with the account a; its SMTP and IMAP passwords are stored");

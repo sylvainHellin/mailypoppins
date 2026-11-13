@@ -340,6 +340,22 @@ impl super::WizardDaemon for RefusingSetPassword {
     }
 }
 
+/// The IMAP password is stored before the SMTP one: storing a password starts
+/// a new account's first sync, which must log in with the IMAP password rather
+/// than fall back to the SMTP one before it arrives (PERSO-199).
+#[tokio::test]
+async fn the_imap_password_is_stored_first() {
+    let mut daemon = RefusingSetPassword {
+        refuse: "none",
+        stored: Vec::new(),
+    };
+    let passwords = [("smtp", "a".to_string()), ("imap", "b".to_string())];
+    super::init::store_passwords(&mut daemon, "work", &passwords)
+        .await
+        .expect("both stored");
+    assert_eq!(daemon.stored, ["imap", "smtp"]);
+}
+
 /// A password the daemon fails to store after the file is written is not
 /// silent: the wizard tries the others, then fails naming the account, the
 /// password and the command that sets it.

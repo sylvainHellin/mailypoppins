@@ -386,7 +386,9 @@ async fn run_pass(
 }
 
 /// The first sync of an account that has never been synced, run by the daemon
-/// itself after the account was added ([`spawn_first_sync_if_new`]).
+/// itself after the account was added or a password of it stored
+/// ([`spawn_first_sync_if_new`]), once it has a password to log in with
+/// ([`missing_login_password`]).
 ///
 /// The pass a `mp sync` with no flags would run, through the same guarded
 /// body, with nothing to drain (a new account has no queued mutations). It
@@ -423,6 +425,15 @@ pub async fn first_sync(
         limit: QUICK_TICK_LIMIT,
         secrets: snapshot.config.secrets_backend,
     };
+    if let Some(reason) = missing_login_password(&request.account, request.secrets).await {
+        log::info!("[daemon] {account}'s first sync waits for its password");
+        if runtimes.get(&account).is_none() && config.accounts().iter().any(|a| a.name == account) {
+            canonical.apply(super::super::config::blocked_by_failure(
+                &runtimes, &account, reason,
+            ));
+        }
+        return;
+    }
     log::info!("[daemon] {account} has no local store yet; running its first sync");
     let observations = ObservationSink::default();
     let result = async {
@@ -480,6 +491,37 @@ pub async fn first_sync(
             }
         }
     }
+}
+
+/// Why a password account's first sync cannot log in yet: neither its IMAP
+/// password nor the SMTP one the login falls back to is stored (PERSO-199).
+///
+/// The wizards write the account before they store its passwords, since
+/// `config.set_password` refuses an account the configuration does not name,
+/// so a first sync started by the write would log in with no password, or
+/// with the SMTP fallback before the IMAP password arrives, and a refused
+/// login is held for an hour (PERSO-296). It waits instead, and the
+/// `config.set_password` that stores a password starts it; the wizards store
+/// the IMAP password first, so the fallback only serves an account that has
+/// no IMAP password of its own.
+async fn missing_login_password(
+    account: &AccountConfig,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Option<String> {
+    if account.auth_method != AuthMethod::Password {
+        return None;
+    }
+    let account = account.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::secrets::init(secrets).ok()?;
+        match ImapConfig::load(&account) {
+            Err(e) if crate::secrets::is_missing(&e) => Some(e.to_string()),
+            _ => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The in-flight mark of a first sync ([`RuntimeTable::begin_first_sync`]),

@@ -448,13 +448,20 @@ async fn imap_flow(
 /// leaves an account that is configured and cannot log in. Each failure is
 /// named with the command that sets it, every password is attempted, and the
 /// wizard ends in an error rather than in its success lines.
+///
+/// The IMAP password goes first: the first one stored starts the account's
+/// first sync, which would otherwise log in with the SMTP password the IMAP
+/// login falls back to (PERSO-199). The desktop wizard stores them in the
+/// same order.
 pub(super) async fn store_passwords(
     daemon: &mut impl WizardDaemon,
     account: &str,
     passwords: &[(&str, String)],
 ) -> Result<()> {
+    let mut ordered: Vec<&(&str, String)> = passwords.iter().collect();
+    ordered.sort_by_key(|(kind, _)| *kind != "imap");
     let mut missing: Vec<&str> = Vec::new();
-    for (kind, value) in passwords {
+    for (kind, value) in ordered {
         match daemon.set_password(account, kind, value).await {
             Ok(()) => println!(
                 "{} {} password stored",

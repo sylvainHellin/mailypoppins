@@ -374,6 +374,14 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
     // have fixed the account on the server's side. Either password lets go
     // of both logins, since the IMAP login falls back to the SMTP password.
     answered_refused_login(account, &family.runtimes, &family.diagnostics);
+    // An account that has never synced waited for a password to log in with
+    // (PERSO-199): this one starts its first sync.
+    crate::daemon::config::spawn_first_sync_if_new(
+        &family.store,
+        &family.runtimes,
+        &family.canonical,
+        &account.name,
+    );
 
     Ok(command(
         family,
