@@ -762,7 +762,7 @@ pub fn found_ids(body: &str) -> Result<Vec<String>, AnswerError> {
 /// mail, or one gone since it was found.
 pub fn associated_event(body: &str) -> Result<Option<String>, AnswerError> {
     let message = match only_message(body, "GetItem") {
-        Err(AnswerError::Refused(error)) if error.code == "ErrorItemNotFound" => return Ok(None),
+        Err(AnswerError::Refused(error)) if error.code == super::ITEM_NOT_FOUND => return Ok(None),
         other => other?,
     };
     let mail = message
