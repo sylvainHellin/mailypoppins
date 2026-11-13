@@ -1401,6 +1401,17 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: shipped in the CLI, the TUI and the desktop (PERSO-255)
 - Note: the TUI and the desktop snooze for five minutes; the CLI takes `--minutes`. A dismissal in Outlook turns the event's reminder off, which the next sync reads, so the reminder leaves every client's list too.
 
+### CAL-16 Exchange Web Services calendar backend for on-premises Exchange
+
+- Classification: GUI parity as a backend variant
+- Source anchor: `src/calendar_backend/ews.rs` and `ews/` (`fetch.rs`, `xml.rs`, `parse.rs`, `write.rs`, `freebusy.rs`), `[accounts.ews]` in `crates/mp-core/src/config.rs` (`EwsSettings`, `EwsLogin`)
+- Daemon surface: the same `calendar.*` and `event.*` methods as `CAL-07` to `CAL-15`, over the backend `calendar_backend = "ews"` names, once the daemon can select it
+- GUI location: clients/desktop, the same surfaces over an EWS account; nothing of its own
+- Validation: `src/calendar_backend/ews/tests.rs` (the seam and the fixtures), `ews/tests/parse.rs` (every answer reader on the spike's sanitised answers in `tests/fixtures/ews/`), `ews/tests/sync.rs` (the calendars and delegate calendars, the baseline, the incremental sync, an item switching between a single event and a series through the store, the invalid state, the cut view, a refused login stopping the pass), `ews/tests/write.rs` (every response, create, update, cancel, delete and reminder envelope asserted whole, the transaction-property retry, the refused zones and rules), `ews/tests/freebusy.rs`, `ews/tests/invite.rs`, `src/calendar_backend/ews/ntlm/tests.rs` (MS-NLMP 4.2.4 vectors and the spike's captured messages)
+- Status: not started in any client: the backend reads, answers, writes, reads free/busy, dismisses and snoozes reminders and lists delegate calendars against a scripted server, but `calendar_backend = "ews"` is still refused as not supported yet, because the HTTP transport that logs in over NTLM is not built (PERSO-256)
+- Note: no live write was ever sent; every write envelope is built from Microsoft's schema documentation and marked so in the code, and the read envelopes are the spike's.
+  An online meeting is refused, since on-premises Exchange makes no Teams link, so its calendars will list every feature but `online-meeting`.
+
 ## Client-side integrations
 
 ### INT-01 Open `config.toml` in the editor

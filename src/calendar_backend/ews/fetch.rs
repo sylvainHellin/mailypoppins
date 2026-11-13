@@ -72,6 +72,13 @@ impl std::error::Error for EwsFetchError {}
 
 /// The transport: one logged-in POST of a SOAP envelope to the account's
 /// endpoint.
+///
+/// It owns the password, so it is what goes through `crate::login_gate` as
+/// the IMAP and SMTP logins do, under an EWS login the gate does not name
+/// yet: it asks the gate with the password before the NTLM type 1, answers a
+/// held refusal as [`EwsFetchError::LoginRefused`] without dialling, reports
+/// the dial accepted once a logged-in request answers and refused on the 401
+/// after the third leg, so no later pass asks before the hold ends.
 pub trait EwsFetch: Send + Sync {
     /// Post `envelope` (the whole document, [`envelope`]) with
     /// `Content-Type: text/xml; charset=utf-8` and answer the response body

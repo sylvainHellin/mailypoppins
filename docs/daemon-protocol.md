@@ -1257,7 +1257,7 @@ A conversation's expansion is `message.thread` with `prefer_mailbox` and `includ
 
 ### The server calendar
 
-PERSO-200 gives every account a calendar view over two sources: the server calendar of an account whose `calendar_backend` is `graph` (`ews` and `caldav` are refused as not supported yet and read as having no backend), cached by the daemon over a rolling window of one month back and twelve months ahead, and the iMIP invitation mails every account holds.
+PERSO-200 gives every account a calendar view over two sources: the server calendar of an account whose `calendar_backend` is `graph` (`ews` and `caldav` are refused as not supported yet and read as having no backend; the EWS backend is built and waits for its login transport), cached by the daemon over a rolling window of one month back and twelve months ahead, and the iMIP invitation mails every account holds.
 The wire types are `mp_protocol::calendar`; an event is `CalendarEvent`, the neutral model `mp_core::calendar_model::Event` key for key plus an optional `source`.
 
 `calendar.list` `{account?}` -> `{calendars: [CalendarInfo]}` is a query.
@@ -1399,6 +1399,12 @@ The fold settles the operation either way, so `mp calendar rebuild` over every a
 
 `message.invite` gained `event_id` on an account with a backend: the server event an invitation mail stands for, read from Graph's `eventMessage` once per mail and remembered, or `null` when the server names none or the mail has no Graph id.
 An account without a backend gets no such key.
+
+`calendar_backend = "ews"` stays refused as not supported yet, and no client receives anything from an EWS calendar: the backend for on-premises Exchange (PERSO-256) is built and tested against a scripted server, but the transport that logs in over NTLM is not, so no account can select it.
+Once it can, its calendars list `write`, `propose-time`, `free-busy` and `server-reminders` and never `online-meeting`, each mailbox of `delegate_calendars` adds a `calendar.list` row named by its address, `can_edit` `false` unless Exchange lets the user create items there, and an event a create made carries its `transaction_id` as on Graph.
+A write Exchange cannot hold fails with `-32603` and the backend's sentence: an event in a zone with no Windows name (`Exchange holds an event's time zone by its Windows name, and Antarctica/Troll has none; give the event another zone`), a yearly series with an interval, a Teams link.
+A refused EWS login fails the call with `-32603`, the message `the Exchange server refused the EWS login (<the server's answer>); set the password again with <command>`, the command being `mp config set-password` for the stored password `password_from` names, and `data` `{account}`; it stops the account's calendar sync for the tick, in which no other call asks the server again, and `calendar.rebuild` settles it as `server.error`.
+The refusal is not yet one of `account.credentials`' `rejected_logins`: the login gate records it once the transport dials through it.
 
 The daemon syncs an account's calendar after the mail pass of each of its ticks, under one lock per account it shares with `calendar.rebuild`, `event.create`, `event.update`, `event.cancel`, `event.delete` and `event.respond`, and publishes `calendar.changed` when the sync moved the cache; a sign-in without the calendar scope is skipped quietly there, since the `calendar:<name>` health check already prompts for the re-login.
 

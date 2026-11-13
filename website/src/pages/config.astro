@@ -688,6 +688,12 @@ server = "sentitems"          # Not "Sent Items"`} />
         as TUM's rooms: each is shown beside your own calendars under its
         address, read-only unless Exchange lets you create items in it.
       </p>
+      <p>
+        The EWS calendar is not selectable yet: mp does not yet log in to
+        Exchange (its NTLM login is still missing), so an <code>"ews"</code>
+        account's table is checked and shown, and its calendar stays empty
+        until a later release.
+      </p>
       <ConfigExample title="EWS calendar config" code={`[[accounts]]
 name = "tum"
 calendar_backend = "ews"
