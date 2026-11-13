@@ -959,8 +959,9 @@ fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::Eve
 }
 
 /// A settled change as the status line: `done`, for a cancel who was told,
-/// and for an invitation mail's change the attendees the server refused it
-/// for, as an invitation's partial send names them.
+/// and for an invitation mail's change each attendee it did not reach yet
+/// under what became of them (PERSO-204): waiting in the outbox for a later
+/// sync, parked there with no verdict, or refused for good.
 fn changed_line(done: &str, settled: &Value) -> String {
     let addresses = |key: &str| -> Vec<String> {
         settled[key]
@@ -980,9 +981,23 @@ fn changed_line(done: &str, settled: &Value) -> String {
         [one] => format!("{done}; told {one}"),
         many => format!("{done}; told {} people", many.len()),
     };
+    let queued = addresses("queued");
+    if !queued.is_empty() {
+        line.push_str(&format!(
+            "; waits in the outbox for {}, goes out with a later sync",
+            queued.join(", ")
+        ));
+    }
+    let parked = addresses("parked");
+    if !parked.is_empty() {
+        line.push_str(&format!(
+            "; parked with no verdict for {}, check, then mp outbox retry or discard",
+            parked.join(", ")
+        ));
+    }
     let refused = addresses("refused");
     if !refused.is_empty() {
-        line.push_str(&format!("; failed: {}", refused.join(", ")));
+        line.push_str(&format!("; refused for good: {}", refused.join(", ")));
     }
     line
 }
@@ -2441,7 +2456,27 @@ mod tests {
                         "refused": [{"address": "cy@example.com", "role": "To",
                                      "delivered": false, "error": "550 no such user"}]})
             ),
-            "Cancelled Budget review; told 2 people; failed: cy@example.com"
+            "Cancelled Budget review; told 2 people; refused for good: cy@example.com"
+        );
+    }
+
+    /// An attendee the change waits in the outbox for, or is parked there
+    /// for with no verdict, is named as such, never as failed: a deferral
+    /// goes out with a later sync.
+    #[test]
+    fn a_changed_line_names_who_waits_in_the_outbox() {
+        let outcome = |address: &str, error: &str| json!({"address": address, "role": "To", "delivered": false, "error": error});
+        assert_eq!(
+            changed_line(
+                "Updated Budget review",
+                &json!({"event": {},
+                        "queued": [outcome("bob@example.com", "451 4.7.1 try again later")],
+                        "parked": [outcome("eve@example.com", "connection reset")],
+                        "refused": [outcome("cy@example.com", "550 no such user")]})
+            ),
+            "Updated Budget review; waits in the outbox for bob@example.com, goes out with a \
+             later sync; parked with no verdict for eve@example.com, check, then mp outbox \
+             retry or discard; refused for good: cy@example.com"
         );
     }
 }
