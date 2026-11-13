@@ -5671,8 +5671,9 @@ mod smtp_durability_tests {
     /// The SMTP configuration of `port`'s server, with a password it refuses.
     fn refused_config(port: u16) -> SmtpConfig {
         SmtpConfig {
-            // An account of its own per server, since the list keys a refused
-            // password by the account and tests run side by side.
+            // An account and a user of its own per server (the user below),
+            // since the list keys a refused password by the user and tests run
+            // side by side.
             account: format!("{ACCOUNT}-{port}"),
             host: "127.0.0.1".to_string(),
             port,

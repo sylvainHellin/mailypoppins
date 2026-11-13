@@ -378,12 +378,12 @@ mod tests {
 
     fn config(port: u16) -> ImapConfig {
         ImapConfig {
-            // An account of its own per server, since the list keys a refused
-            // password by the account and tests run side by side.
+            // An account and a user of its own per server, since the list keys
+            // a refused password by the user and tests run side by side.
             account: format!("pool-{port}"),
             host: "127.0.0.1".into(),
             port,
-            username: "nobody@example.com".into(),
+            username: format!("nobody-{port}@example.com"),
             password: "unused".into(),
             accept_invalid_certs: false,
             fetch_concurrency: 4,

@@ -18,14 +18,25 @@
 //! - a Graph account's token refresh, in [`crate::graph::access_token`],
 //!   refused by `invalid_grant` (the refresh token is revoked or expired).
 //!
-//! Each consults the list kept here. A refusal is recorded under the
-//! account and a hash of the refused secret (the password, or the refresh
-//! token), not under the login: an account's IMAP and SMTP logins that use
-//! one password share one row, whatever their hosts (the TUM's IMAP and SMTP
-//! servers are two hosts checking one password). While the row's hold runs,
-//! every login of the account with that secret fails at once with a
-//! [`LoginRejected`] without dialling, the SMTP login after an IMAP refusal
-//! included, and the answer says at which login the server refused it.
+//! Each consults the list kept here. A refusal is recorded under the login
+//! identity and a hash of the refused secret, not under the login. The
+//! identity of a password login is its user name, compared ASCII-lowercased,
+//! and not its host or its account: an account's IMAP and SMTP logins that
+//! present one user and one password share one row on two hosts (the TUM's
+//! IMAP and SMTP servers are two hosts checking one password), and so do two
+//! configured accounts logging in as one user. Logins as two users are two
+//! rows even with one password, so a typo in one user name neither holds nor
+//! resets the other. A Graph sign-in's identity is its account, with the
+//! refresh token as its secret. While the row's hold runs, every login with
+//! that identity and secret fails at once with a [`LoginRejected`] without
+//! dialling, the SMTP login after an IMAP refusal included, and the answer
+//! says at which login the server refused it.
+//!
+//! The one case this keying gets wrong: two unrelated servers with one user
+//! name and one password share a row, so a refusal at one holds the other
+//! and a success at one resets the other's count. Mail user names are
+//! nearly always full addresses, and keying by host would split the TUM's
+//! two hosts, which is the case the schedule exists for.
 //!
 //! The hold of a password grows with the refusals of it in a row, at either
 //! login ([`hold`]): 2 minutes after the first, 10 after the second, an hour
@@ -36,8 +47,8 @@
 //! an hour after, by the sync and the outbox drain together, until the user
 //! acts. A Graph sign-in is held an hour from the first refusal, since
 //! `invalid_grant` is Entra's final word on the refresh token. Two passwords
-//! (an account whose IMAP and SMTP passwords differ, or one changed at one
-//! login only) are two rows with a schedule each. Dials that race each other
+//! (IMAP and SMTP passwords that differ, or one changed at one login only)
+//! are two rows with a schedule each. Dials that race each other
 //! past the gate as a hold ends are counted as one refusal.
 //!
 //! The hold ends
@@ -47,15 +58,14 @@
 //!   password (`config.set_password`), signs in again
 //!   (`config.oauth2_login`), or starts what needs the login (a sync for the
 //!   IMAP login and the Graph sign-in, a send for the SMTP login and the Graph
-//!   sign-in), which ends it for every login of the account sharing the
-//!   secret.
+//!   sign-in), which ends it for every login sharing the row.
 //!
 //! Neither resets the count: a refusal of the same secret after either is the
 //! next in the row. The row, count and all, ends
 //!
-//! - when a login of the account succeeds with the secret, since the server
-//!   just took it, for the other login as well;
-//! - when no login of the account is attempted with the secret any more;
+//! - when a login with the identity succeeds with the secret, since the
+//!   server just took it, for the other logins of the row as well;
+//! - when no login is attempted with the identity and the secret any more;
 //! - when the daemon restarts, since the list lives in memory only.
 //!
 //! A new secret is not on the list, so it is asked at once, and its first
@@ -386,13 +396,17 @@ fn refusals() -> MutexGuard<'static, Refusals> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What a refused secret is kept under: the account and the secret, not the
-/// login, so an account's IMAP and SMTP logins that use one password share
-/// one row, whatever their hosts. `sign_in` keeps a Graph refresh token apart
-/// from a password.
+/// What a refused secret is kept under: the login identity and the secret,
+/// not the login, so every login that presents the same user and password
+/// shares one row, whatever its host and whichever account it is configured
+/// in.
+///
+/// The identity of a password login is its user name, ASCII-lowercased (mail
+/// servers compare it so); a Graph sign-in's is its account's name, which its
+/// token cache is kept under, and `sign_in` keeps it apart from a password.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct RowKey {
-    account: String,
+    identity: String,
     sign_in: bool,
     secret: [u8; 32],
 }
@@ -400,24 +414,32 @@ struct RowKey {
 impl RowKey {
     fn of(login: &Login, secret: &[u8; 32]) -> Self {
         Self {
-            account: login.account().to_string(),
+            identity: identity(login),
             sign_in: matches!(login, Login::Graph(_)),
             secret: *secret,
         }
     }
 
     fn is_family_of(&self, login: &Login) -> bool {
-        self.account == login.account() && self.sign_in == matches!(login, Login::Graph(_))
+        self.identity == identity(login) && self.sign_in == matches!(login, Login::Graph(_))
     }
 }
 
-/// One refused secret of one account: its schedule, shared by every login of
-/// the account that uses it.
+/// The identity `login` presents to its server, apart from its secret.
+fn identity(login: &Login) -> String {
+    match login {
+        Login::Imap(server) | Login::Smtp(server) => server.username.to_ascii_lowercase(),
+        Login::Graph(account) => account.clone(),
+    }
+}
+
+/// One refused secret of one login identity: its schedule, shared by every
+/// login that presents them.
 struct Row {
     /// When the hold ends and the server is asked again.
     until: Instant,
-    /// The refusals of the secret in a row, at any of the account's logins,
-    /// this one included.
+    /// The refusals of the secret in a row, at any login of the row, this
+    /// one included.
     in_a_row: u32,
     entry: u64,
     /// The login the server last refused the secret at, and its answer.
@@ -435,7 +457,7 @@ impl Row {
 /// without waiting for it.
 #[derive(Default)]
 struct Refusals {
-    /// The refused secrets, by account and secret.
+    /// The refused secrets, by login identity and secret.
     rows: HashMap<RowKey, Row>,
     /// The secret each login was last attempted with, which a caller that
     /// reads no secret (the health check) and the user's action find the
@@ -445,28 +467,24 @@ struct Refusals {
 }
 
 impl Refusals {
-    /// Note that `login` is attempted with `secret`, and drop the rows of its
-    /// account no login is attempted with any more: a password replaced is
-    /// a row nothing reads.
+    /// Note that `login` is attempted with `secret`, and drop the rows no
+    /// login is attempted with any more: a password replaced is a row nothing
+    /// reads.
     fn see(&mut self, login: &Login, secret: &[u8; 32]) {
         if self.seen.get(login) == Some(secret) {
             return;
         }
         self.seen.insert(login.clone(), *secret);
-        let account = login.account().to_string();
         let live: Vec<RowKey> = self
             .seen
             .iter()
-            .filter(|(seen, _)| seen.account() == account)
             .map(|(seen, secret)| RowKey::of(seen, secret))
             .collect();
-        self.rows
-            .retain(|key, _| key.account != account || live.contains(key));
+        self.rows.retain(|key, _| live.contains(key));
     }
 
     /// The answer the gate gives a `login` with `secret` at `now`, if the hold
-    /// of the secret runs, whichever of the account's logins it was refused
-    /// at; `wall` is the wall clock at `now`, which the answer's time is told
+    /// of the secret runs, whichever login of the row it was refused at; `wall` is the wall clock at `now`, which the answer's time is told
     /// in.
     fn refused(
         &mut self,
@@ -544,19 +562,24 @@ impl Refusals {
         }
     }
 
-    /// End at `now` the hold of every row of `account`, keeping the counts.
+    /// End at `now` the hold of the rows of the secrets `account`'s logins
+    /// were last attempted with, keeping the counts.
     fn release_account(&mut self, account: &str, now: Instant) {
-        for (_, row) in self
-            .rows
-            .iter_mut()
-            .filter(|(key, _)| key.account == account)
-        {
-            row.until = row.until.min(now);
+        let keys: Vec<RowKey> = self
+            .seen
+            .iter()
+            .filter(|(login, _)| login.account() == account)
+            .map(|(login, secret)| RowKey::of(login, secret))
+            .collect();
+        for key in keys {
+            if let Some(row) = self.rows.get_mut(&key) {
+                row.until = row.until.min(now);
+            }
         }
     }
 
     /// `login` succeeded with `secret`: drop its row, count and all, for
-    /// every login of the account that shares it.
+    /// every login that shares it.
     fn accept(&mut self, login: &Login, secret: &[u8; 32]) {
         self.see(login, secret);
         self.rows.remove(&RowKey::of(login, secret));
@@ -592,6 +615,21 @@ mod tests {
             port: 465,
             username: "alpha@example.com".into(),
         })
+    }
+
+    /// `login` as `user`.
+    fn as_user(login: Login, user: &str) -> Login {
+        match login {
+            Login::Imap(server) => Login::Imap(ServerLogin {
+                username: user.into(),
+                ..server
+            }),
+            Login::Smtp(server) => Login::Smtp(ServerLogin {
+                username: user.into(),
+                ..server
+            }),
+            graph => graph,
+        }
     }
 
     /// The IMAP and the SMTP login of the account `tum`, on two hosts as the
@@ -646,8 +684,8 @@ mod tests {
         assert!(held.from_list());
         assert!(list.holds(&imap(), now + SECOND));
         assert!(list.refused(&imap(), &other, now, wall()).is_none());
-        let elsewhere = imap_of("home", "imap.tum.test");
-        assert!(list.refused(&elsewhere, &wrong, now, wall()).is_none());
+        let someone_else = as_user(imap(), "bob@example.com");
+        assert!(list.refused(&someone_else, &wrong, now, wall()).is_none());
 
         assert!(list
             .refused(&imap(), &wrong, now + FIRST_HOLD, wall())
@@ -775,6 +813,74 @@ mod tests {
             .refused(&imap(), &fingerprint("wrong"), now, wall())
             .is_none());
         assert_eq!(held_for(&mut list, &imap(), "wrong", now), FIRST_HOLD);
+    }
+
+    /// The identity case (a): one account, one user and one password on two
+    /// hosts, the university's IMAP and SMTP servers, is one row.
+    #[test]
+    fn one_user_and_password_on_two_hosts_is_one_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        assert_ne!(imap(), smtp());
+        let first = held_for(&mut list, &imap(), "wrong", at);
+        assert_eq!(
+            held_for(&mut list, &smtp(), "wrong", at + first),
+            SECOND_HOLD
+        );
+    }
+
+    /// The identity case (b): one account whose IMAP and SMTP users differ
+    /// (a typo in one) but share a password is two rows: the wrong user's
+    /// refusal holds nothing of the right one, and the right one's success
+    /// resets nothing of the wrong one.
+    #[test]
+    fn two_users_with_one_password_are_two_rows() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let typo = as_user(imap(), "alpha@exmaple.com");
+        let wrong = fingerprint("shared");
+        let first = held_for(&mut list, &typo, "shared", at);
+        assert!(
+            list.refused(&smtp(), &wrong, at + SECOND, wall()).is_none(),
+            "the right user is not held by the typo's refusal"
+        );
+        list.accept(&smtp(), &wrong);
+        assert!(
+            list.refused(&typo, &wrong, at + SECOND, wall()).is_some(),
+            "the right user's success let go of nothing"
+        );
+        assert_eq!(
+            held_for(&mut list, &typo, "shared", at + first),
+            SECOND_HOLD,
+            "the typo's count went on"
+        );
+    }
+
+    /// The identity case (c): two configured accounts logging in as the
+    /// same user on the same server with the same wrong password are one
+    /// row, so together they reach the server 3 times in the first hour and
+    /// once an hour after.
+    #[test]
+    fn two_accounts_as_one_user_are_one_row() {
+        let mut list = Refusals::default();
+        let start = Instant::now();
+        let (work, copy) = (
+            imap_of("work", "imap.tum.test"),
+            imap_of("copy", "imap.tum.test"),
+        );
+        let wrong = fingerprint("wrong");
+        let mut dials_per_hour = [0u32; 3];
+        let mut t = Duration::ZERO;
+        while t < 3 * LONG_HOLD {
+            for login in [&work, &copy] {
+                if list.refused(login, &wrong, start + t, wall()).is_none() {
+                    dials_per_hour[(t.as_secs() / 3600) as usize] += 1;
+                    list.record(login.clone(), wrong, &rejected(login), start + t);
+                }
+            }
+            t += 30 * SECOND;
+        }
+        assert_eq!(dials_per_hour, [3, 1, 1]);
     }
 
     /// A password changed at one login only is a row of its own: the other
