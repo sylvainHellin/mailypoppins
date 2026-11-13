@@ -61,7 +61,9 @@
 //! (`a_graph_sign_in_is_held_an_hour_from_the_first_refusal`).
 //!
 //! When a hold ends, the first dial of the row marks it in flight and every
-//! other dial of the row is answered as held until it answers; the mark is a
+//! other dial of the row is answered as held until it answers, told that a
+//! login with the password is being tried right now rather than a time
+//! (`a_dial_held_by_one_in_flight_says_a_login_is_being_tried`); the mark is a
 //! guard ([`Dial`]) that clears on a success, a refusal, any other error, a
 //! timeout and a cancelled task alike (`a_dial_in_flight_holds_the_others_of_its_row`,
 //! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`). No
@@ -93,6 +95,11 @@
 //! read where its dial reads it, for every login of its row, and of no other
 //! secret: a send lets an IMAP password that differs from the SMTP one stay
 //! held (`the_user_acting_on_a_login_not_seen_yet_ends_only_its_own_secrets_hold`).
+//! It lets go of a dial of the row in flight as well, so the user's own dial
+//! asks the server at once, beside it, at the cost of one more login per
+//! user action, and the superseded dial's late end leaves the user's mark
+//! alone (`the_user_acting_gets_past_a_dial_in_flight`, and end to end
+//! `imap_client::pool`'s `a_sync_the_user_starts_gets_past_a_dial_in_flight`).
 //! The count stays, so a refusal right after is the next in the row
 //! (`the_user_acting_ends_the_hold_for_both_logins_and_keeps_the_row`).
 //!
@@ -250,7 +257,7 @@ impl Login {
 /// surfaced as (`IMAP login failed`, `SMTP login failed`); one the gate
 /// answered from the list says so, says at which login the server refused the
 /// password when it was the account's other one, and says when the server is
-/// asked again.
+/// asked again, or that another login with it is being tried right now.
 #[derive(Clone, Debug)]
 pub struct LoginRejected {
     /// Which login was refused.
@@ -262,8 +269,18 @@ pub struct LoginRejected {
     answer: String,
     /// Which entry of the list this refusal is, `None` until it is recorded.
     entry: Option<u64>,
-    /// When the hold ends, set when the gate answered without dialling.
-    asked_again_at: Option<SystemTime>,
+    /// Why the gate answered without dialling, `None` for an answer the
+    /// server sent.
+    held: Option<Held>,
+}
+
+/// Why the gate answered a dial without dialling.
+#[derive(Clone, Copy, Debug)]
+enum Held {
+    /// The hold runs, and the server is asked again at this time.
+    Until(SystemTime),
+    /// The hold ended and another dial of the row is asking the server now.
+    Trying,
 }
 
 impl LoginRejected {
@@ -274,7 +291,7 @@ impl LoginRejected {
             refused_at: kind,
             answer,
             entry: None,
-            asked_again_at: None,
+            held: None,
         }
     }
 
@@ -291,7 +308,7 @@ impl LoginRejected {
 
     /// Whether the gate answered from the list, without asking the server.
     pub fn from_list(&self) -> bool {
-        self.asked_again_at.is_some()
+        self.held.is_some()
     }
 }
 
@@ -302,14 +319,26 @@ impl fmt::Display for LoginRejected {
             RejectedLogin::Smtp => write!(f, "SMTP login failed: {}", self.answer)?,
             RejectedLogin::Graph => write!(f, "OAuth2 sign-in refused: {}", self.answer)?,
         }
-        if let Some(at) = self.asked_again_at {
-            let at = chrono::DateTime::<chrono::Local>::from(at).format("%H:%M");
-            let (who, what, again) = match self.kind {
-                RejectedLogin::Imap => ("the server", "this password", "a sync is started"),
-                RejectedLogin::Smtp => ("the server", "this password", "a message is sent"),
-                RejectedLogin::Graph => {
-                    ("Microsoft", "this sign-in", "a sync or a send is started")
-                }
+        if let Some(held) = self.held {
+            let (who, what, attempt, again) = match self.kind {
+                RejectedLogin::Imap => (
+                    "the server",
+                    "this password",
+                    "a login",
+                    "a sync is started",
+                ),
+                RejectedLogin::Smtp => (
+                    "the server",
+                    "this password",
+                    "a login",
+                    "a message is sent",
+                ),
+                RejectedLogin::Graph => (
+                    "Microsoft",
+                    "this sign-in",
+                    "a sign-in",
+                    "a sync or a send is started",
+                ),
             };
             let elsewhere = match self.refused_at {
                 at if at == self.kind => "",
@@ -321,11 +350,21 @@ impl fmt::Display for LoginRejected {
                 RejectedLogin::Graph => "the account signs in again",
                 _ => "the password is set again",
             };
-            write!(
-                f,
-                " ({who} refused {what}{elsewhere} earlier and is asked again at {at}, or at \
-                 once after {set} or {again})"
-            )?;
+            match held {
+                Held::Until(at) => {
+                    let at = chrono::DateTime::<chrono::Local>::from(at).format("%H:%M");
+                    write!(
+                        f,
+                        " ({who} refused {what}{elsewhere} earlier and is asked again at {at}, or \
+                         at once after {set} or {again})"
+                    )?;
+                }
+                Held::Trying => write!(
+                    f,
+                    " ({who} refused {what}{elsewhere} earlier and {attempt} with it is being \
+                     tried right now; {who} is asked again at once after {set} or {again})"
+                )?,
+            }
         }
         Ok(())
     }
@@ -384,10 +423,11 @@ pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
 }
 
 /// End the hold of the secret `login` dials with, read from where the dial
-/// reads it ([`stored_secret`]), for every login sharing its row, so the
-/// next attempt asks the server; the count of refusals in a row stays, since
-/// the user acting is no success. A secret that cannot be read is the one
-/// `login` was last attempted with, if any. The hold of any other secret
+/// reads it ([`stored_secret`]), for every login sharing its row, and let go
+/// of a dial of the row in flight, so the next attempt asks the server; the
+/// count of refusals in a row stays, since the user acting is no success. A
+/// secret that cannot be read is the one `login` was last attempted with, if
+/// any. The hold of any other secret
 /// runs on: a send does not let go of a different IMAP password.
 pub fn forget(login: &Login) {
     let stored = stored_secret(login).map(|secret| fingerprint(&secret));
@@ -660,8 +700,12 @@ impl Refusals {
             refused_at: row.refused_at,
             answer: row.answer.clone(),
             entry: Some(row.entry),
-            // A dial in flight is asking the server now.
-            asked_again_at: Some(wall + row.until.saturating_duration_since(now)),
+            held: Some(if row.holds(now) {
+                Held::Until(wall + row.until.saturating_duration_since(now))
+            } else {
+                // The hold ended, and a dial in flight is asking the server.
+                Held::Trying
+            }),
         })
     }
 
@@ -740,12 +784,18 @@ impl Refusals {
     /// End at `now` the hold of the row of `login`'s secret, keeping its
     /// count: `stored`, the secret its next dial reads, or the one it was
     /// last attempted with when that cannot be read. Nothing else is let go.
+    ///
+    /// The mark of a dial in flight goes too, so the user's own dial asks the
+    /// server at once, beside it: one more login per user action. The
+    /// superseded dial's end then finds another mark, or none, and leaves it
+    /// ([`Refusals::end`]).
     fn release(&mut self, login: &Login, stored: Option<[u8; 32]>, now: Instant) {
         let Some(secret) = stored.or_else(|| self.seen.get(login).copied()) else {
             return;
         };
         if let Some(row) = self.rows.get_mut(&RowKey::of(login, &secret)) {
             row.until = row.until.min(now);
+            row.in_flight = None;
         }
     }
 
@@ -1220,6 +1270,58 @@ mod tests {
         );
         list.end(&imap(), &wrong, mark);
         assert!(list.begin(&smtp(), &wrong, now, wall()).is_ok());
+    }
+
+    /// The user acting gets past a dial in flight: the release clears its
+    /// mark, so the user's own dial asks the server at once, and the late
+    /// end of the superseded dial leaves the user's mark alone.
+    #[test]
+    fn the_user_acting_gets_past_a_dial_in_flight() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let wrong = fingerprint("wrong");
+        list.record(imap(), wrong, &rejected(&imap()), at);
+        let now = at + FIRST_HOLD;
+        let superseded = list
+            .begin(&imap(), &wrong, now, wall())
+            .expect("the hold ended")
+            .expect("the row is marked");
+
+        list.release(&smtp(), Some(wrong), now);
+        let user = list
+            .begin(&smtp(), &wrong, now, wall())
+            .expect("the user's send asks the server at once")
+            .expect("and marks the row");
+        list.end(&imap(), &wrong, superseded);
+        assert!(
+            list.begin(&imap(), &wrong, now, wall()).is_err(),
+            "the superseded dial's end left the user's mark"
+        );
+        list.end(&smtp(), &wrong, user);
+        assert!(list.begin(&imap(), &wrong, now, wall()).is_ok());
+    }
+
+    /// A dial held only because another dial of its row is in flight is
+    /// told so, not given a time the server is asked again at.
+    #[test]
+    fn a_dial_held_by_one_in_flight_says_a_login_is_being_tried() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let wrong = fingerprint("wrong");
+        list.record(imap(), wrong, &rejected(&imap()), at);
+        let now = at + FIRST_HOLD;
+        list.begin(&imap(), &wrong, now, wall()).unwrap();
+        let held = list.begin(&smtp(), &wrong, now, wall()).unwrap_err();
+        assert!(held.from_list());
+        let text = held.to_string();
+        assert!(
+            text.ends_with(
+                "(the server refused this password at the IMAP login earlier and a login with it \
+                 is being tried right now; the server is asked again at once after the password \
+                 is set again or a message is sent)"
+            ),
+            "{text}"
+        );
     }
 
     /// A mark older than [`MARK_LIFETIME`] is a dial that hung past every

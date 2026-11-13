@@ -526,6 +526,48 @@ mod tests {
         assert_eq!(server.logins(), 4, "the cancelled dial left no mark behind");
     }
 
+    /// PERSO-296: a sync the user starts while a dial of the row is in
+    /// flight asks the server at once, beside it, rather than being answered
+    /// as held; it used to be told the server "is asked again at" the very
+    /// time it was started.
+    #[test]
+    fn a_sync_the_user_starts_gets_past_a_dial_in_flight() {
+        use super::super::fake_imap::RejectingImapServer;
+        use crate::login_gate::{login_rejected, Login};
+
+        let server = RejectingImapServer::start();
+        let rejected = ImapConfig {
+            password: "wrong".into(),
+            accept_invalid_certs: true,
+            ..config(server.port())
+        };
+        let login = Login::Imap(rejected.login());
+        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
+        crate::login_gate::forget(&login);
+
+        server.set_login_delay(Duration::from_millis(400));
+        let (_, user) = futures::executor::block_on(async {
+            let tick = open_imap_session(&rejected);
+            let user = async {
+                while server.logins() < 2 {
+                    async_std::task::sleep(Duration::from_millis(10)).await;
+                }
+                crate::login_gate::forget(&login);
+                open_imap_session(&rejected).await
+            };
+            futures::join!(tick, user)
+        });
+        let err = match user {
+            Ok(_) => panic!("the fake server accepts no login"),
+            Err(e) => e,
+        };
+        assert!(
+            login_rejected(&err).is_some_and(|r| !r.from_list()),
+            "the user's sync asked the server: {err:#}"
+        );
+        assert_eq!(server.logins(), 3);
+    }
+
     /// PERSO-296: a LOGIN the server never answers ends at the dial's
     /// deadline, with an error naming the server and the step, and frees the
     /// row it marked: no answer is no refusal, so the count stays and the
