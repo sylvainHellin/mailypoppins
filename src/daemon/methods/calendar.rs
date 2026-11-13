@@ -29,10 +29,11 @@
 //!                             settles EventRespondResult
 //! event.update            {account, event, scope?, fields: EventPatchParams}
 //!                             -> {operation_id}
-//!                             settles EventUpdateResult {account, event, scope?}
+//!                             settles EventUpdateResult {account, event, scope?, refused?}
 //! event.cancel            {account, event, scope?, comment?, occurrence?}
 //!                             -> {operation_id}
-//!                             settles EventCancelResult {account, event, notified, scope?}
+//!                             settles EventCancelResult {account, event, notified, scope?,
+//!                             refused?}
 //! event.delete            {account, event, scope?}
 //!                             -> {operation_id}
 //!                             settles EventDeleteResult {account, event, scope?}
@@ -171,6 +172,7 @@ use mp_protocol::calendar::{
     IMIP_CALENDAR_ID,
 };
 use mp_protocol::events::KIND_CALENDAR_CHANGED;
+use mp_protocol::send::RecipientOutcome;
 use mp_protocol::RpcError;
 
 use crate::calendar_backend::{
@@ -1108,7 +1110,7 @@ fn plan_imip_update(
         crate::invite::update_messages(&row.invite, &event.time, &patch, row.next_sequence)
             .map_err(invalid_params)?;
     let ics = messages
-        .last()
+        .first()
         .map(|message| message.ics.clone())
         .ok_or_else(|| internal("an update built no message"))?;
     Ok(Work::Imip(Box::new(ImipChangeWork {
@@ -1743,6 +1745,7 @@ fn settle_removal(handle: &OperationHandle, account: String, event: String, remo
                 event,
                 notified: removal.notified,
                 scope: removal.scope,
+                refused: Vec::new(),
             },
         );
     } else {
@@ -1898,6 +1901,7 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
                         account: name,
                         event,
                         scope: scope_word,
+                        refused: Vec::new(),
                     },
                 ),
                 Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
@@ -2266,9 +2270,10 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
     }
 }
 
-/// An organizer's update or cancellation of an invitation mail, each of its
-/// messages submitted durably in turn, the cancellation of dropped attendees
-/// first.
+/// An organizer's update or cancellation of an invitation mail: its first
+/// message, the change itself, submitted durably and judging the
+/// operation, then, only when that one reached an attendee, the
+/// cancellation of the attendees an update drops.
 async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
     let ImipChangeWork {
         account,
@@ -2288,16 +2293,16 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
     let name = account.name.clone();
     let token = handle.token.clone();
     let sent = off_thread("the invitation change", move || async move {
-        let Some((delivered, contacts)) =
-            send_itip(&account, &messages, &email, method, &token).await?
-        else {
+        let Some(sent) = send_itip(&account, &messages, &email, method, &token).await? else {
             return Ok(None);
         };
         let event = match &update {
-            Some(version) => Some(sent_version(&account, row_id, version)?),
-            None => None,
+            Some(version) if !sent.delivered.is_empty() => {
+                Some(sent_version(&account, row_id, version)?)
+            }
+            _ => None,
         };
-        Ok(Some((delivered, contacts, event)))
+        Ok(Some((sent, event)))
     })
     .await
     .and_then(|inner| inner);
@@ -2305,14 +2310,15 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
         // Cancelled at the commit point: nothing went out, and the registry
         // has already settled the operation.
         Ok(None) => {}
-        Ok(Some((delivered, contacts, event))) => {
-            if let Some(contacts) = contacts {
+        Ok(Some((sent, event))) => {
+            if let Some(contacts) = sent.contacts {
                 handle.announce(super::contact::contact_changed(&name, contacts));
             }
             handle.announce(calendar_changed(&name));
-            if delivered.is_empty() {
-                return handle.fail(DomainError::internal(format!(
-                    "No attendee accepted the message; mp outbox list -A {name} shows it"
+            if sent.delivered.is_empty() {
+                return handle.fail(DomainError::internal(no_attendee_took(
+                    &name,
+                    &sent.refused,
                 )));
             }
             match event {
@@ -2322,6 +2328,7 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                         account: name,
                         event,
                         scope: None,
+                        refused: sent.refused,
                     },
                 ),
                 None => settle(
@@ -2329,8 +2336,9 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                     EventCancelResult {
                         account: name,
                         event: named,
-                        notified: delivered,
+                        notified: sent.delivered,
                         scope,
+                        refused: sent.refused,
                     },
                 ),
             }
@@ -2339,17 +2347,53 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
     }
 }
 
+/// The failure of an organizer's change no attendee accepted, naming the
+/// ones the server refused and why.
+fn no_attendee_took(name: &str, refused: &[RecipientOutcome]) -> String {
+    let named: Vec<String> = refused
+        .iter()
+        .map(|recipient| match recipient.error.as_deref() {
+            Some(error) => format!("{} ({error})", recipient.address),
+            None => recipient.address.clone(),
+        })
+        .collect();
+    let refused = if named.is_empty() {
+        String::new()
+    } else {
+        format!(": the server refused {}", named.join(", "))
+    };
+    format!(
+        "No attendee accepted the message{refused}; nothing else was sent, and mp outbox list \
+         -A {name} shows it"
+    )
+}
+
+/// What the messages of one organizer's change did.
+struct ItipSent {
+    /// The addresses that accepted the first message, the change itself.
+    delivered: Vec<String>,
+    /// Every recipient a message of the change did not reach, with why.
+    refused: Vec<RecipientOutcome>,
+    /// How many contacts the index holds once the recipients were counted.
+    contacts: Option<usize>,
+}
+
 /// The messages of one organizer's change, built and submitted through the
-/// durable outbox, or `None` when the token was shut before the first
-/// submission: the addresses that accepted one, and how many contacts the
-/// index holds once they were counted.
+/// durable outbox in order, or `None` when the token was shut before the
+/// first submission.
+///
+/// The first message is the change, which the operation is judged on; the
+/// rest (an update's cancellation of the attendees it drops) go only once
+/// it reached an attendee, so a change nobody received cancels nobody. A
+/// later message the transport could not take at all leaves its
+/// recipients refused with the reason, the change itself having gone out.
 async fn send_itip(
     account: &AccountConfig,
     messages: &[crate::invite::ItipMessage],
     email: &crate::config::EmailSettings,
     method: &str,
     token: &CancelToken,
-) -> anyhow::Result<Option<(Vec<String>, Option<usize>)>> {
+) -> anyhow::Result<Option<ItipSent>> {
     let smtp = super::send::smtp_config(account)?;
     // No signature: a change carries the invitation, and the first one's
     // body was the user's to sign.
@@ -2357,27 +2401,69 @@ async fn send_itip(
         .iter()
         .map(|message| crate::invite::itip_built(account, &smtp.default_from, email, None, message))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let Some((change, rest)) = built.split_first() else {
+        anyhow::bail!("an invitation change built no message");
+    };
     if !commit_point(method, token).await {
         return Ok(None);
     }
-    let mut delivered = Vec::new();
-    for message in &built {
-        let report = crate::send::send_durably(message, account, &smtp).await?;
-        delivered.extend(
-            report
-                .send_result
-                .results
-                .iter()
-                .filter(|result| result.success)
-                .map(|result| result.address.clone()),
-        );
+    let report = crate::send::send_durably(change, account, &smtp).await?;
+    let delivered: Vec<String> = report
+        .send_result
+        .results
+        .iter()
+        .filter(|result| result.success)
+        .map(|result| result.address.clone())
+        .collect();
+    let mut refused = refused_of(&report);
+    if !delivered.is_empty() {
+        for (message, follow) in messages.iter().skip(1).zip(rest) {
+            match crate::send::send_durably(follow, account, &smtp).await {
+                Ok(report) => refused.extend(refused_of(&report)),
+                Err(e) => refused.extend(
+                    message
+                        .to
+                        .iter()
+                        .flat_map(|to| to.split(','))
+                        .map(str::trim)
+                        .filter(|address| !address.is_empty())
+                        .map(|address| RecipientOutcome {
+                            address: address.to_string(),
+                            role: "To".to_string(),
+                            delivered: false,
+                            error: Some(format!("{e:#}")),
+                        }),
+                ),
+            }
+        }
     }
     let contacts = if delivered.is_empty() {
         None
     } else {
         crate::contacts::hooks::bump_owed_sends(account)
     };
-    Ok(Some((delivered, contacts)))
+    Ok(Some(ItipSent {
+        delivered,
+        refused,
+        contacts,
+    }))
+}
+
+/// The recipients one submission did not reach, with the reason the server
+/// gave, as `send.invite` names them.
+fn refused_of(report: &crate::send::SendReport) -> Vec<RecipientOutcome> {
+    report
+        .send_result
+        .results
+        .iter()
+        .filter(|result| !result.success)
+        .map(|result| RecipientOutcome {
+            address: result.address.clone(),
+            role: result.role.to_string(),
+            delivered: false,
+            error: result.error.clone(),
+        })
+        .collect()
 }
 
 /// The new version an update sent, as the agenda shows it: its sent copy's

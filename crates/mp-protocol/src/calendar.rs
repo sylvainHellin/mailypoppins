@@ -872,6 +872,13 @@ pub struct EventUpdateResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub scope: Option<String>,
+    /// The recipients the server refused a message of the change for, with
+    /// the reason it gave, as `send.invite`'s `recipients` name them: an
+    /// invitation mail's attendees an update or a cancellation did not
+    /// reach. Absent when none was refused, and on a server event, whose
+    /// server tells the attendees.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<crate::send::RecipientOutcome>,
 }
 
 /// The `params` of `event.cancel`.
@@ -912,6 +919,13 @@ pub struct EventCancelResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub scope: Option<String>,
+    /// The recipients the server refused a message of the change for, with
+    /// the reason it gave, as `send.invite`'s `recipients` name them: an
+    /// invitation mail's attendees an update or a cancellation did not
+    /// reach. Absent when none was refused, and on a server event, whose
+    /// server tells the attendees.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<crate::send::RecipientOutcome>,
 }
 
 /// The `params` of `event.delete`.

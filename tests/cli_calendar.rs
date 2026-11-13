@@ -174,7 +174,12 @@ impl Slice {
     /// The slice with the account without a backend also holding the sent
     /// copies of two invitations it organised (PERSO-204).
     fn start_organised() -> Slice {
-        Slice::start_with(&[], |root| {
+        Slice::start_organised_rejecting(&[])
+    }
+
+    /// The same, the SMTP fake refusing `rejected` for good.
+    fn start_organised_rejecting(rejected: &[(&str, &str)]) -> Slice {
+        Slice::start_with(rejected, |root| {
             seed_outlook(root);
             support::calendar_fixture::seed_organised(root);
         })
@@ -1308,4 +1313,27 @@ fn an_invitation_the_account_organised_changes_through_the_cli() {
     );
     let again = slice.err(&["event", "cancel", &current, "-A", IMIP]);
     assert!(again.contains("cancelled already"), "{again}");
+}
+
+/// `mp event update` on an invitation mail prints the attendees the server
+/// refused it for, as `mp send` prints a refused recipient.
+#[test]
+fn an_invitation_update_names_the_attendees_the_server_refused() {
+    let slice = Slice::start_organised_rejecting(&[("cy@example.com", "550 no such user")]);
+    let meeting = sent_row(slice.root(), "budget-review");
+    let out = slice.ok(&[
+        "event",
+        "update",
+        &meeting,
+        "--to",
+        "ada@example.com",
+        "--to",
+        "cy@example.com",
+        "-A",
+        IMIP,
+    ]);
+    assert!(
+        out.contains("\u{2717} cy@example.com (To): 550 no such user"),
+        "{out}"
+    );
 }

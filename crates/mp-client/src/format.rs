@@ -409,8 +409,8 @@ pub fn send_cli_lines(outcome: &SendOutcome) -> Vec<String> {
     lines
 }
 
-/// One recipient's own line.
-fn recipient_line(recipient: &mp_protocol::send::RecipientOutcome) -> String {
+/// One recipient's own line, as `mp send` and `mp event` print it.
+pub fn recipient_line(recipient: &mp_protocol::send::RecipientOutcome) -> String {
     if recipient.delivered {
         format!("  \u{2713} {} ({})", recipient.address, recipient.role)
     } else {

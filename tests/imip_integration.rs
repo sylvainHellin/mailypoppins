@@ -913,12 +913,12 @@ fn an_update_the_organizer_sends_moves_the_attendees_event() {
     let (spec, messages) =
         mailypoppins::invite::update_messages(&row.invite, &current, &patch, row.next_sequence)
             .unwrap();
-    // The cancellation of the dropped attendee goes first, one version
-    // below the update, so the organizer's own sent copy of it is a stale
-    // CANCEL that leaves the update standing.
+    // The update goes first, and the cancellation of the dropped attendee
+    // only after it, one version below, so the organizer's own sent copy of
+    // it is a stale CANCEL that leaves the update standing.
     assert_eq!(spec.sequence, 2);
-    let [cancel, update] = messages.as_slice() else {
-        panic!("a cancellation and an update: {messages:#?}")
+    let [update, cancel] = messages.as_slice() else {
+        panic!("an update and a cancellation: {messages:#?}")
     };
     assert_eq!(cancel.to.as_deref(), Some("bob@example.com"));
     assert!(cancel.ics.contains("METHOD:CANCEL") && cancel.ics.contains("SEQUENCE:1"));
@@ -949,9 +949,19 @@ fn an_update_the_organizer_sends_moves_the_attendees_event() {
     assert_eq!(agenda.len(), 1);
     assert!(agenda[0].cancelled, "Bob's copy is cancelled: {agenda:#?}");
 
-    // The organizer's own agenda, once both sent copies are filed: the
-    // update, live.
+    // The organizer's own agenda with the cancellation of Bob filed and
+    // the update's copy not yet: the cancellation names only some of the
+    // invitation's attendees, which uninvites them rather than cancelling
+    // the meeting.
     organizer.ingest_raw(&cancel_raw, "sent", 2);
+    let own = agenda_of(&organizer, "me@example.com");
+    assert_eq!(own.len(), 1);
+    assert!(
+        own[0].is_organizer && !own[0].cancelled,
+        "an uninvitation leaves the organizer's meeting live: {own:#?}"
+    );
+
+    // Once both sent copies are filed: the update, live.
     organizer.ingest_raw(&update_raw, "sent", 3);
     let own = agenda_of(&organizer, "me@example.com");
     assert_eq!(own.len(), 1);

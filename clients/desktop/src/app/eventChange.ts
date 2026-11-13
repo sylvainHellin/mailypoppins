@@ -18,7 +18,16 @@
 // the commands.
 
 import type { Dispatch } from "react";
-import type { CalendarEvent, CalendarInfo, CalendarRecurrence, CalendarTimeSlot, EventCancelResult, EventPatchParams } from "@/protocol/types";
+import type {
+  CalendarEvent,
+  CalendarInfo,
+  CalendarRecurrence,
+  CalendarTimeSlot,
+  EventCancelResult,
+  EventPatchParams,
+  EventUpdateResult,
+  RecipientOutcome,
+} from "@/protocol/types";
 import { asGuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
@@ -350,13 +359,24 @@ export function isEventChangeOperation(s: AppState, operationId: string): boolea
 
 const VERB = { update: ["Updating", "Updated"], cancel: ["Cancelling", "Cancelled"], delete: ["Deleting", "Deleted"] } as const;
 
-/** What a settled change says: what was done, and for a cancel who was told. */
+/** The attendees an invitation mail's change did not reach, with the server's reason. */
+function refusedOf(result: unknown): RecipientOutcome[] {
+  return (result as EventUpdateResult | EventCancelResult | null)?.refused ?? [];
+}
+
+/**
+ * What a settled change says: what was done, for a cancel who was told,
+ * and for an invitation mail's change the attendees the server refused it
+ * for, as a partly delivered send names them.
+ */
 export function changedText(run: EventChangeRun, result: unknown): string {
-  const done = `${VERB[run.kind][1]} ${run.summary}`;
-  if (run.kind !== "cancel") return done;
-  const told = (result as EventCancelResult | null)?.notified ?? [];
-  if (told.length === 0) return done;
-  return told.length === 1 ? `${done}; told ${told[0]}` : `${done}; told ${told.length} people`;
+  let text = `${VERB[run.kind][1]} ${run.summary}`;
+  const told = run.kind === "cancel" ? ((result as EventCancelResult | null)?.notified ?? []) : [];
+  if (told.length === 1) text = `${text}; told ${told[0]}`;
+  else if (told.length > 1) text = `${text}; told ${told.length} people`;
+  const refused = refusedOf(result);
+  if (refused.length === 0) return text;
+  return `${text}; failed: ${refused.map((r) => (r.error ? `${r.address} (${r.error})` : r.address)).join(", ")}`;
 }
 
 /** An update's form back with `error`, over the view when nothing else is open; else kept for Edit on the event, which the notice says. */
@@ -392,7 +412,8 @@ function eventChangeEnded(s: AppState, run: EventChangeRun, end: OperationEnd): 
     if (run.removal) return reopenRemove(next, run.removal, `${VERB[run.kind][0]} ${run.summary} failed: ${error}`, run.kind);
     return pushNotice(next, { kind: "failed", account: run.account, text: `${VERB[run.kind][0]} ${run.summary} failed: ${error}` });
   }
-  return pushNotice(next, { kind: "applied", account: run.account, text: changedText(run, end.result ?? null) });
+  const kind = refusedOf(end.result ?? null).length > 0 ? "send_partial" : "applied";
+  return pushNotice(next, { kind, account: run.account, text: changedText(run, end.result ?? null) });
 }
 
 /** An operation ended: a change this window awaits settles; while one is unanswered an unknown id waits for it. */

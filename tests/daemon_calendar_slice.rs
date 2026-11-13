@@ -2340,15 +2340,32 @@ async fn a_proposed_time_is_refused_before_any_server_call() {
 /// two invitations it organised, and the transport fake armed with its
 /// ledger at `log`.
 fn organised_slice(log: &Path) -> Slice {
+    organised_slice_rejecting(log, &[])
+}
+
+/// The same, the transport refusing `rejected` for good.
+fn organised_slice_rejecting(log: &Path, rejected: &[(&str, &str)]) -> Slice {
     Slice::start_seeded(
         false,
         &[(
             send_fixture::FAKE_TRANSPORT_ENV,
-            send_fixture::fake_transport(log),
+            send_fixture::fake_transport_rejecting(log, rejected),
         )],
         support::calendar_fixture::seed_organised,
         Vec::new(),
     )
+}
+
+/// Every address the transport fake was asked to deliver to, accepted or
+/// not, in order.
+fn asked(log: &Path) -> Vec<String> {
+    send_fixture::transport_events(log)
+        .into_iter()
+        .filter_map(|event| match event {
+            send_fixture::TransportEvent::Submit { address, .. } => Some(address),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The `imip:` event of the invitation `uid` on `account`'s agenda.
@@ -2440,7 +2457,9 @@ async fn event_update_resends_an_invitation_the_account_organised() {
     assert_eq!(result["event"]["location"], "Room 1.01", "{result}");
     assert_eq!(result["event"]["uid"], support::calendar_fixture::OWN_UID);
     assert!(result.get("scope").is_none(), "{result}");
-    assert_eq!(told(&log), ["bob@example.com", "ada@example.com"]);
+    // The update first, then the cancellation of the attendee it drops.
+    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert!(result.get("refused").is_none(), "{result}");
 
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(now["location"], "Room 1.01", "{now}");
@@ -2623,4 +2642,73 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
         )),
         "{cancels:?}"
     );
+}
+
+/// An update that drops an attendee and reaches none of the attendees it
+/// keeps fails, sends the dropped one no cancellation, and leaves the
+/// organizer's meeting live and changeable.
+#[tokio::test]
+async fn an_update_nobody_received_cancels_nobody() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_rejecting(&log, &[("ada@example.com", "550 no such user")]);
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let id = own["id"].as_str().unwrap().to_string();
+    let update = json!({"account": IMIP, "event": id,
+                        "fields": {"attendees": [{"email": "ada@example.com"}]}});
+
+    for _ in 0..2 {
+        let status = run_operation(&mut conn, "event.update", update.clone()).await;
+        assert_eq!(status["state"], "failed", "{status}");
+        let error = status["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("No attendee accepted")
+                && error.contains("ada@example.com (550 no such user)"),
+            "{status}"
+        );
+        assert_eq!(
+            asked(&log)
+                .iter()
+                .filter(|a| *a == "bob@example.com")
+                .count(),
+            0,
+            "the dropped attendee is told nothing"
+        );
+        let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+        assert_eq!(now["cancelled"], false, "{now}");
+        assert_eq!(now["id"], own["id"], "the old version stands: {now}");
+    }
+}
+
+/// An update some of whose attendees the server refuses settles, naming
+/// them with the server's reason, and the dropped attendee is told after
+/// the update went out.
+#[tokio::test]
+async fn an_update_names_the_attendees_the_server_refused() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_rejecting(&log, &[("cy@example.com", "550 no such user")]);
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "cy@example.com"}]}}),
+    )
+    .await;
+    let result = succeeded(&status);
+    assert_eq!(
+        result["refused"],
+        json!([{"address": "cy@example.com", "role": "To", "delivered": false,
+                "error": "550 no such user"}]),
+        "{result}"
+    );
+    assert_eq!(
+        asked(&log),
+        ["ada@example.com", "cy@example.com", "bob@example.com"]
+    );
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["cancelled"], false, "{now}");
 }

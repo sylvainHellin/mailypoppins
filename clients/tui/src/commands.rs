@@ -958,18 +958,33 @@ fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::Eve
     );
 }
 
-/// A settled change as the status line: `done`, and for a cancel who was
-/// told.
+/// A settled change as the status line: `done`, for a cancel who was told,
+/// and for an invitation mail's change the attendees the server refused it
+/// for, as an invitation's partial send names them.
 fn changed_line(done: &str, settled: &Value) -> String {
-    let notified: Vec<&str> = settled["notified"]
-        .as_array()
-        .map(|people| people.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    match notified.as_slice() {
+    let addresses = |key: &str| -> Vec<String> {
+        settled[key]
+            .as_array()
+            .map(|people| {
+                people
+                    .iter()
+                    .filter_map(|person| person.as_str().or_else(|| person["address"].as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let notified = addresses("notified");
+    let mut line = match notified.as_slice() {
         [] => done.to_string(),
         [one] => format!("{done}; told {one}"),
         many => format!("{done}; told {} people", many.len()),
+    };
+    let refused = addresses("refused");
+    if !refused.is_empty() {
+        line.push_str(&format!("; failed: {}", refused.join(", ")));
     }
+    line
 }
 
 /// `event.create`'s settled event as the status line: what was created, and
@@ -2149,8 +2164,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        attachment_files, draft_from_message, draft_from_source, eml_file, local_search,
-        markdown_rendition, MessageAddress,
+        attachment_files, changed_line, draft_from_message, draft_from_source, eml_file,
+        local_search, markdown_rendition, MessageAddress,
     };
     use crate::queries::Queries;
 
@@ -2408,6 +2423,25 @@ mod tests {
                     "hit": {"message_id": "<old@example.com>", "mailbox": "Archive"},
                 })
             )]
+        );
+    }
+
+    /// A settled change names who was told and, for an invitation mail's,
+    /// the attendees the server refused it for.
+    #[test]
+    fn a_changed_line_names_who_was_told_and_who_was_refused() {
+        assert_eq!(
+            changed_line("Updated Budget review", &json!({"event": {}})),
+            "Updated Budget review"
+        );
+        assert_eq!(
+            changed_line(
+                "Cancelled Budget review",
+                &json!({"notified": ["ada@example.com", "bob@example.com"],
+                        "refused": [{"address": "cy@example.com", "role": "To",
+                                     "delivered": false, "error": "550 no such user"}]})
+            ),
+            "Cancelled Budget review; told 2 people; failed: cy@example.com"
         );
     }
 }

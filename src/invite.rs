@@ -282,15 +282,16 @@ pub fn organized_row(
     })
 }
 
-/// The messages an update of `invite` sends: the update to every attendee
-/// it invites, and, when it drops attendees, a cancellation to those first.
+/// The messages an update of `invite` sends, in the order they go: the
+/// update to every attendee it invites, then, when it drops attendees, a
+/// cancellation to those.
 ///
-/// The cancellation takes `next_sequence` and the update the one above it.
-/// The organizer's own sent copies are folded like any other
-/// ([`crate::reconcile::fold_status`]), and a CANCEL at or above the update's
-/// sequence would tombstone the update on the organizer's own agenda; one
-/// below it is a stale CANCEL there, while a dropped attendee's copy, at most
-/// at `next_sequence - 1`, is cancelled by it.
+/// The update goes first because it is the change: one nobody received
+/// must cancel nobody ([`crate::reconcile`] reads the cancellation on the
+/// organizer's own agenda as the uninvitation it is). The cancellation takes
+/// `next_sequence` and the update the one above it, so a dropped attendee's
+/// copy, at most at `next_sequence - 1`, is cancelled by it, while on the
+/// organizer's agenda it is a stale CANCEL below the update's sequence.
 pub fn update_messages(
     invite: &OrganizedInvite,
     current: &EventTime,
@@ -298,25 +299,27 @@ pub fn update_messages(
     next_sequence: u32,
 ) -> Result<(InviteSpec, Vec<ItipMessage>), String> {
     let InviteUpdate { mut spec, removed } = updated_invite(invite, current, patch, next_sequence)?;
-    let mut messages = Vec::new();
-    if !removed.is_empty() {
+    let dropped = if removed.is_empty() {
+        None
+    } else {
         spec.sequence = next_sequence.saturating_add(1);
         let ics = build_cancel_ics(invite, next_sequence, None, &removed)
             .map_err(|e| format!("{e:#}"))?;
-        messages.push(cancellation(invite.title(), &removed, ics, None, None));
-    }
+        Some(cancellation(invite.title(), &removed, ics, None, None))
+    };
     let ics = build_invite_ics(&spec).map_err(|e| format!("{e:#}"))?;
     let body = spec
         .description
         .clone()
         .unwrap_or_else(|| format!("The invitation to {} was updated.", spec.summary));
-    messages.push(ItipMessage {
+    let mut messages = vec![ItipMessage {
         subject: spec.summary.clone(),
         to: Some(spec.attendees.join(", ")),
         cc: None,
         body,
         ics,
-    });
+    }];
+    messages.extend(dropped);
     Ok((spec, messages))
 }
 

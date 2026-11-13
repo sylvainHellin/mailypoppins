@@ -4,6 +4,7 @@ import { renderApp, shellReady } from "@/test/render";
 import { mock, settleEventChange, settleEventCreate } from "@/test/tauri-mock";
 import {
   changedFields,
+  changedText,
   editDialogFor,
   editProblem,
   NOTHING_CHANGED,
@@ -17,7 +18,7 @@ import {
 } from "@/app/eventChange";
 import { NO_TITLE, openEventDialog } from "@/app/eventForm";
 import type { CalendarEvent, CalendarInfo, CalendarRecurrence } from "@/protocol/types";
-import { initialState, type EventDialog } from "@/app/state";
+import { initialState, type EventChangeRun, type EventDialog } from "@/app/state";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const cursorEvent = () => document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-event-id");
@@ -506,5 +507,18 @@ describe("an occurrence of a series", () => {
     act(() => void settleEventChange());
     await noticed(/Cancelled the series Standup; told robin@example.com/);
     expect(mock.events.some((e) => e.series_master_id === first.series_master_id)).toBe(false);
+  });
+});
+
+describe("a settled change of an invitation mail", () => {
+  const run = (kind: EventChangeRun["kind"]): EventChangeRun => ({ token: 1, account: "home", summary: "Budget", kind, dialog: null, removal: null, operation_id: "op" });
+  const refused = [{ address: "cy@example.com", role: "To", delivered: false, error: "550 no such user" }];
+
+  it("names the attendees the server refused it for, as a partly delivered send does", () => {
+    expect(changedText(run("update"), { account: "home", event: event(), refused })).toBe("Updated Budget; failed: cy@example.com (550 no such user)");
+    expect(changedText(run("cancel"), { account: "home", event: "imip:4", notified: ["ada@example.com"], refused })).toBe(
+      "Cancelled Budget; told ada@example.com; failed: cy@example.com (550 no such user)",
+    );
+    expect(changedText(run("update"), { account: "home", event: event() })).toBe("Updated Budget");
   });
 });

@@ -48,7 +48,7 @@
 //!    sequence. An address that was never invited is ignored: the attendee
 //!    list belongs to the organizer's invitation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::calendar::ParsedEvent;
 use crate::types::EventFrontmatter;
@@ -72,7 +72,17 @@ pub struct InviteMessage {
     pub parsed: ParsedEvent,
 }
 
+/// The mailbox role the account's own sent mail lives in.
+pub const SENT_MAILBOX: &str = "sent";
+
 impl InviteMessage {
+    /// Whether the row is the account's own sent copy: a REQUEST there is
+    /// one the account sent, which is what makes it the organizer, and a
+    /// CANCEL there one the account sent as the organizer.
+    pub fn is_sent_copy(&self) -> bool {
+        self.mailbox == SENT_MAILBOX
+    }
+
     /// The upper-cased `METHOD`, empty when the payload carried none.
     pub fn method(&self) -> String {
         self.parsed
@@ -217,11 +227,46 @@ pub fn apply_replies(
 /// The cancellations recorded for one iCal UID (#0031).
 #[derive(Debug, Default, Clone)]
 struct UidCancels {
-    /// Highest `SEQUENCE` of a whole-series `METHOD:CANCEL` (no
-    /// `RECURRENCE-ID`) seen for this UID.
-    series: Option<u32>,
+    /// Each whole-series `METHOD:CANCEL` (no `RECURRENCE-ID`) seen for this
+    /// UID.
+    series: Vec<SeriesCancel>,
     /// `RECURRENCE-ID` -> highest `SEQUENCE` of a single-occurrence CANCEL.
     instances: std::collections::BTreeMap<String, u32>,
+}
+
+/// One whole-series `METHOD:CANCEL`.
+#[derive(Debug, Clone)]
+struct SeriesCancel {
+    sequence: u32,
+    /// On the account's own sent copy, the attendees it names, lower-cased,
+    /// the organizer left out; `None` on a cancellation the account received.
+    told: Option<BTreeSet<String>>,
+}
+
+impl SeriesCancel {
+    /// Whether this cancellation, which the account sent as the organizer,
+    /// only uninvites some attendees of a version that invites `roster`: it
+    /// names a strict subset of them (RFC 5546 3.2.5, the organizer tells
+    /// the attendees it removes with a CANCEL). Such a cancellation ends the
+    /// meeting for those it names, never on the organizer's agenda, whatever
+    /// its `SEQUENCE` against the version filed beside it.
+    fn only_uninvites(&self, roster: &BTreeSet<String>) -> bool {
+        self.told.as_ref().is_some_and(|told| {
+            !told.is_empty() && told.len() < roster.len() && told.is_subset(roster)
+        })
+    }
+}
+
+/// The addresses of `attendees` but `organizer`, trimmed and lower-cased.
+fn roster<'a>(
+    attendees: impl Iterator<Item = &'a str>,
+    organizer: Option<&str>,
+) -> BTreeSet<String> {
+    let organizer = organizer.map(|o| o.trim().to_lowercase());
+    attendees
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| !a.is_empty() && Some(a) != organizer.as_ref())
+        .collect()
 }
 
 /// The account-wide `(UID, RECURRENCE-ID)` version chain: which identities were
@@ -260,7 +305,15 @@ pub fn fold_status(invites: &[InviteMessage]) -> StatusIndex {
                         let slot = entry.instances.entry(rid.to_string()).or_insert(seq);
                         *slot = (*slot).max(seq);
                     }
-                    None => entry.series = Some(entry.series.unwrap_or(seq).max(seq)),
+                    None => entry.series.push(SeriesCancel {
+                        sequence: seq,
+                        told: invite.is_sent_copy().then(|| {
+                            roster(
+                                invite.parsed.attendees.iter().map(|a| a.address.as_str()),
+                                invite.parsed.organizer.as_deref(),
+                            )
+                        }),
+                    }),
                 }
             }
             "REQUEST" => {
@@ -291,6 +344,9 @@ impl StatusIndex {
     /// - a CANCEL cancels a copy whose `SEQUENCE` is at or below its own; a
     ///   *stale* CANCEL (lower sequence than the surviving REQUEST) is a
     ///   cancellation of a version that was already replaced, and is ignored;
+    /// - a whole-event CANCEL the account sent that names a strict subset of
+    ///   the copy's attendees uninvites them and leaves the copy live
+    ///   ([`SeriesCancel::only_uninvites`]), whatever its `SEQUENCE`;
     /// - a REQUEST is superseded only by a strictly greater
     ///   `(SEQUENCE, DTSTAMP)`, so a re-delivered or replayed copy at an equal
     ///   or lower version never displaces the newer state.
@@ -306,7 +362,14 @@ impl StatusIndex {
         let rid = event.recurrence_id.clone();
         let seq = event.sequence;
         if let Some(cancels) = self.cancels.get(uid) {
-            let series_cancelled = cancels.series.is_some_and(|c| c >= seq);
+            let invited = roster(
+                event.attendees.iter().map(|a| a.address.as_str()),
+                event.organizer.as_deref(),
+            );
+            let series_cancelled = cancels
+                .series
+                .iter()
+                .any(|c| c.sequence >= seq && !c.only_uninvites(&invited));
             let instance_cancelled = rid
                 .as_deref()
                 .and_then(|r| cancels.instances.get(r))
@@ -414,5 +477,62 @@ mod tests {
         assert_eq!(next_sequence(&held, "a@x", 0), 5);
         assert_eq!(next_sequence(&held, "a@x", 6), 7);
         assert_eq!(next_sequence(&held, "c@x", 0), 1);
+    }
+
+    /// A copy of `method` for `uid` at `sequence` in `mailbox`, organised by
+    /// me@x and naming `attendees` (the organizer among them, as Outlook
+    /// lists it).
+    fn told(
+        row_id: i64,
+        mailbox: &str,
+        method: &str,
+        sequence: u32,
+        attendees: &[&str],
+    ) -> InviteMessage {
+        let attendees: String = attendees
+            .iter()
+            .map(|a| format!("ATTENDEE:mailto:{a}\r\n"))
+            .collect();
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:m@x\r\n\
+             SEQUENCE:{sequence}\r\nDTSTAMP:20261201T100000Z\r\nDTSTART:20261214T090000Z\r\n\
+             ORGANIZER:mailto:me@x\r\n{attendees}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        InviteMessage {
+            row_id,
+            mailbox: mailbox.to_string(),
+            uid: row_id,
+            subject: None,
+            parsed: crate::calendar::parse_ics(ics.as_bytes()).unwrap(),
+        }
+    }
+
+    /// Whether the fold marks the first of `held` cancelled.
+    fn cancelled(held: &[InviteMessage]) -> bool {
+        let mut event = crate::calendar::event_frontmatter(&held[0].parsed);
+        fold_status(held).apply(&mut event, held[0].dtstamp());
+        event.cancelled
+    }
+
+    /// A cancellation the organizer sent to some of the attendees uninvites
+    /// them: its own agenda keeps the meeting, whatever the cancellation's
+    /// sequence, while the attendee it names and a cancellation of everyone
+    /// still end it.
+    #[test]
+    fn an_organizer_cancelling_some_attendees_uninvites_them() {
+        let request = |mailbox| told(1, mailbox, "REQUEST", 0, &["me@x", "ada@x", "bob@x"]);
+        let to_bob = |mailbox| told(2, mailbox, "CANCEL", 1, &["BOB@x"]);
+        assert!(
+            !cancelled(&[request("sent"), to_bob("sent")]),
+            "the organizer's meeting stays live"
+        );
+        assert!(
+            cancelled(&[request("inbox"), to_bob("inbox")]),
+            "Bob's copy is cancelled"
+        );
+        let everyone = told(2, "sent", "CANCEL", 1, &["ada@x", "bob@x"]);
+        assert!(cancelled(&[request("sent"), everyone]));
+        let nobody = told(2, "sent", "CANCEL", 1, &[]);
+        assert!(cancelled(&[request("sent"), nobody]));
     }
 }

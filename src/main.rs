@@ -5094,6 +5094,9 @@ async fn routed_event_update(
         updated.event.summary,
         updated.event.id
     );
+    for refused in &updated.refused {
+        println!("{}", mp_client::format::recipient_line(refused));
+    }
     let names = calendar_list(&mut connection, Some(account)).await?;
     let names = mailypoppins::calendar_cmd::calendar_names(&calendar_infos(&names)?);
     print!(
@@ -5167,6 +5170,9 @@ async fn routed_event_cancel(
     );
     if !cancelled.notified.is_empty() {
         println!("  told: {}", cancelled.notified.join(", "));
+    }
+    for refused in &cancelled.refused {
+        println!("{}", mp_client::format::recipient_line(refused));
     }
     Ok(())
 }
