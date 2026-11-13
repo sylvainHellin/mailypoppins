@@ -234,8 +234,10 @@ pub struct OrganizedRow {
     /// Above every REQUEST and CANCEL of the `UID` the account holds
     /// ([`crate::reconcile::next_sequence`]).
     pub next_sequence: u32,
-    /// The `RECURRENCE-ID`s the account's cancellations of this version or
-    /// a later one name, the occurrences of the series cancelled already,
+    /// The occurrences of the series cancelled already: the
+    /// `RECURRENCE-ID`s the account's cancellations name and no later
+    /// REQUEST of that occurrence re-issued, whatever version of the series
+    /// followed them ([`crate::reconcile::StatusIndex::cancelled_occurrences`]),
     /// in [`crate::calendar::ParsedEvent::recurrence_id`]'s form.
     pub cancelled_occurrences: Vec<String>,
 }
@@ -285,12 +287,8 @@ pub fn organized_row(
     }
     let held = crate::reconcile::load_invites(store, blobs, &account.name);
     let next_sequence = crate::reconcile::next_sequence(&held, &invite.uid, invite.sequence);
-    let cancelled_occurrences = held
-        .iter()
-        .filter(|held| held.uid() == Some(invite.uid.as_str()) && held.method() == "CANCEL")
-        .filter(|held| held.parsed.sequence >= invite.sequence)
-        .filter_map(|held| held.recurrence_id().map(str::to_string))
-        .collect();
+    let cancelled_occurrences =
+        crate::reconcile::fold_status(&held).cancelled_occurrences(&invite.uid);
     Ok(OrganizedRow {
         invite,
         next_sequence,

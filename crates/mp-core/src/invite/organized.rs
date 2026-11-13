@@ -607,7 +607,8 @@ pub struct InviteUpdate {
 /// meeting, a sensitivity, the choice about new time proposals, a rule) is
 /// refused rather than dropped, and so is an update of a series or of one
 /// of its occurrences: the `VEVENT` is rebuilt from an [`InviteSpec`], which
-/// holds no rule.
+/// holds no rule, and a series update would also have to carry the
+/// occurrences cancelled since as `EXDATE`s (PERSO-303).
 pub fn updated_invite(
     invite: &OrganizedInvite,
     current: &EventTime,
@@ -927,6 +928,30 @@ mod tests {
             ..Default::default()
         })
         .contains("an invitation mail carries"));
+    }
+
+    /// An update of a series, or of one of its occurrences, is refused: the
+    /// `VEVENT` is rebuilt from an [`InviteSpec`], which holds no rule and
+    /// no `EXDATE`, so it would drop the rule and the occurrences cancelled
+    /// since (PERSO-303), which a series update must carry forward.
+    #[test]
+    fn a_series_update_is_refused_rather_than_sent_without_its_cancellations() {
+        let series = organized_from_ics(OUTLOOK_SERIES.as_bytes()).unwrap();
+        let current = EventTime::timed(
+            Utc.with_ymd_and_hms(2026, 12, 7, 8, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 12, 7, 8, 30, 0).unwrap(),
+            "Europe/Berlin",
+        )
+        .unwrap();
+        let patch = EventPatch {
+            summary: Some("Weekly sync, renamed".to_string()),
+            ..Default::default()
+        };
+        let err = updated_invite(&series, &current, &patch, 3).unwrap_err();
+        assert!(
+            err.contains("cannot change a repeating invitation"),
+            "{err}"
+        );
     }
 
     #[test]

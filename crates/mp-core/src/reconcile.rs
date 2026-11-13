@@ -380,6 +380,8 @@ impl StatusIndex {
     /// - a CANCEL cancels a copy whose `SEQUENCE` is at or below its own; a
     ///   *stale* CANCEL (lower sequence than the surviving REQUEST) is a
     ///   cancellation of a version that was already replaced, and is ignored;
+    /// - a CANCEL of one occurrence stays on the series whatever the series'
+    ///   `SEQUENCE` ([`StatusIndex::cancelled_occurrences`]);
     /// - a whole-event CANCEL the account sent as an update's uninvitation
     ///   (marked, or naming a strict subset of the copy's attendees)
     ///   uninvites the attendees it names and leaves the copy live
@@ -415,12 +417,7 @@ impl StatusIndex {
             // Only the series row reports per-occurrence cancellations; an
             // occurrence payload reports its own state in `cancelled`.
             if rid.is_none() {
-                event.cancelled_instances = cancels
-                    .instances
-                    .iter()
-                    .filter(|(_, &c)| c >= seq)
-                    .map(|(r, _)| r.clone())
-                    .collect();
+                event.cancelled_instances = self.cancelled_occurrences(uid);
             }
         }
         let key = (uid.to_string(), rid.unwrap_or_default());
@@ -428,6 +425,34 @@ impl StatusIndex {
             .latest
             .get(&key)
             .is_some_and(|latest| *latest > (seq, dtstamp.to_string()));
+    }
+
+    /// The occurrences of the series `uid` a CANCEL names and no REQUEST
+    /// for that occurrence re-issued at a higher `SEQUENCE` since, in
+    /// [`ParsedEvent::recurrence_id`]'s form (PERSO-303).
+    ///
+    /// A later version of the whole series does not bring an occurrence
+    /// back, whatever its `SEQUENCE`, unless it lists the occurrence again
+    /// as its own `VEVENT`: RFC 5546 3.2.5 has the organizer cancel an
+    /// occurrence with a CANCEL naming it, and nothing in 3.2.2 has a
+    /// series update that omits the `EXDATE` mean to reinstate it, which is
+    /// what an organizer that forgets to carry its cancellations forward
+    /// sends.
+    pub fn cancelled_occurrences(&self, uid: &str) -> Vec<String> {
+        let Some(cancels) = self.cancels.get(uid.trim()) else {
+            return Vec::new();
+        };
+        cancels
+            .instances
+            .iter()
+            .filter(|(rid, &cancelled)| {
+                let key = (uid.trim().to_string(), (*rid).clone());
+                self.latest
+                    .get(&key)
+                    .is_none_or(|(reissued, _)| *reissued <= cancelled)
+            })
+            .map(|(rid, _)| rid.clone())
+            .collect()
     }
 }
 

@@ -88,7 +88,9 @@ impl Candidate {
 ///   still read, never silent data loss);
 /// - identity is `(UID, RECURRENCE-ID)`: a CANCEL naming one occurrence of a
 ///   series cancels that occurrence only, and is listed on the series row as a
-///   cancelled occurrence instead of tombstoning the whole series (#0031).
+///   cancelled occurrence instead of tombstoning the whole series (#0031),
+///   whatever version of the series follows it, until a REQUEST for that
+///   occurrence re-issues it at a higher sequence (PERSO-303).
 ///
 /// Never panics: an unreadable blob, an unparseable payload and an account
 /// with no invites all degrade to fewer rows, and every field degrades to a
@@ -646,6 +648,69 @@ mod tests {
             .unwrap();
         assert!(!series.cancelled);
         assert!(override_row.cancelled, "the occurrence itself is cancelled");
+    }
+
+    /// A later version of a series, at a higher `SEQUENCE` and listing no
+    /// `EXDATE` for an occurrence cancelled before it, keeps that occurrence
+    /// cancelled: only a REQUEST for the occurrence itself, at a `SEQUENCE`
+    /// above the cancellation's, brings it back (PERSO-303).
+    #[test]
+    fn a_series_update_keeps_an_occurrence_cancelled_before_it() {
+        let fx = fixture();
+        let series = |sequence| {
+            event_ics(
+                "REQUEST",
+                Some("uid-u"),
+                sequence,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            )
+        };
+        fx.ingest_invite("inbox", 1, "Weekly", &series(0));
+        fx.ingest_invite(
+            "inbox",
+            2,
+            "Cancelled: Weekly",
+            &occurrence_ics("CANCEL", "uid-u", 1, "20260808T090000Z"),
+        );
+        fx.ingest_invite("inbox", 3, "Weekly, updated", &series(2));
+        let events = agenda(&fx);
+        assert_eq!(subjects(&events), vec!["Weekly, updated"]);
+        assert_eq!(
+            events[0].event.cancelled_instances,
+            vec!["2026-08-08T09:00:00Z".to_string()],
+            "the update does not bring the occurrence back"
+        );
+
+        // An override at the cancellation's own SEQUENCE is cancelled by it.
+        fx.ingest_invite(
+            "inbox",
+            4,
+            "Weekly (moved)",
+            &occurrence_ics("REQUEST", "uid-u", 1, "20260808T090000Z"),
+        );
+        let events = agenda(&fx);
+        let series_row = events.iter().find(|e| e.subject != "Weekly (moved)");
+        assert_eq!(
+            series_row.unwrap().event.cancelled_instances,
+            vec!["2026-08-08T09:00:00Z".to_string()]
+        );
+        let override_row = events.iter().find(|e| e.subject == "Weekly (moved)");
+        assert!(override_row.unwrap().cancelled);
+
+        // Re-issued above it, the occurrence is live again.
+        fx.ingest_invite(
+            "inbox",
+            5,
+            "Weekly (back)",
+            &occurrence_ics("REQUEST", "uid-u", 3, "20260808T090000Z"),
+        );
+        let events = agenda(&fx);
+        assert_eq!(events.len(), 2, "{events:#?}");
+        let series_row = events.iter().find(|e| e.subject == "Weekly, updated");
+        assert!(series_row.unwrap().event.cancelled_instances.is_empty());
+        let override_row = events.iter().find(|e| e.subject == "Weekly (back)");
+        assert!(!override_row.unwrap().cancelled);
     }
 
     /// A malformed CANCEL costs itself and nothing else: the event it names

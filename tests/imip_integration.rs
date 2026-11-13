@@ -1109,6 +1109,60 @@ fn an_occurrence_the_organizer_cancels_leaves_the_attendees_series_live() {
     );
 }
 
+/// An occurrence the organizer cancelled stays cancelled for it after a
+/// later version of the series that lists no `EXDATE` for it (sent from
+/// another client): the agenda still lists it, and cancelling it again is
+/// refused (PERSO-303).
+#[test]
+fn a_later_series_version_keeps_the_organizers_cancelled_occurrence() {
+    let organizer = Mailstore::new();
+    let sent = organizer.ingest_raw(OWN_SERIES.as_bytes(), "sent", 1);
+    let berlin: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
+    let row = mailypoppins::invite::organized_row(
+        &organizer.store,
+        &organizer.blobs,
+        &organizer_account(),
+        sent,
+    )
+    .unwrap();
+    let rid = mailypoppins::invite::occurrence_recurrence_id(
+        &row.invite,
+        "2026-12-21T09:00",
+        berlin,
+        &row.cancelled_occurrences,
+    )
+    .unwrap();
+    let cancel =
+        mailypoppins::invite::cancel_message(&row.invite, row.next_sequence, Some(&rid), None)
+            .unwrap();
+    organizer.ingest_raw(&itip_raw(&cancel), "sent", 2);
+    let later = OWN_SERIES.replace("SEQUENCE:0", "SEQUENCE:2");
+    let resent = organizer.ingest_raw(later.as_bytes(), "sent", 3);
+
+    let agenda = agenda_of(&organizer, "me@example.com");
+    assert_eq!(agenda.len(), 1, "{agenda:#?}");
+    assert_eq!(agenda[0].event.sequence, 2);
+    assert_eq!(
+        agenda[0].event.cancelled_instances,
+        ["2026-12-21T09:00:00+01:00"]
+    );
+    let row = mailypoppins::invite::organized_row(
+        &organizer.store,
+        &organizer.blobs,
+        &organizer_account(),
+        resent,
+    )
+    .unwrap();
+    let err = mailypoppins::invite::occurrence_recurrence_id(
+        &row.invite,
+        "2026-12-21T09:00",
+        berlin,
+        &row.cancelled_occurrences,
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("cancelled already"), "{err:#}");
+}
+
 #[test]
 fn only_an_invitation_the_account_organised_is_changed() {
     let store = Mailstore::new();
