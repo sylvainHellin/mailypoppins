@@ -1507,6 +1507,12 @@ impl SmtpConfig {
     }
 }
 
+/// The IMAP password the IMAP login of the account named `account` dials
+/// with: [`ImapConfig::load`]'s, falling back to the SMTP one.
+pub fn imap_password_of(account: &str) -> Result<String> {
+    imap_password(account, get_secret)
+}
+
 /// The IMAP password of `account`, falling back to the SMTP one, read through
 /// `get`.
 ///

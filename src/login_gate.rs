@@ -58,7 +58,10 @@
 //!   password (`config.set_password`), signs in again
 //!   (`config.oauth2_login`), or starts what needs the login (a sync for the
 //!   IMAP login and the Graph sign-in, a send for the SMTP login and the Graph
-//!   sign-in), which ends it for every login sharing the row.
+//!   sign-in). That ends the hold of the secret the login dials with, read
+//!   where its dial reads it, for every login sharing the row, and of no
+//!   other secret: a send lets an IMAP password that differs from the SMTP
+//!   one stay held.
 //!
 //! Neither resets the count: a refusal of the same secret after either is the
 //! next in the row. The row, count and all, ends
@@ -324,20 +327,45 @@ pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
     .collect()
 }
 
-/// End the hold of the secret `login` was last attempted with, for every
-/// login of the account that shares it, so the next attempt asks the server;
-/// the count of refusals in a row stays, since the user acting is no
-/// success. A login the gate has not seen attempted yet ends the hold of
-/// every secret of its kind (a password, or a sign-in) on its account.
+/// End the hold of the secret `login` dials with, read from where the dial
+/// reads it ([`stored_secret`]), for every login sharing its row, so the
+/// next attempt asks the server; the count of refusals in a row stays, since
+/// the user acting is no success. A secret that cannot be read is the one
+/// `login` was last attempted with, if any. The hold of any other secret
+/// runs on: a send does not let go of a different IMAP password.
 pub fn forget(login: &Login) {
-    refusals().release(login, Instant::now());
+    let stored = stored_secret(login).map(|secret| fingerprint(&secret));
+    refusals().release(login, stored, Instant::now());
 }
 
 /// End the hold of every login `account` makes, which a stored password
 /// asks for: the IMAP login falls back to the SMTP password, so either
 /// password may be the one a refused login needed.
 pub fn forget_account(account: &AccountConfig) {
-    refusals().release_account(&account.name, Instant::now());
+    for kind in [
+        RejectedLogin::Imap,
+        RejectedLogin::Smtp,
+        RejectedLogin::Graph,
+    ] {
+        if let Some(login) = Login::of(account, kind) {
+            forget(&login);
+        }
+    }
+}
+
+/// The secret `login` dials with, read as its dial reads it: the IMAP
+/// password falling back to the SMTP one ([`crate::config::ImapConfig::load`]),
+/// the SMTP password, or the refresh token of the Graph sign-in's token cache.
+fn stored_secret(login: &Login) -> Option<String> {
+    match login {
+        Login::Imap(server) => crate::config::imap_password_of(&server.account).ok(),
+        Login::Smtp(server) => {
+            crate::config::get_secret(&format!("smtp-password-{}", server.account)).ok()
+        }
+        Login::Graph(account) => {
+            crate::oauth2::load_token_cache(account).map(|cache| cache.refresh_token)
+        }
+    }
 }
 
 /// Record a refusal of `login`, as a refused dial does, for a test outside
@@ -418,10 +446,6 @@ impl RowKey {
             sign_in: matches!(login, Login::Graph(_)),
             secret: *secret,
         }
-    }
-
-    fn is_family_of(&self, login: &Login) -> bool {
-        self.identity == identity(login) && self.sign_in == matches!(login, Login::Graph(_))
     }
 }
 
@@ -540,41 +564,15 @@ impl Refusals {
         }
     }
 
-    /// End at `now` the hold of the secret `login` was last attempted with,
-    /// keeping its count; for a login not seen yet, of every row of its
-    /// family on its account.
-    fn release(&mut self, login: &Login, now: Instant) {
-        match self.seen.get(login) {
-            Some(secret) => {
-                if let Some(row) = self.rows.get_mut(&RowKey::of(login, secret)) {
-                    row.until = row.until.min(now);
-                }
-            }
-            None => {
-                for (_, row) in self
-                    .rows
-                    .iter_mut()
-                    .filter(|(key, _)| key.is_family_of(login))
-                {
-                    row.until = row.until.min(now);
-                }
-            }
-        }
-    }
-
-    /// End at `now` the hold of the rows of the secrets `account`'s logins
-    /// were last attempted with, keeping the counts.
-    fn release_account(&mut self, account: &str, now: Instant) {
-        let keys: Vec<RowKey> = self
-            .seen
-            .iter()
-            .filter(|(login, _)| login.account() == account)
-            .map(|(login, secret)| RowKey::of(login, secret))
-            .collect();
-        for key in keys {
-            if let Some(row) = self.rows.get_mut(&key) {
-                row.until = row.until.min(now);
-            }
+    /// End at `now` the hold of the row of `login`'s secret, keeping its
+    /// count: `stored`, the secret its next dial reads, or the one it was
+    /// last attempted with when that cannot be read. Nothing else is let go.
+    fn release(&mut self, login: &Login, stored: Option<[u8; 32]>, now: Instant) {
+        let Some(secret) = stored.or_else(|| self.seen.get(login).copied()) else {
+            return;
+        };
+        if let Some(row) = self.rows.get_mut(&RowKey::of(login, &secret)) {
+            row.until = row.until.min(now);
         }
     }
 
@@ -912,7 +910,7 @@ mod tests {
         let at = Instant::now();
         list.record(imap(), fingerprint("wrong"), &rejected(&imap()), at);
         let now = at + SECOND;
-        list.release(&imap(), now);
+        list.release(&imap(), None, now);
         assert!(!list.holds(&imap(), now));
         for login in [imap(), smtp()] {
             assert!(list
@@ -920,16 +918,36 @@ mod tests {
                 .is_none());
         }
         assert_eq!(held_for(&mut list, &smtp(), "wrong", now), SECOND_HOLD);
+    }
 
-        // A login the gate has not seen yet lets go of every password row
-        // of its account: a sync started for an account whose SMTP login
-        // alone was refused asks the server at once.
+    /// The user acting on a login the gate has not seen dialled yet ends the
+    /// hold of the secret that login dials with, read where the dial reads
+    /// it, and of no other: a send started while the IMAP password A is held
+    /// for an hour and the SMTP password is B lets A's hold run, and one
+    /// started when both use A ends it.
+    #[test]
+    fn the_user_acting_on_a_login_not_seen_yet_ends_only_its_own_secrets_hold() {
+        let at = Instant::now();
+        let now = at + SECOND;
+        let a = fingerprint("password A");
+
         let mut list = Refusals::default();
-        list.record(smtp(), fingerprint("wrong"), &rejected(&smtp()), at);
-        list.release(&imap(), now);
-        assert!(list
-            .refused(&imap(), &fingerprint("wrong"), now, wall())
-            .is_none());
+        list.record(imap(), a, &rejected(&imap()), at);
+        list.release(&smtp(), Some(fingerprint("password B")), now);
+        assert!(
+            list.refused(&imap(), &a, now, wall()).is_some(),
+            "a send on another password lets the IMAP hold run"
+        );
+        list.release(&smtp(), None, now);
+        assert!(
+            list.refused(&imap(), &a, now, wall()).is_some(),
+            "nor does a send whose password cannot be read"
+        );
+        list.release(&smtp(), Some(a), now);
+        assert!(
+            list.refused(&imap(), &a, now, wall()).is_none(),
+            "a send on the same password ends the shared hold"
+        );
     }
 
     /// A Graph sign-in is held an hour from its first refusal: Entra's
@@ -991,7 +1009,7 @@ mod tests {
             !list.holds(&imap(), now + FIRST_HOLD),
             "the race kept the first refusal's hold"
         );
-        list.release(&imap(), now);
+        list.release(&imap(), None, now);
         assert!(!list.holds(&imap(), now));
         let again = list.record(imap(), wrong, &rejected(&imap()), now);
         assert_ne!(first.entry(), again.entry());
