@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- `mp daemon status` now names any client that is falling behind on daemon events, with how much is waiting for it and whether its queue overflowed; a healthy daemon prints what it always did, and `--json` lists every connected client under `connections` (PERSO-221).
+- `mp send-approved` prints each draft's result as soon as that draft is sent, failures included, instead of all of them at the end; the summary and exit code are unchanged (PERSO-223).
 - Profiles: `mp --profile <name>` or `MAILYPOPPINS_PROFILE` runs mp, the TUI, the daemon and the desktop app (`open -n -a mailypoppins --args --profile demo`) on their own config, store, secrets, keyring entries, logs and daemon under `profiles/<name>`; the TUI and the desktop app show the profile's name, the service commands refuse a profile, and a profile's daemon exits 60 s after its last client left (PERSO-176).
 - `mp config set-password --stdin` reads the password from a pipe (first line, newline removed, nothing else trimmed), so a script or a password manager can set it; it is refused on a terminal or for an empty line (PERSO-281).
 - The activity log filters by level in the TUI and the desktop app: `l` cycles all, warnings and errors, errors, and the overlay names the level shown; the TUI overlay's footer still fits an 80-column terminal (PERSO-218).
