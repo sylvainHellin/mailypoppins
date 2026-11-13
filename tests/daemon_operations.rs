@@ -340,6 +340,7 @@ fn progress(done: u64) -> Progress {
         done,
         total: Some(3),
         message: None,
+        outcome: None,
     }
 }
 
@@ -640,6 +641,7 @@ fn the_progress_payload_is_the_five_documented_members() {
         done: 7,
         total: None,
         message: Some("mailbox 2 of many".to_string()),
+        outcome: None,
     });
 
     let events = registry.drain_events();

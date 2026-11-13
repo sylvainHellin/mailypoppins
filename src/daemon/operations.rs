@@ -769,6 +769,7 @@ async fn fake_work(handle: OperationHandle, steps: u64, step_ms: u64, fail_at: O
             done,
             total: Some(steps),
             message: None,
+            outcome: None,
         });
         if fail_at == Some(done) {
             handle.fail(
@@ -806,6 +807,7 @@ mod tests {
             done: 0,
             total: None,
             message: None,
+            outcome: None,
         };
         assert_eq!(
             progress_payload(&id, &bare).to_string(),
@@ -816,6 +818,7 @@ mod tests {
             done: 3,
             total: Some(9),
             message: Some("three of nine".to_string()),
+            outcome: None,
         };
         assert_eq!(
             progress_payload(&id, &full).to_string(),
@@ -953,6 +956,7 @@ mod tests {
             done: 1,
             total: None,
             message: None,
+            outcome: None,
         });
         handle.succeed(json!({}));
         assert_eq!(calls.load(Ordering::SeqCst), 2);

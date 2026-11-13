@@ -652,6 +652,7 @@ async fn run_pass_to_end(
                 done: 0,
                 total: None,
                 message: None,
+                outcome: None,
             });
             body(&request, &targets, stop, &observations).await
         },
@@ -819,6 +820,7 @@ async fn drain(
         done: report.map(|(completed, _)| completed).unwrap_or_default(),
         total: report.map(|(_, pending)| pending),
         message: None,
+        outcome: None,
     });
 
     let ops = {
@@ -850,6 +852,7 @@ async fn drain(
         done,
         total,
         message,
+        outcome: None,
     });
     String::new()
 }

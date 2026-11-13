@@ -1367,6 +1367,7 @@ async fn oauth2_login(
             done: 0,
             total: None,
             message: Some(format!("{uri} {code}")),
+            outcome: None,
         });
     };
     let acquired = crate::oauth2::device_code_flow_reporting(

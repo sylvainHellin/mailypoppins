@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::send::SendOutcome;
 use crate::RpcError;
 
 /// The five states of an operation.
@@ -103,6 +104,8 @@ impl CancelScope {
 ///
 /// `total` and `message` travel as `null` rather than as absent keys, because a
 /// client reads `total` to draw a bar and has to tell "unknown" from "missing".
+/// `outcome` is the exception: absent unless a report settles one send, so
+/// every other operation's report is the four members it always was.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Progress {
@@ -114,6 +117,14 @@ pub struct Progress {
     pub total: Option<u64>,
     /// One line for the user, when there is one.
     pub message: Option<String>,
+    /// The result of the one send this report settles: `send.approved`'s
+    /// `draft_done` report carries the draft's [`SendOutcome`], the element
+    /// the batch's answer will hold for it (PERSO-223), so a client renders
+    /// the line as the draft settles with the wording it uses for the answer.
+    /// Absent on every other report and from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub outcome: Option<SendOutcome>,
 }
 
 /// Everything the daemon says about one operation.
@@ -146,6 +157,36 @@ pub struct OperationStatus {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `send.approved`'s `draft_done` report decodes as a [`Progress`] whose
+    /// `outcome` is the draft's [`SendOutcome`] and re-encodes to the same
+    /// JSON; a report without one (every other operation's, the committed
+    /// `notification.operation_progress.json`) serialises no `outcome` key, so
+    /// its bytes are the ones it always had.
+    #[test]
+    fn a_draft_done_report_carries_the_drafts_outcome_and_others_carry_none() {
+        let raw = include_str!("../fixtures/notification.operation_progress_draft_done.json");
+        let event: Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let mut payload = event["params"]["payload"].clone();
+        payload.as_object_mut().unwrap().remove("operation_id");
+        let report: Progress = serde_json::from_value(payload.clone()).expect("it decodes");
+        assert_eq!(report.phase, "draft_done");
+        assert_eq!(
+            report.message, None,
+            "the daemon sends the data, not a line"
+        );
+        let outcome = report.outcome.as_ref().expect("the draft's outcome");
+        assert_eq!(outcome.recipients.len(), 2);
+        assert_eq!(serde_json::to_value(&report).unwrap(), payload);
+
+        let raw = include_str!("../fixtures/notification.operation_progress.json");
+        let event: Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let mut payload = event["params"]["payload"].clone();
+        payload.as_object_mut().unwrap().remove("operation_id");
+        let report: Progress = serde_json::from_value(payload.clone()).expect("it decodes");
+        assert_eq!(report.outcome, None);
+        assert_eq!(serde_json::to_value(&report).unwrap(), payload);
+    }
 
     /// The committed `operation.status` fixture decodes into the type and
     /// re-encodes to the same JSON.

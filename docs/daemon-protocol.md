@@ -1416,11 +1416,14 @@ The window exists because the table used to hold every operation the process had
 No client is affected by it in practice: `operation.status` is polled while an operation runs and for a moment after it finishes, never about one that finished a thousand operations ago, and a client that outlived a daemon restart already has to handle an id the daemon does not know.
 `-32008` `operation_cancelled` is not used for either: it is the operation's own answer to its caller, and one code may not mean two things on one connection.
 
-Progress travels as the lifecycle event kind `operation.progress`, with a payload of `{operation_id, phase, done, total, message}`, where `total` and `message` are `null` rather than absent when there is nothing to say: a client reads `total` to draw a bar and has to tell "unknown" from "missing field".
+Progress travels as the lifecycle event kind `operation.progress`, with a payload of `{operation_id, phase, done, total, message}`, where `total` and `message` are `null` rather than absent when there is nothing to say: a client reads `total` to draw a bar and has to tell "unknown" from "missing field", and `outcome` is the one member that is absent unless a report settles one send (below).
 Every report is its own event and none coalesce, so `done` never skips a step.
 
-`send.approved` reports each draft of its batch twice: phase `draft`, `done` the draft's index and `message` its selector, before the draft is sent, and phase `draft_done`, `done` one more and `message` the line `mp send-approved` prints for it (`mp_client::format::send_approved_line` of its `SendOutcome`), once it settled, a failure included (PERSO-223).
-A client prints the batch as it goes from these and keeps the settled `ApprovedOutcome` for the counts; a daemon that predates `draft_done` sends only the first report, and a client then renders every line from the outcome.
+`send.approved` reports each draft of its batch twice: phase `draft`, `done` the draft's index and `message` its selector, before the draft is sent, and phase `draft_done`, `done` one more, `message` null and `outcome` the draft's `SendOutcome`, the element the batch's `ApprovedOutcome.results` will hold for it, once it settled, a failure included (PERSO-223).
+`outcome` is a member of `mp_protocol::operation::Progress` that is absent from every other report, so no other operation's progress moved a byte.
+The daemon sends the data and no wording: a client renders the line from `outcome` with the formatter it renders the settled answer with (`mp_client::format::send_approved_line` for `mp send-approved`), so a daemon and a client of two versions cannot print one batch in two wordings, and keeps the settled `ApprovedOutcome` for the counts.
+A daemon that predates `draft_done` sends only the first report, and a client then renders every line from the settled answer.
+The fixtures are `send.approved.{request,response}.json` and `notification.operation_progress_draft_done.json`.
 
 The terminal transition travels as `operation.finished`, with a payload of `{operation_id, state, result}` for a success and `{operation_id, state, error}` for a failure or a cancellation.
 The absent member is absent rather than null.
@@ -1979,5 +1982,5 @@ Both default when absent, so an older daemon's answer decodes with no folder and
 PERSO-221 added `connections` to the `daemon.status` result, one member, optional and additive: every bootstrapped connection's outbound event queue as `mp_protocol::daemon::ConnectionQueue` `{connection, client, events, bytes, overflowed}`, which a client of an older daemon reads as absent.
 The fixtures are `crates/mp-protocol/fixtures/daemon.status.{request,response}.json`; no field was renamed, none was dropped, `mp daemon status --json` gained the key (`[]` when nothing answers), and the human-readable block gains a `backlog:` line only for a connection whose queue holds events or has overflowed.
 
-PERSO-223 added a second `operation.progress` report per draft to `send.approved`, phase `draft_done` with the draft's line as its `message`, after the phase `draft` report it already sent; the payload shape is unchanged, no field was renamed or dropped, and the settled `ApprovedOutcome` is the one it was.
+PERSO-223 added a second `operation.progress` report per draft to `send.approved`, phase `draft_done`, after the phase `draft` report it already sent, and one optional member to `Progress`, `outcome`, which that report fills with the draft's `SendOutcome` and every other report leaves absent; no field was renamed or dropped, `message` is null on the new report, and the settled `ApprovedOutcome` is the one it was.
 `mp send-approved` prints each draft's line as it settles instead of all of them at the end, with the same bytes, the same summary and the same exit code.

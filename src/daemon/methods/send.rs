@@ -1108,7 +1108,7 @@ fn outcome_of(
 /// `send.approved`: every approved draft of one account, in listing order, with
 /// two progress reports each so a batch of nine is visible while it runs:
 /// phase `draft` with the draft's selector before it is sent, and phase
-/// `draft_done` with the line `mp send-approved` prints for it once it was.
+/// `draft_done` with its `SendOutcome` once it was.
 async fn send_approved(
     account: AccountConfig,
     email: EmailSettings,
@@ -1136,6 +1136,7 @@ async fn send_approved(
             done: index as u64,
             total: Some(total),
             message: Some(selector.clone()),
+            outcome: None,
         });
         let runtime = guarded_runtime(runtimes, &account, &row.path);
         let _turn = match &runtime {
@@ -1174,14 +1175,17 @@ async fn send_approved(
         } else {
             outcome.failed += 1;
         }
-        // The draft's own line as it settles, a failure included, so a client
-        // prints the batch as it goes rather than at the end (PERSO-223); the
-        // line is the one the settled outcome renders to.
+        // The draft's own result as it settles, a failure included, so a
+        // client prints the batch as it goes rather than at the end
+        // (PERSO-223). The data and no wording: the client renders it with the
+        // formatter it uses for the settled answer, so a daemon and a client
+        // of two versions cannot print a batch in two wordings.
         handle.report(Progress {
             phase: "draft_done".to_string(),
             done: index as u64 + 1,
             total: Some(total),
-            message: Some(mp_client::format::send_approved_line(&result)),
+            message: None,
+            outcome: Some(result.clone()),
         });
         outcome.results.push(result);
     }

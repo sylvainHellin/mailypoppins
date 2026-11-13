@@ -566,6 +566,7 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
         done: 0,
         total: None,
         message: Some(account.name.clone()),
+        outcome: None,
     });
     let token = handle.token.clone();
     let root = crate::config::account_dir(&account.name);

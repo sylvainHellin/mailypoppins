@@ -3141,8 +3141,10 @@ async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
 /// `mp send-approved` prints a line per message as it goes (PERSO-223): each
 /// draft of the batch is announced by an `operation.progress` of phase
 /// `draft` before it is sent and closed by one of phase `draft_done` once it
-/// was, whose `message` is the line the CLI prints for it, a failure
-/// included, and both come before the operation's finish.
+/// was, whose `outcome` is that draft's `SendOutcome`, a failure included, and
+/// both come before the operation's finish. The daemon sends the data and no
+/// wording: the client renders the line, with the formatter it uses at the
+/// settle.
 ///
 /// Routed side only (fake transport): one draft partly delivered and one
 /// refused by its only recipient.
@@ -3213,17 +3215,25 @@ async fn send_approved_reports_each_draft_as_it_settles() {
         let opened = &reports[2 * index];
         let closed = &reports[2 * index + 1];
         assert_eq!(opened["message"].as_str(), result.selector.as_deref());
+        let reported: SendOutcome = serde_json::from_value(closed["outcome"].clone())
+            .unwrap_or_else(|e| {
+                panic!("draft_done carries the draft's SendOutcome: {e}: {closed}")
+            });
+        assert_eq!(
+            &reported, result,
+            "the result reported as it settles is the one the batch's answer carries"
+        );
         assert_eq!(
             closed["message"],
-            json!(send_approved_line(result)),
-            "the line printed as it settles is the line the outcome renders to"
+            Value::Null,
+            "the daemon sends no wording: {closed}"
         );
     }
     assert!(
-        reports
+        outcome
+            .results
             .iter()
-            .filter(|r| r["phase"] == "draft_done")
-            .any(|r| r["message"].as_str().unwrap().starts_with('\u{2717}')),
+            .any(|result| send_approved_line(result).starts_with('\u{2717}')),
         "a draft that failed is reported as it fails: {reports:?}"
     );
 }

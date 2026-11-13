@@ -658,6 +658,7 @@ mod tests {
                         done: 3,
                         total: None,
                         message: None,
+                        outcome: None,
                     }),
                     result: None,
                     error: None,

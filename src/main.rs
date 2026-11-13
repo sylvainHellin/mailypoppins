@@ -2262,8 +2262,10 @@ enum BatchPiece {
 /// (PERSO-223) rather than once it has settled.
 ///
 /// The daemon reports each draft twice: phase `draft` with its selector before
-/// the send, and phase `draft_done` with its line once it settled, a failure
-/// included. The line is the detail; the summary after the batch carries only
+/// the send, and phase `draft_done` with its `SendOutcome` once it settled, a
+/// failure included, which renders through the same
+/// [`send_approved_line`](mp_client::format::send_approved_line) as the
+/// settle. The line is the detail; the summary after the batch carries only
 /// the counts, so nothing is said twice.
 ///
 /// On a terminal the `Sending to …` half appears when the draft starts and the
@@ -2392,13 +2394,25 @@ impl<'a, W: Write> BatchLines<'a, W> {
                 Vec::new()
             }
             Some("draft_done") if done > 0 => {
-                self.reports_done = true;
-                let Some(line) = payload["message"].as_str() else {
+                // The draft's result, rendered with the formatter the settle
+                // uses, so the line is the client's wording whatever daemon
+                // sent it. A report without one (a build that sent only a
+                // line) is left for the settle.
+                let Some(result) = payload.get("outcome").and_then(|outcome| {
+                    serde_json::from_value::<mp_protocol::send::SendOutcome>(outcome.clone()).ok()
+                }) else {
                     return Vec::new();
                 };
+                self.reports_done = true;
                 let index = done - 1;
-                let selector = self.started.get(index).cloned().flatten();
-                vec![self.close(index, selector.as_deref(), line.to_string())]
+                let line = mp_client::format::send_approved_line(&result);
+                let selector = self
+                    .started
+                    .get(index)
+                    .cloned()
+                    .flatten()
+                    .or(result.selector.clone());
+                vec![self.close(index, selector.as_deref(), line)]
             }
             _ => Vec::new(),
         }
@@ -7636,8 +7650,13 @@ mod tests {
             json!({"phase": "draft", "done": done, "total": 2, "message": selector})
         }
 
-        fn settled(done: u64, line: &str) -> serde_json::Value {
-            json!({"phase": "draft_done", "done": done, "total": 2, "message": line})
+        /// The `draft_done` report of draft `done - 1`, carrying the outcome a
+        /// failed send of `selector` with `reason` has.
+        fn settled(done: u64, selector: &str, reason: &str) -> serde_json::Value {
+            json!({
+                "phase": "draft_done", "done": done, "total": 2, "message": null,
+                "outcome": serde_json::to_value(failed(selector, reason)).unwrap(),
+            })
         }
 
         /// On a terminal a draft's half line opens as it starts and its line,
@@ -7656,7 +7675,7 @@ mod tests {
                 [BatchPiece::Opened("ivana@example.com".into())]
             );
             assert_eq!(
-                batch.progress(&settled(1, "\u{2717} no a")),
+                batch.progress(&settled(1, "a", "no a")),
                 [BatchPiece::Closed("\u{2717} no a".into())]
             );
             assert_eq!(
@@ -7664,7 +7683,7 @@ mod tests {
                 [BatchPiece::Opened("robin@example.com".into())]
             );
             assert_eq!(
-                batch.progress(&settled(2, "\u{2717} no b")),
+                batch.progress(&settled(2, "b", "no b")),
                 [BatchPiece::Closed("\u{2717} no b".into())]
             );
             assert_eq!(batch.settle(&outcome()), []);
@@ -7681,7 +7700,7 @@ mod tests {
             let mut batch = BatchLines::new(&approved, false, Vec::new());
             assert_eq!(batch.progress(&started(0, "a")), []);
             assert_eq!(
-                batch.progress(&settled(1, "\u{2717} no a")),
+                batch.progress(&settled(1, "a", "no a")),
                 [BatchPiece::Whole(
                     "ivana@example.com".into(),
                     "\u{2717} no a".into()
@@ -7689,13 +7708,47 @@ mod tests {
             );
             assert_eq!(batch.progress(&started(1, "b")), []);
             assert_eq!(
-                batch.progress(&settled(2, "\u{2717} no b")),
+                batch.progress(&settled(2, "b", "no b")),
                 [BatchPiece::Whole(
                     "robin@example.com".into(),
                     "\u{2717} no b".into()
                 )]
             );
             assert_eq!(batch.settle(&outcome()), []);
+        }
+
+        /// A `draft_done` carrying the draft's outcome prints the line the
+        /// settle would have printed for the same result, through the same
+        /// formatter, and the settle then prints nothing for it.
+        #[test]
+        fn a_reported_outcome_renders_the_line_the_settle_would() {
+            let (a, b) = (
+                entry("a", "ivana@example.com"),
+                entry("b", "robin@example.com"),
+            );
+            let approved = [&a, &b];
+            let result = failed("a", "no a");
+            let settle_line = mp_client::format::send_approved_line(&result);
+
+            let mut batch = BatchLines::new(&approved, false, Vec::new());
+            assert_eq!(batch.progress(&started(0, "a")), []);
+            let report = json!({
+                "phase": "draft_done", "done": 1, "total": 2, "message": null,
+                "outcome": serde_json::to_value(&result).unwrap(),
+            });
+            assert_eq!(
+                batch.progress(&report),
+                [BatchPiece::Whole("ivana@example.com".into(), settle_line)]
+            );
+            let rest = batch.settle(&outcome());
+            assert_eq!(
+                rest,
+                [BatchPiece::Whole(
+                    "robin@example.com".into(),
+                    "\u{2717} no b".into()
+                )],
+                "only the draft no report settled is left for the settle"
+            );
         }
 
         /// A half line left open when the batch ends without settling (a

@@ -1,0 +1,38 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "operation.progress",
+    "payload": {
+      "done": 1,
+      "message": null,
+      "operation_id": "4c1d2e3f5a6b7c8d9e0f1a2b3c4d5e6f",
+      "outcome": {
+        "account": "work",
+        "message_id": "<20260702T091403.4f2a@example.com>",
+        "recipients": [
+          {
+            "address": "robin@example.com",
+            "delivered": true,
+            "error": null,
+            "role": "to"
+          },
+          {
+            "address": "carol@example.com",
+            "delivered": false,
+            "error": "550 5.1.1 unknown recipient",
+            "role": "cc"
+          }
+        ],
+        "selector": "mp://work/drafts/2026-07-02-angebot",
+        "sent_copy": "filed",
+        "settle_error": null,
+        "status_line": "partly delivered, see `mp outbox list`"
+      },
+      "phase": "draft_done",
+      "total": 2
+    },
+    "revision": 4231
+  }
+}
