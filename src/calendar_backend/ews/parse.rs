@@ -415,6 +415,24 @@ pub fn sync_page(body: &str) -> Result<SyncAnswer, AnswerError> {
 // GetItem
 // ---------------------------------------------------------------------------
 
+/// The extended property a create stamps with its transaction id: a string
+/// named so in the `PublicStrings` set, which GetItem asks for and a retried
+/// create searches by.
+pub const TRANSACTION_PROPERTY: &str = "MailypoppinsTransactionId";
+
+/// The transaction id the item carries, when a create of mp stamped it.
+fn transaction_of(item: &Element) -> Option<String> {
+    item.children_named("ExtendedProperty")
+        .find(|property| {
+            property
+                .child("ExtendedFieldURI")
+                .and_then(|uri| uri.attr("PropertyName"))
+                == Some(TRANSACTION_PROPERTY)
+        })
+        .and_then(|property| property.text_of("Value"))
+        .map(str::to_string)
+}
+
 /// The calendar item of each GetItem response message, in the order the
 /// request named them, or the error the server answered for it.
 pub fn items(body: &str) -> Result<Vec<Message>, AnswerError> {
@@ -651,8 +669,31 @@ pub fn calendar_event(account: &str, calendar: &str, item: &Element) -> Result<E
             .map(str::to_string),
         allow_new_time_proposals: item.flag("AllowNewTimeProposal").unwrap_or(true),
         response_requested: item.flag("IsResponseRequested").unwrap_or(true),
-        transaction_id: None,
+        transaction_id: transaction_of(item),
     })
+}
+
+/// The ItemIds a FindItem without a view answers, items of any kind.
+pub fn found_ids(body: &str) -> Result<Vec<String>, AnswerError> {
+    let message = only_message(body, "FindItem")?;
+    let items = message
+        .at(&["RootFolder", "Items"])
+        .ok_or_else(|| malformed("no RootFolder with Items"))?;
+    Ok(items
+        .children
+        .iter()
+        .filter_map(item_id)
+        .map(str::to_string)
+        .collect())
+}
+
+/// The ItemId of the calendar item a CreateItem or an UpdateItem saved.
+pub fn saved_id(body: &str, operation: &str) -> Result<String, AnswerError> {
+    only_message(body, operation)?
+        .at(&["Items", "CalendarItem"])
+        .and_then(item_id)
+        .map(str::to_string)
+        .ok_or_else(|| malformed("no saved CalendarItem with an ItemId"))
 }
 
 /// The item's `CalendarItemType`, Single when it names none.

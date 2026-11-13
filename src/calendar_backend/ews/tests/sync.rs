@@ -30,10 +30,10 @@ const INVALID_STATE: &str =
 const VERSION_REFUSED: &str =
     include_str!("../../../../tests/fixtures/ews/version_refused_exchange2019.xml");
 
-const MASTER_ID: &str = "AQMkVBg8OIjdLZBuHCO0AZHdGCSuMm47YWI4ISGjCFqaAAK1VcIhUZKSMYAZn3ZmApWgCNjC48PZ5BhoHhrSfyE5YiyKz2bDRF35wtkd4MMFUxCTLWAQvhV2IorIq8fIGM52txmt1URP/N8tCLQWQF==";
+pub(super) const MASTER_ID: &str = "AQMkVBg8OIjdLZBuHCO0AZHdGCSuMm47YWI4ISGjCFqaAAK1VcIhUZKSMYAZn3ZmApWgCNjC48PZ5BhoHhrSfyE5YiyKz2bDRF35wtkd4MMFUxCTLWAQvhV2IorIq8fIGM52txmt1URP/N8tCLQWQF==";
 
 /// The GetItem answer of an item the server no longer has.
-const NOT_FOUND: &str = "<m:GetItemResponseMessage ResponseClass=\"Error\">\
+pub(super) const NOT_FOUND: &str = "<m:GetItemResponseMessage ResponseClass=\"Error\">\
     <m:MessageText>The specified object was not found in the store.</m:MessageText>\
     <m:ResponseCode>ErrorItemNotFound</m:ResponseCode>\
     <m:DescriptiveLinkKey>0</m:DescriptiveLinkKey><m:Items/></m:GetItemResponseMessage>";
@@ -42,7 +42,7 @@ fn backend(fetch: ScriptedFetch) -> EwsCalendarBackend<ScriptedFetch> {
     EwsCalendarBackend::with_fetch("tum", EwsPasswordSource::Imap, fetch)
 }
 
-fn calendar() -> Calendar {
+pub(super) fn calendar() -> Calendar {
     Calendar {
         account: "tum".into(),
         id: CALENDAR_ID.into(),
@@ -72,7 +72,7 @@ fn state_of(page: &str) -> String {
 
 /// One GetItem answer with a response message per part, in order: the
 /// message of a GetItem fixture, or a message given as it is.
-fn get_item(parts: &[&str]) -> String {
+pub(super) fn get_item(parts: &[&str]) -> String {
     let messages: String = parts
         .iter()
         .map(|part| {
@@ -559,20 +559,21 @@ async fn a_refused_login_stops_the_pass_and_is_never_retried() {
     assert_eq!(backend.fetch().sent().len(), 3);
 }
 
-/// The writes, free/busy and the reminders are not built on EWS: each is
-/// refused with a sentence before any request, and the backend lists no
-/// feature for them.
+/// Free/busy and the reminders are not built on EWS: each is refused with
+/// a sentence before any request, and the backend lists no feature for
+/// them.
 #[tokio::test]
 async fn the_calls_not_built_yet_are_refused_without_a_request() {
+    use crate::calendar_model::CalendarFeature;
     let backend = backend(ScriptedFetch::default());
-    let err = backend.delete_event(SINGLE_ID).await.unwrap_err();
+    let err = backend.dismiss_reminder(SINGLE_ID).await.unwrap_err();
     assert_eq!(
         err.to_string(),
-        "the EWS calendar of tum cannot delete an event yet"
+        "the EWS calendar of tum cannot dismiss a reminder on the server yet"
     );
     assert!(backend.fetch().sent().is_empty());
     assert_eq!(
         super::super::FEATURES,
-        [crate::calendar_model::CalendarFeature::ProposeTime]
+        [CalendarFeature::Write, CalendarFeature::ProposeTime]
     );
 }

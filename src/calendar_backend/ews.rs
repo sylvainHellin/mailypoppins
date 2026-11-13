@@ -38,9 +38,10 @@
 //! ([`CalendarBackendError::LoginRefused`]): the session holds it, so no
 //! later call of the pass asks the server again.
 //!
-//! An answer to an invitation, a proposed time included, goes through
-//! [`write`]. Writes, free/busy and the server reminders are not built yet:
-//! [`FEATURES`] lists none of them, and each such call is refused with a
+//! An answer to an invitation, a proposed time included, a create, an update,
+//! a cancel and a delete go through [`write`], which also stamps a create
+//! with its transaction id. Free/busy and the server reminders are not built
+//! yet: [`FEATURES`] lists neither, and each such call is refused with a
 //! sentence.
 
 pub mod fetch;
@@ -67,7 +68,7 @@ use fetch::{EwsFetch, EwsFetchError, EwsSession};
 use parse::{AnswerError, Change, ItemType, Message, SyncAnswer, ViewItem};
 
 /// What this build serves on an EWS calendar beyond reading and answering.
-pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::ProposeTime];
+pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::Write, CalendarFeature::ProposeTime];
 
 /// The most changes one SyncFolderItems page may carry, the server's limit.
 const MAX_CHANGES: usize = 512;
@@ -301,7 +302,9 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
                 .collect();
             let body = format!(
                 "<m:GetItem><m:ItemShape><t:BaseShape>AllProperties</t:BaseShape>\
-                 <t:BodyType>Text</t:BodyType></m:ItemShape><m:ItemIds>{ids}</m:ItemIds></m:GetItem>"
+                 <t:BodyType>Text</t:BodyType><t:AdditionalProperties>{}\
+                 </t:AdditionalProperties></m:ItemShape><m:ItemIds>{ids}</m:ItemIds></m:GetItem>",
+                write::transaction_field()
             );
             let answer = self.call("GetItem", &body).await?;
             let messages =
@@ -319,25 +322,25 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         Ok(answers)
     }
 
-    /// `item` of `calendar` converted, or `None` with a log line when it
-    /// cannot be: one unreadable item does not fail its calendar.
-    fn event_of(&self, calendar: &Calendar, item: &xml::Element) -> Option<Event> {
-        match parse::calendar_event(&self.account, &calendar.id, item) {
+    /// `item` of the calendar `calendar` (its folder id) converted, or `None`
+    /// with a log line when it cannot be: one unreadable item does not fail
+    /// its calendar.
+    fn event_of(&self, calendar: &str, item: &xml::Element) -> Option<Event> {
+        match parse::calendar_event(&self.account, calendar, item) {
             Ok(event) => Some(event),
             Err(why) => {
                 warn!(
-                    "[calendar] {}: skipping EWS item {} of {}: {why}",
+                    "[calendar] {}: skipping EWS item {} of calendar {calendar}: {why}",
                     self.account,
                     parse::id_of(item).unwrap_or("without an id"),
-                    calendar.name
                 );
                 None
             }
         }
     }
 
-    /// The series a master item describes.
-    fn series_of(&self, calendar: &Calendar, master: &xml::Element) -> Option<SeriesInfo> {
+    /// The series a master item of `calendar` describes.
+    fn series_of(&self, calendar: &str, master: &xml::Element) -> Option<SeriesInfo> {
         let event = self.event_of(calendar, master)?;
         Some(SeriesInfo {
             master_id: event.id.clone(),
@@ -354,7 +357,7 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     /// answer leaves its occurrences as they are.
     async fn resolve_series(
         &self,
-        calendar: &Calendar,
+        calendar: &str,
         events: &mut [Event],
     ) -> BackendResult<Vec<SeriesInfo>> {
         let mut asked: Vec<(String, String)> = Vec::new();
@@ -373,8 +376,8 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
             match answer {
                 Ok(master) => series.extend(self.series_of(calendar, &master)),
                 Err(error) => warn!(
-                    "[calendar] {}: no series master for {uid} in {}: {error}",
-                    self.account, calendar.name
+                    "[calendar] {}: no series master for {uid} in calendar {calendar}: {error}",
+                    self.account
                 ),
             }
         }
@@ -400,7 +403,7 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         let mut events = Vec::new();
         for (item, answer) in view.iter().zip(answers) {
             match answer {
-                Ok(found) => events.extend(self.event_of(calendar, &found)),
+                Ok(found) => events.extend(self.event_of(&calendar.id, &found)),
                 Err(error) if error.code == ITEM_NOT_FOUND => {
                     debug!(
                         "[calendar] {}: item {} left {} while it was read",
@@ -412,7 +415,7 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
                 }
             }
         }
-        let series = self.resolve_series(calendar, &mut events).await?;
+        let series = self.resolve_series(&calendar.id, &mut events).await?;
         Ok(SyncResult {
             upserts: events,
             token: Some(EwsToken { sync_state: state }.encode()),
@@ -463,13 +466,13 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
             // before it writes the upserts and the series), and a single
             // event is a series re-sent with no occurrence.
             if parse::item_type(&item) == Some(ItemType::RecurringMaster) {
-                if let Some(series) = self.series_of(calendar, &item) {
+                if let Some(series) = self.series_of(&calendar.id, &item) {
                     result.removed.push(series.master_id.clone());
                     masters.push(series);
                 }
                 continue;
             }
-            match self.event_of(calendar, &item) {
+            match self.event_of(&calendar.id, &item) {
                 Some(event) if event.overlaps(&window, chrono_tz::UTC) => {
                     result.resent_series.push(event.id.clone());
                     result.upserts.push(event)
@@ -494,7 +497,7 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
             let mut events = Vec::new();
             for answer in answers {
                 match answer {
-                    Ok(item) => events.extend(self.event_of(calendar, &item)),
+                    Ok(item) => events.extend(self.event_of(&calendar.id, &item)),
                     Err(error) if error.code == ITEM_NOT_FOUND => {}
                     Err(error) => {
                         return Err(anyhow!("the Exchange server refused GetItem: {error}").into())
@@ -623,28 +626,28 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
 
     async fn create_event(
         &self,
-        _calendar: &Calendar,
-        _input: &EventInput,
-        _transaction_id: &str,
+        calendar: &Calendar,
+        input: &EventInput,
+        transaction_id: &str,
     ) -> BackendResult<Written> {
-        Err(self.not_built("create an event"))
+        self.create_item(calendar, input, transaction_id).await
     }
 
     async fn update_event(
         &self,
-        _calendar: &str,
-        _event: &str,
-        _patch: &EventPatch,
+        calendar: &str,
+        event: &str,
+        patch: &EventPatch,
     ) -> BackendResult<Written> {
-        Err(self.not_built("change an event"))
+        self.update_item(calendar, event, patch).await
     }
 
-    async fn cancel_event(&self, _event: &str, _comment: Option<String>) -> BackendResult<()> {
-        Err(self.not_built("cancel a meeting"))
+    async fn cancel_event(&self, event: &str, comment: Option<String>) -> BackendResult<()> {
+        self.cancel_item(event, comment.as_deref()).await
     }
 
-    async fn delete_event(&self, _event: &str) -> BackendResult<()> {
-        Err(self.not_built("delete an event"))
+    async fn delete_event(&self, event: &str) -> BackendResult<()> {
+        self.delete_item(event).await
     }
 
     async fn dismiss_reminder(&self, _event: &str) -> BackendResult<()> {
