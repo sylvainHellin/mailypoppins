@@ -280,8 +280,7 @@ impl Method for ConfigMethod {
                 }
                 "config.oauth2_login" => {
                     let work = plan_oauth2(&family.store.snapshot().accounts, &params)?;
-                    let diagnostics = Arc::clone(&family.diagnostics);
-                    Ok(self.operation(ctx, move |handle| oauth2_login(work, diagnostics, handle)))
+                    Ok(self.operation(ctx, move |handle| oauth2_login(work, family, handle)))
                 }
                 other => Err(DomainError::method_not_found(other)),
             }
@@ -371,18 +370,10 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         params.kind().as_str(),
         params.account()
     );
-    // A stored password is the user's answer to a refused login (PERSO-296),
-    // so the server is asked again at once, even with the password it
-    // refused: the user may have fixed the account on the server's side.
-    // Either password lets go of both logins, since the IMAP login falls back
-    // to the SMTP password. The account's drain is asked for at once, so the
-    // messages and changes held behind a refusal go out now rather than at
-    // the next tick, and the health check drops the refusal now.
-    crate::login_gate::forget_account(account);
-    if let Some(runtime) = family.runtimes.get(&account.name) {
-        runtime.request_drain();
-    }
-    family.diagnostics.refresh();
+    // Even the password the server refused is asked about again: the user may
+    // have fixed the account on the server's side. Either password lets go
+    // of both logins, since the IMAP login falls back to the SMTP password.
+    answered_refused_login(account, &family.runtimes, &family.diagnostics);
 
     Ok(command(
         family,
@@ -1053,12 +1044,30 @@ fn plan_oauth2(
     })
 }
 
+/// The user answered a refused login of `account` (PERSO-296), with a stored
+/// password (`config.set_password`) or a new sign-in (`config.oauth2_login`):
+/// every hold of the account's logins is lifted, so the server is asked again
+/// at once, the account's drain is asked for, so the sends and changes held
+/// behind the refusal go out now rather than at the next tick, and the health
+/// checks are re-read, so the refusal leaves them now.
+fn answered_refused_login(
+    account: &crate::config::AccountConfig,
+    runtimes: &RuntimeTable,
+    diagnostics: &crate::daemon::diagnostics::Diagnostics,
+) {
+    crate::login_gate::forget_account(account);
+    if let Some(runtime) = runtimes.get(&account.name) {
+        runtime.request_drain();
+    }
+    diagnostics.refresh();
+}
+
 /// `ACC-06`: the device-code flow, with the verification URL and the user code
 /// reported as the operation's first progress so the client can render them and
 /// open a browser (`INT-04`).
 async fn oauth2_login(
     work: OAuth2Work,
-    diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>,
+    family: Arc<ConfigFamily>,
     handle: crate::daemon::operations::OperationHandle,
 ) {
     handle.set_running();
@@ -1087,13 +1096,15 @@ async fn oauth2_login(
     )
     .await;
     // A new sign-in may have granted the calendar scope a stale token lacked
-    // (PERSO-200), and is the user's answer to a sign-in Microsoft refused
-    // (PERSO-296), which the next refresh asks about again: the checks are
-    // re-read now, so the prompts clear without waiting for the periodic
-    // sweep.
+    // (PERSO-200), which the checks re-read now, so the prompt clears without
+    // waiting for the periodic sweep. A staged sign-in is a candidate's, of
+    // an account no runtime serves yet, so it answers nothing.
     if acquired.is_ok() && !work.staged {
-        crate::login_gate::forget(&crate::login_gate::Login::Graph(work.account.clone()));
-        diagnostics.refresh();
+        let snapshot = family.store.snapshot();
+        match snapshot.accounts.iter().find(|a| a.name == work.account) {
+            Some(account) => answered_refused_login(account, &family.runtimes, &family.diagnostics),
+            None => family.diagnostics.refresh(),
+        }
     }
     match acquired {
         Ok(_) => handle.succeed(json!({
@@ -1128,6 +1139,92 @@ fn string_param(params: &Value, name: &str) -> Result<String, DomainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PERSO-296: a stored password and a new sign-in are both the user's
+    /// answer to a refused login, and answer it alike: every hold of the
+    /// account is lifted and its drain asked for at once, so the sends and
+    /// changes held behind the refusal go out now rather than at the next
+    /// tick. A new sign-in used to lift the hold and leave the outbox to the
+    /// next tick.
+    #[tokio::test]
+    async fn an_answer_to_a_refused_login_lifts_its_holds_and_drains_the_account() {
+        use crate::daemon::runtime::account::{AccountRuntime, DrainHook, TickHooks};
+        use crate::login_gate::{self, Login};
+        use futures::future::FutureExt;
+        use mp_protocol::account::RejectedLogin;
+
+        let config: GlobalConfig = toml::from_str(
+            "[[accounts]]\nname = \"renewed-password\"\n\
+             [accounts.imap]\nhost = \"imap.renewed-password.test\"\n\
+             [accounts.smtp]\nhost = \"smtp.renewed-password.test\"\n\n\
+             [[accounts]]\nname = \"renewed-graph\"\nauth_method = \"graph\"\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::daemon::server::DaemonState::new(
+            crate::daemon::runtime::InstanceMeta {
+                app_version: "0.0.0-test".to_string(),
+                protocol_min: mp_protocol::PROTOCOL_MIN,
+                protocol_max: mp_protocol::PROTOCOL_MAX,
+                instance_id: "renewed".to_string(),
+                pid: 42,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                data_dir: dir.path().join("data"),
+                config_dir: dir.path().join("config"),
+            },
+            Arc::new(ConfigStore::new(
+                dir.path().join("config").join("config.toml"),
+                ConfigState::Ok,
+                config.clone(),
+                false,
+            )),
+        );
+        for account in &config.accounts {
+            let quiet: DrainHook = Arc::new(|_ctx| async { String::new() }.boxed());
+            let store_dir = dir.path().join(&account.name);
+            std::fs::create_dir_all(&store_dir).unwrap();
+            let runtime = AccountRuntime::start_at_with_hooks(
+                &store_dir,
+                account.clone(),
+                1,
+                TickHooks {
+                    outbox: Arc::clone(&quiet),
+                    mutations: quiet,
+                    body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+                },
+            )
+            .unwrap();
+            let runtime = Arc::new(runtime);
+            state.runtimes.insert(Arc::clone(&runtime));
+            let logins: Vec<Login> = [
+                RejectedLogin::Imap,
+                RejectedLogin::Smtp,
+                RejectedLogin::Graph,
+            ]
+            .into_iter()
+            .filter_map(|kind| Login::of(account, kind))
+            .collect();
+            for login in &logins {
+                login_gate::refuse_for_test(login.clone());
+            }
+            assert!(!login_gate::rejected_logins(account).is_empty());
+            let mut requests = runtime.drain_requests();
+            requests.borrow_and_update();
+
+            answered_refused_login(account, &state.runtimes, &state.diagnostics);
+
+            assert!(
+                login_gate::rejected_logins(account).is_empty(),
+                "{}: every hold lifted",
+                account.name
+            );
+            assert!(
+                requests.has_changed().unwrap(),
+                "{}: the drain was asked for",
+                account.name
+            );
+        }
+    }
 
     /// The ten specs are the ten names, in the order the dispatcher keeps.
     #[test]

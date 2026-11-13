@@ -426,7 +426,7 @@ The live send's error says the message waits in the outbox and names `mp config 
 A Graph account's token refresh goes through the same list (`graph::access_token`, behind `GraphClient::new_async` and `GraphClient::refresh_token`, so every Graph caller), keyed by the account and a hash of its refresh token.
 A refresh Entra answers with `invalid_grant` (`oauth2::RefreshRejected`: the refresh token expired or was revoked, or its consent withdrawn) is recorded, and for an hour every Graph call of the account fails at once with the same `LoginRejected` instead of asking the token endpoint on every tick, watcher round and queued change; a throttle or an outage is retried as before.
 The tick fails on it, queued changes wait with no attempt spent, queued sends stay `pending_send`, and health and `account.credentials` name the sign-in (`rejected_logins: ["graph"]`, `the sign-in expired or was revoked; sign in again with mp config oauth2-login -A <account>`).
-A new sign-in writes a new refresh token, which the list does not hold, and `config.oauth2_login` lets go of the entry and re-evaluates the checks; a sync or a send the user starts asks again as well.
+A new sign-in writes a new refresh token, which the list does not hold, and `config.oauth2_login` answers the refusal as `config.set_password` does, through `answered_refused_login` in `daemon/methods/config.rs`: it lets go of the entry, asks the account's drain at once, so the queued sends and changes go out without waiting for the tick, and re-evaluates the checks; a sync or a send the user starts asks again as well.
 
 ## Sync backends
 
