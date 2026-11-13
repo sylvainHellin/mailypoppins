@@ -1943,6 +1943,7 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
         secrets,
         shape,
     } = work;
+    super::send::user_started_send(&account);
     if let Err(e) = super::open_secrets(&account.name, secrets) {
         return handle.fail(DomainError::from(e));
     }
@@ -2082,6 +2083,7 @@ fn to_value<T: serde::Serialize>(value: &T) -> Result<Value, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::super::super::dispatch::CancelScope;
+    use super::super::super::operations::OperationState;
     use super::*;
 
     /// The array is the family, in method-name order, and both of it are
@@ -2153,6 +2155,69 @@ mod tests {
             Ok((Rsvp::Declined, Response::Decline))
         ));
         assert!(parse_response("maybe").is_err());
+    }
+
+    /// PERSO-296: an RSVP, and an answer to an event that goes out as an iMIP
+    /// reply, is a send the user started, so it asks the server again about
+    /// an SMTP login refused within the hour, as every other send the user
+    /// starts does. Both used to fail at once from the login gate's list.
+    ///
+    /// The secrets file cannot be read, so the reply fails before it builds
+    /// or dials anything: what is pinned is that the hold was lifted first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reply_the_user_started_asks_again_about_a_refused_smtp_login() {
+        use crate::login_gate::{self, Login};
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".config").join("mailypoppins");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("secrets.enc"), b"not a secrets file").unwrap();
+        let _config = crate::config::test_env::ConfigDirOverride::new(dir.path());
+        let _data = crate::config::test_env::DataDirOverride::set(dir.path().join("data"));
+        let shapes = [
+            ("calendar.rsvp", ReplyShape::Rsvp),
+            (
+                "event.respond",
+                ReplyShape::Event {
+                    event: "event-1".into(),
+                },
+            ),
+        ];
+        for (method, shape) in shapes {
+            let mut account = AccountConfig {
+                name: format!("held-{}", method.replace('.', "-")),
+                default_from: "me@example.com".into(),
+                ..Default::default()
+            };
+            // A login of its own: the gate is one list for the whole process.
+            account.smtp.host = format!("smtp.{}.test", account.name);
+            account.smtp.username = "me@example.com".into();
+            let login = Login::of_send(&account).unwrap();
+            login_gate::refuse_for_test(login.clone());
+            let registry = OperationRegistry::new();
+            let (id, handle) = registry.start(ConnectionId(1), CancelScope::Durable, method);
+
+            reply(
+                RsvpWork {
+                    account,
+                    selector: "held:inbox/1".into(),
+                    rsvp: Rsvp::Accepted,
+                    response: "accept".into(),
+                    comment: None,
+                    ics: Vec::new(),
+                    request_message_id: String::new(),
+                    secrets: crate::secrets::SecretsBackendKind::EncryptedFile,
+                    shape,
+                },
+                handle,
+            )
+            .await;
+
+            assert!(!login_gate::is_refused(&login), "{method} asked again");
+            let status = registry.status(&id).unwrap();
+            assert_eq!(status.state, OperationState::Failed, "{method}");
+            let error = format!("{:?}", status.error);
+            assert!(!error.contains("asked again within the hour"), "{error}");
+        }
     }
 
     #[test]

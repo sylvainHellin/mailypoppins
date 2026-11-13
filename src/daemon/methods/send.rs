@@ -839,6 +839,17 @@ fn drain_after_send(runtimes: &crate::daemon::server::RuntimeTable, account: &st
     }
 }
 
+/// What every send the user started does first, whichever method started it
+/// (`send.*`, `calendar.rsvp`, `event.respond`): it asks the server again
+/// about a login it refused within the hour (PERSO-296), since the user may
+/// have fixed the account on the server's side, and one login per send is
+/// nowhere near a lockout. It runs when the send does, after any hold.
+pub(super) fn user_started_send(account: &AccountConfig) {
+    if let Some(login) = crate::login_gate::Login::of_send(account) {
+        crate::login_gate::forget(&login);
+    }
+}
+
 /// The operation itself, to its terminal state.
 async fn perform(
     work: Work,
@@ -846,13 +857,7 @@ async fn perform(
     runtimes: &crate::daemon::server::RuntimeTable,
 ) {
     handle.set_running();
-    // A send the user started asks the server again about a login it refused
-    // within the hour (PERSO-296): the user may have fixed the account on the
-    // server's side, and one login per send is nowhere near a lockout. It
-    // runs when the send does, after any hold.
-    if let Some(login) = crate::login_gate::Login::of_send(work.config()) {
-        crate::login_gate::forget(&login);
-    }
+    user_started_send(work.config());
     match work {
         Work::Draft {
             account,
