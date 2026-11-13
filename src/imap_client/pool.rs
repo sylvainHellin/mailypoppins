@@ -526,6 +526,61 @@ mod tests {
         assert_eq!(server.logins(), 4, "the cancelled dial left no mark behind");
     }
 
+    /// PERSO-296: a LOGIN the server never answers ends at the dial's
+    /// deadline, with an error naming the server and the step, and frees the
+    /// row it marked: no answer is no refusal, so the count stays and the
+    /// next dial of the row asks the server. Before the deadline, a hung dial
+    /// held every other dial of its row for as long as it hung.
+    #[test]
+    fn a_login_that_never_answers_ends_at_the_deadline_and_frees_the_row() {
+        use super::super::fake_imap::RejectingImapServer;
+        use super::super::open_imap_session_within;
+        use crate::login_gate::{in_a_row_for_test, login_rejected, Login};
+
+        let server = RejectingImapServer::start();
+        let rejected = ImapConfig {
+            password: "wrong".into(),
+            accept_invalid_certs: true,
+            ..config(server.port())
+        };
+        let login = Login::Imap(rejected.login());
+        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
+        crate::login_gate::forget(&login);
+
+        server.set_login_delay(Duration::from_secs(5));
+        let started = Instant::now();
+        let err = match futures::executor::block_on(open_imap_session_within(
+            &rejected,
+            Duration::from_millis(300),
+        )) {
+            Ok(_) => panic!("the fake server accepts no login"),
+            Err(e) => e,
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the dial ended at its deadline, not at the server's answer: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            login_rejected(&err).is_none(),
+            "no answer is no refusal: {err:#}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("127.0.0.1:{}", server.port())) && text.contains("login"),
+            "the error names the server and the step: {text}"
+        );
+        assert_eq!(in_a_row_for_test(&login, "wrong"), 1, "the count stayed");
+
+        server.set_login_delay(Duration::ZERO);
+        assert!(futures::executor::block_on(open_imap_session(&rejected)).is_err());
+        assert_eq!(
+            server.logins(),
+            3,
+            "the next dial of the row asked the server"
+        );
+    }
+
     /// A `NO [UNAVAILABLE]` to LOGIN is the server down for maintenance, and
     /// Gmail's `NO [ALERT] Too many simultaneous connections.` the account
     /// over its connection limit, not answers about the password (RFC 5530):

@@ -684,7 +684,11 @@ mod tests {
             .port(port)
             .build();
         let from: lettre::Address = built.from.parse().unwrap();
-        let result = submit_through(built, &from, &mailer).await.result;
+        let watch = LoginWatch {
+            dial: None,
+            deadline: crate::login_gate::LOGIN_DEADLINE,
+        };
+        let result = submit_through(built, &from, &mailer, watch).await.result;
         drop(mailer);
         let log = std::mem::take(&mut *log.lock().unwrap());
         (result, log)
@@ -4958,6 +4962,23 @@ async fn submit_over(
     smtp_config: &SmtpConfig,
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
 ) -> Result<SendResult> {
+    submit_over_within(
+        built,
+        smtp_config,
+        mailer,
+        crate::login_gate::LOGIN_DEADLINE,
+    )
+    .await
+}
+
+/// [`submit_over`] with the deadline after which an unanswered login lets go
+/// of the gate's mark handed in, so a test need not wait it out.
+async fn submit_over_within(
+    built: &BuiltMessage,
+    smtp_config: &SmtpConfig,
+    mailer: &AsyncSmtpTransport<Tokio1Executor>,
+    deadline: std::time::Duration,
+) -> Result<SendResult> {
     // Parse from address for envelope
     let from_addr: lettre::Address = built
         .from
@@ -4970,7 +4991,16 @@ async fn submit_over(
         result,
         logged_in,
         login_refused,
-    } = submit_through(built, &from_addr, mailer).await;
+    } = submit_through(
+        built,
+        &from_addr,
+        mailer,
+        LoginWatch {
+            dial: Some(&mut dial),
+            deadline,
+        },
+    )
+    .await;
     if logged_in {
         dial.accepted();
     }
@@ -4985,6 +5015,42 @@ async fn submit_over(
         Ok(result)
     } else {
         Err(rejected.into())
+    }
+}
+
+/// The gate's dial of an SMTP submission, which [`submit_through`] keeps
+/// told of the login while the conversation runs (PERSO-296).
+struct LoginWatch<'a> {
+    /// The dial, `None` for a test that submits past the gate.
+    dial: Option<&'a mut crate::login_gate::Dial>,
+    /// How long a send may run with its login unanswered before the dial lets
+    /// go of its mark.
+    deadline: std::time::Duration,
+}
+
+impl LoginWatch<'_> {
+    /// Await `send`. While the dial marks its row, a send still unanswered at
+    /// the deadline lets go of the mark and goes on: lettre bounds only the
+    /// TCP connect, and the login cannot be told apart from the first
+    /// recipient's upload, which a deadline must not cut, so the send keeps
+    /// running and the other dials of the row are free again.
+    async fn answer_of<T>(&mut self, send: impl std::future::Future<Output = T>) -> T {
+        let Some(dial) = self.dial.as_deref_mut().filter(|dial| dial.marked()) else {
+            return send.await;
+        };
+        tokio::pin!(send);
+        tokio::select! {
+            sent = &mut send => sent,
+            () = tokio::time::sleep(self.deadline) => {
+                warn!(
+                    "[send] the SMTP login got no answer within {:?}; the send goes on, and \
+                     the other logins with its password are no longer held",
+                    self.deadline
+                );
+                dial.let_go();
+                send.await
+            }
+        }
     }
 }
 
@@ -5050,6 +5116,7 @@ async fn submit_through(
     built: &BuiltMessage,
     from_addr: &lettre::Address,
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
+    mut watch: LoginWatch<'_>,
 ) -> Submitted {
     let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
@@ -5102,7 +5169,7 @@ async fn submit_through(
         };
 
         let wire = seven_bit.as_deref().unwrap_or(&built.raw);
-        let mut sent = mailer.send_raw(&envelope, wire).await;
+        let mut sent = watch.answer_of(mailer.send_raw(&envelope, wire)).await;
         if seven_bit.is_none() && sent.as_ref().is_err_and(is_8bitmime_refusal) {
             if let Some(fallback) = seven_bit_fallback(&built.raw) {
                 warn!(
@@ -5110,7 +5177,9 @@ async fn submit_through(
                      8BITMIME; sending it as base64 application/octet-stream instead",
                     built.message_id
                 );
-                sent = mailer.send_raw(&envelope, seven_bit.insert(fallback)).await;
+                sent = watch
+                    .answer_of(mailer.send_raw(&envelope, seven_bit.insert(fallback)))
+                    .await;
             }
         }
         logged_in |= match &sent {
@@ -5651,18 +5720,74 @@ mod smtp_durability_tests {
             built: &BuiltMessage,
             smtp_config: &SmtpConfig,
         ) -> impl std::future::Future<Output = Result<SendResult>> {
-            let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous("127.0.0.1")
-                .port(smtp_config.port)
-                .credentials(Credentials::new(
-                    smtp_config.username.clone(),
-                    smtp_config.password.clone(),
-                ))
-                .authentication(vec![
-                    lettre::transport::smtp::authentication::Mechanism::Plain,
-                ])
-                .build();
+            let mailer = server_mailer(smtp_config);
             async move { submit_over(built, smtp_config, &mailer).await }
         }
+    }
+
+    /// A plain-TCP transport to `smtp_config`'s server on localhost, logging
+    /// in with `AUTH PLAIN` and the configuration's password.
+    fn server_mailer(smtp_config: &SmtpConfig) -> AsyncSmtpTransport<Tokio1Executor> {
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous("127.0.0.1")
+            .port(smtp_config.port)
+            .credentials(Credentials::new(
+                smtp_config.username.clone(),
+                smtp_config.password.clone(),
+            ))
+            .authentication(vec![
+                lettre::transport::smtp::authentication::Mechanism::Plain,
+            ])
+            .build()
+    }
+
+    /// PERSO-296: an SMTP login the server never answers lets go of the
+    /// gate's mark at the deadline, as no refusal, while the send goes on:
+    /// the other dials of the row (the IMAP tick and watcher of a shared
+    /// password) are free again. lettre bounds only the TCP connect, so the
+    /// mark used to last as long as the server kept quiet.
+    #[tokio::test]
+    async fn an_smtp_login_that_never_answers_lets_go_of_its_mark_at_the_deadline() {
+        use crate::login_gate::{self, Login, LoginRejected};
+        // An empty answer to AUTH is none at all.
+        let (port, logins) = smtp_server(b"", b"250 OK\r\n").await;
+        let config = refused_config(port);
+        let login = Login::Smtp(config.login());
+        let refusal = LoginRejected::new(
+            mp_protocol::account::RejectedLogin::Smtp,
+            "535 5.7.8".into(),
+        );
+        login_gate::record(&login, &config.password, &refusal);
+        login_gate::forget(&login);
+
+        let built = Outbox::built("<silent-auth@example.com>", Some("id:silent-auth"));
+        let started = std::time::Instant::now();
+        let sending = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                let mailer = server_mailer(&config);
+                submit_over_within(&built, &config, &mailer, std::time::Duration::from_secs(1))
+                    .await
+            })
+        };
+        while logins.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            login_gate::dial(&login, &config.password).is_err(),
+            "the unanswered login holds the row until the deadline"
+        );
+        tokio::time::sleep_until((started + std::time::Duration::from_millis(1500)).into()).await;
+        assert!(!sending.is_finished(), "the send goes on");
+        assert!(
+            login_gate::dial(&login, &config.password).is_ok(),
+            "past the deadline the row is free"
+        );
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            1,
+            "no answer is no refusal"
+        );
+        sending.abort();
     }
 
     /// The SMTP configuration of `port`'s server, with a password it refuses.

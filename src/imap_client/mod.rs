@@ -207,10 +207,12 @@ fn is_rejection(answer: &str) -> bool {
 /// How long the TCP connect of a new IMAP session may take before it is given
 /// up on.
 ///
-/// Nothing else here is bounded, and nothing else needs to be: a server that
-/// answered the SYN and then went quiet fails its read, while a black-holed
-/// host (a dropped route, a firewall that swallows the SYN) leaves the connect
-/// itself hanging for the OS default, over two minutes on Linux. Every caller
+/// A black-holed host (a dropped route, a firewall that swallows the SYN)
+/// leaves the connect hanging for the OS default, over two minutes on Linux,
+/// and a server that answered the SYN and then went quiet leaves every read
+/// after it hanging for as long as the connection stays up, which
+/// [`login_gate::LOGIN_DEADLINE`] bounds from the connect to the login's
+/// answer (PERSO-296). Every caller
 /// of a session sits on some queue that has to wait for it: a sync thread, the
 /// IDLE watcher, or the post-send flag write, which runs after a message has
 /// already gone out (#0076).
@@ -229,11 +231,20 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// login that succeeds clears whatever the list held about its server and
 /// user.
 pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
+    open_imap_session_within(imap_config, login_gate::LOGIN_DEADLINE).await
+}
+
+/// [`open_imap_session`] with the deadline of its handshake and login handed
+/// in, so a test need not wait out [`login_gate::LOGIN_DEADLINE`].
+pub(crate) async fn open_imap_session_within(
+    imap_config: &ImapConfig,
+    deadline: std::time::Duration,
+) -> anyhow::Result<ImapSession> {
     let login = Login::Imap(imap_config.login());
-    // Dropped on any other outcome, the timeout and a cancelled task
+    // Dropped on any other outcome, the deadline and a cancelled task
     // included, it frees the row it held for this dial.
     let mut dial = login_gate::dial(&login, &imap_config.password)?;
-    match dial_imap_session(imap_config).await {
+    match dial_imap_session_within(imap_config, deadline).await {
         Ok(session) => {
             dial.accepted();
             Ok(session)
@@ -249,6 +260,18 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
 /// logins and without adding to it: what `config.probe` takes, since a probe
 /// is the user asking the server, and what [`open_imap_session`] wraps.
 pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
+    dial_imap_session_within(imap_config, login_gate::LOGIN_DEADLINE).await
+}
+
+/// [`dial_imap_session`] with the deadline of everything after the TCP
+/// connect handed in: the greeting and STARTTLS, the TLS handshake and the
+/// login together have `deadline` from the moment the connection is open,
+/// and a step still waiting at its end fails with an error naming the server
+/// and the step, which is no refusal (PERSO-296).
+async fn dial_imap_session_within(
+    imap_config: &ImapConfig,
+    deadline: std::time::Duration,
+) -> anyhow::Result<ImapSession> {
     use crate::timing::TimingSpan;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -276,26 +299,40 @@ pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Resul
     })?
     .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
     span.mark("tcp_connect");
+    let by = Deadline {
+        addr: &addr,
+        end: std::time::Instant::now() + deadline,
+        deadline,
+    };
 
     if imap_config.port == 993 {
-        let tls_stream = tls
-            .connect(&imap_config.host, tcp_stream)
-            .await
-            .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
+        let tls_stream = by
+            .step("TLS handshake", async {
+                tls.connect(&imap_config.host, tcp_stream)
+                    .await
+                    .map_err(|e| anyhow!("TLS handshake failed: {}", e))
+            })
+            .await?;
         span.mark("tls_handshake");
 
         let client = async_imap::Client::new(ImapStream::passthrough(tls_stream));
-        let session = authenticate_client(client, imap_config).await?;
+        let session = by
+            .step("login", authenticate_client(client, imap_config))
+            .await?;
         span.mark("login");
         Ok(session)
     } else {
         info!("IMAP STARTTLS: connecting to {} (plaintext first)", addr);
 
         let mut buf = [0u8; 4096];
-        let n = tcp_stream
-            .read(&mut buf)
-            .await
-            .map_err(|e| anyhow!("Failed to read IMAP greeting: {}", e))?;
+        let n = by
+            .step("greeting", async {
+                tcp_stream
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| anyhow!("Failed to read IMAP greeting: {}", e))
+            })
+            .await?;
         let greeting = String::from_utf8_lossy(&buf[..n]);
         if !greeting.starts_with("* ") {
             return Err(anyhow!("Unexpected IMAP greeting: {}", greeting.trim()));
@@ -303,19 +340,22 @@ pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Resul
         span.mark("greeting");
         info!("IMAP STARTTLS: got greeting, sending STARTTLS");
 
-        tcp_stream
-            .write_all(b"a0 STARTTLS\r\n")
-            .await
-            .map_err(|e| anyhow!("Failed to send STARTTLS: {}", e))?;
-        tcp_stream
-            .flush()
-            .await
-            .map_err(|e| anyhow!("Failed to flush STARTTLS: {}", e))?;
-
-        let n = tcp_stream
-            .read(&mut buf)
-            .await
-            .map_err(|e| anyhow!("Failed to read STARTTLS response: {}", e))?;
+        let n = by
+            .step("STARTTLS", async {
+                tcp_stream
+                    .write_all(b"a0 STARTTLS\r\n")
+                    .await
+                    .map_err(|e| anyhow!("Failed to send STARTTLS: {}", e))?;
+                tcp_stream
+                    .flush()
+                    .await
+                    .map_err(|e| anyhow!("Failed to flush STARTTLS: {}", e))?;
+                tcp_stream
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| anyhow!("Failed to read STARTTLS response: {}", e))
+            })
+            .await?;
         let response = String::from_utf8_lossy(&buf[..n]);
         if !response.contains("OK") {
             return Err(anyhow!("STARTTLS rejected by server: {}", response.trim()));
@@ -323,16 +363,52 @@ pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Resul
         span.mark("starttls_negotiate");
         info!("IMAP STARTTLS: upgrading to TLS");
 
-        let tls_stream = tls
-            .connect(&imap_config.host, tcp_stream)
-            .await
-            .map_err(|e| anyhow!("STARTTLS TLS handshake failed: {}", e))?;
+        let tls_stream = by
+            .step("TLS handshake", async {
+                tls.connect(&imap_config.host, tcp_stream)
+                    .await
+                    .map_err(|e| anyhow!("STARTTLS TLS handshake failed: {}", e))
+            })
+            .await?;
         span.mark("tls_handshake");
 
         let client = async_imap::Client::new(ImapStream::with_greeting(tls_stream));
-        let session = authenticate_client(client, imap_config).await?;
+        let session = by
+            .step("login", authenticate_client(client, imap_config))
+            .await?;
         span.mark("login");
         Ok(session)
+    }
+}
+
+/// The deadline of a dial's steps after its TCP connect.
+struct Deadline<'a> {
+    /// The server, `host:port`.
+    addr: &'a str,
+    /// When the steps must be done.
+    end: std::time::Instant,
+    /// How long they had, for the error.
+    deadline: std::time::Duration,
+}
+
+impl Deadline<'_> {
+    /// Run `step`, named `name`, failing it once the deadline has passed.
+    async fn step<T>(
+        &self,
+        name: &str,
+        step: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        let left = self
+            .end
+            .saturating_duration_since(std::time::Instant::now());
+        async_std::future::timeout(left, step).await.map_err(|_| {
+            anyhow!(
+                "IMAP server {} did not answer the {} within {:?} of the connection",
+                self.addr,
+                name,
+                self.deadline
+            )
+        })?
     }
 }
 

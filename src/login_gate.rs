@@ -64,7 +64,16 @@
 //! other dial of the row is answered as held until it answers; the mark is a
 //! guard ([`Dial`]) that clears on a success, a refusal, any other error, a
 //! timeout and a cancelled task alike (`a_dial_in_flight_holds_the_others_of_its_row`,
-//! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`). So
+//! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`). No
+//! dial keeps its mark past [`LOGIN_DEADLINE`] after its connection opened:
+//! the IMAP dial and the Graph token refresh fail at it as no answer, which
+//! counts as no refusal (`imap_client::pool`'s
+//! `a_login_that_never_answers_ends_at_the_deadline_and_frees_the_row`,
+//! `crate::graph`'s `a_refresh_that_never_answers_ends_at_the_deadline_and_frees_the_row`),
+//! and an SMTP submission lets go of its mark at it and goes on
+//! (`crate::send`'s `an_smtp_login_that_never_answers_lets_go_of_its_mark_at_the_deadline`);
+//! a mark older than `MARK_LIFETIME` holds nothing whatever left it
+//! (`a_mark_older_than_any_dial_is_free`). So
 //! a wrong password reaches the server 3 times in the first hour after its
 //! first refusal and once an hour after, with the sync tick, the IDLE watcher
 //! and the outbox drain racing at every hold end, until the user acts
@@ -127,6 +136,23 @@ pub const SECOND_HOLD: Duration = Duration::from_secs(10 * 60);
 /// How long a password refused three times or more in a row is held, and a
 /// Graph sign-in from its first refusal.
 pub const LONG_HOLD: Duration = Duration::from_secs(60 * 60);
+
+/// How long a dial of a login may wait for the server once its connection is
+/// open, through the TLS handshake, STARTTLS and the login itself, before it
+/// is given up on as no answer, which is no refusal (PERSO-296).
+///
+/// The IMAP dial fails at it; an SMTP submission, which cannot tell its login
+/// from the first recipient's upload, lets go of its mark at it and goes on;
+/// a Graph token refresh fails at it. Generous on purpose, as lettre's own
+/// 60 s command timeout is: a slow server on a bad link must not lose its
+/// login to it.
+pub const LOGIN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long a dial's in-flight mark holds the other dials of its row: past
+/// it the mark is a dial that outlived every deadline above (the IMAP
+/// connect's 30 s and [`LOGIN_DEADLINE`] after it), and the row is free
+/// again, so no hung dial can stop the mail of its row for longer.
+const MARK_LIFETIME: Duration = Duration::from_secs(LOGIN_DEADLINE.as_secs() + 2 * 60);
 
 /// How long `login`, refused `in_a_row` times in a row, is held before the
 /// server is asked again.
@@ -469,13 +495,25 @@ impl Dial {
         }
         recorded
     }
+
+    /// Whether the dial still marks its row in flight.
+    pub fn marked(&self) -> bool {
+        self.mark.is_some()
+    }
+
+    /// Free the row this dial marked without an answer, for a dial that goes
+    /// on past [`LOGIN_DEADLINE`]; its answer, when it comes, is still
+    /// reported.
+    pub fn let_go(&mut self) {
+        if let Some(mark) = self.mark.take() {
+            refusals().end(&self.login, &self.secret, mark);
+        }
+    }
 }
 
 impl Drop for Dial {
     fn drop(&mut self) {
-        if let Some(mark) = self.mark.take() {
-            refusals().end(&self.login, &self.secret, mark);
-        }
+        self.let_go();
     }
 }
 
@@ -546,14 +584,31 @@ struct Row {
     /// The login the server last refused the secret at, and its answer.
     refused_at: RejectedLogin,
     answer: String,
-    /// The token of the dial of the secret in flight since the hold ended,
-    /// which holds every other dial of the row until it answers.
-    in_flight: Option<u64>,
+    /// The dial of the secret in flight since the hold ended, which holds
+    /// every other dial of the row until it answers or its mark goes stale.
+    in_flight: Option<Mark>,
+}
+
+/// A dial's in-flight mark on its row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mark {
+    /// Which dial took it.
+    token: u64,
+    /// When it was taken.
+    taken: Instant,
 }
 
 impl Row {
     fn holds(&self, now: Instant) -> bool {
         now < self.until
+    }
+
+    /// Whether a dial of the row is in flight at `now`: a mark older than
+    /// [`MARK_LIFETIME`] is a dial that hung past every deadline, and holds
+    /// nothing.
+    fn in_flight(&self, now: Instant) -> bool {
+        self.in_flight
+            .is_some_and(|mark| now.saturating_duration_since(mark.taken) < MARK_LIFETIME)
     }
 }
 
@@ -600,7 +655,7 @@ impl Refusals {
     ) -> Option<LoginRejected> {
         self.see(login, secret);
         let row = self.rows.get(&RowKey::of(login, secret))?;
-        (row.holds(now) || row.in_flight.is_some()).then(|| LoginRejected {
+        (row.holds(now) || row.in_flight(now)).then(|| LoginRejected {
             kind: login.kind(),
             refused_at: row.refused_at,
             answer: row.answer.clone(),
@@ -627,15 +682,19 @@ impl Refusals {
             return Ok(None);
         };
         self.next_mark += 1;
-        row.in_flight = Some(self.next_mark);
+        row.in_flight = Some(Mark {
+            token: self.next_mark,
+            taken: now,
+        });
         Ok(Some(self.next_mark))
     }
 
-    /// The dial marked `mark` answered or was dropped: its row, if it is
-    /// still the one it marked, is free for the next dial.
+    /// The dial marked `mark` answered or was dropped: its row, if its mark
+    /// is still this dial's, is free for the next dial. A later dial's mark,
+    /// taken once this one's went stale, stays.
     fn end(&mut self, login: &Login, secret: &[u8; 32], mark: u64) {
         if let Some(row) = self.rows.get_mut(&RowKey::of(login, secret)) {
-            if row.in_flight == Some(mark) {
+            if row.in_flight.is_some_and(|held| held.token == mark) {
                 row.in_flight = None;
             }
         }
@@ -1161,6 +1220,42 @@ mod tests {
         );
         list.end(&imap(), &wrong, mark);
         assert!(list.begin(&smtp(), &wrong, now, wall()).is_ok());
+    }
+
+    /// A mark older than [`MARK_LIFETIME`] is a dial that hung past every
+    /// deadline, and the row is free for the next dial; the hung dial's late
+    /// end leaves the newer mark alone.
+    #[test]
+    fn a_mark_older_than_any_dial_is_free() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let wrong = fingerprint("wrong");
+        list.record(imap(), wrong, &rejected(&imap()), at);
+        let now = at + FIRST_HOLD;
+        let hung = list
+            .begin(&imap(), &wrong, now, wall())
+            .expect("the hold ended")
+            .expect("the row is marked");
+        let before = now + MARK_LIFETIME - SECOND;
+        assert!(list.refused(&smtp(), &wrong, before, wall()).is_some());
+        assert!(list.begin(&smtp(), &wrong, before, wall()).is_err());
+
+        let then = now + MARK_LIFETIME;
+        assert!(
+            list.refused(&smtp(), &wrong, then, wall()).is_none(),
+            "a stale mark holds nothing"
+        );
+        let next = list
+            .begin(&smtp(), &wrong, then, wall())
+            .expect("a stale mark is free")
+            .expect("the row is marked again");
+        list.end(&imap(), &wrong, hung);
+        assert!(
+            list.begin(&imap(), &wrong, then, wall()).is_err(),
+            "the hung dial's end left the new mark"
+        );
+        list.end(&smtp(), &wrong, next);
+        assert!(list.begin(&imap(), &wrong, then, wall()).is_ok());
     }
 
     /// A secret the server never refused is dialled by every task that
