@@ -370,3 +370,75 @@ impl Drop for KeyringCleanup {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The errors a user can meet on that path
+// ---------------------------------------------------------------------------
+
+/// One password account on servers nobody listens on, with no scheduled sync,
+/// written directly so a test starts from a configuration and no password.
+fn write_config(root: &Path, account: &str) {
+    std::fs::write(
+        root.join("config.toml"),
+        format!(
+            "[[accounts]]\nname = \"{account}\"\ndefault_from = \"{USERNAME}\"\n\n\
+             [accounts.smtp]\nhost = \"127.0.0.1\"\nport = 9\nusername = \"{USERNAME}\"\n\n\
+             [accounts.imap]\nport = 9\nsync_interval_secs = 0\n"
+        ),
+    )
+    .expect("write config.toml");
+}
+
+/// A secrets file this machine cannot decrypt (copied from another machine,
+/// or another user's) is named with the command that recovers from it, and
+/// that command runs: the client used to refuse it with the very sentence
+/// that recommends it.
+#[test]
+fn an_undecryptable_secrets_file_is_named_and_mp_config_reset_secrets_recovers_it() {
+    let tmp = root();
+    write_config(tmp.path(), "smoke");
+    let secrets = tmp.path().join("secrets.enc");
+    // The header of a version-1 file, a zero nonce and a ciphertext no key of
+    // this machine authenticates.
+    let mut foreign = b"MPSEC\x01".to_vec();
+    foreign.extend([0u8; 12]);
+    foreign.extend([0x5au8; 48]);
+    std::fs::write(&secrets, &foreign).expect("write a foreign secrets file");
+    let daemon = DaemonFixture::start(tmp.path());
+
+    let out = mp_with_stdin(
+        daemon.root(),
+        &["config", "set-password", "smtp", "-A", "smoke", "--stdin"],
+        &format!("{SMTP_SET}\n"),
+    );
+    assert!(
+        !out.status.success(),
+        "nothing is stored over a foreign file"
+    );
+    let said = stderr(&out);
+    assert!(
+        said.contains(&format!(
+            "Cannot decrypt secrets store at {}",
+            secrets.display()
+        )) && said.contains("different machine or by a different user")
+            && said.contains("Run `mp config reset-secrets`"),
+        "what happened and what to do next:\n{said}"
+    );
+
+    // The password prompts that follow the reset need a terminal, so only the
+    // reset itself is asserted here.
+    let out = mp_with_stdin(daemon.root(), &["config", "reset-secrets"], "y\n");
+    assert!(
+        stdout(&out).contains(&format!("Removed {}", secrets.display())),
+        "mp config reset-secrets runs over a foreign file:\nstdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(!secrets.exists(), "the foreign file is gone");
+
+    set_password(daemon.root(), "smtp", "smoke", SMTP_SET);
+    use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+    let file = EncryptedFileBackend::open(secrets).expect("the new file is this machine's");
+    assert_eq!(file.get("smtp-password-smoke").unwrap(), SMTP_SET);
+    daemon.stop();
+}

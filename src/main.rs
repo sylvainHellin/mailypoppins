@@ -6273,12 +6273,26 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
     } else {
         mailypoppins::config::init_secrets_backend(&global_config)
     };
+    // `mp config reset-secrets` is the command the undecryptable-file refusal
+    // names, so that refusal must not stop it (PERSO-199): it reads no secret,
+    // and over a file this machine cannot decrypt it skips the SMTP load below
+    // rather than warn that the backend never opened.
+    let resets_secrets = matches!(
+        &cli.command,
+        Some(Commands::Config {
+            action: ConfigAction::ResetSecrets { .. }
+        })
+    );
+    let mut secrets_open = true;
     if let Err(e) = secrets {
         match &e {
             mailypoppins::secrets::SecretsError::NotInitialized(_) => {
                 // Empty store at startup is fine -- `mp config init` or
                 // `set-password` will populate it. The actual missing-key
                 // error surfaces later when `SmtpConfig::load` is called.
+            }
+            mailypoppins::secrets::SecretsError::Undecryptable(_, _) if resets_secrets => {
+                secrets_open = false;
             }
             mailypoppins::secrets::SecretsError::Undecryptable(_, _) => {
                 eprintln!("{} {}", "\u{2717}".red(), e);
@@ -6317,22 +6331,23 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
     // are no credentials are part of what every command has always printed.
     // A Graph account sends through Graph and has no SMTP transport by design,
     // so it skips the load and its warning.
-    let _smtp_config = if launches_tui || account_config.auth_method == AuthMethod::Graph {
-        None
-    } else {
-        Some(SmtpConfig::load(&account_config).unwrap_or_else(|e| {
-            eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
-            eprintln!("  Some commands may not work without proper configuration.");
-            SmtpConfig {
-                host: "localhost".to_string(),
-                port: 465,
-                username: String::new(),
-                password: String::new(),
-                default_from: "user@example.com".to_string(),
-                accept_invalid_certs: false,
-            }
-        }))
-    };
+    let _smtp_config =
+        if launches_tui || !secrets_open || account_config.auth_method == AuthMethod::Graph {
+            None
+        } else {
+            Some(SmtpConfig::load(&account_config).unwrap_or_else(|e| {
+                eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
+                eprintln!("  Some commands may not work without proper configuration.");
+                SmtpConfig {
+                    host: "localhost".to_string(),
+                    port: 465,
+                    username: String::new(),
+                    password: String::new(),
+                    default_from: "user@example.com".to_string(),
+                    accept_invalid_certs: false,
+                }
+            }))
+        };
 
     match cli.command {
         Some(Commands::Send {
