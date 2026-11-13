@@ -253,12 +253,12 @@ pub fn absolutise_in(path: &Path, base: &Path) -> PathBuf {
 /// to do with one, and a `Result` here would invite exactly the silent
 /// fallback the migration forbids.
 pub async fn client_session() -> Connection {
-    session_requiring(&[]).await
+    session_requiring(ClientKind::Cli, &[]).await
 }
 
-/// [`client_session`] requiring `required` at the handshake.
-async fn session_requiring(required: &[&str]) -> Connection {
-    match open_session(required).await {
+/// [`client_session`] as a `kind` client requiring `required` at the handshake.
+async fn session_requiring(kind: ClientKind, required: &[&str]) -> Connection {
+    match open_session(kind, required).await {
         Ok((connection, _instance)) => connection,
         Err(why) => unavailable(&why, &socket_path()),
     }
@@ -274,12 +274,12 @@ async fn session_requiring(required: &[&str]) -> Connection {
 /// terminal in raw mode. `None` means "still nothing there", which is a state
 /// the client shows and retries out of.
 pub async fn reopen_session() -> Option<(Connection, String)> {
-    reopen_requiring(&[]).await
+    reopen_requiring(ClientKind::Cli, &[]).await
 }
 
-/// [`reopen_session`] requiring `required` at the handshake.
-async fn reopen_requiring(required: &[&str]) -> Option<(Connection, String)> {
-    match open_session(required).await {
+/// [`reopen_session`] as a `kind` client requiring `required` at the handshake.
+async fn reopen_requiring(kind: ClientKind, required: &[&str]) -> Option<(Connection, String)> {
+    match open_session(kind, required).await {
         Ok(open) => Some(open),
         Err(why) => {
             info!("[client] no daemon to reconnect to: {why}");
@@ -302,10 +302,20 @@ async fn reopen_requiring(required: &[&str]) -> Option<(Connection, String)> {
 /// one-shot command does not: a TUI against a daemon too old to stream a
 /// mailbox stops at the connect with `capability_missing` instead of opening
 /// every large mailbox empty.
+///
+/// Both announce [`ClientKind::Tui`] where a one-shot command announces `Cli`
+/// (PERSO-224): the daemon elects the presenter of a reminder or a new-mail
+/// notification from the TUIs and desktop apps attached to it, so a TUI that
+/// called itself a CLI would never raise one.
 pub fn tui_connector() -> mp_tui::session::Connector {
     mp_tui::session::Connector {
-        open: || Box::pin(session_requiring(TUI_REQUIRED_CAPABILITIES)),
-        reopen: || Box::pin(reopen_requiring(TUI_REQUIRED_CAPABILITIES)),
+        open: || {
+            Box::pin(session_requiring(
+                ClientKind::Tui,
+                TUI_REQUIRED_CAPABILITIES,
+            ))
+        },
+        reopen: || Box::pin(reopen_requiring(ClientKind::Tui, TUI_REQUIRED_CAPABILITIES)),
     }
 }
 
@@ -335,16 +345,16 @@ pub const TUI_REQUIRED_CAPABILITIES: &[&str] =
 /// started beside it could not bind, and the next one comes up once it has
 /// gone (PERSO-176). The start is told so, since under a login service it is
 /// then the manager's restart ([`lifecycle::Before::Stopping`]).
-async fn open_session(required: &[&str]) -> Result<(Connection, String), String> {
+async fn open_session(kind: ClientKind, required: &[&str]) -> Result<(Connection, String), String> {
     let socket = socket_path();
 
-    let leaving = match connect(&socket, required).await {
+    let leaving = match connect(&socket, kind, required).await {
         Ok(open) => {
             ROUTED.store(true, Ordering::SeqCst);
             return Ok(open);
         }
         Err(e) => {
-            if let Some(why) = too_old(&e) {
+            if let Some(why) = too_old(&e, kind) {
                 return Err(why);
             }
             shutting_down(&e)
@@ -381,7 +391,7 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
 
     let mut gap = RETRY_MIN;
     loop {
-        match connect(&socket, required).await {
+        match connect(&socket, kind, required).await {
             Ok(open) => {
                 ROUTED.store(true, Ordering::SeqCst);
                 return Ok(open);
@@ -404,9 +414,9 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
 /// range cannot be answered by starting a daemon, naming both versions and
 /// the way out: `mp daemon restart` for an older daemon, a newer `mp` when
 /// this build is the older side (PERSO-277), or `None` for any other failure.
-fn too_old(error: &ClientError) -> Option<String> {
+fn too_old(error: &ClientError, kind: ClientKind) -> Option<String> {
     let refusal = VersionRefusal::from_error(error)?;
-    Some(refusal.sentence(env!("CARGO_PKG_VERSION"), ClientKind::Cli))
+    Some(refusal.sentence(env!("CARGO_PKG_VERSION"), kind))
 }
 
 /// Whether a handshake was refused by a daemon that is shutting down.
@@ -416,11 +426,15 @@ fn shutting_down(error: &ClientError) -> bool {
 
 /// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
 /// `instance_id` the handshake reported.
-async fn connect(socket: &Path, required: &[&str]) -> Result<(Connection, String), ClientError> {
+async fn connect(
+    socket: &Path,
+    kind: ClientKind,
+    required: &[&str],
+) -> Result<(Connection, String), ClientError> {
     let opened = Connection::open_requiring(
         socket,
         ClientInfo {
-            kind: ClientKind::Cli,
+            kind,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         },
         Identity {
@@ -556,7 +570,7 @@ mod tests {
                 "daemon": {"version": "0.11.0", "min": 1, "max": 1},
             })),
         });
-        let why = too_old(&missing).expect("a missing capability is final");
+        let why = too_old(&missing, ClientKind::Cli).expect("a missing capability is final");
         assert!(why.contains("message.list_stream"), "{why}");
         assert!(why.contains("mailypoppins 0.11.0"), "{why}");
         assert!(
@@ -570,7 +584,8 @@ mod tests {
             message: "the daemon does not offer every required capability".to_string(),
             data: Some(serde_json::json!({"missing": ["message.list_stream"]})),
         });
-        let why = too_old(&older).expect("a daemon that predates the version is final too");
+        let why = too_old(&older, ClientKind::Cli)
+            .expect("a daemon that predates the version is final too");
         assert!(why.contains("does not report its version"), "{why}");
         assert!(why.contains("message.list_stream"), "{why}");
 
@@ -582,7 +597,7 @@ mod tests {
                 "client": {"min": 1, "max": 1},
             })),
         });
-        let why = too_old(&disjoint).expect("a disjoint protocol range is final");
+        let why = too_old(&disjoint, ClientKind::Cli).expect("a disjoint protocol range is final");
         assert!(why.contains("mailypoppins 9.0.0"), "{why}");
         assert!(why.contains("protocol 2"), "{why}");
         // The daemon is the newer side: restarting it from this build would
@@ -598,17 +613,17 @@ mod tests {
             message: "no protocol version is supported by both sides".to_string(),
             data: Some(serde_json::json!({"daemon": {"version": "0.0.1", "min": 0, "max": 0}})),
         });
-        let why = too_old(&below).expect("a disjoint protocol range is final");
+        let why = too_old(&below, ClientKind::Cli).expect("a disjoint protocol range is final");
         assert!(why.contains("mp daemon restart"), "{why}");
 
-        assert!(too_old(&ClientError::NotRunning).is_none());
+        assert!(too_old(&ClientError::NotRunning, ClientKind::Cli).is_none());
         let shutting_down = ClientError::Rpc(mp_protocol::RpcError {
             code: ErrorCode::ShuttingDown.code(),
             message: "shutting down".to_string(),
             data: None,
         });
         assert!(
-            too_old(&shutting_down).is_none(),
+            too_old(&shutting_down, ClientKind::Cli).is_none(),
             "a daemon on its way out is replaced by the on-demand start"
         );
         assert!(super::shutting_down(&shutting_down));

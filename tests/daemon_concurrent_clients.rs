@@ -29,6 +29,10 @@ mod support;
 use std::process::{Child, Output, Stdio};
 use std::time::Instant;
 
+use serde_json::json;
+
+use mailypoppins::tui::session::Session;
+
 use support::parity::{mp_command, DaemonFixture, DEADLINE, TICK};
 use support::sync_fixture;
 
@@ -129,5 +133,58 @@ fn concurrent_cli_commands_each_answer_as_they_do_alone() {
         "the clients shared the running daemon rather than starting another"
     );
 
+    daemon.stop();
+}
+
+/// A TUI session announces itself as a TUI, and keeps answering while CLI
+/// commands run beside it, each of which answers as it does alone.
+#[test]
+fn a_tui_session_and_cli_commands_share_one_daemon_at_the_same_instant() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    sync_fixture::seed(tmp.path());
+    let root = tmp.path().to_path_buf();
+    // `Session::connect` reads these; see the module header.
+    std::env::set_var("HOME", &root);
+    std::env::set_var("MAILYPOPPINS_DATA_DIR", &root);
+    std::env::set_var("MAILYPOPPINS_CONFIG_DIR", &root);
+    std::env::set_var("MAILYPOPPINS_DAEMON_AUTOSTART", "0");
+
+    let daemon = DaemonFixture::start(&root);
+    let mut session = Session::connect(mailypoppins::daemon::client::tui_connector())
+        .expect("the session thread comes up");
+    let accounts = session
+        .call("account.list", json!({}))
+        .expect("a live session answers");
+
+    let logs = session
+        .call("diagnostic.logs", json!({"lines": 500}))
+        .expect("the daemon reads its own log");
+    let logs = logs.to_string();
+    assert!(
+        logs.contains("a tui client completed initialize"),
+        "the TUI's handshake announces a TUI, so the daemon can elect it a presenter: {logs}"
+    );
+
+    let lone = lone_runs(&daemon);
+    let mut running = spawn_all(&daemon);
+    // The session calls while the commands are in flight, and stops once they
+    // have all exited, so the two overlap rather than take turns.
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let answer = session
+            .call("account.list", json!({}))
+            .expect("the session answers while commands run beside it");
+        assert_eq!(answer, accounts, "and answers what it answered alone");
+        let in_flight = running
+            .iter_mut()
+            .any(|child| child.try_wait().expect("polling an mp run").is_none());
+        if !in_flight {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the commands did not finish");
+    }
+    check(running, &lone);
+
+    session.close();
     daemon.stop();
 }
