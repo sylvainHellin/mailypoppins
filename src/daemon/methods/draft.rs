@@ -62,6 +62,7 @@ use crate::selector::{Namespace, Selector};
 use crate::store::drafts::DraftRow;
 use crate::store::read::MessageRow;
 use crate::store::{BlobStore, Store};
+use crate::types::EmailDraft;
 
 use crate::daemon::config::ConfigStore;
 use crate::daemon::watch::{diagnostics_of, DraftWatch};
@@ -337,15 +338,15 @@ fn list(params: &Value, accounts: &[AccountConfig], watch: &DraftWatch) -> Resul
     };
 
     let (rows, collisions, skipped) =
-        crate::store::drafts::index_dir(&crate::config::drafts_dir(&account.name));
+        crate::store::drafts::index_dir_parsed(&crate::config::drafts_dir(&account.name));
     let listing = DraftListing {
         account: account.name.clone(),
         drafts: rows
             .iter()
-            .filter(|row| status.as_deref().is_none_or(|status| row.status == status))
-            .map(|row| DraftEntry {
+            .filter(|(row, _)| status.as_deref().is_none_or(|status| row.status == status))
+            .map(|(row, draft)| DraftEntry {
                 server: watch.server_of(&account.name, &row.id, &row.path),
-                ..entry(&account.name, row)
+                ..entry(&account.name, row, draft)
             })
             .collect(),
         skipped: skipped
@@ -376,8 +377,10 @@ fn list(params: &Value, accounts: &[AccountConfig], watch: &DraftWatch) -> Resul
 /// `subject` is the frontmatter's own field rather than the index's, which
 /// drops an empty one: an empty subject stays an empty subject here, and the
 /// client decides that a blank one prints no line.
-fn entry(account: &str, row: &DraftRow) -> DraftEntry {
-    let draft = crate::draft::parse_email_draft(&row.path);
+///
+/// `draft` is the parse the index scan already made (PERSO-223), so a listed
+/// row is valid by construction: a file that would not parse is in `skipped`.
+fn entry(account: &str, row: &DraftRow, draft: &EmailDraft) -> DraftEntry {
     DraftEntry {
         id: row.id.clone(),
         selector: Selector::for_draft(account, &row.id).to_string(),
@@ -385,19 +388,11 @@ fn entry(account: &str, row: &DraftRow) -> DraftEntry {
         status: row.status.clone(),
         to: row.to.clone(),
         cc: row.cc.clone(),
-        bcc: draft
-            .as_ref()
-            .ok()
-            .and_then(|draft| draft.frontmatter.bcc.clone()),
-        subject: draft
-            .as_ref()
-            .ok()
-            .map(|draft| draft.frontmatter.subject.clone()),
+        bcc: draft.frontmatter.bcc.clone(),
+        subject: Some(draft.frontmatter.subject.clone()),
         date: row.date.clone(),
-        valid: draft.is_ok(),
-        ready: draft
-            .as_ref()
-            .is_ok_and(|draft| crate::draft::validate_draft(draft).is_ok()),
+        valid: true,
+        ready: crate::draft::validate_draft(draft).is_ok(),
         server: None,
     }
 }
@@ -409,11 +404,21 @@ fn entry(account: &str, row: &DraftRow) -> DraftEntry {
 /// an answer, and the exit code stays the client's decision.
 fn validate(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
-    let rows = match addressed(params, &account.name)? {
-        Some(key) => vec![resolve(&account.name, &key)?],
-        None => crate::store::drafts::index_dir(&crate::config::drafts_dir(&account.name)).0,
+    let reports: Vec<DraftReport> = match addressed(params, &account.name)? {
+        Some(key) => {
+            let row = resolve(&account.name, &key)?;
+            vec![report(
+                &account.name,
+                &row,
+                crate::draft::parse_email_draft(&row.path),
+            )]
+        }
+        None => crate::store::drafts::index_dir_parsed(&crate::config::drafts_dir(&account.name))
+            .0
+            .into_iter()
+            .map(|(row, draft)| report(&account.name, &row, Ok(draft)))
+            .collect(),
     };
-    let reports: Vec<DraftReport> = rows.iter().map(|row| report(&account.name, row)).collect();
     to_value(
         "draft.validate",
         &DraftValidation {
@@ -425,9 +430,11 @@ fn validate(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
 
 /// One draft's diagnostics, in the two fields `mp validate` prints: the single
 /// line after the dash, and the warnings it joins with `", "`.
-fn report(account: &str, row: &DraftRow) -> DraftReport {
-    let outcome = crate::draft::parse_email_draft(&row.path)
-        .and_then(|draft| crate::draft::validate_draft(&draft));
+///
+/// `parsed` is the index scan's parse when there was one (PERSO-223), so a
+/// listed draft is read once.
+fn report(account: &str, row: &DraftRow, parsed: anyhow::Result<EmailDraft>) -> DraftReport {
+    let outcome = parsed.and_then(|draft| crate::draft::validate_draft(&draft));
     DraftReport {
         id: row.id.clone(),
         selector: Selector::for_draft(account, &row.id).to_string(),

@@ -28,6 +28,7 @@ use walkdir::WalkDir;
 
 use crate::draft::{parse_email_draft, set_draft_id};
 use crate::store::Store;
+use crate::types::EmailDraft;
 
 /// How much of the body the index keeps for a list line.
 const SNIPPET_CHARS: usize = 200;
@@ -155,7 +156,8 @@ pub fn refresh_reporting(
     dir: &Path,
 ) -> Result<(Vec<DraftRow>, Vec<IdCollision>, Vec<SkippedDraft>)> {
     let (parsed, skipped) = scan(dir);
-    let (rows, collisions) = dedupe_by_id(parsed);
+    let (parsed, collisions) = dedupe_by_id(parsed);
+    let rows: Vec<DraftRow> = parsed.into_iter().map(|(row, _)| row).collect();
     for collision in &collisions {
         log::warn!("[drafts] {collision}");
     }
@@ -207,17 +209,17 @@ pub fn refresh_reporting(
 /// always indexes the same way regardless of readdir order. This is not a
 /// resolution rule: an id is supposed to be unique, and two files carrying one
 /// is a state only the user can fix.
-fn dedupe_by_id(rows: Vec<DraftRow>) -> (Vec<DraftRow>, Vec<IdCollision>) {
+fn dedupe_by_id<T>(rows: Vec<(DraftRow, T)>) -> (Vec<(DraftRow, T)>, Vec<IdCollision>) {
     use std::collections::HashMap;
 
     let mut winner: HashMap<&str, usize> = HashMap::new();
-    for (i, row) in rows.iter().enumerate() {
+    for (i, (row, _)) in rows.iter().enumerate() {
         match winner.get(row.id.as_str()) {
             None => {
                 winner.insert(&row.id, i);
             }
             Some(&held) => {
-                let current = &rows[held];
+                let current = &rows[held].0;
                 let beats = (row.mtime, std::cmp::Reverse(&row.path))
                     > (current.mtime, std::cmp::Reverse(&current.path));
                 if beats {
@@ -228,15 +230,15 @@ fn dedupe_by_id(rows: Vec<DraftRow>) -> (Vec<DraftRow>, Vec<IdCollision>) {
     }
     let winning: HashMap<String, (usize, PathBuf)> = winner
         .iter()
-        .map(|(id, &i)| ((*id).to_string(), (i, rows[i].path.clone())))
+        .map(|(id, &i)| ((*id).to_string(), (i, rows[i].0.path.clone())))
         .collect();
 
     let mut kept = Vec::with_capacity(winning.len());
     let mut collisions = Vec::new();
-    for (i, row) in rows.into_iter().enumerate() {
+    for (i, (row, parsed)) in rows.into_iter().enumerate() {
         let (winner_index, winner_path) = &winning[&row.id];
         if *winner_index == i {
-            kept.push(row);
+            kept.push((row, parsed));
         } else {
             collisions.push(IdCollision {
                 id: row.id,
@@ -258,9 +260,28 @@ fn dedupe_by_id(rows: Vec<DraftRow>) -> (Vec<DraftRow>, Vec<IdCollision>) {
 /// the freshness rule every draft command has always had, and it costs neither
 /// an engine lock nor a store.
 pub fn index_dir(dir: &Path) -> (Vec<DraftRow>, Vec<IdCollision>, Vec<SkippedDraft>) {
+    let (parsed, collisions, skipped) = index_dir_parsed(dir);
+    (
+        parsed.into_iter().map(|(row, _)| row).collect(),
+        collisions,
+        skipped,
+    )
+}
+
+/// [`index_dir`], each row beside the draft its scan parsed, for a caller
+/// that reads more of the file than the index keeps: the scan already parsed
+/// every file it indexed, so a second parse would read the same bytes again
+/// (PERSO-223).
+pub fn index_dir_parsed(
+    dir: &Path,
+) -> (
+    Vec<(DraftRow, EmailDraft)>,
+    Vec<IdCollision>,
+    Vec<SkippedDraft>,
+) {
     let (parsed, skipped) = scan(dir);
-    let (rows, collisions) = dedupe_by_id(parsed);
-    (rows, collisions, skipped)
+    let (parsed, collisions) = dedupe_by_id(parsed);
+    (parsed, collisions, skipped)
 }
 
 /// Refresh the index of an account from its configured drafts directory,
@@ -388,7 +409,7 @@ pub fn fingerprint(dir: &Path) -> u64 {
 /// Returns the parsed rows and, beside them, the files that would not parse:
 /// the skip is data now, not just a log line, so a caller can list the broken
 /// file rather than let it vanish (#0080).
-fn scan(dir: &Path) -> (Vec<DraftRow>, Vec<SkippedDraft>) {
+fn scan(dir: &Path) -> (Vec<(DraftRow, EmailDraft)>, Vec<SkippedDraft>) {
     let mut rows = Vec::new();
     let mut skipped = Vec::new();
     for entry in WalkDir::new(dir)
@@ -408,7 +429,7 @@ fn scan(dir: &Path) -> (Vec<DraftRow>, Vec<SkippedDraft>) {
             }),
         }
     }
-    rows.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.id.cmp(&b.id)));
+    rows.sort_by(|(a, _), (b, _)| b.mtime.cmp(&a.mtime).then_with(|| a.id.cmp(&b.id)));
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
     (rows, skipped)
 }
@@ -429,9 +450,10 @@ fn is_draft_file(path: &Path) -> bool {
     path.is_file() && path.extension().is_some_and(|ext| ext == "md")
 }
 
-/// Index one file, writing an `id:` back into it when it has none.
-fn row_for(path: &Path) -> Result<DraftRow> {
-    let draft = parse_email_draft(path)?;
+/// Index one file, writing an `id:` back into it when it has none, and hand
+/// back the draft it parsed, carrying that id as the file now does.
+fn row_for(path: &Path) -> Result<(DraftRow, EmailDraft)> {
+    let mut draft = parse_email_draft(path)?;
     let id = match draft
         .frontmatter
         .id
@@ -443,12 +465,13 @@ fn row_for(path: &Path) -> Result<DraftRow> {
         None => {
             let id = new_id();
             set_draft_id(path, &id)?;
+            draft.frontmatter.id = Some(id.clone());
             id
         }
     };
     // Stat *after* a possible write-back, so the indexed mtime matches the file.
     let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    Ok(DraftRow {
+    let row = DraftRow {
         id,
         slug: path
             .file_stem()
@@ -466,7 +489,8 @@ fn row_for(path: &Path) -> Result<DraftRow> {
         snippet: snippet_of(&draft.body_markdown),
         in_reply_to: linked_id(draft.frontmatter.in_reply_to.as_deref()),
         forwarded_from: linked_id(draft.frontmatter.forwarded_from.as_deref()),
-    })
+    };
+    Ok((row, draft))
 }
 
 /// A frontmatter `Message-ID` as the index keeps it: verbatim, `None` when
@@ -766,30 +790,35 @@ mod tests {
     /// cannot decide which draft an id addresses.
     #[test]
     fn the_surviving_row_is_the_newest_file_then_the_first_path() {
-        let row = |path: &str, mtime: i64| DraftRow {
-            id: "shared".to_string(),
-            slug: path.trim_end_matches(".md").to_string(),
-            path: PathBuf::from(path),
-            mtime,
-            size: 1,
-            status: "draft".to_string(),
-            to: None,
-            cc: None,
-            subject: None,
-            date: None,
-            snippet: None,
-            in_reply_to: None,
-            forwarded_from: None,
+        let row = |path: &str, mtime: i64| {
+            (
+                DraftRow {
+                    id: "shared".to_string(),
+                    slug: path.trim_end_matches(".md").to_string(),
+                    path: PathBuf::from(path),
+                    mtime,
+                    size: 1,
+                    status: "draft".to_string(),
+                    to: None,
+                    cc: None,
+                    subject: None,
+                    date: None,
+                    snippet: None,
+                    in_reply_to: None,
+                    forwarded_from: None,
+                },
+                (),
+            )
         };
 
         let (kept, collisions) = dedupe_by_id(vec![row("b.md", 10), row("a.md", 20)]);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].path, PathBuf::from("a.md"));
+        assert_eq!(kept[0].0.path, PathBuf::from("a.md"));
         assert_eq!(collisions[0].shadowed, PathBuf::from("b.md"));
 
         let (kept, collisions) = dedupe_by_id(vec![row("b.md", 10), row("a.md", 10)]);
         assert_eq!(
-            kept[0].path,
+            kept[0].0.path,
             PathBuf::from("a.md"),
             "equal mtime breaks by path"
         );
