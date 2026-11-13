@@ -2673,7 +2673,21 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       knownAccount(cmd, account);
       const refuse = (message: string) => ({ kind: "protocol", code: -32602, message });
       const method = cmd.replace("_", ".");
-      if (id.startsWith("imip:")) throw refuse(`${id} is an invitation mail's event, which can only be answered (event.respond); ${method} changes a server event`);
+      // An invitation mail the account organised is updated or cancelled
+      // by mail, as the daemon does (PERSO-204); any other is only answered.
+      const imip = id.startsWith("imip:");
+      if (imip) {
+        const mail = mock.events.find((e) => e.account === account && e.id === id);
+        if (cmd === "event_delete") {
+          throw refuse(`${id} is an invitation mail's event, which ${method} does not reach: its organizer cancels it (event.cancel) and an attendee answers it (event.respond)`);
+        }
+        if (!mail || !(mail.is_organizer || mail.own_response === "organizer")) {
+          throw refuse(
+            `${mail?.summary ?? id} was organised by ${mail?.organizer?.email ?? "someone else"}, not by ${account}: only its organizer changes or cancels it, and an invitation you were sent can only be answered (event.respond)`,
+          );
+        }
+        if (mail.cancelled) throw refuse(`${mail.summary} is cancelled already; there is nothing left to change`);
+      }
       const asked = (params ? params.scope : args.scope) as string | null | undefined;
       const named = mock.events.find((e) => e.account === account && e.id === id) ?? mock.series.find((x) => x.master.account === account && x.master.id === id)?.master;
       const removed = mock.removedEvents.find(
@@ -2709,7 +2723,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         throw refuse(`${named.summary} is not part of a series`);
       }
       const calendar = mock.calendars.find((c) => c.account === account && c.id === event.calendar);
-      if (calendar && !calendar.can_edit) throw refuse(`The calendar ${calendar.name} of ${account} is read-only`);
+      if (calendar && !calendar.can_edit && !imip) throw refuse(`The calendar ${calendar.name} of ${account} is read-only`);
       const organizer = event.is_organizer || event.own_response === "organizer";
       const meeting = event.attendees.length > 0;
       let changed: CalendarEvent | null = null;
@@ -2718,6 +2732,10 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         kind = "update";
         const f = params.fields;
         const keys = Object.keys(f);
+        const unsent = imip ? keys.filter((k) => !["summary", "start", "end", "duration", "zone", "all_day", "location", "body", "attendees"].includes(k)) : [];
+        if (unsent.length > 0) {
+          throw refuse(`${event.summary}: an invitation mail carries its summary, time, location, description and attendees, not ${unsent.join(", ")}`);
+        }
         if (keys.length === 0) throw refuse("Nothing to change: name at least one field of the event");
         if (f.recurrence && scope !== "series") {
           throw refuse(
@@ -2756,6 +2774,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         kind = "cancel";
         if (!organizer) throw refuse(`Only the organizer can cancel ${event.summary}; decline it instead`);
         if (!meeting) throw refuse(`${event.summary} invites nobody, so there is nobody to tell; delete it instead`);
+        // An invitation mail stays on the agenda, tombstoned.
+        if (imip) changed = { ...clone(event), cancelled: true };
       } else {
         kind = "delete";
         if (!event.cancelled && organizer && meeting) throw refuse(`${event.summary} is a meeting with attendees; cancel it to tell them`);

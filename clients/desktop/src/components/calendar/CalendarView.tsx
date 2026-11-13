@@ -76,8 +76,10 @@ export function CalendarView() {
   const narrow = s.layout === "narrow";
   const answer = current ? rsvpDialogFor(s, current.event) : null;
   const refusal = typeof answer === "string" ? answer : null;
-  // An invitation mail's event is only answered, so it shows neither.
-  const server = current !== null && !current.event.id.startsWith("imip:");
+  // An invitation mail's event someone else organised is only answered, so
+  // it shows neither; one the account organised is changed and cancelled by
+  // mail (PERSO-204).
+  const changeable = current !== null && (!current.event.id.startsWith("imip:") || isOrganizer(current.event));
   const editing = current ? editDialogFor(current.event, calendars) : null;
   const removal = current ? removeDialogFor(current.event, calendars) : null;
 
@@ -242,7 +244,7 @@ export function CalendarView() {
                     {refusal}
                   </p>
                 ) : null}
-                {server ? (
+                {changeable ? (
                   <span className="flex flex-wrap gap-1.5">
                     <Button
                       size="sm"

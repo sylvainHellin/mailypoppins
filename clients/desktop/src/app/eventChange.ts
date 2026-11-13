@@ -95,9 +95,18 @@ export function isOccurrence(event: CalendarEvent): boolean {
   return event.kind === "occurrence" || event.kind === "exception" || Boolean(event.series_master_id);
 }
 
-/** Why `event` cannot be changed from mp: an invitation mail's, or one on a calendar that takes no writes; null when it can. */
+/** Whether `event` is an invitation mail's (`imip:<row_id>`) rather than the server's. */
+const isInvitationMail = (event: CalendarEvent) => event.id.startsWith("imip:");
+
+/**
+ * Why `event` cannot be changed from mp: an invitation mail someone else
+ * organised, or one on a calendar that takes no writes; null when it can.
+ * An invitation mail the account organised is changed by mail (PERSO-204):
+ * its calendar takes no server writes, and the daemon sends the update or
+ * the cancellation instead.
+ */
 export function unchangeable(event: CalendarEvent, calendars: readonly CalendarInfo[] | null): string | null {
-  if (event.id.startsWith("imip:")) return "An invitation mail's event can only be answered (V)";
+  if (isInvitationMail(event)) return isOrganizer(event) ? null : "An invitation mail's event can only be answered (V)";
   const calendar = (calendars ?? []).find((c) => c.account === event.account && c.id === event.calendar);
   if (!calendar) return `${event.account} has no calendar ${event.calendar}`;
   if (!calendar.can_edit || !calendar.features.includes("write")) return `The calendar ${calendar.name} takes no changes from mp`;
@@ -116,9 +125,12 @@ export function editDialogFor(
   scope: EventScope | null = null,
   rule: CalendarRecurrence | null = null,
 ): EventDialog | string {
+  const tombstone = cancelledInvitation(event);
+  if (tombstone) return tombstone;
   if (event.cancelled) return `${eventTitle(event)} was cancelled by its organizer; Delete removes your copy`;
   const why = unchangeable(event, calendars);
   if (why) return why;
+  if (isInvitationMail(event) && event.kind !== "single") return `mp cannot change a repeating invitation yet; Cancel meeting cancels ${eventTitle(event)}`;
   const info = (calendars ?? []).find((c) => c.account === event.account && c.id === event.calendar);
   if (!info) return `${event.account} has no calendar ${event.calendar}`;
   const calendar: EventCalendar = {
@@ -187,6 +199,8 @@ export function removeDialogFor(
 ): EventRemoveDialog | string {
   const why = unchangeable(event, calendars);
   if (why) return why;
+  const tombstone = cancelledInvitation(event);
+  if (tombstone) return tombstone;
   const meeting = event.attendees.length > 0;
   let cancel: boolean;
   if (event.cancelled) cancel = false;
@@ -195,6 +209,11 @@ export function removeDialogFor(
   else return `${eventTitle(event)} is someone else's meeting: decline it (Respond) to tell the organizer`;
   const dialog: EventRemoveDialog = { account: event.account, event: event.id, summary: eventTitle(event), cancel, attendees: event.attendees.length };
   return scope ? { ...dialog, scope } : dialog;
+}
+
+/** Why a cancelled invitation mail the account organised takes no change: it is a tombstone, which nothing deletes; null for any other event. */
+function cancelledInvitation(event: CalendarEvent): string | null {
+  return isInvitationMail(event) && event.cancelled && isOrganizer(event) ? `${eventTitle(event)} is cancelled already; an invitation mail stays on the agenda` : null;
 }
 
 /** The start and end as the daemon reads them; an all-day event with no last day lasts one day. */

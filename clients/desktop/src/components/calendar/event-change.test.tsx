@@ -132,7 +132,33 @@ describe("the event change model", () => {
     expect(removeDialogFor(event({ is_organizer: false, own_response: "accepted", organizer: { email: "kim@example.com" } }), calendars)).toMatch(/someone else's meeting/);
     expect(removeDialogFor(event({ kind: "occurrence", series_master_id: "ev-series" }), calendars, "series")).toMatchObject({ cancel: true, scope: "series" });
     expect(removeDialogFor(event({ calendar: "ro" }), calendars)).toMatch(/takes no changes/);
-    expect(editDialogFor(event({ id: "imip:7" }), calendars)).toMatch(/can only be answered/);
+    expect(
+      editDialogFor(event({ id: "imip:7", is_organizer: false, own_response: "needs-action", organizer: { email: "kim@example.com" } }), calendars),
+    ).toMatch(/can only be answered/);
+  });
+});
+
+describe("an invitation mail the account organised (PERSO-204)", () => {
+  const invitations: CalendarInfo[] = [
+    ...calendars,
+    { account: "home", id: "imip", name: "Invitations", color: null, is_default: false, can_edit: false, visible: true, backend: "none", features: [] },
+  ];
+  const sent = (over: Partial<CalendarEvent> = {}) => event({ id: "imip:7", calendar: "imip", reminder: undefined, ...over });
+
+  it("opens the form and the cancel confirmation on it, which the daemon sends by mail", () => {
+    const dialog = editDialogFor(sent(), invitations) as EventDialog;
+    expect(dialog.edit).toMatchObject({ account: "home", event: "imip:7", organizer: true });
+    const moved: EventDialog = { ...dialog, fields: { ...dialog.fields, location: "Room 2" } };
+    expect(changedFields(moved, "Europe/Berlin")).toEqual({ location: "Room 2" });
+    expect(removeDialogFor(sent(), invitations)).toMatchObject({ event: "imip:7", cancel: true, attendees: 1 });
+  });
+
+  it("cancels a repeating one rather than changing it, and says when it is cancelled already", () => {
+    expect(editDialogFor(sent({ kind: "series-master" }), invitations)).toBe("mp cannot change a repeating invitation yet; Cancel meeting cancels Budget");
+    expect(removeDialogFor(sent({ kind: "series-master" }), invitations)).toMatchObject({ cancel: true });
+    const cancelled = "Budget is cancelled already; an invitation mail stays on the agenda";
+    expect(editDialogFor(sent({ cancelled: true }), invitations)).toBe(cancelled);
+    expect(removeDialogFor(sent({ cancelled: true }), invitations)).toBe(cancelled);
   });
 });
 
