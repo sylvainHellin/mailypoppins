@@ -426,12 +426,12 @@ pub async fn first_sync(
         secrets: snapshot.config.secrets_backend,
     };
     if let Some(reason) = missing_login_password(&request.account, request.secrets).await {
-        log::info!("[daemon] {account}'s first sync waits for its password");
-        if runtimes.get(&account).is_none() && config.accounts().iter().any(|a| a.name == account) {
-            canonical.apply(super::super::config::blocked_by_failure(
-                &runtimes, &account, reason,
-            ));
-        }
+        let still_missing = || async {
+            missing_login_password(&request.account, request.secrets)
+                .await
+                .is_some()
+        };
+        wait_for_password(&config, &runtimes, &canonical, mark, reason, still_missing).await;
         return;
     }
     log::info!("[daemon] {account} has no local store yet; running its first sync");
@@ -522,6 +522,41 @@ async fn missing_login_password(
     .await
     .ok()
     .flatten()
+}
+
+/// A first sync that found no password to log in with ([`missing_login_password`]
+/// gave `reason`): the account shows `blocked` with the reason, and the
+/// `config.set_password` that stores a password starts the first sync again.
+///
+/// That `config.set_password` finds the first-sync `mark` held while this one
+/// runs and starts nothing, so a password stored between the check and the
+/// blocked state would be left waiting with the account blocked (PERSO-199).
+/// The mark goes once the blocked state is in, and `still_missing` reads the
+/// store once more: a password stored before that read is found by it, and
+/// one stored after finds no mark and starts the sync itself. No lock is held
+/// across the read.
+async fn wait_for_password<F>(
+    config: &Arc<ConfigStore>,
+    runtimes: &Arc<RuntimeTable>,
+    canonical: &Arc<CanonicalState>,
+    mark: FirstSyncMark,
+    reason: String,
+    still_missing: impl FnOnce() -> F,
+) where
+    F: std::future::Future<Output = bool>,
+{
+    let account = mark.account.clone();
+    log::info!("[daemon] {account}'s first sync waits for its password");
+    if runtimes.get(&account).is_none() && config.accounts().iter().any(|a| a.name == account) {
+        canonical.apply(super::super::config::blocked_by_failure(
+            runtimes, &account, reason,
+        ));
+    }
+    drop(mark);
+    if !still_missing().await {
+        log::info!("[daemon] {account}'s password arrived while its first sync waited");
+        super::super::config::spawn_first_sync_if_new(config, runtimes, canonical, &account);
+    }
 }
 
 /// The in-flight mark of a first sync ([`RuntimeTable::begin_first_sync`]),
@@ -1066,5 +1101,146 @@ mod tests {
             QUICK_TICK_LIMIT
         );
         assert_eq!(pass_limit(TickKind::Quick, 2500), 2500);
+    }
+
+    /// A new password account whose first sync found no password, in a
+    /// daemon of its own: no store, no runtime, the first sync marked in
+    /// flight as `spawn_first_sync_if_new` leaves it.
+    struct Waiting {
+        account: &'static str,
+        config: Arc<ConfigStore>,
+        runtimes: Arc<RuntimeTable>,
+        canonical: Arc<CanonicalState>,
+        _data: crate::config::test_env::DataDirOverride,
+        _config: crate::config::test_env::ConfigDirOverride,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Waiting {
+        fn new() -> (Self, FirstSyncMark) {
+            let account = "zz-first-sync-password";
+            let dir = tempfile::tempdir().expect("tempdir");
+            // Thread-local, and the test's runtime is current-thread, so every
+            // step below resolves the store path under it.
+            let data = crate::config::test_env::DataDirOverride::set(dir.path());
+            let config_dir = crate::config::test_env::ConfigDirOverride::new(dir.path());
+            let text = format!(
+                "[[accounts]]\nname = \"{account}\"\n\n[accounts.imap]\nhost = \"imap.example.com\"\n"
+            );
+            let document = super::super::super::config::validate_document(
+                &text,
+                std::path::Path::new("/c/config.toml"),
+            )
+            .expect("a valid document");
+            let config = Arc::new(ConfigStore::new(
+                std::path::PathBuf::from("/c/config.toml"),
+                super::super::super::config::ConfigState::Ok,
+                document,
+                true,
+            ));
+            let runtimes = Arc::new(RuntimeTable::default());
+            let canonical = Arc::new(CanonicalState::new(
+                crate::daemon::state::InstanceId::new("test"),
+                Vec::new(),
+            ));
+            assert!(runtimes.begin_first_sync(account));
+            let mark = FirstSyncMark {
+                runtimes: Arc::clone(&runtimes),
+                account: account.to_string(),
+            };
+            let waiting = Self {
+                account,
+                config,
+                runtimes,
+                canonical,
+                _data: data,
+                _config: config_dir,
+                _dir: dir,
+            };
+            (waiting, mark)
+        }
+
+        /// What `config.set_password` does once it stored a password.
+        fn password_stored(&self) {
+            super::super::super::config::spawn_first_sync_if_new(
+                &self.config,
+                &self.runtimes,
+                &self.canonical,
+                self.account,
+            );
+        }
+
+        fn blocked(&self) -> bool {
+            matches!(
+                self.runtimes.health_of(self.account),
+                crate::daemon::server::RuntimeHealth::Failed(reason) if reason == NO_PASSWORD
+            )
+        }
+    }
+
+    const NO_PASSWORD: &str = "No IMAP password is stored for account 'zz-first-sync-password', \
+         nor an SMTP password to fall back to.";
+
+    /// The only password arrives between the first sync's check that found
+    /// none and its blocked state: the `config.set_password` that stored it
+    /// finds the first sync still marked and starts nothing, so the waiting
+    /// first sync reads the store once more after letting go of the mark and
+    /// starts the sync itself, rather than leaving the account blocked with
+    /// a password stored (PERSO-199). The test's runtime is current-thread
+    /// and nothing awaits after the call, so the first sync it spawns is
+    /// never polled: the mark it took is what shows it was started.
+    #[tokio::test]
+    async fn a_password_stored_while_the_first_sync_waits_starts_it() {
+        let (waiting, mark) = Waiting::new();
+        // The check has read the store and found no password; now one is
+        // stored, and its `config.set_password` finds the mark held.
+        waiting.password_stored();
+        assert!(
+            !waiting.runtimes.begin_first_sync(waiting.account),
+            "the waiting first sync still holds the mark"
+        );
+
+        let still_missing = || async { false };
+        wait_for_password(
+            &waiting.config,
+            &waiting.runtimes,
+            &waiting.canonical,
+            mark,
+            NO_PASSWORD.to_string(),
+            still_missing,
+        )
+        .await;
+
+        assert!(
+            waiting.runtimes.first_sync_running(waiting.account),
+            "the password found on the second read starts the first sync"
+        );
+        assert!(waiting.blocked(), "blocked until that first sync ends");
+    }
+
+    /// With still no password on the second read, the account stays blocked
+    /// and the mark is gone, so the `config.set_password` that stores one
+    /// later starts the first sync.
+    #[tokio::test]
+    async fn a_first_sync_with_still_no_password_waits_unmarked() {
+        let (waiting, mark) = Waiting::new();
+        let still_missing = || async { true };
+        wait_for_password(
+            &waiting.config,
+            &waiting.runtimes,
+            &waiting.canonical,
+            mark,
+            NO_PASSWORD.to_string(),
+            still_missing,
+        )
+        .await;
+
+        assert!(waiting.blocked());
+        assert!(!waiting.runtimes.first_sync_running(waiting.account));
+        waiting.password_stored();
+        assert!(
+            waiting.runtimes.first_sync_running(waiting.account),
+            "a password stored later starts the first sync"
+        );
     }
 }
