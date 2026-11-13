@@ -533,7 +533,7 @@ A tick queues on the runtime the inbox messages its pass inserted above the mail
 The runner waits until the blocked senders and, for an account with hooks, the mail hooks report that tick done, since either may move a message to Junk, then reads each queued row again and keeps the ones still unread in the Inbox and from neither a blocked sender nor the account's `default_from` address (`src/daemon/arrivals.rs`).
 What survives is one `mail.arrived` to every client with the presenter of that moment, elected as a reminder's is, and an info line `[arrivals] <account>: N new message(s) (presenter ...)` in the log; a tick whose mail was all filtered out logs at debug level only.
 A hook that runs long holds its tick's notification back for as long, its `timeout_secs` at most.
-A pass a client asked for with `--mailbox`, a dry run and the first sync of an account run outside the runtime's tick and announce nothing.
+A pass a client asked for with `--mailbox` while the account's runtime is up hands its new inbox mail to that runtime, which queues it and moves its completed-tick record, so the judges and the arrival runner treat it as a tick's; a dry run and the first sync of an account announce nothing.
 
 ## Mail hooks
 

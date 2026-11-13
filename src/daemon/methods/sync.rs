@@ -671,7 +671,7 @@ async fn run_pass_to_end(
         // session was opened, and that is a success the client renders as a
         // skip rather than a summary of a pass that never happened.
         Ok(None) => handle.succeed(blocked_result()),
-        Ok(Some(pass)) => {
+        Ok(Some(mut pass)) => {
             let arrivals = new_inbox_mail(&pass);
             let outcome = from_sync_result(
                 &request.account.name,
@@ -685,12 +685,34 @@ async fn run_pass_to_end(
                 // that arrived.
                 canonical.apply(super::super::state::Change::SyncCompleted(outcome.clone()));
             }
+            hand_arrivals_to_runtime(&runtimes, &request.account.name, request.dry_run, &mut pass);
             handle.succeed(json!({
                 "blocked": false,
                 "outcome": outcome,
                 "new_inbox_mail": arrivals,
             }));
         }
+    }
+}
+
+/// Hand the new inbox mail of a guarded pass to the account's runtime, when
+/// it has one and the pass was not a dry run (PERSO-186): a `mp sync
+/// --mailbox INBOX` moves the mailbox's top past it, so no later tick would
+/// announce it, and the runtime queues it for the judges and the arrival
+/// runner as for a tick of its own ([`AccountRuntime::note_pass`]).
+///
+/// [`AccountRuntime::note_pass`]: crate::daemon::runtime::account::AccountRuntime::note_pass
+fn hand_arrivals_to_runtime(
+    runtimes: &RuntimeTable,
+    account: &str,
+    dry_run: bool,
+    pass: &mut SyncResult,
+) {
+    if dry_run {
+        return;
+    }
+    if let Some(runtime) = runtimes.get(account) {
+        runtime.note_pass(std::mem::take(&mut pass.new_inbox_mail));
     }
 }
 
@@ -1092,6 +1114,62 @@ mod tests {
             QUICK_TICK_LIMIT
         );
         assert_eq!(pass_limit(TickKind::Quick, 2500), 2500);
+    }
+
+    /// PERSO-186: a guarded pass (`mp sync --mailbox INBOX`) of an account
+    /// whose runtime is up hands its arrivals to that runtime, which queues
+    /// them for the judges and the arrival runner as for a tick; a dry run
+    /// and an account with no runtime hand over nothing.
+    #[tokio::test]
+    async fn a_guarded_pass_hands_its_arrivals_to_the_accounts_runtime() {
+        use futures::future::FutureExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let quiet: crate::daemon::runtime::account::DrainHook =
+            Arc::new(|_ctx| async { String::new() }.boxed());
+        let hooks = crate::daemon::runtime::account::TickHooks {
+            outbox: Arc::clone(&quiet),
+            mutations: quiet,
+            body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+        };
+        let cfg = AccountConfig {
+            name: "alpha".to_string(),
+            ..Default::default()
+        };
+        let runtimes = RuntimeTable::default();
+        runtimes.insert(Arc::new(
+            crate::daemon::runtime::account::AccountRuntime::start_at_with_hooks(
+                dir.path(),
+                cfg,
+                1,
+                hooks,
+            )
+            .unwrap(),
+        ));
+        let pass = || SyncResult {
+            new_inbox_mail: vec![crate::sync::InboxArrival {
+                row_id: 3,
+                message_id: "<three@example.com>".to_string(),
+                from: "ada@example.com".to_string(),
+                subject: "Engine".to_string(),
+            }],
+            ..SyncResult::default()
+        };
+        let queued = || {
+            let runtime = runtimes.get("alpha").unwrap();
+            let through = *runtime.completed_ticks().borrow();
+            runtime.take_arrivals(through)
+        };
+
+        hand_arrivals_to_runtime(&runtimes, "alpha", true, &mut pass());
+        assert!(queued().is_empty(), "a dry run ingested nothing");
+        hand_arrivals_to_runtime(&runtimes, "beta", false, &mut pass());
+        assert!(queued().is_empty(), "another account's pass");
+
+        let mut ran = pass();
+        hand_arrivals_to_runtime(&runtimes, "alpha", false, &mut ran);
+        assert_eq!(queued(), pass().new_inbox_mail);
+        assert!(ran.new_inbox_mail.is_empty(), "handed over, not copied");
     }
 
     /// A new password account whose first sync found no password, in a

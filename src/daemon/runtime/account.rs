@@ -665,6 +665,18 @@ impl AccountRuntime {
         self.ticked.send_replace(tokio::time::Instant::now());
     }
 
+    /// Record that a pass this runtime did not run, a guarded `mp sync
+    /// --mailbox` of this account (PERSO-186), ran a body, with the new inbox
+    /// mail it announced: queued under a stamp, then
+    /// [`AccountRuntime::completed_ticks`] moves, as a tick of the runtime's
+    /// own does, so the blocked senders and the hooks judge what it brought
+    /// in and the arrival runner announces what survives.
+    pub fn note_pass(&self, arrivals: Vec<InboxArrival>) {
+        let stamp = tokio::time::Instant::now();
+        lock(&self.arrivals).extend(arrivals.into_iter().map(|arrival| (stamp, arrival)));
+        self.ticked.send_replace(tokio::time::Instant::now());
+    }
+
     /// Hand the runtime the daemon's draft watcher (#0143) and pass it the
     /// account's drafts mirror state as the store holds it now, which is what
     /// gives the account's drafts their `server` member. Off the reactor,
@@ -1549,6 +1561,31 @@ mod tests {
             mutations: quiet,
             body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
         }
+    }
+
+    /// A pass outside the tick (`mp sync --mailbox`, PERSO-186) hands its
+    /// arrivals to the judges as a tick would: queued under a stamp no later
+    /// than the `completed_ticks` value it moves, so the arrival runner woken
+    /// by it takes them once the judges are done with that value.
+    #[tokio::test]
+    async fn a_pass_outside_the_tick_queues_its_arrivals_and_moves_ticked() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime =
+            AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 0), 1, quiet_hooks())
+                .unwrap();
+        let before = *runtime.completed_ticks().borrow();
+        let arrival = InboxArrival {
+            row_id: 7,
+            message_id: "<seven@example.com>".to_string(),
+            from: "ada@example.com".to_string(),
+            subject: "Engine".to_string(),
+        };
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        runtime.note_pass(vec![arrival.clone()]);
+        let after = *runtime.completed_ticks().borrow();
+        assert!(after > before, "the pass moved ticked, so the judges run");
+        assert_eq!(runtime.take_arrivals(after), vec![arrival]);
+        assert!(runtime.take_arrivals(after).is_empty(), "taken once");
     }
 
     fn config(name: &str, deadline_secs: u64) -> AccountConfig {
