@@ -505,6 +505,8 @@ After every such tick each ready account with a server, IMAP or Graph, also runs
 A row is judged once, by the store's `messages.sender_judged` mark, which a local move keeps, so a message the user moved back to the Inbox stays there; a copy moved back from another client arrives as a new row and is recognised by the Message-IDs the store remembers moving.
 The mark and the memory live in the store, which is disposable: a rebuilt store arms again once its Inbox has synced and judges only what arrives after that.
 An account whose catalogue resolves no Junk folder keeps the mail and the log says so; nothing is set on the server, so blocked mail moves only while the daemon runs.
+The same accounts run an arrival runner (`src/daemon/runtime/arrival_runner.rs`, PERSO-186): a tick queues on the runtime the inbox mail its pass announced as new, each judge records the tick it is done with (`AccountRuntime::judged`), and once the blocked senders and any hooks are done the runner reads the rows again (`src/daemon/arrivals.rs`) and publishes the unread Inbox mail from neither a blocked sender nor the account itself as `mail.arrived`, naming the presenter a reminder would get.
+Which mail deserves a notification is the daemon's to decide; a client raises the notification it is named presenter of, and nothing else.
 The watcher, the scheduler and the drainer publish through `src/daemon/runtime/publish.rs`, which commits the tick's `sync.completed` and one count change per mailbox whose counts differ from the canonical state's.
 Changes on a non-active account set `has_unseen` in the TUI, which is the badge in the status bar.
 

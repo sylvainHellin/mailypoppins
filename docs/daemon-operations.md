@@ -526,6 +526,15 @@ A reminder that leaves the pending list without a decision (its event cancelled,
 A dismissal or a snooze on a backend that serves `server-reminders` reaches the server on a thread of its own after the command answered, and a failure is a warning in the log beside the local record, which stands.
 The table survives `calendar.rebuild`, and a store rebuilt for a new schema version carries it over, so neither fires a reminder again.
 
+### New-mail notifications
+
+Each ready account with a server runs an arrival runner beside its blocked-senders runner and its hook runner (PERSO-186, `src/daemon/runtime/arrival_runner.rs`).
+A tick queues on the runtime the inbox messages its pass inserted above the mailbox's previous top (IMAP) or above the newest message the account held (Graph), so a first sync, a backlog drain and a renumbered mailbox queue nothing.
+The runner waits until the blocked senders and, for an account with hooks, the mail hooks report that tick done, since either may move a message to Junk, then reads each queued row again and keeps the ones still unread in the Inbox and from neither a blocked sender nor the account's `default_from` address (`src/daemon/arrivals.rs`).
+What survives is one `mail.arrived` to every client with the presenter of that moment, elected as a reminder's is, and an info line `[arrivals] <account>: N new message(s) (presenter ...)` in the log; a tick whose mail was all filtered out logs at debug level only.
+A hook that runs long holds its tick's notification back for as long, its `timeout_secs` at most.
+A pass a client asked for with `--mailbox`, a dry run and the first sync of an account run outside the runtime's tick and announce nothing.
+
 ## Mail hooks
 
 A hook runs a command once for every message that arrives in a mailbox after the hook was first seen and passes the hook's `match` table (#0135).

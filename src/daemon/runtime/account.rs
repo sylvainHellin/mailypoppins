@@ -84,9 +84,19 @@ use crate::config::AccountConfig;
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::engine_lock::EngineLock;
 use crate::sync::tick::run_tick_with_drains;
-use crate::sync::{FreshObservation, ObservationSink, Stop, SyncResult};
+use crate::sync::{FreshObservation, InboxArrival, ObservationSink, Stop, SyncResult};
 
 use super::pool::{PooledRead, ReadPool};
+
+/// A post-tick judge new mail waits for before anyone is told of it
+/// (PERSO-186): each may move a message the tick brought in to Junk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Judge {
+    /// The blocked senders ([`super::sender_runner`]).
+    Senders,
+    /// The mail hooks ([`super::hook_runner`]).
+    Hooks,
+}
 
 /// How many of the newest UIDs per mailbox a [`TickKind::Quick`] tick
 /// downloads. The TUI's quick sync uses the same number, and so does a
@@ -305,6 +315,13 @@ impl TickReport {
         self.busy.store(true, Ordering::SeqCst);
     }
 
+    /// Record what a test's body "synced", as the production body hook
+    /// records the engine's result.
+    #[cfg(test)]
+    pub(super) fn record_sync(&self, result: SyncResult) {
+        *lock(&self.sync) = Some(result);
+    }
+
     /// Everything this tick recorded, leaving the slot empty.
     fn take(&self) -> (SyncResult, u64) {
         (
@@ -363,6 +380,15 @@ pub struct AccountRuntime {
     /// counter rather than a unit so a receiver created after the first
     /// request can still tell it was made.
     drain_requests: watch::Sender<u64>,
+    /// The new inbox mail each tick announced, stamped with when it was
+    /// queued, until the arrival runner takes it (PERSO-186). Queued before
+    /// `ticked` moves, so a stamp is never later than the `ticked` value of
+    /// the tick that queued it.
+    arrivals: Mutex<Vec<(tokio::time::Instant, InboxArrival)>>,
+    /// The `ticked` value whose arrivals the blocked senders have judged.
+    judged_senders: watch::Sender<tokio::time::Instant>,
+    /// The `ticked` value whose arrivals the mail hooks have run for.
+    judged_hooks: watch::Sender<tokio::time::Instant>,
     /// Where the production hooks leave the engine's result. Empty for a
     /// runtime built with injected hooks, which report zeros.
     report: TickReport,
@@ -490,6 +516,9 @@ impl AccountRuntime {
             started,
             backlog: AtomicBool::new(false),
             drain_requests: watch::channel(0).0,
+            arrivals: Mutex::new(Vec::new()),
+            judged_senders: watch::channel(started).0,
+            judged_hooks: watch::channel(started).0,
             report: TickReport::default(),
             draft_watch: DraftWatchCell::default(),
             drafts: None,
@@ -576,6 +605,44 @@ impl AccountRuntime {
     /// measured from (PERSO-178).
     pub fn started(&self) -> tokio::time::Instant {
         self.started
+    }
+
+    /// Record that `judge` is done with the arrivals of every tick up to
+    /// `through`, a value [`AccountRuntime::completed_ticks`] held. Never moves
+    /// backwards.
+    pub fn judged(&self, judge: Judge, through: tokio::time::Instant) {
+        self.judge(judge).send_if_modified(|done| {
+            let later = through > *done;
+            if later {
+                *done = through;
+            }
+            later
+        });
+    }
+
+    /// A receiver holding the `ticked` value whose arrivals `judge` is done
+    /// with, closing when the runtime is dropped.
+    pub fn judged_through(&self, judge: Judge) -> watch::Receiver<tokio::time::Instant> {
+        self.judge(judge).subscribe()
+    }
+
+    fn judge(&self, judge: Judge) -> &watch::Sender<tokio::time::Instant> {
+        match judge {
+            Judge::Senders => &self.judged_senders,
+            Judge::Hooks => &self.judged_hooks,
+        }
+    }
+
+    /// Take the new mail every tick up to `through` announced, a value
+    /// [`AccountRuntime::completed_ticks`] held, oldest first; a later tick's
+    /// stays queued.
+    pub fn take_arrivals(&self, through: tokio::time::Instant) -> Vec<InboxArrival> {
+        let mut queued = lock(&self.arrivals);
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut *queued)
+            .into_iter()
+            .partition(|(stamp, _)| *stamp <= through);
+        *queued = later;
+        due.into_iter().map(|(_, arrival)| arrival).collect()
     }
 
     /// Whether the last tick left a backlog the next quick tick drains, so
@@ -939,7 +1006,7 @@ impl AccountRuntime {
 
         let entered = lock(&phases).clone();
         let error = result.err().map(|e| format!("{e:#}"));
-        let (sync_result, failed_mutations) = self.report.take();
+        let (mut sync_result, failed_mutations) = self.report.take();
         // From the report's sink, not the result's: a failed body hands no
         // result over, and the rows it committed are in the sink all the same.
         let contacts = self.index_contacts(self.report.observations.take()).await;
@@ -950,6 +1017,15 @@ impl AccountRuntime {
             error.is_none() && !sync_result.backlogged.is_empty(),
             Ordering::SeqCst,
         );
+        let sync = from_sync_result(&self.account, &sync_result, failed_mutations, error.clone());
+        // Before `ticked` moves, so the arrival runner woken by it finds them
+        // (PERSO-186).
+        let stamp = tokio::time::Instant::now();
+        lock(&self.arrivals).extend(
+            std::mem::take(&mut sync_result.new_inbox_mail)
+                .into_iter()
+                .map(|arrival| (stamp, arrival)),
+        );
         TickOutcome {
             kind,
             phases: entered,
@@ -957,12 +1033,7 @@ impl AccountRuntime {
             blocked: false,
             body_deadline: self.body_deadline,
             status,
-            sync: Some(from_sync_result(
-                &self.account,
-                &sync_result,
-                failed_mutations,
-                error.clone(),
-            )),
+            sync: Some(sync),
             error,
             contacts,
             calendar_changed: false,

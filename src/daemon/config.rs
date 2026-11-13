@@ -745,12 +745,21 @@ async fn start_runtime(
                 // in the background until complete (PERSO-276).
                 super::runtime::fts_backfill::spawn(&runtime, &cfg_for_watch);
                 // The mail hooks, run after every tick that ingested (#0135).
-                super::runtime::hook_runner::spawn(&runtime, &cfg_for_watch);
+                let hooks = super::runtime::hook_runner::spawn(&runtime, &cfg_for_watch).is_some();
                 // The blocked senders, judged after every tick (PERSO-261).
-                super::runtime::sender_runner::spawn(
+                let senders = super::runtime::sender_runner::spawn(
                     &runtime,
                     Arc::clone(canonical),
                     &cfg_for_watch,
+                )
+                .is_some();
+                // The new mail worth a notification, announced once both of
+                // those are done with the tick that brought it (PERSO-186).
+                super::runtime::arrival_runner::spawn(
+                    &runtime,
+                    Arc::clone(canonical),
+                    &cfg_for_watch,
+                    super::runtime::arrival_runner::Judges { senders, hooks },
                 );
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);
             }

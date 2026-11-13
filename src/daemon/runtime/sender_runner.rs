@@ -35,7 +35,7 @@ use crate::config::AccountConfig;
 use crate::daemon::senders;
 use crate::daemon::state::CanonicalState;
 
-use super::account::{AccountRuntime, Readiness};
+use super::account::{AccountRuntime, Judge, Readiness};
 
 /// Start the runner for `runtime`, if its account can receive mail.
 pub fn spawn(
@@ -69,7 +69,7 @@ async fn run(
     cfg: AccountConfig,
 ) {
     loop {
-        let _ = ticks.borrow_and_update();
+        let tick = *ticks.borrow_and_update();
         if *retired.borrow() {
             break;
         }
@@ -77,6 +77,9 @@ async fn run(
             break;
         };
         scan_once(&live, &canonical, &cfg).await;
+        // What this tick brought in has been judged, whatever the scan did:
+        // its new mail may be announced now (PERSO-186).
+        live.judged(Judge::Senders, tick);
         drop(live);
         tokio::select! {
             biased;

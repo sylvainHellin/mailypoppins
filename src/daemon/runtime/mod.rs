@@ -71,6 +71,7 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 
 pub mod account;
+pub mod arrival_runner;
 pub mod drafts_poll;
 pub mod drainer;
 pub mod fts_backfill;

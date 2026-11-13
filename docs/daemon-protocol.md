@@ -1508,6 +1508,10 @@ It is a lifecycle event and reduces into no snapshot: signatures are global rath
 
 `calendar.reminder` says that a reminder fell due, with a `CalendarReminder` as its payload ([The calendar reminders](#the-calendar-reminders)); `calendar.reminders_changed` `{account}` (`CalendarRemindersChanged`) says that one was dismissed, snoozed or left the list, and a client showing reminders reads `calendar.reminders` again. Both are lifecycle events.
 
+`mail.arrived` says that a tick brought an account new mail worth a system notification, with a payload of `{account, arrivals, presenter, presenter_connection}` (`mp_protocol::events::MailArrived`), `arrivals` being `[{from, subject}]` and never empty (PERSO-186).
+It is published once per such tick, after the account's post-tick judges, the blocked senders and the mail hooks, are done with it, and it lists the messages that are still unread in the Inbox, from neither a blocked sender nor the account's own address, and above what the account held before the tick, so a first sync, a backlog drain or a renumbered mailbox announces nothing.
+The presenter is elected as a reminder's is, and only the client on `presenter_connection` raises the notification ([The calendar reminders](#the-calendar-reminders)). It is a lifecycle event.
+
 `message.body_fetched` `{account, row_id}` says that the daemon's fetch of a row's evicted body is over, stored or failed (PERSO-205): a client showing that row's `body_pending` sentence reads `message.get` again. It is a lifecycle event, since no snapshot carries a fetch.
 
 `message.server_hit` carries one hit of a live `message.search_server`, with a payload of `{operation_id, hit}`.

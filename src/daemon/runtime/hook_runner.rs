@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use crate::config::{AccountConfig, AuthMethod};
 use crate::daemon::hooks::{self, state};
 
-use super::account::{AccountRuntime, Readiness};
+use super::account::{AccountRuntime, Judge, Readiness};
 
 /// Start the hook runner for `runtime`, if its account has hooks to run.
 pub fn spawn(runtime: &Arc<AccountRuntime>, cfg: &AccountConfig) -> Option<JoinHandle<()>> {
@@ -94,11 +94,18 @@ async fn run(
     state_path: PathBuf,
 ) {
     loop {
-        let _ = ticks.borrow_and_update();
+        let tick = *ticks.borrow_and_update();
         if runtime.upgrade().is_none() || *retired.borrow() {
             break;
         }
         scan_and_fire(&cfg, &state_path).await;
+        // Every hook this tick's mail matched has run, and whatever it moved
+        // has moved: its new mail may be announced now (PERSO-186).
+        let Some(live) = runtime.upgrade() else {
+            break;
+        };
+        live.judged(Judge::Hooks, tick);
+        drop(live);
         tokio::select! {
             biased;
             () = stopped(&mut retired) => break,
