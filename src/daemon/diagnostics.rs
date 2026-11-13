@@ -53,7 +53,7 @@ use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, Offset, TimeZone, Utc}
 use log::Level;
 use serde_json::{json, Value};
 
-use mp_protocol::diagnostic::CheckStatus;
+use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::KIND_DIAGNOSTIC_CHECK_CHANGED;
 
 use super::config::{validate_document, ConfigStore};
@@ -114,41 +114,27 @@ pub const OPENING_GRACE: std::time::Duration = std::time::Duration::from_secs(30
 // One check
 // ---------------------------------------------------------------------------
 
-/// One check, as the report, the snapshot and the event all carry it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Check {
-    /// `config_loaded`, `store_open`, `socket_owner`, `log_writable` or
-    /// `account:<name>`.
-    pub name: String,
-    /// The verdict.
-    pub status: CheckStatus,
-    /// One sentence, never empty.
-    pub detail: String,
+/// One check, as the report, the snapshot and the event all carry it: the
+/// protocol crate's [`HealthCheck`], so the three cannot drift apart.
+fn health_check(
+    name: impl Into<String>,
+    status: CheckStatus,
+    detail: impl Into<String>,
+) -> HealthCheck {
+    HealthCheck {
+        name: name.into(),
+        status,
+        detail: detail.into(),
+    }
 }
 
-impl Check {
-    fn new(name: impl Into<String>, status: CheckStatus, detail: impl Into<String>) -> Check {
-        Check {
-            name: name.into(),
-            status,
-            detail: detail.into(),
-        }
-    }
-
-    /// The three keys, which are the same three everywhere this travels.
-    pub fn to_json(&self) -> Value {
-        json!({"name": self.name, "status": self.status.as_str(), "detail": self.detail})
-    }
-
-    /// The check as the protocol crate types it, which is what the bootstrap
-    /// snapshot carries.
-    pub fn to_wire(&self) -> mp_protocol::diagnostic::HealthCheck {
-        mp_protocol::diagnostic::HealthCheck {
-            name: self.name.clone(),
-            status: self.status,
-            detail: self.detail.clone(),
-        }
-    }
+/// The three keys, which are the same three everywhere a check travels.
+///
+/// Serialising a [`HealthCheck`] is infallible in practice: an empty object
+/// rather than a panic if that ever changes, because a daemon must not die
+/// rendering a check.
+fn check_json(check: &HealthCheck) -> Value {
+    serde_json::to_value(check).unwrap_or_else(|_| json!({}))
 }
 
 /// Take a lock whose holder may have panicked; the map behind it is whole
@@ -171,7 +157,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// new detail (one more account loaded, a new day's log file) publishes
 /// nothing, because a client only shows a check that is not `ok` and would
 /// otherwise log a recovery that never happened.
-fn is_news(previous: Option<&Check>, check: &Check) -> bool {
+fn is_news(previous: Option<&HealthCheck>, check: &HealthCheck) -> bool {
     match previous {
         None => check.status != CheckStatus::Ok,
         Some(previous) if previous.status != check.status => true,
@@ -200,7 +186,7 @@ pub struct Diagnostics {
     canonical: Weak<CanonicalState>,
     /// Each check as the last refresh evaluated it, status and detail both:
     /// what [`is_news`] compares the next evaluation against.
-    ledger: Mutex<BTreeMap<String, Check>>,
+    ledger: Mutex<BTreeMap<String, HealthCheck>>,
     /// Since when each account that is `opening` has been: the daemon's start
     /// for the accounts configured then, the first evaluation that saw it
     /// opening for any other. Forgotten once its start settles or a reload
@@ -325,17 +311,17 @@ impl Diagnostics {
             // failures or of durable operations joins it without a version bump.
             "operations": {"active": self.operations.live().len()},
             "store": self.store_entry(&accounts),
-            "checks": self.checks().iter().map(Check::to_json).collect::<Vec<_>>(),
+            "checks": self.checks().iter().map(check_json).collect::<Vec<_>>(),
         })
     }
 
     /// The checks that are not `ok`, in report order, which is what
     /// `snapshot.diagnostics` carries.
-    pub fn not_ok(&self) -> Vec<mp_protocol::diagnostic::HealthCheck> {
+    pub fn not_ok(&self) -> Vec<HealthCheck> {
         self.checks()
             .iter()
             .filter(|check| check.status != CheckStatus::Ok)
-            .map(Check::to_wire)
+            .cloned()
             .collect()
     }
 
@@ -351,7 +337,7 @@ impl Diagnostics {
     pub fn refresh(&self) {
         let _serialised = lock(&self.refresh_lock);
         let checks = self.checks();
-        let flipped: Vec<Check> = {
+        let flipped: Vec<HealthCheck> = {
             let mut ledger = lock(&self.ledger);
             let flipped = checks
                 .iter()
@@ -379,7 +365,7 @@ impl Diagnostics {
             );
             canonical.publish(Event::Lifecycle {
                 kind: KIND_DIAGNOSTIC_CHECK_CHANGED,
-                payload: check.to_json(),
+                payload: check_json(&check),
             });
         }
     }
@@ -387,7 +373,7 @@ impl Diagnostics {
     /// Every check, in report order. Nothing is published and the ledger is
     /// not touched; the only thing remembered is when an account was first
     /// seen opening.
-    pub fn checks(&self) -> Vec<Check> {
+    pub fn checks(&self) -> Vec<HealthCheck> {
         let accounts = self.config.accounts();
         // An account a reload removed is forgotten with its start, so adding
         // it back starts a fresh grace rather than inheriting the old clock.
@@ -417,11 +403,11 @@ impl Diagnostics {
     /// broken file is refused and the daemon keeps serving the configuration it
     /// has, which is right, and which is exactly the state this check exists to
     /// report.
-    fn config_loaded(&self) -> Check {
+    fn config_loaded(&self) -> HealthCheck {
         let path = self.config.path();
         let shown = path.display();
         if !path.exists() {
-            return Check::new(
+            return health_check(
                 "config_loaded",
                 CheckStatus::Warn,
                 format!("no config.toml at {shown}; the daemon is serving no accounts"),
@@ -430,7 +416,7 @@ impl Diagnostics {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
-                return Check::new(
+                return health_check(
                     "config_loaded",
                     CheckStatus::Fail,
                     format!("cannot read {shown}: {e}"),
@@ -446,16 +432,16 @@ impl Diagnostics {
                 // opening on a sentence that says all is well.
                 let warnings = crate::config::config_warnings(&text);
                 if warnings.is_empty() {
-                    Check::new(
+                    health_check(
                         "config_loaded",
                         CheckStatus::Ok,
                         format!("{shown} loaded, {} account(s)", config.accounts.len()),
                     )
                 } else {
-                    Check::new("config_loaded", CheckStatus::Warn, warnings.join("; "))
+                    health_check("config_loaded", CheckStatus::Warn, warnings.join("; "))
                 }
             }
-            Err(diagnostic) => Check::new(
+            Err(diagnostic) => health_check(
                 "config_loaded",
                 CheckStatus::Fail,
                 match diagnostic.line {
@@ -471,7 +457,7 @@ impl Diagnostics {
     /// The detail does not repeat the account: the check's name carries it,
     /// and every client shows the two together (`account:home: blocked: ...`
     /// in the TUI, `Account home: blocked: ...` on the desktop).
-    fn account_check(&self, config: &crate::config::AccountConfig) -> Check {
+    fn account_check(&self, config: &crate::config::AccountConfig) -> HealthCheck {
         let account = config.name.as_str();
         let health = self.runtimes.health_of(account);
         let opening_for = {
@@ -565,14 +551,18 @@ pub fn log_file() -> PathBuf {
 /// A start in flight is `ok` until it has taken longer than [`OPENING_GRACE`]:
 /// every daemon start opens every store, and a check that warned for it would
 /// announce a warning and its recovery on each launch.
-fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::Duration) -> Check {
+fn account_check(
+    account: &str,
+    health: RuntimeHealth,
+    opening_for: std::time::Duration,
+) -> HealthCheck {
     let name = format!("account:{account}");
     match health {
-        RuntimeHealth::Ready => Check::new(name, CheckStatus::Ok, "serving"),
+        RuntimeHealth::Ready => health_check(name, CheckStatus::Ok, "serving"),
         RuntimeHealth::Opening if opening_for <= OPENING_GRACE => {
-            Check::new(name, CheckStatus::Ok, "opening its store")
+            health_check(name, CheckStatus::Ok, "opening its store")
         }
-        RuntimeHealth::Opening => Check::new(
+        RuntimeHealth::Opening => health_check(
             name,
             CheckStatus::Warn,
             format!("still opening its store after {}s", opening_for.as_secs()),
@@ -580,9 +570,9 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
         // A lock held elsewhere is a normal state of a developer's machine:
         // the daemon still serves this account's reads.
         RuntimeHealth::Blocked(reason) => {
-            Check::new(name, CheckStatus::Warn, format!("blocked: {reason}"))
+            health_check(name, CheckStatus::Warn, format!("blocked: {reason}"))
         }
-        RuntimeHealth::Failed(reason) => Check::new(
+        RuntimeHealth::Failed(reason) => health_check(
             name,
             CheckStatus::Fail,
             format!("no runtime at all: {reason}"),
@@ -600,13 +590,13 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
 /// `shared_password` is whether the account uses one password for both
 /// logins, which makes the command the kind-less one (PERSO-297).
 fn with_rejected_logins(
-    check: Check,
+    check: HealthCheck,
     account: &str,
     rejected: &[mp_protocol::account::RejectedLogin],
     shared_password: bool,
-) -> Check {
+) -> HealthCheck {
     match rejected.first() {
-        Some(&login) if check.status == CheckStatus::Ok => Check::new(
+        Some(&login) if check.status == CheckStatus::Ok => health_check(
             format!("account:{account}"),
             CheckStatus::Warn,
             mp_core::mp_command::login_rejected_detail(account, login, shared_password),
@@ -620,12 +610,12 @@ fn with_rejected_logins(
 /// Always there for such an account, `ok` included, so the new sign-in that
 /// grants the scope publishes the recovery that clears the prompt. The detail
 /// is the prompt itself, which every client shows as it stands.
-fn calendar_check(account: &str, missing_scopes: &[String]) -> Check {
+fn calendar_check(account: &str, missing_scopes: &[String]) -> HealthCheck {
     let name = format!("calendar:{account}");
     if missing_scopes.is_empty() {
-        Check::new(name, CheckStatus::Ok, "no calendar scope is missing")
+        health_check(name, CheckStatus::Ok, "no calendar scope is missing")
     } else {
-        Check::new(
+        health_check(
             name,
             CheckStatus::Warn,
             crate::oauth2::calendar_relogin_prompt(account),
@@ -637,10 +627,10 @@ fn calendar_check(account: &str, missing_scopes: &[String]) -> Check {
 ///
 /// Every one is `ok`, some is `warn`, none is `fail`: the check is about the
 /// set, and the per-account checks say which one it was.
-fn store_open(accounts: &[crate::config::AccountConfig]) -> Check {
+fn store_open(accounts: &[crate::config::AccountConfig]) -> HealthCheck {
     let total = accounts.len();
     if total == 0 {
-        return Check::new(
+        return health_check(
             "store_open",
             CheckStatus::Ok,
             "no accounts are configured, so there is no store to open",
@@ -659,17 +649,17 @@ fn store_open(accounts: &[crate::config::AccountConfig]) -> Check {
         0 => CheckStatus::Fail,
         _ => CheckStatus::Warn,
     };
-    Check::new("store_open", status, detail)
+    health_check("store_open", status, detail)
 }
 
 /// Whether the socket at the layout's path is this process's, at mode 0600.
-fn socket_owner() -> Check {
+fn socket_owner() -> HealthCheck {
     let socket = socket_path();
     let shown = socket.display();
     let meta = match fs::symlink_metadata(&socket) {
         Ok(meta) => meta,
         Err(e) => {
-            return Check::new(
+            return health_check(
                 "socket_owner",
                 CheckStatus::Fail,
                 format!("{shown} cannot be read: {e}"),
@@ -677,7 +667,7 @@ fn socket_owner() -> Check {
         }
     };
     if !meta.file_type().is_socket() {
-        return Check::new(
+        return health_check(
             "socket_owner",
             CheckStatus::Fail,
             format!("{shown} is not a socket"),
@@ -686,7 +676,7 @@ fn socket_owner() -> Check {
     // SAFETY: `geteuid` takes no pointer and cannot fail.
     let us = unsafe { libc::geteuid() };
     if meta.uid() != us {
-        return Check::new(
+        return health_check(
             "socket_owner",
             CheckStatus::Fail,
             format!("{shown} is owned by uid {}, not by uid {us}", meta.uid()),
@@ -694,13 +684,13 @@ fn socket_owner() -> Check {
     }
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o600 {
-        return Check::new(
+        return health_check(
             "socket_owner",
             CheckStatus::Warn,
             format!("{shown} is mode {mode:04o}, not 0600"),
         );
     }
-    Check::new(
+    health_check(
         "socket_owner",
         CheckStatus::Ok,
         format!("{shown} is this daemon's, mode 0600"),
@@ -708,12 +698,12 @@ fn socket_owner() -> Check {
 }
 
 /// Whether the daemon can still append to the log it names.
-fn log_writable() -> Check {
+fn log_writable() -> HealthCheck {
     let path = log_file();
     let shown = path.display();
     match fs::OpenOptions::new().append(true).create(true).open(&path) {
-        Ok(_) => Check::new("log_writable", CheckStatus::Ok, format!("writing {shown}")),
-        Err(e) => Check::new(
+        Ok(_) => health_check("log_writable", CheckStatus::Ok, format!("writing {shown}")),
+        Err(e) => health_check(
             "log_writable",
             CheckStatus::Fail,
             format!("cannot append to {shown}: {e}"),
@@ -1197,8 +1187,8 @@ mod tests {
     /// unchanged check, or a new sentence under `ok`, publishes nothing.
     #[test]
     fn a_new_detail_is_news_only_while_the_check_is_not_ok() {
-        let warn = |detail: &str| Check::new("config_loaded", CheckStatus::Warn, detail);
-        let ok = |detail: &str| Check::new("config_loaded", CheckStatus::Ok, detail);
+        let warn = |detail: &str| health_check("config_loaded", CheckStatus::Warn, detail);
+        let ok = |detail: &str| health_check("config_loaded", CheckStatus::Ok, detail);
         assert!(is_news(None, &warn("a")), "a check first seen warning");
         assert!(!is_news(None, &ok("a")), "a check first seen ok");
         assert!(is_news(Some(&ok("a")), &warn("a")), "a status that moved");
@@ -1207,7 +1197,7 @@ mod tests {
             is_news(Some(&warn("one key")), &warn("two keys")),
             "a new detail under warn"
         );
-        let fail = |detail: &str| Check::new("config_loaded", CheckStatus::Fail, detail);
+        let fail = |detail: &str| health_check("config_loaded", CheckStatus::Fail, detail);
         assert!(
             is_news(Some(&fail("line 1")), &fail("line 3")),
             "a new detail under fail"
@@ -1383,13 +1373,27 @@ mod tests {
         );
     }
 
-    /// A status is one of three words and a check always says why.
+    /// A status is one of three words and a check always says why, in the
+    /// same bytes whichever of the three ways it travels: a `checks` item, a
+    /// `diagnostic.check_changed` payload, a snapshot's `diagnostics` entry.
     #[test]
     fn a_check_renders_its_three_keys() {
-        let check = Check::new("store_open", CheckStatus::Warn, "one of two");
-        assert_eq!(
-            check.to_json(),
-            json!({"name": "store_open", "status": "warn", "detail": "one of two"})
-        );
+        for (status, word) in [
+            (CheckStatus::Ok, "ok"),
+            (CheckStatus::Warn, "warn"),
+            (CheckStatus::Fail, "fail"),
+        ] {
+            let check = health_check("store_open", status, "one of two");
+            let expected = r#"{"detail":"one of two","name":"store_open","status":"WORD"}"#
+                .replace("WORD", word);
+            assert_eq!(check_json(&check).to_string(), expected);
+            // Every frame is built as a `Value`, whose keys are sorted, so this
+            // is the snapshot entry's bytes on the wire.
+            assert_eq!(
+                serde_json::to_value(&check).unwrap().to_string(),
+                expected,
+                "the snapshot's entry is the same bytes"
+            );
+        }
     }
 }
