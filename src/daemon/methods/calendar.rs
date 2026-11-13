@@ -1193,8 +1193,8 @@ fn unsettled_refusal(
         crate::invite::Unsettled::Filing => format!(
             "{lead}: it was sent and its copy is not filed in Sent yet, where the agenda reads \
              it, so {stale}; it is filed on its own with a later sync of {name}, so change \
-             {summary} once it is, or file it locally and drop the row with mp outbox discard \
-             -A {name} {id}"
+             {summary} once it is, or file it locally at once with mp outbox discard -A \
+             {name} {id}, which leaves its copy in Sent to a later sync"
         ),
         crate::invite::Unsettled::Unconfirmed => format!(
             "{lead}: the server gave no verdict for some of its attendees, who may have it, so \

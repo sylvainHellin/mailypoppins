@@ -3354,6 +3354,25 @@ async fn a_discarded_update_someone_may_hold_is_the_version_a_later_change_build
         json!({"account": IMIP, "row_id": parked[0]["id"]}),
     )
     .await;
+    // The row stays only to file its copy in Sent (PERSO-304): no outbox
+    // view lists it, and it is neither discarded nor sent a second time.
+    let listing = call(&mut conn, "send.outbox_list", json!({"account": IMIP})).await;
+    assert_eq!(listing["rows"], json!([]), "{listing}");
+    assert_eq!(listing["counts"]["open"], 0, "{listing}");
+    for method in ["send.outbox_discard", "send.outbox_retry"] {
+        let refused = call_err(
+            &mut conn,
+            method,
+            json!({"account": IMIP, "row_id": parked[0]["id"]}),
+        )
+        .await;
+        assert_eq!(refused.code, -32602, "{method}: {}", refused.message);
+        assert!(
+            refused.message.contains("was discarded already"),
+            "{method}: {}",
+            refused.message
+        );
+    }
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(
         attendees_of(&now),

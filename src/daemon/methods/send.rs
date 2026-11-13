@@ -598,6 +598,10 @@ fn bound_to(selector: &str, account: &AccountConfig) -> Result<(), RpcError> {
 }
 
 /// The row `row_id` names, or the sentence `mp outbox` has always refused with.
+///
+/// A row the user discarded already, which stays only to file its copy in
+/// Sent and which no listing shows, is refused too: it is neither discarded
+/// nor sent a second time ([`outbox::discarded_refusal`], PERSO-304).
 fn existing_row(account: &str, params: &Value) -> Result<crate::outbox::OutboxRow, RpcError> {
     let id = params
         .get("row_id")
@@ -609,10 +613,14 @@ fn existing_row(account: &str, params: &Value) -> Result<crate::outbox::OutboxRo
         return Err(missing());
     }
     let store = crate::store::Store::open(&path).map_err(|e| server_error(account, &e))?;
-    outbox::load(&store, id)
+    let row = outbox::load(&store, id)
         .map_err(|e| server_error(account, &e))?
         .filter(|row| row.account == account)
-        .ok_or_else(missing)
+        .ok_or_else(missing)?;
+    match outbox::discarded_refusal(&row) {
+        Some(refusal) => Err(invalid_params(refusal)),
+        None => Ok(row),
+    }
 }
 
 /// Whether a retry can do anything with this row: see the module docs.

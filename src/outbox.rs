@@ -1450,11 +1450,8 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     let Some(row) = load(store, id)? else {
         return Ok(false);
     };
-    if row.is_discarded() {
-        anyhow::bail!(
-            "outbox row {id} was discarded already; its copy is filed in {} on its own",
-            row.target_mailbox.as_deref().unwrap_or("Sent")
-        );
+    if let Some(refusal) = discarded_refusal(&row) {
+        anyhow::bail!("{refusal}");
     }
     // Before the release, so the blob passes from the row's reference to
     // the copy's without touching zero, as in [`finish_done`].
@@ -1559,6 +1556,23 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
         )
     })?;
     Ok(true)
+}
+
+/// Why `row` cannot be discarded or retried, when the user discarded it
+/// already ([`OutboxRow::is_discarded`]): it is no message to send, and
+/// what is left of it, the filing of its copy, happens on its own.
+pub fn discarded_refusal(row: &OutboxRow) -> Option<String> {
+    if !row.is_discarded() {
+        return None;
+    }
+    let id = row.id;
+    Some(match row.state {
+        OutboxState::SentPendingAppend => format!(
+            "outbox row {id} was discarded already; its copy is filed in {} on its own",
+            row.target_mailbox.as_deref().unwrap_or("Sent")
+        ),
+        _ => format!("outbox row {id} was discarded already"),
+    })
 }
 
 /// Turn the discarded `row`, whose invitation version [`keep_the_version`]
