@@ -3291,3 +3291,185 @@ async fn a_settled_cancel_names_who_waits_in_the_outbox() {
     );
     assert!(result.get("refused").is_none(), "{result}");
 }
+
+/// The `SEQUENCE` of every `method` copy of the invitation `uid` the store
+/// holds, sent or received.
+fn held_sequences(root: &Path, uid: &str, method: &str) -> Vec<u32> {
+    let store = read_fixture::store(root, IMIP);
+    let blobs =
+        mailypoppins::store::BlobStore::new(send_fixture::account_dir(root, IMIP).join("blobs"));
+    mailypoppins::reconcile::load_invites(&store, &blobs, IMIP)
+        .into_iter()
+        .filter(|invite| invite.uid() == Some(uid) && invite.method() == method)
+        .map(|invite| invite.parsed.sequence)
+        .collect()
+}
+
+/// The addresses of the attendees of the organizer's meeting as its agenda
+/// shows it.
+fn attendees_of(event: &Value) -> Vec<String> {
+    event["attendees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["email"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// An update that adds Carol and that her server gives no verdict for is
+/// parked; discarding that row keeps its version on the agenda, since Carol
+/// may hold it, so the cancellation made after it is built on it: it tells
+/// Carol too, above the `SEQUENCE` she may hold.
+#[tokio::test]
+async fn a_discarded_update_someone_may_hold_is_the_version_a_later_change_builds_on() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(
+        json!({"log": log.to_string_lossy(),
+               "unknown": {"carol@example.com": send_fixture::AMBIGUOUS},
+               "passes": 1})
+        .to_string(),
+    );
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "bob@example.com"},
+            {"email": "carol@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&status)["parked"][0]["address"],
+        "carol@example.com"
+    );
+    let parked = outbox_rows(&mut conn, "failed").await;
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    let held = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST");
+
+    call(
+        &mut conn,
+        "send.outbox_discard",
+        json!({"account": IMIP, "row_id": parked[0]["id"]}),
+    )
+    .await;
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(
+        attendees_of(&now),
+        ["ada@example.com", "bob@example.com", "carol@example.com"],
+        "the agenda holds the version Carol may have: {now}"
+    );
+    let sent = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST");
+    let carols = *sent.iter().max().unwrap();
+    assert!(
+        carols > *held.iter().max().unwrap(),
+        "{held:?} then {sent:?}"
+    );
+
+    let cancel = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": now["id"]}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&cancel)["notified"],
+        json!(["ada@example.com", "bob@example.com", "carol@example.com"]),
+        "{cancel}"
+    );
+    let cancels = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "CANCEL");
+    assert!(
+        cancels.iter().all(|&seq| seq > carols),
+        "{cancels:?} over {carols}"
+    );
+}
+
+/// The same for an update every attendee took whose copy Sent never filed:
+/// discarding its `sent_pending_append` row keeps its version, so the
+/// cancellation tells Carol.
+#[tokio::test]
+async fn a_discarded_update_whose_copy_was_not_filed_is_the_version_a_later_change_builds_on() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice =
+        organised_slice_with(json!({"log": log.to_string_lossy(), "append": "fail"}).to_string());
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "bob@example.com"},
+            {"email": "carol@example.com"}]}}),
+    )
+    .await;
+    succeeded(&status);
+    let appending = outbox_rows(&mut conn, "sent_pending_append").await;
+    assert_eq!(appending.len(), 1, "{appending:?}");
+    call(
+        &mut conn,
+        "send.outbox_discard",
+        json!({"account": IMIP, "row_id": appending[0]["id"]}),
+    )
+    .await;
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(attendees_of(&now).len(), 3, "{now}");
+    let carols = *held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST")
+        .iter()
+        .max()
+        .unwrap();
+    let cancel = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": now["id"]}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&cancel)["notified"],
+        json!(["ada@example.com", "bob@example.com", "carol@example.com"]),
+        "{cancel}"
+    );
+    let cancels = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "CANCEL");
+    assert!(
+        cancels.iter().all(|&seq| seq > carols),
+        "{cancels:?} over {carols}"
+    );
+}
+
+/// An update nobody can hold, queued and never submitted with the
+/// transport down, is dropped whole by a discard: the agenda keeps the
+/// version before it.
+#[tokio::test]
+async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_down(
+        &log,
+        "connection refused",
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let held = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST");
+    run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"location": "Room 9"}}),
+    )
+    .await;
+    let queued = outbox_rows(&mut conn, "pending_send").await;
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    call(
+        &mut conn,
+        "send.outbox_discard",
+        json!({"account": IMIP, "row_id": queued[0]["id"]}),
+    )
+    .await;
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["id"], own["id"], "{now}");
+    assert_eq!(
+        held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST"),
+        held
+    );
+}

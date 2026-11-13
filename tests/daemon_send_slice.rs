@@ -1451,6 +1451,17 @@ async fn outbox_discard_is_a_command_that_names_what_it_dropped() {
         None,
         "the row is gone, and its bytes with it"
     );
+    // A plain mail carries no invitation version to keep, so its discard
+    // files no copy anywhere, even though its recipient may hold it.
+    let filed: i64 = fixture::store(slice.root(), fixture::ACCOUNT)
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE message_id = ?1",
+            [fixture::FAILED_MID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(filed, 0, "a discarded plain mail is not filed");
 }
 
 /// A retry is an operation over one row, and the row has to be one a retry can

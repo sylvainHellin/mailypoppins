@@ -1099,22 +1099,26 @@ fn unsettled_refusal(
     let id = waiting.row_id;
     let lead = format!("{summary} has an earlier change waiting in the outbox (row {id})");
     let stale = "a change made now would be built on the version before it";
+    // A discard keeps on the agenda a version some attendee may hold
+    // (`outbox::discard`), so it is a way out in every stage.
+    let kept = "a version some attendee may already hold stays on the agenda";
     match waiting.stage {
         crate::invite::Unsettled::Queued => format!(
             "{lead} that has not reached every attendee yet, and {stale}; it goes out on its \
              own with a later sync of {name}, so change {summary} once it has, or drop it \
-             first with mp outbox discard -A {name} {id}"
+             first with mp outbox discard -A {name} {id} ({kept})"
         ),
         crate::invite::Unsettled::Filing => format!(
             "{lead}: it was sent and its copy is not filed in Sent yet, where the agenda reads \
              it, so {stale}; it is filed on its own with a later sync of {name}, so change \
-             {summary} once it is"
+             {summary} once it is, or file it locally and drop the row with mp outbox discard \
+             -A {name} {id}"
         ),
         crate::invite::Unsettled::Unconfirmed => format!(
             "{lead}: the server gave no verdict for some of its attendees, who may have it, so \
              {stale}; check whether it arrived, then send it again with mp outbox retry -A \
-             {name} {id} or drop it with mp outbox discard -A {name} {id}, and change \
-             {summary} after"
+             {name} {id} or drop it with mp outbox discard -A {name} {id} ({kept}), and \
+             change {summary} after"
         ),
     }
 }

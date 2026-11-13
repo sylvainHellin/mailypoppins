@@ -94,6 +94,15 @@ pub fn is_imip_invite(bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// The iMIP payload the raw RFC 822 message `raw` carries, parsed: its first
+/// calendar part with a `METHOD` ([`crate::parse::extract_calendar_ics`]);
+/// `None` for a message with none, or one that does not parse.
+pub fn itip_of_message(raw: &[u8]) -> Option<ParsedEvent> {
+    let mail = mailparse::parse_mail(raw).ok()?;
+    let ics = crate::parse::extract_calendar_ics(&mail)?;
+    parse_ics(&ics)
+}
+
 /// Parse raw `.ics` bytes into a [`ParsedEvent`]. Returns `None` when the bytes
 /// are not valid UTF-8, do not parse as a `VCALENDAR`, or contain no `VEVENT`.
 ///

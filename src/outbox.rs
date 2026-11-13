@@ -1370,6 +1370,12 @@ fn blind_recipients(row: &OutboxRow) -> Vec<crate::contacts::window::Owed> {
 ///
 /// The one way a `failed` row's bytes are released: while the row is parked for
 /// inspection the reference is deliberately held, so this has to be explicit.
+///
+/// A row that carries a version of an invitation (an iMIP `REQUEST` or
+/// `CANCEL`) which some recipient may hold has its copy filed in the local
+/// Sent mailbox first ([`keep_the_version`]), so the version stays on the
+/// organizer's agenda and a later change is built on it, at a higher
+/// `SEQUENCE` (PERSO-204).
 pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
     discard_row(store, blobs, id, false)
 }
@@ -1388,6 +1394,9 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     let Some(row) = load(store, id)? else {
         return Ok(());
     };
+    // Before the release, so the blob passes from the row's reference to
+    // the copy's without touching zero, as in [`finish_done`].
+    keep_the_version(store, blobs, &row)?;
     let tx = store
         .conn()
         .unchecked_transaction()
@@ -1417,6 +1426,72 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     }
     tx.commit().context("committing the outbox discard")?;
     unreferenced.remove();
+    Ok(())
+}
+
+/// Whether some recipient may hold the message of `row`: one took it, the
+/// server took it whole (`sent_pending_append`), a submission started that
+/// came back with no verdict (a `pending_send` row with its marker set, a
+/// `failed` row with a recipient neither delivered nor refused for good),
+/// or a `failed` row records no verdicts at all. A row never submitted, or
+/// one every recipient refused for good, reached nobody.
+fn someone_may_hold(row: &OutboxRow) -> bool {
+    let delivered = row
+        .envelope
+        .as_ref()
+        .is_some_and(|envelope| !envelope.delivered.is_empty());
+    match row.state {
+        OutboxState::Done => false,
+        OutboxState::SentPendingAppend => true,
+        OutboxState::PendingSend => delivered || row.submission_started_at.is_some(),
+        OutboxState::Failed => match &row.envelope {
+            None => true,
+            Some(envelope) => delivered || !envelope.outstanding().is_empty(),
+        },
+    }
+}
+
+/// File the copy of the invitation version `row` carries in the local Sent
+/// mailbox, before a discard drops the row, when some recipient may hold it
+/// ([`someone_may_hold`]); a plain mail, a reply, and a version nobody can
+/// hold are left alone (PERSO-204).
+///
+/// The organizer's agenda and [`crate::reconcile::next_sequence`] read the
+/// account's sent copies only, and a discarded row files none, so without
+/// this the version an attendee holds would be unknown to the account: the
+/// next change would be built on the version before it, to its attendees,
+/// at the `SEQUENCE` the attendee already holds. The copy goes in under a
+/// synthetic UID ([`ingest_sent_copy`]), which no IMAP prune reaches (it is
+/// above every UID a server issues) and which a server copy, if the server
+/// has one, takes over through its `Message-ID`. A copy that cannot be
+/// filed fails the discard rather than lose the version.
+fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result<()> {
+    if !someone_may_hold(row) {
+        return Ok(());
+    }
+    let raw = blobs
+        .read(&row.raw_blob)
+        .with_context(|| format!("reading outbox row {} before its discard", row.id))?;
+    let carries_a_version = crate::calendar::itip_of_message(&raw)
+        .is_some_and(|itip| matches!(itip.method.as_deref(), Some("REQUEST" | "CANCEL")));
+    if !carries_a_version {
+        return Ok(());
+    }
+    ingest_sent_copy(
+        store,
+        blobs,
+        &row.account,
+        SENT_ROLE,
+        &raw,
+        &row.message_id,
+        None,
+    )
+    .with_context(|| {
+        format!(
+            "filing the invitation outbox row {} carries before its discard",
+            row.id
+        )
+    })?;
     Ok(())
 }
 

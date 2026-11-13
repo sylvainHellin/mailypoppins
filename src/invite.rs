@@ -354,11 +354,9 @@ pub fn unsettled_change(
         let Ok(raw) = blobs.read(&row.raw_blob) else {
             continue;
         };
-        let carried = mailparse::parse_mail(&raw)
-            .ok()
-            .and_then(|mail| crate::parse::extract_calendar_ics(&mail))
-            .and_then(|ics| crate::calendar::parse_ics(&ics));
-        let Some(parsed) = carried else { continue };
+        let Some(parsed) = crate::calendar::itip_of_message(&raw) else {
+            continue;
+        };
         let same = parsed
             .uid
             .as_deref()
