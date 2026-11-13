@@ -9,15 +9,12 @@
 //!
 //! What the seam is *for*, beyond the tests:
 //!
-//! - #0041 wants one IMAP session held across mailboxes and a CONDSTORE
-//!   `HIGHESTMODSEQ` remembered between passes. Both are backend state, and
-//!   the trait takes `&mut self` so a backend may keep them.
-//! - #0042 wants Graph's `deltaLink` remembered between passes, which is
-//!   the same shape of state behind the same `&mut self`.
-//!
-//! Neither is implemented here. The parity half of #0059, one orchestration
-//! serving both transports, is parked with the Graph backend: `graph.rs` still
-//! runs its own loop, and the engine below is driven by the IMAP backend only.
+//! - one orchestration serving both transports, the parity half of #0059:
+//!   the IMAP backend and, since PERSO-213, the Graph one
+//!   ([`crate::graph::GraphBackend`]);
+//! - a resume point remembered between passes, a CONDSTORE `HIGHESTMODSEQ`
+//!   (#0041) or a Graph `deltaLink` (#0042), which a listing offers
+//!   ([`ResumePoint`]) and the engine records only off a pass that earned it.
 
 pub mod departures;
 pub mod engine;

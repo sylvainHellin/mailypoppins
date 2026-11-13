@@ -899,7 +899,7 @@ async fn body(
             let graph = crate::config::GraphConfig::load(&account)?;
             // The Graph path is not guarded yet (#0122 covers the IMAP ingest),
             // so it always reports a pass that ran.
-            return crate::graph::sync_mailboxes_graph(
+            return crate::graph::sync_mailboxes(
                 &graph,
                 &account.name,
                 &targets,

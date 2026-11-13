@@ -8,13 +8,12 @@
 //! application, the cursor, and the deferred prune pass, are pinned through the
 //! real code path rather than re-walked by hand in a composition test.
 //!
-//! What it is *not*: a Graph orchestrator. `graph.rs` still runs its own loop
-//! (the parity half of #0059 is parked with the Graph backend), and its #0074
-//! bookkeeping mirrors the one here by hand as it did before. The #0115
-//! convergence detector rides this loop only, so a Graph pass builds a
-//! `SyncResult` whose `non_converging` is always empty: the account that
-//! motivated it is IMAP, and the Graph half waits for the parked parity work
-//! rather than being mirrored by hand a second time.
+//! It drives both transports (PERSO-213): IMAP
+//! ([`crate::imap_client::ImapBackend`]) and Microsoft Graph
+//! ([`crate::graph::GraphBackend`]), which ran a loop of its own until then.
+//! What differs between them is in the listing a backend hands over (the
+//! cursor shape it observed, the flags it states, what counts as new mail)
+//! rather than in a second copy of this loop.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -1050,7 +1049,7 @@ pub async fn run_sync<B: SyncBackend>(
         result.prunes_deferred = prunes.iter().map(|(_, v)| v.len()).sum();
         if result.prunes_deferred > 0 {
             info!(
-                "IMAP sync: {} pending prune(s) deferred; this pass did not see every message",
+                "[sync] {account}: {} pending prune(s) deferred; this pass did not see every message",
                 result.prunes_deferred,
             );
         }

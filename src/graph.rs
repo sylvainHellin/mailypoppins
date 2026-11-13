@@ -15,14 +15,13 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::config::GraphConfig;
-use crate::ingest::pass_may_prune;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchOrder, SearchStub};
-use crate::sync::{
-    stops_at, FreshObservation, ObservationSink, Stop, StopPoint, SyncResult, SyncTarget,
-};
-use crate::timing::TimingSpan;
-use crate::types::MailboxRole;
+use crate::sync::SyncTarget;
+
+mod backend;
+
+pub use backend::{sync_mailboxes, GraphBackend, GraphKnown};
 
 pub(crate) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
@@ -666,50 +665,24 @@ pub struct FolderEnumeration {
     pub complete: bool,
 }
 
-/// What one target's fetch pass learned: the messages it downloaded, the ones
-/// it skipped as already known, the folder as enumerated, and whether the
-/// download covered everything the enumeration found.
-pub struct FolderFetch {
-    pub new_emails: Vec<GraphFetched>,
-    pub skipped: usize,
-    pub enumeration: FolderEnumeration,
-    /// True when this pass did not download every new message it found, so the
-    /// leftovers are queued for a later pass. See [`sync_mailboxes_graph`] for
-    /// why that suspends the prune.
-    pub download_incomplete: bool,
-    /// True when `limit` alone left new messages behind, after a download that
-    /// brought everything it asked for: the next pass's window takes the next
-    /// ones, so the folder is worth another pass soon ([`backlog_owed`]).
-    pub backlog: bool,
+/// What one folder's body pass has met so far across its `/$batch` chunks
+/// (#0065): the failed sub-requests that count against
+/// [`BATCH_FAILURE_BUDGET`], and the longest pause a throttled sub-response
+/// asked for, applied before the next chunk.
+#[derive(Debug, Default)]
+pub(crate) struct BatchPacing {
+    pub(crate) failures: usize,
+    pending_retry_after: Option<u64>,
 }
 
-/// What one `/$batch` download run returned, and whether it returned all of it.
+/// Whether a folder's body pass fell short, as counts: one that handed back
+/// fewer messages than ids, or ended before issuing every chunk (the failure
+/// budget, a stop, a failed request), did not download what the listing found.
 ///
-/// The count matters as much as the messages: a chunk whose sub-responses
-/// failed, a parse that did not yield a [`FetchedEmail`], and a run that spent
-/// [`BATCH_FAILURE_BUDGET`] all hand back fewer emails than ids asked for, and
-/// all three mean the same thing to the prune: this pass does not know what the
-/// server holds (#0065 follow-up).
-pub struct BatchFetch {
-    /// How many ids the run was asked for.
-    pub requested: usize,
-    pub emails: Vec<GraphFetched>,
-    /// True when [`BATCH_FAILURE_BUDGET`] stopped the run before it had issued
-    /// every chunk.
-    pub gave_up: bool,
-}
-
-impl BatchFetch {
-    /// Whether fewer messages came back than were asked for.
-    fn fell_short(&self) -> bool {
-        batch_fell_short(self.requested, self.emails.len(), self.gave_up)
-    }
-}
-
-/// The rule behind [`BatchFetch::fell_short`], as counts: a run that handed
-/// back fewer messages than ids, or gave up before issuing every chunk, did not
-/// download what the enumeration found.
-fn batch_fell_short(requested: usize, returned: usize, gave_up: bool) -> bool {
+/// A short return is *reported* rather than absorbed, because a message that
+/// was asked for and did not arrive is exactly the copy whose absence would
+/// make another mailbox's row look deleted (#0065 follow-up).
+pub(crate) fn batch_fell_short(requested: usize, returned: usize, gave_up: bool) -> bool {
     gave_up || returned < requested
 }
 
@@ -1284,125 +1257,98 @@ impl GraphClient {
 // ---------------------------------------------------------------------------
 
 impl GraphClient {
-    /// Fetch messages by their Graph ids, in batches of
-    /// [`BATCH_MAX_REQUESTS`].
+    /// Fetch one chunk of at most [`BATCH_MAX_REQUESTS`] messages by their
+    /// Graph ids, in one `/$batch` request: one batch of a folder's body pass
+    /// (PERSO-213), which the sync engine ingests before it asks for the next.
     ///
-    /// This is what makes a Graph sync converge. Asking a folder for its `$top`
-    /// most recent messages can never return a message that is new to the store
-    /// but old on the server (one moved into Archive, say), so detection kept
-    /// reporting it and the download kept missing it; naming each message by id
-    /// downloads exactly what detection found.
+    /// Naming each message by id is what makes a Graph sync converge. Asking a
+    /// folder for its `$top` most recent messages can never return a message
+    /// that is new to the store but old on the server (one moved into
+    /// Archive, say), so detection kept reporting it and the download kept
+    /// missing it; naming each message by id downloads exactly what detection
+    /// found.
     ///
-    /// A message that fails inside the batch is logged and skipped: the rest of
-    /// the pass still lands, and a message that was not ingested is simply new
-    /// again next sync. Two guards keep that from becoming a treadmill (#0065):
-    /// a throttled sub-response's `Retry-After` paces the remaining chunks, and
-    /// after [`BATCH_FAILURE_BUDGET`] failures the pass stops asking and
-    /// reports what it got, so a systematically failing id set costs one pass
-    /// rather than one request and one log line per message.
+    /// A message that fails inside the batch is logged and skipped: the rest
+    /// of the pass still lands, and a message that was not ingested is simply
+    /// new again next sync. Two guards keep that from becoming a treadmill
+    /// (#0065), and `pacing` carries both across a folder's chunks: a
+    /// throttled sub-response's `Retry-After` paces the next chunk, and the
+    /// failures it counts are what [`BATCH_FAILURE_BUDGET`] is measured
+    /// against, so a systematically failing id set costs one pass rather than
+    /// one request and one log line per message.
     ///
-    /// Whatever the reason, a short return is *reported* rather than absorbed:
-    /// the caller folds it into the prune gate, because a message that was
-    /// asked for and did not arrive is exactly the copy whose absence would
-    /// make another mailbox's row look deleted (#0065 follow-up).
-    pub async fn fetch_messages_by_ids(&self, ids: &[&str]) -> Result<BatchFetch> {
-        let url = format!("{}/$batch", GRAPH_BASE);
-        let mut emails = Vec::with_capacity(ids.len());
-        let mut failures = 0usize;
-        let mut gave_up = false;
-        // The longest pause a sub-response asked for, applied at the top of the
-        // next chunk. Pacing before a chunk rather than after one is what keeps
-        // a throttle in the *last* chunk from sleeping up to `MAX_RETRY_AFTER_
-        // SECS` with nothing left to pace, and keeps a pass that is about to
-        // give up from sleeping first (#0065 follow-up).
-        let mut pending_retry_after: Option<u64> = None;
+    /// The pause is taken at the top of the next chunk rather than after this
+    /// one, which is what keeps a throttle in the *last* chunk from sleeping up
+    /// to [`MAX_RETRY_AFTER_SECS`] with nothing left to pace, and keeps a pass
+    /// that is about to give up from sleeping first (#0065 follow-up).
+    pub(crate) async fn fetch_batch_chunk(
+        &self,
+        chunk: &[&str],
+        pacing: &mut BatchPacing,
+    ) -> Result<Vec<GraphFetched>> {
+        if let Some(secs) = pacing.pending_retry_after.take() {
+            info!("Graph asked for {secs}s before the next batch; pacing the rest of the pass");
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        }
+        let resp = self
+            .client
+            .post(format!("{}/$batch", GRAPH_BASE))
+            .bearer_auth(self.bearer())
+            .json(&batch_request_body(chunk))
+            .send()
+            .await
+            .context("Failed to fetch messages by id")?;
 
-        for chunk in ids.chunks(BATCH_MAX_REQUESTS) {
-            if failures >= BATCH_FAILURE_BUDGET {
-                warn!(
-                    "Giving up on this pass's remaining message downloads after {failures} failed \
-                     sub-requests; {} message(s) landed and the rest stay new",
-                    emails.len(),
-                );
-                gave_up = true;
-                break;
-            }
-            if let Some(secs) = pending_retry_after.take() {
-                info!("Graph asked for {secs}s before the next batch; pacing the rest of the pass");
-                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-            }
-            let resp = self
-                .client
-                .post(&url)
-                .bearer_auth(self.bearer())
-                .json(&batch_request_body(chunk))
-                .send()
-                .await
-                .context("Failed to fetch messages by id")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Batch message fetch failed (HTTP {}): {}",
+                status,
+                body
+            ));
+        }
 
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!(
-                    "Batch message fetch failed (HTTP {}): {}",
-                    status,
-                    body
-                ));
-            }
+        let batch: GraphBatchResponse = resp
+            .json()
+            .await
+            .context("Failed to parse the batch response")?;
 
-            let batch: GraphBatchResponse = resp
-                .json()
-                .await
-                .context("Failed to parse the batch response")?;
-
-            for entry in batch.responses {
-                // Graph is free to reorder the responses, so the request id
-                // (the index into `chunk`) is the only correlation.
-                let requested = entry
-                    .id
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|i| chunk.get(i).copied())
-                    .unwrap_or("<unknown>");
-                let status = entry.status;
-                match entry.into_sub_response() {
-                    SubResponse::Throttled(secs) => {
-                        pending_retry_after = pending_retry_after.max(secs);
-                        debug!(
-                            "Graph throttled the batch fetch of message {requested} (HTTP {status})"
-                        );
-                    }
-                    SubResponse::Failed(why) => {
-                        failures += 1;
-                        if failures <= BATCH_FAILURE_WARN_LIMIT {
-                            warn!("Batch fetch of message {requested} failed: {why}");
-                        }
-                    }
-                    SubResponse::Message(msg) => emails.push(GraphFetched {
-                        graph_id: msg.id.clone(),
-                        threading: thread_hints(
-                            msg.conversation_id.as_deref(),
-                            &msg.single_value_extended_properties,
-                        ),
-                        email: self.hydrate(&msg).await,
-                    }),
+        let mut emails = Vec::with_capacity(chunk.len());
+        for entry in batch.responses {
+            // Graph is free to reorder the responses, so the request id (the
+            // index into `chunk`) is the only correlation.
+            let requested = entry
+                .id
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| chunk.get(i).copied())
+                .unwrap_or("<unknown>");
+            let status = entry.status;
+            match entry.into_sub_response() {
+                SubResponse::Throttled(secs) => {
+                    pacing.pending_retry_after = pacing.pending_retry_after.max(secs);
+                    debug!(
+                        "Graph throttled the batch fetch of message {requested} (HTTP {status})"
+                    );
                 }
+                SubResponse::Failed(why) => {
+                    pacing.failures += 1;
+                    if pacing.failures <= BATCH_FAILURE_WARN_LIMIT {
+                        warn!("Batch fetch of message {requested} failed: {why}");
+                    }
+                }
+                SubResponse::Message(msg) => emails.push(GraphFetched {
+                    graph_id: msg.id.clone(),
+                    threading: thread_hints(
+                        msg.conversation_id.as_deref(),
+                        &msg.single_value_extended_properties,
+                    ),
+                    email: self.hydrate(&msg).await,
+                }),
             }
         }
-
-        if failures > BATCH_FAILURE_WARN_LIMIT {
-            warn!(
-                "{failures} of {} batch sub-requests failed this pass (first \
-                 {BATCH_FAILURE_WARN_LIMIT} logged above); those messages stay new",
-                ids.len(),
-            );
-        }
-
-        Ok(BatchFetch {
-            requested: ids.len(),
-            emails,
-            gave_up,
-        })
+        Ok(emails)
     }
 
     /// Turn one Graph message into a [`FetchedEmail`], pulling its attachments
@@ -1496,44 +1442,6 @@ fn server_attachments(att_list: GraphAttachmentList) -> Vec<crate::ingest::Serve
             content_id: att.content_id,
         })
         .collect()
-}
-
-/// The local half of the PERSO-165 inline backfill of one Graph account:
-/// queue its inline-only rows for the attachment repair (once per store) and
-/// classify a batch of the rows that carry a raw message; then the PERSO-261
-/// address backfill of a batch of those rows. Failures are logged and leave
-/// the work for the next pass.
-fn classify_stored_inline_locally(
-    store: &crate::store::Store,
-    blobs: &crate::store::BlobStore,
-    account: &str,
-) {
-    match crate::ingest::mark_inline_only_rows(store, blobs, account) {
-        Ok(0) => {}
-        Ok(n) => info!("Queued {n} inline-only message(s) for the attachment repair"),
-        Err(e) => warn!("Could not queue the inline-only messages: {e:#}"),
-    }
-    match crate::ingest::classify_inline_from_raw(
-        store,
-        blobs,
-        account,
-        crate::ingest::INLINE_CLASSIFICATIONS_PER_PASS,
-    ) {
-        Ok(0) => {}
-        Ok(n) => info!("Classified the attachments of {n} stored message(s) from their raw"),
-        Err(e) => warn!("Could not classify the stored attachments from their raw: {e:#}"),
-    }
-    // The outbox's Sent copies keep their raw too, and an older build stored
-    // their address headers decoded (PERSO-261).
-    match crate::ingest::rewrite_stored_addresses(
-        store,
-        blobs,
-        crate::ingest::ADDRESS_REWRITES_PER_PASS,
-    ) {
-        Ok(0) => {}
-        Ok(n) => info!("Stored the addresses of {n} message(s) again from their raw"),
-        Err(e) => warn!("Could not store the addresses again from their raw: {e:#}"),
-    }
 }
 
 /// Turn a parsed `/attachments` page into the attachments the store keeps.
@@ -1846,59 +1754,6 @@ impl GraphClient {
         Ok(FolderEnumeration {
             entries: result,
             complete,
-        })
-    }
-
-    /// Two-pass fetch: enumerate the folder, then download by id the messages
-    /// the store does not hold.
-    ///
-    /// The enumeration in the returned [`FolderFetch`] covers every message in
-    /// the folder, so the caller can both apply read-status changes to rows it
-    /// already holds and see what has gone.
-    ///
-    /// `download_incomplete` counts both ways a pass can come up short: `limit`
-    /// leaving new messages unfetched, and the batch handing back fewer
-    /// messages than were asked for. The second was the gap the first shipped
-    /// with (#0065 follow-up): a throttled-out archive target returned an empty
-    /// vector, reported a complete download, and opened the prune gate on inbox
-    /// rows whose archive copies had never landed.
-    ///
-    /// `window` is a `status-only` target's recency window (#0141): only the
-    /// folder's newest `window` messages are candidates, and what lies below
-    /// them is never a backlog ([`backlog_owed`]).
-    pub async fn fetch_new_messages(
-        &self,
-        folder: &str,
-        limit: usize,
-        window: Option<usize>,
-        known_ids: &HashSet<String>,
-    ) -> Result<FolderFetch> {
-        let enumeration = self.enumerate_folder(folder).await?;
-        let (new, found) = select_for_download(&enumeration.entries, known_ids, limit, window);
-        let capped = found > new.len();
-        let skipped = enumeration.entries.len() - found;
-
-        if new.is_empty() {
-            return Ok(FolderFetch {
-                new_emails: Vec::new(),
-                skipped,
-                enumeration,
-                download_incomplete: capped,
-                backlog: false,
-            });
-        }
-
-        let graph_ids: Vec<&str> = new.iter().map(|entry| entry.graph_id.as_str()).collect();
-        let batch = self.fetch_messages_by_ids(&graph_ids).await?;
-        let download_incomplete = capped || batch.fell_short();
-        let backlog = backlog_owed(window, found, graph_ids.len(), batch.fell_short());
-
-        Ok(FolderFetch {
-            new_emails: batch.emails,
-            skipped,
-            enumeration,
-            download_incomplete,
-            backlog,
         })
     }
 }
@@ -2293,79 +2148,6 @@ impl GraphClient {
             }
         }
     }
-
-    /// The delta twin of [`GraphClient::fetch_new_messages`]: walk the change
-    /// set, then download by id the changed messages the store does not hold.
-    ///
-    /// Returns `Ok(None)` when the delta reported removals, which hands the
-    /// pass to the full enumeration with the token left in place
-    /// ([`FolderDelta::forces_full_enumeration`]).
-    async fn fetch_delta(
-        &self,
-        folder: &str,
-        limit: usize,
-        window: Option<usize>,
-        known_ids: &HashSet<String>,
-        link: &str,
-    ) -> Result<Option<DeltaFetch>, DeltaDiscard> {
-        let delta = self.walk_delta(link).await?;
-        info!(
-            "Graph delta for '{folder}': {} page(s), {} changed, {} removed",
-            delta.pages,
-            delta.changed.len(),
-            delta.removed,
-        );
-        if delta.forces_full_enumeration() {
-            return Ok(None);
-        }
-
-        let (new, found) = select_for_download(&delta.changed, known_ids, limit, window);
-        let capped = found > new.len();
-        if new.is_empty() {
-            return Ok(Some(DeltaFetch {
-                new_emails: Vec::new(),
-                changed: delta.changed,
-                delta_link: delta.delta_link,
-                download_incomplete: capped,
-                backlog: false,
-            }));
-        }
-        let graph_ids: Vec<&str> = new.iter().map(|entry| entry.graph_id.as_str()).collect();
-        let batch = match self.fetch_messages_by_ids(&graph_ids).await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("Graph delta download failed for '{folder}': {e:#}");
-                return Err(DeltaDiscard::Failed);
-            }
-        };
-        let download_incomplete = capped || batch.fell_short();
-        let backlog = backlog_owed(window, found, graph_ids.len(), batch.fell_short());
-        Ok(Some(DeltaFetch {
-            new_emails: batch.emails,
-            changed: delta.changed,
-            delta_link: delta.delta_link,
-            download_incomplete,
-            backlog,
-        }))
-    }
-}
-
-/// What one delta pass hands the orchestrator.
-///
-/// The shape deliberately differs from [`FolderFetch`]: there is no
-/// `enumeration`, because a change set is not a folder listing and nothing may
-/// diff against it, and no `skipped`, because a delta does not walk past the
-/// messages it already holds.
-struct DeltaFetch {
-    new_emails: Vec<GraphFetched>,
-    /// The changed messages, for the read-flag pass.
-    changed: HashMap<String, FolderEntry>,
-    /// The resume point, stored only if this pass covered and wrote
-    /// everything.
-    delta_link: String,
-    download_incomplete: bool,
-    /// [`FolderFetch::backlog`], for the change set.
-    backlog: bool,
 }
 
 /// Whether a folder's pass left a backlog that another quick pass can drain at
@@ -2382,7 +2164,7 @@ struct DeltaFetch {
 /// which an immediate retry would only make worse, and a pass that asked for
 /// nothing (`-n 0`) made no progress a retry would repeat; both wait for the
 /// regular interval. A stored delta token cannot hide the backlog: a capped
-/// pass never mints one ([`may_record_delta_token`]), so the next pass
+/// pass never mints one ([`crate::sync::engine::earns_delta_link`]), so the next pass
 /// enumerates again or replays the same change set from the older token.
 ///
 /// A windowed (`status-only`) target never owes one (#0141): what it leaves
@@ -2390,166 +2172,6 @@ struct DeltaFetch {
 /// after pass would download the whole trash or junk folder.
 fn backlog_owed(window: Option<usize>, found: usize, asked: usize, fell_short: bool) -> bool {
     window.is_none() && found > asked && asked > 0 && !fell_short
-}
-
-/// What one folder's ingest loop left behind, for the decisions taken after it.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct WindowIngest {
-    /// Messages of the window the store now holds, newly inserted or not.
-    written: usize,
-    /// A message the store refused and still owes a retry
-    /// ([`crate::ingest::note_ingest_failure`] answered true): the pass did
-    /// not write everything it downloaded.
-    owed_failure: bool,
-    /// A message left out on purpose, as the item a local move or delete is
-    /// taking out of the folder (PERSO-245, [`crate::ingest::Departed`]).
-    withheld: bool,
-}
-
-/// Whether the folder is worth another quick pass at once (PERSO-172), given
-/// that its fetch left a backlog ([`backlog_owed`]) and what the window wrote.
-///
-/// A message the store refused and still owes a retry is the same doubt as a
-/// short batch: the regular interval retries it, an immediate tick would only
-/// repeat it.
-///
-/// A window that wrote nothing owes nothing either. A message given up on
-/// after [`crate::ingest::MAX_INGEST_ATTEMPTS`] counts against nothing, yet it
-/// never enters `known_message_ids`, so every pass lists it as new and puts it
-/// in the window again, newest first. A window made only of such messages
-/// would otherwise owe a follow-up for ever: the same bodies downloaded every
-/// few seconds, none of them ever stored. Progress is the test because it is
-/// what a follow-up buys; a window with one given-up message among written
-/// ones still moves the drain on.
-fn owes_follow_up(backlog: bool, window: &WindowIngest) -> bool {
-    backlog && !window.owed_failure && window.written > 0
-}
-
-/// Write one folder's downloaded window into the store, counting into
-/// `result` what it inserted.
-///
-/// An inserted inbox message is announced as new mail (the desktop
-/// notification of #0009) only when it is newer than every row the account
-/// held before the pass ([`crate::ingest::arrived_after`] over `newest_held`).
-/// The Graph pull is by id, newest first, so a backlog drain and a first sync
-/// insert hundreds of messages that are old to their owner; a message that
-/// arrives during the drain is the newest of its window and is still
-/// announced.
-///
-/// A message the store holds no row for, whose item `departures` says a local
-/// move or delete may be taking out of the folder while it was being listed,
-/// is not written (PERSO-245): it is the copy the user's own move is carrying
-/// away, and a row for it would be a stale duplicate of the moved one. The
-/// rule is the engine's ([`crate::ingest::ingest_listed`], PERSO-240).
-// Each argument is one thing the pass read before this folder's ingest; a
-// struct bundling them would be built at the one call site and the tests only.
-#[allow(clippy::too_many_arguments)]
-fn ingest_window(
-    store: &crate::store::Store,
-    blobs: &crate::store::BlobStore,
-    account_name: &str,
-    target: &SyncTarget,
-    new_emails: &[GraphFetched],
-    newest_held: Option<i64>,
-    departures: &crate::sync::departures::Watch,
-    result: &mut SyncResult,
-) -> WindowIngest {
-    let mut window = WindowIngest::default();
-    for fetched in new_emails {
-        let email = &fetched.email;
-        let message_id = crate::ingest::resolve_message_id(email, None);
-        let uid = crate::ingest::graph_uid(&message_id);
-        match crate::ingest::ingest_listed(
-            store,
-            blobs,
-            &crate::ingest::IngestInput {
-                account: account_name,
-                mailbox: target.role.as_str(),
-                uid,
-                email,
-                raw: None,
-            },
-            &crate::ingest::RebindPolicy::Always,
-            Some(&fetched.threading),
-            &|message_id| {
-                departures.departed_item(&target.server_name, message_id, &fetched.graph_id)
-            },
-        ) {
-            Ok(outcome) => {
-                window.written += 1;
-                crate::ingest::clear_ingest_failure(store, account_name, target.role.as_str(), uid);
-                if outcome.inserted {
-                    result.saved += 1;
-                    result
-                        .fresh_observations
-                        .push(FreshObservation::of(&target.role, email));
-                    if target.role.is_inbox()
-                        && crate::ingest::arrived_after(newest_held, &email.date)
-                    {
-                        result
-                            .new_inbox_mail
-                            .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
-                    }
-                }
-                if outcome.uid_rebound {
-                    result.uid_rebound += 1;
-                }
-            }
-            // No failure: nothing is owed, so it neither counts against the
-            // retry budget nor holds the prune back. A copy still listed once
-            // the departure has landed is another one, and is ingested then.
-            Err(e) if e.downcast_ref::<crate::ingest::Departed>().is_some() => {
-                window.withheld = true;
-                info!(
-                    "[sync] '{}': not ingesting {message_id}: {e}",
-                    target.server_name
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to ingest {} from {}: {:#}",
-                    message_id, target.role, e
-                );
-                window.owed_failure |= crate::ingest::note_ingest_failure(
-                    store,
-                    account_name,
-                    target.role.as_str(),
-                    &target.server_name,
-                    uid,
-                    &format!("{e:#} (message {message_id})"),
-                );
-            }
-        }
-    }
-    window
-}
-
-/// Whether a pass has earned the right to store its delta resume point.
-///
-/// The token means "at this point the store held every message the folder
-/// listed", and that is the whole safety argument for using it later: a delta
-/// from a token with that property reports every subsequent change, so the
-/// property survives. A pass that left a message undownloaded, or downloaded
-/// one it could not write, does not have the property and must not mint the
-/// claim; the older token stays and the next pass replays from it.
-///
-/// This is the same rule #0041 wrote for the CONDSTORE resume point, for the
-/// same reason, and it is what keeps the #0074 ingest bound honest on this
-/// path: `ingest_failed` is false once a poisoned message has been given up
-/// on, so a message the store will never accept cannot wedge the delta chain
-/// for good.
-///
-/// `flags_written` is [`crate::ingest::FlagsApplied::complete`] for the pass's
-/// read-state write (PERSO-202): the token vouches for the flags too, and a
-/// delta from a token minted over a dropped flag change never reports that
-/// change again, so the older token stays and the next delta replays it.
-fn may_record_delta_token(
-    covered: bool,
-    download_incomplete: bool,
-    ingest_failed: bool,
-    flags_written: bool,
-) -> bool {
-    covered && !download_incomplete && !ingest_failed && flags_written
 }
 
 /// Fold one page of an enumeration into the map.
@@ -2596,7 +2218,8 @@ fn server_flags(entry: &FolderEntry) -> crate::types::MessageFlags {
 ///
 /// The two differ exactly when `limit` left some behind, and that difference is
 /// what suspends the prune: a pass that could not fetch everything it found
-/// cannot also be trusted to say what has been deleted (see [`pass_may_prune`]).
+/// cannot also be trusted to say what has been deleted (see
+/// [`crate::ingest::pass_may_prune`]).
 ///
 /// A windowed target (#0141) selects among the folder's newest `window`
 /// messages, held or not, the way the IMAP window takes the newest UIDs of the
@@ -2604,7 +2227,7 @@ fn server_flags(entry: &FolderEntry) -> crate::types::MessageFlags {
 /// pass, since the store lacks them by id, and download the whole folder over
 /// a run of passes. `found` still counts every new message of the folder, so a
 /// windowed pass that left history on the server reports itself capped and
-/// mints no delta token ([`may_record_delta_token`]).
+/// mints no delta token ([`crate::sync::engine::earns_delta_link`]).
 fn select_for_download<'a>(
     server: &'a HashMap<String, FolderEntry>,
     known_ids: &HashSet<String>,
@@ -2656,7 +2279,7 @@ fn newest_first(server: &HashMap<String, FolderEntry>) -> Vec<(&str, &FolderEntr
 /// What replaces the IMAP clamp is the caller's two gates, because both of the
 /// cases the clamp defends against exist here too (#0065): a pass that did not
 /// see the whole folder or could not download its whole backlog does not prune
-/// at all ([`sync_mailboxes_graph`]), and a row too freshly dated to be
+/// at all ([`crate::sync::engine::run_sync`]), and a row too freshly dated to be
 /// anything but a local ingest the server has yet to file is held back
 /// ([`crate::ingest::prunable_uids`]).
 fn vanished_graph_uids(
@@ -2671,7 +2294,7 @@ fn vanished_graph_uids(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4: sync_mailboxes_graph
+// Phase 4: the per-folder maintenance a sync pass ends each folder with
 // ---------------------------------------------------------------------------
 
 /// What one attachment repair pass over a mailbox did, for its log line.
@@ -3042,456 +2665,6 @@ fn absorb_threading_page(
             ),
         );
     }
-}
-
-/// Sync orchestrator for Graph accounts, store-only. Mirrors the IMAP
-/// `sync_mailboxes`, with two documented differences forced by the API:
-///
-/// - Graph never returns the original RFC822, so rows get `raw_blob` NULL and
-///   the body/attachment blobs are the only copies of the content;
-/// - Graph has no UID, so the row's `uid` is [`crate::ingest::graph_uid`] of
-///   the message's `Message-ID`, which is stable per message and keeps the
-///   `UNIQUE (account, mailbox, uid)` identity meaningful.
-///
-/// The orchestration mirrors [`crate::imap_client::sync_mailboxes`] line for
-/// line, prune second pass included: the prunes are held back until every
-/// target has been ingested, so a message archived in Outlook web has its
-/// archive row before its inbox row goes and never spends a window with no row
-/// anywhere (#0055).
-///
-/// Three conditions gate that prune, standing in for the IMAP window clamp
-/// (#0065): the pass must have enumerated every target in full, it must have
-/// landed every new message it found (a quick sync's `limit`, a batch
-/// sub-response failure, a throttle that ran the pass out of budget and an
-/// ingest error all count against this), and a row dated within
-/// [`crate::ingest::PRUNE_MIN_AGE_SECS`] of now is left alone. Without the
-/// first two, a message moved between two folders loses its source row in the
-/// pass that could not fetch its destination copy, and holds no row anywhere
-/// until the backlog drains.
-///
-/// Since #0042 a quick sync may replace the enumeration with a
-/// `/messages/delta` walk from the token in `sync_cursors.deltalink`. The
-/// delta is strictly an accelerator: [`delta_verdict`] refuses it on anything
-/// unusual, any doubt during the walk throws the token away
-/// ([`DeltaDiscard`]), a delta that reports removals hands the pass back to the
-/// enumeration ([`FolderDelta::forces_full_enumeration`]), a full sync always
-/// relists, and a token is only ever minted by a pass that saw the whole
-/// folder and wrote every message in it ([`may_record_delta_token`]).
-///
-/// `stop` is asked before each target (PERSO-127), and only there: a Graph
-/// target fetches and ingests in one step, so its mailbox boundary is the one
-/// point at which nothing is half done. A stopped pass returns what the
-/// targets before the stop wrote, and runs no prune.
-///
-/// Every row the pass inserts is recorded in `observations` as it is
-/// inserted (PERSO-234): a quick tick cut off at its ceiling drops this
-/// future, and the rows it committed before that must still reach the
-/// contacts index.
-pub async fn sync_mailboxes_graph(
-    config: &GraphConfig,
-    account_name: &str,
-    targets: &[SyncTarget],
-    limit: usize,
-    dry_run: bool,
-    stop: Option<&Stop>,
-    observations: &ObservationSink,
-) -> Result<SyncResult> {
-    info!(
-        "sync_mailboxes_graph: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
-        targets.len(),
-    );
-    let span_label = if limit < usize::MAX {
-        "sync_mailboxes_graph:quick"
-    } else {
-        "sync_mailboxes_graph:full"
-    };
-    let mut span = TimingSpan::with_context(span_label, format!("{} targets", targets.len()));
-
-    let client = GraphClient::new_async(config).await?;
-    let store = crate::store::Store::open_for_pass(account_name, dry_run)?;
-    let blobs = crate::store::BlobStore::for_account(account_name);
-    let mut result = SyncResult {
-        fresh_observations: observations.clone(),
-        ..SyncResult::default()
-    };
-    span.mark("client_open");
-    // Opened before the pass reads which messages each folder already holds
-    // (PERSO-245): a listing taken below can be older than a local move or
-    // delete of a message out of the folder it lists, and the ingest asks the
-    // watch before it writes such a message as a new row (PERSO-240).
-    let departures = crate::sync::departures::Watch::open(&store, account_name)?;
-
-    // Every prune this run will apply, collected here and applied after the
-    // loop: see the second pass below for why it cannot run per target.
-    let mut prunes: Vec<(MailboxRole, Vec<i64>)> = Vec::new();
-    // `(enumeration complete, download truncated)` per target, which decides
-    // whether the prunes above may be applied at all: see `pass_may_prune`.
-    let mut coverage: Vec<(bool, bool)> = Vec::with_capacity(targets.len());
-    // What "new" means for the notification: newer than anything the store
-    // held before this pass, read once so a target synced earlier in the pass
-    // does not raise the bar for the inbox (see `ingest_window`).
-    let newest_held = crate::ingest::newest_held_date(&store, account_name);
-
-    // The inline images of rows an older build stored (PERSO-165), the local
-    // half: the inline-only rows queued for the attachment repair once per
-    // store, and the rows that carry a raw message (the outbox's Sent copies)
-    // classified from it, a bounded batch per pass.
-    if !dry_run {
-        classify_stored_inline_locally(&store, &blobs, account_name);
-        span.mark("inline_local");
-    }
-
-    for (index, target) in targets.iter().enumerate() {
-        if stops_at(stop, StopPoint::Mailbox(index)) {
-            info!(
-                "[sync] {account_name}: stopped before '{}', {index} of {} mailbox(es) synced",
-                target.server_name,
-                targets.len()
-            );
-            return Ok(result);
-        }
-        let known = crate::ingest::known_message_ids(&store, account_name, target.role.as_str())?;
-        let mailbox = target.role.as_str();
-        let stored = crate::ingest::load_mailbox_cursor(&store, account_name, mailbox)?;
-        let stored_token = stored.as_ref().and_then(|c| c.deltalink.clone());
-        let stored_identity = stored.as_ref().and_then(|c| c.uidvalidity);
-
-        // The folder id, read fresh. An id we could not read is not evidence
-        // that the folder is the same one, so it counts as a mismatch and the
-        // pass enumerates; the *stored* identity is kept, because a failed
-        // lookup is no evidence of a change either.
-        let observed_identity = if dry_run {
-            None
-        } else {
-            match client.folder_identity(&target.server_name).await {
-                Ok(id) => Some(folder_identity_hash(&id)),
-                Err(e) => {
-                    warn!("Could not read the folder id of {}: {e:#}", target.role);
-                    None
-                }
-            }
-        };
-        let identity_matches = observed_identity.is_some() && observed_identity == stored_identity;
-        let identity = observed_identity.or(stored_identity);
-
-        // A dry run writes nothing, and every delta branch below is a write:
-        // it either drops a token or mints one. So a dry run takes the
-        // pre-#0042 pass, unchanged.
-        let verdict = if dry_run {
-            DeltaVerdict::FullSync
-        } else {
-            delta_verdict(limit, stored_token.as_deref(), identity_matches)
-        };
-        if let DeltaVerdict::Discard(reason) = verdict {
-            info!("Graph delta token for {} dropped ({reason:?})", target.role);
-            crate::ingest::clear_mailbox_deltalink(&store, account_name, mailbox);
-        }
-        if verdict == DeltaVerdict::FolderChanged {
-            info!(
-                "Graph folder id for {} is not the one its delta token was minted against; \
-                 dropping the token and enumerating",
-                target.role
-            );
-            crate::ingest::clear_mailbox_deltalink(&store, account_name, mailbox);
-        }
-
-        // The delta half. `None` here means this pass enumerates, for any of
-        // the reasons above or because the walk itself was in doubt.
-        let mut delta_fetch: Option<DeltaFetch> = None;
-        if verdict == DeltaVerdict::Use {
-            let link = stored_token.clone().unwrap_or_default();
-            match client
-                .fetch_delta(&target.server_name, limit, target.window, &known, &link)
-                .await
-            {
-                Ok(Some(d)) => delta_fetch = Some(d),
-                Ok(None) => info!(
-                    "Graph delta for {} reported removals; enumerating the folder so the \
-                     prune can resolve them",
-                    target.role
-                ),
-                Err(reason) => {
-                    info!(
-                        "Graph delta for {} abandoned ({reason:?}); dropping the token and \
-                         enumerating",
-                        target.role
-                    );
-                    crate::ingest::clear_mailbox_deltalink(&store, account_name, mailbox);
-                }
-            }
-        }
-
-        // What the pass saw, in the two shapes it can come in. `server` is a
-        // whole folder listing and may be diffed against the store; `changed`
-        // is a change set and may not.
-        let (new_emails, server, complete, download_incomplete, backlog, token, used_delta) =
-            match delta_fetch {
-                Some(d) => (
-                    d.new_emails,
-                    d.changed,
-                    // A delta pass covers the folder in the sense the prune gate
-                    // asks about: its token asserts the store held everything the
-                    // folder listed at token time, and this walk brought in every
-                    // change since, so nothing another target's prune might need
-                    // is missing. It contributes no prunes of its own.
-                    true,
-                    d.download_incomplete,
-                    d.backlog,
-                    Some(d.delta_link),
-                    true,
-                ),
-                None => {
-                    // Minted before the enumeration, never after: a token taken
-                    // afterwards would silently swallow the window between the two.
-                    let minted = if dry_run {
-                        None
-                    } else {
-                        client.mint_delta_token(&target.server_name).await
-                    };
-                    let fetch = match client
-                        .fetch_new_messages(&target.server_name, limit, target.window, &known)
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!("Graph sync failed for {}: {}", target.role, e);
-                            // A target that did not sync at all is the strongest
-                            // form of partial pass: the copy that would justify
-                            // another target's deletion may be exactly what this
-                            // fetch failed to bring in.
-                            coverage.push((false, false));
-                            continue;
-                        }
-                    };
-                    let FolderFetch {
-                        new_emails,
-                        skipped,
-                        enumeration,
-                        download_incomplete,
-                        backlog,
-                    } = fetch;
-                    result.skipped += skipped;
-                    (
-                        new_emails,
-                        enumeration.entries,
-                        enumeration.complete,
-                        download_incomplete,
-                        backlog,
-                        minted,
-                        false,
-                    )
-                }
-            };
-        span.mark(&format!("fetch:{}", target.role));
-
-        // What a `status-only` window leaves on the server is its policy, not a
-        // short pass (#0141, [`SyncTarget::short_download_counts`]).
-        let short = download_incomplete && target.short_download_counts();
-        if dry_run {
-            coverage.push((complete, short));
-            result.saved += new_emails.len();
-            continue;
-        }
-
-        // A message that was downloaded but not written is as absent from the
-        // store as one that was never fetched, so it counts against this
-        // target's coverage too (#0065 follow-up).
-        //
-        // Bounded the same way the IMAP path is (#0074 review): without the
-        // bound, one message this store rejects every time would set
-        // `truncated` on every pass and suspend the account's prune for good.
-        // `ingest::note_ingest_failure` counts the attempts per
-        // `(account, mailbox, uid)` and gives up loudly after
-        // `MAX_INGEST_ATTEMPTS`; a success clears the count, so transient
-        // failures never accumulate towards it. The arrival mark has no Graph
-        // half -- the pull is by id, with no positional window (see the cursor
-        // below) -- so the give-up only releases the prune gate.
-        let window = ingest_window(
-            &store,
-            &blobs,
-            account_name,
-            target,
-            &new_emails,
-            newest_held,
-            &departures,
-            &mut result,
-        );
-        let ingest_failed = window.owed_failure;
-        coverage.push((complete, short || ingest_failed));
-        // A window that moved the drain on leaves the next one for the next
-        // pass, which the runtime runs at once rather than an interval from now.
-        if owes_follow_up(backlog, &window) {
-            info!(
-                "Graph sync of {} left older new messages for the next pass",
-                target.role
-            );
-            result.backlogged.push(target.server_name.clone());
-        }
-        span.mark(&format!("ingest:{}", target.role));
-
-        // Read status, and the reply or forward Outlook recorded (PERSO-171),
-        // for messages the store already holds, one transaction for the whole
-        // folder.
-        let flags = crate::ingest::apply_graph_flags(
-            &store,
-            account_name,
-            target.role.as_str(),
-            server
-                .iter()
-                .map(|(mid, entry)| (crate::ingest::graph_uid(mid), server_flags(entry))),
-        );
-        result.flags_updated += flags.changed;
-        span.mark(&format!("flags:{}", target.role));
-
-        // The item each row stands for, which a move, delete or read toggle
-        // of it acts on (PERSO-245): the rows this window wrote and the ones
-        // held before it, whose id a move elsewhere may have changed.
-        crate::ingest::bind_graph_ids(
-            &store,
-            account_name,
-            mailbox,
-            server
-                .iter()
-                .map(|(mid, entry)| (mid.as_str(), entry.graph_id.as_str())),
-        );
-        span.mark(&format!("graph_ids:{}", target.role));
-
-        // Messages stored without the attachments their first fetch failed
-        // to bring, a bounded handful per pass.
-        client
-            .repair_missing_attachments(
-                &store,
-                &blobs,
-                account_name,
-                mailbox,
-                &server,
-                crate::outbox::unix_now(),
-            )
-            .await;
-        span.mark(&format!("attachment_repair:{}", target.role));
-
-        // Rows an older build stored without threading signals, once.
-        client.rethread_stored(&store, account_name, target).await;
-        span.mark(&format!("rethread:{}", target.role));
-
-        // Attachments an older build stored without their inline mark, a
-        // bounded batch per pass (PERSO-165).
-        client
-            .classify_stored_inline(&store, &blobs, account_name, mailbox, &server)
-            .await;
-        span.mark(&format!("inline:{}", target.role));
-
-        // The other half of the same diff: what the store holds here and the
-        // server does not. Held back until every target has been ingested (see
-        // the second pass below).
-        //
-        // Only a full enumeration may compute it. `server` on a delta pass is
-        // a change set, so `known − server` would name every message that did
-        // not happen to change since the token: the entire mailbox (#0042).
-        if !used_delta {
-            let vanished = vanished_graph_uids(&known, &server);
-            if !vanished.is_empty() {
-                prunes.push((target.role.clone(), vanished));
-            }
-        }
-
-        // The resume point is only minted by a pass that saw the whole folder
-        // and wrote every message it found, and only alongside the folder id
-        // it is bound to: a token with no identity could never be validated
-        // again (#0042).
-        // A withheld copy (PERSO-245) is listed and not held, so the token
-        // could not claim the store held the folder: a twin the departure
-        // covered by its Message-ID would never be listed by a delta again.
-        // A read state the store failed to write is the same over-claim
-        // (PERSO-202): the next delta from the new token would never report
-        // that change again.
-        let earned = may_record_delta_token(
-            complete,
-            download_incomplete,
-            ingest_failed || window.withheld,
-            flags.complete,
-        );
-        let minted_a_token = token.is_some();
-        let token_to_store = if earned { token } else { None };
-
-        if used_delta {
-            // A delta pass observed no folder listing, so it writes the token
-            // and nothing else: `exists` and the rest are observations it did
-            // not make, and `record_mailbox_cursor` would null them.
-            if let (Some(identity), Some(link)) = (identity, token_to_store.as_deref()) {
-                crate::ingest::record_delta_token(&store, account_name, mailbox, identity, link);
-            }
-        } else if complete {
-            // Only a complete enumeration knows how many messages the folder
-            // holds; a short one would record a count the UI shows as truth,
-            // so the last known-good stays instead.
-            crate::ingest::record_mailbox_cursor(
-                &store,
-                account_name,
-                mailbox,
-                &crate::ingest::MailboxCursor {
-                    // The Graph analogue of UIDVALIDITY: the folder id its
-                    // delta token is bound to, hashed into the column.
-                    uidvalidity: identity,
-                    last_uid: None,
-                    uidnext: None,
-                    exists: Some(server.len() as i64),
-                    highest_modseq: None,
-                    deltalink: if identity.is_some() {
-                        token_to_store
-                    } else {
-                        None
-                    },
-                    // IMAP-only: the Graph pull downloads by id, so it has no
-                    // positional window that can leave an arrival behind.
-                    arrival_mark: None,
-                },
-            )?;
-            if earned && stored_token.is_some() && !minted_a_token {
-                // This pass covered the folder but could not mint a token, so
-                // the stored one is older than a listing that has just been
-                // fully consumed. Keeping it would replay the same changes
-                // (and, if they included removals, escalate to this same
-                // enumeration) on every pass for good.
-                crate::ingest::clear_mailbox_deltalink(&store, account_name, mailbox);
-            }
-        }
-    }
-
-    // Second pass: every prune, after every target has been ingested. The
-    // ordering argument is [`crate::imap_client::sync_mailboxes`]'s, and holds
-    // here for the same reason: targets are synced inbox, archive, sent, so
-    // pruning inside the loop would delete the inbox row of a message archived
-    // in Outlook web before the archive pass ingests it.
-    if pass_may_prune(&coverage) {
-        let now = crate::outbox::unix_now();
-        for (role, vanished) in &prunes {
-            // The age guard is the other half: a row the outbox has just
-            // ingested locally is not something the server ever listed under
-            // that identity, so it is in every vanished set until the server's
-            // own copy shows up.
-            let prunable =
-                crate::ingest::prunable_uids(&store, account_name, role.as_str(), vanished, now);
-            result.pruned += crate::ingest::prune_vanished(
-                &store,
-                &blobs,
-                account_name,
-                role.as_str(),
-                &prunable,
-            );
-        }
-    } else {
-        result.prunes_deferred = prunes.iter().map(|(_, v)| v.len()).sum();
-        if result.prunes_deferred > 0 {
-            info!(
-                "Graph sync: {} pending prune(s) deferred; this pass did not see every message",
-                result.prunes_deferred,
-            );
-        }
-    }
-    span.mark("prune");
-
-    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -4738,7 +3911,7 @@ impl GraphClient {
     /// the Graph ids [`Self::search_stubs`] kept, downloaded whole in
     /// `/$batch` chunks.
     ///
-    /// Not [`Self::fetch_messages_by_ids`], the sync's download, which skips
+    /// Not [`Self::fetch_batch_chunk`], the sync's download, which skips
     /// a throttled message for the next pass to find again: a search has no
     /// next pass, so a throttled hit is asked for again after its
     /// `Retry-After`, up to [`SEARCH_FETCH_ATTEMPTS`] times, and a hit that
@@ -4917,6 +4090,9 @@ fn is_exact_message_id(candidate: Option<&str>, wanted: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::pass_may_prune;
+    use crate::sync::SyncResult;
+    use crate::types::MailboxRole;
 
     /// PERSO-296: a refresh Entra refused with `invalid_grant` is asked once;
     /// the calls after it fail at once, naming the refusal, without asking the
@@ -5437,7 +4613,7 @@ mod tests {
             }
             let capped = found > new.len();
             owed.push(backlog_owed(None, found, new.len(), false));
-            if may_record_delta_token(true, capped, false, true) {
+            if crate::sync::engine::earns_delta_link(true, capped, false, true) {
                 token = Some(format!("{GRAPH_BASE}/me/mailFolders('A')/messages/delta?t"));
             }
             for entry in new {
@@ -5520,9 +4696,232 @@ mod tests {
         SyncTarget::new(role, server_name)
     }
 
-    /// A departures watch over `store` that no move or delete is in.
-    fn quiet(store: &crate::store::Store) -> crate::sync::departures::Watch {
-        crate::sync::departures::Watch::open(store, "acct").unwrap()
+    // -----------------------------------------------------------------------
+    // PERSO-213: the Graph pass through the engine, its server scripted
+    // -----------------------------------------------------------------------
+
+    const LINK: &str = "https://graph.microsoft.com/v1.0/me/mailFolders('A')/messages/delta?t2";
+
+    /// A Graph backend over one scripted folder instead of a server: the real
+    /// listing ([`backend::folder_listing`]) and the real engine, with the
+    /// `/$batch` downloads answered from the script.
+    struct ScriptedGraph<'a> {
+        /// The folder's listing: what it walked, its identity, and the
+        /// messages its batches answer with.
+        script: Option<(backend::FolderView, Option<i64>, Vec<GraphFetched>)>,
+        bodies: std::collections::VecDeque<GraphFetched>,
+        pass: Option<backend::FolderPass>,
+        /// Run once the engine has opened its departures watch, while the
+        /// folder is being listed: what the daemon commits mid-pass.
+        during_listing: Option<Box<dyn FnOnce() + 'a>>,
+        /// List as if the store held nothing, so every scripted message is
+        /// downloaded again.
+        blind: bool,
+    }
+
+    impl crate::sync::SyncBackend for ScriptedGraph<'_> {
+        type Known = GraphKnown;
+
+        fn known(
+            store: &crate::store::Store,
+            account: &str,
+            target: &SyncTarget,
+        ) -> Result<GraphKnown> {
+            backend::graph_known(store, account, target)
+        }
+
+        async fn list_targets(
+            &mut self,
+            targets: &[SyncTarget],
+            limit: usize,
+            knowns: Vec<GraphKnown>,
+            _stop: Option<&crate::sync::Stop>,
+        ) -> Vec<Result<crate::sync::MailboxListing>> {
+            if let Some(during) = self.during_listing.take() {
+                during();
+            }
+            let (view, identity, mut bodies) = self.script.take().expect("a scripted folder");
+            let known = knowns.into_iter().next().expect("one target");
+            let ids = if self.blind {
+                HashSet::new()
+            } else {
+                known.ids
+            };
+            let (listing, pass) =
+                backend::folder_listing(&targets[0], limit, &ids, view, identity, false);
+            // What `/$batch` answers: the ids the listing asked for, newest
+            // first, those the script holds.
+            self.bodies = pass
+                .queue
+                .iter()
+                .filter_map(|id| {
+                    let at = bodies.iter().position(|b| &b.graph_id == id)?;
+                    Some(bodies.remove(at))
+                })
+                .collect();
+            self.pass = Some(pass);
+            vec![Ok(listing)]
+        }
+
+        async fn next_batch(&mut self, _index: usize) -> Result<crate::sync::BodyBatch> {
+            if self.bodies.is_empty() {
+                return Ok(crate::sync::BodyBatch::Done { complete: true });
+            }
+            let take = self.bodies.len().min(BATCH_MAX_REQUESTS);
+            Ok(crate::sync::BodyBatch::Bodies(
+                self.bodies
+                    .drain(..take)
+                    .map(backend::into_message)
+                    .collect(),
+            ))
+        }
+
+        fn new_mail(&self) -> crate::sync::NewMail {
+            crate::sync::NewMail::NewerThanHeld
+        }
+
+        async fn finish_target(&mut self, _index: usize, finish: &crate::sync::Finish<'_>) {
+            if let Some(pass) = self.pass.take() {
+                backend::bind_items(finish, &pass.server);
+            }
+        }
+    }
+
+    /// The listing's entry of each of `messages`, keyed as the store keys
+    /// them.
+    fn entries_of(messages: &[GraphFetched]) -> HashMap<String, FolderEntry> {
+        messages
+            .iter()
+            .map(|m| {
+                (
+                    m.email
+                        .message_id
+                        .clone()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                    FolderEntry {
+                        graph_id: m.graph_id.clone(),
+                        is_read: m.email.flags.seen,
+                        last_verb: None,
+                        received: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The delta walk that names `messages` and removed nothing: what a
+    /// quick pass sees of messages that arrived, and a view nothing is
+    /// pruned from.
+    fn changes(messages: &[GraphFetched]) -> backend::FolderView {
+        backend::FolderView::Delta(FolderDelta {
+            changed: entries_of(messages),
+            removed: 0,
+            delta_link: LINK.to_string(),
+            pages: 1,
+        })
+    }
+
+    /// The whole folder holding `messages`, listed after minting [`LINK`].
+    fn whole_folder(messages: &[GraphFetched]) -> backend::FolderView {
+        backend::FolderView::Enumeration {
+            enumeration: FolderEnumeration {
+                entries: entries_of(messages),
+                complete: true,
+            },
+            minted: Some(LINK.to_string()),
+        }
+    }
+
+    /// One pass of the engine over `target`, its folder scripted.
+    #[allow(clippy::too_many_arguments)]
+    fn sync_folder<'a>(
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        target: &SyncTarget,
+        view: backend::FolderView,
+        identity: Option<i64>,
+        messages: Vec<GraphFetched>,
+        limit: usize,
+        during_listing: Option<Box<dyn FnOnce() + 'a>>,
+    ) -> SyncResult {
+        let graph = ScriptedGraph {
+            script: Some((view, identity, messages)),
+            bodies: Default::default(),
+            pass: None,
+            during_listing,
+            blind: false,
+        };
+        run_scripted(store, blobs, target, graph, limit)
+    }
+
+    /// [`sync_window`], listed as if the store held none of `messages`.
+    fn sync_folder_blind(
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        target: &SyncTarget,
+        messages: Vec<GraphFetched>,
+    ) -> SyncResult {
+        let graph = ScriptedGraph {
+            script: Some((changes(&messages), None, messages)),
+            bodies: Default::default(),
+            pass: None,
+            during_listing: None,
+            blind: true,
+        };
+        run_scripted(store, blobs, target, graph, 100)
+    }
+
+    /// The real engine over `graph`.
+    fn run_scripted(
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        target: &SyncTarget,
+        mut graph: ScriptedGraph<'_>,
+        limit: usize,
+    ) -> SyncResult {
+        let observations = crate::sync::ObservationSink::default();
+        let run = crate::sync::engine::SyncRun {
+            store,
+            blobs,
+            account: "acct",
+            targets: std::slice::from_ref(target),
+            limit,
+            dry_run: false,
+            stop: None,
+            observations: &observations,
+        };
+        let mut span = crate::timing::TimingSpan::new("test");
+        futures::executor::block_on(crate::sync::engine::run_sync(&mut graph, &run, &mut span))
+            .unwrap()
+    }
+
+    /// A quick pass that downloads `messages` as new arrivals in `target`:
+    /// a change set naming them, so nothing held is listed or pruned.
+    fn sync_window(
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        target: &SyncTarget,
+        messages: Vec<GraphFetched>,
+    ) -> SyncResult {
+        sync_folder(
+            store,
+            blobs,
+            target,
+            changes(&messages),
+            None,
+            messages,
+            100,
+            None,
+        )
+    }
+
+    /// The delta link the store holds for `mailbox`.
+    fn stored_link(store: &crate::store::Store, mailbox: &str) -> Option<String> {
+        crate::ingest::load_mailbox_cursor(store, "acct", mailbox)
+            .unwrap()
+            .and_then(|c| c.deltalink)
     }
 
     /// A message as the Graph download hands it over, dated by its
@@ -5752,17 +5151,12 @@ mod tests {
         crate::outbox::ingest_sent_copy(&store, &blobs, "acct", "sent", raw, "<sent@x>", None)
             .unwrap();
 
-        let mut result = SyncResult::default();
         let sent = sync_target(MailboxRole::Sent, "Sent Items");
-        ingest_window(
+        let result = sync_window(
             &store,
             &blobs,
-            "acct",
             &sent,
-            &[received("<sent@x>", "2026-10-21T20:12:00Z")],
-            None,
-            &quiet(&store),
-            &mut result,
+            vec![received("<sent@x>", "2026-10-21T20:12:00Z")],
         );
         assert!(result.fresh_observations.is_empty(), "{result:?}");
         let rows: i64 = store
@@ -5792,7 +5186,6 @@ mod tests {
                 .unwrap();
             crate::types::MessageFlags::parse(flags.as_deref().unwrap_or_default()).answered
         };
-        let mut result = SyncResult::default();
 
         // Downloaded with the property: answered at ingest.
         let msg = graph_message(serde_json::json!({
@@ -5805,16 +5198,7 @@ mod tests {
         let mut fetched = received("<replied@x>", "2026-10-21T20:12:00Z");
         fetched.email.flags = graph_message_to_fetched_email(&msg).flags;
         let plain = received("<later@x>", "2026-10-21T20:13:00Z");
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &[fetched, plain],
-            None,
-            &quiet(&store),
-            &mut result,
-        );
+        sync_window(&store, &blobs, &inbox, vec![fetched, plain]);
         assert!(answered("<replied@x>"));
         assert!(!answered("<later@x>"));
 
@@ -5909,57 +5293,40 @@ mod tests {
                 )
                 .unwrap()
         };
-        let mut result = SyncResult::default();
 
         // Parent first, reply after: the headers.
-        ingest_window(
+        sync_window(
             &store,
             &blobs,
-            "acct",
             &inbox,
-            &[with("<p1@x>", "2026-10-21T20:12:00Z", None, "C1")],
-            None,
-            &quiet(&store),
-            &mut result,
+            vec![with("<p1@x>", "2026-10-21T20:12:00Z", None, "C1")],
         );
-        ingest_window(
+        sync_window(
             &store,
             &blobs,
-            "acct",
             &inbox,
-            &[with(
+            vec![with(
                 "<r1@x>",
                 "2026-10-21T20:13:00Z",
                 Some("<p1@x>"),
                 "other",
             )],
-            None,
-            &quiet(&store),
-            &mut result,
         );
         assert_eq!(thread_of("<r1@x>"), "<p1@x>", "the headers win");
 
         // Reply first, parent after: the conversation.
-        ingest_window(
+        sync_window(
             &store,
             &blobs,
-            "acct",
             &inbox,
-            &[with("<r2@x>", "2026-10-21T20:13:00Z", Some("<p2@x>"), "C2")],
-            None,
-            &quiet(&store),
-            &mut result,
+            vec![with("<r2@x>", "2026-10-21T20:13:00Z", Some("<p2@x>"), "C2")],
         );
         assert_eq!(thread_of("<r2@x>"), "<r2@x>", "no parent stored yet");
-        ingest_window(
+        sync_window(
             &store,
             &blobs,
-            "acct",
             &inbox,
-            &[with("<p2@x>", "2026-10-21T20:12:00Z", None, "C2")],
-            None,
-            &quiet(&store),
-            &mut result,
+            vec![with("<p2@x>", "2026-10-21T20:12:00Z", None, "C2")],
         );
         assert_eq!(thread_of("<p2@x>"), "<r2@x>");
 
@@ -5974,15 +5341,11 @@ mod tests {
             .unwrap();
         assert_eq!(irt.as_deref(), Some("<p1@x>"));
         assert_eq!(conversation.as_deref(), Some("other"));
-        ingest_window(
+        sync_window(
             &store,
             &blobs,
-            "acct",
             &inbox,
-            &[with("<lone@x>", "2026-10-21T20:14:00Z", None, "")],
-            None,
-            &quiet(&store),
-            &mut result,
+            vec![with("<lone@x>", "2026-10-21T20:14:00Z", None, "")],
         );
         assert_eq!(
             thread_of("<lone@x>"),
@@ -6004,89 +5367,64 @@ mod tests {
         std::fs::write(&not_a_dir, b"").unwrap();
         let blobs = crate::store::BlobStore::new(&not_a_dir);
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
-        let emails: Vec<GraphFetched> = (0..3)
-            .map(|i| received(&format!("<poison{i}@x>"), "2026-08-06T10:00:00Z"))
-            .collect();
 
         for pass in 1..=4 {
-            let mut result = SyncResult::default();
-            let window = ingest_window(
-                &store,
-                &blobs,
-                "acct",
-                &inbox,
-                &emails,
-                None,
-                &quiet(&store),
-                &mut result,
-            );
-            assert_eq!(window.written, 0, "pass {pass} stored nothing");
-            assert_eq!(
-                window.owed_failure,
-                pass < 3,
-                "pass {pass}: owed until the third failure gives up"
-            );
+            let emails: Vec<GraphFetched> = (0..3)
+                .map(|i| received(&format!("<poison{i}@x>"), "2026-08-06T10:00:00Z"))
+                .collect();
+            // One more new message below the window of three: the cap leaves
+            // a backlog behind every pass.
+            let mut listed = entries_of(&emails);
+            listed.insert("<zz-older@x>".into(), entry("G-older", None));
+            let view = backend::FolderView::Delta(FolderDelta {
+                changed: listed,
+                removed: 0,
+                delta_link: LINK.to_string(),
+                pages: 1,
+            });
+            let result = sync_folder(&store, &blobs, &inbox, view, None, emails, 3, None);
+            assert_eq!(result.saved, 0, "pass {pass} stored nothing");
+            for i in 0..3 {
+                let uid = crate::ingest::graph_uid(&format!("<poison{i}@x>"));
+                let attempts = crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid);
+                assert_eq!(
+                    attempts < 3,
+                    pass < 3,
+                    "pass {pass}: owed until the third failure gives up"
+                );
+                assert_eq!(attempts, pass);
+            }
             assert!(
-                !owes_follow_up(true, &window),
+                result.backlogged.is_empty(),
                 "pass {pass} made no progress, so the backlog waits for the interval"
             );
-            assert_eq!(result.saved, 0);
         }
     }
 
-    /// Progress is what a follow-up buys: a given-up message among written ones
-    /// still moves the drain on, an owed retry still waits for the interval.
-    #[test]
-    fn a_follow_up_is_owed_only_by_a_window_that_moved_the_drain_on() {
-        let progressed = WindowIngest {
-            written: 99,
-            ..WindowIngest::default()
-        };
-        assert!(owes_follow_up(true, &progressed));
-        assert!(!owes_follow_up(false, &progressed), "no backlog, no hurry");
-        let retrying = WindowIngest {
-            written: 99,
-            owed_failure: true,
-            ..WindowIngest::default()
-        };
-        assert!(!owes_follow_up(true, &retrying));
-        assert!(!owes_follow_up(true, &WindowIngest::default()));
-    }
-
-    /// The inbox row of `<moving@x>`, synced and bound to its Graph item, and
-    /// the move of it to Archive the user queued, still owed to the server.
-    fn a_move_out_of_the_inbox(
+    /// The inbox row of `<moving@x>`, synced and bound to its Graph item.
+    fn the_inbox_row_of_moving(
         store: &crate::store::Store,
         blobs: &crate::store::BlobStore,
-        runner: crate::pending_ops::Runner<'_>,
-    ) {
+    ) -> i64 {
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
         let moving = received("<moving@x>", "2026-10-28T09:00:00Z");
-        let mut result = SyncResult::default();
-        ingest_window(
-            store,
-            blobs,
-            "acct",
-            &inbox,
-            std::slice::from_ref(&moving),
-            None,
-            &quiet(store),
-            &mut result,
-        );
-        crate::ingest::bind_graph_ids(
-            store,
-            "acct",
-            "inbox",
-            [("<moving@x>", moving.graph_id.as_str())],
-        );
-        let row: i64 = store
+        sync_window(store, blobs, &inbox, vec![moving]);
+        store
             .conn()
             .query_row(
-                "SELECT id FROM messages WHERE message_id = '<moving@x>'",
+                "SELECT id FROM messages WHERE message_id = '<moving@x>' AND graph_id IS NOT NULL",
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    /// The move of `row` to Archive the user queued, still owed to the server.
+    fn move_to_archive(
+        store: &crate::store::Store,
+        row: i64,
+        runner: crate::pending_ops::Runner<'_>,
+    ) {
         let queued = crate::mutations::queue_move(
             store,
             "acct",
@@ -6122,30 +5460,27 @@ mod tests {
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
         let scope = crate::pending_ops::SettleScope::open(&store);
-        a_move_out_of_the_inbox(&store, &blobs, crate::pending_ops::Runner::Caller(&scope));
+        let row = the_inbox_row_of_moving(&store, &blobs);
+        move_to_archive(&store, row, crate::pending_ops::Runner::Caller(&scope));
         assert_eq!(held(&store, "archive"), ["<moving@x>"]);
 
-        let departures = crate::sync::departures::Watch::open(&store, "acct").unwrap();
-        let listed = [
+        let listed = vec![
             received("<moving@x>", "2026-10-28T09:00:00Z"),
             received("<new@x>", "2026-10-28T09:05:00Z"),
         ];
-        let mut result = SyncResult::default();
-        let window = ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &sync_target(MailboxRole::Inbox, "Inbox"),
-            &listed,
-            None,
-            &departures,
-            &mut result,
-        );
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let view = whole_folder(&listed);
+        let result = sync_folder(&store, &blobs, &inbox, view, Some(7), listed, 100, None);
         assert_eq!(held(&store, "inbox"), ["<new@x>"]);
         assert_eq!(held(&store, "archive"), ["<moving@x>"]);
-        assert_eq!((window.written, window.withheld), (1, true));
-        assert!(!window.owed_failure, "a withheld item is no failure");
         assert_eq!(result.saved, 1);
+        assert_eq!(stored_link(&store, "inbox"), None, "the item was withheld");
+        let moving = crate::ingest::graph_uid("<moving@x>");
+        assert_eq!(
+            crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", moving),
+            0,
+            "a withheld item is no failure"
+        );
     }
 
     /// The same when the move commits while the pass is listing, after the
@@ -6156,39 +5491,37 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
-        let departures = crate::sync::departures::Watch::open(&store, "acct").unwrap();
-        a_move_out_of_the_inbox(&store, &blobs, crate::pending_ops::Runner::Drain);
+        let row = the_inbox_row_of_moving(&store, &blobs);
 
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
-        let mut result = SyncResult::default();
-        let source = received("<moving@x>", "2026-10-28T09:00:00Z");
-        let window = ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            std::slice::from_ref(&source),
-            None,
-            &departures,
-            &mut result,
-        );
+        let source = vec![received("<moving@x>", "2026-10-28T09:00:00Z")];
+        let view = whole_folder(&source);
+        let commit = || move_to_archive(&store, row, crate::pending_ops::Runner::Drain);
+        // The move commits after the watch opened and before the store was
+        // read, so the read no longer holds the row and the listing takes the
+        // source item for new: the order the journal is there for.
+        let graph = ScriptedGraph {
+            script: Some((view, Some(7), source)),
+            bodies: Default::default(),
+            pass: None,
+            during_listing: Some(Box::new(commit)),
+            blind: true,
+        };
+        run_scripted(&store, &blobs, &inbox, graph, 100);
         assert!(held(&store, "inbox").is_empty());
-        assert!(window.withheld);
+        assert_eq!(stored_link(&store, "inbox"), None, "the item was withheld");
 
         let mut twin = received("<moving@x>", "2026-10-28T09:00:00Z");
         twin.graph_id = "a-twin-item".to_string();
-        let window = ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &[twin],
-            None,
-            &departures,
-            &mut result,
-        );
+        let twins = vec![twin];
+        let view = whole_folder(&twins);
+        sync_folder(&store, &blobs, &inbox, view, Some(7), twins, 100, None);
         assert_eq!(held(&store, "inbox"), ["<moving@x>"]);
-        assert!(!window.withheld);
+        assert_eq!(
+            stored_link(&store, "inbox").as_deref(),
+            Some(LINK),
+            "nothing was withheld"
+        );
     }
 
     /// PERSO-172 review: a drain inserts a hundred old messages per pass, and
@@ -6217,17 +5550,7 @@ mod tests {
             received("<m3@x>", "2026-08-06T12:00:00Z"),
             received("<m2@x>", "2026-08-06T11:00:00Z"),
         ];
-        let mut result = SyncResult::default();
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &first,
-            None,
-            &quiet(&store),
-            &mut result,
-        );
+        let result = sync_window(&store, &blobs, &inbox, first);
         assert_eq!(result.saved, 2);
         assert!(
             announced(&result).is_empty(),
@@ -6236,42 +5559,20 @@ mod tests {
 
         // A drain pass: the next older window, plus one message that arrived
         // meanwhile and so leads the window.
-        let newest_held = crate::ingest::newest_held_date(&store, "acct");
-        assert!(newest_held.is_some());
+        assert!(crate::ingest::newest_held_date(&store, "acct").is_some());
         let drain = vec![
             received("<fresh@x>", "2026-08-06T12:00:01Z"),
             received("<m1@x>", "2026-08-06T10:00:00Z"),
             received("<m0@x>", "2026-08-06T09:00:00Z"),
         ];
-        let mut result = SyncResult::default();
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &drain,
-            newest_held,
-            &quiet(&store),
-            &mut result,
-        );
+        let result = sync_window(&store, &blobs, &inbox, drain);
         assert_eq!(result.saved, 3, "the old ones are still stored");
         assert_eq!(announced(&result), vec!["<fresh@x>".to_string()]);
 
         // Only the inbox announces, whatever the date.
         let archive = sync_target(MailboxRole::Archive, "Archive");
-        let newest_held = crate::ingest::newest_held_date(&store, "acct");
-        let mut result = SyncResult::default();
         let later = vec![received("<filed@x>", "2026-08-07T08:00:00Z")];
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &archive,
-            &later,
-            newest_held,
-            &quiet(&store),
-            &mut result,
-        );
+        let result = sync_window(&store, &blobs, &archive, later);
         assert_eq!(result.saved, 1);
         assert!(announced(&result).is_empty());
     }
@@ -6285,10 +5586,12 @@ mod tests {
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
-        let window = vec![
-            received("<m2@x>", "2026-08-06T11:00:00Z"),
-            received("<m1@x>", "2026-08-06T10:00:00Z"),
-        ];
+        let window = || {
+            vec![
+                received("<m2@x>", "2026-08-06T11:00:00Z"),
+                received("<m1@x>", "2026-08-06T10:00:00Z"),
+            ]
+        };
         let observed = |result: &SyncResult| -> Vec<(u64, String)> {
             let mut out: Vec<(u64, String)> = result
                 .fresh_observations
@@ -6310,17 +5613,7 @@ mod tests {
             ids
         };
 
-        let mut result = SyncResult::default();
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &window,
-            None,
-            &quiet(&store),
-            &mut result,
-        );
+        let result = sync_window(&store, &blobs, &inbox, window());
         assert_eq!(result.saved, 2);
         let (mut sequences, roles): (Vec<u64>, Vec<String>) = observed(&result).into_iter().unzip();
         assert_eq!(roles, ["inbox", "inbox"], "one per inserted row");
@@ -6328,17 +5621,9 @@ mod tests {
         assert_eq!(sequences.len(), 2, "each numbered apart");
         assert_eq!(row_ids().len(), 2);
 
-        let mut again = SyncResult::default();
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &window,
-            None,
-            &quiet(&store),
-            &mut again,
-        );
+        // The same window downloaded again, as a listing that took the held
+        // rows for new would hand it over.
+        let again = sync_folder_blind(&store, &blobs, &inbox, window());
         assert_eq!(again.saved, 0);
         assert!(
             observed(&again).is_empty(),
@@ -6354,34 +5639,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
-        let mut result = SyncResult::default();
         let archived = vec![received("<old@x>", "2026-08-06T10:00:00Z")];
         let archive = sync_target(MailboxRole::Archive, "Archive");
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &archive,
-            &archived,
-            None,
-            &quiet(&store),
-            &mut result,
-        );
+        sync_window(&store, &blobs, &archive, archived);
 
-        let newest_held = crate::ingest::newest_held_date(&store, "acct");
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
         let arrival = vec![received("<new@x>", "2026-08-06T10:05:00Z")];
-        let mut result = SyncResult::default();
-        ingest_window(
-            &store,
-            &blobs,
-            "acct",
-            &inbox,
-            &arrival,
-            newest_held,
-            &quiet(&store),
-            &mut result,
-        );
+        let result = sync_window(&store, &blobs, &inbox, arrival);
         assert_eq!(result.new_inbox_mail.len(), 1);
         assert_eq!(
             crate::ingest::newest_held_date(&store, "other"),
@@ -7525,12 +6789,12 @@ mod tests {
     // #0074 review: the Graph ingest-failure bound
     // -----------------------------------------------------------------------
 
-    /// The Graph sync loop folds an ingest failure into `truncated`, which
-    /// suspends the account's prune. Without a bound, a message this store
+    /// The sync engine folds a Graph ingest failure into the folder's
+    /// coverage, which suspends the account's prune. Without a bound, a message this store
     /// rejects every time would do that on every pass, for good: the deadlock
     /// #0074 closed on the IMAP side.
     ///
-    /// This walks the two calls the Graph loop makes per failed message, in
+    /// This walks the two calls the engine makes per failed message, in
     /// production order (`note_ingest_failure` folded into `ingest_failed`,
     /// then `pass_may_prune` over the coverage tuple), over the real store.
     #[test]
@@ -7755,21 +7019,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_resume_point_is_only_minted_by_a_pass_that_covered_the_folder() {
-        // covered, nothing left behind, everything written.
-        assert!(may_record_delta_token(true, false, false, true));
-        // A read state the store failed to write (PERSO-202).
-        assert!(!may_record_delta_token(true, false, false, false));
-        // An enumeration that did not see the whole folder.
-        assert!(!may_record_delta_token(false, false, false, true));
-        // A pass that left new messages undownloaded.
-        assert!(!may_record_delta_token(true, true, false, true));
-        // A message downloaded and not written is as absent as one never
-        // fetched, so the token would over-claim.
-        assert!(!may_record_delta_token(true, false, true, true));
-    }
-
     /// PERSO-202: a read-state change the store failed to write mints no
     /// token, so the next delta, from the older one, reports it again.
     ///
@@ -7784,27 +7033,30 @@ mod tests {
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
-        let mut result = SyncResult::default();
-        ingest_window(
+        sync_window(
             &store,
             &blobs,
-            "acct",
             &inbox,
-            &[received("<read@x>", "2026-10-21T20:12:00Z")],
-            None,
-            &quiet(&store),
-            &mut result,
+            vec![received("<read@x>", "2026-10-21T20:12:00Z")],
         );
+        let older = format!("{GRAPH_BASE}/me/mailFolders('A')/messages/delta?t1");
+        crate::ingest::record_delta_token(&store, "acct", "inbox", 7, &older);
+        // Read in Outlook since: the whole folder lists it read.
         let read_in_outlook = || {
-            [(
-                crate::ingest::graph_uid("<read@x>"),
-                server_flags(&FolderEntry {
-                    graph_id: "AAA".into(),
-                    is_read: true,
-                    received: None,
-                    last_verb: None,
-                }),
-            )]
+            let mut read = received("<read@x>", "2026-10-21T20:12:00Z");
+            read.email.flags = crate::types::MessageFlags::seen(true);
+            whole_folder(&[read])
+        };
+        let seen = || {
+            let flags: Option<String> = store
+                .conn()
+                .query_row(
+                    "SELECT flags FROM messages WHERE message_id = '<read@x>'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            crate::types::MessageFlags::parse(flags.as_deref().unwrap_or_default()).seen
         };
 
         // The store refuses the write of the read state for one pass.
@@ -7815,10 +7067,13 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
             )
             .unwrap();
-        let dropped = crate::ingest::apply_graph_flags(&store, "acct", "inbox", read_in_outlook());
-        assert!(!dropped.complete, "the write did fail");
-        assert!(
-            !may_record_delta_token(true, false, false, dropped.complete),
+        let view = read_in_outlook();
+        let dropped = sync_folder(&store, &blobs, &inbox, view, Some(7), Vec::new(), 100, None);
+        assert_eq!(dropped.flags_updated, 0, "the write did fail");
+        assert!(!seen());
+        assert_eq!(
+            stored_link(&store, "inbox"),
+            Some(older),
             "a pass that dropped a read state keeps the older token"
         );
 
@@ -7826,9 +7081,11 @@ mod tests {
             .conn()
             .execute_batch("DROP TRIGGER refuse_flags;")
             .unwrap();
-        let landed = crate::ingest::apply_graph_flags(&store, "acct", "inbox", read_in_outlook());
-        assert_eq!(landed.changed, 1, "the next pass applies the change");
-        assert!(may_record_delta_token(true, false, false, landed.complete));
+        let view = read_in_outlook();
+        let landed = sync_folder(&store, &blobs, &inbox, view, Some(7), Vec::new(), 100, None);
+        assert_eq!(landed.flags_updated, 1, "the next pass applies the change");
+        assert!(seen());
+        assert_eq!(stored_link(&store, "inbox").as_deref(), Some(LINK));
     }
 
     #[test]
@@ -7850,7 +7107,7 @@ mod tests {
                 "the store will not take it",
             );
             assert!(
-                !may_record_delta_token(true, false, ingest_failed, true),
+                !crate::sync::engine::earns_delta_link(true, false, ingest_failed, true),
                 "pass {pass} has not written everything, so it mints no token"
             );
         }
@@ -7865,7 +7122,7 @@ mod tests {
         );
         assert!(!ingest_failed);
         assert!(
-            may_record_delta_token(true, false, ingest_failed, true),
+            crate::sync::engine::earns_delta_link(true, false, ingest_failed, true),
             "a message the store will never accept must not freeze the delta for ever"
         );
     }

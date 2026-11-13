@@ -1379,35 +1379,35 @@ async fn sync_once_imap(
     Ok(result)
 }
 
-/// The Graph body of a tick: the same orchestrator `mp sync --mailbox` runs
-/// (`graph::sync_mailboxes_graph`), over every configured mailbox.
+/// The Graph body of a tick: the sync engine over the Graph backend
+/// (`graph::sync_mailboxes`, PERSO-213), the same pass `mp sync --mailbox`
+/// runs, over every configured mailbox.
 ///
 /// A quick tick is bounded at [`QUICK_TICK_LIMIT`] new messages per mailbox,
 /// which is also what lets it walk `/messages/delta` from the stored token
 /// (#0042); a full tick relists every folder and re-mints the token. Throttling
-/// is the orchestrator's: a 429 or 503 sub-response's `Retry-After` paces the
-/// batch download, and a pass the throttle runs out of budget defers its prune
-/// to the next tick.
+/// is the backend's: a 429 or 503 sub-response's `Retry-After` paces the next
+/// batch, and a pass the throttle runs out of budget defers its prune to the
+/// next tick.
 ///
-/// The body-fetch deadline (#0113) is not a budget the Graph pass can spend
-/// the way IMAP does, since a Graph target fetches and ingests in one step and
-/// the stop is honoured only at each mailbox boundary. It sizes a quick
-/// pass's ceiling instead ([`graph_tick_ceiling`]): a quick pass that
-/// outlives it is cut off and reported as the tick's error, so a request that
-/// never returns cannot hold the run slot and starve every later tick.
-/// Cutting it off is safe at any await point, because every store write in
-/// the pass (an ingest, a flag update, a repair, a cursor, a prune) is a
-/// synchronous transaction between two awaits; the next tick picks up from
-/// what the store holds.
+/// The body-fetch deadline (#0113) is not spent as a body budget here, as the
+/// IMAP backend spends it; it sizes a quick pass's ceiling instead
+/// ([`graph_tick_ceiling`]): a quick pass that outlives it is cut off and
+/// reported as the tick's error, so a request that never returns cannot hold
+/// the run slot and starve every later tick. Cutting it off is safe at any
+/// await point, because every store write in the pass (a batch's ingest, a
+/// flag update, a repair, a cursor, a prune) is a synchronous transaction
+/// between two awaits; the next tick picks up from what the store holds, and
+/// since the engine ingests a batch of 20 before it downloads the next, a cut
+/// costs at most the batch in flight.
 ///
-/// A full tick has no ceiling. It downloads every new message of a folder
-/// before ingesting any of them, so a cut-off full pass would discard the
-/// whole download and the next full sync would restart from scratch and be
-/// cut off again. The Graph client's connect and idle-read timeouts already
-/// bound each request, which is what frees the slot on a dead connection.
+/// A full tick has no ceiling, so a full sync of a large folder is never cut
+/// off as an error; the Graph client's connect and idle-read timeouts bound
+/// each request, which is what frees the slot on a dead connection, and the
+/// tick's stop is asked between two batches.
 ///
-/// The orchestrator opens its own writer connection, unguarded, like the IMAP
-/// engine above: this runtime already holds the account's engine lock.
+/// The pass opens its own writer connection, unguarded, like the IMAP engine
+/// above: this runtime already holds the account's engine lock.
 async fn sync_once_graph(
     cfg: &AccountConfig,
     ctx: &TickContext,
@@ -1417,7 +1417,7 @@ async fn sync_once_graph(
     let graph = crate::config::GraphConfig::load(cfg)?;
     within_ceiling(
         graph_tick_ceiling(ctx.kind, ctx.body_deadline),
-        crate::graph::sync_mailboxes_graph(
+        crate::graph::sync_mailboxes(
             &graph,
             &cfg.name,
             targets,

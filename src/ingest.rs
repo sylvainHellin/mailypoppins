@@ -1748,7 +1748,7 @@ fn too_fresh_to_prune(date_sort: i64, now: i64) -> bool {
 ///
 /// Both backends gate on this. What the two flags *mean* is backend-specific:
 /// Graph pages a folder and counts every message it found but could not fetch
-/// ([`crate::graph::sync_mailboxes_graph`]), while IMAP enumerates the whole
+/// ([`crate::graph::sync_mailboxes`]), while IMAP enumerates the whole
 /// mailbox in one `UID SEARCH ALL` and counts only the arrivals above its
 /// high-water mark, because its window is positional and the backlog under it
 /// is skipped by design (#0072).
