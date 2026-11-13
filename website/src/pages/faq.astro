@@ -55,7 +55,11 @@ import AccordionItem from '../components/AccordionItem.astro';
             password, mailypoppins asks it again after 2 minutes, then 10, then once an hour, one
             attempt at a time for sending and receiving together when they use one user name and
             password, so a wrong password reaches the server 3 times in the first hour and once an
-            hour after; it asks at once when you set the password or start a sync or a send.
+            hour after; it asks at once when you set the password or start a sync or a send. This
+            schedule lives in the daemon's memory: a daemon restart forgets it and asks the
+            server again at once, up to three times, and a profile's daemon
+            (<code>mp --profile</code>), which stops when idle and starts with the next command,
+            does so at every start.
           </p>
         </AccordionItem>
 

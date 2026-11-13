@@ -113,9 +113,20 @@
 //! `crate::send`'s `a_login_taken_with_every_recipient_refused_resets_the_count`
 //! and `an_smtp_login_answered_ends_the_mark_before_the_last_recipient`),
 //! when no login is attempted with its identity and secret any more
-//! (`a_replaced_password_drops_its_row`), and when the daemon restarts, since
-//! the list lives in memory only. A new secret has no row, so it is asked at
-//! once.
+//! (`a_replaced_password_drops_its_row`), and when the daemon restarts. A new
+//! secret has no row, so it is asked at once.
+//!
+//! # A restart forgets
+//!
+//! The list lives in the daemon's memory only, so a restart forgets every
+//! hold and every count, and its first contact with a wrong password costs
+//! up to three logins again, one per task that dials (the sync tick, the IDLE
+//! watcher, the outbox drain). A profile daemon stops a minute after its last
+//! client and starts with the next command, so it asks the server again at
+//! every start, up to three logins each time, however often the server
+//! refused the password before; the default profile's daemon does not stop
+//! when idle, so only a manual restart or a reinstall forgets its holds. The
+//! list is not kept on disk.
 //!
 //! # What the clients read
 //!
