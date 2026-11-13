@@ -133,10 +133,10 @@ impl SyncBackend for PanickingBackend {
 struct MailboxFetch {
     messages: Vec<FetchedRaw>,
     skipped: usize,
-    known_flags: Vec<(u32, MessageFlags)>,
+    known_flags: Vec<(i64, MessageFlags)>,
     state: MailboxState,
-    vanished: Vec<u32>,
-    listed: Vec<u32>,
+    vanished: Vec<i64>,
+    listed: Vec<i64>,
     uidvalidity_reset: bool,
     enumeration_complete: bool,
     download_incomplete: bool,
@@ -206,8 +206,8 @@ impl SyncBackend for ScriptedBackend {
             };
             // A scripted body the engine did not download leaves the mailbox
             // short, whatever the script says of a pass that got them all.
-            let scripted: Vec<u32> = fetch.messages.iter().map(|m| m.uid).collect();
-            let coverage = move |downloaded: &[u32], _: bool| MailboxCoverage {
+            let scripted: Vec<i64> = fetch.messages.iter().map(|m| m.uid).collect();
+            let coverage = move |downloaded: &[i64], _: bool| MailboxCoverage {
                 download_incomplete: covered.download_incomplete
                     || scripted.iter().any(|uid| !downloaded.contains(uid)),
                 ..covered
@@ -248,8 +248,8 @@ impl SyncBackend for ScriptedBackend {
 /// `listed` is derived from the scripted UIDs, so the #0112 rebind gate is
 /// exercised rather than degraded; a test that wants the degradation clears
 /// `enumeration_complete` or sets `uidvalidity_reset`.
-fn fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
-    let mut listed: Vec<u32> = messages.iter().map(|(uid, _)| *uid).collect();
+fn fetch(messages: Vec<(i64, Vec<u8>)>) -> MailboxFetch {
+    let mut listed: Vec<i64> = messages.iter().map(|(uid, _)| *uid).collect();
     listed.sort_unstable();
     MailboxFetch {
         messages: messages
@@ -277,7 +277,7 @@ fn fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
 /// The same pass after the server renumbered: the listing says nothing about
 /// which message wears which UID, so the engine degrades to the unconditional
 /// rebind ingest always did.
-fn reset_fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
+fn reset_fetch(messages: Vec<(i64, Vec<u8>)>) -> MailboxFetch {
     MailboxFetch {
         uidvalidity_reset: true,
         ..fetch(messages)

@@ -935,20 +935,29 @@ where
         new: new_uids.len(),
         handed: 0,
     };
+    // The engine speaks the store's `i64` UIDs (PERSO-213); the arithmetic
+    // here stays on the `u32`s the server issued.
     let listing = MailboxListing {
         skipped,
-        known_flags,
+        known_flags: known_flags
+            .into_iter()
+            .map(|(uid, flags)| (i64::from(uid), flags))
+            .collect(),
         state,
-        vanished,
-        listed: listed.clone(),
+        vanished: vanished.into_iter().map(i64::from).collect(),
+        listed: listed.iter().copied().map(i64::from).collect(),
         uidvalidity_reset,
         enumeration_complete,
-        coverage: Box::new(move |downloaded: &[u32], bodies_complete: bool| {
+        coverage: Box::new(move |downloaded: &[i64], bodies_complete: bool| {
+            let downloaded: Vec<u32> = downloaded
+                .iter()
+                .filter_map(|&uid| u32::try_from(uid).ok())
+                .collect();
             let coverage = arrival_coverage(
                 &listed,
                 &known_uids,
                 ceiling,
-                downloaded,
+                &downloaded,
                 carried_mark,
                 prior_high_water,
             );
@@ -984,9 +993,11 @@ pub(crate) async fn fetch_body_chunk_on_session(
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
         .try_filter_map(|msg| async move {
             Ok(match (msg.uid, msg.body()) {
-                (Some(uid), Some(body)) => {
-                    Some(FetchedRaw::new(uid, body.to_vec(), flags_of(&msg)))
-                }
+                (Some(uid), Some(body)) => Some(FetchedRaw::new(
+                    i64::from(uid),
+                    body.to_vec(),
+                    flags_of(&msg),
+                )),
                 _ => None,
             })
         })

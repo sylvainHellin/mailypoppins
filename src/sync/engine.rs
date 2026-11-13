@@ -42,7 +42,7 @@ fn nonconverging_key(role: &str) -> String {
 
 /// The identity of one pass's download: the UID set, order-independent, plus
 /// its size so a hash collision still has to agree on the count.
-fn fingerprint(uids: &[u32]) -> (u64, usize) {
+fn fingerprint(uids: &[i64]) -> (u64, usize) {
     let mut sorted = uids.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
@@ -101,7 +101,7 @@ fn note_download_fingerprint(
     store: &Store,
     account: &str,
     target: &SyncTarget,
-    uids: &[u32],
+    uids: &[i64],
 ) -> Option<u32> {
     let key = nonconverging_key(target.role.as_str());
     if uids.is_empty() {
@@ -159,18 +159,11 @@ pub struct SyncRun<'a> {
     pub observations: &'a ObservationSink,
 }
 
-/// The IMAP half of [`ingest::note_ingest_failure`]: the same give-up bound,
-/// over this path's `u32` UIDs. `false` means the arrival mark no longer has to
-/// stay below the UID (#0074).
-fn note_ingest_failure(
-    store: &Store,
-    account: &str,
-    mailbox: &str,
-    server_name: &str,
-    uid: u32,
-    error: &str,
-) -> bool {
-    ingest::note_ingest_failure(store, account, mailbox, server_name, uid as i64, error)
+/// The store UIDs of `uids` an IMAP server could have issued, as the `u32`s
+/// the departures watch compares: a negative move sentinel or a
+/// [`ingest::graph_uid`] is no IMAP UID and is left out.
+fn imap_uids(uids: &[i64]) -> impl Iterator<Item = u32> + '_ {
+    uids.iter().filter_map(|&uid| u32::try_from(uid).ok())
 }
 
 /// The arrival mark a pass must persist once ingest is done, given the mark the
@@ -193,11 +186,11 @@ fn note_ingest_failure(
 /// Saturating at 0 rather than wrapping: a UID of 1 that will not ingest leaves
 /// a mark of 0, meaning every listed UID is an arrival, which is the correct
 /// reading when the very bottom of the mailbox is missing.
-pub(crate) fn mark_below_unmet(pending: Option<u32>, unmet: &[u32]) -> Option<u32> {
+pub(crate) fn mark_below_unmet(pending: Option<u32>, unmet: &[i64]) -> Option<u32> {
     let Some(lowest) = unmet.iter().copied().min() else {
         return pending;
     };
-    let owed = lowest.saturating_sub(1);
+    let owed = u32::try_from(lowest.saturating_sub(1).max(0)).unwrap_or(u32::MAX);
     Some(pending.map_or(owed, |mark| mark.min(owed)))
 }
 
@@ -307,7 +300,7 @@ pub async fn run_sync(
     }
     // Every prune this run will apply, collected here and applied after the
     // loop: see the second pass below for why it cannot run per target.
-    let mut prunes: Vec<(MailboxRole, Vec<u32>)> = Vec::new();
+    let mut prunes: Vec<(MailboxRole, Vec<i64>)> = Vec::new();
     // `(enumeration complete, download short)` per target, which decides
     // whether the prunes above may be applied at all (#0072). Mirrors the
     // Graph backend; the shared gate is `ingest::pass_may_prune`.
@@ -446,16 +439,16 @@ pub async fn run_sync(
             if uidvalidity_reset || !enumeration_complete {
                 std::collections::HashSet::new()
             } else {
-                listed.iter().map(|&uid| uid as i64).collect()
+                listed.iter().copied().collect()
             };
         // What the folder holds, for the departures watch to tell a departing
         // op's stale UID from a live one (PERSO-246), under the same
         // conditions: a reset or short listing cannot say.
         let folder: Option<std::collections::HashSet<u32>> =
             (!uidvalidity_reset && enumeration_complete && !listed.is_empty())
-                .then(|| listed.iter().copied().collect());
+                .then(|| imap_uids(&listed).collect());
 
-        let mut unmet: Vec<u32> = Vec::new();
+        let mut unmet: Vec<i64> = Vec::new();
         // #0115: a UID the store has given up on drops out of `unmet`, which is
         // exactly what makes the pass look complete while the message still has
         // no row. The server keeps listing it, so every later pass downloads it
@@ -466,8 +459,8 @@ pub async fn run_sync(
         // downloaded on purpose, and the next pass may download the copy again
         // while its move is still owed, so it says nothing about convergence.
         let mut withheld = false;
-        let mut note_failure = |uid: u32, error: &str| {
-            if note_ingest_failure(
+        let mut note_failure = |uid: i64, error: &str| {
+            if ingest::note_ingest_failure(
                 store,
                 account,
                 target.role.as_str(),
@@ -490,7 +483,7 @@ pub async fn run_sync(
         // `downloaded` is every UID whose body came back, written or not: the
         // backend's coverage measures the download, and `unmet` above carries
         // what the ingest then failed to write.
-        let mut downloaded: Vec<u32> = Vec::new();
+        let mut downloaded: Vec<i64> = Vec::new();
         let bodies_complete;
         let mut stopped = false;
         let mut failure: Option<anyhow::Error> = None;
@@ -541,34 +534,38 @@ pub async fn run_sync(
                     &IngestInput {
                         account,
                         mailbox: target.role.as_str(),
-                        uid: message.uid as i64,
+                        uid: message.uid,
                         email: &email,
                         raw: Some(&message.raw),
                     },
                     &RebindPolicy::UnlessListed(&server_uids),
                     None,
+                    // A UID no IMAP server issues names no copy the watch
+                    // could have journalled.
                     &|message_id| {
-                        departures.departed(
-                            message_id,
-                            &super::departures::Listed {
-                                source: &target.server_name,
-                                uid: message.uid,
-                                uidvalidity: state.uid_validity,
-                                folder: folder.as_ref(),
-                            },
-                        )
+                        u32::try_from(message.uid).is_ok_and(|uid| {
+                            departures.departed(
+                                message_id,
+                                &super::departures::Listed {
+                                    source: &target.server_name,
+                                    uid,
+                                    uidvalidity: state.uid_validity,
+                                    folder: folder.as_ref(),
+                                },
+                            )
+                        })
                     },
                 );
                 match outcome {
                     Ok(outcome) => {
                         // Whatever row now holds this UID is off limits to the rest
                         // of the pass: see the gate's comment above.
-                        server_uids.insert(message.uid as i64);
+                        server_uids.insert(message.uid);
                         ingest::clear_ingest_failure(
                             store,
                             account,
                             target.role.as_str(),
-                            message.uid as i64,
+                            message.uid,
                         );
                         if outcome.inserted {
                             result.saved += 1;
@@ -680,10 +677,10 @@ pub async fn run_sync(
         // Rows on UIDs the server does not list are left alone: they block
         // nothing, and the prune is the path that answers for them.
         if uidvalidity_reset {
-            let unverified: Vec<u32> = listed
+            let unverified: Vec<i64> = listed
                 .iter()
                 .copied()
-                .filter(|&uid| !server_uids.contains(&(uid as i64)))
+                .filter(|uid| !server_uids.contains(uid))
                 .collect();
             ingest::unbind_rows_on_uids(store, account, target.role.as_str(), &unverified);
         }
@@ -702,14 +699,7 @@ pub async fn run_sync(
 
         // The IMAP server states the whole flag set, so it is truth for all
         // three bits of the second axis (#TKT-0051), not just for `\Seen`.
-        let flags = ingest::apply_flags(
-            store,
-            account,
-            target.role.as_str(),
-            known_flags
-                .into_iter()
-                .map(|(uid, flags)| (uid as i64, flags)),
-        );
+        let flags = ingest::apply_flags(store, account, target.role.as_str(), known_flags);
         result.flags_updated += flags.changed;
 
         // The other half of the same diff: the UIDs the store holds for this
@@ -742,7 +732,7 @@ pub async fn run_sync(
             result.non_converging.push(target.server_name.clone());
         }
 
-        let highest_uid = downloaded.iter().map(|&uid| uid as i64).max();
+        let highest_uid = downloaded.iter().copied().max();
         ingest::record_mailbox_cursor(
             store,
             account,
@@ -813,8 +803,7 @@ pub async fn run_sync(
             // The age guard is the other half: a row this client has just
             // written locally (a Sent copy the server has not filed yet) is in
             // every vanished set until the server's own copy shows up.
-            let vanished: Vec<i64> = vanished.iter().map(|&uid| uid as i64).collect();
-            let prunable = ingest::prunable_uids(store, account, role.as_str(), &vanished, now);
+            let prunable = ingest::prunable_uids(store, account, role.as_str(), vanished, now);
             result.pruned +=
                 ingest::prune_vanished(store, blobs, account, role.as_str(), &prunable);
         }
@@ -885,10 +874,10 @@ mod tests {
     struct MailboxFetch {
         messages: Vec<FetchedRaw>,
         skipped: usize,
-        known_flags: Vec<(u32, MessageFlags)>,
+        known_flags: Vec<(i64, MessageFlags)>,
         state: MailboxState,
-        vanished: Vec<u32>,
-        listed: Vec<u32>,
+        vanished: Vec<i64>,
+        listed: Vec<i64>,
         uidvalidity_reset: bool,
         enumeration_complete: bool,
         download_incomplete: bool,
@@ -924,18 +913,19 @@ mod tests {
                 pending_arrival_mark: self.pending_arrival_mark,
                 highest_modseq: self.highest_modseq,
             };
-            let scripted: Vec<u32> = self.messages.iter().map(|m| m.uid).collect();
-            let listed = self.listed.clone();
+            let scripted: Vec<i64> = self.messages.iter().map(|m| m.uid).collect();
+            let listed: Vec<u32> = imap_uids(&self.listed).collect();
             let ceiling = crate::imap_client::ceiling(self.state.uid_next, &listed);
-            let coverage: crate::sync::CoverageOf = Box::new(move |downloaded: &[u32], _| {
+            let coverage: crate::sync::CoverageOf = Box::new(move |downloaded: &[i64], _| {
                 if scripted.iter().all(|uid| downloaded.contains(uid)) {
                     return covered;
                 }
+                let downloaded: Vec<u32> = imap_uids(downloaded).collect();
                 let arrivals = crate::imap_client::arrival_coverage(
                     &listed,
                     &held.uids,
                     ceiling,
-                    downloaded,
+                    &downloaded,
                     held.carried,
                     held.prior,
                 );
@@ -1054,7 +1044,7 @@ mod tests {
                         let (carried, prior) = (known.arrival_mark, known.prior_high_water);
                         let (skip, reset) = known.resolve(fetch.state.uid_validity);
                         if self.honour_skip_list {
-                            fetch.messages.retain(|m| !skip.contains(&(m.uid as i64)));
+                            fetch.messages.retain(|m| !skip.contains(&m.uid));
                         }
                         let held = StoreHeld {
                             uids: skip,
@@ -1116,9 +1106,9 @@ mod tests {
     /// degradation says so by clearing the field, and
     /// `an_empty_listing_falls_back_to_the_unconditional_rebind` is where it is
     /// asserted on purpose.
-    fn fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
-        let listed: Vec<u32> = {
-            let mut uids: Vec<u32> = messages.iter().map(|(uid, _)| *uid).collect();
+    fn fetch(messages: Vec<(i64, Vec<u8>)>) -> MailboxFetch {
+        let listed: Vec<i64> = {
+            let mut uids: Vec<i64> = messages.iter().map(|(uid, _)| *uid).collect();
             uids.sort_unstable();
             uids
         };
@@ -1365,7 +1355,7 @@ mod tests {
     #[test]
     fn a_stop_during_a_mailbox_ingest_ends_the_pass_after_the_batch_in_hand() {
         let fx = Fixture::new();
-        let message = |uid: u32| (uid, raw(&format!("m{uid}")));
+        let message = |uid: i64| (uid, raw(&format!("m{uid}")));
         // History: the mailbox's first ten messages, so the arrivals below
         // have a recorded top to arrive above.
         let mut first = FakeBackend::default();
@@ -1373,7 +1363,7 @@ mod tests {
         fx.run(&mut first, &targets());
         assert_eq!(fx.cursor_mark("inbox"), None, "the history pass caught up");
 
-        let top = 10 + 5 * FAKE_BATCH as u32;
+        let top = 10 + 5 * FAKE_BATCH as i64;
         let arrivals = || {
             let mut inbox = fetch((11..=top).map(message).collect());
             inbox.listed = (1..=top).collect();
@@ -1388,13 +1378,10 @@ mod tests {
         let result = fx.run_until(&mut backend, &targets(), usize::MAX, false, Some(&stop));
 
         assert_eq!(backend.batches, 1, "no batch is downloaded after the stop");
-        let newest = top - FAKE_BATCH as u32 + 1;
+        let newest = top - FAKE_BATCH as i64 + 1;
         assert_eq!(
             fx.rows("inbox"),
-            (1..=10)
-                .chain(newest..=top)
-                .map(i64::from)
-                .collect::<Vec<_>>(),
+            (1..=10).chain(newest..=top).collect::<Vec<_>>(),
             "the batch in hand, the newest, is written, and nothing after it"
         );
         assert_eq!(result.saved, FAKE_BATCH);
@@ -1402,7 +1389,7 @@ mod tests {
         let cursor = ingest::load_mailbox_cursor(&fx.store, "acct", "inbox")
             .unwrap()
             .expect("the mailbox the stop landed in records its cursor");
-        assert_eq!(cursor.last_uid, Some(i64::from(top)));
+        assert_eq!(cursor.last_uid, Some(top));
         assert_eq!(
             fx.cursor_mark("inbox"),
             Some(10),
@@ -1426,7 +1413,7 @@ mod tests {
         resumed.script("INBOX", vec![Ok(arrivals())]);
         resumed.script("Archive", vec![Ok(fetch(vec![(201, raw("arch"))]))]);
         fx.run(&mut resumed, &targets());
-        assert_eq!(fx.rows("inbox"), (1..=i64::from(top)).collect::<Vec<_>>());
+        assert_eq!(fx.rows("inbox"), (1..=top).collect::<Vec<_>>());
         assert_eq!(fx.cursor_mark("inbox"), None);
     }
 
@@ -1444,7 +1431,7 @@ mod tests {
     fn a_mailbox_closed_short_after_a_batch_keeps_the_mark_it_resumed_from() {
         let fx = Fixture::new();
         let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
-        let message = |uid: u32| (uid, raw(&format!("m{uid}")));
+        let message = |uid: i64| (uid, raw(&format!("m{uid}")));
         let mut first = FakeBackend::default();
         let mut history = fetch((1..=10).map(message).collect());
         history.highest_modseq = Some(mark(100, 1));
@@ -1452,7 +1439,7 @@ mod tests {
         fx.run(&mut first, &targets);
         assert_eq!(fx.modseq("inbox"), Some(mark(100, 1)));
 
-        let top = 10 + 3 * FAKE_BATCH as u32;
+        let top = 10 + 3 * FAKE_BATCH as i64;
         let arrivals = |modseq: u64| {
             let mut inbox = fetch((11..=top).map(message).collect());
             inbox.listed = (1..=top).collect();
@@ -1501,7 +1488,7 @@ mod tests {
         resumed.script("INBOX", vec![Ok(arrivals(400))]);
         let result = fx.run(&mut resumed, &targets);
         assert_eq!(result.bodies_truncated, 0);
-        assert_eq!(fx.rows("inbox"), (1..=i64::from(top)).collect::<Vec<_>>());
+        assert_eq!(fx.rows("inbox"), (1..=top).collect::<Vec<_>>());
         assert_eq!(fx.modseq("inbox"), Some(mark(400, 1)));
     }
 
@@ -2534,7 +2521,7 @@ mod tests {
             let fx = Fixture::new();
             let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
             let mut backend = FakeBackend::default();
-            let blind = |uid: u32| {
+            let blind = |uid: i64| {
                 let mut f = fetch(vec![(uid, raw("dup"))]);
                 if short_enumeration {
                     // The server listed fewer UIDs than it announced under

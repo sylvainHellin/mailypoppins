@@ -258,7 +258,9 @@ pub struct SyncResult {
 
 /// One message downloaded for ingest, with the identity the store keys on.
 pub struct FetchedRaw {
-    pub uid: u32,
+    /// The row's `uid` in the store: the IMAP UID, or the synthetic
+    /// [`crate::ingest::graph_uid`] a backend without UIDs derives.
+    pub uid: i64,
     pub raw: Vec<u8>,
     /// What the server says has happened to it: read, answered, forwarded.
     pub flags: MessageFlags,
@@ -268,7 +270,7 @@ pub struct FetchedRaw {
 }
 
 impl FetchedRaw {
-    pub fn new(uid: u32, raw: Vec<u8>, flags: MessageFlags) -> FetchedRaw {
+    pub fn new(uid: i64, raw: Vec<u8>, flags: MessageFlags) -> FetchedRaw {
         FetchedRaw {
             uid,
             raw,
@@ -341,6 +343,10 @@ pub struct MailboxState {
 /// everything the engine needs to re-flag, prune and record a cursor, and
 /// nothing about how it was obtained.
 ///
+/// Every UID here is the store's `i64` (PERSO-213): an IMAP UID widened, or a
+/// [`crate::ingest::graph_uid`], which no `u32` can hold. A backend whose own
+/// arithmetic is positional converts at its edge.
+///
 /// The bodies are not here (PERSO-300). The engine asks for them a batch at a
 /// time ([`SyncBackend::next_batch`]) and ingests each batch before it asks for
 /// the next, so a pass holds one batch of mail in memory whatever the size of
@@ -353,12 +359,12 @@ pub struct MailboxListing {
     /// The flags of those already-held UIDs, the only server-to-local channel
     /// for the second status axis (#0004, #TKT-0051): read, answered and
     /// forwarded all arrive here and nowhere else.
-    pub known_flags: Vec<(u32, MessageFlags)>,
+    pub known_flags: Vec<(i64, MessageFlags)>,
     /// What SELECT said about the mailbox.
     pub state: MailboxState,
     /// UIDs the store holds for this mailbox that the server no longer lists.
     /// See [`crate::imap_client::vanished_uids`].
-    pub vanished: Vec<u32>,
+    pub vanished: Vec<i64>,
     /// Every UID the server listed for this mailbox on this pass, ascending.
     ///
     /// The engine reads it as "what the server is currently holding", which is
@@ -367,7 +373,7 @@ pub struct MailboxListing {
     /// ([`crate::ingest::RebindPolicy`], #0112). An empty listing means the
     /// backend cannot answer, and the gate degrades to the unconditional
     /// rebind ingest always did.
-    pub listed: Vec<u32>,
+    pub listed: Vec<i64>,
     /// True when the server's UIDVALIDITY no longer matches the stored one, so
     /// this fetch deliberately skipped nothing and redownloaded the window.
     pub uidvalidity_reset: bool,
@@ -386,7 +392,7 @@ pub struct MailboxListing {
 /// The question a [`MailboxListing`] answers once its body pass has ended:
 /// given the UIDs whose bodies came back and whether every new UID was asked
 /// for, what the mailbox's cursor records.
-pub type CoverageOf = Box<dyn FnOnce(&[u32], bool) -> MailboxCoverage + Send>;
+pub type CoverageOf = Box<dyn FnOnce(&[i64], bool) -> MailboxCoverage + Send>;
 
 /// What one mailbox's body pass leaves for its cursor and the prune gate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

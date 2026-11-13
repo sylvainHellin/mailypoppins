@@ -1331,11 +1331,11 @@ pub fn clear_mailbox_modseq(store: &Store, account: &str, mailbox: &str) {
 /// Best-effort like [`prune_vanished`]: a row that refuses to update is logged
 /// and the rest still go, because the alternative is failing a sync over
 /// bookkeeping the next pass would redo anyway.
-pub fn unbind_rows_on_uids(store: &Store, account: &str, mailbox: &str, uids: &[u32]) -> usize {
+pub fn unbind_rows_on_uids(store: &Store, account: &str, mailbox: &str, uids: &[i64]) -> usize {
     if uids.is_empty() {
         return 0;
     }
-    let listed: std::collections::HashSet<i64> = uids.iter().map(|&uid| uid as i64).collect();
+    let listed: std::collections::HashSet<i64> = uids.iter().copied().collect();
     let conn = store.conn();
     let squatters: Vec<i64> = {
         let mut stmt = match conn
