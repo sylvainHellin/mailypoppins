@@ -3473,3 +3473,80 @@ async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
         held
     );
 }
+
+/// Two updates of one invitation sent at once from two connections, the
+/// transport armed with `transport`: the refusal of the one not taken, after
+/// asserting that exactly one went out, as one row in the outbox.
+async fn race_two_updates(transport: impl FnOnce(&Path) -> String) -> String {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(transport(&log));
+    let mut first = slice.connect().await;
+    let mut second = slice.connect().await;
+    let own = imip_event(&mut first, IMIP, support::calendar_fixture::OWN_UID).await;
+    let update = |summary: &str| json!({"account": IMIP, "event": own["id"], "fields": {"summary": summary}});
+    let (a, b) = tokio::join!(
+        first.call("event.update", update("Budget, A")),
+        second.call("event.update", update("Budget, B")),
+    );
+    let mut taken = 0;
+    let mut refused = Vec::new();
+    for (conn, started) in [(&mut first, a), (&mut second, b)] {
+        match started {
+            Ok(started) => {
+                let status = wait_for(conn, "event.update", &started).await;
+                match status["state"].as_str() {
+                    Some("succeeded") => taken += 1,
+                    _ => refused.push(
+                        status["error"]["message"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                }
+            }
+            Err(ClientError::Rpc(error)) => refused.push(error.message),
+            Err(other) => panic!("event.update: {other:?}"),
+        }
+    }
+    assert_eq!(taken, 1, "refused: {refused:?}");
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    let rows: i64 = read_fixture::store(slice.root(), IMIP)
+        .conn()
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "one row for the one update taken");
+    let messages: std::collections::BTreeSet<String> = send_fixture::transport_events(&log)
+        .into_iter()
+        .filter_map(|event| match event {
+            send_fixture::TransportEvent::Submit { message_id, .. } => Some(message_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), 1, "one message submitted: {messages:?}");
+    refused.remove(0)
+}
+
+/// Two updates of one invitation sent at once, from two connections (the
+/// desktop and the TUI, or a double submit): exactly one goes out and the
+/// other is refused, never sent at the same `SEQUENCE` on the version the
+/// first replaces. While the first waits in the outbox (Ada's server
+/// defers it) the refusal is the guard's; once it went out and was filed,
+/// the second says the meeting changed while it waited.
+#[tokio::test]
+async fn two_updates_at_once_send_one() {
+    let waiting = race_two_updates(|log| {
+        send_fixture::fake_transport_deferring(log, &[("ada@example.com", "451 later")])
+    })
+    .await;
+    assert!(
+        waiting.contains("has an earlier change waiting in the outbox"),
+        "{waiting}"
+    );
+    let filed = race_two_updates(send_fixture::fake_transport).await;
+    assert!(
+        filed.contains("has an earlier change waiting in the outbox")
+            || filed.contains("changed while this change waited to go out"),
+        "{filed}"
+    );
+}

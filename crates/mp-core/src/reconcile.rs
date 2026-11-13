@@ -272,13 +272,18 @@ impl SeriesCancel {
     /// The subset fallback misreads a whole cancellation built on a version
     /// that a later-filed one at its `SEQUENCE` or below extends (an update
     /// adding an attendee still queued when the cancellation was built).
-    /// mp's own `event.update` and `event.cancel` cannot produce that: both
-    /// are refused while an earlier change of the `UID` waits in the outbox
-    /// (`invite::unsettled_change` in the root crate), so a cancellation
-    /// they build is above every version that is ever filed. It stays
-    /// reachable for a hand-made `mp send --invite --sequence`, another
-    /// client sending from the same mailbox, and a store holding copies
-    /// sent before that refusal, which is why the fallback is kept.
+    /// mp's own `event.update` and `event.cancel` do not produce that on one
+    /// daemon: both are refused while an earlier change of the `UID` waits in
+    /// the outbox (`invite::unsettled_change` in the root crate), checked
+    /// when the change is planned and again under the account's lock just
+    /// before its first message is enqueued, which also refuses one whose
+    /// version was filed since its plan; and a discarded row some attendee
+    /// may hold files its copy first (`outbox::discard`). So a cancellation
+    /// they build is above every version filed or sent. It stays reachable
+    /// for a hand-made `mp send --invite --sequence`, another client sending
+    /// from the same mailbox, a store rebuilt without the local copies those
+    /// discards filed, and copies sent before the guard existed, which is
+    /// why the fallback is kept.
     fn only_uninvites(&self, roster: &BTreeSet<String>) -> bool {
         self.told.as_ref().is_some_and(|told| {
             !told.is_empty()

@@ -572,6 +572,10 @@ struct ImipChangeWork {
     /// names back.
     named: String,
     row_id: i64,
+    /// The invitation's `UID` and summary, and the `SEQUENCE` the messages
+    /// were built at, which [`imip_change`] checks again under the
+    /// account's lock before the first of them is enqueued.
+    planned: Planned,
     /// The scope a cancellation was made in: `series` for a whole series,
     /// `occurrence` for one occurrence.
     scope: Option<String>,
@@ -581,6 +585,25 @@ struct ImipChangeWork {
     update: Option<SentVersion>,
     email: crate::config::EmailSettings,
     secrets: crate::secrets::SecretsBackendKind,
+}
+
+/// What an organizer's change was planned on: the invitation's `UID` and
+/// summary, and the `SEQUENCE` its messages take
+/// ([`crate::invite::OrganizedRow::next_sequence`]).
+struct Planned {
+    uid: String,
+    summary: String,
+    next_sequence: u32,
+}
+
+impl Planned {
+    fn of(row: &crate::invite::OrganizedRow, summary: &str) -> Self {
+        Planned {
+            uid: row.invite.uid.clone(),
+            summary: summary.to_string(),
+            next_sequence: row.next_sequence,
+        }
+    }
 }
 
 /// An update's new version: its `UID`, its `VCALENDAR` and its summary.
@@ -1120,6 +1143,34 @@ fn refuse_while_unsettled(
     }
 }
 
+/// Whether the change planned as `planned` on row `row_id` of `account` can
+/// still go out as built, checked under the account's lock before its first
+/// message is enqueued: no earlier change of the `UID` waits in the outbox
+/// (the guard's refusal, as at plan time), and none was filed since the plan
+/// (the version it was built on is still the newest, so its `SEQUENCE` is).
+fn still_as_planned(account: &AccountConfig, row_id: i64, planned: &Planned) -> anyhow::Result<()> {
+    let store = Store::open(crate::config::store_path(&account.name))?;
+    let blobs = BlobStore::for_account(&account.name);
+    if let Some(waiting) =
+        crate::invite::unsettled_change(&store, &blobs, &account.name, &planned.uid)?
+    {
+        anyhow::bail!(
+            "{}; nothing was sent",
+            unsettled_refusal(&planned.summary, &account.name, &waiting)
+        );
+    }
+    let now = crate::invite::organized_row(&store, &blobs, account, row_id)?;
+    if now.next_sequence != planned.next_sequence {
+        anyhow::bail!(
+            "{} changed while this change waited to go out, so it was built on the version \
+             before; nothing was sent, so change {} again as the agenda now shows it",
+            planned.summary,
+            planned.summary
+        );
+    }
+    Ok(())
+}
+
 /// The refusal of a change of `summary` while an earlier one waits in
 /// `name`'s outbox: what holds it, then the way out.
 fn unsettled_refusal(
@@ -1195,6 +1246,7 @@ fn plan_imip_update(
         method: "event.update",
         named: request.event,
         row_id,
+        planned: Planned::of(&row, &event.summary),
         scope: None,
         messages,
         update: Some(SentVersion {
@@ -1296,6 +1348,7 @@ fn plan_imip_cancel(
     Ok(Work::Imip(Box::new(ImipChangeWork {
         account,
         method: "event.cancel",
+        planned: Planned::of(&row, title),
         named: request.event,
         row_id,
         scope: scope.map(|scope| scope.as_str().to_string()),
@@ -2361,6 +2414,7 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
         method,
         named,
         row_id,
+        planned,
         scope,
         messages,
         update,
@@ -2374,6 +2428,15 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
     let name = account.name.clone();
     let token = handle.token.clone();
     let sent = off_thread("the invitation change", move || async move {
+        // The plan checked the outbox, and the first message is enqueued
+        // only now, so a second change of the account planned in between
+        // would go out on the same version at the same `SEQUENCE`. One
+        // change of the account's invitations at a time, each checking
+        // again under the lock that nothing was enqueued or filed since its
+        // plan; the lock is the one calendar writes hold.
+        let lock = crate::calendar_sync::account_lock(&account.name);
+        let _held = lock.lock().await;
+        still_as_planned(&account, row_id, &planned)?;
         let Some(sent) = send_itip(&account, &messages, &email, method, &token).await? else {
             return Ok(None);
         };
