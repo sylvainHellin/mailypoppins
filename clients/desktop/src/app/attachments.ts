@@ -22,6 +22,7 @@ import { isOpenable } from "@/app/search";
 import { viewInEditor } from "@/app/compose";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type Attachment, type DraftAttachments, type MessageSource } from "@/lib/gui-types";
+import type { MessageAttachment } from "@/protocol/types";
 import { homeDir, openPicker } from "@/lib/tauri";
 
 /**
@@ -82,18 +83,25 @@ function cursorSubject(s: AppState, dispatch: Dispatch<Action>): Subject | null 
 }
 
 /**
- * A message's parts: the reader's headers when they are this row's, else
- * `message.get`'s, which for a server-only hit lists the server copy's.
+ * A message's parts as `to` and `ts` list them: `message.attachments`, the
+ * call `mp open`, `mp save` and the TUI make (PERSO-222), in the daemon's
+ * reading order and each with its own `part`; for a server-only hit, the
+ * server copy's.
  */
-async function partsOf(s: AppState, account: string, source: MessageSource): Promise<Attachment[]> {
-  if (source.kind === "row") {
-    const meta = s.reader.key === readerKey(account, source.row_id) ? s.reader.meta : null;
-    if (meta) return meta.attachments;
-  }
-  return cmd.messageAttachments(account, source);
+async function partsOf(account: string, source: MessageSource): Promise<AttachmentItem[]> {
+  return listedItems(await cmd.messageAttachments(account, source));
 }
 
-/** The real attachments first, then the body's inline images; `part` stays the daemon's index. */
+/** The entries of a `message.attachments` listing, in its order, each keeping its `part`. */
+function listedItems(parts: MessageAttachment[]): AttachmentItem[] {
+  return parts.map((p) => ({ part: p.part, name: p.name, size: p.size, missing: false, inline: p.inline }));
+}
+
+/**
+ * The reader header's list, from `message.get`'s record, which keeps stored
+ * order: the real attachments first, then the body's inline images; `part`
+ * stays the daemon's index.
+ */
 export function messageItems(parts: Attachment[]): AttachmentItem[] {
   const items = parts.map((p, part) => ({ part, name: p.name, size: p.size, missing: false, inline: p.inline }));
   return [...items.filter((i) => !i.inline), ...items.filter((i) => i.inline)];
@@ -124,7 +132,7 @@ export async function openAttachment(s: AppState, dispatch: Dispatch<Action>): P
       items = draftItemsOf(await cmd.draftAttachments(subj.account, subj.draftId));
     } else {
       owner = { kind: "message", account: subj.account, source: subj.source };
-      items = messageItems(await partsOf(s, subj.account, subj.source));
+      items = await partsOf(subj.account, subj.source);
     }
   } catch (e: unknown) {
     return failed(dispatch, subj.account, `Attachments failed: ${asGuiError(e).message}`);
@@ -141,7 +149,7 @@ export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): P
   if (subj.kind === "draft") return notice(dispatch, "A draft's attachments are files already; t o opens one");
   let items: AttachmentItem[];
   try {
-    items = messageItems(await partsOf(s, subj.account, subj.source));
+    items = await partsOf(subj.account, subj.source);
   } catch (e: unknown) {
     return failed(dispatch, subj.account, `Attachments failed: ${asGuiError(e).message}`);
   }

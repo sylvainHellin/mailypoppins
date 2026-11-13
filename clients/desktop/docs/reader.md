@@ -115,7 +115,7 @@ The header block lists the message's attachments from `MessageMeta.attachments`,
 Open calls `attachment_open`, which hands the daemon's copy of the part to the system opener, and the status line says "Opened: <name>", the TUI's words ([rust-layer.md](rust-layer.md), "Attachments").
 Save opens the Save dialog for that one part.
 
-The keys act on the cursor message from the list or the reader, as the TUI's MESSAGE keys do:
+The keys act on the cursor message from the list or the reader, as the TUI's MESSAGE keys do, and list its parts through `message_attachments`, the daemon's `message.attachments`, in its order, whether or not the reader shows the message (PERSO-222):
 
 - `to` opens a message's only attachment at once, and over several opens the "Open attachment" dialog, one button per part, the first focused; `j`/`k` and the arrows move between the parts, Enter opens the focused one, `q` closes.
 - `ts` opens the Save dialog with every part checked.

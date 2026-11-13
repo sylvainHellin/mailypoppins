@@ -2079,8 +2079,11 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       draftChanged(account, d);
       return { account, id: d.id, selector: d.selector, path: d.path, status: d.status };
     }
-    case "message_attachments":
-      return partsOfSource("message.get", account, args.source as Source);
+    case "message_attachments": {
+      // `message.attachments`: reading order, each part keeping its stored index.
+      const listed = partsOfSource("message.attachments", account, args.source as Source).map((p, part) => ({ part, ...p }));
+      return [...listed.filter((p) => !p.inline), ...listed.filter((p) => p.inline)];
+    }
     case "attachment_open": {
       const name = partOfSource("message.materialise_attachment", account, args.source as Source, Number(args.part));
       const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/${name}`;

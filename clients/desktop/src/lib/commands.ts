@@ -24,6 +24,7 @@ import type {
   EventProposedTime,
   EventUpdateParams,
   HoldListing,
+  MessageAttachment,
   OutboxListing,
   SenderBlocked,
   SenderUnblocked,
@@ -44,7 +45,6 @@ import type {
   DraftStatusBatch,
   EditorLaunch,
   EditorSetting,
-  Attachment,
   ExportedMessage,
   FetchOutcome,
   FixtureSimulation,
@@ -552,9 +552,9 @@ export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationS
 // A `source` is a stored row or a server-only hit, whose parts and `.eml` the
 // daemon reads from the server's copy without ingesting it (PERSO-155).
 
-/** A message's parts, in the order `part` addresses them. */
-export const messageAttachments = (account: string, source: MessageSource): Promise<Attachment[]> =>
-  invoke<Attachment[]>("message_attachments", { account, source });
+/** A message's parts (`message.attachments`, PERSO-222): in reading order, each with the `part` that addresses it. */
+export const messageAttachments = (account: string, source: MessageSource): Promise<MessageAttachment[]> =>
+  invoke<MessageAttachment[]>("message_attachments", { account, source });
 
 /** Open part `part` of a message with the system opener. */
 export const attachmentOpen = (account: string, source: MessageSource, part: number): Promise<OpenedFile> =>

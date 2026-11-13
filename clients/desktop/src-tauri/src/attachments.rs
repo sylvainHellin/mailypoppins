@@ -32,6 +32,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use mp_protocol::attachment::{MessageAttachment, MessageAttachments, METHOD_MESSAGE_ATTACHMENTS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
@@ -314,25 +315,25 @@ fn release(door: &Door, handle: &str) {
     }
 }
 
-/// The parts of `source` in the order `part` addresses them: `message.get`
-/// without a body, which for a server-only hit lists the server copy's parts
-/// (PERSO-155).
+/// The parts of `source` through `message.attachments`, the call `mp open`,
+/// `mp save` and the TUI make (PERSO-222): in reading order, each with the
+/// `part` that addresses it, and for a server-only hit the server copy's
+/// parts (PERSO-155).
 pub fn message_attachments_on(
     door: &Door,
     account: &str,
     source: &MessageSource,
-) -> Result<Vec<crate::commands::Attachment>, GuiError> {
-    let mut params = source.address(account);
-    params["body"] = json!(false);
+) -> Result<Vec<MessageAttachment>, GuiError> {
     let answer = call(
         door,
-        "message.get",
-        params,
+        METHOD_MESSAGE_ATTACHMENTS,
+        source.address(account),
         source.budget(),
         Addressing::Resource,
     )?;
-    serde_json::from_value(answer["attachments"].clone())
-        .map_err(|e| GuiError::protocol(format!("message.get's attachments did not decode: {e}")))
+    serde_json::from_value::<MessageAttachments>(answer)
+        .map(|listing| listing.attachments)
+        .map_err(|e| GuiError::protocol(format!("message.attachments did not decode: {e}")))
 }
 
 /// The `message.materialise_attachment` parameters of part `part`.
@@ -730,7 +731,7 @@ pub async fn message_attachments(
     session: State<'_, SessionHandle>,
     account: String,
     source: MessageSource,
-) -> Result<Vec<crate::commands::Attachment>, GuiError> {
+) -> Result<Vec<MessageAttachment>, GuiError> {
     with_door(&session, move |_, door| {
         message_attachments_on(door, &account, &source)
     })
@@ -1112,10 +1113,11 @@ mod tests {
         let parts = message_attachments_on(&door, "work", &server_only()).unwrap();
         assert_eq!(parts.len(), 1, "{parts:?}");
         assert_eq!(parts[0].name, "server-only-notes.txt");
+        assert_eq!(parts[0].part, 0);
         let address = json!({"message_id": "<server-only@fixture.example>", "mailbox": "Archive"});
         assert_eq!(
-            calls_of(&fixture, "message.get"),
-            vec![json!({"account": "work", "hit": address, "body": false})]
+            calls_of(&fixture, "message.attachments"),
+            vec![json!({"account": "work", "hit": address})]
         );
 
         let opened = attachment_open_on(&door, "work", &server_only(), 0).unwrap();

@@ -4480,6 +4480,21 @@ impl Fixture {
                 }
                 Ok(answer)
             }
+            "message.attachments" => {
+                let account = param_str(method, &params, "account")?;
+                let row = if params["hit"].is_null() {
+                    let row_id = params["row_id"].as_i64().unwrap_or(-1);
+                    s.row(account, row_id)
+                        .ok_or_else(|| {
+                            refused(method, -32602, &format!("no message has row_id {row_id}"))
+                        })?
+                        .1
+                        .clone()
+                } else {
+                    s.hit_row(method, account, &params["hit"])?.1
+                };
+                Ok(attachment_listing(account, &row))
+            }
             "message.get" if !params["hit"].is_null() => {
                 let account = param_str(method, &params, "account")?;
                 let (mailbox, row) = s.hit_row(method, account, &params["hit"])?;
@@ -7250,6 +7265,29 @@ fn shown(account: &str, mailbox: &str, row: &Value, body: bool) -> Value {
         record["body"] = row["body"].clone();
     }
     record
+}
+
+/// `message.attachments` over a fixture row (PERSO-222): its parts in
+/// reading order, the real ones and then the inline images, each with its
+/// stored index as `part`.
+fn attachment_listing(account: &str, row: &Value) -> Value {
+    let parts = row["attachments"].as_array().cloned().unwrap_or_default();
+    let (inline, real): (Vec<Value>, Vec<Value>) = parts
+        .iter()
+        .enumerate()
+        .map(|(part, p)| {
+            json!({
+                "part": part, "name": p["name"].as_str().unwrap_or_default(),
+                "size": p["size"].as_u64().unwrap_or_default(),
+                "inline": p["inline"].as_bool().unwrap_or_default(),
+            })
+        })
+        .partition(|p| p["inline"] == true);
+    json!({
+        "account": account,
+        "selector": row["selector"].as_str().unwrap_or_default(),
+        "attachments": real.into_iter().chain(inline).collect::<Vec<Value>>(),
+    })
 }
 
 fn server_hit(account: &str, mailbox: &str, row: &Value) -> Value {

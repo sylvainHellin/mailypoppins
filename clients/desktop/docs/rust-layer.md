@@ -143,7 +143,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `outbox_retry` | `account`, `row_id` | `{ operation_id }` |
 | `outbox_discard` | `account`, `row_id` | `OutboxDiscarded` |
 | `message_fetch` | `account`, `mailbox` (label or server name), `message_id` | `FetchOutcome`, once the fetch has ended |
-| `message_attachments` | `account`, `source` | `Attachment[]`, the parts in `part`'s order |
+| `message_attachments` | `account`, `source` | `MessageAttachment[]`, the parts in reading order, each with its `part` |
 | `attachment_open` | `account`, `source`, `part` | `OpenedFile` |
 | `attachment_save` | `account`, `source`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
 | `message_export` | `account`, `source`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
@@ -765,7 +765,7 @@ A fixture with no terminal editor installed journals a bare `nvim`, and a GUI ed
 ## Attachments
 
 A received message's part and its browser rendition are files the daemon writes, one call each: `message.materialise_attachment {account, row_id, part}` and `message.materialise_html {account, row_id}` answer `{handle, path, name, bytes, expires_at}`, with the file at `<data_dir>/runtime/handles/<handle>/<name>` for ten minutes.
-`part` is the zero-based index into `MessageMeta.attachments`, which is `message.get`'s list; the daemon serves no list method of its own.
+`part` is the zero-based index the daemon hands out on every entry of `message.attachments` (PERSO-222), which `message_attachments` answers in reading order, the real attachments and then the inline images, as `mp open`, `mp save` and the TUI read it; it is also the position in `MessageMeta.attachments`, `message.get`'s list in stored order, which the reader's header shows.
 The layer checks that `name` is one file in one directory (not empty, `.` or `..`, and without `/`, `\` or NUL) and that `path` is absolute and ends in `name`, before it opens or copies anything.
 
 `attachment_open` and `html_open` hand the daemon's file to the system opener and leave the handle unreleased, since the viewer just launched holds the file (`ATT-01`, `ATT-05`).
@@ -781,7 +781,7 @@ A part that fails lands in `failed` with its `GuiError`, and the others still go
 
 `message_export` is the same copy for the message itself (PERSO-174): `message.materialise_eml` writes its raw RFC 822 bytes as `<date>_<subject>.eml`, `mp export`'s file, and the copy into `dest_dir` takes the `_1` rule before the handle is released.
 A row stored without its raw message (every Graph row) is answered from the server, so the call waits up to 90 seconds, as `draft_forward` with `as_attachment` does, which attaches the same bytes.
-Every command of this section takes a `MessageSource`, and a server-only search hit is `{kind: "hit", mailbox, message_id}`, which goes to the daemon as `hit: {message_id, mailbox}`: `message_attachments` (`message.get` without a body), `attachment_open`, `attachment_save` and `message_export` are then answered from the server's copy, without ingesting anything (PERSO-174, PERSO-155), and wait as long as an export.
+Every command of this section takes a `MessageSource`, and a server-only search hit is `{kind: "hit", mailbox, message_id}`, which goes to the daemon as `hit: {message_id, mailbox}`: `message_attachments` (`message.attachments`), `attachment_open`, `attachment_save` and `message_export` are then answered from the server's copy, without ingesting anything (PERSO-174, PERSO-155), and wait as long as an export.
 
 ```ts
 type OpenedFile = { name: string; path: string };

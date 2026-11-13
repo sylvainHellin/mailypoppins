@@ -323,6 +323,36 @@ describe("the reader's attachments", () => {
     );
   });
 
+  it("to and ts list the parts through message_attachments, in the daemon's order, and open and save each by its own part (PERSO-222)", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.rows.work.inbox[0].attachments = [
+        { name: "image001.png", size: 12, inline: true },
+        { name: "Rechnung.pdf", size: 8 },
+      ];
+    });
+    await shellReady();
+    await user.keyboard("j");
+    await within(reader()).findByRole("list", { name: "Attachments" });
+    const source = { kind: "row", row_id: 1001 };
+    await user.keyboard("to");
+    const picker = await screen.findByRole("dialog", { name: "Open attachment" });
+    expect(argsOf("message_attachments")).toEqual([{ account: "work", source }]);
+    const names = within(picker)
+      .getAllByRole("button", { name: /^Open / })
+      .map((b) => b.getAttribute("aria-label"));
+    expect(names).toEqual(["Open Rechnung.pdf", "Open image001.png"]);
+    await user.click(within(picker).getByRole("button", { name: "Open image001.png" }));
+    await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", source, part: 0 }]));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await user.keyboard("ts");
+    const save = await screen.findByRole("dialog", { name: "Save attachments" });
+    expect(argsOf("message_attachments")).toHaveLength(2);
+    await user.click(within(save).getByRole("checkbox", { name: /image001\.png/ }));
+    await user.click(within(save).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(argsOf("attachment_save")).toEqual([{ account: "work", source, parts: [1], dest_dir: "~/Downloads" }]));
+  });
+
   it("marks the cursor row of the to picker on every row, the first one included, and moves the mark with j and k", async () => {
     const { user } = renderApp(1400, () => {
       mock.rows.work.inbox[0].attachments = [
