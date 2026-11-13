@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
-import { cursorRow, hiddenByOutbox, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog } from "@/app/outbox";
+import { cursorRow, hiddenByOutbox, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog, stateLabel } from "@/app/outbox";
 import { initialState, isStale, type AppState } from "@/app/state";
 import { fixtures, outboxListing, mock, resetMock } from "@/test/tauri-mock";
 import { GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
@@ -211,6 +211,8 @@ describe("the confirmations and the words", () => {
     expect(warning(row(5, { state: "pending_send", never_submitted: true }))).toMatch(/never submitted/);
     expect(warning(row(5, { state: "sent_pending_append" }))).toMatch(/delivered; discarding it gives up its copy in Sent/);
     expect(warning(row(5, { state: "done", partial: true }))).toMatch(/went to some recipients/);
+    expect(warning(row(5, { state: "done", partial: false }))).toMatch(/only in this machine's Sent mailbox/);
+    expect(stateLabel(row(5, { state: "done", partial: false }))).toBe("Copy only on this machine");
   });
 
   it("says a retry's outcome in each of the row's ends", () => {

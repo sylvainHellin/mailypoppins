@@ -218,6 +218,9 @@ struct FakeSent {
     swallow_ack_next: RefCell<bool>,
     /// Make the dedup search fail rather than answer.
     search_fails: RefCell<bool>,
+    /// Have the server answer the next APPEND, or the dedup search, with a
+    /// refusal (`NO` or `BAD`) rather than fail to answer at all.
+    refuse_next: RefCell<bool>,
     searches: RefCell<usize>,
     appends: RefCell<usize>,
 }
@@ -262,6 +265,11 @@ impl SentMailbox for FakeSent {
         if *self.search_fails.borrow() {
             return Err(anyhow::anyhow!("SEARCH unavailable"));
         }
+        if self.refuse_next.replace(false) {
+            return Err(anyhow::Error::new(outbox::SentRefused(
+                "NO [UNAVAILABLE] Sent is locked".into(),
+            )));
+        }
         Ok(self
             .appended
             .borrow()
@@ -280,7 +288,12 @@ impl SentMailbox for FakeSent {
         let message_id = mailypoppins::send::message_id_of(raw);
         if *self.fail_next.borrow() {
             *self.fail_next.borrow_mut() = false;
-            return Err(anyhow::anyhow!("APPEND refused"));
+            return Err(anyhow::anyhow!("connection refused"));
+        }
+        if self.refuse_next.replace(false) {
+            return Err(anyhow::Error::new(outbox::SentRefused(
+                "NO [OVERQUOTA] mailbox full".into(),
+            )));
         }
         let uid = self.store(mailbox, &message_id);
         if *self.swallow_ack_next.borrow() {
@@ -1993,30 +2006,12 @@ fn a_discarded_version_on_an_account_that_appends_nothing_is_kept_locally() {
     assert_eq!(local_sent_copies(&store, mid).len(), 1);
 }
 
-/// A discarded row's copy that the server keeps refusing is given up a week
-/// after the discard: the row ends, the local copy stays, and nothing is
-/// tried again.
-#[tokio::test]
-async fn a_discarded_version_whose_append_keeps_failing_is_given_up_after_a_week() {
-    let account = Account::new();
-    let mid = "<update-5@example.com>";
-    let id = parked_invitation(&account, mid, Some(SENT), None);
-    let (store, blobs) = account.open();
-    assert!(outbox::discard(&store, &blobs, id).unwrap());
-
-    let mut sent = FakeSent::new();
-    *sent.fail_next.borrow_mut() = true;
-    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
-        .await
-        .unwrap();
-    assert_eq!(state_of(&account, id), OutboxState::SentPendingAppend);
-    assert!(outbox_looks_empty(&store));
-
-    // A week on, the server still refuses it.
-    let row = outbox::load(&store, id).unwrap().unwrap();
+/// Move the discard of row `id` back by `secs`, as a machine that was shut
+/// for that long finds it.
+fn backdate_discard(store: &Store, id: i64, secs: i64) {
+    let row = outbox::load(store, id).unwrap().unwrap();
     let mut envelope = row.envelope.unwrap();
-    let week_ago = outbox::unix_now() - outbox::DISCARDED_FILING_SECS - 1;
-    envelope.discarded = Some(week_ago);
+    envelope.discarded = envelope.discarded.map(|at| at - secs);
     store
         .conn()
         .execute(
@@ -2024,14 +2019,75 @@ async fn a_discarded_version_whose_append_keeps_failing_is_given_up_after_a_week
             rusqlite::params![id, envelope.encode()],
         )
         .unwrap();
-    *sent.fail_next.borrow_mut() = true;
+}
+
+/// A discarded row whose server was never reached, a week and more on,
+/// stays to file its copy however long that takes: a failure before the
+/// server answered never ends it.
+#[tokio::test]
+async fn a_discarded_version_whose_server_was_never_reached_waits_for_it() {
+    let account = Account::new();
+    let mid = "<update-5@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    let (store, blobs) = account.open();
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+    backdate_discard(&store, id, 8 * 24 * 3600);
+
+    let mut sent = FakeSent::new();
+    for pass in 0..3 {
+        *sent.fail_next.borrow_mut() = true;
+        let later = outbox::unix_now() + (pass + 1) * outbox::BACKOFF_MAX_SECS;
+        outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
+            .await
+            .unwrap();
+        assert_eq!(state_of(&account, id), OutboxState::SentPendingAppend);
+    }
+    assert!(outbox_looks_empty(&store));
+
+    // The server, reached at last, takes it.
+    let later = outbox::unix_now() + 10 * outbox::BACKOFF_MAX_SECS;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
+        .await
+        .unwrap();
+    assert_eq!(state_of(&account, id), OutboxState::Done);
+    assert_eq!(sent.copies(mid), 1);
+}
+
+/// A discarded row whose copy the server itself refuses is given up only
+/// once a week has passed since the discard: the row ends with a note that
+/// the version exists only on this machine, which `mp outbox list` shows
+/// until the user discards it for good; nothing is tried again.
+#[tokio::test]
+async fn a_discarded_version_the_server_refuses_for_a_week_is_given_up_with_a_note() {
+    let account = Account::new();
+    let mid = "<update-8@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    let (store, blobs) = account.open();
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+
+    // Refused within the week: the row waits.
+    let mut sent = FakeSent::new();
+    *sent.refuse_next.borrow_mut() = true;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    assert_eq!(state_of(&account, id), OutboxState::SentPendingAppend);
+
+    // Refused a week on, by the dedup search the earlier attempt arms.
+    backdate_discard(&store, id, outbox::DISCARDED_FILING_SECS + 1);
+    *sent.refuse_next.borrow_mut() = true;
     let later = outbox::unix_now() + outbox::BACKOFF_MAX_SECS;
     outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
         .await
         .unwrap();
     let row = outbox::load(&store, id).unwrap().unwrap();
     assert_eq!(row.state, OutboxState::Done, "given up");
-    assert_eq!(row.last_error, None);
+    let note = row.last_error.clone().unwrap_or_default();
+    assert!(
+        note.contains("could not be filed in Sent on the server"),
+        "{note}"
+    );
+    assert!(note.contains("exists only on this machine"), "{note}");
     assert_eq!(sent.copies(mid), 0);
     assert_eq!(
         local_sent_copies(&store, mid).len(),
@@ -2040,11 +2096,21 @@ async fn a_discarded_version_whose_append_keeps_failing_is_given_up_after_a_week
     );
     assert!(blobs.contains(&row.raw_blob));
 
+    let listed = outbox::unfinished_rows(&store, ACCOUNT).unwrap();
+    assert_eq!(listed.iter().map(|r| r.id).collect::<Vec<_>>(), [id]);
+    assert_eq!(outbox::counts(&store, ACCOUNT).unwrap().failed, 1);
     let appends = *sent.appends.borrow();
     outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later + 3600)
         .await
         .unwrap();
     assert_eq!(*sent.appends.borrow(), appends, "nothing is tried again");
+
+    // A discard of the noted row removes it for good, and the copy stays.
+    assert!(outbox::discarded_refusal(&row).is_none());
+    outbox::discard(&store, &blobs, id).unwrap();
+    assert!(outbox::load(&store, id).unwrap().is_none());
+    assert!(outbox_looks_empty(&store));
+    assert_eq!(local_sent_copies(&store, mid).len(), 1);
 }
 
 /// A discarded row is discarded once: a second discard is refused, and its

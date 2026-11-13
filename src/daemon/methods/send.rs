@@ -666,8 +666,9 @@ fn listing(account: &str) -> Result<OutboxListing, RpcError> {
 fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
     // A `done` row is only listed when it kept a note, which is what a partial
     // delivery leaves behind (#0063): calling that `done` would bury the
-    // recipient who never got it.
-    let partial = row.state == OutboxState::Done;
+    // recipient who never got it. A discarded row given up on keeps a note
+    // too, which is about its copy and not its recipients (PERSO-304).
+    let partial = row.state == OutboxState::Done && !row.is_discarded();
     OutboxRow {
         id: row.id,
         state: row.state.as_str().to_string(),
@@ -1273,6 +1274,34 @@ async fn retry_row(account: &AccountConfig, row_id: i64) -> anyhow::Result<Outbo
 mod tests {
     use super::super::super::dispatch::CancelScope;
     use super::*;
+
+    /// A `done` row with a note is a partial delivery, except a discarded
+    /// one whose copy was given up, whose note is about that copy.
+    #[test]
+    fn a_given_up_discard_is_listed_with_its_note_and_never_as_partial() {
+        let row = |discarded: Option<i64>| crate::outbox::OutboxRow {
+            id: 7,
+            account: "work".into(),
+            target_mailbox: Some("Sent".into()),
+            message_id: "<m@x>".into(),
+            raw_blob: crate::store::blobs::BlobHash::parse(&"a".repeat(64)).unwrap(),
+            state: OutboxState::Done,
+            attempts: 3,
+            last_error: Some("the note".into()),
+            appended_uid: None,
+            created: 0,
+            updated: 0,
+            submission_started_at: None,
+            envelope: Some(crate::outbox::Envelope {
+                discarded,
+                ..Default::default()
+            }),
+        };
+        assert!(listed_row(&row(None)).partial);
+        let given_up = listed_row(&row(Some(1)));
+        assert!(!given_up.partial);
+        assert_eq!(given_up.last_error.as_deref(), Some("the note"));
+    }
 
     /// The array is the family, in method-name order, and every one of it is
     /// durable: a send outlives the client that asked for it, and a hold is

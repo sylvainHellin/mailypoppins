@@ -27,10 +27,15 @@ export function retryable(row: OutboxRow): boolean {
   return row.state === "failed" || row.state === "sent_pending_append";
 }
 
-/** The chip a row shows. A `done` row is listed only when it is partial, which is never a failure (SND-08). */
+/**
+ * The chip a row shows. A `done` row is listed only when it kept a note: a partial delivery, which is never a failure (SND-08),
+ * or a discarded invitation version whose copy the server's Sent folder would not take, which is only on this machine (PERSO-304).
+ */
 export function stateLabel(row: OutboxRow): string {
   if (row.partial) return "Partly delivered";
   switch (row.state) {
+    case "done":
+      return "Copy only on this machine";
     case "pending_send":
       return "Queued";
     case "failed":
@@ -272,6 +277,7 @@ export function selectOutboxRow(s: AppState, rowId: number): AppState {
 /** Why a row may already have done what a discard or a retry is about, or null. */
 function discardWarning(row: OutboxRow): string | null {
   if (row.partial) return "It went to some recipients; discarding it drops the note of who never got it.";
+  if (row.state === "done") return "Its copy is only in this machine's Sent mailbox; discarding it drops the note, and the copy stays.";
   if (row.state === "sent_pending_append") {
     return `It was delivered; discarding it gives up its copy in ${row.target_mailbox ?? "the Sent mailbox"}.`;
   }

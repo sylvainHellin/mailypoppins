@@ -304,15 +304,19 @@ impl SeriesCancel {
     /// when the change is planned and again under the account's lock just
     /// before its first message is enqueued, which also refuses one whose
     /// version was filed since its plan; and a discarded row some attendee
-    /// may hold files its copy first, locally and then in the server's Sent
-    /// folder, where a rebuilt store finds it (`outbox::discard`,
-    /// PERSO-304). So a cancellation they build is above every version
-    /// filed or sent. It stays reachable for a hand-made
-    /// `mp send --invite --sequence`, another client sending from the same
-    /// mailbox, a store rebuilt on an account that keeps no Sent copy
-    /// (`save_to_sent = "never"`) or after a discarded row's copy the server
-    /// refused for a week, and copies sent before the guard existed, which
-    /// is why the fallback is kept.
+    /// may hold files its copy first, locally at once and then in the
+    /// server's Sent folder by a later pass, where a store rebuilt from the
+    /// server finds it (`outbox::discard`, PERSO-304). So a cancellation
+    /// they build is above every version filed or sent. It stays reachable
+    /// for a hand-made `mp send --invite --sequence`, another client sending
+    /// from the same mailbox, copies sent before the guard existed, and a
+    /// store rebuilt while a discarded version is only in the local store:
+    /// before a later pass filed it in Sent, on an account that APPENDs no
+    /// copy of its own (`save_to_sent = "never"`, or a server that files its
+    /// own and did not take this one), and after a discarded row's copy was
+    /// given up (the server refused it a week or more after the discard,
+    /// which its outbox row says until the user discards it). That is why
+    /// the fallback is kept.
     fn only_uninvites(&self, roster: &BTreeSet<String>) -> bool {
         self.told.as_ref().is_some_and(|told| {
             !told.is_empty()

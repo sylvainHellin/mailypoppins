@@ -250,18 +250,29 @@ pub struct OutboxRow {
 }
 
 impl OutboxRow {
-    /// Whether the row was discarded and stays only to file its copy in
-    /// the server's Sent folder ([`Envelope::discarded`]).
+    /// Whether the user discarded the row ([`Envelope::discarded`]).
     pub fn is_discarded(&self) -> bool {
         self.envelope
             .as_ref()
             .is_some_and(|envelope| envelope.discarded.is_some())
     }
+
+    /// Whether the row was discarded and stays only to file its copy in the
+    /// server's Sent folder: out of every outbox view, and neither
+    /// discarded nor retried again ([`discard`]). A discarded row that ended
+    /// otherwise (given up, [`give_up_filing`], or parked by a store
+    /// rebuild) is listed for the user to discard.
+    pub fn is_filing(&self) -> bool {
+        self.is_discarded() && self.state == OutboxState::SentPendingAppend
+    }
 }
 
 /// How long after its discard a row keeps trying to file its copy in the
-/// server's Sent folder: an APPEND that still fails a week on is given up,
-/// the copy staying in the local store only (PERSO-304).
+/// server's Sent folder before a refusal from the server ends it: a row is
+/// given up only when this has passed and the server itself answered the
+/// Sent search or the APPEND with a refusal ([`AppendOutcome::Refused`]), so
+/// a machine that was shut or offline for the week never gives one up
+/// (PERSO-304).
 pub const DISCARDED_FILING_SECS: i64 = 7 * 24 * 3600;
 
 /// The SMTP envelope a resumed submission needs, and what became of each
@@ -608,6 +619,28 @@ pub enum SubmitOutcome {
     PerRecipient(RecipientVerdicts),
 }
 
+/// Marker error a [`SentMailbox`] attaches when the server itself answered
+/// the Sent search or the APPEND with a refusal (an IMAP `NO` or `BAD`), as
+/// against a connection that failed, timed out or was never made: only such
+/// an answer counts towards giving up a discarded row's copy
+/// ([`DISCARDED_FILING_SECS`]).
+#[derive(Debug)]
+pub struct SentRefused(pub String);
+
+impl std::fmt::Display for SentRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the server refused it: {}", self.0)
+    }
+}
+
+impl std::error::Error for SentRefused {}
+
+/// Whether `err` is the server's refusal ([`SentRefused`]) rather than a
+/// failure to reach it.
+pub fn is_sent_refusal(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<SentRefused>())
+}
+
 /// What the APPEND attempt did.
 #[derive(Debug, Clone)]
 pub enum AppendOutcome {
@@ -618,8 +651,13 @@ pub enum AppendOutcome {
     /// APPEND was skipped. This is what makes a retry after an ambiguous
     /// APPEND safe.
     AlreadyPresent { uid: Option<i64> },
-    /// The copy is not there and the row stays retryable.
+    /// The copy is not there and the row stays retryable: the server could
+    /// not be reached or did not answer.
     Failed(String),
+    /// The copy is not there because the server answered the Sent search or
+    /// the APPEND with a refusal ([`SentRefused`]). The row stays retryable,
+    /// but a discarded one a week after its discard is given up.
+    Refused(String),
 }
 
 /// Marker error for a submission that never produced a verdict.
@@ -1272,12 +1310,16 @@ pub fn record_append(
             finish_done(store, blobs, &row, *uid, now)?;
             Ok(OutboxState::Done)
         }
-        AppendOutcome::Failed(err) => {
+        AppendOutcome::Failed(err) | AppendOutcome::Refused(err) => {
+            // Only the server's own refusal ends a discarded row, and only a
+            // week after the discard: a machine that was off or offline has
+            // not offered the copy to anyone.
+            let refused = matches!(outcome, AppendOutcome::Refused(_));
             let discarded = row
                 .envelope
                 .as_ref()
                 .and_then(|envelope| envelope.discarded);
-            if discarded.is_some_and(|at| now - at >= DISCARDED_FILING_SECS) {
+            if refused && discarded.is_some_and(|at| now - at >= DISCARDED_FILING_SECS) {
                 give_up_filing(store, blobs, &row, err, now)?;
                 return Ok(OutboxState::Done);
             }
@@ -1562,7 +1604,7 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
 /// already ([`OutboxRow::is_discarded`]): it is no message to send, and
 /// what is left of it, the filing of its copy, happens on its own.
 pub fn discarded_refusal(row: &OutboxRow) -> Option<String> {
-    if !row.is_discarded() {
+    if !row.is_filing() {
         return None;
     }
     let id = row.id;
@@ -1613,9 +1655,12 @@ fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<()> {
     Ok(())
 }
 
-/// End a discarded row whose copy the server's Sent folder kept refusing
-/// for [`DISCARDED_FILING_SECS`]: `done`, its bytes released, the local copy
-/// [`keep_the_version`] filed left as the only one, which the log says.
+/// End a discarded row whose copy the server's Sent folder refused a week
+/// or more after the discard ([`DISCARDED_FILING_SECS`]): `done`, its bytes
+/// released, the local copy [`keep_the_version`] filed left as the only
+/// one. The row keeps a note saying so, which keeps it in
+/// [`unfinished_rows`] and in the counts until the user discards it, as a
+/// partial delivery's note does.
 fn give_up_filing(
     store: &Store,
     blobs: &BlobStore,
@@ -1623,21 +1668,24 @@ fn give_up_filing(
     err: &str,
     now: i64,
 ) -> Result<()> {
+    let mailbox = row.target_mailbox.as_deref().unwrap_or("Sent");
+    let note = format!(
+        "discarded, and its copy could not be filed in Sent on the server ({mailbox}: {err}); \
+         this version of the invitation exists only on this machine, and a store rebuilt \
+         from the server will not have it"
+    );
     warn!(
-        "[outbox] row {} ({}) was discarded and its copy could not be filed in {} for a week \
-         ({err}); giving up: the copy stays in the local store only, and a store rebuilt from \
-         the server will not have it",
-        row.id,
-        row.message_id,
-        row.target_mailbox.as_deref().unwrap_or("Sent")
+        "[outbox] row {} ({}) gave up filing its copy in {mailbox}, which the server refused a \
+         week after the discard ({err}); the version stays in the local store only",
+        row.id, row.message_id
     );
     let tx = store
         .conn()
         .unchecked_transaction()
         .context("opening the give-up of a discarded row")?;
     tx.execute(
-        "UPDATE outbox SET state = 'done', last_error = NULL, updated = ?2 WHERE id = ?1",
-        rusqlite::params![row.id, now],
+        "UPDATE outbox SET state = 'done', last_error = ?3, updated = ?2 WHERE id = ?1",
+        rusqlite::params![row.id, now, note],
     )
     .context("ending a discarded row whose copy was never filed")?;
     let unreferenced = blobs.release(&tx, &row.raw_blob)?;
@@ -1761,7 +1809,7 @@ pub fn unfinished_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
         account,
         "(state <> 'done' OR last_error IS NOT NULL)",
     )?;
-    rows.retain(|row| !row.is_discarded());
+    rows.retain(|row| !row.is_filing());
     Ok(rows)
 }
 
@@ -1938,7 +1986,7 @@ pub struct OutboxCounts {
     /// that only a human can close them, by reading the row and discarding it.
     pub partial: usize,
     /// Rows the user discarded that still file their copy in the server's
-    /// Sent folder ([`OutboxRow::is_discarded`]): work for the drain, which
+    /// Sent folder ([`OutboxRow::is_filing`]): work for the drain, which
     /// no outbox view lists, so [`OutboxCounts::total`] leaves them out.
     pub filing: usize,
 }
@@ -1958,8 +2006,10 @@ pub fn counts(store: &Store, account: &str) -> Result<OutboxCounts> {
     )?;
     for row in rows {
         match row.state {
-            _ if row.is_discarded() => counts.filing += 1,
+            _ if row.is_filing() => counts.filing += 1,
             OutboxState::Failed => counts.failed += 1,
+            // A discarded row given up on is the user's to read and drop.
+            OutboxState::Done if row.is_discarded() => counts.failed += 1,
             OutboxState::Done => counts.partial += 1,
             OutboxState::PendingSend | OutboxState::SentPendingAppend => counts.open += 1,
         }
@@ -2232,7 +2282,12 @@ async fn append_once<M: SentMailbox>(
             Ok(_) => {}
             Err(e) => {
                 // Could not tell. Appending now might duplicate, so do not.
-                return AppendOutcome::Failed(format!("Sent dedup search failed: {e:#}"));
+                let error = format!("Sent dedup search failed: {e:#}");
+                return if is_sent_refusal(&e) {
+                    AppendOutcome::Refused(error)
+                } else {
+                    AppendOutcome::Failed(error)
+                };
             }
         }
     }
@@ -2245,6 +2300,7 @@ async fn append_once<M: SentMailbox>(
         Ok(uid) => AppendOutcome::Appended {
             uid: uid.map(|u| u as i64),
         },
+        Err(e) if is_sent_refusal(&e) => AppendOutcome::Refused(format!("APPEND failed: {e:#}")),
         Err(e) => AppendOutcome::Failed(format!("APPEND failed: {e:#}")),
     }
 }

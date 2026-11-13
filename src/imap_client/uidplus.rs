@@ -28,12 +28,26 @@ pub(crate) struct NewUid {
     pub uid: u32,
 }
 
+/// The server's own `NO` or `BAD` to an `APPEND`, before the literal or
+/// after it, with its words: the error [`append`] answers when the server
+/// refused, as against one that broke the connection or never answered.
+#[derive(Debug)]
+pub(crate) struct AppendRefused(pub String);
+
+impl fmt::Display for AppendRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AppendRefused {}
+
 /// `APPEND` `content` to `mailbox` with `flags` (a parenthesised list), and
 /// the `APPENDUID` the server answered, `None` from a server without UIDPLUS.
 ///
 /// Success is the tagged `OK`, as it is for `async-imap`'s own `append`: a
-/// `NO` or `BAD`, before the literal or after it, is an error carrying the
-/// server's words. A server that refuses the command before asking for the
+/// `NO` or `BAD`, before the literal or after it, is an [`AppendRefused`]
+/// carrying the server's words. A server that refuses the command before asking for the
 /// literal never receives it.
 pub(crate) async fn append<T>(
     session: &mut async_imap::Session<T>,
@@ -71,10 +85,10 @@ where
                 information,
             } if *done == tag => {
                 if *status != Status::Ok {
-                    bail!(
+                    return Err(anyhow::Error::new(AppendRefused(format!(
                         "the server refused the APPEND to '{mailbox}': {}",
                         information.as_deref().unwrap_or("no reason given")
-                    );
+                    ))));
                 }
                 if !sent {
                     bail!("the server ended the APPEND to '{mailbox}' before it took the message");
@@ -188,8 +202,12 @@ mod tests {
 
         let error = append(&mut session, "Sent", "(\\Seen)", b"secret body")
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        assert!(
+            error.is::<AppendRefused>(),
+            "the server's own answer: {error:#}"
+        );
+        let error = error.to_string();
 
         assert!(error.contains("Mailbox doesn't exist"), "{error}");
         assert_eq!(
