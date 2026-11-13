@@ -421,8 +421,8 @@ async fn a_single_event_that_became_a_series_leaves_no_stale_row() {
 }
 
 /// A series that became a single event under the same ItemId takes its
-/// cached occurrences along: the single event stands alone, and an
-/// exception of another series stays.
+/// cached occurrences and its series row along: the single event stands
+/// alone, and an exception of another series stays.
 #[tokio::test]
 async fn a_series_that_became_a_single_event_leaves_no_stale_occurrence() {
     let first = backend(baseline_script(ScriptedFetch::default()));
@@ -453,6 +453,11 @@ async fn a_series_that_became_a_single_event_leaves_no_stale_occurrence() {
         .unwrap()
         .unwrap();
     assert_eq!(single.kind, EventKind::Single);
+    assert_eq!(
+        crate::store::calendar::get_series(&store, "tum", MASTER_ID).unwrap(),
+        None,
+        "the series row goes with the series"
+    );
 }
 
 /// A single event moved out of the window, or gone before it was read, is

@@ -466,7 +466,8 @@ fn meeting_providers(raw: Option<String>) -> Vec<OnlineMeetingProvider> {
 /// anything else merges its upserts and removals, a removed series master
 /// taking its occurrences and its series row along and a series re-sent
 /// whole ([`SyncResult::resent_series`]) keeping only the occurrences that
-/// came. A baseline stamps
+/// came, and losing its series row when its master came back as an event of
+/// its own. A baseline stamps
 /// `baselined_at` with `now`; an incremental sync keeps the stamp it had.
 ///
 /// Each series master the sync brings is handed on to the cached occurrences
@@ -553,7 +554,10 @@ pub fn apply_sync(
         changed = true;
     }
     // A series re-sent whole keeps the occurrences that came and loses the
-    // ones that did not, deleted or ended by a new rule on the server.
+    // ones that did not, deleted or ended by a new rule on the server. One
+    // whose master came back as an event of its own is no series any more
+    // (EWS keeps an item's id when it turns from a series into a single
+    // event), so its series row goes too.
     if !result.full_resync {
         let brought: HashSet<&str> = result.upserts.iter().map(|e| e.id.as_str()).collect();
         for master in &result.resent_series {
@@ -563,6 +567,13 @@ pub fn apply_sync(
                     cached.remove(&occurrence);
                     changed = true;
                 }
+            }
+            if brought.contains(master.as_str()) {
+                tx.execute(
+                    &format!("DELETE FROM {SERIES_TABLE} WHERE account = ?1 AND master_id = ?2"),
+                    [account, master.as_str()],
+                )
+                .with_context(|| format!("removing series {master}"))?;
             }
         }
     }
