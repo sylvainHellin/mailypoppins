@@ -2349,12 +2349,14 @@ fn organised_slice(log: &Path) -> Slice {
 
 /// The same, the transport refusing `rejected` for good.
 fn organised_slice_rejecting(log: &Path, rejected: &[(&str, &str)]) -> Slice {
+    organised_slice_with(send_fixture::fake_transport_rejecting(log, rejected))
+}
+
+/// The same, the transport armed with `transport`.
+fn organised_slice_with(transport: String) -> Slice {
     Slice::start_seeded(
         false,
-        &[(
-            send_fixture::FAKE_TRANSPORT_ENV,
-            send_fixture::fake_transport_rejecting(log, rejected),
-        )],
+        &[(send_fixture::FAKE_TRANSPORT_ENV, transport)],
         support::calendar_fixture::seed_organised,
         Vec::new(),
     )
@@ -2694,6 +2696,102 @@ async fn an_update_nobody_received_cancels_nobody() {
         assert_eq!(now["cancelled"], false, "{now}");
         assert_eq!(now["id"], own["id"], "the old version stands: {now}");
     }
+}
+
+/// An update the server defers for every attendee it keeps waits in the
+/// outbox and goes out on a later pass, so the attendee it drops is told
+/// now: the operation fails saying the update is still queued, and the
+/// organizer's meeting stays live, the cancellation of Bob naming only
+/// some of its attendees.
+#[tokio::test]
+async fn an_update_the_server_defers_still_cancels_the_attendee_it_drops() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
+        &log,
+        &[("ada@example.com", "451 4.7.1 try again later")],
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"attendees": [{"email": "ada@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("ada@example.com (451 4.7.1 try again later)")
+            && error.contains("waits in the outbox")
+            && error.contains("told bob@example.com")
+            && !error.contains("nothing else was sent"),
+        "{status}"
+    );
+    assert_eq!(
+        told(&log),
+        ["bob@example.com"],
+        "the dropped attendee is told"
+    );
+
+    let outbox = call(&mut conn, "send.outbox_list", json!({"account": IMIP})).await;
+    let queued: Vec<&Value> = outbox["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["state"] == "pending_send")
+        .collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "the update waits for a later pass: {outbox}"
+    );
+
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["cancelled"], false, "{now}");
+    assert_eq!(now["id"], own["id"], "the old version stands: {now}");
+}
+
+/// An update the transport fails before any attendee could take it stays
+/// queued for a later pass, so the cancellation of the attendee it drops
+/// is queued beside it rather than never sent.
+#[tokio::test]
+async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_down(
+        &log,
+        "connection refused",
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"attendees": [{"email": "ada@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("connection refused")
+            && error.contains("waits in the outbox")
+            && error.contains("was not taken for bob@example.com"),
+        "{status}"
+    );
+
+    let outbox = call(&mut conn, "send.outbox_list", json!({"account": IMIP})).await;
+    let queued = outbox["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["state"] == "pending_send")
+        .count();
+    assert_eq!(queued, 2, "the update and the cancellation wait: {outbox}");
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["cancelled"], false, "{now}");
 }
 
 /// An update some of whose attendees the server refuses settles, naming

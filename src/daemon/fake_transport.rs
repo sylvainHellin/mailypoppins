@@ -14,6 +14,8 @@
 //! {
 //!   "log": "<path>",
 //!   "reject": {"carol@example.com": "550 5.1.1 unknown recipient"},
+//!   "defer": {"dan@example.com": "451 4.7.1 try again later"},
+//!   "down": "connection refused",
 //!   "append": "ok" | "fail" | "swallow_ack",
 //!   "append_delay_ms": 0
 //! }
@@ -59,6 +61,12 @@ enum AppendMode {
 pub struct FakeTransport {
     log: Option<PathBuf>,
     rejected: Vec<(String, String)>,
+    /// The recipients the server refuses for now (a 4xx), each left
+    /// retryable on the outbox row.
+    deferred: Vec<(String, String)>,
+    /// The error every submission fails with before any recipient is
+    /// asked, as a server that cannot be reached does; `None` serves them.
+    down: Option<String>,
     append: AppendMode,
     append_delay: std::time::Duration,
 }
@@ -75,22 +83,30 @@ pub fn fake_transport() -> Option<FakeTransport> {
         return None;
     }
     let value: Value = serde_json::from_str(&raw).ok()?;
-    Some(FakeTransport {
-        log: value.get("log").and_then(Value::as_str).map(PathBuf::from),
-        rejected: value
-            .get("reject")
+    let refusals = |key: &str, fallback: &str| -> Vec<(String, String)> {
+        value
+            .get(key)
             .and_then(Value::as_object)
             .map(|map| {
                 map.iter()
                     .map(|(address, reason)| {
                         (
                             address.clone(),
-                            reason.as_str().unwrap_or("rejected").to_string(),
+                            reason.as_str().unwrap_or(fallback).to_string(),
                         )
                     })
                     .collect()
             })
-            .unwrap_or_default(),
+            .unwrap_or_default()
+    };
+    Some(FakeTransport {
+        log: value.get("log").and_then(Value::as_str).map(PathBuf::from),
+        rejected: refusals("reject", "rejected"),
+        deferred: refusals("defer", "deferred"),
+        down: value
+            .get("down")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         append: match value.get("append").and_then(Value::as_str) {
             Some("fail") => AppendMode::Fail,
             Some("swallow_ack") => AppendMode::SwallowAck,
@@ -111,41 +127,49 @@ pub fn armed() -> bool {
 }
 
 impl FakeTransport {
-    /// The SMTP submission: one verdict per recipient, one ledger line each.
+    /// The SMTP submission: one verdict per recipient, one ledger line each,
+    /// or, the server down, its error and no line.
     pub fn submit(
         &self,
         message_id: &str,
         recipients: &[(String, crate::send::RecipientRole)],
-    ) -> SendResult {
+    ) -> Result<SendResult> {
+        if let Some(error) = &self.down {
+            anyhow::bail!("{error}");
+        }
+        let named = |list: &[(String, String)], address: &str| {
+            list.iter()
+                .find(|(named, _)| named.eq_ignore_ascii_case(address.trim()))
+                .map(|(_, reason)| reason.clone())
+        };
         let results = recipients
             .iter()
             .map(|(address, role)| {
-                let refusal = self
-                    .rejected
-                    .iter()
-                    .find(|(rejected, _)| rejected.eq_ignore_ascii_case(address.trim()))
-                    .map(|(_, reason)| reason.clone());
+                let (verdict, error) = match named(&self.rejected, address) {
+                    Some(reason) => (RecipientVerdict::Rejected, Some(reason)),
+                    None => match named(&self.deferred, address) {
+                        Some(reason) => (RecipientVerdict::Retryable, Some(reason)),
+                        None => (RecipientVerdict::Delivered, None),
+                    },
+                };
                 self.record(&format!(
                     "submit {message_id} {address} {}",
-                    if refusal.is_some() {
-                        "rejected"
-                    } else {
-                        "accepted"
+                    match verdict {
+                        RecipientVerdict::Rejected => "rejected",
+                        RecipientVerdict::Retryable => "deferred",
+                        _ => "accepted",
                     }
                 ));
                 RecipientResult {
                     address: address.clone(),
                     role: *role,
-                    success: refusal.is_none(),
-                    error: refusal.clone(),
-                    verdict: match refusal {
-                        Some(_) => RecipientVerdict::Rejected,
-                        None => RecipientVerdict::Delivered,
-                    },
+                    success: verdict == RecipientVerdict::Delivered,
+                    error,
+                    verdict,
                 }
             })
             .collect();
-        SendResult { results }
+        Ok(SendResult { results })
     }
 
     /// One event, appended whole.

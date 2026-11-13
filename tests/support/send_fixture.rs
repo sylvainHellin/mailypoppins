@@ -281,6 +281,22 @@ pub fn fake_transport_rejecting(log: &Path, rejected: &[(&str, &str)]) -> String
     serde_json::json!({"log": log.to_string_lossy(), "reject": map}).to_string()
 }
 
+/// The same, with `deferred` naming the recipients the server refuses for
+/// now (a 4xx), which the outbox keeps for a later pass.
+pub fn fake_transport_deferring(log: &Path, deferred: &[(&str, &str)]) -> String {
+    let mut map = serde_json::Map::new();
+    for (address, reason) in deferred {
+        map.insert((*address).to_string(), serde_json::json!(reason));
+    }
+    serde_json::json!({"log": log.to_string_lossy(), "defer": map}).to_string()
+}
+
+/// The same, with every submission failing with `error` before any
+/// recipient is asked, as a server that cannot be reached does.
+pub fn fake_transport_down(log: &Path, error: &str) -> String {
+    serde_json::json!({"log": log.to_string_lossy(), "down": error}).to_string()
+}
+
 /// The same, with the APPEND behaving as `append` says and parking for
 /// `delay_ms` inside the request.
 pub fn fake_transport_appending(log: &Path, append: &str, delay_ms: u64) -> String {

@@ -1479,6 +1479,28 @@ pub fn load(store: &Store, id: i64) -> Result<Option<OutboxRow>> {
     Ok(row)
 }
 
+/// The newest row of `account` that queued the message `message_id`.
+pub fn load_by_message_id(
+    store: &Store,
+    account: &str,
+    message_id: &str,
+) -> Result<Option<OutboxRow>> {
+    let row = store
+        .conn()
+        .query_row(
+            "SELECT id, account, target_mailbox, message_id, raw_blob, state, attempts,
+                    last_error, appended_uid, created, updated, submission_started_at,
+                    envelope
+             FROM outbox WHERE account = ?1 AND message_id = ?2
+             ORDER BY id DESC LIMIT 1",
+            [account, message_id],
+            row_from_sql,
+        )
+        .optional()
+        .context("loading an outbox row by its Message-ID")?;
+    Ok(row)
+}
+
 /// Every row in a non-terminal state, oldest first.
 pub fn open_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
     rows_in_states(

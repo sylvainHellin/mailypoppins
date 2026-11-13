@@ -2272,7 +2272,7 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
 
 /// An organizer's update or cancellation of an invitation mail: its first
 /// message, the change itself, submitted durably and judging the
-/// operation, then, only when that one reached an attendee, the
+/// operation, then, unless that one can reach no attendee at all, the
 /// cancellation of the attendees an update drops.
 async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
     let ImipChangeWork {
@@ -2316,11 +2316,15 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
             }
             handle.announce(calendar_changed(&name));
             if sent.delivered.is_empty() {
-                return handle.fail(DomainError::internal(no_attendee_took(
-                    &name,
-                    &sent.refused,
-                )));
+                return handle.fail(DomainError::internal(unreached(&name, &sent)));
             }
+            let ItipSent {
+                delivered,
+                mut refused,
+                dropped,
+                ..
+            } = sent;
+            refused.extend(dropped.refused);
             match event {
                 Some(event) => settle(
                     &handle,
@@ -2328,7 +2332,7 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                         account: name,
                         event,
                         scope: None,
-                        refused: sent.refused,
+                        refused,
                     },
                 ),
                 None => settle(
@@ -2336,9 +2340,9 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                     EventCancelResult {
                         account: name,
                         event: named,
-                        notified: sent.delivered,
+                        notified: delivered,
                         scope,
-                        refused: sent.refused,
+                        refused,
                     },
                 ),
             }
@@ -2347,33 +2351,139 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
     }
 }
 
-/// The failure of an organizer's change no attendee accepted, naming the
-/// ones the server refused and why.
-fn no_attendee_took(name: &str, refused: &[RecipientOutcome]) -> String {
-    let named: Vec<String> = refused
-        .iter()
-        .map(|recipient| match recipient.error.as_deref() {
-            Some(error) => format!("{} ({error})", recipient.address),
-            None => recipient.address.clone(),
-        })
-        .collect();
-    let refused = if named.is_empty() {
+/// The failure of an organizer's change no attendee accepted yet: one
+/// that goes nowhere, naming the addresses the server refused and why, or
+/// one the outbox still holds, saying so and what became of the
+/// cancellation of the attendees it drops.
+fn unreached(name: &str, sent: &ItipSent) -> String {
+    let listed = |list: &[RecipientOutcome]| {
+        list.iter()
+            .map(|recipient| match recipient.error.as_deref() {
+                Some(error) => format!("{} ({error})", recipient.address),
+                None => recipient.address.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let held = |lead: &str, detail: &Option<String>| match (sent.refused.is_empty(), detail) {
+        (false, _) => format!(": the server {lead} {}", listed(&sent.refused)),
+        (true, Some(detail)) => format!(": {detail}"),
+        (true, None) => String::new(),
+    };
+    let mut told = Vec::new();
+    if !sent.dropped.told.is_empty() {
+        told.push(format!("told {}", sent.dropped.told.join(", ")));
+    }
+    if !sent.dropped.refused.is_empty() {
+        told.push(format!(
+            "was not taken for {}",
+            listed(&sent.dropped.refused)
+        ));
+    }
+    let dropped = if told.is_empty() {
         String::new()
     } else {
-        format!(": the server refused {}", named.join(", "))
+        format!(
+            "; the cancellation to the attendees it drops {}",
+            told.join(" and ")
+        )
     };
-    format!(
-        "No attendee accepted the message{refused}; nothing else was sent, and mp outbox list \
-         -A {name} shows it"
-    )
+    match &sent.reach {
+        Reach::Queued(detail) => format!(
+            "No attendee has the message yet{}; it waits in the outbox and goes out on its \
+             own, so do not send the change again{dropped}; mp outbox list -A {name} shows it",
+            held("did not take it for", detail)
+        ),
+        Reach::Unconfirmed(detail) => format!(
+            "No attendee is known to have the message{}; the server gave no verdict for some, \
+             who may have it, and mp does not send it again on its own{dropped}; mp outbox \
+             list -A {name} shows it",
+            held("did not confirm it for", detail)
+        ),
+        Reach::Delivered | Reach::Nowhere => format!(
+            "No attendee accepted the message{}; nothing else was sent, and mp outbox list \
+             -A {name} shows it",
+            held("refused", &None)
+        ),
+    }
+}
+
+/// Where the first message of an organizer's change, the change itself,
+/// stands once submitted.
+enum Reach {
+    /// An attendee accepted it.
+    Delivered,
+    /// No attendee accepted it and none will: every recipient refused it
+    /// for good, or it holds no outbox row a later pass could submit.
+    Nowhere,
+    /// No attendee has it yet, and the outbox submits it again on a later
+    /// pass: the server deferred its recipients, or the transport failed
+    /// before any could take it, with the error it gave.
+    Queued(Option<String>),
+    /// The server gave no verdict for a recipient, who may hold it: the
+    /// outbox keeps the row for a human and never submits it again on its
+    /// own, with the error the transport gave.
+    Unconfirmed(Option<String>),
+}
+
+impl Reach {
+    /// Where a submission that came back with its verdicts left the change.
+    fn of(report: &crate::send::SendReport) -> Self {
+        let results = &report.send_result.results;
+        if results.iter().any(|result| result.success) {
+            Reach::Delivered
+        } else if results.iter().any(crate::send::RecipientResult::ambiguous) {
+            Reach::Unconfirmed(None)
+        } else if report.state == Some(crate::outbox::OutboxState::PendingSend) {
+            Reach::Queued(None)
+        } else {
+            Reach::Nowhere
+        }
+    }
+
+    /// Where a submission that failed with `error` left the change `built`,
+    /// read from its outbox row; `None` when it has none, so it goes
+    /// nowhere.
+    fn after(
+        account: &AccountConfig,
+        built: &crate::send::BuiltMessage,
+        error: &anyhow::Error,
+    ) -> Option<Self> {
+        let store = Store::open(crate::config::store_path(&account.name)).ok()?;
+        let row =
+            crate::outbox::load_by_message_id(&store, &account.name, &built.message_id).ok()??;
+        let detail = Some(format!("{error:#}"));
+        Some(
+            if row.state == crate::outbox::OutboxState::PendingSend
+                && row.submission_started_at.is_none()
+            {
+                Reach::Queued(detail)
+            } else {
+                Reach::Unconfirmed(detail)
+            },
+        )
+    }
+}
+
+/// What the cancellation of the attendees an update drops did.
+#[derive(Default)]
+struct Dropped {
+    /// The addresses that accepted it.
+    told: Vec<String>,
+    /// The recipients it did not reach, with why.
+    refused: Vec<RecipientOutcome>,
 }
 
 /// What the messages of one organizer's change did.
 struct ItipSent {
     /// The addresses that accepted the first message, the change itself.
     delivered: Vec<String>,
-    /// Every recipient a message of the change did not reach, with why.
+    /// Where the change itself stands.
+    reach: Reach,
+    /// The recipients the change itself did not reach, with why.
     refused: Vec<RecipientOutcome>,
+    /// What the cancellation of the attendees an update drops did.
+    dropped: Dropped,
     /// How many contacts the index holds once the recipients were counted.
     contacts: Option<usize>,
 }
@@ -2383,10 +2493,20 @@ struct ItipSent {
 /// first submission.
 ///
 /// The first message is the change, which the operation is judged on; the
-/// rest (an update's cancellation of the attendees it drops) go only once
-/// it reached an attendee, so a change nobody received cancels nobody. A
-/// later message the transport could not take at all leaves its
-/// recipients refused with the reason, the change itself having gone out.
+/// rest (an update's cancellation of the attendees it drops) go unless the
+/// change can reach nobody, refused for good by every recipient or failed
+/// with no outbox row left to retry, so a change nobody will receive
+/// cancels nobody. A change the outbox still holds (a deferred recipient,
+/// a transport that failed before any took it, a recipient with no
+/// verdict) reaches its attendees later or already did, so the dropped
+/// ones are told now: the update's own copy is filed in Sent only once it
+/// goes out, and nothing would tell them afterwards. On the organizer's
+/// agenda the cancellation, filed first, names a strict subset of the
+/// attendees of the version it holds, which the agenda reads as their
+/// uninvitation and not as the meeting's end ([`crate::reconcile`]); it
+/// stores its `SEQUENCE`, so a change made before the queued update goes
+/// out takes one above both. A later message the transport could not take
+/// at all leaves its recipients refused with the reason.
 async fn send_itip(
     account: &AccountConfig,
     messages: &[crate::invite::ItipMessage],
@@ -2407,20 +2527,27 @@ async fn send_itip(
     if !commit_point(method, token).await {
         return Ok(None);
     }
-    let report = crate::send::send_durably(change, account, &smtp).await?;
-    let delivered: Vec<String> = report
-        .send_result
-        .results
-        .iter()
-        .filter(|result| result.success)
-        .map(|result| result.address.clone())
-        .collect();
-    let mut refused = refused_of(&report);
-    if !delivered.is_empty() {
+    let (delivered, reach, refused) = match crate::send::send_durably(change, account, &smtp).await
+    {
+        Ok(report) => (
+            delivered_of(&report),
+            Reach::of(&report),
+            refused_of(&report),
+        ),
+        Err(e) => match Reach::after(account, change, &e) {
+            Some(reach) => (Vec::new(), reach, Vec::new()),
+            None => return Err(e),
+        },
+    };
+    let mut dropped = Dropped::default();
+    if !matches!(reach, Reach::Nowhere) {
         for (message, follow) in messages.iter().skip(1).zip(rest) {
             match crate::send::send_durably(follow, account, &smtp).await {
-                Ok(report) => refused.extend(refused_of(&report)),
-                Err(e) => refused.extend(
+                Ok(report) => {
+                    dropped.told.extend(delivered_of(&report));
+                    dropped.refused.extend(refused_of(&report));
+                }
+                Err(e) => dropped.refused.extend(
                     message
                         .to
                         .iter()
@@ -2437,16 +2564,29 @@ async fn send_itip(
             }
         }
     }
-    let contacts = if delivered.is_empty() {
+    let contacts = if delivered.is_empty() && dropped.told.is_empty() {
         None
     } else {
         crate::contacts::hooks::bump_owed_sends(account)
     };
     Ok(Some(ItipSent {
         delivered,
+        reach,
         refused,
+        dropped,
         contacts,
     }))
+}
+
+/// The addresses that accepted one submission.
+fn delivered_of(report: &crate::send::SendReport) -> Vec<String> {
+    report
+        .send_result
+        .results
+        .iter()
+        .filter(|result| result.success)
+        .map(|result| result.address.clone())
+        .collect()
 }
 
 /// The recipients one submission did not reach, with the reason the server

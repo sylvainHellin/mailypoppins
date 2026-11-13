@@ -4933,7 +4933,7 @@ pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<Se
     // The daemon-side transport fake (P4-U12), which serves the submission in
     // process and records it. Unset outside a test, and never set on a client.
     if let Some(fake) = crate::daemon::fake_transport::fake_transport() {
-        return Ok(fake.submit(&built.message_id, &built.recipients));
+        return fake.submit(&built.message_id, &built.recipients);
     }
     // Create SMTP transport (branching on auth method / TLS mode).
     let mailer = build_smtp_transport(smtp_config)?;

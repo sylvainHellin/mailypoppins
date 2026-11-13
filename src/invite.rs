@@ -302,9 +302,10 @@ pub fn organized_row(
 /// update to every attendee it invites, then, when it drops attendees, a
 /// cancellation to those.
 ///
-/// The update goes first because it is the change: one nobody received
-/// must cancel nobody ([`crate::reconcile`] reads the cancellation on the
-/// organizer's own agenda as the uninvitation it is). The cancellation takes
+/// The update goes first because it is the change: one that can reach
+/// nobody must cancel nobody, while one the outbox still holds tells the
+/// dropped attendees at once ([`crate::reconcile`] reads the cancellation
+/// on the organizer's own agenda as the uninvitation it is). The cancellation takes
 /// `next_sequence` and the update the one above it, so a dropped attendee's
 /// copy, at most at `next_sequence - 1`, is cancelled by it, while on the
 /// organizer's agenda it is a stale CANCEL below the update's sequence.
