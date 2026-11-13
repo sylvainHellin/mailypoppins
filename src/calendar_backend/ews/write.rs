@@ -15,8 +15,9 @@
 //!   later). A `SaveOnly` answer may leave the unsent response in Drafts:
 //!   when the CreateItem answer names it as a `MeetingResponse` or a
 //!   `Message`, it is deleted for good (`HardDelete`); an item of any other
-//!   kind, the calendar item above all, is never deleted, and an answer that
-//!   names none is logged. Whether the server names it is unverified live.
+//!   kind, the calendar item above all, is never deleted, nor is one whose
+//!   id is the answered event's, and an answer that names none is logged.
+//!   Whether the server names it is unverified live.
 //!
 //! - A create is a `CalendarItem` through `CreateItem` into the calendar's
 //!   folder, every field in the schema's order, which invites the attendees
@@ -679,6 +680,13 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
             .map_err(|error| answer_error(&error, "CreateItem"))?;
         match draft {
             _ if send_response => {}
+            // A HardDelete on the answered event's own id would delete the
+            // event, whatever kind the answer names it as.
+            Some(draft) if draft == event => info!(
+                "[calendar] {}: the answer to {event} saved without telling the organizer names \
+                 the event itself as its response item; nothing is deleted",
+                self.account
+            ),
             Some(draft) => self.delete_draft(&draft).await,
             // At info, so the live check of a SaveOnly answer reads it.
             None => info!(

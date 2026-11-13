@@ -193,6 +193,33 @@ async fn an_answer_that_names_the_calendar_item_deletes_nothing() {
     assert!(backend.fetch().exhausted());
 }
 
+/// A response item whose id is the answered event's own is never deleted,
+/// whatever kind the CreateItem answer names it as: a HardDelete on that id
+/// would delete the event.
+#[tokio::test]
+async fn a_response_item_named_by_the_event_id_deletes_nothing() {
+    let backend = backend(ScriptedFetch::default().answer(
+        "CreateItem",
+        &built_answer(
+            "CreateItem",
+            &success_message(
+                "CreateItem",
+                &format!(
+                    "<m:Items><t:MeetingResponse><t:ItemId Id=\"{SINGLE_ID}\" \
+                     ChangeKey=\"k\"/></t:MeetingResponse></m:Items>"
+                ),
+            ),
+        ),
+    ));
+    backend
+        .respond(SINGLE_ID, Response::Accept, None, false, None)
+        .await
+        .unwrap();
+    let sent = backend.fetch().sent();
+    assert_eq!(sent.len(), 1, "the CreateItem alone: {sent:?}");
+    assert!(backend.fetch().exhausted());
+}
+
 /// A decline carries its comment before the reference and the proposal
 /// after it, the schema's order; an accept never carries a proposal.
 #[tokio::test]
