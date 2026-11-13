@@ -702,6 +702,9 @@ fn plan(
             let name = string_param(params, "account")?;
             let account = super::account::ready_account(&snapshot.accounts, &name)?;
             let server = has_backend(account).then(|| Box::new(account.clone()));
+            // A resync the user starts asks the server even about an EWS
+            // login it refused and still holds (PERSO-296).
+            crate::login_gate::forget_calendar(account);
             Ok(Work::Rebuild {
                 account: name,
                 server,

@@ -110,9 +110,15 @@ fn bootstrap(revision: u64) -> Bootstrap {
 
 /// `home` ready, its credentials read once with nothing rejected.
 fn app() -> (App, Daemon) {
+    app_of(config())
+}
+
+/// `home` as `config` names it, ready, its credentials read once with
+/// nothing rejected.
+fn app_of(config: mp_core::config::GlobalConfig) -> (App, Daemon) {
     let daemon = Daemon::default();
     let served = daemon.clone();
-    let mut app = App::from_bootstrap(config(), &bootstrap(1));
+    let mut app = App::from_bootstrap(config, &bootstrap(1));
     app.session = Some(crate::session::Session::serving(move || served));
     app.pending_actions.clear();
     app.refresh_credentials(0);
@@ -125,7 +131,7 @@ fn app() -> (App, Daemon) {
 fn account_check(status: CheckStatus) -> HealthCheck {
     let detail = match status {
         CheckStatus::Ok => "serving".to_string(),
-        _ => mp_core::mp_command::login_rejected_detail(ACCOUNT, RejectedLogin::Imap, false),
+        _ => mp_core::mp_command::login_rejected_detail(ACCOUNT, RejectedLogin::Imap, false, None),
     };
     HealthCheck {
         name: format!("account:{ACCOUNT}"),
@@ -276,6 +282,51 @@ fn a_refused_sign_in_names_the_command_that_signs_in_again() {
     assert!(
         screen.contains("oauth2-login -A home"),
         "and the way out: {screen}"
+    );
+}
+
+/// An account whose calendar logs in to Exchange Web Services with its SMTP
+/// password: its `calendar:<name>` check turning `warn` reads the
+/// credentials, and the sidebar names the EWS password and the command that
+/// sets the SMTP password it is, the daemon's sentence.
+#[test]
+fn a_rejected_ews_login_names_the_password_it_logs_in_with() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut ews = config();
+    ews.accounts[0].calendar_backend = Some(mp_core::config::CalendarBackendKind::Ews);
+    ews.accounts[0].ews = Some(mp_core::config::EwsSettings {
+        endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+        username: "ab12cde".into(),
+        password_from: Some(mp_core::config::EwsPasswordSource::Smtp),
+        delegate_calendars: Vec::new(),
+    });
+    let (mut app, daemon) = app_of(ews);
+
+    *daemon.rejected.lock().unwrap() = Some(RejectedLogin::Ews);
+    app.apply_event(&check_changed(
+        2,
+        &HealthCheck {
+            name: format!("calendar:{ACCOUNT}"),
+            status: CheckStatus::Warn,
+            detail: mp_core::mp_command::login_rejected_detail(
+                ACCOUNT,
+                RejectedLogin::Ews,
+                false,
+                Some(mp_core::config::EwsPasswordSource::Smtp),
+            ),
+        },
+    ));
+    assert_eq!(rejected(&app), Some(RejectedLogin::Ews));
+
+    let screen = drawn(&mut app);
+    assert!(screen.contains("login rejected"), "{screen}");
+    assert!(
+        screen.contains("the server rejected the EWS"),
+        "the sidebar names the login: {screen}"
+    );
+    assert!(
+        screen.contains("set-password -A home smtp"),
+        "and the password it logs in with: {screen}"
     );
 }
 

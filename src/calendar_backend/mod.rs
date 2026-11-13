@@ -462,7 +462,7 @@ fn ews_backend(
             ])
         )));
     };
-    let transport = EwsHttp::new(login, password)?;
+    let transport = EwsHttp::new(&account.name, login, password)?;
     Ok(
         EwsCalendarBackend::with_fetch(&account.name, login.password_from, transport)
             .with_delegate_calendars(login.delegate_calendars.clone()),

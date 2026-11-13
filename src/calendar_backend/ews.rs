@@ -247,15 +247,15 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     /// A seam failure of `operation` as the error a client shows.
     fn seam_error(&self, error: EwsFetchError, operation: &str) -> CalendarBackendError {
         match error {
-            EwsFetchError::LoginRefused(_) => CalendarBackendError::LoginRefused(format!(
-                "{error}; set the password again with `{}`",
-                mp_core::mp_command::here(&[
-                    "config",
-                    "set-password",
-                    self.password_from.as_str(),
-                    "--account",
+            // The transport's refusal is the gate's (`EWS login failed: ...`),
+            // and the way out every surface names follows it.
+            EwsFetchError::LoginRefused(why) => CalendarBackendError::LoginRefused(format!(
+                "{why}; {}",
+                crate::login_gate::rejected_detail(
                     &self.account,
-                ])
+                    mp_protocol::account::RejectedLogin::Ews,
+                    Some(self.password_from),
+                )
             )),
             EwsFetchError::Status { status, .. } => CalendarBackendError::Other(anyhow!(
                 "the Exchange server answered {operation} with HTTP {status}"

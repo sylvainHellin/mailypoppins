@@ -394,7 +394,7 @@ pub struct EwsSettings {
 }
 
 /// Which stored password an EWS login uses.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum EwsPasswordSource {
     /// The IMAP password (`imap-password-<account>`).

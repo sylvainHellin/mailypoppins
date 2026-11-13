@@ -15,6 +15,9 @@ use base64::Engine;
 
 use super::*;
 use crate::calendar_backend::ews::fetch::{EwsFetch, EwsFetchError};
+use crate::config::ServerLogin;
+use crate::login_gate::{self, Login};
+use mp_protocol::account::RejectedLogin;
 
 const TYPE2: &str = include_str!("../../../../tests/fixtures/ews/ntlm_type2.hex");
 
@@ -226,16 +229,40 @@ fn ok_chunked(parts: &[&str]) -> String {
     text
 }
 
+/// A user name no other test logs in as: the gate is one list for the whole
+/// process, and a refusal one test records would hold another's login.
+fn fresh_user(what: &str) -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!("ews-{what}-{}", NEXT.fetch_add(1, Ordering::SeqCst))
+}
+
+fn timeouts(request: Duration) -> Timeouts {
+    Timeouts {
+        connect: Duration::from_secs(2),
+        request,
+        login: Duration::from_secs(5),
+    }
+}
+
+/// A transport to `server` as `user` with `password`.
+fn transport_as(server: &Server, user: &str, password: &str, timeouts: Timeouts) -> EwsHttp {
+    EwsHttp::plain_for_test(&server.url(), user, password, timeouts)
+}
+
+/// A transport to `server` as a user of its own.
 fn transport(server: &Server, request: Duration) -> EwsHttp {
-    EwsHttp::plain_for_test(
-        &server.url(),
-        "ab12cde",
-        "secret",
-        Timeouts {
-            connect: Duration::from_secs(2),
-            request,
-        },
-    )
+    transport_as(server, &fresh_user("call"), "secret", timeouts(request))
+}
+
+/// The gate's IMAP login of `user`, on another host, as the TUM's IMAP
+/// login presents the user its EWS login does.
+fn imap_login(user: &str) -> Login {
+    Login::Imap(ServerLogin {
+        account: format!("imap-of-{user}"),
+        host: "imap.example.test".into(),
+        port: 993,
+        username: user.into(),
+    })
 }
 
 /// The happy path: the type 1 and the type 3 go on one connection, each
@@ -249,7 +276,8 @@ async fn the_login_and_the_next_call_go_on_one_connection() {
         (Some(ok("<first/>")), Then::Next),
         (Some(ok_chunked(&["<sec", "ond/>"])), Then::Next),
     ]]);
-    let http = transport(&server, Duration::from_secs(5));
+    let user = fresh_user("happy");
+    let http = transport_as(&server, &user, "secret", timeouts(Duration::from_secs(5)));
     assert_eq!(http.post(ENVELOPE).await.unwrap(), "<first/>");
     assert_eq!(http.post(ENVELOPE).await.unwrap(), "<second/>");
     let requests = server.requests();
@@ -261,7 +289,7 @@ async fn the_login_and_the_next_call_go_on_one_connection() {
     );
     assert_eq!(requests[0].ntlm().unwrap(), ntlm::negotiate_message());
     let type3 = requests[1].ntlm().unwrap();
-    let user: Vec<u8> = "ab12cde"
+    let user: Vec<u8> = user
         .encode_utf16()
         .flat_map(|unit| unit.to_le_bytes())
         .collect();
@@ -294,7 +322,8 @@ async fn a_401_after_the_type_3_is_a_refused_login_never_asked_again() {
     let http = transport(&server, Duration::from_secs(5));
     let err = http.post(ENVELOPE).await.unwrap_err();
     assert!(
-        matches!(err, EwsFetchError::LoginRefused(ref why) if why.contains("HTTP 401")),
+        matches!(err, EwsFetchError::LoginRefused(ref why)
+            if why.starts_with("EWS login failed: HTTP 401")),
         "{err:?}"
     );
     let again = http.post(ENVELOPE).await.unwrap_err();
@@ -422,12 +451,9 @@ async fn a_silent_or_absent_server_is_a_transport_failure() {
     drop(unused);
     let http = EwsHttp::plain_for_test(
         &url,
-        "ab12cde",
+        &fresh_user("absent"),
         "secret",
-        Timeouts {
-            connect: Duration::from_secs(2),
-            request: Duration::from_secs(5),
-        },
+        timeouts(Duration::from_secs(5)),
     );
     let err = http.post(ENVELOPE).await.unwrap_err();
     assert!(matches!(err, EwsFetchError::Transport(_)), "{err:?}");
@@ -442,12 +468,15 @@ fn a_user_name_splits_off_its_domain() {
     assert_eq!(split_user("ab12cde@tum.de"), ("ab12cde@tum.de", ""));
 }
 
-/// A refused login holds its password across transports, so the next pass
-/// does not ask the server again with it within the hold: a second
-/// transport with the same login answers the refusal without a connection,
-/// and one with another password, a password stored anew, logs in at once.
+/// A refused EWS password holds the IMAP login of the same user and
+/// password, and the reverse: TUM counts refusals per directory account
+/// whatever the protocol, so the gate's one row per user and password holds
+/// every login that presents them. A held EWS login dials nothing and says
+/// where the password was refused and when it is asked again; another
+/// password is asked at once.
 #[tokio::test]
-async fn a_refused_password_is_held_across_passes_and_a_new_one_is_asked() {
+async fn a_refused_ews_password_holds_the_imap_login_of_its_user_and_the_reverse() {
+    let user = fresh_user("refused");
     let server = Server::start(vec![
         vec![
             (Some(challenge(&[])), Then::Next),
@@ -458,25 +487,161 @@ async fn a_refused_password_is_held_across_passes_and_a_new_one_is_asked() {
             (Some(ok("<taken/>")), Then::Next),
         ],
     ]);
-    let pass = |password: &str| {
-        EwsHttp::plain_for_test(
-            &server.url(),
-            "ab12cde",
-            password,
-            Timeouts {
-                connect: Duration::from_secs(2),
-                request: Duration::from_secs(5),
-            },
-        )
-    };
+    let pass =
+        |password: &str| transport_as(&server, &user, password, timeouts(Duration::from_secs(5)));
     let err = pass("wrong").post(ENVELOPE).await.unwrap_err();
     assert!(matches!(err, EwsFetchError::LoginRefused(_)), "{err:?}");
+    let imap = login_gate::dial(&imap_login(&user), "wrong")
+        .err()
+        .expect("the IMAP login of the same user and password is held");
+    assert!(
+        imap.to_string()
+            .contains("(the server refused this password at the EWS login earlier"),
+        "{imap}"
+    );
     let held = pass("wrong").post(ENVELOPE).await.unwrap_err();
     assert!(
-        matches!(held, EwsFetchError::LoginRefused(ref why) if why.contains("asked again at")),
+        matches!(held, EwsFetchError::LoginRefused(ref why)
+            if why.starts_with("EWS login failed: HTTP 401") && why.contains("is asked again at")),
         "{held:?}"
     );
-    assert_eq!(server.connections(), 1, "the held pass asked nobody");
+    assert_eq!(server.connections(), 1, "the held login dialled nothing");
     assert_eq!(pass("right").post(ENVELOPE).await.unwrap(), "<taken/>");
     assert_eq!(server.connections(), 2);
+
+    let other = fresh_user("refused-at-imap");
+    login_gate::record(
+        &imap_login(&other),
+        "wrong",
+        &login_gate::LoginRejected::new(RejectedLogin::Imap, "NO LOGIN failed.".into()),
+    );
+    let quiet = Server::start(Vec::new());
+    let held = transport_as(&quiet, &other, "wrong", timeouts(Duration::from_secs(5)))
+        .post(ENVELOPE)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(held, EwsFetchError::LoginRefused(ref why)
+            if why.contains("(the server refused this password at the IMAP login earlier")),
+        "{held:?}"
+    );
+    assert_eq!(quiet.connections(), 0, "the EWS login dialled nothing");
+}
+
+/// The gate's deadline rule for a login that gets no answer: a type 3 of a
+/// password the gate holds a refusal of, written and unanswered by the
+/// deadline, is one more step of its hold; a type 3 of a password never
+/// refused counts nothing; and a deadline that runs out before the type 3
+/// was written (the server never answers the type 1) counts nothing, even
+/// for a refused password, since no password reached the server.
+#[tokio::test]
+async fn an_unanswered_type_3_steps_the_hold_of_a_refused_password_only() {
+    let short = Timeouts {
+        login: Duration::from_millis(300),
+        ..timeouts(Duration::from_secs(5))
+    };
+    let silent_after_challenge = || {
+        Server::start(vec![vec![
+            (Some(challenge(&[])), Then::Next),
+            (None, Then::Next),
+        ]])
+    };
+
+    let user = fresh_user("unanswered");
+    let refused_once = |user: &str| {
+        let login = imap_login(user);
+        login_gate::record(
+            &login,
+            "wrong",
+            &login_gate::LoginRejected::new(RejectedLogin::Imap, "NO LOGIN failed.".into()),
+        );
+        // The user acting ends the hold and keeps the row's count.
+        login_gate::forget(&login);
+        assert_eq!(login_gate::in_a_row_for_test(&login, "wrong"), 1);
+        login
+    };
+    let login = refused_once(&user);
+    let server = silent_after_challenge();
+    let started = std::time::Instant::now();
+    let err = transport_as(&server, &user, "wrong", short)
+        .post(ENVELOPE)
+        .await
+        .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(err, EwsFetchError::Transport(_)), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains("did not answer the NTLM login within"),
+        "{err}"
+    );
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .map(Request::ntlm_type)
+            .collect::<Vec<_>>(),
+        [1, 3]
+    );
+    assert_eq!(
+        login_gate::in_a_row_for_test(&login, "wrong"),
+        2,
+        "a step of the hold"
+    );
+    assert!(
+        login_gate::dial(&login, "wrong").is_err(),
+        "held from then on"
+    );
+
+    let fresh = fresh_user("unanswered-fresh");
+    let server = silent_after_challenge();
+    let err = transport_as(&server, &fresh, "fresh", short)
+        .post(ENVELOPE)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EwsFetchError::Transport(_)), "{err:?}");
+    assert_eq!(
+        login_gate::in_a_row_for_test(&imap_login(&fresh), "fresh"),
+        0
+    );
+
+    let early = fresh_user("unanswered-early");
+    let login = refused_once(&early);
+    let server = Server::start(vec![vec![(None, Then::Next)]]);
+    let err = transport_as(&server, &early, "wrong", short)
+        .post(ENVELOPE)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EwsFetchError::Transport(_)), "{err:?}");
+    assert_eq!(server.requests().len(), 1, "the type 1 alone");
+    assert_eq!(
+        login_gate::in_a_row_for_test(&login, "wrong"),
+        1,
+        "nothing counted"
+    );
+    assert!(login_gate::dial(&login, "wrong").is_ok(), "the row is free");
+}
+
+/// A login the server takes ends the row of its password, count and all,
+/// for every login of the row.
+#[tokio::test]
+async fn an_accepted_ews_login_ends_the_row_of_its_password() {
+    let user = fresh_user("accepted");
+    let login = imap_login(&user);
+    login_gate::record(
+        &login,
+        "right",
+        &login_gate::LoginRejected::new(RejectedLogin::Imap, "NO LOGIN failed.".into()),
+    );
+    login_gate::forget(&login);
+    let server = Server::start(vec![vec![
+        (Some(challenge(&[])), Then::Next),
+        (Some(ok("<taken/>")), Then::Next),
+    ]]);
+    let http = transport_as(&server, &user, "right", timeouts(Duration::from_secs(5)));
+    assert_eq!(http.post(ENVELOPE).await.unwrap(), "<taken/>");
+    assert_eq!(login_gate::in_a_row_for_test(&login, "right"), 0);
 }

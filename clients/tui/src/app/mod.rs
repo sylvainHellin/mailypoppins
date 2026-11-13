@@ -1032,13 +1032,17 @@ impl App {
         }
     }
 
-    /// An `account:<name>` health check moved: the daemon refuses or accepts
-    /// the account's login again (PERSO-296), which `account.credentials`
-    /// answers as `rejected_logins`, so the account's answer is read again.
-    /// The check's detail is the daemon's sentence and is not parsed here.
-    /// A check about anything else reads nothing.
+    /// An `account:<name>` health check moved, or a `calendar:<name>` one,
+    /// which reports an EWS calendar's login (PERSO-256): the daemon refuses
+    /// or accepts the account's login again (PERSO-296), which
+    /// `account.credentials` answers as `rejected_logins`, so the account's
+    /// answer is read again. The check's detail is the daemon's sentence and
+    /// is not parsed here. A check about anything else reads nothing.
     pub fn on_account_check(&mut self, check: &str) {
-        let Some(account) = check.strip_prefix("account:") else {
+        let Some(account) = check
+            .strip_prefix("account:")
+            .or_else(|| check.strip_prefix("calendar:"))
+        else {
             return;
         };
         if let Some(index) = self

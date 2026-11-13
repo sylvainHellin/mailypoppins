@@ -393,6 +393,15 @@ impl Diagnostics {
                     &crate::calendar_backend::missing_scopes(account),
                 ));
             }
+            let ews = mp_protocol::account::RejectedLogin::Ews;
+            if let Some(login @ crate::login_gate::Login::Ews(_, source)) =
+                crate::login_gate::Login::of(account, ews)
+            {
+                let refused = crate::login_gate::is_refused(&login);
+                // The secrets are read only for a refused password.
+                let shared = refused && crate::login_gate::shared_password(&account.name);
+                checks.push(ews_calendar_check(&account.name, refused, shared, source));
+            }
         }
         checks
     }
@@ -471,7 +480,7 @@ impl Diagnostics {
             }
         };
         let check = account_check(account, health, opening_for);
-        let rejected = crate::login_gate::rejected_logins(config);
+        let rejected = mail_logins(&crate::login_gate::rejected_logins(config));
         // The secrets are read only for a refused password, the rare case.
         let shared = rejected
             .first()
@@ -599,10 +608,51 @@ fn with_rejected_logins(
         Some(&login) if check.status == CheckStatus::Ok => health_check(
             format!("account:{account}"),
             CheckStatus::Warn,
-            mp_core::mp_command::login_rejected_detail(account, login, shared_password),
+            mp_core::mp_command::login_rejected_detail(account, login, shared_password, None),
         ),
         _ => check,
     }
+}
+
+/// The logins of `rejected` the account's mail goes through, which its
+/// `account:<name>` check is about: the EWS login is its calendar's, which
+/// the `calendar:<name>` check reports.
+fn mail_logins(
+    rejected: &[mp_protocol::account::RejectedLogin],
+) -> Vec<mp_protocol::account::RejectedLogin> {
+    rejected
+        .iter()
+        .copied()
+        .filter(|login| *login != mp_protocol::account::RejectedLogin::Ews)
+        .collect()
+}
+
+/// An EWS calendar account's login (PERSO-256), as the check
+/// `calendar:<name>`: `warn` while the gate holds a refusal of its password
+/// (`refused`), with the sentence every client shows, naming the password
+/// `source` and the command that sets it, or the kind-less one when the
+/// account uses one password (`shared`); `ok` otherwise, so the recovery is
+/// published.
+fn ews_calendar_check(
+    account: &str,
+    refused: bool,
+    shared: bool,
+    source: crate::config::EwsPasswordSource,
+) -> HealthCheck {
+    let name = format!("calendar:{account}");
+    if !refused {
+        return health_check(name, CheckStatus::Ok, "the EWS login is not refused");
+    }
+    health_check(
+        name,
+        CheckStatus::Warn,
+        mp_core::mp_command::login_rejected_detail(
+            account,
+            mp_protocol::account::RejectedLogin::Ews,
+            shared,
+            Some(source),
+        ),
+    )
 }
 
 /// A Graph calendar account's sign-in, as the check `calendar:<name>`.
@@ -1277,6 +1327,45 @@ mod tests {
         );
         let kept = with_rejected_logins(blocked, "tum", &[RejectedLogin::Smtp], false);
         assert_eq!(kept.detail, "blocked: held");
+    }
+
+    /// An EWS calendar's check warns while the gate holds a refusal of its
+    /// login, with the sentence every client shows, naming the password the
+    /// login uses and the command that sets it; the account's own check is
+    /// about its mail logins and stays `ok` for a refusal of the EWS login
+    /// alone.
+    #[test]
+    fn a_rejected_ews_login_warns_on_the_calendar_check() {
+        use crate::config::EwsPasswordSource;
+        use mp_protocol::account::RejectedLogin;
+        let refused = ews_calendar_check("tum", true, false, EwsPasswordSource::Imap);
+        assert_eq!(refused.name, "calendar:tum");
+        assert_eq!(refused.status, CheckStatus::Warn);
+        assert_eq!(
+            refused.detail,
+            mp_core::mp_command::login_rejected_detail(
+                "tum",
+                RejectedLogin::Ews,
+                false,
+                Some(EwsPasswordSource::Imap)
+            )
+        );
+        assert_eq!(
+            refused.detail,
+            "the server rejected the EWS password; set it with mp config set-password -A tum imap"
+        );
+        let shared = ews_calendar_check("tum", true, true, EwsPasswordSource::Imap);
+        assert_eq!(
+            shared.detail,
+            "the server rejected the EWS password; set it with mp config set-password -A tum"
+        );
+        let fine = ews_calendar_check("tum", false, false, EwsPasswordSource::Imap);
+        assert_eq!(fine.status, CheckStatus::Ok);
+        let serving = account_check("tum", RuntimeHealth::Ready, std::time::Duration::ZERO);
+        assert_eq!(
+            with_rejected_logins(serving, "tum", &mail_logins(&[RejectedLogin::Ews]), false).status,
+            CheckStatus::Ok
+        );
     }
 
     /// At `DEBUG` the writer adds the thread id and the module path, and both

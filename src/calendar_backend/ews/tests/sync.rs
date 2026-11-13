@@ -615,7 +615,9 @@ async fn a_refused_login_stops_the_pass_and_is_never_retried() {
             .answer("FindFolder", &second)
             .fail(
                 "SyncFolderItems",
-                EwsFetchError::LoginRefused("HTTP 401 after the NTLM handshake".into()),
+                EwsFetchError::LoginRefused(
+                    "EWS login failed: HTTP 401 after the NTLM login as ab12cde".into(),
+                ),
             ),
     );
     let dir = tempfile::tempdir().unwrap();
@@ -624,11 +626,16 @@ async fn a_refused_login_stops_the_pass_and_is_never_retried() {
     let err = crate::calendar_sync::sync_account(&store, &backend, "tum", now)
         .await
         .unwrap_err();
+    // The gate's refusal, then the sentence every surface shows.
     let expected = format!(
-        "the Exchange server refused the EWS login (HTTP 401 after the NTLM handshake); \
-         set the password again with `{}`",
-        mp_core::mp_command::here(&["config", "set-password", "imap", "--account", "tum"])
+        "EWS login failed: HTTP 401 after the NTLM login as ab12cde; {}",
+        crate::login_gate::rejected_detail(
+            "tum",
+            mp_protocol::account::RejectedLogin::Ews,
+            Some(EwsPasswordSource::Imap)
+        )
     );
+    assert!(expected.contains("the server rejected the EWS password; set it with mp config"));
     assert!(
         matches!(err, CalendarBackendError::LoginRefused(ref sentence) if *sentence == expected),
         "{err:?}"

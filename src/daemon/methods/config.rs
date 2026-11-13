@@ -666,6 +666,14 @@ fn release_written(account: &crate::config::AccountConfig, kinds: &[SecretKind])
         if let Some(login) = crate::login_gate::Login::of(account, login) {
             crate::login_gate::forget(&login);
         }
+        // The EWS login presents one of the two passwords.
+        if let Some(login @ crate::login_gate::Login::Ews(_, source)) =
+            crate::login_gate::Login::of(account, mp_protocol::account::RejectedLogin::Ews)
+        {
+            if source.as_str() == kind.as_str() {
+                crate::login_gate::forget(&login);
+            }
+        }
     }
 }
 

@@ -70,9 +70,9 @@ function HealthLine({ check, rejected }: { check: HealthCheck; rejected: Rejecte
           <LogIn aria-hidden="true" />
           Sign in again
         </Button>
-      ) : rejected ? (
+      ) : rejected && rejected.kind !== "ews" ? (
         <PasswordButton account={rejected.account} kind={sharedPassword(s, rejected.account) ? null : rejected.kind} />
-      ) : null}
+      ) : null /* An EWS calendar's login (PERSO-256) is the calendar check's; its detail names the command. */}
       <Button
         size="icon-xs"
         variant="ghost"

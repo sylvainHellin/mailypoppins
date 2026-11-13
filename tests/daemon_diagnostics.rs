@@ -1338,7 +1338,8 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
         mp_core::mp_command::login_rejected_detail(
             ALPHA,
             mp_protocol::account::RejectedLogin::Imap,
-            true
+            true,
+            None
         ),
         "in the sentence the TUI and the desktop app show, without a kind: the \
          account has no SMTP password of its own, so one password serves both (PERSO-297)"

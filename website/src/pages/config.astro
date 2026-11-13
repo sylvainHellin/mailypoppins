@@ -690,9 +690,11 @@ server = "sentitems"          # Not "Sent Items"`} />
       </p>
       <p>
         mp logs in to Exchange over NTLM with that password. A password the
-        server refuses is not tried again for an hour, so a wrong one cannot
-        lock the account; storing the right one with
-        <code>mp config set-password</code> lets the next sync try it at once.
+        server refuses is held as a refused IMAP password is, 2 minutes, then
+        10, then an hour, and one refused at the IMAP login of the same user is
+        held for the calendar too, so a wrong one cannot lock the account;
+        <code>mp daemon health</code> names it, and storing the right one with
+        <code>mp config set-password</code>, or starting a sync, tries it at once.
       </p>
       <ConfigExample title="EWS calendar config" code={`[[accounts]]
 name = "tum"

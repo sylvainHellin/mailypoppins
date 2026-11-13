@@ -4514,7 +4514,8 @@ mod tests {
                     "is still queued: {}; nothing was changed",
                     crate::login_gate::rejected_detail(
                         "alice",
-                        mp_protocol::account::RejectedLogin::Imap
+                        mp_protocol::account::RejectedLogin::Imap,
+                        None
                     )
                 )),
                 "{}",

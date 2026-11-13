@@ -1693,7 +1693,7 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
                  was changed, try again once that is done",
                 queued.id,
                 queued.kind,
-                crate::login_gate::rejected_detail(&row.account, login)
+                crate::login_gate::rejected_detail(&row.account, login, None)
             );
         }
         if let Some(refused) = ahead.iter().find(|op| op.attempts > 0) {

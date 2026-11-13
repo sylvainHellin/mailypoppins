@@ -38,6 +38,9 @@ pub(super) fn account_alert(app: &App) -> Option<Alert> {
                 &acct.account_config.name,
                 login,
                 acct.credentials.is_some_and(|c| c.shared_password),
+                mp_core::config::EwsLogin::of(&acct.account_config)
+                    .ok()
+                    .map(|ews| ews.password_from),
             ),
             rows: LOGIN_REASON_ROWS,
         });

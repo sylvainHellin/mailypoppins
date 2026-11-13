@@ -16,7 +16,12 @@
 //! - the SMTP login, in [`crate::send::submit`], refused by a `535` or a reply
 //!   carrying the enhanced code `5.7.8`;
 //! - a Graph account's token refresh, in [`crate::graph::access_token`],
-//!   refused by `invalid_grant` (the refresh token is revoked or expired).
+//!   refused by `invalid_grant` (the refresh token is revoked or expired);
+//! - the Exchange Web Services login of an EWS calendar (PERSO-256), in
+//!   `calendar_backend::ews::http`, refused by an HTTP 401 to the NTLM type
+//!   3. Its user is the directory account the IMAP login presents at TUM, so
+//!   it shares that login's row: TUM counts refusals per account whatever
+//!   the protocol (`an_ews_login_shares_the_row_of_the_imap_login_of_its_user_and_password`).
 //!
 //! Each asks the gate first ([`dial`]), and the gate keeps a row per
 //! refused secret. What each promise below rests on is named after it.
@@ -111,7 +116,12 @@
 //!   the server; a greeting or EHLO stalled after the connect still counts
 //!   (`an_smtp_connect_that_never_completes_is_no_step_of_the_hold`);
 //! - the Graph token refresh has it for its whole request and counts at it
-//!   (`crate::graph`'s `a_refresh_unanswered_by_the_deadline_counts_only_for_a_refused_token`).
+//!   (`crate::graph`'s `a_refresh_unanswered_by_the_deadline_counts_only_for_a_refused_token`);
+//! - the EWS login has it from the end of its TCP connect, over the TLS
+//!   handshake and both NTLM legs; one that runs out once the type 3 was
+//!   written counts, one that runs out before counts nothing, since no
+//!   password reached the server (`calendar_backend::ews::http`'s
+//!   `an_unanswered_type_3_steps_the_hold_of_a_refused_password_only`).
 //!
 //! A mark older than `MARK_LIFETIME` holds nothing whatever left it
 //! (`a_mark_older_than_any_dial_is_free`). So a wrong password reaches the
@@ -130,8 +140,8 @@
 //! The hold ends early when the user acts, through [`forget`] or
 //! [`forget_account`]: stores a password (`config.set_password`), signs in
 //! again (`config.oauth2_login`), or starts what needs the login (a sync for
-//! the IMAP login and the Graph sign-in, a send for the SMTP login and the
-//! Graph sign-in). That ends the hold of the secret the login dials with,
+//! the IMAP login, the EWS login and the Graph sign-in, a calendar rebuild
+//! for the EWS login, a send for the SMTP login and the Graph sign-in). That ends the hold of the secret the login dials with,
 //! read where its dial reads it, for every login of its row, and of no other
 //! secret: a send lets an IMAP password that differs from the SMTP one stay
 //! held (`the_user_acting_on_a_login_not_seen_yet_ends_only_its_own_secrets_hold`).
@@ -244,6 +254,11 @@ pub enum Login {
     /// A Graph account's sign-in, by the account's name, which its token
     /// cache is kept under.
     Graph(String),
+    /// The EWS login of an account whose calendar is EWS (PERSO-256): the
+    /// endpoint's host, the user without its `DOMAIN\\` (the directory
+    /// account, as the IMAP login presents it), and which stored password it
+    /// presents.
+    Ews(ServerLogin, crate::config::EwsPasswordSource),
 }
 
 impl Login {
@@ -251,7 +266,7 @@ impl Login {
     /// under.
     pub fn account(&self) -> &str {
         match self {
-            Login::Imap(server) | Login::Smtp(server) => &server.account,
+            Login::Imap(server) | Login::Smtp(server) | Login::Ews(server, _) => &server.account,
             Login::Graph(account) => account,
         }
     }
@@ -262,15 +277,47 @@ impl Login {
             Login::Imap(_) => RejectedLogin::Imap,
             Login::Smtp(_) => RejectedLogin::Smtp,
             Login::Graph(_) => RejectedLogin::Graph,
+            Login::Ews(..) => RejectedLogin::Ews,
         }
     }
 
+    /// The EWS login of `account`, which `login` names.
+    pub fn ews(account: &str, login: &crate::config::EwsLogin) -> Login {
+        let user = match login.username.split_once('\\') {
+            Some((_domain, user)) => user,
+            None => login.username.as_str(),
+        };
+        let port = reqwest::Url::parse(&login.endpoint)
+            .ok()
+            .and_then(|url| url.port_or_known_default())
+            .unwrap_or(443);
+        Login::Ews(
+            ServerLogin {
+                account: account.to_string(),
+                host: login.host.clone(),
+                port,
+                username: user.to_string(),
+            },
+            login.password_from,
+        )
+    }
+
     /// `account`'s login of `kind`, `None` when the account makes no such
-    /// login: a local-only account makes none, a password account no Graph
-    /// sign-in, a Graph account no IMAP or SMTP login, and an account naming
-    /// the retired `oauth2` mode none at all.
+    /// login: a local-only account makes no mail login, a password account
+    /// no Graph sign-in, a Graph account no IMAP or SMTP login, an account
+    /// whose calendar is not EWS, or whose `[accounts.ews]` lacks a field, no
+    /// EWS login, and an account naming the retired `oauth2` mode no mail
+    /// login.
     pub fn of(account: &AccountConfig, kind: RejectedLogin) -> Option<Login> {
         match (&account.auth_method, kind) {
+            // The calendar's login, apart from the mail's.
+            (_, RejectedLogin::Ews) => {
+                if account.calendar_backend() != crate::config::CalendarBackendKind::Ews {
+                    return None;
+                }
+                let login = crate::config::EwsLogin::of(account).ok()?;
+                Some(Login::ews(&account.name, &login))
+            }
             _ if account.is_local_only() => None,
             (AuthMethod::Password, RejectedLogin::Imap) => {
                 Some(Login::Imap(ServerLogin::imap(account)))
@@ -292,6 +339,16 @@ impl Login {
             _ => RejectedLogin::Imap,
         };
         Login::of(account, kind)
+    }
+
+    /// The logins a sync of `account` needs, which a sync the user starts
+    /// lets go of: [`Login::of_mail`], and the EWS login of an account whose
+    /// calendar is EWS, since the sync reads the calendar after the mail.
+    pub fn of_sync(account: &AccountConfig) -> Vec<Login> {
+        Login::of_mail(account)
+            .into_iter()
+            .chain(Login::of(account, RejectedLogin::Ews))
+            .collect()
     }
 
     /// The login `account`'s sends go through: the SMTP login of a password
@@ -376,6 +433,7 @@ impl fmt::Display for LoginRejected {
             RejectedLogin::Imap => write!(f, "IMAP login failed: {}", self.answer)?,
             RejectedLogin::Smtp => write!(f, "SMTP login failed: {}", self.answer)?,
             RejectedLogin::Graph => write!(f, "OAuth2 sign-in refused: {}", self.answer)?,
+            RejectedLogin::Ews => write!(f, "EWS login failed: {}", self.answer)?,
         }
         if let Some(held) = self.held {
             let (who, what, attempt, again) = match self.kind {
@@ -397,11 +455,18 @@ impl fmt::Display for LoginRejected {
                     "a sign-in",
                     "a sync or a send is started",
                 ),
+                RejectedLogin::Ews => (
+                    "the server",
+                    "this password",
+                    "a login",
+                    "a sync is started",
+                ),
             };
             let elsewhere = match self.refused_at {
                 at if at == self.kind => "",
                 RejectedLogin::Imap => " at the IMAP login",
                 RejectedLogin::Smtp => " at the SMTP login",
+                RejectedLogin::Ews => " at the EWS login",
                 RejectedLogin::Graph => "",
             };
             let set = match self.kind {
@@ -475,25 +540,35 @@ pub fn shared_password(account: &str) -> bool {
 
 /// What every surface says about `account`'s refused `login`
 /// ([`mp_core::mp_command::login_rejected_detail`]), with the kind-less
-/// set-password command when the account uses one password for both logins.
-pub fn rejected_detail(account: &str, login: RejectedLogin) -> String {
+/// set-password command when the account uses one password for both logins;
+/// `ews_password` is the password an EWS login presents, unread for the
+/// others.
+pub fn rejected_detail(
+    account: &str,
+    login: RejectedLogin,
+    ews_password: Option<crate::config::EwsPasswordSource>,
+) -> String {
     let shared = login != RejectedLogin::Graph && shared_password(account);
-    mp_core::mp_command::login_rejected_detail(account, login, shared)
+    mp_core::mp_command::login_rejected_detail(account, login, shared, ews_password)
 }
+
+/// Every login kind, in the order of [`RejectedLogin`].
+const KINDS: [RejectedLogin; 4] = [
+    RejectedLogin::Imap,
+    RejectedLogin::Smtp,
+    RejectedLogin::Graph,
+    RejectedLogin::Ews,
+];
 
 /// The logins of `account` the list holds a running refusal of, in the order
 /// of [`RejectedLogin`].
 pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
-    [
-        RejectedLogin::Imap,
-        RejectedLogin::Smtp,
-        RejectedLogin::Graph,
-    ]
-    .into_iter()
-    .filter_map(|kind| Login::of(account, kind))
-    .filter(is_refused)
-    .map(|login| login.kind())
-    .collect()
+    KINDS
+        .into_iter()
+        .filter_map(|kind| Login::of(account, kind))
+        .filter(is_refused)
+        .map(|login| login.kind())
+        .collect()
 }
 
 /// End the hold of the secret `login` dials with, read from where the dial
@@ -512,22 +587,32 @@ pub fn forget(login: &Login) {
 /// asks for: the IMAP login falls back to the SMTP password, so either
 /// password may be the one a refused login needed.
 pub fn forget_account(account: &AccountConfig) {
-    for kind in [
-        RejectedLogin::Imap,
-        RejectedLogin::Smtp,
-        RejectedLogin::Graph,
-    ] {
+    for kind in KINDS {
         if let Some(login) = Login::of(account, kind) {
             forget(&login);
         }
     }
 }
 
+/// End the hold of `account`'s calendar login, which a calendar rebuild the
+/// user starts asks for: the EWS login of an account whose calendar is EWS,
+/// and nothing for any other.
+pub fn forget_calendar(account: &AccountConfig) {
+    if let Some(login) = Login::of(account, RejectedLogin::Ews) {
+        forget(&login);
+    }
+}
+
 /// The secret `login` dials with, read as its dial reads it: the IMAP
 /// password falling back to the SMTP one ([`crate::config::ImapConfig::load`]),
-/// the SMTP password, or the refresh token of the Graph sign-in's token cache.
+/// the SMTP password, the refresh token of the Graph sign-in's token cache,
+/// or the password `[accounts.ews]` names for the EWS login, with no
+/// fallback, as `calendar_backend::backend_for` reads it.
 fn stored_secret(login: &Login) -> Option<String> {
     match login {
+        Login::Ews(server, source) => {
+            crate::config::get_secret(&source.secret_key(&server.account)).ok()
+        }
         Login::Imap(server) => crate::config::imap_password_of(&server.account).ok(),
         Login::Smtp(server) => {
             crate::config::get_secret(&format!("smtp-password-{}", server.account)).ok()
@@ -684,7 +769,9 @@ impl RowKey {
 /// The identity `login` presents to its server, apart from its secret.
 fn identity(login: &Login) -> String {
     match login {
-        Login::Imap(server) | Login::Smtp(server) => server.username.to_ascii_lowercase(),
+        Login::Imap(server) | Login::Smtp(server) | Login::Ews(server, _) => {
+            server.username.to_ascii_lowercase()
+        }
         Login::Graph(account) => account.clone(),
     }
 }
@@ -1105,6 +1192,162 @@ mod tests {
         assert!(list
             .refused(&smtp(), &fingerprint("its own"), now + SECOND, wall())
             .is_none());
+    }
+
+    /// The EWS login of `account`, presenting the user the IMAP login does
+    /// with the password `[accounts.ews]` names.
+    fn ews_of(account: &str) -> Login {
+        Login::Ews(
+            ServerLogin {
+                account: account.into(),
+                host: "mail.tum.test".into(),
+                port: 443,
+                username: "ALPHA@example.com".into(),
+            },
+            crate::config::EwsPasswordSource::Imap,
+        )
+    }
+
+    /// A refused EWS login is one of the account's `rejected_logins`, which
+    /// `account.credentials` answers, and the user storing a password ends
+    /// its hold.
+    #[test]
+    fn an_ews_refusal_is_one_of_the_accounts_rejected_logins() {
+        let account = AccountConfig {
+            name: "ews-credentials".into(),
+            calendar_backend: Some(crate::config::CalendarBackendKind::Ews),
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ews-credentials-user".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Imap),
+                delegate_calendars: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        assert!(rejected_logins(&account).is_empty());
+        refuse_for_test(Login::of(&account, RejectedLogin::Ews).unwrap());
+        assert_eq!(rejected_logins(&account), [RejectedLogin::Ews]);
+        forget_account(&account);
+        assert!(rejected_logins(&account).is_empty());
+    }
+
+    /// A sync the user starts ends the hold of the logins it needs: the
+    /// mail login and, on an EWS calendar account, the EWS login; a calendar
+    /// rebuild the EWS login alone.
+    #[test]
+    fn a_sync_the_user_starts_ends_the_hold_of_its_mail_and_ews_logins() {
+        let account = AccountConfig {
+            name: "ews-sync".into(),
+            calendar_backend: Some(crate::config::CalendarBackendKind::Ews),
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ews-sync-user".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Imap),
+                delegate_calendars: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let mut account = account;
+        account.imap.host = "imap.tum.test".into();
+        account.smtp.host = "smtp.tum.test".into();
+        let ews = Login::of(&account, RejectedLogin::Ews).unwrap();
+        assert_eq!(
+            Login::of_sync(&account),
+            [Login::of_mail(&account).unwrap(), ews.clone()]
+        );
+        refuse_for_test(ews.clone());
+        assert!(is_refused(&ews));
+        forget_calendar(&account);
+        assert!(!is_refused(&ews));
+        refuse_for_test(ews.clone());
+        for login in Login::of_sync(&account) {
+            forget(&login);
+        }
+        assert!(!is_refused(&ews));
+    }
+
+    /// The EWS login shares its row with the IMAP and SMTP logins of the
+    /// same user and password, the user name compared as the others are: a
+    /// password refused at the EWS login holds the IMAP login, and says so,
+    /// and one refused at the IMAP login holds the EWS login, on the
+    /// password schedule.
+    #[test]
+    fn an_ews_login_shares_the_row_of_the_imap_login_of_its_user_and_password() {
+        let mut list = Refusals::default();
+        let now = Instant::now();
+        let wrong = fingerprint("wrong");
+        let ews = ews_of("tum");
+        assert_eq!(ews.kind(), RejectedLogin::Ews);
+        assert_eq!(ews.account(), "tum");
+        list.record(ews.clone(), wrong, &rejected(&ews), now);
+        let held = list
+            .refused(&imap(), &wrong, now + SECOND, wall())
+            .expect("the IMAP login of the same user and password is held");
+        assert!(
+            held.to_string()
+                .contains("(the server refused this password at the EWS login earlier"),
+            "{held}"
+        );
+
+        let mut list = Refusals::default();
+        list.record(imap(), wrong, &rejected(&imap()), now);
+        let held = list
+            .refused(&ews, &wrong, now + SECOND, wall())
+            .expect("the EWS login of the same user and password is held");
+        let text = held.to_string();
+        assert!(
+            text.starts_with(
+                "EWS login failed: no response: LOGIN failed. (the server refused this \
+                 password at the IMAP login earlier and is asked again at "
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("or a sync is started)"), "{text}");
+        assert_eq!(
+            held_for(&mut list, &ews, "wrong", now + FIRST_HOLD),
+            SECOND_HOLD
+        );
+    }
+
+    /// An account whose calendar is EWS makes an EWS login as its
+    /// `[accounts.ews]` names it, the domain of a `DOMAIN\\user` name left
+    /// out since the directory account is the user; any other account, and
+    /// an EWS one whose table lacks a field, makes none.
+    #[test]
+    fn an_ews_account_makes_the_ews_login_its_table_names() {
+        let ews = AccountConfig {
+            name: "tum".into(),
+            calendar_backend: Some(crate::config::CalendarBackendKind::Ews),
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ADS\\ab12cde".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Smtp),
+                delegate_calendars: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            Login::of(&ews, RejectedLogin::Ews),
+            Some(Login::Ews(
+                ServerLogin {
+                    account: "tum".into(),
+                    host: "mail.tum.de".into(),
+                    port: 443,
+                    username: "ab12cde".into(),
+                },
+                crate::config::EwsPasswordSource::Smtp,
+            ))
+        );
+        let bare = AccountConfig {
+            ews: None,
+            ..ews.clone()
+        };
+        assert_eq!(Login::of(&bare, RejectedLogin::Ews), None);
+        let mail = AccountConfig {
+            calendar_backend: None,
+            ..ews
+        };
+        assert_eq!(Login::of(&mail, RejectedLogin::Ews), None);
     }
 
     /// A refusal at either login is the next in the one row, and the hold it

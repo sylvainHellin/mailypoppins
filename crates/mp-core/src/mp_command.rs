@@ -40,10 +40,20 @@ pub fn here(args: &[&str]) -> String {
 /// password changed on the server changed for both logins; else it names the
 /// refused login's kind, leaving the other password alone.
 ///
+/// An EWS login (PERSO-256) presents the IMAP or SMTP password
+/// `ews_password` names (`[accounts.ews]` `password_from`), so its command
+/// names that kind, or none when the account uses one password or the caller
+/// does not know which; the argument is unread for the other logins.
+///
 /// Here rather than in `mp_client::format` beside the other shared
 /// sentences, because its command is [`here`]'s, on this process's profile
 /// and quoted, and `mp-client` links `mp-protocol` alone.
-pub fn login_rejected_detail(account: &str, login: RejectedLogin, shared_password: bool) -> String {
+pub fn login_rejected_detail(
+    account: &str,
+    login: RejectedLogin,
+    shared_password: bool,
+    ews_password: Option<crate::config::EwsPasswordSource>,
+) -> String {
     let set_password = |kind: &str| {
         let mut args = vec!["config", "set-password", "-A", account];
         if !shared_password {
@@ -64,6 +74,13 @@ pub fn login_rejected_detail(account: &str, login: RejectedLogin, shared_passwor
             "the sign-in expired or was revoked; sign in again with {}",
             here(&["config", "oauth2-login", "-A", account])
         ),
+        RejectedLogin::Ews => {
+            let command = match ews_password {
+                Some(source) => set_password(source.as_str()),
+                None => here(&["config", "set-password", "-A", account]),
+            };
+            format!("the server rejected the EWS password; set it with {command}")
+        }
     }
 }
 
@@ -121,15 +138,15 @@ mod tests {
     #[test]
     fn a_rejected_login_names_the_login_and_the_command_that_fixes_it() {
         assert_eq!(
-            login_rejected_detail("tum", RejectedLogin::Imap, false),
+            login_rejected_detail("tum", RejectedLogin::Imap, false, None),
             "the server rejected the IMAP password; set it with mp config set-password -A tum imap"
         );
         assert_eq!(
-            login_rejected_detail("tum", RejectedLogin::Smtp, false),
+            login_rejected_detail("tum", RejectedLogin::Smtp, false, None),
             "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
         );
         assert_eq!(
-            login_rejected_detail("hines", RejectedLogin::Graph, false),
+            login_rejected_detail("hines", RejectedLogin::Graph, false, None),
             "the sign-in expired or was revoked; sign in again with mp config oauth2-login -A hines"
         );
     }
@@ -140,20 +157,20 @@ mod tests {
     #[test]
     fn a_rejected_shared_password_names_the_command_that_sets_both() {
         assert_eq!(
-            login_rejected_detail("tum", RejectedLogin::Imap, true),
+            login_rejected_detail("tum", RejectedLogin::Imap, true, None),
             "the server rejected the IMAP password; set it with mp config set-password -A tum"
         );
         assert_eq!(
-            login_rejected_detail("tum", RejectedLogin::Smtp, true),
+            login_rejected_detail("tum", RejectedLogin::Smtp, true, None),
             "the server rejected the SMTP password; set it with mp config set-password -A tum"
         );
         assert_eq!(
-            login_rejected_detail("hines", RejectedLogin::Graph, true),
-            login_rejected_detail("hines", RejectedLogin::Graph, false)
+            login_rejected_detail("hines", RejectedLogin::Graph, true, None),
+            login_rejected_detail("hines", RejectedLogin::Graph, false, None)
         );
         let _demo = crate::config::test_env::ProfileOverride::set(Some("demo"));
         assert_eq!(
-            login_rejected_detail("TUM Mail", RejectedLogin::Imap, true),
+            login_rejected_detail("TUM Mail", RejectedLogin::Imap, true, None),
             "the server rejected the IMAP password; set it with \
              mp --profile demo config set-password -A 'TUM Mail'"
         );
@@ -165,19 +182,59 @@ mod tests {
     fn a_rejected_login_command_is_quoted_and_on_the_profile() {
         let _demo = crate::config::test_env::ProfileOverride::set(Some("demo"));
         assert_eq!(
-            login_rejected_detail("TUM Mail", RejectedLogin::Imap, false),
+            login_rejected_detail("TUM Mail", RejectedLogin::Imap, false, None),
             "the server rejected the IMAP password; set it with \
              mp --profile demo config set-password -A 'TUM Mail' imap"
         );
         assert_eq!(
-            login_rejected_detail("TUM Mail", RejectedLogin::Smtp, false),
+            login_rejected_detail("TUM Mail", RejectedLogin::Smtp, false, None),
             "the server rejected the SMTP password; set it with \
              mp --profile demo config set-password -A 'TUM Mail' smtp"
         );
         assert_eq!(
-            login_rejected_detail("Bob's", RejectedLogin::Graph, false),
+            login_rejected_detail("Bob's", RejectedLogin::Graph, false, None),
             "the sign-in expired or was revoked; sign in again with \
              mp --profile demo config oauth2-login -A 'Bob'\\''s'"
+        );
+    }
+
+    /// An EWS login presents the IMAP or the SMTP password its
+    /// `password_from` names, so its sentence names that kind's command, or
+    /// the kind-less one when the account uses one password for both; a
+    /// caller that does not know the kind names the kind-less one.
+    #[test]
+    fn a_rejected_ews_password_names_the_password_it_logs_in_with() {
+        use crate::config::EwsPasswordSource;
+        assert_eq!(
+            login_rejected_detail(
+                "tum",
+                RejectedLogin::Ews,
+                false,
+                Some(EwsPasswordSource::Imap)
+            ),
+            "the server rejected the EWS password; set it with mp config set-password -A tum imap"
+        );
+        assert_eq!(
+            login_rejected_detail(
+                "tum",
+                RejectedLogin::Ews,
+                false,
+                Some(EwsPasswordSource::Smtp)
+            ),
+            "the server rejected the EWS password; set it with mp config set-password -A tum smtp"
+        );
+        assert_eq!(
+            login_rejected_detail(
+                "tum",
+                RejectedLogin::Ews,
+                true,
+                Some(EwsPasswordSource::Smtp)
+            ),
+            "the server rejected the EWS password; set it with mp config set-password -A tum"
+        );
+        assert_eq!(
+            login_rejected_detail("tum", RejectedLogin::Ews, false, None),
+            "the server rejected the EWS password; set it with mp config set-password -A tum"
         );
     }
 }

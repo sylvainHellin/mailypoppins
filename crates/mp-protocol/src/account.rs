@@ -90,6 +90,11 @@ pub enum RejectedLogin {
     /// longer takes (revoked or expired): nothing reaches the mailbox until
     /// the user signs in again (`mp config oauth2-login`).
     Graph,
+    /// The Exchange Web Services login of an account whose calendar is EWS
+    /// (PERSO-256), made with the IMAP or SMTP password its `[accounts.ews]`
+    /// names: the calendar does not sync until a password the server takes
+    /// is set.
+    Ews,
 }
 
 /// The `result` of `account.credentials`: every configured account in the

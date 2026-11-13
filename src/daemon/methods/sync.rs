@@ -212,7 +212,7 @@ impl Method for SyncPass {
             // refused and still holds (PERSO-296): the user may have fixed the
             // account on the server's side, and one login per request is
             // nowhere near a lockout. The TUI starts one at every launch.
-            if let Some(login) = crate::login_gate::Login::of_mail(&request.account) {
+            for login in crate::login_gate::Login::of_sync(&request.account) {
                 crate::login_gate::forget(&login);
             }
             let (id, handle) = self.operations.start(

@@ -3168,6 +3168,7 @@ async fn submit_durably<S: SmtpSubmit>(
             let detail = crate::login_gate::rejected_detail(
                 account,
                 mp_protocol::account::RejectedLogin::Smtp,
+                None,
             );
             return Err(match durable {
                 Some(_) => e.context(format!(
@@ -6503,7 +6504,8 @@ mod smtp_durability_tests {
             message.contains("the message waits in the outbox")
                 && message.contains(&crate::login_gate::rejected_detail(
                     ACCOUNT,
-                    mp_protocol::account::RejectedLogin::Smtp
+                    mp_protocol::account::RejectedLogin::Smtp,
+                    None
                 )),
             "{message}"
         );
