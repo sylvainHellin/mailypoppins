@@ -1242,13 +1242,16 @@ impl State {
         };
         let series = scope == Some(EventScope::Series);
         let master_id = event.id.clone();
+        // An invitation mail's change goes out by mail, whatever its
+        // calendar allows.
+        let imip = id.starts_with(IMIP_EVENT_PREFIX);
         let calendar = self
             .server_calendars
             .iter()
             .find(|c| c.account == account && c.id == event.calendar)
             .cloned()
             .ok_or_else(|| refusal(format!("{account} has no calendar for {id}")))?;
-        if !calendar.can_edit {
+        if !calendar.can_edit && !imip {
             return Err(refusal(format!(
                 "The calendar {} of {account} is read-only",
                 calendar.name
@@ -1259,6 +1262,33 @@ impl State {
                 let fields: mp_protocol::calendar::EventPatchParams =
                     serde_json::from_value(params["fields"].clone())
                         .map_err(|e| refusal(format!("event.update: {e}")))?;
+                let carried = [
+                    "summary",
+                    "start",
+                    "end",
+                    "duration",
+                    "zone",
+                    "all_day",
+                    "location",
+                    "body",
+                    "attendees",
+                ];
+                let unsent: Vec<&str> = params["fields"]
+                    .as_object()
+                    .map(|f| f.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                let unsent: Vec<&str> = unsent
+                    .into_iter()
+                    .filter(|key| imip && !carried.contains(key))
+                    .collect();
+                if !unsent.is_empty() {
+                    return Err(refusal(format!(
+                        "{}: an invitation mail carries its summary, time, location, \
+                         description and attendees, not {}",
+                        event.summary,
+                        unsent.join(", ")
+                    )));
+                }
                 if fields.recurrence.is_some() && !series {
                     return Err(refusal(match scope {
                         Some(_) => "An occurrence repeats by its series' rule; change the rule \
@@ -1362,7 +1392,18 @@ impl State {
                         event.summary
                     )));
                 }
-                self.take_off(account, &event.id, series);
+                if imip {
+                    // An invitation mail stays on the agenda, tombstoned.
+                    if let Some(mail) = self
+                        .server_events
+                        .iter_mut()
+                        .find(|e| e.account == account && e.id == event.id)
+                    {
+                        mail.cancelled = true;
+                    }
+                } else {
+                    self.take_off(account, &event.id, series);
+                }
                 let notified: Vec<String> =
                     event.attendees.iter().map(|a| a.email.clone()).collect();
                 json!({"account": account, "event": id, "notified": notified})
@@ -5375,11 +5416,45 @@ impl Fixture {
                 let id = param_str(method, &params, "event")?.to_string();
                 s.account_ready(method, &account)?;
                 let refusal = |message: String| refused(method, -32602, &message);
+                // An invitation mail the account organised is updated or
+                // cancelled by mail, as the daemon does (PERSO-204); any
+                // other is only answered.
                 if id.starts_with(IMIP_EVENT_PREFIX) {
-                    return Err(refusal(format!(
-                        "{id} is an invitation mail's event, which can only be answered \
-                         (event.respond); {method} changes a server event"
-                    )));
+                    if method == "event.delete" {
+                        return Err(refusal(format!(
+                            "{id} is an invitation mail's event, which {method} does not \
+                             reach: its organizer cancels it (event.cancel) and an attendee \
+                             answers it (event.respond)"
+                        )));
+                    }
+                    let mail = s
+                        .server_events
+                        .iter()
+                        .find(|e| e.account == account && e.id == id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            refusal(format!(
+                                "{account} has no event {id} (an older version of an \
+                                 invitation, or no invitation at all)"
+                            ))
+                        })?;
+                    if !mail.is_organizer {
+                        return Err(refusal(format!(
+                            "{} was organised by {}, not by {account}: only its organizer \
+                             changes or cancels it, and an invitation you were sent can only \
+                             be answered (event.respond)",
+                            mail.summary,
+                            mail.organizer
+                                .as_ref()
+                                .map_or("someone else", |o| o.email.as_str())
+                        )));
+                    }
+                    if mail.cancelled {
+                        return Err(refusal(format!(
+                            "{} is cancelled already; there is nothing left to change",
+                            mail.summary
+                        )));
+                    }
                 }
                 // The daemon's counted-as-done retry: a repeat of the cancel or
                 // delete that already took the event off the server settles

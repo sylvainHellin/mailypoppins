@@ -251,10 +251,14 @@ fn ids(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// The first message `account`'s seed stored, by row id: the one invitation
+/// mail of a slice whose seed ingests one.
 fn row_of(root: &Path, account: &str) -> i64 {
     read_fixture::store(root, account)
         .conn()
-        .query_row("SELECT id FROM messages LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT id FROM messages ORDER BY id LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 

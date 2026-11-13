@@ -23,6 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { eventIssue, localZone, SHOW_AS, submitEvent, type ProblemField } from "@/app/eventForm";
 import { editIssue, submitEdit } from "@/app/eventChange";
+import { IMIP_PREFIX } from "@/app/calendar";
 import { describeRecurrence, NO_REPEAT, patternLabel, REPEAT_PATTERNS, repeatLabel, WEEKDAYS, type RepeatFields, type RepeatPattern } from "@/app/recurrence";
 import { AvailabilityGrid } from "@/components/calendar/AvailabilityGrid";
 import { useDispatch } from "@/app/store";
@@ -97,6 +98,9 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
   const retry = dialog?.transactionId != null;
   // An attendee changes their copy's reminder and show-as and nothing else.
   const locked = edit !== null && !edit.organizer;
+  // An invitation mail carries no Teams link, reminder or show-as, which the
+  // daemon refuses on its update (PERSO-204): its form shows none of them.
+  const mail = edit?.event.startsWith(IMIP_PREFIX) ?? false;
   const scope = edit?.scope ?? null;
   const title = edit
     ? locked
@@ -415,7 +419,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
               "Details",
               <>
                 {field("location", "Location", { placeholder: "Room, address or link" })}
-                {plain(
+                {!mail && plain(
                   "Online",
                   <span className="flex min-w-0 items-center gap-3">
                     {check("teams", "Teams meeting", (on) => change({ teams: on }), teamsOff)}
@@ -430,7 +434,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
                     ) : null}
                   </span>,
                 )}
-                {row(
+                {!mail && row(
                   "reminder",
                   "Reminder",
                   <span className="flex items-center gap-4">
@@ -452,7 +456,7 @@ export function NewEventDialog({ dialog, onOpenChange }: NewEventDialogProps) {
                     {check("noReminder", "None", (on) => change({ noReminder: on }))}
                   </span>,
                 )}
-                {row(
+                {!mail && row(
                   "show-as",
                   "Show as",
                   <select

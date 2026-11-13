@@ -44,6 +44,9 @@ pub struct EventEdit {
     pub is_organizer: bool,
     /// The event is a Teams meeting, which stays one.
     pub online: bool,
+    /// The event is an invitation mail's (`imip:`), whose update carries no
+    /// reminder, show-as or Teams link.
+    pub mail: bool,
     /// `occurrence` or `series` for a change to a recurring event, which
     /// `event` names: the occurrence, or the series master.
     pub scope: Option<String>,
@@ -378,6 +381,9 @@ impl EventForm {
             event: event.id.clone(),
             is_organizer: event.is_organizer,
             online: event.is_online_meeting,
+            mail: event
+                .id
+                .starts_with(mp_protocol::calendar::IMIP_EVENT_PREFIX),
             scope: None,
             original: Box::new(form.clone()),
         });
@@ -620,11 +626,13 @@ impl EventForm {
     }
 
     /// The rows `Tab` walks: no start time on an all-day event, no Teams row
-    /// where the backend has no online meetings, the Repeat row on a new
-    /// event and a recurring one, with the rows that shape a rule under it
-    /// while the form makes one.
+    /// where the backend has no online meetings, no Teams, reminder or
+    /// show-as row on an invitation mail, which carries none, the Repeat row
+    /// on a new event and a recurring one, with the rows that shape a rule
+    /// under it while the form makes one.
     pub fn rows(&self) -> Vec<EventFormRow> {
         use EventFormRow::*;
+        let mail = self.editing.as_ref().is_some_and(|e| e.mail);
         [
             Calendar,
             Title,
@@ -648,7 +656,10 @@ impl EventForm {
         .into_iter()
         .filter(|row| match row {
             Start => !self.all_day,
-            Teams => self.chosen().teams || self.editing.as_ref().is_some_and(|e| e.online),
+            Teams => {
+                !mail && (self.chosen().teams || self.editing.as_ref().is_some_and(|e| e.online))
+            }
+            Reminder | ShowAs => !mail,
             Repeat => self.editing.is_none() || self.scope().is_some(),
             Every | Ends => self.repeat.is_some() && self.scope() != Some("occurrence"),
             RepeatOn => self.repeat == Some(RepeatPattern::Weekly),
@@ -1145,6 +1156,27 @@ mod tests {
     fn edit_form(organizer: bool) -> EventForm {
         let main = form().calendars[0].clone();
         EventForm::edit(&meeting(organizer), main, "Europe/Berlin".parse().unwrap())
+    }
+
+    /// An invitation mail carries no reminder, show-as or Teams link, which
+    /// the daemon refuses on its update: its form shows none of those rows.
+    #[test]
+    fn an_invitation_mail_form_shows_only_what_mail_carries() {
+        let mut mail = meeting(true);
+        mail.id = "imip:43".into();
+        mail.calendar = "imip".into();
+        let main = form().calendars[0].clone();
+        let form = EventForm::edit(&mail, main, "Europe/Berlin".parse().unwrap());
+        let rows = form.rows();
+        for hidden in [
+            EventFormRow::Teams,
+            EventFormRow::Reminder,
+            EventFormRow::ShowAs,
+        ] {
+            assert!(!rows.contains(&hidden), "{hidden:?} in {rows:?}");
+        }
+        assert!(rows.contains(&EventFormRow::Location), "{rows:?}");
+        assert!(edit_form(true).rows().contains(&EventFormRow::Reminder));
     }
 
     /// An edit form opens with the event's values in the view's zone, its

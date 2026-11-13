@@ -277,6 +277,20 @@ describe("changing an event in the Calendar view", () => {
     expect(again.querySelector('[data-slot="event-error"]')).toHaveTextContent("The change did not go through");
   });
 
+  it("an invitation mail's form shows only what mail carries (PERSO-204)", async () => {
+    const r = await calendarOn("imip:1008", () => {
+      mock.events = mock.events.map((e) =>
+        e.id === "imip:1008" ? { ...e, is_organizer: true, own_response: "organizer", organizer: { email: "me@example.com" } } : e,
+      );
+    });
+    await r.user.keyboard("E");
+    const dialog = await screen.findByRole("dialog", { name: "Edit event" });
+    expect(within(dialog).getByLabelText("Location")).toBeTruthy();
+    expect(dialog.querySelector('[data-field="reminder"]')).toBeNull();
+    expect(dialog.querySelector('[data-field="showAs"]')).toBeNull();
+    expect(within(dialog).queryByLabelText("Teams meeting")).toBeNull();
+  });
+
   it("an attendee's form changes the reminder and the show-as only", async () => {
     const r = await calendarOn("AAMkAD-design");
     await r.user.keyboard("E");
