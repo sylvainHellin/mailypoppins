@@ -98,6 +98,62 @@ async fn a_tentative_saved_only_carries_the_proposed_time() {
     );
 }
 
+/// An answer saved only may leave its unsent response in Drafts: when the
+/// server names the item it saved, it is deleted for good; an answer sent
+/// leaves nothing to delete, and a draft that cannot be deleted does not
+/// fail the answer, which the calendar already holds.
+#[tokio::test]
+async fn an_answer_saved_only_deletes_the_draft_it_leaves() {
+    let draft = |id: &str| {
+        built_answer(
+            "CreateItem",
+            &success_message(
+                "CreateItem",
+                &format!(
+                    "<m:Items><t:MeetingResponse><t:ItemId Id=\"{id}\" ChangeKey=\"k\"/>\
+                     </t:MeetingResponse></m:Items>"
+                ),
+            ),
+        )
+    };
+    let deleted = built_answer("DeleteItem", &success_message("DeleteItem", ""));
+    let refused = built_answer(
+        "DeleteItem",
+        &error_message("DeleteItem", "ErrorAccessDenied", "Access is denied."),
+    );
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("CreateItem", &draft("draft-1"))
+            .answer("DeleteItem", &deleted)
+            .answer("CreateItem", &draft("draft-2"))
+            .answer("DeleteItem", &refused)
+            .answer("CreateItem", &response_made()),
+    );
+    backend
+        .respond(SINGLE_ID, Response::Tentative, None, false, None)
+        .await
+        .unwrap();
+    backend
+        .respond(SINGLE_ID, Response::Decline, None, false, None)
+        .await
+        .unwrap();
+    backend
+        .respond(SINGLE_ID, Response::Accept, None, false, None)
+        .await
+        .unwrap();
+    let sent = backend.fetch().sent();
+    assert_eq!(sent.len(), 5);
+    assert_eq!(
+        sent[1],
+        envelope(
+            "<m:DeleteItem DeleteType=\"HardDelete\"><m:ItemIds><t:ItemId Id=\"draft-1\"/>\
+             </m:ItemIds></m:DeleteItem>"
+        )
+    );
+    assert!(sent[3].contains("<t:ItemId Id=\"draft-2\"/>"));
+    assert!(backend.fetch().exhausted());
+}
+
 /// A decline carries its comment before the reference and the proposal
 /// after it, the schema's order; an accept never carries a proposal.
 #[tokio::test]

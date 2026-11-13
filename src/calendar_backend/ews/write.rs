@@ -12,7 +12,9 @@
 //!   the organizer, `SaveOnly` records the answer without telling anybody.
 //!   A tentative or a decline may carry `ProposedStart` and `ProposedEnd`, a
 //!   new time the organizer receives as a proposal (`Exchange2013` and
-//!   later).
+//!   later). A `SaveOnly` answer may leave the unsent response in Drafts:
+//!   when the CreateItem answer names the item it saved, it is deleted for
+//!   good (`HardDelete`); whether the server names it is unverified live.
 //!
 //! - A create is a `CalendarItem` through `CreateItem` into the calendar's
 //!   folder, every field in the schema's order, which invites the attendees
@@ -67,7 +69,7 @@ use std::str::FromStr;
 use anyhow::anyhow;
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
-use log::debug;
+use log::{debug, warn};
 
 use super::fetch::EwsFetch;
 use super::parse::ItemType;
@@ -671,10 +673,39 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     ) -> BackendResult<()> {
         let body = response_body(event, response, comment, send_response, proposed);
         let answer = self.call("CreateItem", &body).await?;
-        parse::only_message(&answer, "CreateItem")
-            .map_err(|error| answer_error(&error, "CreateItem"))?;
+        let draft =
+            parse::first_saved_id(&answer).map_err(|error| answer_error(&error, "CreateItem"))?;
+        if let Some(draft) = draft.filter(|_| !send_response) {
+            self.delete_draft(&draft).await;
+        }
         Ok(())
     }
+
+    /// Delete for good the unsent response `draft` an answer saved only left
+    /// in Drafts. Built from the schema documentation, unverified live. A
+    /// draft that cannot be deleted is logged, never the answer's failure:
+    /// the calendar holds the answer already, and the draft is clutter the
+    /// user can delete.
+    async fn delete_draft(&self, draft: &str) {
+        let request = format!(
+            "<m:DeleteItem DeleteType=\"HardDelete\"><m:ItemIds><t:ItemId Id=\"{}\"/>\
+             </m:ItemIds></m:DeleteItem>",
+            xml::escape(draft)
+        );
+        let outcome = match self.call("DeleteItem", &request).await {
+            Ok(answer) => parse::only_message(&answer, "DeleteItem")
+                .map(drop)
+                .map_err(|error| error.sentence("DeleteItem")),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(why) = outcome {
+            warn!(
+                "[calendar] {}: the unsent answer {draft} stays in Drafts: {why}",
+                self.account
+            );
+        }
+    }
+
     /// The calendar item `id` of `calendar` as the server holds it after a
     /// write: a series master as its series, an occurrence or an exception
     /// hung from its master.

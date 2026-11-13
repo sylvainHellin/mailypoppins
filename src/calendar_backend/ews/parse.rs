@@ -776,6 +776,16 @@ pub fn associated_event(body: &str) -> Result<Option<String>, AnswerError> {
         .map(str::to_string))
 }
 
+/// The ItemId of the first item a CreateItem answer names, whatever its
+/// kind: the response a `SaveOnly` answer left in Drafts. `None` when the
+/// answer names none, as a sent one does.
+pub fn first_saved_id(body: &str) -> Result<Option<String>, AnswerError> {
+    Ok(only_message(body, "CreateItem")?
+        .child("Items")
+        .and_then(|items| items.children.iter().find_map(item_id))
+        .map(str::to_string))
+}
+
 /// The ItemId of the calendar item a CreateItem or an UpdateItem saved.
 pub fn saved_id(body: &str, operation: &str) -> Result<String, AnswerError> {
     only_message(body, operation)?
