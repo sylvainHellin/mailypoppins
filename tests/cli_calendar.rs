@@ -179,20 +179,35 @@ impl Slice {
 
     /// The same, the SMTP fake refusing `rejected` for good.
     fn start_organised_rejecting(rejected: &[(&str, &str)]) -> Slice {
-        Slice::start_with(rejected, |root| {
+        Slice::start_organised_with(|log| send_fixture::fake_transport_rejecting(log, rejected))
+    }
+
+    /// The same, the SMTP fake armed with what `transport` makes of its
+    /// ledger's path.
+    fn start_organised_with(transport: impl FnOnce(&Path) -> String) -> Slice {
+        Slice::start_armed(transport, |root| {
             seed_outlook(root);
             support::calendar_fixture::seed_organised(root);
         })
     }
 
     fn start_with(rejected: &[(&str, &str)], seed_root: impl FnOnce(&Path)) -> Slice {
+        Slice::start_armed(
+            |log| send_fixture::fake_transport_rejecting(log, rejected),
+            seed_root,
+        )
+    }
+
+    fn start_armed(
+        transport: impl FnOnce(&Path) -> String,
+        seed_root: impl FnOnce(&Path),
+    ) -> Slice {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tempfile::tempdir().unwrap();
         seed_root(tmp.path());
         let events = [weekly(), vec![proposed(), proposed_occurrence()]].concat();
         let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, events);
-        let transport =
-            send_fixture::fake_transport_rejecting(&ledger.path().join("transport.log"), rejected);
+        let transport = transport(&ledger.path().join("transport.log"));
         let env = [
             (FAKE_CALENDAR_ENV, spec.as_str()),
             (send_fixture::FAKE_TRANSPORT_ENV, transport.as_str()),
@@ -1334,6 +1349,64 @@ fn an_invitation_update_names_the_attendees_the_server_refused() {
     ]);
     assert!(
         out.contains("\u{2717} cy@example.com (To): 550 no such user"),
+        "{out}"
+    );
+}
+
+/// `mp event update` and `mp event cancel` name each attendee an
+/// invitation mail's message did not reach yet under what became of them:
+/// waiting in the outbox for a later sync, parked with no verdict, or
+/// refused for good.
+#[test]
+fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
+    let slice = Slice::start_organised_with(|log| {
+        serde_json::json!({"log": log.to_string_lossy(),
+                           "reject": {"cy@example.com": "550 no such user"},
+                           "defer": {"bob@example.com": "451 4.7.1 try again later"}})
+        .to_string()
+    });
+    let meeting = sent_row(slice.root(), "budget-review");
+    let out = slice.ok(&[
+        "event",
+        "update",
+        &meeting,
+        "--to",
+        "ada@example.com",
+        "--to",
+        "cy@example.com",
+        "-A",
+        IMIP,
+    ]);
+    assert!(
+        out.contains(
+            "\u{2717} cy@example.com (To): 550 no such user; refused for good, so they will \
+             not get it"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "\u{29d7} bob@example.com (To): 451 4.7.1 try again later; waits in the outbox \
+             and goes out with a later sync"
+        ),
+        "{out}"
+    );
+
+    let parked = Slice::start_organised_with(|log| {
+        send_fixture::fake_transport_unconfirming(
+            log,
+            &[("bob@example.com", send_fixture::AMBIGUOUS)],
+        )
+    });
+    let meeting = sent_row(parked.root(), "budget-review");
+    let out = parked.ok(&["event", "cancel", &meeting, "-A", IMIP]);
+    assert!(out.contains("told: ada@example.com"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "? bob@example.com (To): {}; parked in the outbox with no verdict, so they may \
+             have it: check, then mp outbox retry or mp outbox discard (mp outbox list -A {IMIP})",
+            send_fixture::AMBIGUOUS
+        )),
         "{out}"
     );
 }

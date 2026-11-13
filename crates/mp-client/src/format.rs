@@ -423,6 +423,47 @@ pub fn recipient_line(recipient: &mp_protocol::send::RecipientOutcome) -> String
     }
 }
 
+/// The lines `mp event update` and `mp event cancel` print for each
+/// attendee an invitation mail's change did not reach yet, under what became
+/// of them (PERSO-204): `queued` waits in the outbox and goes out with a later
+/// sync, `parked` waits for a human because the server gave no verdict, and
+/// `refused` was refused for good. `account` names the outbox to look in.
+pub fn change_recipient_lines(
+    account: &str,
+    refused: &[mp_protocol::send::RecipientOutcome],
+    queued: &[mp_protocol::send::RecipientOutcome],
+    parked: &[mp_protocol::send::RecipientOutcome],
+) -> Vec<String> {
+    let line = |mark: &str, recipient: &mp_protocol::send::RecipientOutcome, what: &str| {
+        format!(
+            "  {mark} {} ({}): {}; {what}",
+            recipient.address,
+            recipient.role,
+            recipient.error.as_deref().unwrap_or("no reason given")
+        )
+    };
+    let parked_what = format!(
+        "parked in the outbox with no verdict, so they may have it: check, then mp outbox \
+         retry or mp outbox discard (mp outbox list -A {account})"
+    );
+    queued
+        .iter()
+        .map(|r| {
+            line(
+                "\u{29d7}",
+                r,
+                "waits in the outbox and goes out with a later sync",
+            )
+        })
+        .chain(parked.iter().map(|r| line("?", r, &parked_what)))
+        .chain(
+            refused
+                .iter()
+                .map(|r| line("\u{2717}", r, "refused for good, so they will not get it")),
+        )
+        .collect()
+}
+
 /// The one line `mp send-approved` prints per draft, after the
 /// `Sending to …` prefix it is appended to.
 ///
@@ -844,6 +885,7 @@ mod reminder_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::change_recipient_lines;
     use super::refused_rebuild_line;
     use super::{online_meeting_line, series_line, time_span};
     use mp_protocol::calendar::{CalendarEvent, CalendarEventTime};
@@ -862,6 +904,36 @@ mod tests {
             "show_as": "busy"
         }))
         .unwrap()
+    }
+
+    /// An invitation mail's change names who waits in the outbox, who is
+    /// parked there with no verdict and who was refused for good, each with
+    /// the server's reason, in that order.
+    #[test]
+    fn a_change_names_each_attendee_it_did_not_reach_yet() {
+        let outcome = |address: &str, error: &str| mp_protocol::send::RecipientOutcome {
+            address: address.into(),
+            role: "To".into(),
+            delivered: false,
+            error: Some(error.into()),
+        };
+        assert_eq!(
+            change_recipient_lines(
+                "perso",
+                &[outcome("cy@x", "550 no such user")],
+                &[outcome("bob@x", "451 later")],
+                &[outcome("eve@x", "connection reset")],
+            ),
+            [
+                "  \u{29d7} bob@x (To): 451 later; waits in the outbox and goes out with a later \
+                 sync",
+                "  ? eve@x (To): connection reset; parked in the outbox with no verdict, so they \
+                 may have it: check, then mp outbox retry or mp outbox discard (mp outbox list -A \
+                 perso)",
+                "  \u{2717} cy@x (To): 550 no such user; refused for good, so they will not get it",
+            ]
+        );
+        assert!(change_recipient_lines("perso", &[], &[], &[]).is_empty());
     }
 
     #[test]
