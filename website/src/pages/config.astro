@@ -646,9 +646,10 @@ server = "sentitems"          # Not "Sent Items"`} />
       </p>
       <h3 id="secrets-keyring">OS keyring (opt-in)</h3>
       <p>
-        To keep passwords in the OS keyring instead (macOS Keychain, or Secret Service on
-        Linux, such as GNOME Keyring or KWallet), add this top-level key to
-        <code>config.toml</code>, before the first <code>[section]</code> header:
+        To keep passwords in the OS keyring instead (the macOS Keychain, or the kernel keyring
+        on Linux and WSL, which needs no desktop session but is cleared by every reboot), add
+        this top-level key to <code>config.toml</code>, before the first <code>[section]</code>
+        header:
       </p>
       <ConfigExample code={`secrets_backend = "keyring"`} />
       <p>

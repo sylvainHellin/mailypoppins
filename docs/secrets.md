@@ -71,6 +71,22 @@ are reused by `oauth2.rs` to encrypt Graph token caches at
 `<mailypoppins_data_dir>/tokens/<account>.enc` (raw blob format -- the plaintext is
 JSON, not TOML, but the wrapping is identical).
 
+## What the errors say
+
+Each error a user can meet between `mp config init` and a login names what happened and the command that fixes it (PERSO-199, pinned by `tests/secrets_smoke.rs` and the unit tests in `crates/mp-core/src/secrets.rs`):
+
+```
+No SMTP password is stored for account 'tum'. Run `mp config set-password smtp --account tum`.
+No IMAP password is stored for account 'tum', nor an SMTP password to fall back to. Run `mp config set-password imap --account tum`.
+No SMTP password is stored for account 'tum' in the system keyring (service 'mailypoppins'). Run `mp config set-password smtp --account tum`.
+Could not read the SMTP password of account 'tum' from the system keyring: <the keyring's reason>. Unlock the system keyring (on macOS, the login Keychain) and retry, or set `secrets_backend = "encrypted-file"` in config.toml, restart the daemon (`mp daemon restart`) and store the password again.
+Could not read this machine's ID, from which the encrypted secrets file's key is derived (<reason>). To store passwords, create /etc/machine-id (`sudo systemd-machine-id-setup`), or set `secrets_backend = "keyring"` in config.toml and restart the daemon (`mp daemon restart`).
+```
+
+On a named profile the command carries `--profile <name>`, and the keyring service is `mailypoppins-<name>`.
+The `/etc/machine-id` advice is printed on Linux only.
+With no configuration at all, the first line a command prints says to run `mp config init`, and no password is mentioned.
+
 ## Recovery
 
 If the secrets file becomes undecryptable (you restored from a backup onto
@@ -78,10 +94,10 @@ a new machine, the kernel handed out a new machine-id, or the file got
 corrupted), every command that needs a password will fail with:
 
 ```
-Cannot decrypt secrets store on this machine. Run `mp config reset-secrets` to wipe and re-enter passwords.
+Cannot decrypt secrets store at <path> (<reason>). This usually means the file was created on a different machine or by a different user. Run `mp config reset-secrets` to wipe and re-enter passwords.
 ```
 
-`mp config reset-secrets`:
+`mp config reset-secrets`, which that refusal does not stop:
 
 1. Confirms the destructive operation interactively.
 2. Removes `~/.config/mailypoppins/secrets.enc`.
@@ -92,8 +108,7 @@ Cannot decrypt secrets store on this machine. Run `mp config reset-secrets` to w
 
 ## Opting into the OS keyring
 
-Power users on a release-signed build (Apple Developer ID, Linux Secret
-Service, etc.) can switch to the OS keyring by adding to
+Power users can switch to the OS keyring by adding to
 `~/.config/mailypoppins/config.toml`:
 
 ```toml
@@ -109,7 +124,11 @@ The keyring service name is `mailypoppins`, and `mailypoppins-<name>` on a named
 It was `email-cli` before #0022, so on the default profile a lookup that misses under `mailypoppins` retries under `email-cli` and nobody who opted in before the rename loses access to a stored password.
 A profile reads, writes and deletes under its own service alone, never under `mailypoppins` or `email-cli`.
 Writes and deletes go to `mailypoppins` only, so the next `mp config set-password` moves the credential across and leaves a stale, harmless `email-cli` entry behind.
-Clear those by hand if you want them gone (Keychain Access on macOS, `secret-tool` / Seahorse on Linux).
+Clear those by hand if you want them gone (Keychain Access on macOS, `keyctl` from keyutils on Linux).
+
+The OS keyring is the login Keychain on macOS and the kernel keyring (keyutils, the `keyring` crate's `linux-native` store) on Linux and WSL, not the Secret Service: it needs no desktop session or D-Bus, which is why `tests/secrets_smoke.rs` runs the keyring backend headless on Linux.
+The kernel keyring lives in memory: a reboot clears it, and after a logout it lasts only as long as the user's persistent keyring (a few days by default, `/proc/sys/kernel/keys/persistent_keyring_expiry`).
+On Linux, a password stored in the keyring has to be set again after every reboot, so the encrypted file is the better choice there for anything but a throwaway setup.
 
 On macOS, the keyring backend will re-prompt for every keychain item every
 time the binary is rebuilt with a different code-signing identity (which
