@@ -364,6 +364,114 @@ pub struct AccountConfig {
     /// accessor, never this field.
     #[serde(default)]
     pub calendar_backend: Option<CalendarBackendKind>,
+    /// `[accounts.ews]` (PERSO-256): where and as whom a
+    /// `calendar_backend = "ews"` account reaches Exchange Web Services.
+    /// Read through [`EwsLogin::of`], which checks it.
+    #[serde(default)]
+    pub ews: Option<EwsSettings>,
+}
+
+/// `[accounts.ews]` as written (PERSO-256): the endpoint, the login name and
+/// which of the account's stored passwords the login uses. Every field is
+/// needed; [`EwsLogin::of`] refuses a table that lacks one.
+#[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct EwsSettings {
+    /// The EWS URL, `https://mail.tum.de/ews/exchange.asmx` for TUM.
+    #[serde(default)]
+    pub endpoint: String,
+    /// The login name, the bare TUM ID for TUM.
+    #[serde(default)]
+    pub username: String,
+    /// The stored password the login uses, the one
+    /// `mp config set-password imap|smtp` stored.
+    #[serde(default)]
+    pub password_from: Option<EwsPasswordSource>,
+}
+
+/// Which stored password an EWS login uses.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EwsPasswordSource {
+    /// The IMAP password (`imap-password-<account>`).
+    Imap,
+    /// The SMTP password (`smtp-password-<account>`).
+    Smtp,
+}
+
+impl EwsPasswordSource {
+    /// The value as the config file and `mp config set-password` spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EwsPasswordSource::Imap => "imap",
+            EwsPasswordSource::Smtp => "smtp",
+        }
+    }
+
+    /// The secrets-store key of `account`'s password of this kind.
+    pub fn secret_key(self, account: &str) -> String {
+        format!("{}-password-{account}", self.as_str())
+    }
+}
+
+/// An account's checked `[accounts.ews]`: the login an EWS calendar makes,
+/// without its password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EwsLogin {
+    /// The endpoint URL, an `https` URL with a host.
+    pub endpoint: String,
+    /// The endpoint's host, lowercase: the NTLM target name is
+    /// `http/<host>`.
+    pub host: String,
+    pub username: String,
+    pub password_from: EwsPasswordSource,
+}
+
+impl EwsLogin {
+    /// The EWS login `account`'s `[accounts.ews]` names, or a sentence
+    /// saying which field is missing or wrong. Reads no secret and makes no
+    /// network call.
+    pub fn of(account: &AccountConfig) -> Result<Self> {
+        let at = format!(
+            "account {:?}: calendar_backend = \"ews\" needs",
+            account.name
+        );
+        let Some(settings) = account.ews.as_ref() else {
+            anyhow::bail!("{at} an [accounts.ews] table with endpoint, username and password_from");
+        };
+        let endpoint = settings.endpoint.trim();
+        if endpoint.is_empty() {
+            anyhow::bail!(
+                "{at} endpoint in [accounts.ews], the EWS URL \
+                 (https://mail.tum.de/ews/exchange.asmx for TUM)"
+            );
+        }
+        let host = reqwest::Url::parse(endpoint)
+            .ok()
+            .filter(|url| url.scheme() == "https")
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "account {:?}: endpoint {endpoint:?} in [accounts.ews] is not an https URL",
+                    account.name
+                )
+            })?;
+        let username = settings.username.trim();
+        if username.is_empty() {
+            anyhow::bail!("{at} username in [accounts.ews], the login name (the TUM ID for TUM)");
+        }
+        let Some(password_from) = settings.password_from else {
+            anyhow::bail!(
+                "{at} password_from in [accounts.ews], the stored password it logs in with: \
+                 \"imap\" or \"smtp\""
+            );
+        };
+        Ok(EwsLogin {
+            endpoint: endpoint.to_string(),
+            host,
+            username: username.to_string(),
+            password_from,
+        })
+    }
 }
 
 /// Which server calendar an account reaches (PERSO-200,
@@ -2620,6 +2728,115 @@ mirror = false
             voice_snapshots_dir("tum"),
             mailypoppins_data_dir().join("voice-snapshots").join("tum")
         );
+    }
+
+    /// `[accounts.ews]` (PERSO-256) reads its endpoint, login name and stored
+    /// password, draws no unknown-key warning, and is checked by
+    /// [`EwsLogin::of`], which names the host the NTLM target is built on.
+    #[test]
+    fn an_ews_table_reads_its_endpoint_login_and_stored_password() {
+        let toml_str = r#"
+[[accounts]]
+name = "tum"
+calendar_backend = "ews"
+
+[accounts.ews]
+endpoint = "https://Mail.TUM.de/ews/exchange.asmx"
+username = "ab12cde"
+password_from = "imap"
+
+[[accounts]]
+name = "other"
+calendar_backend = "ews"
+
+[accounts.ews]
+endpoint = "https://xmail.mwn.de/EWS/Exchange.asmx"
+username = "ab12cde"
+password_from = "smtp"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert!(config_warnings(toml_str).is_empty());
+        let login = EwsLogin::of(&config.accounts[0]).unwrap();
+        assert_eq!(
+            login,
+            EwsLogin {
+                endpoint: "https://Mail.TUM.de/ews/exchange.asmx".into(),
+                host: "mail.tum.de".into(),
+                username: "ab12cde".into(),
+                password_from: EwsPasswordSource::Imap,
+            }
+        );
+        assert_eq!(login.password_from.secret_key("tum"), "imap-password-tum");
+        let other = EwsLogin::of(&config.accounts[1]).unwrap();
+        assert_eq!(other.host, "xmail.mwn.de");
+        assert_eq!(other.password_from, EwsPasswordSource::Smtp);
+        assert_eq!(
+            other.password_from.secret_key("other"),
+            "smtp-password-other"
+        );
+        assert!(toml::from_str::<GlobalConfig>(
+            "[[accounts]]\nname = \"x\"\n[accounts.ews]\npassword_from = \"keyring\"\n"
+        )
+        .is_err());
+    }
+
+    /// An `ews` account whose table is missing, or lacks a field, or names
+    /// an endpoint that is no https URL, is refused with the field and what
+    /// goes in it.
+    #[test]
+    fn an_ews_table_that_lacks_a_field_is_refused_by_name() {
+        let refusal = |table: &str| {
+            let toml_str =
+                format!("[[accounts]]\nname = \"tum\"\ncalendar_backend = \"ews\"\n{table}");
+            let config: GlobalConfig = toml::from_str(&toml_str).unwrap();
+            EwsLogin::of(&config.accounts[0]).unwrap_err().to_string()
+        };
+        let full = |skip: &str| {
+            let mut table = String::from("[accounts.ews]\n");
+            for line in [
+                "endpoint = \"https://mail.tum.de/ews/exchange.asmx\"",
+                "username = \"ab12cde\"",
+                "password_from = \"imap\"",
+            ] {
+                if !line.starts_with(skip) {
+                    table.push_str(line);
+                    table.push('\n');
+                }
+            }
+            table
+        };
+        assert_eq!(
+            refusal(""),
+            "account \"tum\": calendar_backend = \"ews\" needs an [accounts.ews] table with \
+             endpoint, username and password_from"
+        );
+        assert_eq!(
+            refusal(&full("endpoint")),
+            "account \"tum\": calendar_backend = \"ews\" needs endpoint in [accounts.ews], \
+             the EWS URL (https://mail.tum.de/ews/exchange.asmx for TUM)"
+        );
+        assert_eq!(
+            refusal(&full("username")),
+            "account \"tum\": calendar_backend = \"ews\" needs username in [accounts.ews], \
+             the login name (the TUM ID for TUM)"
+        );
+        assert_eq!(
+            refusal(&full("password_from")),
+            "account \"tum\": calendar_backend = \"ews\" needs password_from in [accounts.ews], \
+             the stored password it logs in with: \"imap\" or \"smtp\""
+        );
+        for endpoint in ["http://mail.tum.de/ews/exchange.asmx", "mail.tum.de"] {
+            let table = full("endpoint").replace(
+                "[accounts.ews]\n",
+                &format!("[accounts.ews]\nendpoint = \"{endpoint}\"\n"),
+            );
+            assert_eq!(
+                refusal(&table),
+                format!(
+                    "account \"tum\": endpoint \"{endpoint}\" in [accounts.ews] is not an https URL"
+                )
+            );
+        }
     }
 
     /// `calendar_backend` (PERSO-200) defaults from `auth_method`, an explicit

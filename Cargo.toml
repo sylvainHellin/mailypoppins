@@ -100,6 +100,9 @@ mp-tui = { path = "clients/tui" }
 md4 = "0.10"
 md-5 = "0.10"
 hmac = "0.12"
+# The SOAP answers of the EWS calendar backend (PERSO-256), read in
+# src/calendar_backend/ews/xml.rs.
+quick-xml = "0.42.0"
 
 [features]
 # Statically link OpenSSL (built from source). Required for the

@@ -484,7 +484,7 @@ After the tail drain, whatever the mail pass did, and once it has released the r
 It runs off the reactor, as the mail body does, and under one lock per account that `calendar.rebuild`, `event.create`, `event.update`, `event.cancel`, `event.delete` and `event.respond` take too, so two syncs of one account never read the same token side by side.
 A sync that moved the cache publishes `calendar.changed` `{account}` beside the tick's `sync.completed`; a joiner carries none, as it carries no `sync.completed`.
 A token without the calendar scope is skipped with a debug line, because the `calendar:<name>` health check already prompts for the re-login, and any other failure is a warning in the log: the tick reports the mail pass, never the calendar.
-An `ews` or `caldav` account is refused as not supported yet and syncs nothing; an account without a server ticks never, so its calendar is polled by nothing either.
+An `ews` or `caldav` account is refused as not supported yet and syncs nothing, an `ews` one whose `[accounts.ews]` lacks a field with the sentence naming that field instead; an account without a server ticks never, so its calendar is polled by nothing either.
 The calendar is polled at the tick's own pace, the scheduler's `sync_interval_secs`, the watcher's arrivals and the clients' syncs; Graph webhooks would need a public endpoint (`.agents/plans/calendar.md`, D11).
 
 ### Answering an invitation

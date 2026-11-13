@@ -29,7 +29,7 @@ use crate::calendar_model::{
     Calendar, CalendarFeature, CalendarWindow, Event, EventId, Recurrence,
 };
 use crate::calendar_write::{EventInput, EventPatch, ProposedTime};
-use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
+use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind, EwsLogin};
 
 use fake::FakeCalendarBackend;
 use graph::GraphCalendarBackend;
@@ -328,7 +328,9 @@ pub enum BackendChoice {
 /// The fake, when the daemon runs under [`fake::FAKE_CALENDAR_ENV`], stands
 /// in for every account whose `calendar_backend` is not `none`, whatever that
 /// backend is. A backend a later phase builds (`ews`, `caldav`) is refused
-/// with a sentence naming it.
+/// with a sentence naming it; an `ews` account whose `[accounts.ews]` lacks a
+/// field is refused with the field first ([`EwsLogin::of`]), since its login
+/// to the server is not built yet either.
 pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
     let kind = account.calendar_backend();
     if kind == CalendarBackendKind::None {
@@ -340,6 +342,10 @@ pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
     match kind {
         CalendarBackendKind::Graph => Ok(BackendChoice::Graph),
         CalendarBackendKind::None => Ok(BackendChoice::None),
+        CalendarBackendKind::Ews => {
+            EwsLogin::of(account)?;
+            Err(unsupported(kind))
+        }
         other => Err(unsupported(other)),
     }
 }
@@ -610,17 +616,30 @@ mod tests {
             choice(AuthMethod::Graph, Some(CalendarBackendKind::None)),
             Ok(BackendChoice::None)
         ));
-        for (kind, name) in [
-            (CalendarBackendKind::Ews, "ews"),
-            (CalendarBackendKind::Caldav, "caldav"),
-        ] {
-            let err = choice(AuthMethod::Password, Some(kind)).unwrap_err();
+        let ews = AccountConfig {
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ab12cde".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Imap),
+            }),
+            ..account(AuthMethod::Password, Some(CalendarBackendKind::Ews))
+        };
+        let caldav = account(AuthMethod::Password, Some(CalendarBackendKind::Caldav));
+        for (configured, name) in [(&ews, "ews"), (&caldav, "caldav")] {
+            let err = choose_backend(configured).unwrap_err();
             assert_eq!(
                 err.to_string(),
                 format!("calendar backend {name} is not supported yet")
             );
-            assert!(!has_backend(&account(AuthMethod::Password, Some(kind))));
+            assert!(!has_backend(configured));
         }
+        let bare_ews = account(AuthMethod::Password, Some(CalendarBackendKind::Ews));
+        assert_eq!(
+            choose_backend(&bare_ews).unwrap_err().to_string(),
+            "account \"work\": calendar_backend = \"ews\" needs an [accounts.ews] table with \
+             endpoint, username and password_from"
+        );
+        assert!(!has_backend(&bare_ews));
         assert!(has_backend(&account(AuthMethod::Graph, None)));
         assert!(!has_backend(&account(AuthMethod::Password, None)));
     }

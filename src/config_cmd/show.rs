@@ -104,6 +104,25 @@ fn calendar_backend_line(account: &AccountConfig) -> String {
     line
 }
 
+/// The `[ews]` lines of an account whose calendar backend is EWS
+/// (PERSO-256): the endpoint, the login name and the stored password the
+/// login uses, or the sentence saying what `[accounts.ews]` lacks. Empty for
+/// every other backend.
+fn ews_lines(account: &AccountConfig) -> Vec<String> {
+    if account.calendar_backend() != crate::config::CalendarBackendKind::Ews {
+        return Vec::new();
+    }
+    match crate::config::EwsLogin::of(account) {
+        Ok(login) => vec![
+            "[ews]".bold().to_string(),
+            format!("  endpoint      = {}", login.endpoint),
+            format!("  username      = {}", login.username),
+            format!("  password_from = {}", login.password_from.as_str()),
+        ],
+        Err(err) => vec![format!("{} {err}", "\u{26a0}".yellow())],
+    }
+}
+
 /// Print the config file path.
 pub fn cmd_config_path() {
     println!("{}", config_path().display());
@@ -218,6 +237,9 @@ pub fn cmd_config_show(
         }
 
         println!("  {}", calendar_backend_line(account));
+        for line in ews_lines(account) {
+            println!("  {line}");
+        }
         if let Some(line) =
             missing_scope_line(&account.name, credential_of(credentials, &account.name))
         {
@@ -397,7 +419,7 @@ pub fn cmd_config_show(
 
 #[cfg(test)]
 mod tests {
-    use super::{calendar_backend_line, folder_lines, missing_scope_line};
+    use super::{calendar_backend_line, ews_lines, folder_lines, missing_scope_line};
     use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
     use mp_protocol::state::{FolderPolicy, MailboxRow};
 
@@ -427,6 +449,47 @@ mod tests {
             "calendar_backend = ews (not supported yet)"
         );
         assert_eq!(calendar_backend_line(&none), "calendar_backend = none");
+    }
+
+    /// PERSO-256: an EWS account shows its `[accounts.ews]` login, or what
+    /// the table lacks; another backend shows no such lines.
+    #[test]
+    fn an_ews_account_shows_its_login_or_what_its_table_lacks() {
+        colored::control::set_override(false);
+        let bare = AccountConfig {
+            name: "tum".into(),
+            calendar_backend: Some(CalendarBackendKind::Ews),
+            ..Default::default()
+        };
+        assert_eq!(
+            ews_lines(&bare),
+            [
+                "\u{26a0} account \"tum\": calendar_backend = \"ews\" needs an [accounts.ews] \
+              table with endpoint, username and password_from"
+            ]
+        );
+        let tum = AccountConfig {
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ab12cde".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Imap),
+            }),
+            ..bare
+        };
+        assert_eq!(
+            ews_lines(&tum),
+            [
+                "[ews]",
+                "  endpoint      = https://mail.tum.de/ews/exchange.asmx",
+                "  username      = ab12cde",
+                "  password_from = imap",
+            ]
+        );
+        let graph = AccountConfig {
+            ews: tum.ews.clone(),
+            ..Default::default()
+        };
+        assert!(ews_lines(&graph).is_empty());
     }
 
     /// PERSO-200: an account whose sign-in lacks the calendar scope gets the

@@ -676,6 +676,24 @@ server = "sentitems"          # Not "Sent Items"`} />
         account keeps its sign-in to the mail permissions.
       </p>
       <p>
+        An <code>"ews"</code> account, for an on-premises Exchange such as TUM's,
+        names its Exchange Web Services login in an <code>[accounts.ews]</code>
+        table: <code>endpoint</code>, the EWS URL; <code>username</code>, the login
+        name; and <code>password_from</code>, which stored password it logs in with,
+        <code>"imap"</code> or <code>"smtp"</code> (the one
+        <code>mp config set-password</code> stored). A table that lacks a field is
+        refused with a line naming it, which <code>mp config show</code> prints
+        under the account.
+      </p>
+      <ConfigExample title="EWS calendar config" code={`[[accounts]]
+name = "tum"
+calendar_backend = "ews"
+
+[accounts.ews]
+endpoint = "https://mail.tum.de/ews/exchange.asmx"
+username = "ab12cde"           # the TUM ID
+password_from = "imap"         # the password mp config set-password imap stored`} />
+      <p>
         A Graph account signed in before the calendar arrived has a token without
         the calendar permission (<code>Calendars.ReadWrite</code>). Mail keeps
         working, and every client shows <code>calendar needs a re-login (mp config
