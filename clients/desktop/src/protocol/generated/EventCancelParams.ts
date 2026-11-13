@@ -16,4 +16,12 @@ scope?: string,
 /**
  * A message for the attendees, sent with the cancellation.
  */
-comment?: string, };
+comment?: string,
+/**
+ * The start of the one occurrence of an invitation mail's series
+ * (`imip:<row_id>`) to cancel, in the forms of
+ * [`EventInputParams::start`] read in the series' own zone, or a bare
+ * date for an all-day series; with no scope or the `occurrence` one.
+ * A server occurrence is named by its own id instead.
+ */
+occurrence?: string, };

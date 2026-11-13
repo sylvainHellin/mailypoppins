@@ -30,7 +30,7 @@
 //! event.update            {account, event, scope?, fields: EventPatchParams}
 //!                             -> {operation_id}
 //!                             settles EventUpdateResult {account, event, scope?}
-//! event.cancel            {account, event, scope?, comment?}
+//! event.cancel            {account, event, scope?, comment?, occurrence?}
 //!                             -> {operation_id}
 //!                             settles EventCancelResult {account, event, notified, scope?}
 //! event.delete            {account, event, scope?}
@@ -118,8 +118,15 @@
 //! dropped, so the sync right after is a baseline of the calendar's window,
 //! which brings the occurrences the change moved, renamed, reset or ended.
 //!
+//! An update or a cancel of an invitation mail's event (`imip:<row_id>`)
+//! the account organised goes out by iMIP instead (PERSO-204): the sent
+//! copy's `invite.ics` read back, the next `SEQUENCE` over every version
+//! the account holds, and the messages submitted through the durable
+//! outbox ([`plan_imip_update`], [`plan_imip_cancel`]); `occurrence` names
+//! the one occurrence of such a series a cancel reaches.
+//!
 //! Their refusals, all `-32602` before an operation starts but the re-login
-//! prompt: an invitation mail's event (`imip:`), an account without a
+//! prompt: an invitation mail's event to a delete, an account without a
 //! backend, an event the cache does not hold (and mp did not just cancel or
 //! delete through the same call in the same scope), an occurrence without a
 //! scope, the `occurrence` scope on an event that is no occurrence or on a
@@ -517,6 +524,9 @@ enum Work {
     Create(Box<CreateWork>),
     /// A change to, a cancellation or a deletion of a cached server event.
     Change(Box<ChangeWork>),
+    /// An organizer's update or cancellation of an invitation mail it sent,
+    /// by iMIP (PERSO-204).
+    Imip(Box<ImipChangeWork>),
     /// A retried cancel or delete of an event the same call already took
     /// off the server and out of the cache, which settles as that call did.
     Removed {
@@ -546,6 +556,35 @@ struct ChangeWork {
     change: Change,
     scope: Option<EventScope>,
     named: String,
+}
+
+/// Everything an organizer's change of an invitation mail needs, resolved
+/// before the operation id exists: the messages it sends, built down to
+/// their `VCALENDAR`s, and what it settles with.
+struct ImipChangeWork {
+    account: AccountConfig,
+    /// `event.update` or `event.cancel`, the commit point's name.
+    method: &'static str,
+    /// The `imip:<row_id>` the client named, which a cancellation's result
+    /// names back.
+    named: String,
+    row_id: i64,
+    /// The scope a cancellation was made in: `series` for a whole series,
+    /// `occurrence` for one occurrence.
+    scope: Option<String>,
+    messages: Vec<crate::invite::ItipMessage>,
+    /// The new version an update sends, read back from the agenda once it
+    /// went out; `None` for a cancellation.
+    update: Option<SentVersion>,
+    email: crate::config::EmailSettings,
+    secrets: crate::secrets::SecretsBackendKind,
+}
+
+/// An update's new version: its `UID`, its `VCALENDAR` and its summary.
+struct SentVersion {
+    uid: String,
+    ics: String,
+    summary: String,
 }
 
 /// Everything one create needs, resolved before the operation id exists.
@@ -653,8 +692,8 @@ fn plan(
 
 /// The account and store of the server event an update, a cancel or a
 /// delete addresses, each refused before an operation starts: an invitation
-/// mail's event, an account without a backend, and a sign-in without the
-/// calendar scope.
+/// mail's event (which only a delete still reaches here), an account
+/// without a backend, and a sign-in without the calendar scope.
 fn change_store(
     method: &str,
     name: &str,
@@ -664,8 +703,8 @@ fn change_store(
     let account = super::account::configured_account(&snapshot.accounts, name)?.clone();
     if imip_row_id(id).is_some() {
         return Err(invalid_params(format!(
-            "{id} is an invitation mail's event, which can only be answered (event.respond); \
-             {method} changes a server event"
+            "{id} is an invitation mail's event, which {method} does not reach: its organizer \
+             cancels it (event.cancel) and an attendee answers it (event.respond)"
         )));
     }
     match choose_backend(&account) {
@@ -841,6 +880,9 @@ fn plan_update(
     )?;
     let request: EventUpdateParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.update: {e}")))?;
+    if let Some(row_id) = imip_row_id(&request.event) {
+        return plan_imip_update(request, row_id, snapshot);
+    }
     let name = request.account.as_str();
     let scope = scope_param(request.scope.as_deref())?;
     let (account, store) = change_store("event.update", name, &request.event, snapshot)?;
@@ -936,10 +978,20 @@ fn plan_cancel(
     only_params(
         "event.cancel",
         params,
-        &["account", "comment", "event", "scope"],
+        &["account", "comment", "event", "occurrence", "scope"],
     )?;
     let request: EventCancelParams = serde_json::from_value(params.clone())
         .map_err(|e| invalid_params(format!("event.cancel: {e}")))?;
+    if let Some(row_id) = imip_row_id(&request.event) {
+        return plan_imip_cancel(request, row_id, snapshot);
+    }
+    if request.occurrence.is_some() {
+        return Err(invalid_params(format!(
+            "occurrence names an occurrence of an invitation mail's series; an occurrence of \
+             the server's series {} is cancelled by its own id, with the occurrence scope",
+            request.event
+        )));
+    }
     let scope = scope_param(request.scope.as_deref())?;
     let (account, store) =
         change_store("event.cancel", &request.account, &request.event, snapshot)?;
@@ -968,6 +1020,196 @@ fn plan_cancel(
         change: Change::Cancel { comment },
         scope,
         named: request.event,
+    })))
+}
+
+/// The refusal of an organizer's change of an invitation mail on a Graph
+/// account, which sends no SMTP (`ANO-4`, as for its first send).
+pub const GRAPH_IMIP_CHANGE_REFUSAL: &str =
+    "Changing or cancelling an invitation by mail is not supported for Graph accounts yet \
+     (#0036, blocked on #0035)";
+
+/// The account, the agenda event and the sent invitation of the invitation
+/// mail `row_id` an organizer's change addresses, each refused before an
+/// operation starts: a Graph account, an event the agenda does not list (an
+/// older version, or no invitation), an invitation the account did not
+/// organise, and one cancelled already.
+fn organised(
+    name: &str,
+    id: &str,
+    row_id: i64,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<(AccountConfig, Sourced, crate::invite::OrganizedRow), RpcError> {
+    let account = super::account::configured_account(&snapshot.accounts, name)?.clone();
+    if account.auth_method == AuthMethod::Graph {
+        return Err(RpcError {
+            code: super::INVALID_PARAMS,
+            message: GRAPH_IMIP_CHANGE_REFUSAL.to_string(),
+            data: Some(json!({"account": name, "event": id})),
+        });
+    }
+    super::account::ready_account(&snapshot.accounts, name)?;
+    let store = open_store(name)?;
+    let found = crate::calendar_view::get(&account, id, local_zone())
+        .map_err(|e| server_error(name, &e))?
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "{name} has no event {id} (an older version of an invitation, or no invitation \
+                 at all)"
+            ))
+        })?;
+    let blobs = BlobStore::for_account(name);
+    let row = crate::invite::organized_row(&store, &blobs, &account, row_id)
+        .map_err(|e| invalid_params(format!("{e:#}")))?;
+    if found.event.cancelled {
+        return Err(invalid_params(format!(
+            "{} is cancelled already; there is nothing left to change",
+            found.event.summary
+        )));
+    }
+    Ok((account, found, row))
+}
+
+/// `event.update` of an invitation mail the account organised: the new
+/// version, at the next `SEQUENCE`, to the attendees it invites, and a
+/// cancellation to the ones it drops.
+fn plan_imip_update(
+    request: EventUpdateParams,
+    row_id: i64,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<Work, RpcError> {
+    let (account, found, row) = organised(&request.account, &request.event, row_id, snapshot)?;
+    let scope = scope_param(request.scope.as_deref())?;
+    let event = &found.event;
+    if event.kind == EventKind::Single {
+        match scope {
+            Some(EventScope::Occurrence) => {
+                return Err(invalid_params(format!(
+                    "{} is not an occurrence of a series",
+                    event.summary
+                )))
+            }
+            Some(EventScope::Series) => {
+                return Err(invalid_params(format!(
+                    "{} is not part of a series",
+                    event.summary
+                )))
+            }
+            None => {}
+        }
+    }
+    let patch = resolve_patch(&request.fields, event, local_zone()).map_err(invalid_params)?;
+    let (spec, messages) =
+        crate::invite::update_messages(&row.invite, &event.time, &patch, row.next_sequence)
+            .map_err(invalid_params)?;
+    let ics = messages
+        .last()
+        .map(|message| message.ics.clone())
+        .ok_or_else(|| internal("an update built no message"))?;
+    Ok(Work::Imip(Box::new(ImipChangeWork {
+        account,
+        method: "event.update",
+        named: request.event,
+        row_id,
+        scope: None,
+        messages,
+        update: Some(SentVersion {
+            uid: spec.uid,
+            ics,
+            summary: spec.summary,
+        }),
+        email: snapshot.config.email.clone(),
+        secrets: snapshot.config.secrets_backend,
+    })))
+}
+
+/// `event.cancel` of an invitation mail the account organised, told to
+/// every attendee: the whole event, a whole series, one occurrence of a
+/// series named by its start, or an occurrence the account changed on its
+/// own (an override), in the scope the client names.
+fn plan_imip_cancel(
+    request: EventCancelParams,
+    row_id: i64,
+    snapshot: &super::super::config::Snapshot,
+) -> Result<Work, RpcError> {
+    let (account, found, row) = organised(&request.account, &request.event, row_id, snapshot)?;
+    let scope = scope_param(request.scope.as_deref())?;
+    let title = found.event.summary.as_str();
+    let occurrence = request
+        .occurrence
+        .as_deref()
+        .map(str::trim)
+        .filter(|when| !when.is_empty());
+    let named = |when: &str| {
+        crate::invite::occurrence_recurrence_id(&row.invite, when, local_zone())
+            .map_err(|e| invalid_params(format!("{e:#}")))
+    };
+    let (recurrence_id, scope) = if let Some(own) = &row.invite.recurrence_id {
+        if occurrence.is_some() {
+            return Err(invalid_params(format!(
+                "{title} is one occurrence already; cancel it in the occurrence scope, naming no \
+                 other"
+            )));
+        }
+        match scope {
+            None => {
+                return Err(invalid_params(format!(
+                    "{title} is one occurrence of a series: name the scope, occurrence or series"
+                )))
+            }
+            Some(EventScope::Occurrence) => (Some(own.clone()), Some(EventScope::Occurrence)),
+            Some(EventScope::Series) => (None, Some(EventScope::Series)),
+        }
+    } else if row.invite.recurring {
+        match (scope, occurrence) {
+            (Some(EventScope::Series), Some(_)) => {
+                return Err(invalid_params(format!(
+                    "An occurrence is cancelled in the occurrence scope; the series scope \
+                     cancels all of {title}"
+                )))
+            }
+            (Some(EventScope::Occurrence), None) => {
+                return Err(invalid_params(format!(
+                    "To cancel one occurrence of {title}, name the occurrence (its start)"
+                )))
+            }
+            (_, Some(when)) => (Some(named(when)?), Some(EventScope::Occurrence)),
+            (_, None) => (None, Some(EventScope::Series)),
+        }
+    } else {
+        if let Some(when) = occurrence {
+            named(when)?;
+        }
+        match scope {
+            None => (None, None),
+            Some(EventScope::Occurrence) => {
+                return Err(invalid_params(format!(
+                    "{title} is not an occurrence of a series"
+                )))
+            }
+            Some(EventScope::Series) => {
+                return Err(invalid_params(format!("{title} is not part of a series")))
+            }
+        }
+    };
+    let comment = request.comment.filter(|comment| !comment.trim().is_empty());
+    let message = crate::invite::cancel_message(
+        &row.invite,
+        row.next_sequence,
+        recurrence_id.as_ref(),
+        comment.as_deref(),
+    )
+    .map_err(|e| invalid_params(format!("{e:#}")))?;
+    Ok(Work::Imip(Box::new(ImipChangeWork {
+        account,
+        method: "event.cancel",
+        named: request.event,
+        row_id,
+        scope: scope.map(|scope| scope.as_str().to_string()),
+        messages: vec![message],
+        update: None,
+        email: snapshot.config.email.clone(),
+        secrets: snapshot.config.secrets_backend,
     })))
 }
 
@@ -1454,6 +1696,7 @@ async fn run(work: Work, handle: OperationHandle) {
         Work::Respond(work) => respond(*work, handle).await,
         Work::Create(work) => create(*work, handle).await,
         Work::Change(work) => change(*work, handle).await,
+        Work::Imip(work) => imip_change(*work, handle).await,
         Work::Removed {
             account,
             event,
@@ -2007,6 +2250,150 @@ async fn reply(work: RsvpWork, handle: OperationHandle) {
         }
         Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
     }
+}
+
+/// An organizer's update or cancellation of an invitation mail, each of its
+/// messages submitted durably in turn, the cancellation of dropped attendees
+/// first.
+async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
+    let ImipChangeWork {
+        account,
+        method,
+        named,
+        row_id,
+        scope,
+        messages,
+        update,
+        email,
+        secrets,
+    } = work;
+    super::send::user_started_send(&account);
+    if let Err(e) = super::open_secrets(&account.name, secrets) {
+        return handle.fail(DomainError::from(e));
+    }
+    let name = account.name.clone();
+    let token = handle.token.clone();
+    let sent = off_thread("the invitation change", move || async move {
+        let Some((delivered, contacts)) =
+            send_itip(&account, &messages, &email, method, &token).await?
+        else {
+            return Ok(None);
+        };
+        let event = match &update {
+            Some(version) => Some(sent_version(&account, row_id, version)?),
+            None => None,
+        };
+        Ok(Some((delivered, contacts, event)))
+    })
+    .await
+    .and_then(|inner| inner);
+    match sent {
+        // Cancelled at the commit point: nothing went out, and the registry
+        // has already settled the operation.
+        Ok(None) => {}
+        Ok(Some((delivered, contacts, event))) => {
+            if let Some(contacts) = contacts {
+                handle.announce(super::contact::contact_changed(&name, contacts));
+            }
+            handle.announce(calendar_changed(&name));
+            if delivered.is_empty() {
+                return handle.fail(DomainError::internal(format!(
+                    "No attendee accepted the message; mp outbox list -A {name} shows it"
+                )));
+            }
+            match event {
+                Some(event) => settle(
+                    &handle,
+                    EventUpdateResult {
+                        account: name,
+                        event,
+                        scope: None,
+                    },
+                ),
+                None => settle(
+                    &handle,
+                    EventCancelResult {
+                        account: name,
+                        event: named,
+                        notified: delivered,
+                        scope,
+                    },
+                ),
+            }
+        }
+        Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+    }
+}
+
+/// The messages of one organizer's change, built and submitted through the
+/// durable outbox, or `None` when the token was shut before the first
+/// submission: the addresses that accepted one, and how many contacts the
+/// index holds once they were counted.
+async fn send_itip(
+    account: &AccountConfig,
+    messages: &[crate::invite::ItipMessage],
+    email: &crate::config::EmailSettings,
+    method: &str,
+    token: &CancelToken,
+) -> anyhow::Result<Option<(Vec<String>, Option<usize>)>> {
+    let smtp = super::send::smtp_config(account)?;
+    // No signature: a change carries the invitation, and the first one's
+    // body was the user's to sign.
+    let built = messages
+        .iter()
+        .map(|message| crate::invite::itip_built(account, &smtp.default_from, email, None, message))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if !commit_point(method, token).await {
+        return Ok(None);
+    }
+    let mut delivered = Vec::new();
+    for message in &built {
+        let report = crate::send::send_durably(message, account, &smtp).await?;
+        delivered.extend(
+            report
+                .send_result
+                .results
+                .iter()
+                .filter(|result| result.success)
+                .map(|result| result.address.clone()),
+        );
+    }
+    let contacts = if delivered.is_empty() {
+        None
+    } else {
+        crate::contacts::hooks::bump_owed_sends(account)
+    };
+    Ok(Some((delivered, contacts)))
+}
+
+/// The new version an update sent, as the agenda shows it: its sent copy's
+/// row once the outbox filed it, else the version itself on the old row.
+fn sent_version(
+    account: &AccountConfig,
+    old_row: i64,
+    version: &SentVersion,
+) -> anyhow::Result<CalendarEvent> {
+    let zone = local_zone();
+    let store = Store::open(crate::config::store_path(&account.name))?;
+    let filed = crate::calendar_view::imip_events(&store, account, zone)
+        .into_iter()
+        .find(|sourced| {
+            sourced.event.uid == version.uid
+                && sourced.event.recurrence_id.is_none()
+                && sourced.source.as_ref().is_some_and(|s| s.row_id != old_row)
+        });
+    let sourced = match filed {
+        Some(sourced) => sourced,
+        None => crate::calendar_view::organised_from_ics(
+            version.ics.as_bytes(),
+            old_row,
+            &version.summary,
+            &account.name,
+            zone,
+        )
+        .ok_or_else(|| anyhow::anyhow!("the update's own VEVENT has no start"))?,
+    };
+    sourced.to_wire()
 }
 
 /// Settle `handle` with `result`, serialised.

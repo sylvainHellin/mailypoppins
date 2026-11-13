@@ -5136,6 +5136,7 @@ async fn routed_event_cancel(
         event: event.to_string(),
         scope: scope.map(|scope| scope.word().to_string()),
         comment,
+        occurrence: None,
     })?;
     let mut connection = operation_session().await;
     let result = run_admin_operation(&mut connection, "event.cancel", params, account).await?;

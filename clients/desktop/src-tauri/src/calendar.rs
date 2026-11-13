@@ -351,6 +351,7 @@ pub fn event_cancel_on(
             .map(str::trim)
             .filter(|c| !c.is_empty())
             .map(str::to_string),
+        occurrence: None,
     };
     let params = serde_json::to_value(params)
         .map_err(|e| GuiError::protocol(format!("event.cancel params: {e}")))?;

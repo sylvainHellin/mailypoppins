@@ -890,6 +890,14 @@ pub struct EventCancelParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub comment: Option<String>,
+    /// The start of the one occurrence of an invitation mail's series
+    /// (`imip:<row_id>`) to cancel, in the forms of
+    /// [`EventInputParams::start`] read in the series' own zone, or a bare
+    /// date for an all-day series; with no scope or the `occurrence` one.
+    /// A server occurrence is named by its own id instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub occurrence: Option<String>,
 }
 
 /// What a settled `event.cancel` reports.

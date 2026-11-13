@@ -256,8 +256,8 @@ pub fn organized_row(
     let own = crate::parse::extract_email_address(&account.default_from);
     if !invite.organizer.eq_ignore_ascii_case(&own) {
         return Err(anyhow!(
-            "{} was organised by {}, not by {}: only its organizer changes or cancels it; \
-             answer it instead",
+            "{} was organised by {}, not by {}: only its organizer changes or cancels it, \
+             and an invitation you were sent can only be answered (event.respond)",
             invite.title(),
             invite.organizer,
             account.name

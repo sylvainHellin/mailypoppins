@@ -2331,3 +2331,244 @@ async fn a_proposed_time_is_refused_before_any_server_call() {
     }
     assert!(slice.answers().is_empty(), "no answer reached the server");
 }
+
+// ---------------------------------------------------------------------------
+// The organizer's changes to an invitation mail (PERSO-204)
+// ---------------------------------------------------------------------------
+
+/// The slice with the account without a backend holding the sent copies of
+/// two invitations it organised, and the transport fake armed with its
+/// ledger at `log`.
+fn organised_slice(log: &Path) -> Slice {
+    Slice::start_seeded(
+        false,
+        &[(
+            send_fixture::FAKE_TRANSPORT_ENV,
+            send_fixture::fake_transport(log),
+        )],
+        support::calendar_fixture::seed_organised,
+        Vec::new(),
+    )
+}
+
+/// The `imip:` event of the invitation `uid` on `account`'s agenda.
+async fn imip_event(conn: &mut Connection, account: &str, uid: &str) -> Value {
+    view(conn, json!({"accounts": [account]}))
+        .await
+        .into_iter()
+        .find(|event| event["uid"] == uid)
+        .unwrap_or_else(|| panic!("{account} lists no event {uid}"))
+}
+
+/// The addresses the transport fake accepted a message for, in order.
+fn told(log: &Path) -> Vec<String> {
+    send_fixture::transport_events(log)
+        .into_iter()
+        .filter_map(|event| match event {
+            send_fixture::TransportEvent::Submit {
+                address,
+                accepted: true,
+                ..
+            } => Some(address),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An update of an invitation the account organised goes out as a new
+/// version to the attendees it keeps and as a cancellation to the one it
+/// drops, and the agenda shows the new version as soon as it settles.
+#[tokio::test]
+async fn event_update_resends_an_invitation_the_account_organised() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice(&log);
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let id = own["id"].as_str().unwrap().to_string();
+    assert_eq!(own["is_organizer"], true, "{own}");
+    let update =
+        |event: &str, fields: Value| json!({"account": IMIP, "event": event, "fields": fields});
+
+    let received = imip_event(&mut conn, IMIP, LOCAL_UID).await["id"].clone();
+    let received = received.as_str().unwrap();
+    let cases = [
+        (
+            update(received, json!({"summary": "Mine now"})),
+            "can only be answered",
+        ),
+        (
+            update(&id, json!({"reminder": 15})),
+            "an invitation mail carries",
+        ),
+        (update(&id, json!({})), "Nothing to change"),
+        (
+            json!({"account": IMIP, "event": id, "scope": "series", "fields": {"summary": "x"}}),
+            "is not part of a series",
+        ),
+        (
+            update(&id, json!({"attendees": []})),
+            "at least one attendee",
+        ),
+    ];
+    for (params, words) in cases {
+        let error = call_err(&mut conn, "event.update", params.clone()).await;
+        assert_eq!(error.code, -32602, "{params}: {}", error.message);
+        assert!(error.message.contains(words), "{params}: {}", error.message);
+    }
+    assert!(told(&log).is_empty(), "a refusal sends nothing");
+
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        update(
+            &id,
+            json!({"location": "Room 1.01", "attendees": [{"email": "ada@example.com"}]}),
+        ),
+    )
+    .await;
+    let result = succeeded(&status);
+    assert_eq!(result["account"], IMIP, "{result}");
+    assert_eq!(result["event"]["location"], "Room 1.01", "{result}");
+    assert_eq!(result["event"]["uid"], support::calendar_fixture::OWN_UID);
+    assert!(result.get("scope").is_none(), "{result}");
+    assert_eq!(told(&log), ["bob@example.com", "ada@example.com"]);
+
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["location"], "Room 1.01", "{now}");
+    assert_eq!(now["cancelled"], false, "{now}");
+    assert_eq!(now["is_organizer"], true, "{now}");
+    let emails: Vec<&str> = now["attendees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["email"].as_str().unwrap())
+        .collect();
+    assert_eq!(emails, ["ada@example.com"]);
+    assert_eq!(
+        result["event"]["id"], now["id"],
+        "the result names the new version"
+    );
+}
+
+/// A cancellation of an invitation the account organised tells every
+/// attendee and tombstones it on the agenda; one occurrence of a series is
+/// cancelled on its own, the series staying live.
+#[tokio::test]
+async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice(&log);
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let id = own["id"].as_str().unwrap().to_string();
+    let series = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_SERIES_UID).await;
+    let series_id = series["id"].as_str().unwrap().to_string();
+    let received = imip_event(&mut conn, IMIP, LOCAL_UID).await["id"].clone();
+    let occurrence = (at(13, 8)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let cases = [
+        (
+            json!({"account": IMIP, "event": received}),
+            "can only be answered",
+        ),
+        (
+            json!({"account": IMIP, "event": id, "occurrence": occurrence}),
+            "does not repeat",
+        ),
+        (
+            json!({"account": IMIP, "event": series_id, "scope": "occurrence"}),
+            "name the occurrence",
+        ),
+        (
+            json!({"account": IMIP, "event": series_id, "occurrence": at(13, 9).to_rfc3339()}),
+            "is not one of them",
+        ),
+        (
+            json!({"account": SERVER, "event": "ev-own", "occurrence": occurrence}),
+            "an invitation mail's series",
+        ),
+    ];
+    for (params, words) in cases {
+        let error = call_err(&mut conn, "event.cancel", params.clone()).await;
+        assert_eq!(error.code, -32602, "{params}: {}", error.message);
+        assert!(error.message.contains(words), "{params}: {}", error.message);
+    }
+    let delete = call_err(
+        &mut conn,
+        "event.delete",
+        json!({"account": IMIP, "event": id}),
+    )
+    .await;
+    assert!(
+        delete
+            .message
+            .contains("its organizer cancels it (event.cancel)"),
+        "{}",
+        delete.message
+    );
+    assert!(told(&log).is_empty(), "a refusal sends nothing");
+
+    let status = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": id, "comment": "Numbers not in yet"}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&status),
+        &json!({"account": IMIP, "event": id, "notified": ["ada@example.com", "bob@example.com"]})
+    );
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(
+        now["cancelled"], true,
+        "the organizer's own copy is tombstoned: {now}"
+    );
+    let again = call_err(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": now["id"]}),
+    )
+    .await;
+    assert!(
+        again.message.contains("cancelled already"),
+        "{}",
+        again.message
+    );
+
+    let status = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": series_id, "occurrence": occurrence}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&status),
+        &json!({"account": IMIP, "event": series_id, "notified": ["ada@example.com"],
+                "scope": "occurrence"})
+    );
+    let after = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_SERIES_UID).await;
+    assert_eq!(after["cancelled"], false, "the series lives on: {after}");
+    let store = read_fixture::store(slice.root(), IMIP);
+    let blobs = mailypoppins::store::BlobStore::new(
+        send_fixture::account_dir(slice.root(), IMIP).join("blobs"),
+    );
+    let cancels: Vec<(String, Option<String>)> =
+        mailypoppins::reconcile::load_invites(&store, &blobs, IMIP)
+            .into_iter()
+            .filter(|invite| invite.method() == "CANCEL")
+            .map(|invite| {
+                (
+                    invite.uid().unwrap().to_string(),
+                    invite.recurrence_id().map(str::to_string),
+                )
+            })
+            .collect();
+    assert!(
+        cancels.contains(&(
+            support::calendar_fixture::OWN_SERIES_UID.to_string(),
+            Some(occurrence.clone())
+        )),
+        "{cancels:?}"
+    );
+}

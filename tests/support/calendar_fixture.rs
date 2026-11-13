@@ -381,3 +381,73 @@ pub fn fake_spec_free_busy(log: &Path, missing_scope: bool, free_busy: bool) -> 
     });
     spec.to_string()
 }
+
+/// The `UID` of the invitation the account without a backend organised
+/// and sent (PERSO-204).
+pub const OWN_UID: &str = "budget-review@example.com";
+/// The `UID` of the weekly series it organised.
+pub const OWN_SERIES_UID: &str = "own-weekly@example.com";
+
+/// A `METHOD:REQUEST` the account without a backend sent as organizer, to
+/// `attendees`, with `extra` content lines in its `VEVENT`.
+fn organised_ics(
+    uid: &str,
+    summary: &str,
+    start: DateTime<Utc>,
+    attendees: &[&str],
+    extra: &str,
+) -> Vec<u8> {
+    let attendees: String = attendees
+        .iter()
+        .map(|a| format!("ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{a}\r\n"))
+        .collect();
+    format!(
+        "BEGIN:VCALENDAR\r\nPRODID:-//mailypoppins//calendar slice//EN\r\nVERSION:2.0\r\n\
+         METHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nSEQUENCE:0\r\n\
+         DTSTAMP:20260101T000000Z\r\nSUMMARY:{summary}\r\nDTSTART:{}\r\nDTEND:{}\r\n{extra}\
+         LOCATION:Room 4.12\r\nORGANIZER:mailto:perso@example.com\r\n{attendees}\
+         END:VEVENT\r\nEND:VCALENDAR\r\n",
+        ics_time(start),
+        ics_time(start + Days::hours(1)),
+    )
+    .into_bytes()
+}
+
+/// The sent copies of two invitations the account without a backend
+/// organised: a meeting five days out with Ada and Bob, and a weekly series
+/// with Ada from six days out.
+pub fn seed_organised(root: &Path) {
+    let mut meeting = read_fixture::email(
+        "Perso <perso@example.com>",
+        "ada@example.com, bob@example.com",
+        "Budget review",
+        "Mon, 6 Jul 2026 10:00:00 +0200",
+        "numbers\n",
+    );
+    meeting.message_id = Some("<budget-review@example.com>".into());
+    meeting.calendar_ics = Some(organised_ics(
+        OWN_UID,
+        "Budget review",
+        at(5, 9),
+        &["ada@example.com", "bob@example.com"],
+        "",
+    ));
+    read_fixture::ingest(root, IMIP, "sent", 1, &meeting);
+
+    let mut series = read_fixture::email(
+        "Perso <perso@example.com>",
+        "ada@example.com",
+        "Weekly planning",
+        "Mon, 6 Jul 2026 10:00:00 +0200",
+        "every week\n",
+    );
+    series.message_id = Some("<own-weekly@example.com>".into());
+    series.calendar_ics = Some(organised_ics(
+        OWN_SERIES_UID,
+        "Weekly planning",
+        at(6, 8),
+        &["ada@example.com"],
+        "RRULE:FREQ=WEEKLY;COUNT=4\r\n",
+    ));
+    read_fixture::ingest(root, IMIP, "sent", 2, &series);
+}

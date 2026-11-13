@@ -267,6 +267,38 @@ pub fn imip_events(store: &Store, account: &AccountConfig, viewer: Tz) -> Vec<So
         .collect()
 }
 
+/// The event an invitation payload `ics` the account organised would put on
+/// its agenda at row `row_id`: what an update just sent looks like before
+/// its sent copy is filed (PERSO-204). `None` when the payload has no
+/// usable start.
+pub fn organised_from_ics(
+    ics: &[u8],
+    row_id: i64,
+    subject: &str,
+    account: &str,
+    viewer: Tz,
+) -> Option<Sourced> {
+    let row = AgendaEvent {
+        row_id,
+        event: crate::calendar::event_frontmatter(&crate::calendar::parse_ics(ics)?),
+        subject: subject.to_string(),
+        start_sort: String::new(),
+        end_sort: String::new(),
+        start_display: String::new(),
+        is_organizer: true,
+        cancelled: false,
+    };
+    Some(Sourced {
+        event: imip_event(&row, account, viewer)?,
+        source: Some(CalendarEventSource {
+            kind: IMIP_SOURCE_KIND.into(),
+            row_id,
+            selector: String::new(),
+            subject: subject.to_string(),
+        }),
+    })
+}
+
 /// One agenda row as a neutral event of the virtual invitation calendar.
 ///
 /// The agenda's start and end strings come in three forms
