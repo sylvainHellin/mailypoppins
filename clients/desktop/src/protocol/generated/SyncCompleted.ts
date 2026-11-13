@@ -72,13 +72,12 @@ failed_mutations: number,
  */
 error: string | null,
 /**
- * What arrived in an inbox on this tick, for the desktop notification
- * (#0009, P5-U8).
+ * What this tick inserted into an inbox above what the account held
+ * before it (P5-U8, PERSO-186), before the blocked senders and the hooks
+ * judged it.
  *
- * On the event rather than only in the answer to whoever asked for the
- * pass, because a runtime's tick is a pass nobody asked for and its
- * answer therefore has no reader. `default` so a payload written by a
- * daemon that predates the field still decodes as a tick that notified
- * about nothing.
+ * No client notifies from it: new mail worth a notification is
+ * [`MailArrived`], published once those judges are done. `default` so a
+ * payload written by a daemon that predates the field still decodes.
  */
 new_inbox_mail: Array<Arrival>, };

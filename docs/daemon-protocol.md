@@ -940,7 +940,8 @@ The refusal arrives before anything opens a socket, and before either drain runs
 A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
 A pass that ran answers `{blocked: false, outcome: <sync.completed payload>}` and publishes the same payload as a `sync.completed` event, unless it was a dry run, whose counts describe mail that was not ingested and would read to every other client as mail that arrived.
 
-Both answers also carry `new_inbox_mail`, `[{from, subject}]` for every message the pass ingested into the inbox and `[]` for a pass that ingested none or was blocked.
+Both answers also carry `new_inbox_mail`, `[{from, subject}]` for every message the pass inserted into the inbox above what the account held before it, and `[]` for a pass that inserted none, a first sync or a blocked pass (PERSO-186).
+No client notifies from it, nor from the same list on `sync.completed`: the list is taken before the blocked senders and the hooks judge the mail, and the notification is `mail.arrived`'s, published once they have.
 Since P5-U8 the `sync.completed` payload carries the same list under the same name, and the answer's copy is the same list for the client that asked: a tick nobody asked for - an account runtime's watcher noticing the mailbox move - has no answer for the arrivals to ride, and the desktop notification of #0009 is scoped to the client that is looking rather than to the one that typed a command.
 
 Each of the five slots of a tick is one `operation.progress` report whose `phase` is one of `head_outbox`, `head_mutations`, `body`, `tail_outbox`, `tail_mutations`, in that order (#0114).
@@ -1569,10 +1570,10 @@ The one trace it leaves in a later bootstrap is the account's `sync_health` verd
 | `non_converging` | array of string | mailboxes that downloaded the same UIDs again, sorted and deduplicated |
 | `failed_mutations` | u64 | queued mutations that failed and were rolled back |
 | `error` | string or null | the engine's error rendered with `{:#}`, `null` on a tick that ran |
-| `new_inbox_mail` | array of `{from, subject}` | what the tick ingested into an inbox, `[]` when it ingested none |
+| `new_inbox_mail` | array of `{from, subject}` | what the tick inserted into an inbox above what the account held before it, `[]` when none |
 
 Every key is present on every payload, so a client never branches on an absent one, and a tick that did not fail carries `"error": null` rather than an empty string.
-`new_inbox_mail` is a sender and a subject per message and nothing else: a client renders a notification from it, and a row id or a uid would invite it to treat an arrival as an address into a list it has not refetched.
+`new_inbox_mail` is a sender and a subject per message and nothing else, taken before the blocked senders and the hooks judged the mail; a client notifies from `mail.arrived` instead (PERSO-186).
 
 The severity is decided in this order: an `error` that is not null is `error` whatever else the tick did; otherwise a non-empty `non_converging` **or** a `failed_mutations` above zero is `warning`; otherwise the tick is `ok`.
 `bodies_truncated` and `prunes_deferred` never raise it: a deadline stop is progress, because the mailbox has more mail on the server and the next tick resumes from the same cursor, and a deferred prune is a suspended deletion rather than a failure.

@@ -733,23 +733,14 @@ fn blocked_result() -> Value {
     json!({"blocked": true, "outcome": null, "new_inbox_mail": []})
 }
 
-/// The inbox arrivals of one pass, as the desktop notification reads them
-/// (#0009).
+/// The inbox arrivals of one pass: what it inserted above what the account
+/// held before it, before the blocked senders and the hooks judged it.
 ///
-/// A sibling of `outcome` rather than a member of it, which is a statement
-/// about this answer's shape and not about where the list travels: `outcome`
-/// is the [`SyncCompleted`] summary as the event publishes it, and the
-/// arrivals sit beside it so the client that asked for the pass reads them
-/// without unpacking a summary.
-///
-/// Since P5-U8 the same list also rides the published `SyncCompleted` itself
-/// ([`SyncCompleted::new_inbox_mail`], filled in `src/daemon/sync_outcome.rs`),
-/// because an account runtime's tick has no caller to answer and the desktop
-/// notification of #0009 would otherwise have died with the client-side
-/// watcher. A subscribed client that asked for the pass therefore sees the
-/// list twice, and drops one: `App::apply_tick` ignores a published tick for
-/// an account whose pass this client is awaiting, so the answer notifies and
-/// the event does not.
+/// A sibling of `outcome` rather than a member of it: `outcome` is the
+/// [`SyncCompleted`] summary as the event publishes it, which carries the same
+/// list ([`SyncCompleted::new_inbox_mail`]). No client notifies from either;
+/// the notification is `mail.arrived`'s, which the account's arrival runner
+/// publishes once the judges are done (PERSO-186).
 ///
 /// [`SyncCompleted`]: mp_protocol::events::SyncCompleted
 fn new_inbox_mail(pass: &SyncResult) -> Value {
