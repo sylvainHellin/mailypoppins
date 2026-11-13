@@ -41,8 +41,10 @@ token: TokenState | null,
  */
 missing_scopes: Array<string>,
 /**
- * The account's logins the server refused within the last hour, which
- * the daemon is not making again until the user acts (PERSO-296): sets
+ * The account's logins the server refused whose hold still runs, which
+ * the daemon is not making again until the hold ends (2 minutes after a
+ * password's first refusal in a row, 10 after its second, an hour after
+ * any later one or a Graph sign-in's) or the user acts (PERSO-296): sets
  * the password, signs in again, or starts a sync or a send. In the order
  * of [`RejectedLogin`], empty when none was refused, and when absent, so
  * an older daemon's answer still parses.

@@ -3042,7 +3042,7 @@ mod tests {
 
     /// PERSO-296: an RSVP, and an answer to an event that goes out as an iMIP
     /// reply, is a send the user started, so it asks the server again about
-    /// an SMTP login refused within the hour, as every other send the user
+    /// an SMTP login whose refusal is held, as every other send the user
     /// starts does. Both used to fail at once from the login gate's list.
     ///
     /// The secrets file cannot be read, so the reply fails before it builds

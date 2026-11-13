@@ -957,8 +957,8 @@ pub struct Credentials {
     /// The account's server calendar needs a scope its sign-in was not
     /// granted (`missing_scopes`, PERSO-200): the Calendar view's banner.
     pub calendar_scope_missing: bool,
-    /// The account's login the server rejected within the hour, so the
-    /// daemon is not making it again (the first of `rejected_logins`,
+    /// The account's login the server rejected, whose refusal the daemon
+    /// still holds, so it is not making it again (the first of `rejected_logins`,
     /// PERSO-296): the sidebar's and the account picker's mark.
     pub rejected_login: Option<mp_protocol::account::RejectedLogin>,
 }

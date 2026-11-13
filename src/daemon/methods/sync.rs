@@ -208,7 +208,7 @@ impl Method for SyncPass {
             let snapshot = self.config.snapshot();
             let request = pass_request(self.spec.name, &params, &snapshot)?;
             // A sync the user started asks the server even about a login it
-            // refused within the hour (PERSO-296): the user may have fixed the
+            // refused and still holds (PERSO-296): the user may have fixed the
             // account on the server's side, and one login per request is
             // nowhere near a lockout. The TUI starts one at every launch.
             if let Some(login) = crate::login_gate::Login::of_mail(&request.account) {
@@ -500,7 +500,7 @@ pub async fn first_sync(
 /// `config.set_password` refuses an account the configuration does not name,
 /// so a first sync started by the write would log in with no password, or
 /// with the SMTP fallback before the IMAP password arrives, and a refused
-/// login is held for an hour (PERSO-296). It waits instead, and the
+/// login is held for minutes, then an hour (PERSO-296). It waits instead, and the
 /// `config.set_password` that stores a password starts it; the wizards store
 /// the IMAP password first, so the fallback only serves an account that has
 /// no IMAP password of its own.

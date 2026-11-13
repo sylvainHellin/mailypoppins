@@ -864,7 +864,7 @@ fn drain_after_send(runtimes: &crate::daemon::server::RuntimeTable, account: &st
 
 /// What every send the user started does first, whichever method started it
 /// (`send.*`, `calendar.rsvp`, `event.respond`): it asks the server again
-/// about a login it refused within the hour (PERSO-296), since the user may
+/// about a login whose refusal it still holds (PERSO-296), since the user may
 /// have fixed the account on the server's side, and one login per send is
 /// nowhere near a lockout. It runs when the send does, after any hold.
 pub(super) fn user_started_send(account: &AccountConfig) {

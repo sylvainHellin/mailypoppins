@@ -1647,8 +1647,8 @@ pub async fn run_and_settle<E: OpExecutor>(
 /// An older `queued` op is not waited for while the server refuses the
 /// account's login ([`OlderOps::unless_login_refused`], PERSO-296): the
 /// drain holds it, with no attempt spent, until a login succeeds, which
-/// takes the user setting the password or the hour the gate holds a
-/// refusal. The caller is told so at once, with the command that sets the
+/// takes the user setting the password or the end of the gate's hold of
+/// the refusal (2 minutes, 10, then an hour). The caller is told so at once, with the command that sets the
 /// password, in the words of the health check.
 /// A settling older op is another caller's, which fails at the same login
 /// on its own.
@@ -2493,8 +2493,8 @@ mod tests {
 
     /// PERSO-296: an op whose login the server refused spends no attempt.
     /// While the login gate holds a refusal every pass fails at the login,
-    /// with the server never asked about the op, and the hold is an hour
-    /// while the budget ran out in about ten minutes, rolling the star back
+    /// with the server never asked about the op, and the hold reaches an
+    /// hour while the budget ran out in about ten minutes, rolling the star back
     /// unasked. The row stays queued with the star in place however many
     /// passes the refusal lasts, and lands on the first pass after it.
     #[tokio::test]

@@ -1031,7 +1031,7 @@ pub fn record_submission(
             // As a clean failure, the marker goes back to NULL; unlike one,
             // no attempt is spent and `updated` stays, so the row goes out on
             // the first drain after the login is taken again, with no backoff
-            // grown over the hour the refusal was held (PERSO-296).
+            // grown over the time the refusal was held (PERSO-296).
             store
                 .conn()
                 .execute(

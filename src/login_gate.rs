@@ -20,35 +20,69 @@
 //!
 //! Each consults the list kept here: a refusal is recorded under the login
 //! and a hash of the refused secret (the password, or the refresh token), and
-//! while the entry is fresh the same login fails at once with the same
-//! [`LoginRejected`] without dialling. The entry ends
+//! while its hold runs the same login fails at once with the same
+//! [`LoginRejected`] without dialling. The hold of a password grows with the
+//! refusals in a row ([`hold`]): 2 minutes after the first, 10 after the
+//! second, an hour from the third on, so a server that refuses a correct
+//! password for a minute (the TUM server answered `NO LOGIN failed.` to one
+//! twice 30 s apart, and took it on the attempts around) stops the mail for
+//! minutes, while a wrong password is asked at most three times in the first
+//! hour and once an hour after, far below any lockout threshold. A Graph
+//! sign-in is held an hour from the first refusal, since `invalid_grant` is
+//! Entra's final word on the refresh token. The hold ends
 //!
-//! - after [`REFUSAL_HOLD`], so the server is asked again at most once an hour
-//!   per login, which recovers on its own from a lockout that lifted and stays
-//!   far below any lockout threshold;
-//! - when the same login succeeds;
+//! - when it runs out, and the next attempt asks the server;
 //! - when the user acts, through [`forget`]: stores a password
 //!   (`config.set_password`), signs in again (`config.oauth2_login`), or
 //!   starts what needs the login (a sync for the IMAP login and the Graph
-//!   sign-in, a send for the SMTP login and the Graph sign-in);
+//!   sign-in, a send for the SMTP login and the Graph sign-in).
+//!
+//! Neither resets the count: a refusal of the same secret after either is the
+//! next in the row. The entry, count and all, ends
+//!
+//! - when the same login succeeds;
 //! - when the daemon restarts, since the list lives in memory only.
 //!
 //! A new secret is not on the list, because the hash is part of the entry,
-//! so it is asked at once. `config.probe` dials past the gate: a probe is the
-//! user asking the server.
+//! so it is asked at once, and its first refusal is the first of a new row.
+//! `config.probe` dials past the gate: a probe is the user asking the server.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mp_protocol::account::RejectedLogin;
 use sha2::{Digest, Sha256};
 
 use crate::config::{AccountConfig, AuthMethod, ServerLogin};
 
-/// How long a refused login stays refused before the server is asked again.
-pub const REFUSAL_HOLD: Duration = Duration::from_secs(60 * 60);
+/// How long a password refused once in a row is held.
+pub const FIRST_HOLD: Duration = Duration::from_secs(2 * 60);
+
+/// How long a password refused twice in a row is held.
+pub const SECOND_HOLD: Duration = Duration::from_secs(10 * 60);
+
+/// How long a password refused three times or more in a row is held, and a
+/// Graph sign-in from its first refusal.
+pub const LONG_HOLD: Duration = Duration::from_secs(60 * 60);
+
+/// How long `login`, refused `in_a_row` times in a row, is held before the
+/// server is asked again.
+///
+/// A password is held 2 minutes, then 10, then an hour: a server may refuse
+/// a correct password for a minute, and a long first hold would stop the
+/// account's mail for that long. A Graph sign-in is held the hour from the
+/// first refusal, since `invalid_grant` says the refresh token is revoked or
+/// expired and asking again sooner cannot change the answer.
+pub fn hold(login: &Login, in_a_row: u32) -> Duration {
+    match (login, in_a_row) {
+        (Login::Graph(_), _) => LONG_HOLD,
+        (_, 0 | 1) => FIRST_HOLD,
+        (_, 2) => SECOND_HOLD,
+        _ => LONG_HOLD,
+    }
+}
 
 /// One login an account makes, without its secret: what the list is keyed by,
 /// and what the health check and `account.credentials` look a refusal up by
@@ -127,8 +161,8 @@ pub struct LoginRejected {
     answer: String,
     /// Which entry of the list this refusal is, `None` until it is recorded.
     entry: Option<u64>,
-    /// Whether the gate answered without dialling.
-    from_list: bool,
+    /// When the hold ends, set when the gate answered without dialling.
+    asked_again_at: Option<SystemTime>,
 }
 
 impl LoginRejected {
@@ -138,7 +172,7 @@ impl LoginRejected {
             kind,
             answer,
             entry: None,
-            from_list: false,
+            asked_again_at: None,
         }
     }
 
@@ -155,7 +189,7 @@ impl LoginRejected {
 
     /// Whether the gate answered from the list, without asking the server.
     pub fn from_list(&self) -> bool {
-        self.from_list
+        self.asked_again_at.is_some()
     }
 }
 
@@ -166,7 +200,8 @@ impl fmt::Display for LoginRejected {
             RejectedLogin::Smtp => write!(f, "SMTP login failed: {}", self.answer)?,
             RejectedLogin::Graph => write!(f, "OAuth2 sign-in refused: {}", self.answer)?,
         }
-        if self.from_list {
+        if let Some(at) = self.asked_again_at {
+            let at = chrono::DateTime::<chrono::Local>::from(at).format("%H:%M");
             let (who, what, again) = match self.kind {
                 RejectedLogin::Imap => ("the server", "this password", "a sync is started"),
                 RejectedLogin::Smtp => ("the server", "this password", "a message is sent"),
@@ -180,8 +215,8 @@ impl fmt::Display for LoginRejected {
             };
             write!(
                 f,
-                " ({who} refused {what} earlier and is asked again within the hour, or at once \
-                 after {set} or {again})"
+                " ({who} refused {what} earlier and is asked again at {at}, or at once after \
+                 {set} or {again})"
             )?;
         }
         Ok(())
@@ -199,7 +234,7 @@ pub fn login_rejected(error: &anyhow::Error) -> Option<&LoginRejected> {
 /// what the health check and `account.credentials` read, neither of which
 /// may read a secret.
 pub fn is_refused(login: &Login) -> bool {
-    refusals().holds(login, Instant::now(), REFUSAL_HOLD)
+    refusals().holds(login, Instant::now())
 }
 
 /// The logins of `account` the list holds a fresh refusal of, in the order of
@@ -217,12 +252,13 @@ pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
     .collect()
 }
 
-/// Drop the refusal of `login`, so its next attempt asks the server.
+/// End the hold of `login`, so its next attempt asks the server; the count
+/// of refusals in a row stays, since the user acting is no success.
 pub fn forget(login: &Login) {
-    refusals().forget(login);
+    refusals().release(login, Instant::now());
 }
 
-/// Drop the refusal of every login `account` makes, which a stored password
+/// End the hold of every login `account` makes, which a stored password
 /// asks for: the IMAP login falls back to the SMTP password, so either
 /// password may be the one a refused login needed.
 pub fn forget_account(account: &AccountConfig) {
@@ -247,23 +283,22 @@ pub(crate) fn refuse_for_test(login: Login) {
 
 /// The refusal a `login` with `secret` would get without dialling, if any.
 pub fn refused(login: &Login, secret: &str) -> Option<LoginRejected> {
-    refusals().refused(login, &fingerprint(secret), Instant::now(), REFUSAL_HOLD)
+    refusals().refused(
+        login,
+        &fingerprint(secret),
+        Instant::now(),
+        SystemTime::now(),
+    )
 }
 
 /// Record that the server refused `login` with `secret`, and answer the
 /// refusal with its entry.
 pub fn record(login: &Login, secret: &str, rejected: &LoginRejected) -> LoginRejected {
-    refusals().record(
-        login.clone(),
-        fingerprint(secret),
-        rejected,
-        Instant::now(),
-        REFUSAL_HOLD,
-    )
+    refusals().record(login.clone(), fingerprint(secret), rejected, Instant::now())
 }
 
-/// `login` succeeded, so whatever the list held about it no longer describes
-/// the server.
+/// `login` succeeded, so whatever the list held about it, the count of
+/// refusals in a row included, no longer describes the server.
 pub fn accepted(login: &Login) {
     refusals().forget(login);
 }
@@ -286,13 +321,22 @@ fn refusals() -> MutexGuard<'static, Refusals> {
 /// One refused login.
 struct Refusal {
     secret: [u8; 32],
-    at: Instant,
+    /// When the hold ends and the server is asked again.
+    until: Instant,
+    /// The refusals of `secret` in a row, this one included.
+    in_a_row: u32,
     entry: u64,
     answer: String,
 }
 
-/// The list itself, with the clock and the hold passed in so a test can step
-/// past the hour without waiting for it.
+impl Refusal {
+    fn holds(&self, now: Instant) -> bool {
+        now < self.until
+    }
+}
+
+/// The list itself, with the clock passed in so a test can step past a hold
+/// without waiting for it.
 #[derive(Default)]
 struct Refusals {
     entries: HashMap<Login, Refusal>,
@@ -300,27 +344,22 @@ struct Refusals {
 }
 
 impl Refusals {
-    fn fresh(refusal: &Refusal, now: Instant, hold: Duration) -> bool {
-        now.saturating_duration_since(refusal.at) < hold
-    }
-
+    /// The answer the gate gives a `login` with `secret` at `now`, if its hold
+    /// runs; `wall` is the wall clock at `now`, which the answer's time is
+    /// told in.
     fn refused(
-        &mut self,
+        &self,
         login: &Login,
         secret: &[u8; 32],
         now: Instant,
-        hold: Duration,
+        wall: SystemTime,
     ) -> Option<LoginRejected> {
         let refusal = self.entries.get(login)?;
-        if !Self::fresh(refusal, now, hold) {
-            self.entries.remove(login);
-            return None;
-        }
-        (refusal.secret == *secret).then(|| LoginRejected {
+        (refusal.secret == *secret && refusal.holds(now)).then(|| LoginRejected {
             kind: login.kind(),
             answer: refusal.answer.clone(),
             entry: Some(refusal.entry),
-            from_list: true,
+            asked_again_at: Some(wall + refusal.until.saturating_duration_since(now)),
         })
     }
 
@@ -330,21 +369,25 @@ impl Refusals {
         secret: [u8; 32],
         rejected: &LoginRejected,
         now: Instant,
-        hold: Duration,
     ) -> LoginRejected {
-        // Two dials that raced each other past the gate were refused once: the
-        // second keeps the first's entry, so a caller logs the refusal once.
         let entry = match self.entries.get(&login) {
-            Some(refusal) if refusal.secret == secret && Self::fresh(refusal, now, hold) => {
-                refusal.entry
-            }
-            _ => {
+            // Two dials that raced each other past the gate were refused once:
+            // the second keeps the first's entry, so a caller logs the refusal
+            // once, and its hold.
+            Some(refusal) if refusal.secret == secret && refusal.holds(now) => refusal.entry,
+            previous => {
+                let in_a_row = match previous {
+                    Some(refusal) if refusal.secret == secret => refusal.in_a_row + 1,
+                    _ => 1,
+                };
                 self.next_entry += 1;
+                let until = now + hold(&login, in_a_row);
                 self.entries.insert(
                     login,
                     Refusal {
                         secret,
-                        at: now,
+                        until,
+                        in_a_row,
                         entry: self.next_entry,
                         answer: rejected.answer.clone(),
                     },
@@ -358,14 +401,22 @@ impl Refusals {
         }
     }
 
+    /// End the hold of `login` at `now`, keeping its count.
+    fn release(&mut self, login: &Login, now: Instant) {
+        if let Some(refusal) = self.entries.get_mut(login) {
+            refusal.until = refusal.until.min(now);
+        }
+    }
+
+    /// Drop `login`'s entry, count and all.
     fn forget(&mut self, login: &Login) {
         self.entries.remove(login);
     }
 
-    fn holds(&self, login: &Login, now: Instant, hold: Duration) -> bool {
+    fn holds(&self, login: &Login, now: Instant) -> bool {
         self.entries
             .get(login)
-            .is_some_and(|refusal| Self::fresh(refusal, now, hold))
+            .is_some_and(|refusal| refusal.holds(now))
     }
 }
 
@@ -389,32 +440,162 @@ mod tests {
         LoginRejected::new(RejectedLogin::Imap, "no".into())
     }
 
-    /// A refusal holds the secret it refused for the hold and no longer;
+    const SECOND: Duration = Duration::from_secs(1);
+
+    /// A refusal holds the secret it refused for its hold and no longer;
     /// another secret, or the same one after the hold, is asked.
     #[test]
     fn a_refusal_holds_its_password_for_the_hold_and_then_lapses() {
         let mut list = Refusals::default();
-        let (now, hold) = (Instant::now(), Duration::from_secs(3600));
+        let now = Instant::now();
         let (wrong, other) = (fingerprint("wrong"), fingerprint("other"));
-        let recorded = list.record(login(993), wrong, &rejected(), now, hold);
+        let recorded = list.record(login(993), wrong, &rejected(), now);
 
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let held = list
-            .refused(&login(993), &wrong, now + hold / 2, hold)
+            .refused(&login(993), &wrong, now + SECOND, wall)
             .expect("the same password is refused from the list");
         assert_eq!(held.entry(), recorded.entry());
-        assert!(held.to_string().contains("asked again within the hour"));
-        assert!(list.holds(&login(993), now + hold / 2, hold));
-        assert!(list.refused(&login(993), &other, now, hold).is_none());
-        assert!(list.refused(&login(143), &wrong, now, hold).is_none());
+        assert!(held.from_list());
+        assert!(list.holds(&login(993), now + SECOND));
+        assert!(list.refused(&login(993), &other, now, wall).is_none());
+        assert!(list.refused(&login(143), &wrong, now, wall).is_none());
 
-        assert!(!list.holds(&login(993), now + hold, hold));
+        assert!(!list.holds(&login(993), now + FIRST_HOLD));
         assert!(list
-            .refused(&login(993), &wrong, now + hold, hold)
+            .refused(&login(993), &wrong, now + FIRST_HOLD, wall)
             .is_none());
+    }
+
+    /// The answer from the list names the time the server is asked again,
+    /// the end of the hold on the wall clock, not a stretch it may not be.
+    #[test]
+    fn a_held_refusal_names_the_time_the_server_is_asked_again() {
+        let mut list = Refusals::default();
+        let now = Instant::now();
+        list.record(login(993), fingerprint("wrong"), &rejected(), now);
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let held = list
+            .refused(&login(993), &fingerprint("wrong"), now + 30 * SECOND, wall)
+            .expect("held");
+        let again = chrono::DateTime::<chrono::Local>::from(wall + FIRST_HOLD - 30 * SECOND)
+            .format("%H:%M")
+            .to_string();
         assert!(
-            !list.holds(&login(993), now, hold),
-            "a lapsed entry is dropped when it is found lapsed"
+            held.to_string().contains(&format!(
+                "(the server refused this password earlier and is asked again at {again}, \
+                 or at once after the password is set again or a sync is started)"
+            )),
+            "{held}"
         );
+        assert!(!held.to_string().contains("hour"), "{held}");
+    }
+
+    /// Refuse `secret` at `at` and answer how long the gate then holds it:
+    /// the first instant from `at` on, to the second, when it asks again.
+    fn held_for(list: &mut Refusals, secret: &str, at: Instant) -> Duration {
+        list.record(login(993), fingerprint(secret), &rejected(), at);
+        let mut held = Duration::ZERO;
+        while list.holds(&login(993), at + held) {
+            held += SECOND;
+        }
+        held
+    }
+
+    /// The hold of a password grows with its refusals in a row: 2 minutes
+    /// after the first, 10 after the second, an hour from the third on, so a
+    /// wrong password is asked at most three times in the first hour.
+    #[test]
+    fn a_password_is_held_two_minutes_then_ten_then_an_hour() {
+        let mut list = Refusals::default();
+        let mut at = Instant::now();
+        let mut holds = Vec::new();
+        for _ in 0..5 {
+            let held = held_for(&mut list, "wrong", at);
+            holds.push(held);
+            at += held;
+        }
+        assert_eq!(
+            holds,
+            [FIRST_HOLD, SECOND_HOLD, LONG_HOLD, LONG_HOLD, LONG_HOLD]
+        );
+        assert_eq!(FIRST_HOLD, 2 * 60 * SECOND);
+        assert_eq!(SECOND_HOLD, 10 * 60 * SECOND);
+        assert_eq!(LONG_HOLD, 60 * 60 * SECOND);
+        let in_the_first_hour = holds
+            .iter()
+            .scan(Duration::ZERO, |start, held| {
+                let this = *start;
+                *start += *held;
+                Some(this)
+            })
+            .filter(|start| *start < LONG_HOLD)
+            .count();
+        assert_eq!(in_the_first_hour, 3);
+    }
+
+    /// A success ends the row: the next refusal of the same password is held
+    /// 2 minutes again.
+    #[test]
+    fn a_success_resets_the_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let first = held_for(&mut list, "wrong", at);
+        let second = held_for(&mut list, "wrong", at + first);
+        assert_eq!(second, SECOND_HOLD);
+        list.forget(&login(993));
+        assert_eq!(
+            held_for(&mut list, "wrong", at + first + second),
+            FIRST_HOLD
+        );
+    }
+
+    /// A new password starts a row of its own, and asks at once.
+    #[test]
+    fn a_changed_password_starts_its_own_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        let first = held_for(&mut list, "wrong", at);
+        held_for(&mut list, "wrong", at + first);
+        let now = at + first + SECOND;
+        assert!(list
+            .refused(&login(993), &fingerprint("new"), now, SystemTime::now())
+            .is_none());
+        assert_eq!(held_for(&mut list, "new", now), FIRST_HOLD);
+    }
+
+    /// The user acting ends the hold at once and keeps the row, so a refusal
+    /// right after is the next in it rather than the first of a new one.
+    #[test]
+    fn the_user_acting_ends_the_hold_and_keeps_the_row() {
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        list.record(login(993), fingerprint("wrong"), &rejected(), at);
+        let now = at + SECOND;
+        list.release(&login(993), now);
+        assert!(!list.holds(&login(993), now));
+        assert!(list
+            .refused(&login(993), &fingerprint("wrong"), now, SystemTime::now())
+            .is_none());
+        assert_eq!(held_for(&mut list, "wrong", now), SECOND_HOLD);
+    }
+
+    /// A Graph sign-in is held the hour from its first refusal: Entra's
+    /// `invalid_grant` does not change by being asked again.
+    #[test]
+    fn a_graph_sign_in_is_held_an_hour_from_the_first_refusal() {
+        let graph = Login::Graph("hines".into());
+        assert_eq!(hold(&graph, 1), LONG_HOLD);
+        assert_eq!(hold(&graph, 2), LONG_HOLD);
+        assert_eq!(hold(&login(993), 1), FIRST_HOLD);
+        assert_eq!(hold(&Login::Smtp(server(465)), 1), FIRST_HOLD);
+        assert_eq!(hold(&Login::Smtp(server(465)), 2), SECOND_HOLD);
+        assert_eq!(hold(&Login::Smtp(server(465)), 3), LONG_HOLD);
+        let mut list = Refusals::default();
+        let at = Instant::now();
+        list.record(graph.clone(), fingerprint("revoked"), &rejected(), at);
+        assert!(list.holds(&graph, at + LONG_HOLD - SECOND));
+        assert!(!list.holds(&graph, at + LONG_HOLD));
     }
 
     /// The IMAP and the SMTP login of one server and user are two logins: a
@@ -423,7 +604,7 @@ mod tests {
     #[test]
     fn the_imap_and_the_smtp_login_are_held_apart() {
         let mut list = Refusals::default();
-        let (now, hold) = (Instant::now(), Duration::from_secs(3600));
+        let (now, wall) = (Instant::now(), SystemTime::now());
         let wrong = fingerprint("wrong");
         let smtp = Login::Smtp(server(993));
         list.record(
@@ -431,10 +612,9 @@ mod tests {
             wrong,
             &LoginRejected::new(RejectedLogin::Smtp, "535 5.7.8".into()),
             now,
-            hold,
         );
-        assert!(list.refused(&login(993), &wrong, now, hold).is_none());
-        let held = list.refused(&smtp, &wrong, now, hold).expect("held");
+        assert!(list.refused(&login(993), &wrong, now, wall).is_none());
+        let held = list.refused(&smtp, &wrong, now, wall).expect("held");
         assert_eq!(held.kind(), RejectedLogin::Smtp);
         assert!(held.from_list());
         assert!(
@@ -450,13 +630,17 @@ mod tests {
     #[test]
     fn a_second_refusal_of_the_same_password_keeps_its_entry() {
         let mut list = Refusals::default();
-        let (now, hold) = (Instant::now(), Duration::from_secs(3600));
-        let first = list.record(login(993), fingerprint("wrong"), &rejected(), now, hold);
-        let raced = list.record(login(993), fingerprint("wrong"), &rejected(), now, hold);
+        let now = Instant::now();
+        let first = list.record(login(993), fingerprint("wrong"), &rejected(), now);
+        let raced = list.record(login(993), fingerprint("wrong"), &rejected(), now);
         assert_eq!(first.entry(), raced.entry());
-        list.forget(&login(993));
-        assert!(!list.holds(&login(993), now, hold));
-        let again = list.record(login(993), fingerprint("wrong"), &rejected(), now, hold);
+        assert!(
+            !list.holds(&login(993), now + FIRST_HOLD),
+            "the race kept the first refusal's hold"
+        );
+        list.release(&login(993), now);
+        assert!(!list.holds(&login(993), now));
+        let again = list.record(login(993), fingerprint("wrong"), &rejected(), now);
         assert_ne!(first.entry(), again.entry());
     }
 
