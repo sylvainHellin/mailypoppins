@@ -417,14 +417,37 @@ async fn an_all_day_series_goes_out_in_its_zone_and_comes_back_as_the_series() {
     assert_eq!(sent[2], read_back(MASTER_ID));
 }
 
+/// The input a create of `event` would carry: every field it holds.
+fn input_of(event: &Event) -> EventInput {
+    EventInput {
+        location: event.location.clone(),
+        body: event.body.clone(),
+        attendees: event
+            .attendees
+            .iter()
+            .map(|attendee| AttendeeInput {
+                email: attendee.email.clone(),
+                name: attendee.name.clone(),
+                role: attendee.role,
+            })
+            .collect(),
+        reminder: Some(event.reminder),
+        show_as: Some(event.show_as),
+        sensitivity: Some(event.sensitivity),
+        allow_new_time_proposals: Some(event.allow_new_time_proposals),
+        ..EventInput::new(event.summary.clone(), event.time.clone())
+    }
+}
+
 /// A create whose first try made the event (its answer lost) finds that
-/// event by the transaction property and updates it with its own fields
-/// instead of making a second one.
+/// event by the transaction property, reads it, and updates it with its own
+/// fields where they differ instead of making a second one.
 #[tokio::test]
 async fn a_retried_create_updates_the_event_its_first_try_made() {
     let backend = backend(
         ScriptedFetch::default()
             .answer("FindItem", &found(&[SINGLE_ID]))
+            .answer("GetItem", &get_item(&[&single_with_tx("tx-1")]))
             .answer("UpdateItem", &saved("UpdateItem", SINGLE_ID))
             .answer("GetItem", &get_item(&[&single_with_tx("tx-1")])),
     );
@@ -437,15 +460,50 @@ async fn a_retried_create_updates_the_event_its_first_try_made() {
     );
     assert_eq!(event.id, SINGLE_ID);
     let sent = backend.fetch().sent();
-    assert_eq!(sent.len(), 3);
+    assert_eq!(sent.len(), 4);
     assert_eq!(sent[0], earlier_try("tx-1"));
-    assert!(sent[1].contains(&format!("<t:ItemChange><t:ItemId Id=\"{SINGLE_ID}\"/>")));
-    assert!(sent[1].contains(
+    assert_eq!(sent[1], read_back(SINGLE_ID));
+    assert!(sent[2].contains(&format!("<t:ItemChange><t:ItemId Id=\"{SINGLE_ID}\"/>")));
+    assert!(sent[2].contains(
         "<t:SetItemField><t:FieldURI FieldURI=\"item:Subject\"/><t:CalendarItem>\
          <t:Subject>Review</t:Subject></t:CalendarItem></t:SetItemField>"
     ));
     assert!(!sent.iter().any(|sent| sent.contains("<m:CreateItem")));
-    assert_eq!(sent[2], read_back(SINGLE_ID));
+    assert_eq!(sent[3], read_back(SINGLE_ID));
+}
+
+/// A retried create whose first try made the event as asked answers that
+/// event as it is, so no attendee is sent an update for a change that is
+/// none.
+#[tokio::test]
+async fn a_retried_create_that_made_the_event_as_asked_changes_nothing() {
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("FindItem", &found(&[SINGLE_ID]))
+            .answer("GetItem", &get_item(&[&single_with_tx("tx-1")])),
+    );
+    let held = written_event(
+        super::super::parse::items(&single_with_tx("tx-1"))
+            .unwrap()
+            .remove(0)
+            .map(|item| {
+                Written::Event(Box::new(
+                    super::super::parse::calendar_event("tum", CALENDAR_ID, &item).unwrap(),
+                ))
+            })
+            .unwrap(),
+    );
+    let event = written_event(
+        backend
+            .create_event(&calendar(), &input_of(&held), "tx-1")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(event, held);
+    assert_eq!(event.transaction_id.as_deref(), Some("tx-1"));
+    let sent = backend.fetch().sent();
+    assert_eq!(sent, [earlier_try("tx-1"), read_back(SINGLE_ID)]);
+    assert!(backend.fetch().exhausted());
 }
 
 /// A zone with no Windows id, a yearly rule every other year and an online

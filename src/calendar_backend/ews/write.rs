@@ -44,9 +44,12 @@
 //! back into [`Event::transaction_id`], so the store finds the event as it
 //! finds a Graph one. Before it creates, a create looks for an item of the
 //! calendar carrying its transaction id (FindItem on the property): one is
-//! the event a first try made whose answer was lost, which the create
-//! updates with its own fields instead of making a second one, as Graph's
-//! `ErrorDuplicateTransactionId` adoption does.
+//! the event a first try made whose answer was lost, which the create reads
+//! and answers as it is when it already carries the create's fields
+//! ([`EventInput::matches`], and the rule of a series), and otherwise
+//! updates with them instead of making a second one, as Graph's
+//! `ErrorDuplicateTransactionId` adoption does; an unchanged retry so mails
+//! nobody an update.
 //!
 //! Times go out as UTC instants with the event's zone as its Windows id
 //! (`StartTimeZone`, `EndTimeZone`), which Exchange keeps the meeting in: an
@@ -731,6 +734,25 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         let body = create_body(&calendar.id, input, transaction_id)?;
         if !transaction_id.trim().is_empty() {
             if let Some(existing) = self.earlier_try(&calendar.id, transaction_id).await? {
+                let held = self.written(&calendar.id, &existing).await?;
+                let same = match &held {
+                    Written::Event(event) => input.matches(event),
+                    Written::Series(series) => {
+                        series
+                            .master
+                            .as_deref()
+                            .is_some_and(|master| input.matches(master))
+                            && input.matches_rule(series.recurrence.as_ref())
+                    }
+                };
+                if same {
+                    debug!(
+                        "[calendar] {}: transaction {transaction_id} made item {existing} as asked \
+                         already",
+                        self.account
+                    );
+                    return Ok(held);
+                }
                 debug!(
                     "[calendar] {}: transaction {transaction_id} made item {existing} already; \
                      updating it with this create's fields",
