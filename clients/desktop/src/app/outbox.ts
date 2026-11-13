@@ -22,6 +22,14 @@ const OUTBOX_EARLY_CAP = 16;
 /** The sidebar's outbox line: what waits, what failed, what went to only some recipients. */
 export type OutboxSummary = { queued: number; failed: number; partial: number };
 
+/**
+ * Whether the daemon counts the row among the failed ones: parked in `failed`, or a `done` row listed with a note that is not
+ * a partial delivery, a discarded invitation version whose copy the server's Sent folder would not take (PERSO-304).
+ */
+export function countsAsFailed(row: OutboxRow): boolean {
+  return row.state === "failed" || (row.state === "done" && !row.partial);
+}
+
 /** Whether the daemon admits a retry of a row in this state (`send.outbox_retry`). */
 export function retryable(row: OutboxRow): boolean {
   return row.state === "failed" || row.state === "sent_pending_append";
@@ -87,7 +95,7 @@ function withoutRow(listing: OutboxListing, rowId: number): OutboxListing {
     rows: listing.rows.filter((r) => r !== row),
     counts: {
       open: listing.counts.open - open,
-      failed: listing.counts.failed - (row.state === "failed" ? 1 : 0),
+      failed: listing.counts.failed - (countsAsFailed(row) ? 1 : 0),
       partial: listing.counts.partial - (row.partial ? 1 : 0),
     },
   };
@@ -123,7 +131,7 @@ export function outboxSummary(s: AppState, account: string): OutboxSummary {
     const minus = (pred: (r: OutboxRow) => boolean) => hidden.filter(pred).length;
     return {
       queued: listing.counts.open - minus((r) => r.state === "pending_send" || r.state === "sent_pending_append"),
-      failed: listing.counts.failed - minus((r) => r.state === "failed"),
+      failed: listing.counts.failed - minus(countsAsFailed),
       partial: listing.counts.partial - minus((r) => r.partial),
     };
   }

@@ -54,6 +54,7 @@ import type {
 import { FakeBridge } from "@/fixture/terminal-bridge";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
+import { countsAsFailed } from "@/app/outbox";
 import { comparableAddress, entryRefusal, mailboxAddresses, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
 import type {
   AccountDraft,
@@ -176,17 +177,17 @@ function seedOutbox(): Record<string, { ever_used: boolean; rows: OutboxRow[] }>
   return out;
 }
 
-/** A listing as the fixture's `send.outbox_list` answers it, counts from the rows. */
+/** A listing as the fixture's `send.outbox_list` answers it, counts from the rows: a `done` row only when it kept a note. */
 export function outboxListing(account: string): OutboxListing {
   const o = mock.outbox[account];
-  const rows = clone(o?.rows ?? []).filter((r) => r.state !== "done" || r.partial);
+  const rows = clone(o?.rows ?? []).filter((r) => r.state !== "done" || r.partial || r.last_error !== null);
   return {
     account,
     ever_used: o?.ever_used ?? false,
     rows,
     counts: {
       open: rows.filter((r) => r.state === "pending_send" || r.state === "sent_pending_append").length,
-      failed: rows.filter((r) => r.state === "failed").length,
+      failed: rows.filter(countsAsFailed).length,
       partial: rows.filter((r) => r.partial).length,
     },
   };

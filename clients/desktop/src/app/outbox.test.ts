@@ -194,6 +194,19 @@ describe("retry and discard", () => {
   });
 });
 
+describe("a discarded invitation row given up on", () => {
+  it("counts as failed, as the daemon counts it, and its discard takes it off the count at once", () => {
+    const givenUp = row(5, { state: "done", partial: false, outstanding: [], last_error: "discarded, and its copy could not be filed in Sent on the server" });
+    let s = opened([givenUp, row(6)]);
+    expect(s.outbox.work.data?.rows.map((r) => r.id)).toEqual([5, 6]);
+    expect(outboxSummary(s, "work")).toEqual({ queued: 0, failed: 2, partial: 0 });
+    s = run(s, { type: "outbox_action_requested", token: 3, kind: "discard", account: "work", row_id: 5 });
+    expect(outboxSummary(s, "work")).toEqual({ queued: 0, failed: 1, partial: 0 });
+    const done = run(s, { type: "outbox_discarded", token: 3, message_id: "<row-5@example.com>" });
+    expect(done.outbox.work.data?.counts).toEqual({ open: 0, failed: 1, partial: 0 });
+  });
+});
+
 describe("the confirmations and the words", () => {
   it("retries only what the daemon admits, and warns about a second delivery", () => {
     const failed = retryDialog("work", row(5));
