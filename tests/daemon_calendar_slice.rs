@@ -3385,6 +3385,96 @@ async fn a_discarded_update_someone_may_hold_is_the_version_a_later_change_build
     );
 }
 
+/// A discard that keeps an invitation version on the agenda tells the
+/// clients the calendar changed, so an open agenda shows the version kept
+/// rather than the one before it; the discard of a plain mail, which
+/// changes no agenda, tells them nothing.
+#[tokio::test]
+async fn a_discard_that_keeps_a_version_announces_the_calendar_change() {
+    const PLAIN: &str = "<plain-parked@example.com>";
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = Slice::start_seeded(
+        false,
+        &[(
+            send_fixture::FAKE_TRANSPORT_ENV,
+            json!({"log": log.to_string_lossy(),
+                   "unknown": {"carol@example.com": send_fixture::AMBIGUOUS},
+                   "passes": 1})
+            .to_string(),
+        )],
+        |root| {
+            support::calendar_fixture::seed_organised(root);
+            let store = send_fixture::store(root, IMIP);
+            let blobs = send_fixture::blobs(root, IMIP);
+            send_fixture::park_mail(&store, &blobs, IMIP, PLAIN);
+        },
+        Vec::new(),
+    );
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "bob@example.com"},
+            {"email": "carol@example.com"}]}}),
+    )
+    .await;
+    succeeded(&status);
+    let parked = outbox_rows(&mut conn, "failed").await;
+    let row_of = |plain: bool| {
+        parked
+            .iter()
+            .find(|row| (row["message_id"] == PLAIN) == plain)
+            .unwrap_or_else(|| panic!("no parked row (plain: {plain}): {parked:?}"))["id"]
+            .clone()
+    };
+    let (mail, update) = (row_of(true), row_of(false));
+
+    // Subscribed after the update settled, so its own announcement is not
+    // among what the watcher is sent.
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({})).await;
+    let plain = call(
+        &mut conn,
+        "send.outbox_discard",
+        json!({"account": IMIP, "row_id": mail}),
+    )
+    .await;
+    let after_plain = plain["revision"].as_u64().unwrap();
+    call(
+        &mut conn,
+        "send.outbox_discard",
+        json!({"account": IMIP, "row_id": update}),
+    )
+    .await;
+
+    // Events reach a subscriber in revision order, so the first one past the
+    // plain discard's revision comes after anything that discard published.
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let mut before = Vec::new();
+    let announced = loop {
+        match tokio::time::timeout_at(deadline, watcher.next_notification()).await {
+            Ok(Some(notification)) if notification.params["kind"] == "calendar.changed" => {
+                let revision = notification.params["revision"].as_u64().unwrap();
+                if revision > after_plain {
+                    break Some(notification.params);
+                }
+                before.push(notification.params);
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break None,
+        }
+    };
+    assert!(
+        before.is_empty(),
+        "the plain mail's discard announced a calendar change: {before:?}"
+    );
+    let announced = announced.expect("the kept version's discard announced no calendar change");
+    assert_eq!(announced["payload"]["account"], IMIP, "{announced}");
+}
+
 /// The same for an update every attendee took whose copy Sent never filed:
 /// discarding its `sent_pending_append` row keeps its version, so the
 /// cancellation tells Carol.

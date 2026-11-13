@@ -200,17 +200,30 @@ impl Method for SendMethod {
                     graph,
                     row_id,
                 } => {
-                    let revision = self.canonical.revision().get();
+                    let Discarded {
+                        mut answer,
+                        kept_version,
+                    } = discard(&account, graph, row_id)?;
+                    let mut affected = vec![ResourceId::new(format!("outbox:{account}"))];
+                    // A kept invitation version changed the agenda
+                    // (`calendar_view::imip_events` now lists it), so an
+                    // open one is told to read it again.
+                    let revision = if kept_version {
+                        affected.push(ResourceId::new(format!(
+                            "calendar:{account}/{}",
+                            mp_protocol::calendar::IMIP_CALENDAR_ID
+                        )));
+                        self.canonical
+                            .publish(super::calendar::calendar_changed(&account))
+                            .get()
+                    } else {
+                        self.canonical.revision().get()
+                    };
                     // In the result as well as in the envelope: a command
                     // reports the revision it moved to, and a client that
                     // renders one row's disappearance reads it beside the row.
-                    let mut result = discard(&account, graph, row_id)?;
-                    result["revision"] = json!(revision);
-                    Ok(Outcome::command(
-                        result,
-                        revision,
-                        vec![ResourceId::new(format!("outbox:{account}"))],
-                    ))
+                    answer["revision"] = json!(revision);
+                    Ok(Outcome::command(answer, revision, affected))
                 }
                 Request::Operation { work, hold } => {
                     let (id, handle) = self.operations.start(
@@ -676,9 +689,17 @@ fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
     }
 }
 
+/// What a discard did: its answer, and whether it filed the invitation
+/// version the row carried ([`outbox::discard`]), which changed the agenda.
+#[derive(Debug)]
+pub(crate) struct Discarded {
+    pub answer: Value,
+    pub kept_version: bool,
+}
+
 /// `send.outbox_discard`: one row, one transaction, and the message-id in the
 /// answer so the client can name what it dropped without having listed first.
-fn discard(account: &str, graph: bool, row_id: i64) -> Result<Value, RpcError> {
+fn discard(account: &str, graph: bool, row_id: i64) -> Result<Discarded, RpcError> {
     let store = crate::store::Store::open(crate::config::store_path(account))
         .map_err(|e| server_error(account, &e))?;
     let blobs = crate::store::BlobStore::for_account(account);
@@ -702,7 +723,7 @@ pub(crate) fn discard_in(
     account: &str,
     graph: bool,
     row_id: i64,
-) -> Result<Value, RpcError> {
+) -> Result<Discarded, RpcError> {
     let Some(row) = outbox::load(store, row_id).map_err(|e| server_error(account, &e))? else {
         return Err(invalid_params(format!("no outbox row {row_id}")));
     };
@@ -723,12 +744,15 @@ pub(crate) fn discard_in(
     } else {
         outbox::discard(store, blobs, row_id)
     };
-    discarded.map_err(|e| server_error(account, &e))?;
-    Ok(json!({
-        "discarded": true,
-        "row_id": row_id,
-        "message_id": row.message_id,
-    }))
+    let kept_version = discarded.map_err(|e| server_error(account, &e))?;
+    Ok(Discarded {
+        answer: json!({
+            "discarded": true,
+            "row_id": row_id,
+            "message_id": row.message_id,
+        }),
+        kept_version,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,7 +1319,11 @@ mod tests {
             .faults
             .push((Step::Lookup, Fault::Refuse));
 
-        let answer = discard_in(&store, &blobs, "acct", true, id).unwrap();
+        let Discarded {
+            answer,
+            kept_version,
+        } = discard_in(&store, &blobs, "acct", true, id).unwrap();
+        assert!(!kept_version, "a plain mail keeps no invitation version");
         assert_eq!(answer["discarded"], true);
         assert_eq!(answer["message_id"], "<discarded@example.com>");
         assert!(

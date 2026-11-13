@@ -571,15 +571,7 @@ pub fn seed_outbox(root: &Path) {
 
     // 2. A submission that died without a verdict: parked, never re-sent
     //    automatically, and the only row `mp outbox retry` may re-arm.
-    let failed = enqueue(&store, &blobs, FAILED_MID, Some(SENT_MAILBOX));
-    outbox::mark_submission_started(&store, failed).expect("mark the parked row");
-    outbox::record_submission(
-        &store,
-        &blobs,
-        failed,
-        &SubmitOutcome::Ambiguous(AMBIGUOUS.to_string()),
-    )
-    .expect("park the row");
+    park_mail(&store, &blobs, ACCOUNT, FAILED_MID);
 
     // 3. Partly delivered (SND-08): one recipient has it, one never will. No
     //    target mailbox, so the row completed on the 250 and is `done` - and
@@ -607,16 +599,42 @@ pub fn seed_outbox(root: &Path) {
 
 /// One queued row with the fixture's envelope.
 fn enqueue(store: &Store, blobs: &BlobStore, message_id: &str, target: Option<&str>) -> i64 {
+    enqueue_in(store, blobs, ACCOUNT, message_id, target)
+}
+
+/// [`enqueue`] on `account`.
+fn enqueue_in(
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    message_id: &str,
+    target: Option<&str>,
+) -> i64 {
     outbox::enqueue(
         store,
         blobs,
-        ACCOUNT,
+        account,
         target,
         message_id,
         &raw(message_id),
         &envelope(),
     )
     .unwrap_or_else(|e| panic!("enqueue {message_id}: {e}"))
+}
+
+/// A plain mail on `account` whose submission died without a verdict,
+/// parked in `failed` as the seeded [`FAILED_ROW`] is: its id.
+pub fn park_mail(store: &Store, blobs: &BlobStore, account: &str, message_id: &str) -> i64 {
+    let failed = enqueue_in(store, blobs, account, message_id, Some(SENT_MAILBOX));
+    outbox::mark_submission_started(store, failed).expect("mark the parked row");
+    outbox::record_submission(
+        store,
+        blobs,
+        failed,
+        &SubmitOutcome::Ambiguous(AMBIGUOUS.to_string()),
+    )
+    .expect("park the row");
+    failed
 }
 
 /// The envelope every seeded row carries: one recipient who gets it and one

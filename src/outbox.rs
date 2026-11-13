@@ -1375,8 +1375,9 @@ fn blind_recipients(row: &OutboxRow) -> Vec<crate::contacts::window::Owed> {
 /// `CANCEL`) which some recipient may hold has its copy filed in the local
 /// Sent mailbox first ([`keep_the_version`]), so the version stays on the
 /// organizer's agenda and a later change is built on it, at a higher
-/// `SEQUENCE` (PERSO-204).
-pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
+/// `SEQUENCE` (PERSO-204). Whether it did is the answer, since the agenda
+/// then changed and the caller tells the clients so.
+pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<bool> {
     discard_row(store, blobs, id, false)
 }
 
@@ -1386,17 +1387,17 @@ pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
 /// Graph resume removes those drafts and the cleanup
 /// ([`crate::send::graph_submit::clear_server_cleanups`]), so the discard
 /// needs no network and leaves nothing on the server that nothing names.
-pub fn discard_graph(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
+pub fn discard_graph(store: &Store, blobs: &BlobStore, id: i64) -> Result<bool> {
     discard_row(store, blobs, id, true)
 }
 
-fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result<()> {
+fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result<bool> {
     let Some(row) = load(store, id)? else {
-        return Ok(());
+        return Ok(false);
     };
     // Before the release, so the blob passes from the row's reference to
     // the copy's without touching zero, as in [`finish_done`].
-    keep_the_version(store, blobs, &row)?;
+    let kept = keep_the_version(store, blobs, &row)?;
     let tx = store
         .conn()
         .unchecked_transaction()
@@ -1426,7 +1427,7 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     }
     tx.commit().context("committing the outbox discard")?;
     unreferenced.remove();
-    Ok(())
+    Ok(kept)
 }
 
 /// Whether some recipient may hold the message of `row`: one took it, the
@@ -1454,7 +1455,7 @@ fn someone_may_hold(row: &OutboxRow) -> bool {
 /// File the copy of the invitation version `row` carries in the local Sent
 /// mailbox, before a discard drops the row, when some recipient may hold it
 /// ([`someone_may_hold`]); a plain mail, a reply, and a version nobody can
-/// hold are left alone (PERSO-204).
+/// hold are left alone (PERSO-204). Whether it filed one is the answer.
 ///
 /// The organizer's agenda and [`crate::reconcile::next_sequence`] read the
 /// account's sent copies only, and a discarded row files none, so without
@@ -1465,9 +1466,9 @@ fn someone_may_hold(row: &OutboxRow) -> bool {
 /// above every UID a server issues) and which a server copy, if the server
 /// has one, takes over through its `Message-ID`. A copy that cannot be
 /// filed fails the discard rather than lose the version.
-fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result<()> {
+fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result<bool> {
     if !someone_may_hold(row) {
-        return Ok(());
+        return Ok(false);
     }
     let raw = blobs
         .read(&row.raw_blob)
@@ -1475,7 +1476,7 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
     let carries_a_version = crate::calendar::itip_of_message(&raw)
         .is_some_and(|itip| matches!(itip.method.as_deref(), Some("REQUEST" | "CANCEL")));
     if !carries_a_version {
-        return Ok(());
+        return Ok(false);
     }
     ingest_sent_copy(
         store,
@@ -1492,7 +1493,7 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
             row.id
         )
     })?;
-    Ok(())
+    Ok(true)
 }
 
 /// The server drafts a discarded Graph row may have left, still to be removed
