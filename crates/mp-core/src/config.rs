@@ -994,10 +994,6 @@ pub fn set_secret(key: &str, value: &str) -> Result<()> {
     crate::secrets::set(key, value)
 }
 
-pub fn delete_secret(key: &str) -> Result<()> {
-    crate::secrets::delete(key)
-}
-
 /// Initialize the process-wide secrets backend from the loaded config.
 /// Idempotent. Logs (does not fail) if config is unreadable -- callers can
 /// still operate on a default `EncryptedFile` backend.

@@ -122,8 +122,8 @@ A running daemon that has already opened its backend refuses a `config.reload` t
 
 The keyring service name is `mailypoppins`, and `mailypoppins-<name>` on a named profile (`mp --profile <name>`), so a profile keeps its passwords apart from the default profile's even for an account of the same name.
 It was `email-cli` before #0022, so on the default profile a lookup that misses under `mailypoppins` retries under `email-cli` and nobody who opted in before the rename loses access to a stored password.
-A profile reads, writes and deletes under its own service alone, never under `mailypoppins` or `email-cli`.
-Writes and deletes go to `mailypoppins` only, so the next `mp config set-password` moves the credential across and leaves a stale, harmless `email-cli` entry behind.
+A profile reads and writes under its own service alone, never under `mailypoppins` or `email-cli`.
+Writes go to `mailypoppins` only, so the next `mp config set-password` moves the credential across and leaves a stale, harmless `email-cli` entry behind.
 Clear those by hand if you want them gone (Keychain Access on macOS, `keyctl` from keyutils on Linux).
 
 The OS keyring is the login Keychain on macOS and the kernel keyring (keyutils, the `keyring` crate's `linux-native` store) on Linux and WSL, not the Secret Service: it needs no desktop session or D-Bus, which is why `tests/secrets_smoke.rs` runs the keyring backend headless on Linux.

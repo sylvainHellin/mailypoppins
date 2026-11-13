@@ -206,7 +206,6 @@ fn secret_in_words(key: &str) -> String {
 pub trait SecretsBackend: Send + Sync {
     fn get(&self, key: &str) -> Result<String>;
     fn set(&self, key: &str, value: &str) -> Result<()>;
-    fn delete(&self, key: &str) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,16 +546,6 @@ impl SecretsBackend for EncryptedFileBackend {
             .insert(key.to_string(), value.to_string());
         self.save_locked(&mut state)
     }
-
-    fn delete(&self, key: &str) -> Result<()> {
-        let mut state = self
-            .inner
-            .write()
-            .map_err(|_| anyhow!("secrets lock poisoned"))?;
-        self.refresh_locked(&mut state)?;
-        state.file.entries.remove(key);
-        self.save_locked(&mut state)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +560,7 @@ const KEYRING_SERVICE: &str = "mailypoppins";
 /// Read-only, and only as a fallback on the default profile: a user who opted
 /// into the keyring backend before the rename still has credentials filed under
 /// it, and orphaning them is the one dangerous direction in a cosmetic rename.
-/// `set` and `delete` operate on the current service alone, so the next
+/// `set` operates on the current service alone, so the next
 /// `mp config set-password` migrates the credential naturally and leaves a
 /// harmless stale entry behind.
 const LEGACY_KEYRING_SERVICE: &str = "email-cli";
@@ -621,11 +610,6 @@ impl KeyringBackend {
             profile: crate::profile::active(),
         }
     }
-
-    fn entry(&self, action: &str, key: &str) -> Result<keyring::Entry> {
-        keyring::Entry::new(&keyring_service(self.profile.as_deref()), key)
-            .map_err(|e| keyring_failure(action, key, &e))
-    }
 }
 
 /// What the keyring answered a read of `key` with, as the error a user reads:
@@ -640,7 +624,7 @@ fn keyring_read_error(key: &str, profile: Option<&str>, error: keyring::Error) -
     }
 }
 
-/// A keyring that would not `action` (read, store or delete) `key`: its own
+/// A keyring that would not `action` (read or store) `key`: its own
 /// reason, and what to do about a keyring that will not answer (PERSO-199).
 fn keyring_failure(action: &str, key: &str, error: &keyring::Error) -> anyhow::Error {
     let preposition = match action {
@@ -669,17 +653,10 @@ impl SecretsBackend for KeyringBackend {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
-        self.entry("store", key)?
+        keyring::Entry::new(&keyring_service(self.profile.as_deref()), key)
+            .map_err(|e| keyring_failure("store", key, &e))?
             .set_password(value)
             .map_err(|e| keyring_failure("store", key, &e))
-    }
-
-    /// Deleting a password that is not there is done, as it is in the file.
-    fn delete(&self, key: &str) -> Result<()> {
-        match self.entry("delete", key)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(keyring_failure("delete", key, &e)),
-        }
     }
 }
 
@@ -732,11 +709,6 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     backend()?.set(key, value)
 }
 
-/// Delete a secret from the active backend.
-pub fn delete(key: &str) -> Result<()> {
-    backend()?.delete(key)
-}
-
 fn backend() -> Result<&'static (dyn SecretsBackend + 'static)> {
     let b = BACKEND
         .get()
@@ -781,7 +753,7 @@ mod tests {
     }
 
     /// The default profile keeps the service its passwords were filed under,
-    /// and a profile gets its own, so `set` and `delete` on a profile can never
+    /// and a profile gets its own, so `set` on a profile can never
     /// reach the default profile's entries (PERSO-176).
     #[test]
     fn the_keyring_service_is_mailypoppins_on_the_default_profile_and_its_own_on_a_profile() {
@@ -1044,18 +1016,6 @@ mod tests {
             daemon.get("imap-password-alpha").is_err(),
             "a reset store is empty"
         );
-    }
-
-    #[test]
-    fn delete_removes_entry() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("secrets.enc");
-        let ikm = b"unit-test-ikm-B";
-
-        let backend = EncryptedFileBackend::open_with_ikm_for_test(path.clone(), ikm).unwrap();
-        backend.set("k", "v").unwrap();
-        backend.delete("k").unwrap();
-        assert!(backend.get("k").is_err());
     }
 
     #[test]

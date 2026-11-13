@@ -34,11 +34,6 @@ fn encrypted_backend_round_trip_with_real_machine_key() {
     let reopened = EncryptedFileBackend::open(path.clone()).unwrap();
     assert_eq!(reopened.get("smtp-password-foo").unwrap(), "hunter2");
     assert_eq!(reopened.get("imap-password-foo").unwrap(), "hunter3");
-
-    // Delete one and verify the other survives.
-    reopened.delete("smtp-password-foo").unwrap();
-    assert!(reopened.get("smtp-password-foo").is_err());
-    assert_eq!(reopened.get("imap-password-foo").unwrap(), "hunter3");
 }
 
 #[test]
