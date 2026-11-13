@@ -2215,19 +2215,31 @@ async fn routed_send_approved(
     .await
     .map_err(|e| refusal(account, e))?;
     let operation = wire_str(&started["operation_id"]).to_string();
-    let mut batch = BatchLines::new(&approved, io::stdout().is_terminal());
-    let outcome: mp_protocol::send::ApprovedOutcome =
-        match await_operation(&mut connection, &operation, |payload| {
-            print_pieces(&batch.progress(payload));
+    let mut batch = BatchLines::new(&approved, io::stdout().is_terminal(), io::stdout());
+    // Matched here rather than through `await_operation`: a daemon that dies
+    // mid-batch ends the run through `daemon_unavailable`, which exits without
+    // running a destructor, so the half line a terminal has open is closed
+    // first and the diagnostic does not read as that draft's outcome.
+    let settled = connection
+        .await_operation(&operation, |payload| {
+            let pieces = batch.progress(payload);
+            batch.emit(&pieces);
         })
-        .await
-        {
-            Settled::Done(result) => serde_json::from_value(result)
-                .context("reading the daemon's send.approved answer")?,
-            Settled::Failed(message) => return Err(anyhow!("{message}")),
-        };
+        .await;
+    let outcome: mp_protocol::send::ApprovedOutcome = match settled {
+        Ok(Settled::Done(result)) => {
+            serde_json::from_value(result).context("reading the daemon's send.approved answer")?
+        }
+        Ok(Settled::Failed(message)) => return Err(anyhow!("{message}")),
+        Err(_) => {
+            drop(batch);
+            daemon_unavailable("the daemon closed the connection with an operation still running")
+        }
+    };
 
-    print_pieces(&batch.settle(&outcome));
+    let pieces = batch.settle(&outcome);
+    batch.emit(&pieces);
+    drop(batch);
     println!(
         "\n{}",
         paint(&mp_client::format::send_approved_summary(&outcome))
@@ -2244,21 +2256,6 @@ enum BatchPiece {
     Closed(String),
     /// `Sending to <to>... <line>`, whole.
     Whole(String, String),
-}
-
-/// Print what [`BatchLines`] produced, flushing an open line so a terminal
-/// shows it while the draft is sent.
-fn print_pieces(pieces: &[BatchPiece]) {
-    for piece in pieces {
-        match piece {
-            BatchPiece::Opened(to) => {
-                print!("Sending to {to}... ");
-                let _ = io::stdout().flush();
-            }
-            BatchPiece::Closed(line) => println!("{}", paint(line)),
-            BatchPiece::Whole(to, line) => println!("Sending to {to}... {}", paint(line)),
-        }
-    }
 }
 
 /// The per-draft lines of `mp send-approved`, printed as the batch goes
@@ -2278,10 +2275,21 @@ fn print_pieces(pieces: &[BatchPiece]) {
 /// yet printed is printed at the settle, as before; the half line a terminal
 /// opened for the first draft is completed there rather than left dangling,
 /// and no other is opened until a `draft_done` has proved the daemon sends
-/// them.
-struct BatchLines<'a> {
+/// them. The client cannot know before the first draft settles: the protocol
+/// version did not move and the capability list names methods, so a terminal
+/// opens the first half line either way.
+///
+/// Whichever way the batch ends, a half line it left open is closed: the
+/// settle closes it with the draft's line, and dropping the printer (a failed
+/// or cancelled operation, an error return, a panic) ends it with a newline,
+/// so whatever is printed next does not read as that draft's outcome. The one
+/// exit that runs no destructor, the daemon dying under the batch, drops it
+/// explicitly first.
+struct BatchLines<'a, W: Write> {
     approved: &'a [&'a mp_protocol::draft::DraftEntry],
     terminal: bool,
+    /// Where the lines go: stdout, or a buffer in a test.
+    out: W,
     /// The selector each `draft` report named, by its index in the batch.
     started: Vec<Option<String>>,
     /// The index whose half line is on screen.
@@ -2292,11 +2300,21 @@ struct BatchLines<'a> {
     reports_done: bool,
 }
 
-impl<'a> BatchLines<'a> {
-    fn new(approved: &'a [&'a mp_protocol::draft::DraftEntry], terminal: bool) -> Self {
+impl<W: Write> Drop for BatchLines<'_, W> {
+    fn drop(&mut self) {
+        if self.open.take().is_some() {
+            let _ = writeln!(self.out);
+            let _ = self.out.flush();
+        }
+    }
+}
+
+impl<'a, W: Write> BatchLines<'a, W> {
+    fn new(approved: &'a [&'a mp_protocol::draft::DraftEntry], terminal: bool, out: W) -> Self {
         BatchLines {
             approved,
             terminal,
+            out,
             started: Vec::new(),
             open: None,
             printed: Vec::new(),
@@ -2317,6 +2335,23 @@ impl<'a> BatchLines<'a> {
             .and_then(|entry| entry.to.as_deref())
             .unwrap_or("(bcc only)")
             .to_string()
+    }
+
+    /// Print what [`BatchLines::progress`] or [`BatchLines::settle`]
+    /// produced, flushing an open line so a terminal shows it while the draft
+    /// is sent. A write error is not the batch's to report: the sends went out
+    /// whether or not their lines could be printed.
+    fn emit(&mut self, pieces: &[BatchPiece]) {
+        for piece in pieces {
+            let _ = match piece {
+                BatchPiece::Opened(to) => write!(self.out, "Sending to {to}... "),
+                BatchPiece::Closed(line) => writeln!(self.out, "{}", paint(line)),
+                BatchPiece::Whole(to, line) => {
+                    writeln!(self.out, "Sending to {to}... {}", paint(line))
+                }
+            };
+        }
+        let _ = self.out.flush();
     }
 
     fn mark(&mut self, index: usize) {
@@ -7615,7 +7650,7 @@ mod tests {
                 entry("b", "robin@example.com"),
             );
             let approved = [&a, &b];
-            let mut batch = BatchLines::new(&approved, true);
+            let mut batch = BatchLines::new(&approved, true, Vec::new());
             assert_eq!(
                 batch.progress(&started(0, "a")),
                 [BatchPiece::Opened("ivana@example.com".into())]
@@ -7643,7 +7678,7 @@ mod tests {
                 entry("b", "robin@example.com"),
             );
             let approved = [&a, &b];
-            let mut batch = BatchLines::new(&approved, false);
+            let mut batch = BatchLines::new(&approved, false, Vec::new());
             assert_eq!(batch.progress(&started(0, "a")), []);
             assert_eq!(
                 batch.progress(&settled(1, "\u{2717} no a")),
@@ -7663,6 +7698,44 @@ mod tests {
             assert_eq!(batch.settle(&outcome()), []);
         }
 
+        /// A half line left open when the batch ends without settling (a
+        /// failed or cancelled operation, an error return, a panic) is closed
+        /// by the printer's drop, so what is printed next starts a line of its
+        /// own; one the settle closed is not closed twice.
+        #[test]
+        fn a_half_line_left_open_is_closed_when_the_printer_goes() {
+            let (a, b) = (
+                entry("a", "ivana@example.com"),
+                entry("b", "robin@example.com"),
+            );
+            let approved = [&a, &b];
+            let mut out = Vec::new();
+            {
+                let mut batch = BatchLines::new(&approved, true, &mut out);
+                let pieces = batch.progress(&started(0, "a"));
+                batch.emit(&pieces);
+            }
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                "Sending to ivana@example.com... \n"
+            );
+
+            let mut out = Vec::new();
+            {
+                let mut batch = BatchLines::new(&approved, true, &mut out);
+                let pieces = batch.progress(&started(0, "a"));
+                batch.emit(&pieces);
+                let pieces = batch.settle(&outcome());
+                batch.emit(&pieces);
+            }
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                text.ends_with(&format!("{}\n", super::super::paint("\u{2717} no b"))),
+                "the settle closed the line and the drop added nothing: {text:?}"
+            );
+            assert_eq!(text.matches('\n').count(), 2, "{text:?}");
+        }
+
         /// A daemon that predates `draft_done` gets the lines at the settle,
         /// the first one closing the half line the terminal opened and no
         /// second one opened behind it.
@@ -7673,7 +7746,7 @@ mod tests {
                 entry("b", "robin@example.com"),
             );
             let approved = [&a, &b];
-            let mut batch = BatchLines::new(&approved, true);
+            let mut batch = BatchLines::new(&approved, true, Vec::new());
             assert_eq!(
                 batch.progress(&started(0, "a")),
                 [BatchPiece::Opened("ivana@example.com".into())]
