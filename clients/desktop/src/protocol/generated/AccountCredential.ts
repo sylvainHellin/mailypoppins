@@ -43,7 +43,7 @@ missing_scopes: Array<string>,
 /**
  * The account's logins the server refused within the last hour, which
  * the daemon is not making again until the user acts (PERSO-296): sets
- * the password, or starts a sync or a send. In the order
+ * the password, signs in again, or starts a sync or a send. In the order
  * of [`RejectedLogin`], empty when none was refused, and when absent, so
  * an older daemon's answer still parses.
  */

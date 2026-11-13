@@ -2332,7 +2332,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
             imap_password: password ? stored("imap") : null,
             token: auth === "graph" ? ("valid" as const) : null,
             missing_scopes: [],
-            rejected_logins: password ? mock.loginRejected.filter((r) => r.account === a.name).map((r) => r.login) : [],
+            rejected_logins: mock.loginRejected.filter((r) => r.account === a.name).map((r) => r.login),
           };
         }),
       } satisfies AccountCredentials;

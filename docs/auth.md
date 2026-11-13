@@ -43,6 +43,7 @@ No write takes a block naming it: the daemon's `account_block` refuses one.
   ```
 
 - Token cache: `<mailypoppins_data_dir>/tokens/<account>.enc` (encrypted with the same `encrypt_blob` / `decrypt_blob` as `secrets.enc`), refreshed automatically; when the refresh token expires after roughly 90 days of inactivity, re-run `mp config oauth2-login --account <name>`.
+  A refresh Entra answers with `invalid_grant` (the refresh token expired or was revoked) is held by the daemon for an hour instead of retried on every tick (PERSO-296): `mp daemon health` and both clients say `the sign-in expired or was revoked; sign in again with mp config oauth2-login -A <name>`, and a new sign-in, a sync or a send the user starts asks again at once.
 - Scopes: `GRAPH_SCOPES` constant in `crates/mp-core/src/oauth2.rs` (`Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `offline_access`).
   The token cache records the scopes each token response granted (`TokenCache::scopes`, empty in a cache written before PERSO-200).
   A refresh asks for all of them, so a token whose user already consented to the calendar picks it up; when Entra refuses the calendar scope, the refresh is repeated without it and the mail keeps working.

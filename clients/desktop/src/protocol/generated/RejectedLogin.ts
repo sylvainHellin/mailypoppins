@@ -4,4 +4,4 @@
  * A login of an account that the server refused (PERSO-296), named by what
  * the user does about it.
  */
-export type RejectedLogin = "imap" | "smtp";
+export type RejectedLogin = "imap" | "smtp" | "graph";

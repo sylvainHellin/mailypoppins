@@ -1,12 +1,13 @@
 import { useCallback } from "react";
-import { CircleAlert, CloudOff, KeyRound, RefreshCw, Power, SquarePen, X } from "lucide-react";
+import { CircleAlert, CloudOff, KeyRound, LogIn, RefreshCw, Power, SquarePen, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { bannerFor, type AppState } from "@/app/state";
 import { checkAccount, checkLabel, loginRejected, shownChecks } from "@/app/health";
 import { openConfig } from "@/app/interop";
 import type { HealthCheck, RejectedLogin } from "@/protocol/types";
 import { queueDepth, queueText } from "@/app/outbox";
-import { useDispatch } from "@/app/store";
+import { useAppState, useDispatch } from "@/app/store";
+import { signInOrShow } from "@/app/signin";
 import { LIFETIME_MS } from "@/app/activity";
 import { useWindDown } from "@/hooks/use-wind-down";
 
@@ -34,14 +35,15 @@ function NoticeLine({ text }: { text: string }) {
  * One health check that is not ok, a line under the connection banner: the
  * icon carries the level, the text stays calm, and `config_loaded` offers the
  * file, which is where a warning about it is fixed. An account whose login
- * the server rejected (`passwordFor`, PERSO-296) offers the dialog that sets
- * the IMAP or the SMTP password, the in-app way to the command its detail
- * names. Dismissing hides
+ * the server rejected (`rejected`, PERSO-296) offers the dialog that sets
+ * the IMAP or the SMTP password, or for a Graph account the sign-in, the
+ * in-app way to the command its detail names. Dismissing hides
  * it until the check's detail changes: a blocked account is a normal state
  * of a machine running a second engine, and a line that cannot go is a nag.
  */
-function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: RejectedPassword | null }) {
+function HealthLine({ check, rejected }: { check: HealthCheck; rejected: RejectedAccount | null }) {
   const dispatch = useDispatch();
+  const s = useAppState();
   return (
     <div
       data-health={check.name}
@@ -58,16 +60,18 @@ function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: R
           Open config.toml
         </Button>
       ) : null}
-      {passwordFor !== null ? (
+      {rejected?.kind === "graph" ? (
         <Button
           size="xs"
           variant="outline"
-          aria-label={`Set ${passwordFor.kind.toUpperCase()} password for ${passwordFor.account}`}
-          onClick={() => dispatch({ type: "open_password", account: passwordFor.account, kind: passwordFor.kind })}
+          aria-label={`Sign ${rejected.account} in again`}
+          onClick={() => signInOrShow(s, dispatch, rejected.account)}
         >
-          <KeyRound aria-hidden="true" />
-          Set {passwordFor.kind.toUpperCase()} password
+          <LogIn aria-hidden="true" />
+          Sign in again
         </Button>
+      ) : rejected ? (
+        <PasswordButton account={rejected.account} kind={rejected.kind} />
       ) : null}
       <Button
         size="icon-xs"
@@ -81,11 +85,28 @@ function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: R
   );
 }
 
-/** An account whose login the server rejected, and the password that login needs. */
-type RejectedPassword = { account: string; kind: RejectedLogin };
+/** The button that opens the dialog setting the `kind` password `account`'s rejected login needs. */
+function PasswordButton({ account, kind }: { account: string; kind: "imap" | "smtp" }) {
+  const dispatch = useDispatch();
+  const label = `Set ${kind.toUpperCase()} password`;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      aria-label={`${label} for ${account}`}
+      onClick={() => dispatch({ type: "open_password", account, kind })}
+    >
+      <KeyRound aria-hidden="true" />
+      {label}
+    </Button>
+  );
+}
+
+/** An account whose login the server rejected, and which login. */
+type RejectedAccount = { account: string; kind: RejectedLogin };
 
 /** The account of an `account:<name>` check whose login the server rejected, with that login, or null. */
-function rejectedAccount(state: AppState, check: HealthCheck): RejectedPassword | null {
+function rejectedAccount(state: AppState, check: HealthCheck): RejectedAccount | null {
   const account = checkAccount(check.name);
   const kind = account !== null ? loginRejected(state, account) : null;
   return account !== null && kind !== null ? { account, kind } : null;
@@ -120,7 +141,7 @@ export function StatusRegion({ state }: { state: AppState }) {
         </div>
       ) : null}
       {shownChecks(state).map((check) => (
-        <HealthLine key={check.name} check={check} passwordFor={rejectedAccount(state, check)} />
+        <HealthLine key={check.name} check={check} rejected={rejectedAccount(state, check)} />
       ))}
       {notice ? <NoticeLine text={notice} /> : null}
       {/* Mounted at 0, visually hidden and empty, so the first depth is announced. */}

@@ -519,6 +519,49 @@ impl Refusal {
         serde_json::from_str::<TokenErrorResponse>(&self.body)
             .is_ok_and(|err| err.is_scope_refusal())
     }
+
+    /// Whether Entra refused the grant itself (`invalid_grant`), which a new
+    /// sign-in fixes and a throttle or an outage never is.
+    fn is_grant_refusal(&self) -> bool {
+        serde_json::from_str::<TokenErrorResponse>(&self.body)
+            .is_ok_and(|err| err.error == "invalid_grant")
+    }
+}
+
+/// A refresh the token endpoint refused with `invalid_grant` (PERSO-296):
+/// the refresh token is revoked or expired, or the consent it carried was
+/// withdrawn, and only a new sign-in fixes it. Asking again with the same
+/// refresh token cannot succeed, so the daemon's login gate holds it rather
+/// than refreshing on every tick.
+#[derive(Debug, Clone)]
+pub struct RefreshRejected {
+    status: u16,
+    body: String,
+}
+
+impl std::fmt::Display for RefreshRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Token refresh failed with HTTP {} (the refresh token may have expired -- run \
+             `mp config oauth2-login`): {}",
+            self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for RefreshRejected {}
+
+impl RefreshRejected {
+    /// A refusal with `status` and `body`, for a test outside this module
+    /// that stands in for the token endpoint.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(status: u16, body: &str) -> Self {
+        Self {
+            status,
+            body: body.to_string(),
+        }
+    }
 }
 
 /// One refresh request: the token response, or the refusal.
@@ -634,11 +677,15 @@ where
         }
     }
     answer.map_err(|refusal| {
-        anyhow!(
-            "Token refresh failed with HTTP {} (the refresh token may have expired -- run `mp config oauth2-login`): {}",
-            refusal.status,
-            refusal.body
-        )
+        let rejected = RefreshRejected {
+            status: refusal.status,
+            body: refusal.body.clone(),
+        };
+        if refusal.is_grant_refusal() {
+            anyhow::Error::new(rejected)
+        } else {
+            anyhow!("{rejected}")
+        }
     })
 }
 
@@ -951,6 +998,41 @@ mod tests {
             assert!(error.contains(&format!("HTTP {status}")), "{error}");
             assert!(error.contains(body), "{error}");
             assert_eq!(asked, vec![GRAPH_SCOPES.to_string()]);
+        }
+    }
+
+    /// A refresh Entra answers with `invalid_grant`, the refresh token revoked
+    /// or expired, is a [`RefreshRejected`] (PERSO-296), which only a new
+    /// sign-in fixes; a throttle or an outage is not one.
+    #[test]
+    fn a_dead_refresh_token_is_a_rejected_refresh() {
+        let dead = r#"{"error":"invalid_grant","error_description":"AADSTS700082: The refresh token has expired due to inactivity.","error_codes":[700082]}"#;
+        let (outcome, _) = run_refresh(vec![Err(Refusal {
+            status: 400,
+            body: dead.into(),
+        })]);
+        let error = outcome.err().expect("refused");
+        let rejected = error
+            .downcast_ref::<RefreshRejected>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert!(rejected.to_string().contains("AADSTS700082"), "{rejected}");
+        assert!(
+            rejected.to_string().contains("mp config oauth2-login"),
+            "{rejected}"
+        );
+        for (status, body) in [
+            (429, r#"{"error":"temporarily_unavailable"}"#),
+            (503, "Service Unavailable"),
+        ] {
+            let (outcome, _) = run_refresh(vec![Err(Refusal {
+                status,
+                body: body.into(),
+            })]);
+            let error = outcome.err().expect(body);
+            assert!(
+                error.downcast_ref::<RefreshRejected>().is_none(),
+                "{error:#}"
+            );
         }
     }
 

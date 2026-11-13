@@ -9,15 +9,17 @@
 //! watcher and the outbox drain, and its health check still said the account
 //! was fine.
 //!
-//! Two logins go through the gate, each keyed by a [`Login`]:
+//! Three logins go through the gate, each keyed by a [`Login`]:
 //!
 //! - the IMAP login, in [`crate::imap_client::open_imap_session`], refused by
 //!   a `NO` about the password;
 //! - the SMTP login, in [`crate::send::submit`], refused by a `535` or a reply
-//!   carrying the enhanced code `5.7.8`.
+//!   carrying the enhanced code `5.7.8`;
+//! - a Graph account's token refresh, in [`crate::graph::access_token`],
+//!   refused by `invalid_grant` (the refresh token is revoked or expired).
 //!
 //! Each consults the list kept here: a refusal is recorded under the login
-//! and a hash of the refused secret, the password, and
+//! and a hash of the refused secret (the password, or the refresh token), and
 //! while the entry is fresh the same login fails at once with the same
 //! [`LoginRejected`] without dialling. The entry ends
 //!
@@ -26,8 +28,9 @@
 //!   far below any lockout threshold;
 //! - when the same login succeeds;
 //! - when the user acts, through [`forget`]: stores a password
-//!   (`config.set_password`), or starts what needs the login (a sync for the
-//!   IMAP login, a send for the SMTP login);
+//!   (`config.set_password`), signs in again (`config.oauth2_login`), or
+//!   starts what needs the login (a sync for the IMAP login and the Graph
+//!   sign-in, a send for the SMTP login and the Graph sign-in);
 //! - when the daemon restarts, since the list lives in memory only.
 //!
 //! A new secret is not on the list, because the hash is part of the entry,
@@ -56,6 +59,9 @@ pub enum Login {
     Imap(ServerLogin),
     /// The SMTP login of a password account.
     Smtp(ServerLogin),
+    /// A Graph account's sign-in, by the account's name, which its token
+    /// cache is kept under.
+    Graph(String),
 }
 
 impl Login {
@@ -64,13 +70,14 @@ impl Login {
         match self {
             Login::Imap(_) => RejectedLogin::Imap,
             Login::Smtp(_) => RejectedLogin::Smtp,
+            Login::Graph(_) => RejectedLogin::Graph,
         }
     }
 
     /// `account`'s login of `kind`, `None` when the account makes no such
-    /// login: a local-only account makes none, a Graph account no IMAP or
-    /// SMTP login, and an account naming the retired `oauth2` mode none at
-    /// all.
+    /// login: a local-only account makes none, a password account no Graph
+    /// sign-in, a Graph account no IMAP or SMTP login, and an account naming
+    /// the retired `oauth2` mode none at all.
     pub fn of(account: &AccountConfig, kind: RejectedLogin) -> Option<Login> {
         match (&account.auth_method, kind) {
             _ if account.is_local_only() => None,
@@ -80,21 +87,30 @@ impl Login {
             (AuthMethod::Password, RejectedLogin::Smtp) => {
                 Some(Login::Smtp(ServerLogin::smtp(account)))
             }
+            (AuthMethod::Graph, RejectedLogin::Graph) => Some(Login::Graph(account.name.clone())),
             _ => None,
         }
     }
 
     /// The login `account`'s mail goes through, which its sync, its IDLE
     /// watcher and its queued changes need: the IMAP login of a password
-    /// account.
+    /// account, the sign-in of a Graph one.
     pub fn of_mail(account: &AccountConfig) -> Option<Login> {
-        Login::of(account, RejectedLogin::Imap)
+        let kind = match account.auth_method {
+            AuthMethod::Graph => RejectedLogin::Graph,
+            _ => RejectedLogin::Imap,
+        };
+        Login::of(account, kind)
     }
 
     /// The login `account`'s sends go through: the SMTP login of a password
-    /// account.
+    /// account, the sign-in of a Graph one.
     pub fn of_send(account: &AccountConfig) -> Option<Login> {
-        Login::of(account, RejectedLogin::Smtp)
+        let kind = match account.auth_method {
+            AuthMethod::Graph => RejectedLogin::Graph,
+            _ => RejectedLogin::Smtp,
+        };
+        Login::of(account, kind)
     }
 }
 
@@ -148,16 +164,24 @@ impl fmt::Display for LoginRejected {
         match self.kind {
             RejectedLogin::Imap => write!(f, "IMAP login failed: {}", self.answer)?,
             RejectedLogin::Smtp => write!(f, "SMTP login failed: {}", self.answer)?,
+            RejectedLogin::Graph => write!(f, "OAuth2 sign-in refused: {}", self.answer)?,
         }
         if self.from_list {
-            let again = match self.kind {
-                RejectedLogin::Imap => "a sync is started",
-                RejectedLogin::Smtp => "a message is sent",
+            let (who, what, again) = match self.kind {
+                RejectedLogin::Imap => ("the server", "this password", "a sync is started"),
+                RejectedLogin::Smtp => ("the server", "this password", "a message is sent"),
+                RejectedLogin::Graph => {
+                    ("Microsoft", "this sign-in", "a sync or a send is started")
+                }
+            };
+            let set = match self.kind {
+                RejectedLogin::Graph => "the account signs in again",
+                _ => "the password is set again",
             };
             write!(
                 f,
-                " (the server refused this password earlier and is asked again within the \
-                 hour, or at once after the password is set again or {again})"
+                " ({who} refused {what} earlier and is asked again within the hour, or at once \
+                 after {set} or {again})"
             )?;
         }
         Ok(())
@@ -181,12 +205,16 @@ pub fn is_refused(login: &Login) -> bool {
 /// The logins of `account` the list holds a fresh refusal of, in the order of
 /// [`RejectedLogin`].
 pub fn rejected_logins(account: &AccountConfig) -> Vec<RejectedLogin> {
-    [RejectedLogin::Imap, RejectedLogin::Smtp]
-        .into_iter()
-        .filter_map(|kind| Login::of(account, kind))
-        .filter(is_refused)
-        .map(|login| login.kind())
-        .collect()
+    [
+        RejectedLogin::Imap,
+        RejectedLogin::Smtp,
+        RejectedLogin::Graph,
+    ]
+    .into_iter()
+    .filter_map(|kind| Login::of(account, kind))
+    .filter(is_refused)
+    .map(|login| login.kind())
+    .collect()
 }
 
 /// Drop the refusal of `login`, so its next attempt asks the server.
@@ -198,7 +226,11 @@ pub fn forget(login: &Login) {
 /// asks for: the IMAP login falls back to the SMTP password, so either
 /// password may be the one a refused login needed.
 pub fn forget_account(account: &AccountConfig) {
-    for kind in [RejectedLogin::Imap, RejectedLogin::Smtp] {
+    for kind in [
+        RejectedLogin::Imap,
+        RejectedLogin::Smtp,
+        RejectedLogin::Graph,
+    ] {
         if let Some(login) = Login::of(account, kind) {
             forget(&login);
         }
@@ -458,7 +490,7 @@ mod tests {
     }
 
     /// A password account makes an IMAP and an SMTP login, a Graph account
-    /// and a local-only account none.
+    /// its sign-in, and a local-only account none.
     #[test]
     fn each_kind_of_account_makes_its_own_logins() {
         let config: crate::config::GlobalConfig = toml::from_str(
@@ -473,8 +505,10 @@ mod tests {
         };
         assert!(matches!(Login::of_mail(tum), Some(Login::Imap(_))));
         assert!(matches!(Login::of_send(tum), Some(Login::Smtp(_))));
-        assert_eq!(Login::of_mail(hines), None);
-        assert_eq!(Login::of_send(hines), None);
+        assert_eq!(Login::of(tum, RejectedLogin::Graph), None);
+        assert_eq!(Login::of_mail(hines), Some(Login::Graph("hines".into())));
+        assert_eq!(Login::of_send(hines), Some(Login::Graph("hines".into())));
+        assert_eq!(Login::of(hines, RejectedLogin::Imap), None);
         assert_eq!(Login::of_mail(notes), None);
         assert_eq!(Login::of_send(notes), None);
     }

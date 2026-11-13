@@ -1,5 +1,5 @@
-//! An account whose IMAP or SMTP login the server rejected (PERSO-296), in
-//! the TUI.
+//! An account whose IMAP or SMTP login the server rejected, or whose Graph
+//! sign-in Microsoft refused (PERSO-296), in the TUI.
 //!
 //! The daemon holds the password it was refused and says so twice: the
 //! `account:<name>` health check turns `warn`, published as a
@@ -44,7 +44,11 @@ impl crate::queries::Queries for Daemon {
         match method {
             "account.credentials" => Ok(json!({"accounts": [{
                 "account": ACCOUNT,
-                "auth_method": "password",
+                // A refused sign-in is a Graph account's.
+                "auth_method": match *self.rejected.lock().unwrap() {
+                    Some(RejectedLogin::Graph) => "graph",
+                    _ => "password",
+                },
                 "smtp_password": true,
                 "imap_password": true,
                 "token": null,
@@ -222,6 +226,29 @@ fn a_rejected_smtp_login_names_the_smtp_password() {
     );
     assert!(
         screen.contains("set-password -A home smtp"),
+        "and the way out: {screen}"
+    );
+}
+
+/// A Graph account whose sign-in Microsoft refused is marked the same way,
+/// and the sidebar names the command that signs it in again.
+#[test]
+fn a_refused_sign_in_names_the_command_that_signs_in_again() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let (mut app, daemon) = app();
+
+    *daemon.rejected.lock().unwrap() = Some(RejectedLogin::Graph);
+    app.apply_event(&check_changed(2, &account_check(CheckStatus::Warn)));
+    assert_eq!(rejected(&app), Some(RejectedLogin::Graph));
+
+    let screen = drawn(&mut app);
+    assert!(screen.contains("login rejected"), "{screen}");
+    assert!(
+        screen.contains("the sign-in expired or was"),
+        "the sidebar says why: {screen}"
+    );
+    assert!(
+        screen.contains("oauth2-login -A home"),
         "and the way out: {screen}"
     );
 }

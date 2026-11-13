@@ -54,7 +54,7 @@ pub struct AccountCredential {
     pub missing_scopes: Vec<String>,
     /// The account's logins the server refused within the last hour, which
     /// the daemon is not making again until the user acts (PERSO-296): sets
-    /// the password, or starts a sync or a send. In the order
+    /// the password, signs in again, or starts a sync or a send. In the order
     /// of [`RejectedLogin`], empty when none was refused, and when absent, so
     /// an older daemon's answer still parses.
     #[serde(default)]
@@ -74,6 +74,10 @@ pub enum RejectedLogin {
     /// outbox until a password the server takes is set
     /// (`mp config set-password smtp`).
     Smtp,
+    /// The sign-in of a Graph account, whose refresh token Microsoft no
+    /// longer takes (revoked or expired): nothing reaches the mailbox until
+    /// the user signs in again (`mp config oauth2-login`).
+    Graph,
 }
 
 /// The `result` of `account.credentials`: every configured account in the

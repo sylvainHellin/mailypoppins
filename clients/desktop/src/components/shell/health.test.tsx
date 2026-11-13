@@ -90,6 +90,25 @@ describe("the health banner", () => {
     expect(within(dialog).getByRole("form", { name: "SMTP password for work" })).toBeInTheDocument();
   });
 
+  it("offers a new sign-in on a Graph account whose sign-in Microsoft refused", async () => {
+    const graph = "the sign-in expired or was revoked; sign in again with mp config oauth2-login -A home";
+    const { user } = renderApp(undefined, () => {
+      mock.bootstrap.snapshot.diagnostics = [];
+      mock.loginRejected = [{ account: "home", login: "graph" }];
+    });
+    await shellReady();
+    act(() => emitEnvelope("diagnostic.check_changed", { name: "account:home", status: "warn", detail: graph }));
+    const shown = await waitFor(() => {
+      const el = line("account:home");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(shown).toHaveTextContent(`Account home: ${graph}`);
+    expect(within(shown).queryByRole("button", { name: /^Set .* password/ })).toBeNull();
+    await user.click(await within(shown).findByRole("button", { name: "Sign home in again" }));
+    await waitFor(() => expect(mock.signIns.map((r) => r.account)).toEqual(["home"]));
+  });
+
   it("offers no password on an account check about something else", async () => {
     renderApp();
     await shellReady();

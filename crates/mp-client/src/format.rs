@@ -509,6 +509,10 @@ pub fn login_rejected_detail(account: &str, login: RejectedLogin) -> String {
             "the server rejected the SMTP password; set it with mp config set-password -A \
              {account} smtp"
         ),
+        RejectedLogin::Graph => format!(
+            "the sign-in expired or was revoked; sign in again with mp config oauth2-login -A \
+             {account}"
+        ),
     }
 }
 
@@ -899,6 +903,10 @@ mod tests {
         assert_eq!(
             login_rejected_detail("tum", RejectedLogin::Smtp),
             "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
+        );
+        assert_eq!(
+            login_rejected_detail("hines", RejectedLogin::Graph),
+            "the sign-in expired or was revoked; sign in again with mp config oauth2-login -A hines"
         );
     }
 

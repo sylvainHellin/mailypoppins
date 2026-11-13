@@ -1087,9 +1087,12 @@ async fn oauth2_login(
     )
     .await;
     // A new sign-in may have granted the calendar scope a stale token lacked
-    // (PERSO-200): its check is re-read now, so the prompt clears without
-    // waiting for the periodic sweep.
+    // (PERSO-200), and is the user's answer to a sign-in Microsoft refused
+    // (PERSO-296), which the next refresh asks about again: the checks are
+    // re-read now, so the prompts clear without waiting for the periodic
+    // sweep.
     if acquired.is_ok() && !work.staged {
+        crate::login_gate::forget(&crate::login_gate::Login::Graph(work.account.clone()));
         diagnostics.refresh();
     }
     match acquired {

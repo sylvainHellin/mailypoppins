@@ -4316,6 +4316,14 @@ async fn resubmit_pending_graph(
             let drafts = crate::config::drafts_dir(&account.name);
             graph_submit::resume_rows(store, blobs, &account.name, &drafts, now, &client).await
         }
+        // A refused sign-in the list answered was logged when Entra sent it
+        // (PERSO-296); the rows wait for a new sign-in.
+        Err(e) if crate::login_gate::login_rejected(&e).is_some_and(|r| r.from_list()) => {
+            log::debug!(
+                "[outbox] {} has queued Graph sends waiting for a new sign-in: {e:#}",
+                account.name
+            )
+        }
         Err(e) => log::warn!(
             "[outbox] {} has queued Graph sends but no usable Graph client: {e:#}",
             account.name

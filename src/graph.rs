@@ -293,12 +293,15 @@ impl GraphClient {
     /// Create a new GraphClient, loading/refreshing the OAuth2 token synchronously.
     /// Panics if called from inside an async runtime (use `new_async` instead).
     pub fn new(config: &GraphConfig) -> Result<Self> {
-        let access_token = crate::oauth2::load_or_refresh_token_blocking(
-            &config.account_name,
-            &config.client_id,
-            &config.tenant_id,
-            &config.scopes,
-        )?;
+        let access_token = gated_token(&config.account_name, || {
+            std::future::ready(crate::oauth2::load_or_refresh_token_blocking(
+                &config.account_name,
+                &config.client_id,
+                &config.tenant_id,
+                &config.scopes,
+            ))
+        });
+        let access_token = futures::executor::block_on(access_token)?;
         Ok(Self {
             client: http_client()?,
             access_token,
@@ -309,13 +312,7 @@ impl GraphClient {
 
     /// Create a new GraphClient from within an async context.
     pub async fn new_async(config: &GraphConfig) -> Result<Self> {
-        let access_token = crate::oauth2::load_or_refresh_token(
-            &config.account_name,
-            &config.client_id,
-            &config.tenant_id,
-            &config.scopes,
-        )
-        .await?;
+        let access_token = access_token(config).await?;
         Ok(Self {
             client: http_client()?,
             access_token,
@@ -356,14 +353,65 @@ impl GraphClient {
     /// throws away the connection pool as well. `load_or_refresh_token` hits
     /// the network only when the cached token has actually expired.
     pub async fn refresh_token(&mut self, config: &GraphConfig) -> Result<()> {
-        self.access_token = crate::oauth2::load_or_refresh_token(
+        self.access_token = access_token(config).await?;
+        Ok(())
+    }
+}
+
+/// The account's access token: the cached one, or a refreshed one, through
+/// the daemon's list of refused logins ([`crate::login_gate`], PERSO-296).
+///
+/// A refresh Entra refused with `invalid_grant`
+/// ([`crate::oauth2::RefreshRejected`]: the refresh token is revoked or
+/// expired) is recorded under the account and a hash of its refresh token,
+/// and while it is held every caller fails at once with the same
+/// [`LoginRejected`](crate::login_gate::LoginRejected) instead of asking the
+/// token endpoint again on every tick, watcher round and queued change. A new
+/// sign-in writes a new refresh token, which the list does not hold, and
+/// `config.oauth2_login` lets go of the entry as well.
+pub async fn access_token(config: &GraphConfig) -> Result<String> {
+    gated_token(&config.account_name, || {
+        crate::oauth2::load_or_refresh_token(
             &config.account_name,
             &config.client_id,
             &config.tenant_id,
             &config.scopes,
         )
-        .await?;
-        Ok(())
+    })
+    .await
+}
+
+/// [`access_token`] with the token's load or refresh handed in as `fetch`, so
+/// a test can stand in for the token endpoint.
+async fn gated_token<F, Fut>(account: &str, fetch: F) -> Result<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    use crate::login_gate::{self, Login, LoginRejected};
+    let login = Login::Graph(account.to_string());
+    let refresh = crate::oauth2::load_token_cache(account)
+        .map(|cache| cache.refresh_token)
+        .unwrap_or_default();
+    if let Some(refused) = login_gate::refused(&login, &refresh) {
+        return Err(refused.into());
+    }
+    match fetch().await {
+        Ok(token) => {
+            login_gate::accepted(&login);
+            Ok(token)
+        }
+        Err(e) => match e.downcast_ref::<crate::oauth2::RefreshRejected>() {
+            Some(refusal) => {
+                log::warn!("[graph] the sign-in of {account} was refused: {refusal}");
+                let rejected = LoginRejected::new(
+                    mp_protocol::account::RejectedLogin::Graph,
+                    refusal.to_string(),
+                );
+                Err(login_gate::record(&login, &refresh, &rejected).into())
+            }
+            None => Err(e),
+        },
     }
 }
 
@@ -4873,6 +4921,71 @@ fn is_exact_message_id(candidate: Option<&str>, wanted: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PERSO-296: a refresh Entra refused with `invalid_grant` is asked once;
+    /// the calls after it fail at once, naming the refusal, without asking the
+    /// token endpoint again, and the account reports its sign-in as the
+    /// rejected login until the refusal is let go. It used to be asked again
+    /// on every tick and every watcher round.
+    #[tokio::test]
+    async fn a_refused_refresh_is_held_and_not_asked_again() {
+        use crate::login_gate::{self, Login};
+        use mp_protocol::account::RejectedLogin;
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let account = "gated-graph";
+        let config: crate::config::GlobalConfig = toml::from_str(&format!(
+            "[[accounts]]\nname = \"{account}\"\nauth_method = \"graph\"\n"
+        ))
+        .unwrap();
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let refuse = || async {
+            asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<String, _>(anyhow::Error::new(
+                crate::oauth2::RefreshRejected::for_test(
+                    400,
+                    r#"{"error":"invalid_grant","error_description":"AADSTS50173: The provided grant has expired due to it being revoked"}"#,
+                ),
+            ))
+        };
+
+        let first = gated_token(account, refuse).await.unwrap_err();
+        let second = gated_token(account, refuse).await.unwrap_err();
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{second:#}"
+        );
+        let rejected = login_gate::login_rejected(&second).expect("a held refusal");
+        assert_eq!(rejected.kind(), RejectedLogin::Graph);
+        assert!(rejected.from_list());
+        assert!(format!("{first:#}").contains("AADSTS50173"), "{first:#}");
+        assert_eq!(
+            login_gate::rejected_logins(&config.accounts[0]),
+            [RejectedLogin::Graph]
+        );
+
+        login_gate::forget(&Login::Graph(account.to_string()));
+        assert!(login_gate::rejected_logins(&config.accounts[0]).is_empty());
+        let token = gated_token(account, || async { Ok("fresh".to_string()) })
+            .await
+            .unwrap();
+        assert_eq!(token, "fresh");
+    }
+
+    /// A refresh refused for any other reason, a throttle or an outage, is
+    /// not held: the next call asks again.
+    #[tokio::test]
+    async fn a_refresh_refused_for_another_reason_is_not_held() {
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let throttled = || async {
+            asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<String, _>(anyhow::anyhow!("Token refresh failed with HTTP 429"))
+        };
+        gated_token("throttled-graph", throttled).await.unwrap_err();
+        gated_token("throttled-graph", throttled).await.unwrap_err();
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     /// A MIME send is allowed up to the threshold inclusive and refused one
     /// byte past it, where the caller stages the send through a draft

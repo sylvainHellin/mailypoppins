@@ -982,6 +982,7 @@ impl Credentials {
             // none left at all.
             _ => Self {
                 calendar_scope_missing,
+                rejected_login: entry.rejected_logins.first().copied(),
                 ..Self::default()
             },
         }
