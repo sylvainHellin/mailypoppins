@@ -50,6 +50,7 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Notify};
 
 use mp_protocol::events::KIND_DAEMON_SHUTTING_DOWN;
+use mp_protocol::operation::OperationStatus;
 use mp_protocol::{frame, Notification, JSONRPC_VERSION, METHOD_DAEMON_STOPPED};
 
 use super::operations::OperationId;
@@ -88,7 +89,7 @@ pub struct Report {
     pub clean: bool,
     /// What did not, as `operation.status` objects in start order, captured
     /// before they were cancelled.
-    pub unsettled: Vec<Value>,
+    pub unsettled: Vec<OperationStatus>,
 }
 
 /// The one shutdown of one daemon process.
@@ -124,7 +125,7 @@ struct Inner {
     /// with rather than re-deciding.
     grace_secs: u64,
     /// What was live at step 4, for the answer and the announcement.
-    pending: Vec<Value>,
+    pending: Vec<OperationStatus>,
     /// The outcome of steps 5 and 6, `None` until they are done.
     report: Option<Report>,
 }
@@ -343,7 +344,7 @@ fn drive(state: Arc<DaemonState>, exit: watch::Sender<bool>) {
 ///
 /// Returns before the deadline the moment nothing is live, which is what makes
 /// the grace a ceiling. A `grace` of zero polls once and cancels immediately.
-async fn wait_out(state: &Arc<DaemonState>, grace: Duration) -> Vec<Value> {
+async fn wait_out(state: &Arc<DaemonState>, grace: Duration) -> Vec<OperationStatus> {
     let deadline = Instant::now() + grace;
     loop {
         if state.operations.live().is_empty() {
@@ -358,9 +359,9 @@ async fn wait_out(state: &Arc<DaemonState>, grace: Duration) -> Vec<Value> {
     // Captured before the cancel, so the report names the state that made the
     // stop unclean rather than the `cancelled` this line is about to write.
     let left = state.operations.live();
-    let unsettled: Vec<Value> = left
+    let unsettled: Vec<OperationStatus> = left
         .iter()
-        .map(super::operations::OperationStatus::to_json)
+        .map(super::operations::OperationStatus::to_wire)
         .collect();
     for status in &left {
         let id = OperationId::new(status.id.as_str());
@@ -432,12 +433,12 @@ async fn await_connections(state: &Arc<DaemonState>) {
 
 /// Everything the registry still has live, as `operation.status` objects in
 /// start order.
-fn live_operations(state: &DaemonState) -> Vec<Value> {
+fn live_operations(state: &DaemonState) -> Vec<OperationStatus> {
     state
         .operations
         .live()
         .iter()
-        .map(super::operations::OperationStatus::to_json)
+        .map(super::operations::OperationStatus::to_wire)
         .collect()
 }
 
@@ -465,7 +466,15 @@ mod tests {
         let shutdown = Shutdown::new();
         lock(&shutdown.inner).report = Some(Report {
             clean: false,
-            unsettled: vec![json!({"operation_id": "op-1", "method": "sync.full"})],
+            unsettled: vec![OperationStatus {
+                operation_id: "op-1".to_string(),
+                method: "sync.full".to_string(),
+                state: mp_protocol::operation::OperationState::Running,
+                scope: mp_protocol::operation::CancelScope::Durable,
+                progress: None,
+                result: None,
+                error: None,
+            }],
         });
         shutdown.settled.send_replace(true);
 
