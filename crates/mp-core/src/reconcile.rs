@@ -268,6 +268,17 @@ impl SeriesCancel {
     /// that replaces every attendee and waits in the outbox, its own copy
     /// not filed yet, leaves a cancellation naming every attendee of the
     /// version the agenda still holds. A whole cancellation is never marked.
+    ///
+    /// The subset fallback misreads a whole cancellation built on a version
+    /// that a later-filed one at its `SEQUENCE` or below extends (an update
+    /// adding an attendee still queued when the cancellation was built).
+    /// mp's own `event.update` and `event.cancel` cannot produce that: both
+    /// are refused while an earlier change of the `UID` waits in the outbox
+    /// (`invite::unsettled_change` in the root crate), so a cancellation
+    /// they build is above every version that is ever filed. It stays
+    /// reachable for a hand-made `mp send --invite --sequence`, another
+    /// client sending from the same mailbox, and a store holding copies
+    /// sent before that refusal, which is why the fallback is kept.
     fn only_uninvites(&self, roster: &BTreeSet<String>) -> bool {
         self.told.as_ref().is_some_and(|told| {
             !told.is_empty()

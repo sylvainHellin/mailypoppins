@@ -298,6 +298,82 @@ pub fn organized_row(
     })
 }
 
+/// An earlier change of an invitation the outbox holds with no final
+/// verdict yet ([`unsettled_change`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsettledChange {
+    /// The outbox row, as `mp outbox retry|discard` names it.
+    pub row_id: i64,
+    pub stage: Unsettled,
+}
+
+/// Where an earlier change of an invitation stands in the outbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsettled {
+    /// `pending_send`: never handed to the server, deferred by it (a 4xx)
+    /// for some recipient, or failed by the transport before any took it;
+    /// a later pass submits it on its own.
+    Queued,
+    /// `sent_pending_append`: the server took it and its copy is not filed
+    /// in Sent yet, where the agenda reads it; a later pass files it.
+    Filing,
+    /// `failed` with a recipient that has no verdict: the submission
+    /// started and the server never answered for them, who may hold it; the
+    /// row is parked for a human (`mp outbox retry` or `discard`).
+    Unconfirmed,
+}
+
+/// The oldest outbox row of `account` that carries a `REQUEST` or `CANCEL`
+/// of the invitation `uid`, read from its iCalendar part, and has no final
+/// verdict yet, or `None` when every change of it is settled.
+///
+/// Final is `done` (every recipient took it or refused it for good, its
+/// copy filed or none owed) and `failed` with every recipient refused for
+/// good, a change that went nowhere. Anything else is [`Unsettled`]: the
+/// agenda still shows the version before that change, and its
+/// `SEQUENCE` is not counted by [`crate::reconcile::next_sequence`], so a
+/// change built now would go to the old attendees at a sequence the queued
+/// one shares or tops (PERSO-204). A row whose bytes cannot be read is
+/// skipped: nothing tells which invitation it carries.
+pub fn unsettled_change(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+    uid: &str,
+) -> Result<Option<UnsettledChange>> {
+    for row in crate::outbox::undone_rows(store, account)? {
+        let stage = match row.state {
+            crate::outbox::OutboxState::PendingSend => Unsettled::Queued,
+            crate::outbox::OutboxState::SentPendingAppend => Unsettled::Filing,
+            crate::outbox::OutboxState::Failed => match &row.envelope {
+                Some(envelope) if envelope.outstanding().is_empty() => continue,
+                _ => Unsettled::Unconfirmed,
+            },
+            crate::outbox::OutboxState::Done => continue,
+        };
+        let Ok(raw) = blobs.read(&row.raw_blob) else {
+            continue;
+        };
+        let carried = mailparse::parse_mail(&raw)
+            .ok()
+            .and_then(|mail| crate::parse::extract_calendar_ics(&mail))
+            .and_then(|ics| crate::calendar::parse_ics(&ics));
+        let Some(parsed) = carried else { continue };
+        let same = parsed
+            .uid
+            .as_deref()
+            .is_some_and(|carried| carried.trim() == uid.trim());
+        let changes = matches!(parsed.method.as_deref(), Some("REQUEST" | "CANCEL"));
+        if same && changes {
+            return Ok(Some(UnsettledChange {
+                row_id: row.id,
+                stage,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// The messages an update of `invite` sends, in the order they go: the
 /// update to every attendee it invites, then, when it drops attendees, a
 /// cancellation to those.

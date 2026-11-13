@@ -1040,7 +1040,9 @@ pub const GRAPH_IMIP_CHANGE_REFUSAL: &str =
 /// mail `row_id` an organizer's change addresses, each refused before an
 /// operation starts: a Graph account, an event the agenda does not list (an
 /// older version, or no invitation), an invitation the account did not
-/// organise, and one cancelled already.
+/// organise, one cancelled already, and one with an earlier change the
+/// outbox holds with no final verdict ([`crate::invite::unsettled_change`]),
+/// which a change built now on the agenda's version would contradict.
 fn organised(
     name: &str,
     id: &str,
@@ -1074,7 +1076,46 @@ fn organised(
             found.event.summary
         )));
     }
+    if let Some(waiting) = crate::invite::unsettled_change(&store, &blobs, name, &row.invite.uid)
+        .map_err(|e| server_error(name, &e))?
+    {
+        return Err(invalid_params(unsettled_refusal(
+            &found.event.summary,
+            name,
+            &waiting,
+        )));
+    }
     Ok((account, found, row))
+}
+
+/// The refusal of a change of `summary` while an earlier one waits in
+/// `name`'s outbox: what holds it, then the way out.
+fn unsettled_refusal(
+    summary: &str,
+    name: &str,
+    waiting: &crate::invite::UnsettledChange,
+) -> String {
+    let id = waiting.row_id;
+    let lead = format!("{summary} has an earlier change waiting in the outbox (row {id})");
+    let stale = "a change made now would be built on the version before it";
+    match waiting.stage {
+        crate::invite::Unsettled::Queued => format!(
+            "{lead} that has not reached every attendee yet, and {stale}; it goes out on its \
+             own with a later sync of {name}, so change {summary} once it has, or drop it \
+             first with mp outbox discard -A {name} {id}"
+        ),
+        crate::invite::Unsettled::Filing => format!(
+            "{lead}: it was sent and its copy is not filed in Sent yet, where the agenda reads \
+             it, so {stale}; it is filed on its own with a later sync of {name}, so change \
+             {summary} once it is"
+        ),
+        crate::invite::Unsettled::Unconfirmed => format!(
+            "{lead}: the server gave no verdict for some of its attendees, who may have it, so \
+             {stale}; check whether it arrived, then send it again with mp outbox retry -A \
+             {name} {id} or drop it with mp outbox discard -A {name} {id}, and change \
+             {summary} after"
+        ),
+    }
 }
 
 /// `event.update` of an invitation mail the account organised: the new

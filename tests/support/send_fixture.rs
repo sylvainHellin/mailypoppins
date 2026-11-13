@@ -230,6 +230,10 @@ pub const FIXED_UPDATED: i64 = 1_767_322_845;
 /// {
 ///   "log": "<path>",                       // one line per transport event
 ///   "reject": {"carol@example.com": "550 …"},
+///   "defer": {"dan@example.com": "451 …"},
+///   "unknown": {"eve@example.com": "connection reset …"},
+///   "down": "connection refused",
+///   "passes": 1,
 ///   "append": "ok" | "fail" | "swallow_ack",
 ///   "append_delay_ms": 0
 /// }
@@ -241,6 +245,15 @@ pub const FIXED_UPDATED: i64 = 1_767_322_845;
 /// - `reject` fails exactly those recipients, with the reason given, and
 ///   accepts the rest: that is the partly-delivered outcome (`SND-08`) without
 ///   a server.
+/// - `defer` refuses those recipients for now (a 4xx), which keeps the row
+///   `pending_send` for a later pass.
+/// - `unknown` gives those recipients no verdict, which parks the row in
+///   `failed` for a human (`mp outbox retry`).
+/// - `down` fails every submission with that error before any recipient is
+///   asked, as a server that cannot be reached does.
+/// - `passes` ends `defer` and `unknown` after that many submissions to the
+///   recipient, whatever the message, counted on the ledger, so every later
+///   one is delivered; unset, they last for ever.
 /// - `append` decides what the Sent-mailbox APPEND does. `swallow_ack` files
 ///   the copy and reports a failure, which is the ambiguity the dedup search
 ///   exists for.

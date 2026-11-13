@@ -1510,6 +1510,12 @@ pub fn open_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
     )
 }
 
+/// Every row not `done` yet, oldest first: queued, sent with its copy still
+/// to file, or parked in `failed`.
+pub fn undone_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
+    rows_in_states(store, account, "state <> 'done'")
+}
+
 /// Every row that still has something to say, oldest first: what
 /// `mp outbox list` shows.
 ///

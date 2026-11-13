@@ -17,6 +17,7 @@
 //!   "defer": {"dan@example.com": "451 4.7.1 try again later"},
 //!   "unknown": {"eve@example.com": "connection reset while waiting for the 250"},
 //!   "down": "connection refused",
+//!   "passes": 1,
 //!   "append": "ok" | "fail" | "swallow_ack",
 //!   "append_delay_ms": 0
 //! }
@@ -71,6 +72,11 @@ pub struct FakeTransport {
     /// The error every submission fails with before any recipient is
     /// asked, as a server that cannot be reached does; `None` serves them.
     down: Option<String>,
+    /// How many submissions to a recipient the `defer` and `unknown`
+    /// verdicts last, whatever the message, counted on the ledger, before
+    /// the server takes every later one, as a server that comes back does;
+    /// `None` keeps them for ever.
+    passes: Option<usize>,
     append: AppendMode,
     append_delay: std::time::Duration,
 }
@@ -112,6 +118,10 @@ pub fn fake_transport() -> Option<FakeTransport> {
             .get("down")
             .and_then(Value::as_str)
             .map(str::to_string),
+        passes: value
+            .get("passes")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok()),
         append: match value.get("append").and_then(Value::as_str) {
             Some("fail") => AppendMode::Fail,
             Some("swallow_ack") => AppendMode::SwallowAck,
@@ -142,19 +152,40 @@ impl FakeTransport {
         if let Some(error) = &self.down {
             anyhow::bail!("{error}");
         }
+        let ledger = self.ledger();
         let named = |list: &[(String, String)], address: &str| {
             list.iter()
                 .find(|(named, _)| named.eq_ignore_ascii_case(address.trim()))
                 .map(|(_, reason)| reason.clone())
+        };
+        // A deferral or a missing verdict lasts `passes` submissions to
+        // that recipient, then the server takes every later message.
+        let held = |list: &[(String, String)], address: &str| {
+            named(list, address).filter(|_| {
+                self.passes.is_none_or(|passes| {
+                    let before = ledger
+                        .iter()
+                        .filter(|line| {
+                            let words: Vec<&str> = line.split_whitespace().collect();
+                            matches!(
+                                words.as_slice(),
+                                ["submit", _, named, "deferred" | "unknown"]
+                                    if named.eq_ignore_ascii_case(address.trim())
+                            )
+                        })
+                        .count();
+                    before < passes
+                })
+            })
         };
         let results = recipients
             .iter()
             .map(|(address, role)| {
                 let (verdict, error) = match named(&self.rejected, address) {
                     Some(reason) => (RecipientVerdict::Rejected, Some(reason)),
-                    None => match named(&self.deferred, address) {
+                    None => match held(&self.deferred, address) {
                         Some(reason) => (RecipientVerdict::Retryable, Some(reason)),
-                        None => match named(&self.unknown, address) {
+                        None => match held(&self.unknown, address) {
                             Some(reason) => (RecipientVerdict::Unknown, Some(reason)),
                             None => (RecipientVerdict::Delivered, None),
                         },

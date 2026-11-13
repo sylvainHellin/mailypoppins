@@ -2834,13 +2834,42 @@ async fn an_update_deferred_for_one_and_refused_for_another_says_which_waits() {
     );
 }
 
+/// The outbox rows of `IMIP` in `state`, as `send.outbox_list` lists them.
+async fn outbox_rows(conn: &mut Connection, state: &str) -> Vec<Value> {
+    let outbox = call(conn, "send.outbox_list", json!({"account": IMIP})).await;
+    outbox["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["state"] == state)
+        .cloned()
+        .collect()
+}
+
+/// The refusal of `method` with `params`, which must name the change that
+/// waits in the outbox and never read the meeting as cancelled.
+async fn refused_while_queued(conn: &mut Connection, method: &str, params: Value) -> String {
+    let refused = call_err(conn, method, params.clone()).await;
+    assert_eq!(refused.code, -32602, "{params}: {}", refused.message);
+    assert!(
+        refused
+            .message
+            .contains("has an earlier change waiting in the outbox")
+            && !refused.message.contains("cancelled already"),
+        "{params}: {}",
+        refused.message
+    );
+    refused.message
+}
+
 /// An update that replaces every attendee and the server defers cancels
-/// the old ones at once, and the organizer's meeting, whose agenda still
-/// holds the old version, stays live and changeable: the cancellation
-/// names every attendee that version invites, yet it uninvites them and
-/// does not end the meeting.
+/// the old ones at once and leaves the organizer's meeting live; a change
+/// made before the update goes out would be built on the old version (a
+/// cancellation of Ada and Bob alone, while Carol later gets a meeting
+/// nothing cancels), so both changes are refused until it has, naming the
+/// row and the way out.
 #[tokio::test]
-async fn an_update_replacing_every_attendee_the_server_defers_keeps_the_meeting_live() {
+async fn a_change_waits_for_a_deferred_update_that_replaced_every_attendee() {
     let ledger = tempfile::tempdir().unwrap();
     let log = ledger.path().join("transport.log");
     let slice = organised_slice_with(send_fixture::fake_transport_deferring(
@@ -2860,29 +2889,48 @@ async fn an_update_replacing_every_attendee_the_server_defers_keeps_the_meeting_
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(now["cancelled"], false, "{now}");
     assert_eq!(now["id"], own["id"], "the old version stands: {now}");
-    // A later change is taken, not refused as a change of a cancelled
-    // meeting.
-    let again = run_operation(
+    let queued = outbox_rows(&mut conn, "pending_send").await;
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    let row = queued[0]["id"].as_i64().unwrap();
+    let message = refused_while_queued(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": own["id"]}),
+    )
+    .await;
+    assert!(
+        message.contains(&format!("(row {row})"))
+            && message.contains(&format!("mp outbox discard -A {IMIP} {row}")),
+        "{message}"
+    );
+    refused_while_queued(
         &mut conn,
         "event.update",
         json!({"account": IMIP, "event": own["id"], "fields": {"summary": "Budget, moved"}}),
     )
     .await;
-    let error = again["error"]["message"].as_str().unwrap_or_default();
-    assert!(!error.contains("cancelled already"), "{again}");
+    assert_eq!(
+        told(&log),
+        ["ada@example.com", "bob@example.com"],
+        "nothing more was mailed"
+    );
 }
 
 /// The same update, the server giving no verdict for the new attendee:
-/// the outbox parks it for a human and never resends it, so the meeting
-/// must not read as cancelled for as long as that row stays failed.
+/// the outbox parks it for a human, the meeting stays live, and a change
+/// is refused until the row is settled; once `mp outbox retry` delivered
+/// and filed it, the agenda holds the new version and a whole cancellation
+/// is taken again, telling its attendee and ending the meeting.
 #[tokio::test]
-async fn an_update_replacing_every_attendee_with_no_verdict_keeps_the_meeting_live() {
+async fn a_change_is_taken_again_once_the_parked_update_went_out() {
     let ledger = tempfile::tempdir().unwrap();
     let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_unconfirming(
-        &log,
-        &[("carol@example.com", send_fixture::AMBIGUOUS)],
-    ));
+    let slice = organised_slice_with(
+        json!({"log": log.to_string_lossy(),
+               "unknown": {"carol@example.com": send_fixture::AMBIGUOUS},
+               "passes": 1})
+        .to_string(),
+    );
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2902,18 +2950,179 @@ async fn an_update_replacing_every_attendee_with_no_verdict_keeps_the_meeting_li
 
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(now["cancelled"], false, "{now}");
-    let cancel = run_operation(
+    let parked = outbox_rows(&mut conn, "failed").await;
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    let row = parked[0]["id"].as_i64().unwrap();
+    let message = refused_while_queued(
         &mut conn,
         "event.cancel",
         json!({"account": IMIP, "event": own["id"]}),
     )
     .await;
-    assert_eq!(cancel["state"], "succeeded", "{cancel}");
+    assert!(
+        message.contains(&format!("mp outbox retry -A {IMIP} {row}")),
+        "{message}"
+    );
+
+    let retried = run_operation(
+        &mut conn,
+        "send.outbox_retry",
+        json!({"account": IMIP, "row_id": row}),
+    )
+    .await;
+    assert_eq!(retried["state"], "succeeded", "{retried}");
+    assert!(outbox_rows(&mut conn, "failed").await.is_empty());
+    let filed = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_ne!(filed["id"], own["id"], "the new version is filed: {filed}");
+    let cancel = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": filed["id"]}),
+    )
+    .await;
+    assert_eq!(
+        succeeded(&cancel)["notified"],
+        json!(["carol@example.com"]),
+        "{cancel}"
+    );
     let after = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(
         after["cancelled"], true,
         "a whole cancellation still ends the meeting: {after}"
     );
+}
+
+/// An update that only adds an attendee, queued with the transport down,
+/// refuses a cancellation made before it goes out: built on the old
+/// version, it would name Ada and Bob alone at the queued update's
+/// sequence, which the organizer's agenda would then read as their
+/// uninvitation, and Carol would never be told.
+#[tokio::test]
+async fn a_cancel_waits_for_a_queued_update_that_adds_an_attendee() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_down(
+        &log,
+        "connection refused",
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "bob@example.com"},
+            {"email": "carol@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 1);
+    refused_while_queued(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": own["id"]}),
+    )
+    .await;
+    assert_eq!(
+        outbox_rows(&mut conn, "pending_send").await.len(),
+        1,
+        "no cancellation was queued"
+    );
+}
+
+/// An update that drops an attendee, queued with the transport down,
+/// holds the uninvitation and the new version in the outbox; a
+/// cancellation made then would take the uninvitation's sequence, below
+/// the update's, and be lost on every attendee that update reaches, so it
+/// is refused.
+#[tokio::test]
+async fn a_cancel_waits_for_a_queued_update_and_its_uninvitation() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_down(
+        &log,
+        "connection refused",
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"attendees": [{"email": "ada@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 2);
+    refused_while_queued(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": own["id"]}),
+    )
+    .await;
+    assert_eq!(
+        outbox_rows(&mut conn, "pending_send").await.len(),
+        2,
+        "no third message was queued"
+    );
+}
+
+/// An update the server took whose copy Sent did not file yet leaves the
+/// agenda on the version before it, so a change is refused until the copy
+/// is filed; an update every attendee refused for good went nowhere and
+/// holds nothing back (`an_update_nobody_received_cancels_nobody`).
+#[tokio::test]
+async fn a_change_waits_for_the_copy_of_the_one_before_it() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice =
+        organised_slice_with(json!({"log": log.to_string_lossy(), "append": "fail"}).to_string());
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"summary": "Budget, moved"}}),
+    )
+    .await;
+    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert_eq!(outbox_rows(&mut conn, "sent_pending_append").await.len(), 1);
+    let message = refused_while_queued(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"summary": "Budget, again"}}),
+    )
+    .await;
+    assert!(message.contains("not filed in Sent yet"), "{message}");
+    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+}
+
+/// A cancellation of one occurrence the server defers is refused a second
+/// time while it waits, which would mail the attendee the same
+/// cancellation twice, and so is any other change of the series.
+#[tokio::test]
+async fn an_occurrence_cancel_waits_for_the_one_queued_before_it() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
+        &log,
+        &[("ada@example.com", "451 4.7.1 try again later")],
+    ));
+    let mut conn = slice.connect().await;
+    let series = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_SERIES_UID).await;
+    let occurrence = (at(13, 8)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let cancel = json!({"account": IMIP, "event": series["id"], "occurrence": occurrence});
+    let status = run_operation(&mut conn, "event.cancel", cancel.clone()).await;
+    assert_eq!(status["state"], "failed", "{status}");
+    assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 1);
+    refused_while_queued(&mut conn, "event.cancel", cancel).await;
+    refused_while_queued(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": series["id"], "scope": "series"}),
+    )
+    .await;
+    assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 1);
 }
 
 /// An update some of whose attendees the server refuses settles, naming
