@@ -504,6 +504,95 @@ fn d_on_the_card_opens_the_cancel_confirmation_or_refuses_a_foreign_meeting() {
     assert_eq!(removal.scope, None);
 }
 
+/// An invitation mail the account organised is changed and cancelled by
+/// mail (PERSO-204): `E` opens the form on it and `D` asks to cancel it,
+/// telling its attendees, both through the daemon's `event.update` and
+/// `event.cancel`; a repeating one is cancelled rather than changed, and one
+/// cancelled already says so.
+#[test]
+fn an_invitation_the_account_organised_takes_e_and_d() {
+    let organised = |app: &mut App| {
+        let event = app
+            .calendar_view
+            .events
+            .iter_mut()
+            .find(|e| e.id == "imip:3")
+            .expect("the fixture's invitation mail");
+        event.is_organizer = true;
+        event.own_response = "organizer".into();
+        event.organizer = Some(mp_protocol::calendar::CalendarPerson {
+            name: None,
+            email: "perso@example.org".into(),
+        });
+        event.attendees = vec![mp_protocol::calendar::CalendarAttendee {
+            name: None,
+            email: "ada@example.org".into(),
+            role: "required".into(),
+            status: "needs-action".into(),
+            proposed_time: None,
+        }];
+    };
+    let mut app = calendar_fixture();
+    organised(&mut app);
+    card_on(&mut app, 2, "PhD Kolloquium");
+    app.handle_key(key('E'));
+    let Overlay::EventForm(form) = &app.overlay else {
+        panic!("E opens the form: {:?}", app.status_message);
+    };
+    let editing = form.editing.as_ref().expect("the form edits the event");
+    assert_eq!(
+        (editing.account.as_str(), editing.event.as_str()),
+        ("perso", "imip:3")
+    );
+    assert!(editing.is_organizer);
+
+    app.overlay = Overlay::None;
+    card_on(&mut app, 2, "PhD Kolloquium");
+    app.handle_key(key('D'));
+    let Overlay::EventRemove(removal) = &app.overlay else {
+        panic!("D asks to cancel: {:?}", app.status_message);
+    };
+    assert_eq!(removal.event, "imip:3");
+    assert!(removal.cancel, "the attendees are told");
+    assert_eq!(removal.attendees, 1);
+
+    let mut app = calendar_fixture();
+    organised(&mut app);
+    for event in app
+        .calendar_view
+        .events
+        .iter_mut()
+        .filter(|e| e.id == "imip:3")
+    {
+        event.kind = "series-master".into();
+    }
+    card_on(&mut app, 2, "PhD Kolloquium");
+    app.handle_key(key('E'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("mp cannot change a repeating invitation yet; D cancels PhD Kolloquium")
+    );
+
+    let mut app = calendar_fixture();
+    organised(&mut app);
+    for event in app
+        .calendar_view
+        .events
+        .iter_mut()
+        .filter(|e| e.id == "imip:3")
+    {
+        event.cancelled = true;
+    }
+    card_on(&mut app, 2, "PhD Kolloquium");
+    app.handle_key(key('D'));
+    assert!(matches!(app.overlay, Overlay::None));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("PhD Kolloquium is cancelled already; an invitation mail stays on the agenda")
+    );
+}
+
 /// `e` on the card of an invitation mail's event closes it and queues the
 /// invitation's `.ics` for `$EDITOR`, the CALENDAR view's `e`; on a server
 /// event there is no mail behind it, so the card closes, nothing is queued

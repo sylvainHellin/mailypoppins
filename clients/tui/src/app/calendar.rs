@@ -570,11 +570,16 @@ impl App {
     }
 
     /// Why `event` cannot be changed from here, before the daemon is asked:
-    /// an invitation mail's event, or a calendar that takes no writes. The
-    /// daemon checks again.
+    /// an invitation mail's event someone else organised, or a calendar that
+    /// takes no writes. The daemon checks again.
+    ///
+    /// An invitation mail the account organised is changed by mail
+    /// (PERSO-204): its calendar takes no server writes, and the daemon
+    /// sends the update or the cancellation instead.
     fn unchangeable(&mut self, event: &CalendarEvent) -> Option<String> {
         if event.id.starts_with(IMIP_EVENT_PREFIX) {
-            return Some("An invitation mail's event can only be answered (V)".into());
+            return (!event.is_organizer)
+                .then(|| "An invitation mail's event can only be answered (V)".into());
         }
         if let Some(queries) = self.queries() {
             self.calendar_view.calendars = super::super::queries::calendar_list(queries);
@@ -628,6 +633,13 @@ impl App {
         }
         if let Some(why) = self.unchangeable(event) {
             self.set_status(why);
+            return;
+        }
+        if event.id.starts_with(IMIP_EVENT_PREFIX) && event.kind != "single" {
+            self.set_status(format!(
+                "mp cannot change a repeating invitation yet; D cancels {}",
+                event.summary
+            ));
             return;
         }
         if event.is_occurrence() {
@@ -797,6 +809,14 @@ impl App {
         }
         if let Some(why) = self.unchangeable(event) {
             self.set_status(why);
+            return;
+        }
+        // A cancelled invitation mail is a tombstone, which nothing deletes.
+        if event.id.starts_with(IMIP_EVENT_PREFIX) && event.cancelled {
+            self.set_status(format!(
+                "{} is cancelled already; an invitation mail stays on the agenda",
+                event.summary
+            ));
             return;
         }
         // Someone else's meeting is refused before any scope is asked.
