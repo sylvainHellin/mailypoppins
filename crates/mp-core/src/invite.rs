@@ -17,6 +17,9 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use icalendar::{Calendar, CalendarComponent, Component, Event, EventLike, Property};
 
+mod organized;
+pub use organized::*;
+
 /// When an invited event happens: two instants, or a run of whole days.
 ///
 /// The two are different kinds of value, not one kind with a flag: an all-day
@@ -584,20 +587,7 @@ pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
     let dtend = event.properties().get("DTEND").cloned();
     let duration = event.properties().get("DURATION").cloned();
 
-    let tzids: Vec<&str> = [&dtstart, &dtend]
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p.params().get("TZID"))
-        .map(|tzid| tzid.value())
-        .collect();
-    let timezones = if tzids.is_empty() {
-        Vec::new()
-    } else {
-        vtimezone_blocks(text)
-            .into_iter()
-            .filter(|block| vtimezone_tzid(block).is_none_or(|tzid| tzids.contains(&tzid.as_str())))
-            .collect()
-    };
+    let timezones = timezones_named(text, &[&dtstart, &dtend]);
 
     Ok(ReplyContext {
         uid,
@@ -611,6 +601,40 @@ pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
         dtend,
         duration,
     })
+}
+
+/// The `VTIMEZONE` components of a calendar's `text` that `properties` name
+/// by `TZID`, verbatim; none when they name no `TZID`.
+fn timezones_named(text: &str, properties: &[&Option<Property>]) -> Vec<String> {
+    let tzids: Vec<&str> = properties
+        .iter()
+        .filter_map(|p| p.as_ref())
+        .filter_map(|p| p.params().get("TZID"))
+        .map(|tzid| tzid.value())
+        .collect();
+    if tzids.is_empty() {
+        return Vec::new();
+    }
+    vtimezone_blocks(text)
+        .into_iter()
+        .filter(|block| vtimezone_tzid(block).is_none_or(|tzid| tzids.contains(&tzid.as_str())))
+        .collect()
+}
+
+/// A rendered iTIP calendar with `timezones` (source text) put in ahead of
+/// its `VEVENT`, where RFC 5545 has them.
+fn with_timezones(rendered: String, timezones: &[String]) -> Result<String> {
+    if timezones.is_empty() {
+        return Ok(rendered);
+    }
+    let at = rendered
+        .find("BEGIN:VEVENT\r\n")
+        .ok_or_else(|| anyhow!("the rendered calendar has no VEVENT"))?;
+    let mut ics = String::with_capacity(rendered.len() + timezones.concat().len());
+    ics.push_str(&rendered[..at]);
+    ics.extend(timezones.iter().map(String::as_str));
+    ics.push_str(&rendered[at..]);
+    Ok(ics)
 }
 
 /// Every `VTIMEZONE` component of a calendar's text, verbatim, each line
@@ -783,20 +807,8 @@ pub fn build_reply_ics(
 
     let mut calendar = itip_calendar("REPLY");
     calendar.push(event.done());
-    let rendered = calendar.to_string();
-
     // The VTIMEZONEs go in as the invite's own text, ahead of the VEVENT.
-    if ctx.timezones.is_empty() {
-        return Ok(rendered);
-    }
-    let at = rendered
-        .find("BEGIN:VEVENT\r\n")
-        .ok_or_else(|| anyhow!("the rendered REPLY has no VEVENT"))?;
-    let mut ics = String::with_capacity(rendered.len() + ctx.timezones.concat().len());
-    ics.push_str(&rendered[..at]);
-    ics.extend(ctx.timezones.iter().map(String::as_str));
-    ics.push_str(&rendered[at..]);
-    Ok(ics)
+    with_timezones(calendar.to_string(), &ctx.timezones)
 }
 
 /// A bare calendar date, `YYYY-MM-DD`, the form that makes an event all-day.

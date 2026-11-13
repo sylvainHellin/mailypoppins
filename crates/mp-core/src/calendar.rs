@@ -246,7 +246,7 @@ pub fn resolve_local(
 
 /// The IANA zone a `TZID` names, read as IANA first and as a Windows name
 /// (`W. Europe Standard Time`) second.
-fn zone_of_tzid(tzid: &str) -> Option<Tz> {
+pub(crate) fn zone_of_tzid(tzid: &str) -> Option<Tz> {
     tzid.parse::<Tz>().ok().or_else(|| {
         crate::windows_zones::windows_zone_to_iana(tzid.trim()).and_then(|iana| iana.parse().ok())
     })

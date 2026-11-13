@@ -331,6 +331,25 @@ impl StatusIndex {
     }
 }
 
+/// The `SEQUENCE` the organizer's next version of `uid` goes out with: one
+/// above every REQUEST and CANCEL of it the account holds and above `floor`,
+/// the version being changed (PERSO-204).
+///
+/// Every version after the first is a strictly higher one, never a newer
+/// `DTSTAMP` at the same sequence: an attendee's reply to the old version
+/// would then still look current, and [`StatusIndex::apply`] would not mark
+/// the old copy superseded on a store whose clocks disagree.
+/// A REPLY echoes the version it answered and names none of its own.
+pub fn next_sequence(invites: &[InviteMessage], uid: &str, floor: u32) -> u32 {
+    invites
+        .iter()
+        .filter(|invite| invite.uid() == Some(uid))
+        .filter(|invite| matches!(invite.method().as_str(), "REQUEST" | "CANCEL"))
+        .map(|invite| invite.parsed.sequence)
+        .fold(floor, u32::max)
+        .saturating_add(1)
+}
+
 /// Our own answer to an invite: the winning REPLY we sent for it, falling back
 /// to whatever `PARTSTAT` the organizer's own copy already carries for us.
 ///
@@ -359,4 +378,41 @@ pub fn own_rsvp(
         }
     }
     "needs-action".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(row_id: i64, method: &str, uid: &str, sequence: u32) -> InviteMessage {
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:{uid}\r\n\
+             SEQUENCE:{sequence}\r\nDTSTAMP:20261201T100000Z\r\nDTSTART:20261214T090000Z\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        InviteMessage {
+            row_id,
+            mailbox: "sent".to_string(),
+            uid: row_id,
+            subject: None,
+            parsed: crate::calendar::parse_ics(ics.as_bytes()).unwrap(),
+        }
+    }
+
+    /// The organizer's next version is above every version of the UID the
+    /// account holds, a cancellation included, and above the one it changes;
+    /// an attendee's REPLY echoes a version and names none of its own.
+    #[test]
+    fn the_next_sequence_is_above_every_version_held() {
+        let held = [
+            payload(1, "REQUEST", "a@x", 0),
+            payload(2, "REQUEST", "a@x", 2),
+            payload(3, "CANCEL", "a@x", 4),
+            payload(4, "REPLY", "a@x", 9),
+            payload(5, "REQUEST", "b@x", 7),
+        ];
+        assert_eq!(next_sequence(&held, "a@x", 0), 5);
+        assert_eq!(next_sequence(&held, "a@x", 6), 7);
+        assert_eq!(next_sequence(&held, "c@x", 0), 1);
+    }
 }
