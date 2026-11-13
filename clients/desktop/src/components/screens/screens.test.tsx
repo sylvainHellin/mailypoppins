@@ -70,11 +70,12 @@ describe("the connection screens", () => {
     expect(screen.getByText("Daemon protocol")).toBeInTheDocument();
     expect(screen.getByText("1 to 2")).toBeInTheDocument();
     expect(screen.getByText(/Restart the daemon to run the version this app expects/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Restart daemon/ })).toBeInTheDocument();
   });
 
-  it("tells the user to update the app when the daemon is the newer side (PERSO-277)", async () => {
+  it("tells the user to update the app and offers no restart when the daemon is the newer side (PERSO-277)", async () => {
     const why =
-      "the running daemon is mailypoppins 9.0.0 (protocol 2) and shares no protocol version with this client (mailypoppins 0.12.0, protocol 1); update this app to the matching version (mailypoppins 9.0.0), since restarting the daemon from it would put the daemon back on this older build";
+      "the running daemon is mailypoppins 9.0.0 (protocol 2) and shares no protocol version with this client (mailypoppins 0.12.0, protocol 1); update this app to the matching version (mailypoppins 9.0.0) and open it again, since restarting the daemon from it would put the daemon back on this older build";
     renderApp(1400, () => {
       mock.connection = {
         state: "failed",
@@ -83,8 +84,14 @@ describe("the connection screens", () => {
     });
     expect(await screen.findByRole("heading", { name: /incompatible version/ })).toBeInTheDocument();
     expect(await screen.findByText("0.1.0")).toBeInTheDocument();
-    expect(screen.getByText(/Update this app to the version the daemon runs/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Update this app to the matching version (mailypoppins 9.0.0) and open it again, since restarting the daemon from it would put the daemon back on this older build.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/Restart the daemon to run the version this app expects/)).toBeNull();
+    // The way out is a newer app; a restart from this one does not give it.
+    expect(screen.queryByRole("button", { name: /Restart daemon/ })).toBeNull();
   });
 
   it("says a daemon that does not report its version is older, never unknown (PERSO-277)", async () => {

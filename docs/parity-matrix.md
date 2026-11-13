@@ -1569,7 +1569,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - GUI location: not required (daemon administration)
 - Validation: `tests/daemon_lifecycle.rs` (`restart_yields_a_new_instance_id`)
 - Status: shipped (P2-U7, ticket #0120)
-- Note: also invoked by the GUI mismatch screen after user confirmation.
+- Note: also invoked by the GUI mismatch screen after user confirmation, which offers it only when the daemon is not the newer side (PERSO-277).
 
 ### LIF-06 Install or remove the login-start service
 

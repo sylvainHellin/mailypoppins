@@ -119,8 +119,8 @@ impl VersionRefusal {
                 "restart it on this build with `mp daemon restart`".to_string()
             }
             (ClientKind::Gui, true) => format!(
-                "update this app to {}, since restarting the daemon from it would put the \
-                 daemon back on this older build",
+                "update this app to {} and open it again, since restarting the daemon from it \
+                 would put the daemon back on this older build",
                 matching("version")
             ),
             (ClientKind::Gui, false) => {
@@ -256,8 +256,8 @@ mod tests {
         let gui = newer.sentence("0.12.0", ClientKind::Gui);
         assert!(
             gui.ends_with(
-                "; update this app to the matching version (mailypoppins 9.0.0), since restarting \
-                 the daemon from it would put the daemon back on this older build"
+                "; update this app to the matching version (mailypoppins 9.0.0) and open it again, \
+                 since restarting the daemon from it would put the daemon back on this older build"
             ),
             "{gui}"
         );
