@@ -7,6 +7,8 @@
 
 pub mod fetch;
 pub mod ntlm;
+pub mod parse;
+pub mod xml;
 
 #[cfg(test)]
 mod tests;

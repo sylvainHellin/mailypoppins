@@ -9,6 +9,9 @@ use std::sync::Mutex;
 
 use super::fetch::{envelope, EwsFetch, EwsFetchError, EwsSession, REQUEST_SERVER_VERSION};
 
+/// The answer readers on the fixtures.
+mod parse;
+
 const CALENDAR_VIEW: &str = include_str!("../../../tests/fixtures/ews/finditem_calendarview.xml");
 const GET_FOLDER: &str = include_str!("../../../tests/fixtures/ews/getfolder_calendar.xml");
 
