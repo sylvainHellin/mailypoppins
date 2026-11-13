@@ -684,10 +684,7 @@ mod tests {
             .port(port)
             .build();
         let from: lettre::Address = built.from.parse().unwrap();
-        let watch = LoginWatch {
-            dial: None,
-            deadline: crate::login_gate::LOGIN_DEADLINE,
-        };
+        let watch = LoginWatch::new(None, crate::login_gate::LOGIN_DEADLINE);
         let result = submit_through(built, &from, &mailer, watch).await.result;
         drop(mailer);
         let log = std::mem::take(&mut *log.lock().unwrap());
@@ -5026,10 +5023,7 @@ async fn submit_over_within(
         built,
         &from_addr,
         mailer,
-        LoginWatch {
-            dial: Some(&mut dial),
-            deadline,
-        },
+        LoginWatch::new(Some(&mut dial), deadline),
     )
     .await;
     let Some(answer) = login_refused else {
@@ -5048,6 +5042,10 @@ async fn submit_over_within(
 
 /// The gate's dial of an SMTP submission, which [`submit_through`] keeps
 /// told of the login while the conversation runs (PERSO-296).
+///
+/// Dropped while a send is under way with the login unanswered (the task
+/// cancelled), it counts the login unanswered, as a send that ends without
+/// an answer about the login does ([`LoginWatch::unanswered`], PERSO-307).
 struct LoginWatch<'a> {
     /// The dial until the server took the login, `None` after it and for a
     /// test that submits past the gate.
@@ -5055,9 +5053,18 @@ struct LoginWatch<'a> {
     /// How long a send may run with its login unanswered before the dial
     /// counts it unanswered, from the start of the send, connection included.
     deadline: std::time::Duration,
+    /// A send is under way, so AUTH may have gone out.
+    sending: bool,
 }
 
-impl LoginWatch<'_> {
+impl<'a> LoginWatch<'a> {
+    fn new(dial: Option<&'a mut crate::login_gate::Dial>, deadline: std::time::Duration) -> Self {
+        Self {
+            dial,
+            deadline,
+            sending: false,
+        }
+    }
     /// Await `send`. While the dial marks its row (a password refused
     /// before), a send whose login is still unanswered at the deadline,
     /// counted from the start of the send with the connect, the greeting,
@@ -5071,21 +5078,40 @@ impl LoginWatch<'_> {
     /// cut, so the send keeps running, and its refusal or success, when it
     /// comes, is reported as usual.
     async fn answer_of<T>(&mut self, send: impl std::future::Future<Output = T>) -> T {
-        let Some(dial) = self.dial.as_deref_mut().filter(|dial| dial.marked()) else {
-            return send.await;
-        };
-        tokio::pin!(send);
-        tokio::select! {
-            sent = &mut send => sent,
-            () = tokio::time::sleep(self.deadline) => {
-                warn!(
-                    "[send] the SMTP login got no answer within {:?}; the send goes on, and \
-                     the other logins with its password are held as after a refusal",
-                    self.deadline
-                );
-                dial.unanswered();
-                send.await
+        self.sending = true;
+        let sent = match self.dial.as_deref_mut().filter(|dial| dial.marked()) {
+            None => send.await,
+            Some(dial) => {
+                tokio::pin!(send);
+                tokio::select! {
+                    sent = &mut send => sent,
+                    () = tokio::time::sleep(self.deadline) => {
+                        warn!(
+                            "[send] the SMTP login got no answer within {:?}; the send goes \
+                             on, and the other logins with its password are held as after a \
+                             refusal",
+                            self.deadline
+                        );
+                        dial.unanswered();
+                        send.await
+                    }
+                }
             }
+        };
+        self.sending = false;
+        sent
+    }
+
+    /// The send ended, or was cancelled, with no answer about the login
+    /// once AUTH may have gone out: while the dial marks its row (a password
+    /// refused before), that is one more step of the row's hold
+    /// ([`crate::login_gate::Dial::unanswered`]), as a deadline run out is.
+    /// lettre does not say whether AUTH went out, so a reply or a lost
+    /// connection at the greeting or EHLO counts as well; only what it raises
+    /// before AUTH for certain does not ([`raised_before_auth`]).
+    fn unanswered(&mut self) {
+        if let Some(dial) = self.dial.as_deref_mut().filter(|dial| dial.marked()) {
+            dial.unanswered();
         }
     }
 
@@ -5098,6 +5124,26 @@ impl LoginWatch<'_> {
             dial.accepted();
         }
     }
+}
+
+impl Drop for LoginWatch<'_> {
+    fn drop(&mut self) {
+        if self.sending {
+            self.unanswered();
+        }
+    }
+}
+
+/// Whether lettre raised `err` before it could have written AUTH, so no
+/// password reached the server: the connect (its `Connection error`, which
+/// has no predicate of its own), the TLS handshake, a refusal of its own
+/// (no AUTH mechanism in common, no STARTTLS offered) or a transport shut
+/// down.
+fn raised_before_auth(err: &lettre::transport::smtp::Error) -> bool {
+    err.is_client()
+        || err.is_tls()
+        || err.is_transport_shutdown()
+        || err.to_string().starts_with("Connection error")
 }
 
 /// What [`submit_through`] did: the verdict of each recipient, and the
@@ -5227,8 +5273,11 @@ async fn submit_through(
                     .await;
             }
         }
-        if sent.as_ref().map_or_else(answered_past_login, |_| true) {
-            watch.logged_in();
+        match &sent {
+            Ok(_) => watch.logged_in(),
+            Err(e) if answered_past_login(e) => watch.logged_in(),
+            Err(e) if !is_login_refusal(e) && !raised_before_auth(e) => watch.unanswered(),
+            Err(_) => {}
         }
         match sent {
             Ok(_) => {
@@ -5696,9 +5745,14 @@ mod smtp_durability_tests {
         .await
     }
 
+    /// What [`smtp_server`] answers a login with to close the connection
+    /// instead, with no reply, as a server that drops a bad password's
+    /// connection does (PERSO-307).
+    const HANG_UP: &[u8] = b"(hang up)";
+
     /// A plain-TCP SMTP server on localhost that offers `AUTH PLAIN`, answers
-    /// every login with `auth` and every recipient with `rcpt`, counting the
-    /// logins it was asked.
+    /// every login with `auth` (or hangs up on it, [`HANG_UP`]) and every
+    /// recipient with `rcpt`, counting the logins it was asked.
     async fn smtp_server(
         auth: &'static [u8],
         rcpt: &'static [u8],
@@ -5745,6 +5799,9 @@ mod smtp_durability_tests {
                             "EHLO" => b"250-fake\r\n250 AUTH PLAIN LOGIN\r\n",
                             "AUTH" => {
                                 logins.fetch_add(1, Ordering::SeqCst);
+                                if auth == HANG_UP {
+                                    return;
+                                }
                                 auth
                             }
                             "RCPT" => rcpt,
@@ -6054,6 +6111,104 @@ mod smtp_durability_tests {
             2,
             "the late refusal is the step the unanswered login counted"
         );
+    }
+
+    /// PERSO-307: an SMTP login of a password refused before that ends with
+    /// neither a reply past the login nor a refusal (the connection closed
+    /// on AUTH with no reply, a temporary `454`) counts as one more step of
+    /// the password's hold, as one unanswered by the deadline does: lettre
+    /// does not say whether AUTH went out, and the missing answer may well
+    /// have been a refusal. It used to count nothing, so a server that drops
+    /// a bad password's connection was sent it again on every drain.
+    #[tokio::test]
+    async fn an_smtp_login_ending_without_an_answer_is_a_step_of_its_hold() {
+        use crate::login_gate::{self, login_rejected};
+        for auth in [
+            HANG_UP,
+            b"454 4.7.0 Temporary authentication failure\r\n".as_slice(),
+        ] {
+            let (port, logins) = smtp_server(auth, b"250 OK\r\n").await;
+            let config = refused_config(port);
+            let login = refused_and_released(&config);
+
+            let built = Outbox::built("<cut-off@example.com>", Some("id:cut-off"));
+            let mailer = server_mailer(&config);
+            let sent =
+                submit_over_within(&built, &config, &mailer, std::time::Duration::from_secs(5))
+                    .await;
+            let shown = String::from_utf8_lossy(auth);
+            if let Err(e) = &sent {
+                assert!(login_rejected(e).is_none(), "{shown}: no refusal: {e:#}");
+            }
+            assert_eq!(logins.load(Ordering::SeqCst), 1, "{shown}");
+            assert_eq!(
+                login_gate::in_a_row_for_test(&login, &config.password),
+                2,
+                "{shown}: a step of the hold"
+            );
+            let held = login_gate::dial(&login, &config.password)
+                .err()
+                .unwrap_or_else(|| panic!("{shown}: the row holds as after a refusal"));
+            assert!(held.from_list(), "{shown}");
+        }
+    }
+
+    /// An SMTP login of a password never refused that ends with no answer
+    /// records nothing.
+    #[tokio::test]
+    async fn an_smtp_login_of_a_password_never_refused_ending_without_an_answer_records_nothing() {
+        use crate::login_gate::{self, Login};
+        let (port, logins) = smtp_server(HANG_UP, b"250 OK\r\n").await;
+        let config = refused_config(port);
+        let login = Login::Smtp(config.login());
+
+        let built = Outbox::built("<fresh-cut-off@example.com>", Some("id:fresh-cut-off"));
+        let mailer = server_mailer(&config);
+        let _ = submit_over(&built, &config, &mailer).await;
+        assert_eq!(logins.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            0,
+            "nothing recorded"
+        );
+        assert!(login_gate::dial(&login, &config.password).is_ok());
+    }
+
+    /// PERSO-307: an SMTP send of a password refused before, cancelled once
+    /// its AUTH reached the server and before any answer, counts as one more
+    /// step of the password's hold. It used to free the row with nothing
+    /// counted.
+    #[tokio::test]
+    async fn an_smtp_send_cancelled_after_auth_is_a_step_of_its_hold() {
+        use crate::login_gate;
+        // An empty answer to AUTH is none at all.
+        let (port, logins) = smtp_server(b"", b"250 OK\r\n").await;
+        let config = refused_config(port);
+        let login = refused_and_released(&config);
+
+        let built = Outbox::built("<cancelled@example.com>", Some("id:cancelled"));
+        let sending = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                let mailer = server_mailer(&config);
+                submit_over_within(&built, &config, &mailer, std::time::Duration::from_secs(30))
+                    .await
+            })
+        };
+        while logins.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        sending.abort();
+        assert!(sending.await.is_err_and(|e| e.is_cancelled()));
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, &config.password),
+            2,
+            "a step of the hold"
+        );
+        let held = login_gate::dial(&login, &config.password)
+            .err()
+            .expect("the row holds as after a refusal");
+        assert!(held.from_list());
     }
 
     /// The SMTP configuration of `port`'s server, with a password it refuses.

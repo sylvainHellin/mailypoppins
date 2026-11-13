@@ -95,6 +95,12 @@
 //!   its answer is reported when it comes (`crate::send`'s
 //!   `an_smtp_login_unanswered_by_the_deadline_is_a_step_of_its_hold`,
 //!   `a_slow_greeting_past_the_deadline_holds_the_imap_login_of_a_shared_password`).
+//!   A send that ends before the login was answered with neither a reply
+//!   past it nor a refusal (a connection closed or reset, another reply,
+//!   the task cancelled) counts as such a login too, for the same reason,
+//!   unless lettre raised it before AUTH for certain: a connect, TLS or
+//!   client error (PERSO-307: `an_smtp_login_ending_without_an_answer_is_a_step_of_its_hold`,
+//!   `an_smtp_send_cancelled_after_auth_is_a_step_of_its_hold`).
 //!   A connect that never completes fails first, at the transport's 30 s
 //!   connect timeout, as an error that counts nothing, since nothing reached
 //!   the server; a greeting or EHLO stalled after the connect still counts
