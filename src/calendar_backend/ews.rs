@@ -5,3 +5,6 @@
 //! mp ([`ntlm`]).
 
 pub mod ntlm;
+
+#[cfg(test)]
+mod tests;
