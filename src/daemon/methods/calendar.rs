@@ -1064,7 +1064,8 @@ fn plan_create(
             .ok_or_else(|| {
                 invalid_params(format!(
                     "{name} has no default calendar yet: its calendars have not synced \
-                     (mp calendar rebuild -A {name})"
+                     ({})",
+                    mp_core::mp_command::here(&["calendar", "rebuild", "-A", &name])
                 ))
             })?,
     };

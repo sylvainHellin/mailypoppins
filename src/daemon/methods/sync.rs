@@ -466,7 +466,8 @@ pub async fn first_sync(
         Ok(None) => log::info!("[daemon] {account}'s first sync is another engine's"),
         Err(e) => {
             let reason = format!(
-                "the first sync of {account} failed: {e:#}; fix the account and run `mp sync -A {account}`"
+                "the first sync of {account} failed: {e:#}; fix the account and run `{}`",
+                mp_core::mp_command::here(&["sync", "-A", &account])
             );
             // Still no runtime, so the table still holds the failed start this
             // replaces; a swap that removed the account meanwhile wins.

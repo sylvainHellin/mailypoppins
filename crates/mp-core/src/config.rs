@@ -69,9 +69,11 @@ pub fn retired_oauth2_message(account: &str) -> String {
     format!(
         "account {account:?} uses auth_method = \"oauth2\" (Microsoft sign-in over IMAP and SMTP), \
          which mailypoppins no longer supports. For Microsoft 365, set auth_method = \"graph\" \
-         and run `mp config oauth2-login --account {account}`; for on-premises Exchange, \
+         and run `{}`; for on-premises Exchange, \
          remove the auth_method line and store the password with \
-         `mp config set-password smtp --account {account}`."
+         `{}`.",
+        crate::mp_command::here(&["config", "oauth2-login", "--account", account]),
+        crate::mp_command::here(&["config", "set-password", "smtp", "--account", account])
     )
 }
 

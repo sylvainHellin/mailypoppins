@@ -372,6 +372,14 @@ async fn a_password_that_was_not_stored_is_named_with_its_command() {
         both.contains("SMTP and IMAP passwords are not stored"),
         "{both}"
     );
+
+    // A name with a space is quoted, so the line pastes into a shell as one
+    // argument.
+    let spaced = super::init::missing_passwords_message("TUM Mail", &["imap"]);
+    assert!(
+        spaced.ends_with("\n  mp config set-password imap --account 'TUM Mail'"),
+        "{spaced}"
+    );
 }
 
 /// `mp config set-password --stdin` (PERSO-281): one line, its newline gone and

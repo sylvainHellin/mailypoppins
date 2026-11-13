@@ -881,6 +881,23 @@ mod tests {
         );
     }
 
+    /// An account name with a space is quoted in the command, which a shell
+    /// would otherwise split into two arguments.
+    #[test]
+    fn the_command_quotes_an_account_name_with_a_space() {
+        let missing = MissingSecret {
+            key: "smtp-password-TUM Mail".to_string(),
+            backend: SecretsBackendKind::EncryptedFile,
+            profile: None,
+            smtp_fallback_missing: false,
+        };
+        assert_eq!(
+            missing.to_string(),
+            "No SMTP password is stored for account 'TUM Mail'. \
+             Run `mp config set-password smtp --account 'TUM Mail'`."
+        );
+    }
+
     /// The IMAP login falls back to the SMTP password, so when neither is
     /// there the sentence says both are missing and names the IMAP command.
     #[test]

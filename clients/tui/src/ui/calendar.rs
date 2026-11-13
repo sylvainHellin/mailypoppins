@@ -133,11 +133,13 @@ fn scope_banner(app: &App) -> Option<String> {
     match missing.as_slice() {
         [] => None,
         [one] => Some(format!(
-            "\u{26a0} {one}: calendar needs a re-login (mp config oauth2-login -A {one})"
+            "\u{26a0} {one}: calendar needs a re-login ({})",
+            mp_core::mp_command::here(&["config", "oauth2-login", "-A", one])
         )),
         many => Some(format!(
-            "\u{26a0} {}: calendar needs a re-login (mp config oauth2-login -A <name>)",
-            many.join(", ")
+            "\u{26a0} {}: calendar needs a re-login ({} <name>)",
+            many.join(", "),
+            mp_core::mp_command::here(&["config", "oauth2-login", "-A"])
         )),
     }
 }

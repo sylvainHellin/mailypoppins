@@ -492,7 +492,11 @@ pub(super) fn missing_passwords_message(account: &str, missing: &[&str]) -> Stri
     };
     let commands: Vec<String> = missing
         .iter()
-        .map(|kind| format!("  mp config set-password {kind} --account {account}"))
+        .map(|kind| {
+            let command =
+                mp_core::mp_command::here(&["config", "set-password", kind, "--account", account]);
+            format!("  {command}")
+        })
         .collect();
     format!(
         "Account '{account}' is configured, but its {kinds} {noun} {verb} not stored, \

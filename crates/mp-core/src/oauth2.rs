@@ -91,7 +91,13 @@ pub fn scope_name(scope: &str) -> &str {
 /// the calendar scope: the `calendar:<account>` health check's detail, and
 /// the line `mp config show` prints.
 pub fn calendar_relogin_prompt(account: &str) -> String {
-    format!("calendar needs a re-login (mp config oauth2-login -A {account})")
+    format!("calendar needs a re-login ({})", login_command(account))
+}
+
+/// The command that signs `account` in again, on the profile this process
+/// runs on.
+fn login_command(account: &str) -> String {
+    crate::mp_command::here(&["config", "oauth2-login", "-A", account])
 }
 
 /// The scopes `account` signs in and refreshes with: [`GRAPH_SCOPES`] when its
@@ -703,9 +709,9 @@ pub async fn load_or_refresh_token(
 ) -> Result<String> {
     let cache = load_token_cache(account_name).ok_or_else(|| {
         anyhow!(
-            "No OAuth2 token cached for account '{}'. Run `mp config oauth2-login -A {}` first.",
+            "No OAuth2 token cached for account '{}'. Run `{}` first.",
             account_name,
-            account_name
+            login_command(account_name)
         )
     })?;
 
@@ -716,8 +722,8 @@ pub async fn load_or_refresh_token(
 
     if cache.refresh_token.is_empty() {
         return Err(anyhow!(
-            "OAuth2 token expired and no refresh token available. Run `mp config oauth2-login -A {}`.",
-            account_name
+            "OAuth2 token expired and no refresh token available. Run `{}`.",
+            login_command(account_name)
         ));
     }
 

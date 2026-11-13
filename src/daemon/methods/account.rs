@@ -312,7 +312,10 @@ pub fn ready_account<'a>(
     if state != STATE_READY {
         return Err(RpcError {
             code: ErrorCode::AccountNotReady.code(),
-            message: format!("{name} has no local store to read yet; run `mp sync -A {name}`"),
+            message: format!(
+                "{name} has no local store to read yet; run `{}`",
+                mp_core::mp_command::here(&["sync", "-A", name])
+            ),
             data: Some(json!({"account": name, "state": state})),
         });
     }

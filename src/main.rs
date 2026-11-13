@@ -3671,8 +3671,9 @@ fn ensure_selector_account_matches(selector: &str, bound: &AccountConfig) -> Res
         if name != bound.name {
             bail!(
                 "selector names account '{name}', but this command is bound to '{}' \
-                 (its transport is already configured); re-run with `-A {name}`",
-                bound.name
+                 (its transport is already configured); re-run with `-A {}`",
+                bound.name,
+                mp_core::mp_command::quote(&name)
             );
         }
     }
@@ -5831,10 +5832,15 @@ async fn routed_reset_secrets() -> Result<()> {
             }
             AuthMethod::Graph => {
                 println!(
-                    "{} Account '{}' (Graph auth) -- run `mp config oauth2-login --account {}` to re-acquire token",
+                    "{} Account '{}' (Graph auth) -- run `{}` to re-acquire token",
                     "\u{2139}".blue(),
                     account.name.bold(),
-                    account.name
+                    mp_core::mp_command::here(&[
+                        "config",
+                        "oauth2-login",
+                        "--account",
+                        &account.name
+                    ])
                 );
             }
             AuthMethod::RetiredOAuth2 => {
