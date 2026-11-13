@@ -30,6 +30,9 @@
 //! switches (refused, temporarily unavailable, or accepted into an empty
 //! `INBOX`), for the rejected-login rows (PERSO-296); the library's unit
 //! tests include it by path.
+//! [`fake_smtp`] is a STARTTLS SMTP server that accepts every login and
+//! records the credentials it carried, for the secrets smoke test
+//! (PERSO-199).
 //! [`readiness`] waits for a spawned daemon to answer `daemon.status`, and
 //! [`events`] reads `state.event` notifications past the daemon's own startup
 //! events; daemon suites that do not declare `mod support;` include either
@@ -45,6 +48,7 @@ pub mod calendar_fixture;
 pub mod draft_fixture;
 pub mod events;
 pub mod fake_imap;
+pub mod fake_smtp;
 pub mod gate;
 pub mod mutation_fixture;
 pub mod parity;

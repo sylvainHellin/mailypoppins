@@ -12,7 +12,8 @@
 //! while the server runs: by default the TUM server's tagged
 //! `NO [AUTHENTICATIONFAILED] LOGIN failed.`, or the temporary
 //! `NO [UNAVAILABLE]` of RFC 5530, or Gmail's `NO [ALERT]` over its
-//! connection limit, or `OK`. It counts every LOGIN. A login it
+//! connection limit, or `OK`. It counts every LOGIN and keeps the password
+//! each one carried ([`RejectingImapServer::passwords`]). A login it
 //! accepts gets an empty `INBOX` and nothing else: enough of a session for a
 //! daemon tick to list, select, search and IDLE, so a test can let the
 //! daemon in and then refuse it, the password changing while it runs.
@@ -118,6 +119,8 @@ impl FakeFolder {
 /// What every connection shares with the test.
 struct Shared {
     logins: AtomicUsize,
+    /// The password of every LOGIN, in order, whatever it was answered.
+    passwords: Mutex<Vec<String>>,
     policy: AtomicU8,
     /// The open connections, so a test can cut them all at once.
     connections: Mutex<Vec<TcpStream>>,
@@ -168,6 +171,7 @@ impl RejectingImapServer {
         let port = listener.local_addr().expect("its address").port();
         let shared = Arc::new(Shared {
             logins: AtomicUsize::new(0),
+            passwords: Mutex::new(Vec::new()),
             policy: AtomicU8::new(policy.as_u8()),
             connections: Mutex::new(Vec::new()),
             folders: Mutex::new(vec![FakeFolder::empty("INBOX")]),
@@ -210,6 +214,17 @@ impl RejectingImapServer {
     /// answered.
     pub fn logins(&self) -> usize {
         self.shared.logins.load(Ordering::SeqCst)
+    }
+
+    /// The password of every LOGIN so far, in order, whatever the server
+    /// answered: what a test reads to prove which stored password a client
+    /// logged in with (PERSO-199).
+    pub fn passwords(&self) -> Vec<String> {
+        self.shared
+            .passwords
+            .lock()
+            .expect("the password list")
+            .clone()
     }
 
     /// Answer every later LOGIN with `policy`. Sessions already logged in
@@ -335,6 +350,11 @@ async fn serve(
         let reply = match command.as_str() {
             "LOGIN" => {
                 shared.logins.fetch_add(1, Ordering::SeqCst);
+                shared
+                    .passwords
+                    .lock()
+                    .expect("the password list")
+                    .push(login_password(&line));
                 match LoginPolicy::from_u8(shared.policy.load(Ordering::SeqCst)) {
                     LoginPolicy::Reject => format!("{tag} {LOGIN_FAILED}\r\n"),
                     LoginPolicy::Unavailable => format!("{tag} {LOGIN_UNAVAILABLE}\r\n"),
@@ -480,6 +500,24 @@ fn in_set(set: &str, uid: u32) -> bool {
         }
         None => part.parse::<u32>().is_ok_and(|one| one == uid),
     })
+}
+
+/// The password of a `LOGIN "user" "password"` line, which `async-imap`
+/// writes as two quoted strings with `\` and `"` escaped by a backslash.
+fn login_password(line: &str) -> String {
+    let mut quoted = Vec::new();
+    let mut current: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (&mut current, c) {
+            (None, '"') => current = Some(String::new()),
+            (Some(_), '"') => quoted.extend(current.take()),
+            (Some(s), '\\') => s.extend(chars.next()),
+            (Some(s), c) => s.push(c),
+            (None, _) => {}
+        }
+    }
+    quoted.get(1).cloned().unwrap_or_default()
 }
 
 /// The mailbox a `SELECT`, `EXAMINE` or `STATUS` line names: its first
