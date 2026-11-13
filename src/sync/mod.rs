@@ -400,8 +400,16 @@ pub struct MailboxListing {
     /// for the second status axis (#0004, #TKT-0051): read, answered and
     /// forwarded all arrive here and nowhere else.
     pub known_flags: Vec<(i64, MessageFlags)>,
-    /// What SELECT said about the mailbox.
-    pub state: MailboxState,
+    /// What the listing observed about the mailbox as a whole, which is what
+    /// its cursor records.
+    pub observed: Observed,
+    /// True when the resume point the store holds for this mailbox no longer
+    /// describes it: Graph's delta token expired, malformed, minted for
+    /// another folder, or walked into doubt (#0042). The engine drops it
+    /// right after the listings, before any mailbox is ingested; a
+    /// UIDVALIDITY reset reaches the same clear through
+    /// [`uidvalidity_reset`](MailboxListing::uidvalidity_reset).
+    pub resume_stale: bool,
     /// UIDs the store holds for this mailbox that the server no longer lists.
     /// See [`crate::imap_client::vanished_uids`].
     pub vanished: Vec<i64>,
@@ -429,13 +437,52 @@ pub struct MailboxListing {
     pub coverage: CoverageOf,
 }
 
+/// What a listing observed about its mailbox as a whole: the three shapes a
+/// cursor can be recorded from (PERSO-213).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observed {
+    /// What IMAP's `SELECT` said: every column of the cursor is an
+    /// observation, the arrival mark and the CONDSTORE mark with them.
+    Selected(MailboxState),
+    /// A whole folder listed by id (a Graph enumeration): the folder's
+    /// identity, kept where IMAP keeps UIDVALIDITY because it is what a delta
+    /// link is bound to, and how many messages it holds. A folder listed by
+    /// id has no top and no arrival mark.
+    Folder {
+        /// [`crate::ingest::graph_uid`] of the folder's id, `None` when it
+        /// could not be read.
+        identity: Option<i64>,
+        exists: usize,
+    },
+    /// A change set (a Graph delta walk) or a listing cut short: no count may
+    /// be recorded, since the last known-good is truer than a partial one, so
+    /// only an earned delta link is written, bound to `identity`.
+    Partial { identity: Option<i64> },
+}
+
+/// Where the next pass may resume from, and what a pass must have done to
+/// record one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumePoint {
+    /// The CONDSTORE `HIGHESTMODSEQ` and the lowest UID it vouches for (#0041,
+    /// PERSO-202): every flag at or above that UID was correct as of the
+    /// modseq. Recorded off a pass whose bodies all came and whose flag write
+    /// all landed.
+    Modseq(crate::ingest::ModseqMark),
+    /// A Graph `deltaLink` (#0042): the store held everything the folder
+    /// listed when it was minted. Recorded off a pass that also saw the whole
+    /// folder and wrote every message it downloaded
+    /// ([`engine::earns_delta_link`]).
+    DeltaLink(String),
+}
+
 /// The question a [`MailboxListing`] answers once its body pass has ended:
 /// given the UIDs whose bodies came back and whether every new UID was asked
 /// for, what the mailbox's cursor records.
 pub type CoverageOf = Box<dyn FnOnce(&[i64], bool) -> MailboxCoverage + Send>;
 
 /// What one mailbox's body pass leaves for its cursor and the prune gate.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MailboxCoverage {
     /// True when this pass did not ingest every message that arrived in the
     /// mailbox since the store last saw it: the `limit` window cut some off,
@@ -447,16 +494,16 @@ pub struct MailboxCoverage {
     /// Carried back in by the next fetch so the gate cannot open on a mark that
     /// this pass's own ingest raised (#0072).
     pub pending_arrival_mark: Option<u32>,
-    /// The CONDSTORE `HIGHESTMODSEQ` to record as the next pass's resume point,
-    /// with the lowest UID it vouches for, or `None` for "this fetch cannot
-    /// vouch for one", which the cursor UPSERT reads as "keep whatever is
-    /// stored" (#0041, PERSO-202).
+    /// The resume point this pass offers the next one, which the engine
+    /// records only if the pass earned it ([`ResumePoint`]).
     ///
-    /// `None` is the answer for every backend and every path without CONDSTORE,
-    /// and for a CONDSTORE pass that looked at no flag or was cut short: a
-    /// mark claims every flag at or above its UID was correct as of its
-    /// modseq, and only a pass that looked at all of them may claim it.
-    pub highest_modseq: Option<crate::ingest::ModseqMark>,
+    /// `None` on IMAP is "this fetch cannot vouch for a modseq", which the
+    /// cursor UPSERT reads as "keep whatever is stored": every path without
+    /// CONDSTORE, and a CONDSTORE pass that looked at no flag or was cut
+    /// short (#0041, PERSO-202). On a whole Graph folder it is a pass that
+    /// could mint no link, and one that earned its claim drops the stored
+    /// link, which is older than the listing it has just consumed (#0042).
+    pub resume: Option<ResumePoint>,
 }
 
 /// One answer of [`SyncBackend::next_batch`].

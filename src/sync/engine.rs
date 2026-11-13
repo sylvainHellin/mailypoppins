@@ -22,8 +22,8 @@ use anyhow::Result;
 use log::{info, warn};
 
 use super::{
-    stops_at, BodyBatch, FetchedBody, FreshObservation, MailboxListing, ObservationSink, Stop,
-    StopPoint, SyncBackend, SyncResult, SyncTarget,
+    stops_at, BodyBatch, FetchedBody, FreshObservation, MailboxListing, ObservationSink, Observed,
+    ResumePoint, Stop, StopPoint, SyncBackend, SyncResult, SyncTarget,
 };
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
@@ -194,6 +194,167 @@ pub(crate) fn mark_below_unmet(pending: Option<u32>, unmet: &[i64]) -> Option<u3
     Some(pending.map_or(owed, |mark| mark.min(owed)))
 }
 
+/// What one target's pass did, as far as its cursor is concerned.
+struct Closed<'a> {
+    /// Every UID whose body came back, written or not.
+    downloaded: &'a [i64],
+    /// The UIDs downloaded and not written that a later pass still owes.
+    unmet: &'a [i64],
+    /// The body pass asked for every new UID.
+    bodies_complete: bool,
+    enumeration_complete: bool,
+    /// Every flag the server reported is in the store (PERSO-202).
+    flags_written: bool,
+    /// A message the pass downloaded and did not write: one still owed, or a
+    /// copy withheld as departing (PERSO-245).
+    owes_write: bool,
+    covered: super::MailboxCoverage,
+}
+
+/// Whether a pass has earned the right to store a delta link (#0042).
+///
+/// The link means "at this point the store held every message the folder
+/// listed", and that is the whole safety argument for using it later: a delta
+/// from a link with that property reports every subsequent change, so the
+/// property survives. A pass that did not see the whole folder
+/// (`covered`), left a message undownloaded (`download_incomplete`), or
+/// downloaded one it did not write (`owes_write`) does not have the property
+/// and must not mint the claim; the older link stays and the next pass replays
+/// from it.
+///
+/// This is the rule #0041 wrote for the CONDSTORE resume point, for the same
+/// reason, and it is what keeps the #0074 ingest bound honest: a message given
+/// up on is no longer owed, so a message the store will never accept cannot
+/// wedge the delta chain for good.
+///
+/// `flags_written` is the read-state write of the pass (PERSO-202): the link
+/// vouches for the flags too, and a delta from a link minted over a dropped
+/// flag change never reports that change again.
+pub(crate) fn earns_delta_link(
+    covered: bool,
+    download_incomplete: bool,
+    owes_write: bool,
+    flags_written: bool,
+) -> bool {
+    covered && !download_incomplete && !owes_write && flags_written
+}
+
+/// Record the cursor of one target whose pass has ended, in the shape its
+/// listing observed (PERSO-213).
+fn record_target_cursor(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    observed: Observed,
+    closed: Closed<'_>,
+) -> Result<()> {
+    let Closed {
+        downloaded,
+        unmet,
+        bodies_complete,
+        enumeration_complete,
+        flags_written,
+        owes_write,
+        covered,
+    } = closed;
+    let state = match observed {
+        Observed::Selected(state) => state,
+        Observed::Folder { identity, exists } => {
+            let earned = earns_delta_link(
+                enumeration_complete,
+                covered.download_incomplete || !bodies_complete,
+                owes_write,
+                flags_written,
+            );
+            let link = delta_link(covered.resume);
+            ingest::record_mailbox_cursor(
+                store,
+                account,
+                mailbox,
+                &MailboxCursor {
+                    uidvalidity: identity,
+                    last_uid: None,
+                    uidnext: None,
+                    exists: i64::try_from(exists).ok(),
+                    highest_modseq: None,
+                    // A link with no identity could never be validated again,
+                    // and `None` keeps whatever is stored.
+                    deltalink: link.clone().filter(|_| earned && identity.is_some()),
+                    arrival_mark: None,
+                },
+            )?;
+            // A pass that consumed the whole folder and could mint no link
+            // leaves a stored one older than its listing: kept, it would
+            // replay the same changes on every pass for good.
+            if earned && link.is_none() {
+                ingest::clear_mailbox_deltalink(store, account, mailbox);
+            }
+            return Ok(());
+        }
+        // A change set, or a listing cut short, observed no count: going
+        // through the wide writer would null the last known-good, so only an
+        // earned link is written, with the identity it is bound to.
+        Observed::Partial { identity } => {
+            let earned = earns_delta_link(
+                enumeration_complete,
+                covered.download_incomplete || !bodies_complete,
+                owes_write,
+                flags_written,
+            );
+            if let (true, Some(identity), Some(link)) =
+                (earned, identity, delta_link(covered.resume))
+            {
+                ingest::record_delta_token(store, account, mailbox, identity, &link);
+            }
+            return Ok(());
+        }
+    };
+    let highest_uid = downloaded.iter().copied().max();
+    let modseq = match covered.resume {
+        Some(ResumePoint::Modseq(mark)) => Some(mark),
+        Some(ResumePoint::DeltaLink(_)) | None => None,
+    };
+    ingest::record_mailbox_cursor(
+        store,
+        account,
+        mailbox,
+        &MailboxCursor {
+            uidvalidity: state.uid_validity.map(|v| v as i64),
+            last_uid: highest_uid.or_else(|| state.uid_next.map(|n| n as i64 - 1)),
+            uidnext: state.uid_next.map(|v| v as i64),
+            exists: Some(state.exists as i64),
+            // `None` here means "this pass has nothing to say about the
+            // modseq", not "clear it": the UPSERT COALESCEs, so a
+            // full-window pass leaves a CONDSTORE pass's resume point
+            // alone (#0041).
+            //
+            // A body pass that ended short, at the pass's budget, at a
+            // stop between two batches or at a failure, has nothing to say
+            // either (#0113, PERSO-300): the stored mark, still true,
+            // stays. So does a pass whose flag write did not all land
+            // (PERSO-202 review): its flags may have come as a
+            // `CHANGEDSINCE` delta, and recording its modseq would tell
+            // the next pass never to ask about the change it dropped. The
+            // old mark stays, so the next delta reports it again.
+            highest_modseq: modseq.filter(|_| bodies_complete && flags_written),
+            deltalink: None,
+            // What this pass owes the next one: the mark below which the
+            // gate must stay shut because an arrival the server lists is
+            // still not in the store. Written even when it is None, which
+            // is how a pass that caught up reopens the gate (#0072).
+            arrival_mark: mark_below_unmet(covered.pending_arrival_mark, unmet).map(|m| m as i64),
+        },
+    )
+}
+
+/// The delta link a resume point is, if it is one.
+fn delta_link(resume: Option<ResumePoint>) -> Option<String> {
+    match resume {
+        Some(ResumePoint::DeltaLink(link)) => Some(link),
+        Some(ResumePoint::Modseq(_)) | None => None,
+    }
+}
+
 /// [`run_sync`] under the per-account engine lock: the entry point every live
 /// caller uses (#0122).
 ///
@@ -330,6 +491,18 @@ pub async fn run_sync<B: SyncBackend>(
     let listings = backend.list_targets(targets, limit, knowns, stop).await;
     span.mark("list");
 
+    // The resume points a listing found stale go before anything is ingested
+    // (PERSO-213), so a pass that stops at its first mailbox does not leave
+    // the next one a token to walk into the same doubt.
+    if !dry_run {
+        for (target, listing) in targets.iter().zip(&listings) {
+            if listing.as_ref().is_ok_and(|listing| listing.resume_stale) {
+                ingest::clear_mailbox_deltalink(store, account, target.role.as_str());
+                ingest::clear_mailbox_modseq(store, account, target.role.as_str());
+            }
+        }
+    }
+
     // Phase 3: download and ingest serially, in target order.
     for (index, (target, listing)) in targets.iter().zip(listings).enumerate() {
         // The mailbox boundary (PERSO-127): what earlier targets wrote stays,
@@ -370,7 +543,8 @@ pub async fn run_sync<B: SyncBackend>(
         let MailboxListing {
             skipped,
             known_flags,
-            state,
+            observed,
+            resume_stale: _,
             vanished,
             listed,
             uidvalidity_reset,
@@ -443,6 +617,12 @@ pub async fn run_sync<B: SyncBackend>(
         let folder: Option<std::collections::HashSet<u32>> =
             (!uidvalidity_reset && enumeration_complete && !listed.is_empty())
                 .then(|| imap_uids(&listed).collect());
+        // The UIDVALIDITY a departing op's UID is compared under: a folder
+        // listed by id has none, and its copies are asked about by item.
+        let uid_validity = match &observed {
+            Observed::Selected(state) => state.uid_validity,
+            Observed::Folder { .. } | Observed::Partial { .. } => None,
+        };
 
         let mut unmet: Vec<i64> = Vec::new();
         // #0115: a UID the store has given up on drops out of `unmet`, which is
@@ -566,7 +746,7 @@ pub async fn run_sync<B: SyncBackend>(
                                 &super::departures::Listed {
                                     source: &target.server_name,
                                     uid,
-                                    uidvalidity: state.uid_validity,
+                                    uidvalidity: uid_validity,
                                     folder: folder.as_ref(),
                                 },
                             )
@@ -721,8 +901,6 @@ pub async fn run_sync<B: SyncBackend>(
                 || ((covered.download_incomplete || !bodies_complete)
                     && target.short_download_counts()),
         ));
-        let pending_arrival_mark = mark_below_unmet(covered.pending_arrival_mark, &unmet);
-
         // The IMAP server states the whole flag set, so it is truth for all
         // three bits of the second axis (#TKT-0051), not just for `\Seen`.
         let flags = ingest::apply_flags(store, account, target.role.as_str(), known_flags);
@@ -758,38 +936,19 @@ pub async fn run_sync<B: SyncBackend>(
             result.non_converging.push(target.server_name.clone());
         }
 
-        let highest_uid = downloaded.iter().copied().max();
-        ingest::record_mailbox_cursor(
+        record_target_cursor(
             store,
             account,
             target.role.as_str(),
-            &MailboxCursor {
-                uidvalidity: state.uid_validity.map(|v| v as i64),
-                last_uid: highest_uid.or_else(|| state.uid_next.map(|n| n as i64 - 1)),
-                uidnext: state.uid_next.map(|v| v as i64),
-                exists: Some(state.exists as i64),
-                // `None` here means "this pass has nothing to say about the
-                // modseq", not "clear it": the UPSERT COALESCEs, so a
-                // full-window pass leaves a CONDSTORE pass's resume point
-                // alone (#0041).
-                //
-                // A body pass that ended short, at the pass's budget, at a
-                // stop between two batches or at a failure, has nothing to say
-                // either (#0113, PERSO-300): the stored mark, still true,
-                // stays. So does a pass whose flag write did not all land
-                // (PERSO-202 review): its flags may have come as a
-                // `CHANGEDSINCE` delta, and recording its modseq would tell
-                // the next pass never to ask about the change it dropped. The
-                // old mark stays, so the next delta reports it again.
-                highest_modseq: covered
-                    .highest_modseq
-                    .filter(|_| bodies_complete && flags.complete),
-                deltalink: None,
-                // What this pass owes the next one: the mark below which the
-                // gate must stay shut because an arrival the server lists is
-                // still not in the store. Written even when it is None, which
-                // is how a pass that caught up reopens the gate (#0072).
-                arrival_mark: pending_arrival_mark.map(|m| m as i64),
+            observed,
+            Closed {
+                downloaded: &downloaded,
+                unmet: &unmet,
+                bodies_complete,
+                enumeration_complete,
+                flags_written: flags.complete,
+                owes_write: !unmet.is_empty() || withheld,
+                covered,
             },
         )?;
 
@@ -879,7 +1038,9 @@ mod tests {
 
     use super::*;
     use crate::ingest::ModseqMark;
-    use crate::sync::{FetchedMessage, MailboxCoverage, MailboxState, ParsedMessage};
+    use crate::sync::{
+        FetchedMessage, MailboxCoverage, MailboxState, Observed, ParsedMessage, ResumePoint,
+    };
     use crate::types::MessageFlags;
 
     /// A CONDSTORE mark: `modseq`, vouching for every UID from `from_uid` up.
@@ -912,6 +1073,13 @@ mod tests {
         /// cut at its deadline does not (#0113).
         bodies_complete: bool,
         highest_modseq: Option<ModseqMark>,
+        /// The cursor shape the listing observed; `None` is IMAP's `SELECT`
+        /// over `state`.
+        observed: Option<Observed>,
+        /// A Graph delta link offered as the resume point (PERSO-213).
+        delta_link: Option<String>,
+        /// The stored resume point no longer describes the mailbox.
+        resume_stale: bool,
     }
 
     /// What the store held for one target when the engine listed it: what the
@@ -937,7 +1105,10 @@ mod tests {
             let covered = MailboxCoverage {
                 download_incomplete: self.download_incomplete,
                 pending_arrival_mark: self.pending_arrival_mark,
-                highest_modseq: self.highest_modseq,
+                resume: self
+                    .highest_modseq
+                    .map(ResumePoint::Modseq)
+                    .or(self.delta_link.map(ResumePoint::DeltaLink)),
             };
             let scripted: Vec<i64> = self.messages.iter().map(|m| m.uid).collect();
             let listed: Vec<u32> = imap_uids(&self.listed).collect();
@@ -964,13 +1135,14 @@ mod tests {
                         (Some(computed), Some(scripted)) => Some(computed.min(scripted)),
                         (computed, scripted) => computed.or(scripted),
                     },
-                    highest_modseq: covered.highest_modseq,
+                    resume: covered.resume,
                 }
             });
             let listing = MailboxListing {
                 skipped: self.skipped,
                 known_flags: self.known_flags,
-                state: self.state,
+                observed: self.observed.unwrap_or(Observed::Selected(self.state)),
+                resume_stale: self.resume_stale,
                 vanished: self.vanished,
                 listed: self.listed,
                 uidvalidity_reset: self.uidvalidity_reset,
@@ -1174,6 +1346,9 @@ mod tests {
             // server, which is what every existing engine test assumed and
             // still asserts.
             highest_modseq: None,
+            observed: None,
+            delta_link: None,
+            resume_stale: false,
         }
     }
 
@@ -1318,6 +1493,189 @@ mod tests {
     // -----------------------------------------------------------------------
     // Engine tests: the loop itself, driven by the fake backend
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // PERSO-213: the cursor shapes of a backend that is not positional
+    // -----------------------------------------------------------------------
+
+    const OLD_LINK: &str =
+        "https://graph.microsoft.com/v1.0/me/mailFolders('A')/messages/delta?$deltatoken=t1";
+    const LINK: &str =
+        "https://graph.microsoft.com/v1.0/me/mailFolders('A')/messages/delta?$deltatoken=t2";
+
+    /// A message as Graph hands it over: parsed, under the hash of its
+    /// Message-ID.
+    fn parsed(name: &str) -> FetchedMessage {
+        let email = parse_rfc822_to_fetched_email(&raw(name)).unwrap();
+        FetchedMessage::parsed(
+            ingest::graph_uid(&format!("<{name}@example.com>")),
+            ParsedMessage {
+                email,
+                threading: ingest::ThreadHints::default(),
+                item: format!("item-{name}"),
+            },
+        )
+    }
+
+    /// A Graph folder over `messages`: no UID listing, the cursor shape
+    /// `observed`.
+    fn folder_fetch(messages: Vec<FetchedMessage>, observed: Observed) -> MailboxFetch {
+        let mut fetch = fetch(Vec::new());
+        fetch.messages = messages;
+        fetch.listed = Vec::new();
+        fetch.observed = Some(observed);
+        fetch
+    }
+
+    fn inbox_only() -> Vec<SyncTarget> {
+        vec![SyncTarget::new(MailboxRole::Inbox, "Inbox")]
+    }
+
+    impl Fixture {
+        fn delta_link(&self, mailbox: &str) -> Option<String> {
+            ingest::load_mailbox_cursor(&self.store, "acct", mailbox)
+                .unwrap()
+                .and_then(|c| c.deltalink)
+        }
+
+        fn exists(&self, mailbox: &str) -> Option<i64> {
+            self.store
+                .conn()
+                .query_row(
+                    "SELECT exists_count FROM mailboxes WHERE account = 'acct' AND name = ?1",
+                    [mailbox],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+    }
+
+    /// A whole Graph enumeration records the folder's identity where IMAP
+    /// keeps UIDVALIDITY, its count, and the link it earned, and no
+    /// positional column: a folder listed by id has no top and no arrival
+    /// mark.
+    #[test]
+    fn a_whole_folder_listing_records_its_identity_count_and_earned_link() {
+        let fx = Fixture::new();
+        let mut inbox = folder_fetch(
+            vec![parsed("a"), parsed("b")],
+            Observed::Folder {
+                identity: Some(77),
+                exists: 5,
+            },
+        );
+        inbox.delta_link = Some(LINK.into());
+        let mut backend = FakeBackend::default();
+        backend.script("Inbox", vec![Ok(inbox)]);
+        let result = fx.run(&mut backend, &inbox_only());
+
+        assert_eq!(result.saved, 2);
+        let cursor = ingest::load_mailbox_cursor(&fx.store, "acct", "inbox")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.uidvalidity, Some(77));
+        assert_eq!(cursor.deltalink.as_deref(), Some(LINK));
+        assert_eq!((cursor.last_uid, cursor.arrival_mark), (None, None));
+        assert_eq!(fx.exists("inbox"), Some(5));
+    }
+
+    /// A link claims the store held the whole folder: a pass that left mail
+    /// behind keeps the stored one and still records what it observed, and a
+    /// pass that earned its claim but offers no link drops the stored one,
+    /// which is older than a listing it has just consumed whole.
+    #[test]
+    fn a_folder_pass_keeps_or_drops_the_stored_link_by_what_it_earned() {
+        let fx = Fixture::new();
+        ingest::record_delta_token(&fx.store, "acct", "inbox", 77, OLD_LINK);
+        let folder = Observed::Folder {
+            identity: Some(77),
+            exists: 1,
+        };
+
+        let mut short = folder_fetch(vec![parsed("a")], folder.clone());
+        short.delta_link = Some(LINK.into());
+        short.download_incomplete = true;
+        let mut backend = FakeBackend::default();
+        backend.script("Inbox", vec![Ok(short)]);
+        fx.run(&mut backend, &inbox_only());
+        assert_eq!(fx.delta_link("inbox").as_deref(), Some(OLD_LINK));
+        assert_eq!(fx.exists("inbox"), Some(1));
+
+        let mut backend = FakeBackend::default();
+        backend.script("Inbox", vec![Ok(folder_fetch(Vec::new(), folder))]);
+        fx.run(&mut backend, &inbox_only());
+        assert_eq!(fx.delta_link("inbox"), None);
+    }
+
+    /// A change set observes no count, so it writes its link and nothing else,
+    /// and only when it earned it.
+    #[test]
+    fn a_change_set_records_only_the_link_it_earned() {
+        let fx = Fixture::new();
+        ingest::record_mailbox_cursor(
+            &fx.store,
+            "acct",
+            "inbox",
+            &ingest::MailboxCursor {
+                uidvalidity: Some(77),
+                exists: Some(42),
+                deltalink: Some(OLD_LINK.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let changes = Observed::Partial { identity: Some(77) };
+
+        let mut short = folder_fetch(vec![parsed("a")], changes.clone());
+        short.delta_link = Some(LINK.into());
+        short.bodies_complete = false;
+        let mut backend = FakeBackend::default();
+        backend.script("Inbox", vec![Ok(short)]);
+        fx.run(&mut backend, &inbox_only());
+        assert_eq!(fx.delta_link("inbox").as_deref(), Some(OLD_LINK));
+
+        let mut whole = folder_fetch(vec![parsed("b")], changes);
+        whole.delta_link = Some(LINK.into());
+        let mut backend = FakeBackend::default();
+        backend.script("Inbox", vec![Ok(whole)]);
+        fx.run(&mut backend, &inbox_only());
+        assert_eq!(fx.delta_link("inbox").as_deref(), Some(LINK));
+        assert_eq!(fx.exists("inbox"), Some(42), "the last known count stays");
+    }
+
+    /// A resume point the listing found stale is dropped before the first
+    /// mailbox is ingested, so a pass stopped there does not leave it for the
+    /// next one to walk again.
+    #[test]
+    fn a_stale_resume_point_is_dropped_before_any_mailbox_is_ingested() {
+        let fx = Fixture::new();
+        ingest::record_delta_token(&fx.store, "acct", "inbox", 77, OLD_LINK);
+        let mut stale = folder_fetch(vec![parsed("a")], Observed::Partial { identity: None });
+        stale.resume_stale = true;
+        let mut backend = FakeBackend::default();
+        backend.script("Inbox", vec![Ok(stale)]);
+        let (stop, _) = stop_from(StopPoint::Mailbox(0));
+        fx.run_until(&mut backend, &inbox_only(), 100, false, Some(&stop));
+        assert_eq!(fx.delta_link("inbox"), None);
+        assert!(fx.rows("inbox").is_empty());
+    }
+
+    /// The link's claim, as the four facts of a pass that decide it (#0042,
+    /// PERSO-202).
+    #[test]
+    fn a_delta_link_is_only_earned_by_a_pass_that_covered_the_folder() {
+        // covered, nothing left behind, everything written.
+        assert!(earns_delta_link(true, false, false, true));
+        // A read state the store failed to write (PERSO-202).
+        assert!(!earns_delta_link(true, false, false, false));
+        // An enumeration that did not see the whole folder.
+        assert!(!earns_delta_link(false, false, false, true));
+        // A pass that left new messages undownloaded.
+        assert!(!earns_delta_link(true, true, false, true));
+        // A message downloaded and not written is as absent as one never
+        // fetched, so the link would over-claim.
+        assert!(!earns_delta_link(true, false, true, true));
+    }
 
     /// PERSO-213: a message a backend hands over already parsed, as Graph
     /// does since it never returns the original MIME, is ingested under the

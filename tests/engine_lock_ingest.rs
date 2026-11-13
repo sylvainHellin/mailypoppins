@@ -73,7 +73,7 @@ use mailypoppins::store::{BlobStore, Store};
 use mailypoppins::sync::engine::{run_sync_guarded_at, SyncRun};
 use mailypoppins::sync::{
     BodyBatch, FetchedMessage, MailboxCoverage, MailboxListing, MailboxState, ObservationSink,
-    Stop, SyncBackend, SyncResult, SyncTarget,
+    Observed, ResumePoint, Stop, SyncBackend, SyncResult, SyncTarget,
 };
 use mailypoppins::timing::TimingSpan;
 use mailypoppins::types::{MailboxRole, MessageFlags};
@@ -216,7 +216,7 @@ impl SyncBackend for ScriptedBackend {
             let covered = MailboxCoverage {
                 download_incomplete: fetch.download_incomplete,
                 pending_arrival_mark: fetch.pending_arrival_mark,
-                highest_modseq: fetch.highest_modseq,
+                resume: fetch.highest_modseq.map(ResumePoint::Modseq),
             };
             // A scripted body the engine did not download leaves the mailbox
             // short, whatever the script says of a pass that got them all.
@@ -231,7 +231,8 @@ impl SyncBackend for ScriptedBackend {
             out.push(Ok(MailboxListing {
                 skipped: fetch.skipped,
                 known_flags: fetch.known_flags,
-                state: fetch.state,
+                observed: Observed::Selected(fetch.state),
+                resume_stale: false,
                 vanished: fetch.vanished,
                 listed: fetch.listed,
                 uidvalidity_reset: fetch.uidvalidity_reset,

@@ -12,7 +12,9 @@ use super::{
 use crate::ingest::{KnownUids, ModseqMark};
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
-use crate::sync::{FetchedMessage, MailboxCoverage, MailboxListing, MailboxState};
+use crate::sync::{
+    FetchedMessage, MailboxCoverage, MailboxListing, MailboxState, Observed, ResumePoint,
+};
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
 
@@ -943,7 +945,8 @@ where
             .into_iter()
             .map(|(uid, flags)| (i64::from(uid), flags))
             .collect(),
-        state,
+        observed: Observed::Selected(state),
+        resume_stale: false,
         vanished: vanished.into_iter().map(i64::from).collect(),
         listed: listed.iter().copied().map(i64::from).collect(),
         uidvalidity_reset,
@@ -964,12 +967,13 @@ where
             MailboxCoverage {
                 download_incomplete: coverage.incomplete,
                 pending_arrival_mark: coverage.pending_mark,
-                highest_modseq: modseq_to_record(
+                resume: modseq_to_record(
                     server_modseq,
                     covered_from,
                     enumeration_complete,
                     bodies_complete,
-                ),
+                )
+                .map(ResumePoint::Modseq),
             }
         }),
     };
@@ -1884,7 +1888,10 @@ mod tests {
     /// The mark a listing leaves once a body pass with nothing to download
     /// has run to its end.
     fn mark_left(listing: MailboxListing) -> Option<ModseqMark> {
-        (listing.coverage)(&[], true).highest_modseq
+        match (listing.coverage)(&[], true).resume {
+            Some(ResumePoint::Modseq(mark)) => Some(mark),
+            Some(ResumePoint::DeltaLink(_)) | None => None,
+        }
     }
 
     /// What a CONDSTORE server answers to `SELECT "INBOX" (CONDSTORE)` for a
