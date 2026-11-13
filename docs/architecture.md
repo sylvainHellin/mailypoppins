@@ -464,8 +464,11 @@ The store reads that seed each listing happen serially first, the listings overl
 A mailbox's body pass borrows a session at its first chunk, `SELECT`s the mailbox again and checks its UIDVALIDITY against the listing's, and returns the session when the pass ends (PERSO-300).
 Per mailbox, `UID SEARCH ALL` gives the UID list, the last `limit` UIDs are the window, pass 1 fetches `(UID FLAGS)` over the whole window and pass 2 downloads `BODY.PEEK[]` only for UIDs the store does not hold.
 The store answers "which UIDs do I hold" with one query, so there is no local scan and no dedup pass.
-Pass 2 is chunked (20 UIDs per `UID FETCH`, newest chunk first) and, on a TUI tick, bounded by `imap.body_fetch_deadline_secs` per mailbox (default 30, clamped to [0, 600], 0 unbounded); `mp sync` passes no budget (#0113).
-The budget is measured against the network time the mailbox has spent, its listing included, and not the wall clock, which since PERSO-300 also runs through the mailbox's own ingest and the mailboxes before it.
+Pass 2 is chunked (20 UIDs per `UID FETCH`, newest chunk first) and, on a tick of the account's runtime, bounded by `imap.body_fetch_deadline_secs` (default 30, clamped to [0, 600], 0 unbounded); the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, an account's first sync) passes no budget (#0113).
+A `mp sync` of the whole account runs as a runtime tick while the daemon is the account's engine, so it carries the budget too.
+The budget is the pass's, all its mailboxes together, and not each mailbox's (PERSO-300): the mailboxes download one after another, and a budget per mailbox let a tick catching up six of them spend six while every other account waited behind it.
+Once it is spent, the mailbox in hand and every mailbox after it in the pass close short, and the next pass picks them up.
+It is measured against the network time the body downloads have spent, the listings that run in parallel before them not included, and not against the wall clock, which also runs through the ingest of every chunk.
 The budget is checked between chunks and never inside one, because abandoning a `UID FETCH` mid-stream would poison the pooled session; a pass that stops ends with `BodyBatch::Done { complete: false }`, which suspends every prune in the pass and blocks the modseq, and the rest resumes from the cursor on the next pass.
 IMAP supports implicit TLS (port 993) and STARTTLS (any other port, for example 1143 for Proton Bridge); the `ImapStream` wrapper injects a fake greeting for STARTTLS because `async_imap` expects one.
 

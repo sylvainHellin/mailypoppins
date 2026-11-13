@@ -28,7 +28,9 @@
 //! A folder given whole messages ([`RejectingImapServer::set_mail`]) is one a
 //! sync can run against (PERSO-300): `UID SEARCH` lists its UIDs, and
 //! `UID FETCH` answers `(UID FLAGS)` and `(UID BODY.PEEK[] FLAGS)` for the
-//! UIDs of a sequence set, ranges included, with no flag set.
+//! UIDs of a sequence set, ranges included, with no flag set. A test can
+//! slow every body download down ([`RejectingImapServer::set_body_delay`])
+//! and count them ([`RejectingImapServer::body_fetches`]).
 //!
 //! Two test trees use it: the daemon suites through `mod support;`, and the
 //! library's own unit tests, which include this file by path from
@@ -38,7 +40,7 @@
 // Each test tree uses a different part of it.
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_std::net::{TcpListener, TcpStream};
@@ -123,6 +125,11 @@ struct Shared {
     folders: Mutex<Vec<FakeFolder>>,
     /// The whole messages of the folders a sync runs against, by folder name.
     mail: Mutex<std::collections::HashMap<String, Vec<FakeMessage>>>,
+    /// How long the server waits before it answers a `BODY.PEEK[]` fetch, in
+    /// milliseconds.
+    body_delay_ms: AtomicU64,
+    /// How many `BODY.PEEK[]` fetches the server has answered.
+    body_fetches: AtomicUsize,
 }
 
 /// One whole message of a folder a sync runs against: its UID and its bytes.
@@ -165,6 +172,8 @@ impl RejectingImapServer {
             connections: Mutex::new(Vec::new()),
             folders: Mutex::new(vec![FakeFolder::empty("INBOX")]),
             mail: Mutex::new(std::collections::HashMap::new()),
+            body_delay_ms: AtomicU64::new(0),
+            body_fetches: AtomicUsize::new(0),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -236,6 +245,18 @@ impl RejectingImapServer {
             .lock()
             .expect("the mail")
             .insert(name.to_string(), messages);
+    }
+
+    /// Wait `delay` before answering each later `BODY.PEEK[]` fetch: a slow
+    /// download, for a test of the body budget (PERSO-300).
+    pub fn set_body_delay(&self, delay: std::time::Duration) {
+        let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.shared.body_delay_ms.store(millis, Ordering::SeqCst);
+    }
+
+    /// How many `BODY.PEEK[]` fetches the server has answered so far.
+    pub fn body_fetches(&self) -> usize {
+        self.shared.body_fetches.load(Ordering::SeqCst)
     }
 
     /// Cut every open connection, the way a server drops the sessions of an
@@ -374,6 +395,13 @@ async fn serve(
                     .and_then(|f| shared.mail.lock().expect("the mail").get(&f.name).cloned())
                     .unwrap_or_default();
                 let bodies = line.contains("BODY.PEEK[]");
+                if bodies {
+                    let delay = shared.body_delay_ms.load(Ordering::SeqCst);
+                    if delay > 0 {
+                        async_std::task::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
+                    shared.body_fetches.fetch_add(1, Ordering::SeqCst);
+                }
                 let mut reply = String::new();
                 for (seq, (uid, raw)) in mail.iter().enumerate() {
                     if !in_set(wanted, *uid) {

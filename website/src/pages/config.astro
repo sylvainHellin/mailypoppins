@@ -59,7 +59,7 @@ host = "imap.example.com"   # Falls back to smtp.host if omitted
 port = 993
 username = ""               # Falls back to smtp.username if omitted
 fetch_concurrency = 4       # Mailboxes fetched in parallel per sync (1-8)
-body_fetch_deadline_secs = 30  # Per-mailbox download budget on a TUI sync (0 = unbounded)
+body_fetch_deadline_secs = 30  # Body download budget of one sync, all mailboxes together (0 = unbounded)
 sync_interval_secs = 900    # Daemon syncs after this long without a sync (0 = never)
 # Password falls back to SMTP password if not set separately
 
@@ -186,14 +186,16 @@ default_from = "your.name@example.com"`} />
         if a server throttles concurrent connections.
       </p>
       <p>
-        <code>body_fetch_deadline_secs</code> is how long a single mailbox may spend
-        downloading message bodies on a sync started by the TUI (default <code>30</code>,
-        maximum <code>600</code>, <code>0</code> for no limit). A mailbox that runs out of
-        budget stops between batches, keeps what it has downloaded, and resumes on the next
-        sync, so a large backlog arrives over several syncs instead of holding one open;
-        newest mail is downloaded first. Nothing is deleted and no flag delta is advanced on
-        a sync that stopped early. <code>mp sync</code> ignores the budget and always
-        downloads everything it owes.
+        <code>body_fetch_deadline_secs</code> is how long one sync of the account may spend
+        downloading message bodies, all its mailboxes together (default <code>30</code>,
+        maximum <code>600</code>, <code>0</code> for no limit). A sync that runs out of
+        budget stops between batches and keeps what it has downloaded; the mailbox it was in
+        and the ones after it resume on the next sync, so a large backlog arrives over
+        several syncs instead of holding one open; newest mail is downloaded first. Nothing
+        is deleted and no flag delta is advanced on a sync that stopped early. Every sync of
+        the whole account the daemon runs is bounded this way, whether the TUI, the
+        schedule or <code>mp sync</code> started it; <code>mp sync --mailbox</code> and
+        <code>mp sync --dry-run</code> ignore the budget and download everything they owe.
       </p>
       <p>
         <code>sync_interval_secs</code> is how long the daemon lets the account go without
@@ -210,7 +212,7 @@ host = "imap.example.com"   # Falls back to smtp.host
 port = 993
 username = ""               # Falls back to smtp.username
 fetch_concurrency = 4       # Parallel mailbox fetches per sync (1-8)
-body_fetch_deadline_secs = 30  # Per-mailbox body download budget, seconds (0 = unbounded)
+body_fetch_deadline_secs = 30  # Body download budget of one sync, seconds, all mailboxes together (0 = unbounded)
 sync_interval_secs = 900    # Seconds without a sync before the daemon runs one (0 = never)`} />
 
       <!-- Where data lives -->

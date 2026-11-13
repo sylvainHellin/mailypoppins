@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use futures::TryStreamExt;
@@ -591,24 +591,31 @@ pub(crate) fn body_chunks(new_uids: &[u32], chunk: usize) -> Vec<&[u32]> {
     new_uids.rchunks(chunk.max(1)).collect()
 }
 
-/// Whether the body pass must stop before asking for chunk `index`, having
-/// spent `spent` of a `budget` on this mailbox's network work.
+/// Whether a sync pass must stop before asking for another chunk of bodies,
+/// having asked for `asked` chunks so far and spent `spent` of a `budget` on
+/// them, every mailbox of the pass counted.
 ///
-/// Two rules, and both are load-bearing. The first chunk always goes out, so a
-/// budget that is already spent still makes progress rather than turning the
-/// pass into a no-op that repeats forever. And the check sits *between*
-/// chunks: wrapping a `UID FETCH` in a timeout would abandon a command
-/// mid-stream and leave unread response bytes on a session that goes back into
-/// the pool ([`super::pool`]), so the next borrower reads this fetch's mail as
-/// the answer to its own command. A chunk that has been asked for is always
-/// collected in full.
+/// The budget is the pass's, not each mailbox's (PERSO-300): the mailboxes
+/// download one after another, so a budget per mailbox let a tick catching up
+/// six of them spend six budgets while every other account waited behind it.
+/// A mailbox the budget cuts short, and every mailbox after it, closes short
+/// and resumes on the next pass.
 ///
-/// The budget is spent, not elapsed (PERSO-300): the engine ingests each chunk
-/// before it asks for the next and walks the mailboxes one at a time, so the
-/// wall clock since the listing would charge this mailbox for its own ingest
-/// and for every mailbox ingested before it.
-pub(crate) fn stop_before_chunk(index: usize, budget: Option<Duration>, spent: Duration) -> bool {
-    index > 0 && budget.is_some_and(|budget| spent >= budget)
+/// Two rules, and both are load-bearing. The pass's first chunk always goes
+/// out, so a budget that is already spent still makes progress rather than
+/// turning the pass into a no-op that repeats forever. And the check sits
+/// *between* chunks: wrapping a `UID FETCH` in a timeout would abandon a
+/// command mid-stream and leave unread response bytes on a session that goes
+/// back into the pool ([`super::pool`]), so the next borrower reads this
+/// fetch's mail as the answer to its own command. A chunk that has been asked
+/// for is always collected in full, which is why a pass can overrun its budget
+/// by one chunk.
+///
+/// The budget is spent, not elapsed: the engine ingests each chunk before it
+/// asks for the next, so the wall clock would charge the download for the
+/// ingest too.
+pub(crate) fn stop_before_chunk(asked: usize, budget: Option<Duration>, spent: Duration) -> bool {
+    asked > 0 && budget.is_some_and(|budget| spent >= budget)
 }
 
 /// What one mailbox's body pass still has to download, from the listing that
@@ -627,11 +634,6 @@ pub(crate) struct BodyPlan {
     pub(crate) new: usize,
     /// How many bodies the pass has handed over so far.
     pub(crate) handed: usize,
-    /// How many chunks the pass has asked for so far.
-    pub(crate) asked: usize,
-    /// The network time this mailbox has spent, its listing included: what
-    /// the body budget is measured against ([`stop_before_chunk`]).
-    pub(crate) spent: Duration,
 }
 
 /// The listing half of the store ingest fetch: `SELECT`, `UID SEARCH ALL`,
@@ -664,7 +666,6 @@ pub(crate) async fn list_mailbox_on_session(
     known: KnownUids,
     caps: ServerCaps,
 ) -> Result<(MailboxListing, BodyPlan)> {
-    let started = Instant::now();
     let mut span = TimingSpan::with_context("list_mailbox", mailbox.to_string());
 
     // `SELECT (CONDSTORE)` only where the server advertised CONDSTORE: it is
@@ -826,8 +827,6 @@ pub(crate) async fn list_mailbox_on_session(
             .collect(),
         new: new_uids.len(),
         handed: 0,
-        asked: 0,
-        spent: started.elapsed(),
     };
     let listing = MailboxListing {
         skipped,
@@ -1375,12 +1374,12 @@ mod tests {
 
     /// #0113: where the deadline is answered, and where it is not.
     ///
-    /// The first chunk always goes out even on a budget already spent, or a
-    /// mailbox whose listing was slow would download nothing on every pass and
-    /// never converge. From the second chunk on, a spent budget stops the
-    /// pass. The check is between chunks by construction: there is no point at
-    /// which a `UID FETCH` in flight can be abandoned, so a half-read response
-    /// can never be left on a pooled session.
+    /// A sync pass's first chunk always goes out even on a budget already
+    /// spent, or a pass would download nothing and never converge. From the
+    /// second chunk on, whichever mailbox it belongs to, a spent budget stops
+    /// the pass (PERSO-300). The check is between chunks by construction:
+    /// there is no point at which a `UID FETCH` in flight can be abandoned, so
+    /// a half-read response can never be left on a pooled session.
     #[test]
     fn the_deadline_stops_the_next_chunk_and_never_the_first() {
         let budget = Some(Duration::from_secs(30));

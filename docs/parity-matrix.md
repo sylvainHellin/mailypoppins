@@ -1073,10 +1073,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: `tests/cli_read_surface_integration.rs`, which runs offline
 - Status: not started
 
-### SYN-12 Per-mailbox body-fetch deadline
+### SYN-12 Body-fetch deadline of a sync pass
 
 - Classification: GUI parity for its surfacing
-- Source anchor: `[imap] body_fetch_deadline_secs` (`crates/mp-core/src/config.rs:524`), clamped to 600 at load (`crates/mp-core/src/config.rs:1521`), documented at `website/src/pages/config.astro`; `BODY_CHUNK_SIZE` (`src/imap_client/fetch.rs:578`); `BodyBatch::Done { complete }` (`src/sync/mod.rs:424`); the TUI message at `crates/mp-client/src/format.rs:148`
+- Source anchor: `[imap] body_fetch_deadline_secs` (`crates/mp-core/src/config.rs:533`), clamped to 600 at load (`crates/mp-core/src/config.rs:1531`), documented at `website/src/pages/config.astro`; `BODY_CHUNK_SIZE` (`src/imap_client/fetch.rs:578`); `BodyBatch::Done { complete }` (`src/sync/mod.rs:424`); the TUI message at `crates/mp-client/src/format.rs:148`
 - Daemon surface: `state.event` progress carrying the deadline stop
 - GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/imap_client/fetch.rs`, `clients/tui/src/helpers.rs`

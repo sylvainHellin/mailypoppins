@@ -507,19 +507,28 @@ pub struct ImapSettings {
     /// 1 restores the old serial ordering (one session per mailbox, opened in turn).
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: usize,
-    /// How long one mailbox's fetch may spend on the network before its body
-    /// download stops and leaves the rest for the next pass (#0113). The
-    /// budget is checked between body chunks, never inside one, so a chunk
-    /// already asked for is always collected in full.
+    /// How long one sync pass of the account may spend on the network
+    /// downloading message bodies, all its mailboxes together, before the
+    /// mailbox it is in and every one after it stop and leave the rest for the
+    /// next pass (#0113, PERSO-300). The budget is checked between body
+    /// chunks, never inside one, so a chunk already asked for is always
+    /// collected in full and a pass can overrun the budget by one chunk. The
+    /// listings, which run before any body, and the ingest are not charged to
+    /// it.
     ///
-    /// A tick is serial across accounts and one slow mailbox blocks every other
-    /// one behind it: a 34 MB Sent mailbox took 160 seconds, which is 160
-    /// seconds in which nothing else syncs. Stopping early costs nothing but
-    /// latency on the backlog, because a short pass already suspends the prune
-    /// and resumes from its cursor.
+    /// A tick is serial across accounts and one slow download blocks every
+    /// other account behind it: a 34 MB Sent mailbox took 160 seconds, which
+    /// is 160 seconds in which nothing else syncs. The budget is the pass's
+    /// rather than each mailbox's because the mailboxes download one after
+    /// another, and a budget per mailbox let a pass catching up six of them
+    /// spend six. Stopping early costs nothing but latency on the backlog,
+    /// because a short pass already suspends the prune and resumes from its
+    /// cursor.
     ///
-    /// `0` means unbounded, which is what `mp sync` uses whatever this says.
-    /// Clamped to [0, 600] at load.
+    /// It bounds every tick of the account's runtime, which is also how the
+    /// daemon runs a `mp sync` of the whole account while it is the account's
+    /// engine; a `mp sync --mailbox` or `--dry-run`, and an account's first
+    /// sync, pass no budget. `0` means unbounded. Clamped to [0, 600] at load.
     #[serde(default = "default_body_fetch_deadline_secs")]
     pub body_fetch_deadline_secs: u64,
     /// How long the daemon lets this account go without a sync before it runs
@@ -873,8 +882,9 @@ pub struct ImapConfig {
     /// Parallel mailbox fetches per sync, clamped to [1, 8]. See
     /// [`ImapSettings::fetch_concurrency`].
     pub fetch_concurrency: usize,
-    /// Per-mailbox body-fetch budget in seconds, clamped to [0, 600]; 0 is
-    /// unbounded. See [`ImapSettings::body_fetch_deadline_secs`] and
+    /// Body-fetch budget of one sync pass in seconds, all its mailboxes
+    /// together, clamped to [0, 600]; 0 is unbounded. See
+    /// [`ImapSettings::body_fetch_deadline_secs`] and
     /// [`ImapConfig::body_fetch_deadline`].
     pub body_fetch_deadline_secs: u64,
 }

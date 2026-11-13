@@ -38,18 +38,26 @@ use crate::timing::TimingSpan;
 /// The IMAP transport behind [`crate::sync::SyncBackend`] (#0059).
 ///
 /// It owns what a fetch needs and nothing the engine owns: no store handle, no
-/// cursors, no ingest bookkeeping. That is the config, the body budget, and
-/// each mailbox's body pass between the engine's batches (PERSO-300); #0041
+/// cursors, no ingest bookkeeping. That is the config, the body budget and
+/// what the pass has spent of it, and each mailbox's body pass between the
+/// engine's batches (PERSO-300); #0041
 /// put the sessions themselves in [`super::pool`] rather than in this struct,
 /// because they have to outlive the backend (a `mp sync` builds one per call,
 /// and the queued-op drain has no backend at all), and the pool is what every
 /// IMAP path in the process borrows from.
 pub struct ImapBackend<'a> {
     config: &'a ImapConfig,
-    /// How long one mailbox's fetch may spend on the network before its body
-    /// pass stops and leaves the rest for the next pass (#0113). `None` is
+    /// How much network time the pass may spend downloading bodies, summed
+    /// over its mailboxes, before the mailbox it is in and every one after it
+    /// stop and leave the rest for the next pass (#0113, PERSO-300). `None` is
     /// unbounded.
     body_budget: Option<Duration>,
+    /// The network time the pass has spent on bodies so far, every mailbox
+    /// counted: what the budget is measured against ([`stop_before_chunk`]).
+    body_spent: Duration,
+    /// How many chunks of bodies the pass has asked for, every mailbox
+    /// counted.
+    chunks_asked: usize,
     /// The body pass of each target of the last listing, by index; `None` for
     /// a target whose listing failed.
     passes: Vec<Option<BodyPass>>,
@@ -69,15 +77,20 @@ impl<'a> ImapBackend<'a> {
         Self {
             config,
             body_budget: None,
+            body_spent: Duration::ZERO,
+            chunks_asked: 0,
             passes: Vec::new(),
         }
     }
 
-    /// Bound each mailbox's network time (#0113).
+    /// Bound the network time the pass spends downloading bodies (#0113).
     ///
-    /// The budget is per target rather than per sync: one mailbox's slow
-    /// download must not spend another's budget and truncate it for no reason
-    /// of its own.
+    /// The budget is the pass's, every mailbox counted, not each mailbox's
+    /// (PERSO-300): the mailboxes download one after another, and what the
+    /// budget is for is that one account's slow download does not hold up the
+    /// daemon's serial tick across accounts. A budget per mailbox let a pass
+    /// catching up six mailboxes spend six. The listings, which run in
+    /// parallel before any body, are not charged to it.
     pub fn with_body_budget(mut self, budget: Option<Duration>) -> Self {
         self.body_budget = budget;
         self
@@ -106,6 +119,8 @@ impl SyncBackend for ImapBackend<'_> {
     ) -> Vec<Result<MailboxListing>> {
         use futures::stream::StreamExt;
         self.passes.clear();
+        self.body_spent = Duration::ZERO;
+        self.chunks_asked = 0;
         let concurrency = self.config.fetch_concurrency.clamp(1, 8);
         let config = self.config;
         // One checkout before the fan-out (PERSO-296), so the mailboxes do not
@@ -173,8 +188,9 @@ impl SyncBackend for ImapBackend<'_> {
     /// out was left on some other one, and a mailbox renumbered since its
     /// listing fails the pass rather than download bodies under UIDs that now
     /// name other messages. The budget is asked before every chunk but the
-    /// first ([`stop_before_chunk`]), against the network time the mailbox has
-    /// spent, its listing included.
+    /// pass's first ([`stop_before_chunk`]), against the network time the
+    /// pass has spent on bodies across its mailboxes, so once it is spent the
+    /// mailbox in hand and every one after it end short.
     async fn next_batch(&mut self, index: usize) -> Result<BodyBatch> {
         let config = self.config;
         let budget = self.body_budget;
@@ -185,10 +201,10 @@ impl SyncBackend for ImapBackend<'_> {
             pass.session = None;
             return Ok(BodyBatch::Done { complete: true });
         }
-        if stop_before_chunk(pass.plan.asked, budget, pass.plan.spent) {
+        if stop_before_chunk(self.chunks_asked, budget, self.body_spent) {
             warn!(
-                "[sync] '{}': body fetch stopped at the {}s deadline after {}/{} new message(s); \
-                 the rest resume on the next pass",
+                "[sync] '{}': body fetch stopped at the account's {}s budget after {}/{} new \
+                 message(s); the rest resume on the next pass",
                 pass.plan.mailbox,
                 budget.map_or(0, |b| b.as_secs()),
                 pass.plan.handed,
@@ -199,8 +215,8 @@ impl SyncBackend for ImapBackend<'_> {
         }
         let started = Instant::now();
         let fetched = fetch_next_chunk(config, pass).await;
-        pass.plan.spent += started.elapsed();
-        pass.plan.asked += 1;
+        self.body_spent += started.elapsed();
+        self.chunks_asked += 1;
         match fetched {
             Ok(bodies) => {
                 pass.plan.handed += bodies.len();
@@ -270,10 +286,11 @@ fn copy_of(error: &anyhow::Error) -> anyhow::Error {
 /// `dry_run` fetches and counts what *would* be ingested without touching the
 /// store or the blob directory.
 ///
-/// `body_budget` bounds each mailbox's body download (#0113): a TUI tick passes
-/// the account's configured deadline so one slow mailbox cannot hold the tick,
-/// and `mp sync` passes `None`, because it is the explicit recovery path and a
-/// full sync must not be cut short.
+/// `body_budget` bounds the network time the pass spends on bodies, summed
+/// over its mailboxes ([`ImapBackend::with_body_budget`]). Its one caller,
+/// the daemon's guarded `mp sync` pass (`--mailbox`, `--dry-run`, or an
+/// account with no runtime), passes `None`; the runtime's tick builds its own
+/// backend with the configured budget.
 ///
 /// Since #0122 the pass runs under the per-account engine lock, so `Ok(None)`
 /// means another process is this account's engine and this call did nothing:
@@ -702,6 +719,149 @@ mod tests {
             held_bodies::peak()
         );
         assert_eq!(held_bodies::live(), 0, "no body outlives the pass");
+    }
+
+    /// PERSO-300: the body budget is the pass's, every mailbox counted. A
+    /// pass whose mailboxes each owe a chunk of slow bodies spends one budget
+    /// on them at most, plus the chunk that crossed it; the mailboxes
+    /// it did not reach close short with their arrival mark held, the prune
+    /// waits, and the next pass brings the rest in.
+    ///
+    /// With a budget per mailbox, each of the three would have downloaded its
+    /// chunk, three budgets' worth of time for a tick every other account
+    /// waits behind.
+    #[test]
+    fn a_pass_spends_one_body_budget_across_its_mailboxes() {
+        use std::time::Duration;
+
+        use crate::config::ImapConfig;
+        use crate::imap_client::fake_imap::{LoginPolicy, RejectingImapServer};
+        use crate::imap_client::fetch::BODY_CHUNK_SIZE;
+        use crate::ingest;
+        use crate::store::{BlobStore, Store};
+        use crate::sync::engine::{run_sync, SyncRun};
+        use crate::sync::{ObservationSink, SyncResult, SyncTarget};
+        use crate::types::MailboxRole;
+
+        let message = |folder: &str, uid: u32| {
+            let raw = format!(
+                "From: a@example.com\r\nTo: b@example.com\r\nSubject: {folder} {uid}\r\n\
+                 Message-ID: <{uid}@{folder}.example.com>\r\n\
+                 Date: Thu, 7 Aug 2025 10:00:00 +0000\r\n\r\n{folder} body {uid}\r\n"
+            );
+            (uid, raw.into_bytes())
+        };
+        let folders = ["INBOX", "Archive", "Sent"];
+        let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+        let fill = |top: u32| {
+            for folder in folders {
+                server.set_mail(
+                    folder,
+                    3,
+                    (1..=top).map(|uid| message(folder, uid)).collect(),
+                );
+            }
+        };
+        let config = ImapConfig {
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            username: "budget@example.com".into(),
+            password: "right".into(),
+            accept_invalid_certs: true,
+            fetch_concurrency: 4,
+            body_fetch_deadline_secs: 0,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(tmp.path().join("blobs"));
+        let targets = vec![
+            SyncTarget::new(MailboxRole::Inbox, "INBOX"),
+            SyncTarget::new(MailboxRole::Archive, "Archive"),
+            SyncTarget::new(MailboxRole::Sent, "Sent"),
+        ];
+        let pass = |budget: Option<Duration>| -> SyncResult {
+            futures::executor::block_on(run_sync(
+                &mut super::ImapBackend::new(&config).with_body_budget(budget),
+                &SyncRun {
+                    store: &store,
+                    blobs: &blobs,
+                    account: "acct",
+                    targets: &targets,
+                    limit: usize::MAX,
+                    dry_run: false,
+                    stop: None,
+                    observations: &ObservationSink::default(),
+                },
+                &mut crate::timing::TimingSpan::new("test"),
+            ))
+            .unwrap()
+        };
+        let held = |mailbox: &str| {
+            let mut uids: Vec<i64> = ingest::known_uids(&store, "acct", mailbox)
+                .unwrap()
+                .into_iter()
+                .collect();
+            uids.sort_unstable();
+            uids
+        };
+        let mark = |mailbox: &str| {
+            ingest::known_uids_with_cursor(&store, "acct", mailbox)
+                .unwrap()
+                .arrival_mark
+        };
+
+        // History: five messages in each mailbox, so what follows arrives
+        // above a recorded top.
+        fill(5);
+        assert_eq!(pass(None).saved, 15);
+
+        // A chunk of new mail in each mailbox, every chunk slower than half
+        // the budget, and a message gone from the inbox for the prune to want.
+        let top = 5 + BODY_CHUNK_SIZE as u32;
+        fill(top);
+        server.set_mail(
+            "INBOX",
+            3,
+            (2..=top).map(|uid| message("INBOX", uid)).collect(),
+        );
+        let delay = Duration::from_millis(100);
+        let budget = Duration::from_millis(150);
+        server.set_body_delay(delay);
+        let before = server.body_fetches();
+        let cut = pass(Some(budget));
+        let fetched = server.body_fetches() - before;
+
+        // Every fetch costs at least `delay`, and none is asked once `budget`
+        // is spent: two at most, the one that crossed it included.
+        let most = (budget.as_millis() / delay.as_millis()) as usize + 1;
+        assert!(
+            (1..=most).contains(&fetched),
+            "the pass asked for {fetched} chunk(s) of bodies, where one budget buys {most} at most"
+        );
+        assert_eq!(
+            held("sent"),
+            (1..=5).collect::<Vec<_>>(),
+            "the mailbox after the budget ran out downloads nothing"
+        );
+        assert_eq!(
+            mark("sent"),
+            Some(5),
+            "its mark holds below the arrivals it left on the server"
+        );
+        assert!(cut.bodies_truncated >= 1);
+        assert_eq!(cut.pruned, 0, "a pass the budget cut prunes nothing");
+        assert_eq!(cut.prunes_deferred, 1);
+        assert!(held("inbox").contains(&1));
+
+        // The next pass takes what the budget left, and the prune runs.
+        server.set_body_delay(Duration::ZERO);
+        let caught_up = pass(None);
+        assert_eq!(caught_up.pruned, 1);
+        assert_eq!(held("sent"), (1..=i64::from(top)).collect::<Vec<_>>());
+        assert_eq!(held("inbox"), (2..=i64::from(top)).collect::<Vec<_>>());
+        for mailbox in ["inbox", "archive", "sent"] {
+            assert_eq!(mark(mailbox), None, "{mailbox} caught up");
+        }
     }
 
     /// PERSO-185: the rename probe reads each gained folder's UIDVALIDITY and
