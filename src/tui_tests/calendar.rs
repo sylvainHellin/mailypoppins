@@ -584,13 +584,16 @@ fn an_invitation_the_account_organised_takes_e_and_d() {
     {
         event.cancelled = true;
     }
-    card_on(&mut app, 2, "PhD Kolloquium");
-    app.handle_key(key('D'));
-    assert!(matches!(app.overlay, Overlay::None));
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("PhD Kolloquium is cancelled already; an invitation mail stays on the agenda")
-    );
+    for k in ['D', 'E'] {
+        card_on(&mut app, 2, "PhD Kolloquium");
+        app.handle_key(key(k));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("PhD Kolloquium is cancelled already; an invitation mail stays on the agenda"),
+            "{k}"
+        );
+    }
 }
 
 /// `e` on the card of an invitation mail's event closes it and queues the

@@ -624,6 +624,10 @@ impl App {
                 return;
             }
         }
+        if let Some(why) = cancelled_invitation(event) {
+            self.set_status(why);
+            return;
+        }
         if event.cancelled {
             self.set_status(format!(
                 "{} was cancelled by its organizer; D deletes your copy",
@@ -811,12 +815,8 @@ impl App {
             self.set_status(why);
             return;
         }
-        // A cancelled invitation mail is a tombstone, which nothing deletes.
-        if event.id.starts_with(IMIP_EVENT_PREFIX) && event.cancelled {
-            self.set_status(format!(
-                "{} is cancelled already; an invitation mail stays on the agenda",
-                event.summary
-            ));
+        if let Some(why) = cancelled_invitation(event) {
+            self.set_status(why);
             return;
         }
         // Someone else's meeting is refused before any scope is asked.
@@ -874,6 +874,18 @@ impl App {
             self.open_rsvp_overlay_for(&event);
         }
     }
+}
+
+/// Why a cancelled invitation mail the account organised takes no change:
+/// it is a tombstone, which nothing deletes (PERSO-204); `None` for any
+/// other event.
+fn cancelled_invitation(event: &CalendarEvent) -> Option<String> {
+    (event.id.starts_with(IMIP_EVENT_PREFIX) && event.cancelled && event.is_organizer).then(|| {
+        format!(
+            "{} is cancelled already; an invitation mail stays on the agenda",
+            event.summary
+        )
+    })
 }
 
 /// Whether `D` on `event` cancels it (`true`: a meeting the user organizes,
