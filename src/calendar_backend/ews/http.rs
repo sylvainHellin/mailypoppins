@@ -667,9 +667,16 @@ async fn line(connection: &mut Connection) -> Result<String> {
 }
 
 /// Read one answer whole: its status line and headers, then its body by
-/// `Content-Length`, by chunks, or to the end of the connection. An interim
-/// `1xx` answer is skipped.
+/// `Content-Length`, by chunks, or to the end of the connection, up to
+/// [`MAX_BODY`] bytes ([`read_answer_within`]). An interim `1xx` answer is
+/// skipped.
 async fn read_answer(connection: &mut Connection) -> Result<Answer> {
+    read_answer_within(connection, MAX_BODY).await
+}
+
+/// [`read_answer`] with a body of at most `cap` bytes, a parameter so the
+/// tests reach the cap's boundary without allocating [`MAX_BODY`].
+async fn read_answer_within(connection: &mut Connection, cap: usize) -> Result<Answer> {
     loop {
         if connection.buffered.is_empty() && !fill(connection).await? {
             bail!("the Exchange server closed the connection before it answered");
@@ -711,22 +718,27 @@ async fn read_answer(connection: &mut Connection) -> Result<Answer> {
             || (version == "HTTP/1.0"
                 && !named("Connection").is_some_and(|value| value.contains("keep-alive")));
         let body = if named("Transfer-Encoding").is_some_and(|value| value.contains("chunked")) {
-            read_chunks(connection).await?
+            read_chunks(connection, cap).await?
         } else if let Some(length) = named("Content-Length") {
             let length: usize = length
                 .parse()
                 .map_err(|_| anyhow!("an unreadable Content-Length {length:?}"))?;
-            if length > MAX_BODY {
-                bail!("an answer of {length} bytes, over the {MAX_BODY} the transport reads");
+            if length > cap {
+                bail!("an answer of {length} bytes, over the {cap} the transport reads");
             }
             take(connection, length).await?
         } else if status == 204 || status == 304 {
             Vec::new()
         } else {
             close = true;
-            while fill(connection).await? {
-                if connection.buffered.len() > MAX_BODY {
-                    bail!("an answer over the {MAX_BODY} bytes the transport reads");
+            // Checked before each read too, as the head's reads may have
+            // buffered the whole body already.
+            loop {
+                if connection.buffered.len() > cap {
+                    bail!("an answer over the {cap} bytes the transport reads");
+                }
+                if !fill(connection).await? {
+                    break;
                 }
             }
             std::mem::take(&mut connection.buffered)
@@ -740,8 +752,8 @@ async fn read_answer(connection: &mut Connection) -> Result<Answer> {
     }
 }
 
-/// A chunked body, its trailers read and dropped.
-async fn read_chunks(connection: &mut Connection) -> Result<Vec<u8>> {
+/// A chunked body of at most `cap` bytes, its trailers read and dropped.
+async fn read_chunks(connection: &mut Connection, cap: usize) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     loop {
         let size_line = line(connection).await?;
@@ -754,8 +766,8 @@ async fn read_chunks(connection: &mut Connection) -> Result<Vec<u8>> {
         }
         // `body.len() + size` would overflow on a hostile size; `body` never
         // holds more than the cap, so the difference cannot.
-        if size > MAX_BODY - body.len() {
-            bail!("an answer over the {MAX_BODY} bytes the transport reads");
+        if size > cap - body.len() {
+            bail!("an answer over the {cap} bytes the transport reads");
         }
         body.extend(take(connection, size).await?);
         if !take(connection, 2).await?.eq(b"\r\n") {

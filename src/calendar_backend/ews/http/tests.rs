@@ -715,7 +715,18 @@ async fn an_accepted_ews_login_ends_the_row_of_its_password() {
     assert_eq!(login_gate::in_a_row_for_test(&login, "right"), 0);
 }
 
-/// The answer `raw` as a connection would read it.
+/// The answer `raw` as a connection would read it, its body capped at
+/// `cap` bytes.
+fn answer_within(raw: &[u8], cap: usize) -> Result<Answer> {
+    let mut connection = Connection {
+        stream: Box::new(futures::io::Cursor::new(raw.to_vec())),
+        buffered: Vec::new(),
+        last_used: std::time::Instant::now(),
+    };
+    futures::executor::block_on(read_answer_within(&mut connection, cap))
+}
+
+/// The answer `raw` as the transport reads it, capped at [`MAX_BODY`].
 fn answer_of(raw: &[u8]) -> Result<Answer> {
     let mut connection = Connection {
         stream: Box::new(futures::io::Cursor::new(raw.to_vec())),
@@ -729,7 +740,7 @@ fn answer_of(raw: &[u8]) -> Result<Answer> {
 /// read for it, where the sum of the body read and the size overflowed (a
 /// panic in a debug build, a read until the server closes in a release
 /// one); a Content-Length past the cap, or one no `usize` holds, is refused
-/// the same way.
+/// the same way. The transport's own cap is [`MAX_BODY`].
 #[test]
 fn a_hostile_body_size_is_refused_before_it_is_read() {
     let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
@@ -744,16 +755,76 @@ fn a_hostile_body_size_is_refused_before_it_is_read() {
         MAX_BODY
     );
     assert!(answer_of(past_cap.as_bytes()).is_err());
-    let at_cap = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
-                   1\r\na\r\n2\r\nbc\r\n0\r\n\r\n";
-    assert_eq!(answer_of(at_cap).unwrap().body, b"abc");
-    for length in [
-        format!("{}", MAX_BODY + 1),
-        "99999999999999999999999".to_string(),
+    let huge = "99999999999999999999999";
+    for (length, refusal) in [
+        (
+            format!("{}", MAX_BODY + 1),
+            format!(
+                "an answer of {} bytes, over the {MAX_BODY} the transport reads",
+                MAX_BODY + 1
+            ),
+        ),
+        (
+            huge.to_string(),
+            format!("an unreadable Content-Length {huge:?}"),
+        ),
     ] {
         let raw = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n");
-        assert!(answer_of(raw.as_bytes()).is_err(), "{length}");
+        let err = answer_of(raw.as_bytes()).err().expect("refused");
+        assert_eq!(err.to_string(), refusal, "{length}");
     }
+}
+
+/// The body cap's boundary on each way a body comes: a body of exactly the
+/// cap is read whole, one byte more is refused, by chunks (the last chunk
+/// crossing it), by Content-Length and to the end of the connection.
+#[test]
+fn a_body_of_the_cap_is_read_and_one_byte_more_is_refused() {
+    const CAP: usize = 16;
+    let refusal = format!("an answer over the {CAP} bytes the transport reads");
+    let chunked = |last: &str| {
+        format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+             a\r\n0123456789\r\n{:x}\r\n{last}\r\n0\r\n\r\n",
+            last.len()
+        )
+    };
+    let body = answer_within(chunked("abcdef").as_bytes(), CAP)
+        .unwrap()
+        .body;
+    assert_eq!(body, b"0123456789abcdef");
+    let err = answer_within(chunked("abcdefg").as_bytes(), CAP)
+        .err()
+        .expect("refused");
+    assert_eq!(err.to_string(), refusal);
+
+    let sized = |body: &str| {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let at_cap = "0123456789abcdef";
+    assert_eq!(
+        answer_within(sized(at_cap).as_bytes(), CAP).unwrap().body,
+        at_cap.as_bytes()
+    );
+    let err = answer_within(sized("0123456789abcdefg").as_bytes(), CAP)
+        .err()
+        .expect("refused");
+    assert_eq!(
+        err.to_string(),
+        format!("an answer of 17 bytes, over the {CAP} the transport reads")
+    );
+
+    let to_close = |body: &str| format!("HTTP/1.1 200 OK\r\n\r\n{body}");
+    let answer = answer_within(to_close(at_cap).as_bytes(), CAP).unwrap();
+    assert_eq!(answer.body, at_cap.as_bytes());
+    assert!(answer.close);
+    let err = answer_within(to_close("0123456789abcdefg").as_bytes(), CAP)
+        .err()
+        .expect("refused");
+    assert_eq!(err.to_string(), refusal);
 }
 
 /// The IMAP login of a fresh user whose password `wrong` the gate holds a
