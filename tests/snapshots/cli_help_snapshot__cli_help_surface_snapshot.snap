@@ -1478,15 +1478,23 @@ Options:
 $ mp outbox discard --help
 Drop a submission and release the message bytes it holds
 
+An invitation update or cancellation some attendee may already hold is filed in Sent first, locally at once and on the server with the next sync, so the agenda keeps that version.
+
 Usage: mp outbox discard [OPTIONS] <ID>
 
 Arguments:
-  <ID>  Outbox row id, as shown by `mp outbox list`
+  <ID>
+          Outbox row id, as shown by `mp outbox list`
 
 Options:
-  -A, --account <ACCOUNT>  Account to use
-      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
-  -h, --help               Print help
+  -A, --account <ACCOUNT>
+          Account to use
+
+      --profile <NAME>
+          Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 $ mp store --help
 Local store maintenance (retention garbage collection)

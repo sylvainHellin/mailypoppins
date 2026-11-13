@@ -732,6 +732,10 @@ enum OutboxAction {
         id: i64,
     },
     /// Drop a submission and release the message bytes it holds
+    ///
+    /// An invitation update or cancellation some attendee may already hold is
+    /// filed in Sent first, locally at once and on the server with the next
+    /// sync, so the agenda keeps that version.
     Discard {
         /// Outbox row id, as shown by `mp outbox list`
         id: i64,

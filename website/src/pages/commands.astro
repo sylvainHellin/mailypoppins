@@ -29,7 +29,7 @@ const draftCommands = [
   { command: 'mp send-approved [--all-accounts] [-y]', description: 'Send every approved draft of the account' },
   { command: 'mp outbox list [--json]', description: 'Show queued, retrying, failed and partly delivered submissions (--json prints them as JSON on stdout)' },
   { command: 'mp outbox retry <id>', description: 'Send a failed submission again' },
-  { command: 'mp outbox discard <id>', description: 'Drop a submission and release its bytes; an invitation update or cancellation some attendee may already hold (delivered to one, or sent with no verdict) is first filed in your local Sent mailbox, so the agenda keeps that version and your next change of the meeting builds on it' },
+  { command: 'mp outbox discard <id>', description: 'Drop a submission and release its bytes; an invitation update or cancellation some attendee may already hold (delivered to one, or sent with no verdict) is first filed in your local Sent mailbox, so the agenda keeps that version and your next change of the meeting builds on it, and is then filed in the Sent folder on your server by the next sync, out of the outbox list meanwhile, so a fresh store still has it' },
   { command: 'mp reply <selector> [--all] [--mailbox <name>] [-s <name>|--no-signature]', description: 'Create a reply draft and print its selector' },
   { command: 'mp forward <selector> [--mailbox <name>] [--as-attachment] [-s <name>|--no-signature]', description: 'Create a forward draft and print its selector; --as-attachment attaches the original as an .eml (message/rfc822, quoted thread and attachments inside) instead of carrying its attachments, under a body holding only the signature' },
 ];
