@@ -1027,8 +1027,8 @@ Examples:
         #[arg(long)]
         json: bool,
     },
-    /// Change an event: only the fields you name change, and the server
-    /// sends the attendees an update
+    /// Change an event: only the fields you name change, and the attendees
+    /// get an update
     #[command(after_help = "\
 WHEN takes the forms of mp event create. A new --start keeps the event's
 length unless --end or --duration names a new one, and an --end or a
@@ -1045,6 +1045,12 @@ An occurrence of a series needs --scope: occurrence changes it alone, series
 changes the whole series, its times read against the series' first
 occurrence; a series' new time or --repeat resets the occurrences changed on
 their own. --repeat takes the flags of mp event create, with --scope series.
+
+An invitation you sent by mail (imip:<row_id>, organised by the account) is
+updated by mail: mp re-sends it with the same UID at a higher SEQUENCE to the
+attendees of the new list, and a cancellation to the ones --to drops. Mail
+carries the summary, the time, the location, the description and the
+attendees; a repeating invitation is cancelled rather than changed.
 
 Examples:
   mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
@@ -1070,7 +1076,18 @@ Examples:
 A meeting that invites nobody is deleted with mp event delete, and a meeting
 someone else organizes is declined with mp event respond EVENT decline. An
 occurrence of a series needs --scope: occurrence cancels it alone, series
-cancels the whole series.")]
+cancels the whole series.
+
+An invitation you sent by mail (imip:<row_id>) is cancelled by mail: every
+attendee gets a METHOD:CANCEL, and the event stays on the agenda, cancelled.
+One occurrence of such a series is named by its start with --occurrence, read
+in the series' own zone (2026-12-21T09:00), or by its day for an all-day
+series (2026-12-21).
+
+Examples:
+  mp event cancel AAMkADev1 --comment 'Postponed to January' -A evoqs
+  mp event cancel imip:42 -A perso
+  mp event cancel imip:43 --occurrence 2026-12-21T09:00 -A perso")]
     Cancel {
         /// The event id, as `mp calendar view --json` prints it
         #[arg(value_name = "EVENT")]
@@ -1081,6 +1098,10 @@ cancels the whole series.")]
         /// A message for the attendees, sent with the cancellation
         #[arg(long, value_name = "TEXT")]
         comment: Option<String>,
+        /// The start of the one occurrence of an invitation mail's series to
+        /// cancel (imip:<row_id>)
+        #[arg(long, value_name = "WHEN")]
+        occurrence: Option<String>,
         /// Print the settled `event.cancel` result as JSON on stdout
         #[arg(long)]
         json: bool,
@@ -5125,21 +5146,13 @@ async fn series_first_day(
 
 /// `mp event cancel`: the meeting cancelled, and who was told.
 async fn routed_event_cancel(
-    account: &str,
-    event: &str,
-    scope: Option<EventScopeArg>,
-    comment: Option<String>,
+    cancel: mp_protocol::calendar::EventCancelParams,
     json: bool,
 ) -> Result<()> {
-    let params = serde_json::to_value(mp_protocol::calendar::EventCancelParams {
-        account: account.to_string(),
-        event: event.to_string(),
-        scope: scope.map(|scope| scope.word().to_string()),
-        comment,
-        occurrence: None,
-    })?;
+    let account = cancel.account.clone();
+    let params = serde_json::to_value(cancel)?;
     let mut connection = operation_session().await;
-    let result = run_admin_operation(&mut connection, "event.cancel", params, account).await?;
+    let result = run_admin_operation(&mut connection, "event.cancel", params, &account).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
@@ -7156,9 +7169,17 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
                     event,
                     scope,
                     comment,
+                    occurrence,
                     json,
                 } => {
-                    routed_event_cancel(&account, &event, scope, comment, json).await?;
+                    let cancel = mp_protocol::calendar::EventCancelParams {
+                        account,
+                        event,
+                        scope: scope.map(|scope| scope.word().to_string()),
+                        comment,
+                        occurrence,
+                    };
+                    routed_event_cancel(cancel, json).await?;
                 }
                 EventAction::Delete { event, scope, json } => {
                     routed_event_delete(&account, &event, scope, json).await?;

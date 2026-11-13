@@ -1127,7 +1127,7 @@ Usage: mp event [OPTIONS] <COMMAND>
 
 Commands:
   create   Create an event in the account's server calendar; the server sends the invitations
-  update   Change an event: only the fields you name change, and the server sends the attendees an update
+  update   Change an event: only the fields you name change, and the attendees get an update
   cancel   Cancel a meeting you organize: every attendee gets the cancellation
   delete   Delete an event that tells nobody: one without attendees, or your copy of a meeting its organizer cancelled
   show     Show one event: when, where, organizer, attendees, your answer
@@ -1199,7 +1199,7 @@ Examples:
   mp event create -A evoqs --summary Review --start 2026-11-26T14:00 --duration 1h --repeat monthly --monthly-by weekday --count 6
 
 $ mp event update --help
-Change an event: only the fields you name change, and the server sends the attendees an update
+Change an event: only the fields you name change, and the attendees get an update
 
 Usage: mp event update [OPTIONS] <EVENT>
 
@@ -1254,6 +1254,12 @@ changes the whole series, its times read against the series' first
 occurrence; a series' new time or --repeat resets the occurrences changed on
 their own. --repeat takes the flags of mp event create, with --scope series.
 
+An invitation you sent by mail (imip:<row_id>, organised by the account) is
+updated by mail: mp re-sends it with the same UID at a higher SEQUENCE to the
+attendees of the new list, and a cancellation to the ones --to drops. Mail
+carries the summary, the time, the location, the description and the
+attendees; a repeating invitation is cancelled rather than changed.
+
 Examples:
   mp event update AAMkADev1 --start 2026-11-18T15:00 -A evoqs
   mp event update AAMkADev1 --summary 'Budget, final' --clear-location -A evoqs
@@ -1271,6 +1277,7 @@ Arguments:
 Options:
       --scope <SCOPE>      What a cancel of an occurrence of a series reaches [possible values: occurrence, series]
       --comment <TEXT>     A message for the attendees, sent with the cancellation
+      --occurrence <WHEN>  The start of the one occurrence of an invitation mail's series to cancel (imip:<row_id>)
       --json               Print the settled `event.cancel` result as JSON on stdout
   -A, --account <ACCOUNT>  Account to use
       --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
@@ -1280,6 +1287,17 @@ A meeting that invites nobody is deleted with mp event delete, and a meeting
 someone else organizes is declined with mp event respond EVENT decline. An
 occurrence of a series needs --scope: occurrence cancels it alone, series
 cancels the whole series.
+
+An invitation you sent by mail (imip:<row_id>) is cancelled by mail: every
+attendee gets a METHOD:CANCEL, and the event stays on the agenda, cancelled.
+One occurrence of such a series is named by its start with --occurrence, read
+in the series' own zone (2026-12-21T09:00), or by its day for an all-day
+series (2026-12-21).
+
+Examples:
+  mp event cancel AAMkADev1 --comment 'Postponed to January' -A evoqs
+  mp event cancel imip:42 -A perso
+  mp event cancel imip:43 --occurrence 2026-12-21T09:00 -A perso
 
 $ mp event delete --help
 Delete an event that tells nobody: one without attendees, or your copy of a meeting its organizer cancelled

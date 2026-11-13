@@ -168,9 +168,22 @@ impl Slice {
 
     /// A slice whose SMTP fake refuses `rejected` for good.
     fn start_rejecting(rejected: &[(&str, &str)]) -> Slice {
+        Slice::start_with(rejected, seed_outlook)
+    }
+
+    /// The slice with the account without a backend also holding the sent
+    /// copies of two invitations it organised (PERSO-204).
+    fn start_organised() -> Slice {
+        Slice::start_with(&[], |root| {
+            seed_outlook(root);
+            support::calendar_fixture::seed_organised(root);
+        })
+    }
+
+    fn start_with(rejected: &[(&str, &str)], seed_root: impl FnOnce(&Path)) -> Slice {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tempfile::tempdir().unwrap();
-        seed_outlook(tmp.path());
+        seed_root(tmp.path());
         let events = [weekly(), vec![proposed(), proposed_occurrence()]].concat();
         let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, events);
         let transport =
@@ -1218,4 +1231,76 @@ fn a_series_through_the_cli() {
         "event", "delete", &solo, "-A", SERVER, "--scope", "series", "--json",
     ]);
     assert_eq!(deleted["scope"], "series");
+}
+
+/// The `imip:` id of the sent invitation whose `Message-ID` holds `needle`.
+fn sent_row(root: &Path, needle: &str) -> String {
+    let id: i64 = read_fixture::store(root, IMIP)
+        .conn()
+        .query_row(
+            "SELECT id FROM messages WHERE message_id LIKE ?1",
+            [format!("%{needle}%")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    format!("imip:{id}")
+}
+
+/// `mp event update` and `mp event cancel` reach an invitation the account
+/// organised by mail (PERSO-204): the update prints the new version, a
+/// cancel names who was told, and `--occurrence` cancels one occurrence of
+/// a series.
+#[test]
+fn an_invitation_the_account_organised_changes_through_the_cli() {
+    let slice = Slice::start_organised();
+    let meeting = sent_row(slice.root(), "budget-review");
+    let series = sent_row(slice.root(), "own-weekly");
+
+    let updated = slice.json(&[
+        "event",
+        "update",
+        &meeting,
+        "--location",
+        "Room 1.01",
+        "-A",
+        IMIP,
+        "--json",
+    ]);
+    assert_eq!(updated["event"]["location"], "Room 1.01", "{updated}");
+    let current = updated["event"]["id"].as_str().unwrap().to_string();
+    assert_ne!(current, meeting, "the update's sent copy is the event now");
+
+    let unsent = slice.err(&["event", "update", &current, "--reminder", "10", "-A", IMIP]);
+    assert!(unsent.contains("an invitation mail carries"), "{unsent}");
+
+    let occurrence = at(13, 8).to_rfc3339();
+    let one = slice.ok(&[
+        "event",
+        "cancel",
+        &series,
+        "--occurrence",
+        &occurrence,
+        "-A",
+        IMIP,
+    ]);
+    assert_eq!(
+        one.trim(),
+        format!("\u{2713} Cancelled the occurrence {series}\n  told: ada@example.com")
+    );
+
+    let all = slice.ok(&[
+        "event",
+        "cancel",
+        &current,
+        "--comment",
+        "Numbers not in yet",
+        "-A",
+        IMIP,
+    ]);
+    assert_eq!(
+        all.trim(),
+        format!("\u{2713} Cancelled {current}\n  told: ada@example.com, bob@example.com")
+    );
+    let again = slice.err(&["event", "cancel", &current, "-A", IMIP]);
+    assert!(again.contains("cancelled already"), "{again}");
 }
