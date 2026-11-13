@@ -29,11 +29,12 @@
 //!                             settles EventRespondResult
 //! event.update            {account, event, scope?, fields: EventPatchParams}
 //!                             -> {operation_id}
-//!                             settles EventUpdateResult {account, event, scope?, refused?}
+//!                             settles EventUpdateResult {account, event, scope?, refused?,
+//!                             queued?, parked?}
 //! event.cancel            {account, event, scope?, comment?, occurrence?}
 //!                             -> {operation_id}
 //!                             settles EventCancelResult {account, event, notified, scope?,
-//!                             refused?}
+//!                             refused?, queued?, parked?}
 //! event.delete            {account, event, scope?}
 //!                             -> {operation_id}
 //!                             settles EventDeleteResult {account, event, scope?}
@@ -1787,6 +1788,8 @@ fn settle_removal(handle: &OperationHandle, account: String, event: String, remo
                 notified: removal.notified,
                 scope: removal.scope,
                 refused: Vec::new(),
+                queued: Vec::new(),
+                parked: Vec::new(),
             },
         );
     } else {
@@ -1943,6 +1946,8 @@ async fn change(work: ChangeWork, handle: OperationHandle) {
                         event,
                         scope: scope_word,
                         refused: Vec::new(),
+                        queued: Vec::new(),
+                        parked: Vec::new(),
                     },
                 ),
                 Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
@@ -2338,7 +2343,7 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
             return Ok(None);
         };
         let event = match &update {
-            Some(version) if !sent.delivered.is_empty() => {
+            Some(version) if !sent.change.told.is_empty() => {
                 Some(sent_version(&account, row_id, version)?)
             }
             _ => None,
@@ -2356,19 +2361,23 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                 handle.announce(super::contact::contact_changed(&name, contacts));
             }
             handle.announce(calendar_changed(&name));
-            if sent.delivered.is_empty() {
+            if sent.change.told.is_empty() {
                 return handle.fail(DomainError::internal(unreached(&name, &sent)));
             }
             let ItipSent {
-                delivered,
-                mut refused,
-                dropped,
-                ..
+                change, dropped, ..
             } = sent;
-            // A cancellation that waits in the outbox has not reached them
-            // yet, which the result names as it names every refusal.
+            // Each recipient a message did not reach yet under what became
+            // of it: refused for good, waiting in the outbox, or parked.
+            let Reached {
+                told: notified,
+                mut refused,
+                mut queued,
+                mut parked,
+            } = change;
             refused.extend(dropped.refused);
-            refused.extend(dropped.queued);
+            queued.extend(dropped.queued);
+            parked.extend(dropped.parked);
             match event {
                 Some(event) => settle(
                     &handle,
@@ -2377,6 +2386,8 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                         event,
                         scope: None,
                         refused,
+                        queued,
+                        parked,
                     },
                 ),
                 None => settle(
@@ -2384,9 +2395,11 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
                     EventCancelResult {
                         account: name,
                         event: named,
-                        notified: delivered,
+                        notified,
                         scope,
                         refused,
+                        queued,
+                        parked,
                     },
                 ),
             }
@@ -2410,11 +2423,14 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let (for_good, waiting): (Vec<RecipientOutcome>, Vec<RecipientOutcome>) = sent
-        .refused
+    let for_good = &sent.change.refused;
+    let waiting: Vec<RecipientOutcome> = sent
+        .change
+        .queued
         .iter()
+        .chain(&sent.change.parked)
         .cloned()
-        .partition(|recipient| sent.rejected.contains(&recipient.address));
+        .collect();
     let held = |lead: &str, detail: &Option<String>| match (waiting.is_empty(), detail) {
         (false, _) => format!(": the server {lead} {}", listed(&waiting)),
         (true, Some(detail)) => format!(": {detail}"),
@@ -2425,23 +2441,27 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
     } else {
         format!(
             "; the server refused it for good for {}, who will not get it",
-            listed(&for_good)
+            listed(for_good)
         )
     };
     let mut told = Vec::new();
-    if !sent.dropped.told.is_empty() {
-        told.push(format!("told {}", sent.dropped.told.join(", ")));
+    let dropped = &sent.dropped;
+    if !dropped.told.is_empty() {
+        told.push(format!("told {}", dropped.told.join(", ")));
     }
-    if !sent.dropped.refused.is_empty() {
-        told.push(format!(
-            "was not taken for {}",
-            listed(&sent.dropped.refused)
-        ));
+    if !dropped.refused.is_empty() {
+        told.push(format!("was not taken for {}", listed(&dropped.refused)));
     }
-    if !sent.dropped.queued.is_empty() {
+    if !dropped.queued.is_empty() {
         told.push(format!(
             "waits in the outbox for {}",
-            listed(&sent.dropped.queued)
+            listed(&dropped.queued)
+        ));
+    }
+    if !dropped.parked.is_empty() {
+        told.push(format!(
+            "is parked in the outbox for {}, which mp does not send again on its own",
+            listed(&dropped.parked)
         ));
     }
     let dropped = if told.is_empty() {
@@ -2468,10 +2488,10 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
         Reach::Delivered | Reach::Nowhere => format!(
             "No attendee accepted the message{}; nothing else was sent, and mp outbox list \
              -A {name} shows it",
-            if sent.refused.is_empty() {
+            if sent.change.unreached().is_empty() {
                 String::new()
             } else {
-                format!(": the server refused {}", listed(&sent.refused))
+                format!(": the server refused {}", listed(&sent.change.unreached()))
             }
         ),
     }
@@ -2529,7 +2549,8 @@ impl Reach {
 }
 
 /// Whether the outbox row that queued `built` waits for a later pass, still
-/// pending and never handed to the server; `None` when `built` has no row.
+/// pending and never handed to the server, `false` when it is parked for a
+/// human; `None` when `built` has no row.
 fn still_pending(account: &AccountConfig, built: &crate::send::BuiltMessage) -> Option<bool> {
     let store = Store::open(crate::config::store_path(&account.name)).ok()?;
     let row =
@@ -2539,32 +2560,116 @@ fn still_pending(account: &AccountConfig, built: &crate::send::BuiltMessage) -> 
     )
 }
 
-/// What the cancellation of the attendees an update drops did.
+/// What messages of an organizer's change did, recipient by recipient, as
+/// `EventUpdateResult` and `EventCancelResult` name them.
 #[derive(Default)]
-struct Dropped {
+struct Reached {
     /// The addresses that accepted it.
     told: Vec<String>,
-    /// The recipients it did not reach, with why.
+    /// The recipients it will never reach, with why: the server refused
+    /// them for good (a 5xx), or no outbox row holds it for a later attempt.
     refused: Vec<RecipientOutcome>,
     /// The recipients it has not reached yet, with why: the server deferred
     /// them, or the transport failed before any took it, and its outbox row
     /// goes out to them on a later pass.
     queued: Vec<RecipientOutcome>,
+    /// The recipients its outbox row is parked for, with why: a recipient
+    /// got no verdict and may hold it, so the row waits for a human
+    /// (`mp outbox retry` or `discard`) and is never sent again on its own.
+    parked: Vec<RecipientOutcome>,
+}
+
+impl Reached {
+    /// What a submission that came back with its verdicts did: a refusal
+    /// for good is `refused`, and every other recipient not reached waits
+    /// on its row, `queued` while it is pending and `parked` once it is
+    /// failed; with no row at all, nothing will try them again.
+    fn of(report: &crate::send::SendReport) -> Self {
+        use crate::outbox::OutboxState;
+        let mut reached = Reached::default();
+        for result in &report.send_result.results {
+            if result.success {
+                reached.told.push(result.address.clone());
+                continue;
+            }
+            let outcome = unreached_outcome(result);
+            match (result.verdict, report.state) {
+                (crate::send::RecipientVerdict::Rejected, _) | (_, None) => {
+                    reached.refused.push(outcome)
+                }
+                (_, Some(OutboxState::PendingSend)) => reached.queued.push(outcome),
+                (_, Some(_)) => reached.parked.push(outcome),
+            }
+        }
+        reached
+    }
+
+    /// What a submission of `message` that failed with `error` did, read
+    /// from the outbox row of `built` as [`Reach::after`] reads the
+    /// change's: every recipient `queued` when the row is still pending,
+    /// `parked` when it is not, and `refused` when there is none.
+    fn after(
+        account: &AccountConfig,
+        message: &crate::invite::ItipMessage,
+        built: &crate::send::BuiltMessage,
+        error: &anyhow::Error,
+    ) -> Self {
+        let recipients = message
+            .to
+            .iter()
+            .flat_map(|to| to.split(','))
+            .map(str::trim)
+            .filter(|address| !address.is_empty())
+            .map(|address| RecipientOutcome {
+                address: address.to_string(),
+                role: "To".to_string(),
+                delivered: false,
+                error: Some(format!("{error:#}")),
+            })
+            .collect();
+        match still_pending(account, built) {
+            Some(true) => Reached {
+                queued: recipients,
+                ..Reached::default()
+            },
+            Some(false) => Reached {
+                parked: recipients,
+                ..Reached::default()
+            },
+            None => Reached {
+                refused: recipients,
+                ..Reached::default()
+            },
+        }
+    }
+
+    /// Every recipient it did not reach, refused, queued or parked.
+    fn unreached(&self) -> Vec<RecipientOutcome> {
+        self.refused
+            .iter()
+            .chain(&self.queued)
+            .chain(&self.parked)
+            .cloned()
+            .collect()
+    }
+
+    /// Adds what another message did.
+    fn extend(&mut self, other: Reached) {
+        self.told.extend(other.told);
+        self.refused.extend(other.refused);
+        self.queued.extend(other.queued);
+        self.parked.extend(other.parked);
+    }
 }
 
 /// What the messages of one organizer's change did.
 struct ItipSent {
-    /// The addresses that accepted the first message, the change itself.
-    delivered: Vec<String>,
+    /// What the first message, the change itself, did.
+    change: Reached,
     /// Where the change itself stands.
     reach: Reach,
-    /// The recipients the change itself did not reach, with why.
-    refused: Vec<RecipientOutcome>,
-    /// The addresses among `refused` the server refused for good (a 5xx),
-    /// which no later pass of the outbox reaches.
-    rejected: Vec<String>,
     /// What the cancellation of the attendees an update drops did.
-    dropped: Dropped,
+    dropped: Reached,
     /// How many contacts the index holds once the recipients were counted.
     contacts: Option<usize>,
 }
@@ -2594,7 +2699,8 @@ struct ItipSent {
 /// `UID` with no final verdict ([`crate::invite::unsettled_change`]), and
 /// the next change is built on the filed version, above every `SEQUENCE`
 /// sent. A later message the transport could not take at all leaves its
-/// recipients refused with the reason.
+/// recipients queued, parked or refused with the reason, as its outbox row
+/// holds them ([`Reached::after`]).
 async fn send_itip(
     account: &AccountConfig,
     messages: &[crate::invite::ItipMessage],
@@ -2615,111 +2721,39 @@ async fn send_itip(
     if !commit_point(method, token).await {
         return Ok(None);
     }
-    let (delivered, reach, refused, rejected) =
-        match crate::send::send_durably(change, account, &smtp).await {
-            Ok(report) => (
-                delivered_of(&report),
-                Reach::of(&report),
-                refused_of(&report),
-                rejected_of(&report),
-            ),
-            Err(e) => match Reach::after(account, change, &e) {
-                Some(reach) => (Vec::new(), reach, Vec::new(), Vec::new()),
-                None => return Err(e),
-            },
-        };
-    let mut dropped = Dropped::default();
+    let (change_reached, reach) = match crate::send::send_durably(change, account, &smtp).await {
+        Ok(report) => (Reached::of(&report), Reach::of(&report)),
+        Err(e) => match Reach::after(account, change, &e) {
+            Some(reach) => (Reached::default(), reach),
+            None => return Err(e),
+        },
+    };
+    let mut dropped = Reached::default();
     if !matches!(reach, Reach::Nowhere) {
         for (message, follow) in messages.iter().skip(1).zip(rest) {
-            match crate::send::send_durably(follow, account, &smtp).await {
-                Ok(report) => {
-                    dropped.told.extend(delivered_of(&report));
-                    // A row still pending submits its deferred recipients
-                    // again on a later pass; the rest were refused.
-                    let pending = report.state == Some(crate::outbox::OutboxState::PendingSend);
-                    for result in report.send_result.results.iter().filter(|r| !r.success) {
-                        if pending && result.verdict == crate::send::RecipientVerdict::Retryable {
-                            dropped.queued.push(unreached_outcome(result));
-                        } else {
-                            dropped.refused.push(unreached_outcome(result));
-                        }
-                    }
-                }
-                Err(e) => {
-                    let recipients = message
-                        .to
-                        .iter()
-                        .flat_map(|to| to.split(','))
-                        .map(str::trim)
-                        .filter(|address| !address.is_empty())
-                        .map(|address| RecipientOutcome {
-                            address: address.to_string(),
-                            role: "To".to_string(),
-                            delivered: false,
-                            error: Some(format!("{e:#}")),
-                        });
-                    // Read back as the change's own row is: one still
-                    // pending goes out on a later pass.
-                    if still_pending(account, follow) == Some(true) {
-                        dropped.queued.extend(recipients);
-                    } else {
-                        dropped.refused.extend(recipients);
-                    }
-                }
-            }
+            dropped.extend(
+                match crate::send::send_durably(follow, account, &smtp).await {
+                    Ok(report) => Reached::of(&report),
+                    Err(e) => Reached::after(account, message, follow, &e),
+                },
+            );
         }
     }
-    let contacts = if delivered.is_empty() && dropped.told.is_empty() {
+    let contacts = if change_reached.told.is_empty() && dropped.told.is_empty() {
         None
     } else {
         crate::contacts::hooks::bump_owed_sends(account)
     };
     Ok(Some(ItipSent {
-        delivered,
+        change: change_reached,
         reach,
-        refused,
-        rejected,
         dropped,
         contacts,
     }))
 }
 
-/// The addresses one submission's server refused for good (a 5xx).
-fn rejected_of(report: &crate::send::SendReport) -> Vec<String> {
-    report
-        .send_result
-        .results
-        .iter()
-        .filter(|result| result.verdict == crate::send::RecipientVerdict::Rejected)
-        .map(|result| result.address.clone())
-        .collect()
-}
-
-/// The addresses that accepted one submission.
-fn delivered_of(report: &crate::send::SendReport) -> Vec<String> {
-    report
-        .send_result
-        .results
-        .iter()
-        .filter(|result| result.success)
-        .map(|result| result.address.clone())
-        .collect()
-}
-
-/// The recipients one submission did not reach, with the reason the server
-/// gave, as `send.invite` names them.
-fn refused_of(report: &crate::send::SendReport) -> Vec<RecipientOutcome> {
-    report
-        .send_result
-        .results
-        .iter()
-        .filter(|result| !result.success)
-        .map(unreached_outcome)
-        .collect()
-}
-
 /// One recipient a submission did not reach, with the reason the server
-/// gave.
+/// gave, as `send.invite` names them.
 fn unreached_outcome(result: &crate::send::RecipientResult) -> RecipientOutcome {
     RecipientOutcome {
         address: result.address.clone(),

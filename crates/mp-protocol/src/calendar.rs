@@ -872,13 +872,30 @@ pub struct EventUpdateResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub scope: Option<String>,
-    /// The recipients the server refused a message of the change for, with
-    /// the reason it gave, as `send.invite`'s `recipients` name them: an
-    /// invitation mail's attendees an update or a cancellation did not
-    /// reach. Absent when none was refused, and on a server event, whose
-    /// server tells the attendees.
+    /// The recipients the server refused a message of the change for good
+    /// (a 5xx), or that no outbox row holds for a later attempt, with the
+    /// reason, as `send.invite`'s `recipients` name them: an invitation
+    /// mail's attendees an update or a cancellation will never reach.
+    /// Absent when there is none, and on a server event, whose server tells
+    /// the attendees.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<crate::send::RecipientOutcome>,
+    /// The recipients a message of the change waits in the outbox for, with
+    /// the reason it did not reach them yet: the server deferred them (a
+    /// 4xx) or the transport failed before any took it, and the outbox
+    /// sends it to them on its own with a later sync. Absent when there is
+    /// none; a client that reads only `refused` does not show them, and
+    /// `send.outbox_list` still lists their row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<crate::send::RecipientOutcome>,
+    /// The recipients a message of the change is parked in the outbox for,
+    /// with the reason: the server gave no verdict for one of them, who may
+    /// hold it, so the outbox does not send it again on its own and waits
+    /// for `send.outbox_retry` or `send.outbox_discard`. Absent when there
+    /// is none; a client that reads only `refused` does not show them, and
+    /// `send.outbox_list` still lists their row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<crate::send::RecipientOutcome>,
 }
 
 /// The `params` of `event.cancel`.
@@ -919,13 +936,30 @@ pub struct EventCancelResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub scope: Option<String>,
-    /// The recipients the server refused a message of the change for, with
-    /// the reason it gave, as `send.invite`'s `recipients` name them: an
-    /// invitation mail's attendees an update or a cancellation did not
-    /// reach. Absent when none was refused, and on a server event, whose
-    /// server tells the attendees.
+    /// The recipients the server refused a message of the change for good
+    /// (a 5xx), or that no outbox row holds for a later attempt, with the
+    /// reason, as `send.invite`'s `recipients` name them: an invitation
+    /// mail's attendees an update or a cancellation will never reach.
+    /// Absent when there is none, and on a server event, whose server tells
+    /// the attendees.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<crate::send::RecipientOutcome>,
+    /// The recipients a message of the change waits in the outbox for, with
+    /// the reason it did not reach them yet: the server deferred them (a
+    /// 4xx) or the transport failed before any took it, and the outbox
+    /// sends it to them on its own with a later sync. Absent when there is
+    /// none; a client that reads only `refused` does not show them, and
+    /// `send.outbox_list` still lists their row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<crate::send::RecipientOutcome>,
+    /// The recipients a message of the change is parked in the outbox for,
+    /// with the reason: the server gave no verdict for one of them, who may
+    /// hold it, so the outbox does not send it again on its own and waits
+    /// for `send.outbox_retry` or `send.outbox_discard`. Absent when there
+    /// is none; a client that reads only `refused` does not show them, and
+    /// `send.outbox_list` still lists their row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<crate::send::RecipientOutcome>,
 }
 
 /// The `params` of `event.delete`.

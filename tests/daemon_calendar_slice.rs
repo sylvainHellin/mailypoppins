@@ -3191,3 +3191,103 @@ async fn an_update_names_the_attendees_the_server_refused() {
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(now["cancelled"], false, "{now}");
 }
+
+/// An update that reached the attendees it keeps settles with each
+/// recipient it did not reach yet under what became of them: the server
+/// refused Cy for good (`refused`), deferred the cancellation of Bob, which
+/// waits in the outbox for a later pass (`queued`), and nothing else.
+#[tokio::test]
+async fn a_settled_update_names_who_waits_in_the_outbox_apart_from_who_was_refused() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(
+        json!({"log": log.to_string_lossy(),
+               "reject": {"cy@example.com": "550 no such user"},
+               "defer": {"bob@example.com": "451 4.7.1 try again later"}})
+        .to_string(),
+    );
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "cy@example.com"}]}}),
+    )
+    .await;
+    let result = succeeded(&status);
+    assert_eq!(
+        result["refused"],
+        json!([{"address": "cy@example.com", "role": "To", "delivered": false,
+                "error": "550 no such user"}]),
+        "{result}"
+    );
+    assert_eq!(
+        result["queued"],
+        json!([{"address": "bob@example.com", "role": "To", "delivered": false,
+                "error": "451 4.7.1 try again later"}]),
+        "{result}"
+    );
+    assert!(result.get("parked").is_none(), "{result}");
+    assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 1);
+}
+
+/// A cancellation the server gave no verdict for is parked in the outbox
+/// for a human, who may find it arrived: the settled update names Bob under
+/// `parked`, never as refused for good nor as going out on its own.
+#[tokio::test]
+async fn a_settled_update_names_who_is_parked_in_the_outbox() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_unconfirming(
+        &log,
+        &[("bob@example.com", send_fixture::AMBIGUOUS)],
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"attendees": [{"email": "ada@example.com"}]}}),
+    )
+    .await;
+    let result = succeeded(&status);
+    assert_eq!(
+        result["parked"],
+        json!([{"address": "bob@example.com", "role": "To", "delivered": false,
+                "error": send_fixture::AMBIGUOUS}]),
+        "{result}"
+    );
+    assert!(result.get("refused").is_none(), "{result}");
+    assert!(result.get("queued").is_none(), "{result}");
+}
+
+/// A cancellation some attendees' server deferred settles with them under
+/// `queued` and the others under `notified`.
+#[tokio::test]
+async fn a_settled_cancel_names_who_waits_in_the_outbox() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
+        &log,
+        &[("bob@example.com", "451 4.7.1 try again later")],
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": own["id"]}),
+    )
+    .await;
+    let result = succeeded(&status);
+    assert_eq!(result["notified"], json!(["ada@example.com"]), "{result}");
+    assert_eq!(
+        result["queued"],
+        json!([{"address": "bob@example.com", "role": "To", "delivered": false,
+                "error": "451 4.7.1 try again later"}]),
+        "{result}"
+    );
+    assert!(result.get("refused").is_none(), "{result}");
+}
