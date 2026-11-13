@@ -53,6 +53,7 @@
 
 pub mod fetch;
 mod freebusy;
+pub mod http;
 pub mod ntlm;
 pub mod parse;
 mod write;
