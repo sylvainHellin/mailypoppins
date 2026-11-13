@@ -274,8 +274,8 @@ pub async fn run_sync_guarded_at(
 /// arrival mark holds the prune gate shut over what it did not reach. A pass
 /// that stops skips the prune pass altogether: it has not ingested every
 /// target, so the coverage gate would refuse it anyway.
-pub async fn run_sync(
-    backend: &mut impl SyncBackend,
+pub async fn run_sync<B: SyncBackend>(
+    backend: &mut B,
     run: &SyncRun<'_>,
     span: &mut TimingSpan,
 ) -> Result<SyncResult> {
@@ -322,16 +322,12 @@ pub async fn run_sync(
     let departures = super::departures::Watch::open(store, account)?;
     let mut knowns = Vec::with_capacity(targets.len());
     for target in targets {
-        knowns.push(ingest::known_uids_with_cursor(
-            store,
-            account,
-            target.role.as_str(),
-        )?);
+        knowns.push(B::known(store, account, target)?);
     }
 
     // Phase 2: the listings. One per target, in target order, whatever order
     // the backend actually listed them in (see [`SyncBackend`]).
-    let listings = backend.list_targets(targets, limit, knowns).await;
+    let listings = backend.list_targets(targets, limit, knowns, stop).await;
     span.mark("list");
 
     // Phase 3: download and ingest serially, in target order.
@@ -1043,11 +1039,22 @@ mod tests {
     }
 
     impl SyncBackend for FakeBackend {
+        type Known = crate::ingest::KnownUids;
+
+        fn known(
+            store: &Store,
+            account: &str,
+            target: &SyncTarget,
+        ) -> Result<crate::ingest::KnownUids> {
+            ingest::known_uids_with_cursor(store, account, target.role.as_str())
+        }
+
         async fn list_targets(
             &mut self,
             targets: &[SyncTarget],
             limit: usize,
             knowns: Vec<crate::ingest::KnownUids>,
+            _stop: Option<&Stop>,
         ) -> Vec<Result<MailboxListing>> {
             if let Some(during_fetch) = self.during_fetch.take() {
                 during_fetch();

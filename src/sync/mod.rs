@@ -25,7 +25,7 @@ pub mod tick;
 
 use anyhow::Result;
 
-use crate::ingest::KnownUids;
+use crate::store::Store;
 use crate::types::{MailboxRole, MessageFlags};
 
 pub use engine::run_sync;
@@ -39,6 +39,12 @@ pub use engine::run_sync;
 pub enum StopPoint {
     /// Before the transport is asked for anything.
     Fetch,
+    /// Before a backend that lists its targets one after another lists the
+    /// target at this index; never asked for the first, which [`Fetch`] has
+    /// just covered (PERSO-213).
+    ///
+    /// [`Fetch`]: StopPoint::Fetch
+    Listing(usize),
     /// Before the next batch of one mailbox's bodies is downloaded, once the
     /// batch before it is ingested (PERSO-300).
     Chunk,
@@ -495,14 +501,29 @@ pub enum BodyBatch {
 /// body pass between its batches, a persistent session and its `HIGHESTMODSEQ`
 /// (#0041), a `deltaLink` (#0042).
 pub trait SyncBackend {
-    /// List every target's window. `knowns` is parallel to `targets`: the
-    /// store's skip list for each, already read under the single-writer
-    /// discipline before any network call. No body is downloaded here.
+    /// What the store holds for one target, in the shape this backend's
+    /// listing decides with: IMAP's UIDs under their UIDVALIDITY
+    /// ([`crate::ingest::KnownUids`]), Graph's Message-IDs and stored delta
+    /// token.
+    type Known;
+
+    /// Read one target's [`Known`](SyncBackend::Known) from the store. The
+    /// engine calls it for every target, serially, before the transport is
+    /// asked anything, so the listing never races the single SQLite writer.
+    fn known(store: &Store, account: &str, target: &SyncTarget) -> Result<Self::Known>;
+
+    /// List every target's window. `knowns` is parallel to `targets`, read by
+    /// [`known`](SyncBackend::known). No body is downloaded here.
+    ///
+    /// `stop` is the pass's: a backend that lists its targets one after
+    /// another asks it at [`StopPoint::Listing`] before each but the first,
+    /// and answers every target it did not list with an `Err`.
     fn list_targets(
         &mut self,
         targets: &[SyncTarget],
         limit: usize,
-        knowns: Vec<KnownUids>,
+        knowns: Vec<Self::Known>,
+        stop: Option<&Stop>,
     ) -> impl std::future::Future<Output = Vec<Result<MailboxListing>>>;
 
     /// The next batch of new bodies of the target at `index` of the last

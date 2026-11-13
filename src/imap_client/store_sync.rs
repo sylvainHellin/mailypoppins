@@ -98,6 +98,14 @@ impl<'a> ImapBackend<'a> {
 }
 
 impl SyncBackend for ImapBackend<'_> {
+    type Known = KnownUids;
+
+    /// The UIDs the store holds, with the UIDVALIDITY, the arrival mark and
+    /// the CONDSTORE mark the last pass recorded.
+    fn known(store: &Store, account: &str, target: &SyncTarget) -> Result<KnownUids> {
+        crate::ingest::known_uids_with_cursor(store, account, target.role.as_str())
+    }
+
     /// List every mailbox in parallel, one IMAP session each (#0005).
     ///
     /// IMAP allows one SELECTed mailbox per connection, so the old single
@@ -116,6 +124,9 @@ impl SyncBackend for ImapBackend<'_> {
         targets: &[SyncTarget],
         limit: usize,
         knowns: Vec<KnownUids>,
+        // The listings run in parallel, so there is no point between two of
+        // them to stop at.
+        _stop: Option<&Stop>,
     ) -> Vec<Result<MailboxListing>> {
         use futures::stream::StreamExt;
         self.passes.clear();

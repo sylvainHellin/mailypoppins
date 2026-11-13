@@ -73,7 +73,7 @@ use mailypoppins::store::{BlobStore, Store};
 use mailypoppins::sync::engine::{run_sync_guarded_at, SyncRun};
 use mailypoppins::sync::{
     BodyBatch, FetchedMessage, MailboxCoverage, MailboxListing, MailboxState, ObservationSink,
-    SyncBackend, SyncResult, SyncTarget,
+    Stop, SyncBackend, SyncResult, SyncTarget,
 };
 use mailypoppins::timing::TimingSpan;
 use mailypoppins::types::{MailboxRole, MessageFlags};
@@ -111,11 +111,18 @@ async fn the_plain_form_takes_exactly_run_syncs_parameters(
 struct PanickingBackend;
 
 impl SyncBackend for PanickingBackend {
+    type Known = KnownUids;
+
+    fn known(store: &Store, account: &str, target: &SyncTarget) -> Result<KnownUids> {
+        mailypoppins::ingest::known_uids_with_cursor(store, account, target.role.as_str())
+    }
+
     async fn list_targets(
         &mut self,
         _targets: &[SyncTarget],
         _limit: usize,
         _knowns: Vec<KnownUids>,
+        _stop: Option<&Stop>,
     ) -> Vec<Result<MailboxListing>> {
         panic!(
             "run_sync_guarded opened a fetch while another process held the engine lock: \
@@ -176,11 +183,18 @@ impl ScriptedBackend {
 }
 
 impl SyncBackend for ScriptedBackend {
+    type Known = KnownUids;
+
+    fn known(store: &Store, account: &str, target: &SyncTarget) -> Result<KnownUids> {
+        mailypoppins::ingest::known_uids_with_cursor(store, account, target.role.as_str())
+    }
+
     async fn list_targets(
         &mut self,
         targets: &[SyncTarget],
         _limit: usize,
         _knowns: Vec<KnownUids>,
+        _stop: Option<&Stop>,
     ) -> Vec<Result<MailboxListing>> {
         self.calls += 1;
         self.bodies.clear();
