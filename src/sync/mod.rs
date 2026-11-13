@@ -473,6 +473,28 @@ pub struct Finish<'a> {
     pub stopped: bool,
 }
 
+/// A listing that failed after it found the stored resume point stale: an
+/// expired delta link whose enumeration then failed (PERSO-213).
+///
+/// The `Err` element of [`SyncBackend::list_targets`] carries no listing, so
+/// [`MailboxListing::resume_stale`] cannot say it; this wrapper does, and the
+/// engine clears the resume point as it would off a listing. Kept, the dead
+/// link would be walked again by every later pass before it enumerated.
+#[derive(Debug)]
+pub struct ResumeStale(pub anyhow::Error);
+
+impl std::fmt::Display for ResumeStale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for ResumeStale {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 /// What a listing observed about its mailbox as a whole: the three shapes a
 /// cursor can be recorded from (PERSO-213).
 #[derive(Debug, Clone, PartialEq, Eq)]

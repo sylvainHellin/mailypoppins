@@ -26,8 +26,8 @@ use crate::store::{BlobStore, Store};
 use crate::sync::engine::{run_sync, SyncRun};
 use crate::sync::{
     stops_at, BodyBatch, FetchedMessage, Finish, FlagScope, MailboxCoverage, MailboxListing,
-    NewMail, ObservationSink, Observed, ParsedMessage, ResumePoint, Stop, StopPoint, SyncBackend,
-    SyncResult, SyncTarget,
+    NewMail, ObservationSink, Observed, ParsedMessage, ResumePoint, ResumeStale, Stop, StopPoint,
+    SyncBackend, SyncResult, SyncTarget,
 };
 use crate::timing::TimingSpan;
 
@@ -192,7 +192,11 @@ impl GraphBackend {
                 } else {
                     self.client.mint_delta_token(&target.server_name).await
                 };
-                let enumeration = self.client.enumerate_folder(&target.server_name).await?;
+                let enumeration = self
+                    .client
+                    .enumerate_folder(&target.server_name)
+                    .await
+                    .map_err(|e| listing_failed(e, stale))?;
                 FolderView::Enumeration {
                     enumeration,
                     minted,
@@ -200,6 +204,17 @@ impl GraphBackend {
             }
         };
         Ok(folder_listing(target, limit, &ids, view, identity, stale))
+    }
+}
+
+/// The error of a folder listing that failed, marked [`ResumeStale`] when the
+/// listing had already found the stored delta link stale, so the engine drops
+/// the link whatever became of the enumeration that was to replace it.
+pub(super) fn listing_failed(error: anyhow::Error, stale: bool) -> anyhow::Error {
+    if stale {
+        ResumeStale(error).into()
+    } else {
+        error
     }
 }
 

@@ -504,7 +504,11 @@ pub async fn run_sync<B: SyncBackend>(
     // the next one a token to walk into the same doubt.
     if !dry_run {
         for (target, listing) in targets.iter().zip(&listings) {
-            if listing.as_ref().is_ok_and(|listing| listing.resume_stale) {
+            let stale = match listing {
+                Ok(listing) => listing.resume_stale,
+                Err(e) => e.downcast_ref::<super::ResumeStale>().is_some(),
+            };
+            if stale {
                 ingest::clear_mailbox_deltalink(store, account, target.role.as_str());
                 ingest::clear_mailbox_modseq(store, account, target.role.as_str());
             }

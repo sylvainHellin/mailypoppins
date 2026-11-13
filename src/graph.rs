@@ -4706,9 +4706,12 @@ mod tests {
     /// listing ([`backend::folder_listing`]) and the real engine, with the
     /// `/$batch` downloads answered from the script.
     struct ScriptedGraph<'a> {
-        /// The folder's listing: what it walked, its identity, and the
-        /// messages its batches answer with.
-        script: Option<(backend::FolderView, Option<i64>, Vec<GraphFetched>)>,
+        /// The folder's listing: what it walked, or how the walk failed, its
+        /// identity, and the messages its batches answer with.
+        script: Option<(Result<backend::FolderView>, Option<i64>, Vec<GraphFetched>)>,
+        /// The stored resume point was found stale before the folder was
+        /// walked: an expired, malformed or foreign delta link.
+        stale: bool,
         bodies: std::collections::VecDeque<GraphFetched>,
         pass: Option<backend::FolderPass>,
         /// Run once the engine has opened its departures watch, while the
@@ -4747,8 +4750,12 @@ mod tests {
             } else {
                 known.ids
             };
+            let view = match view {
+                Ok(view) => view,
+                Err(e) => return vec![Err(backend::listing_failed(e, self.stale))],
+            };
             let (listing, pass) =
-                backend::folder_listing(&targets[0], limit, &ids, view, identity, false);
+                backend::folder_listing(&targets[0], limit, &ids, view, identity, self.stale);
             // What `/$batch` answers: the ids the listing asked for, newest
             // first, those the script holds.
             self.bodies = pass
@@ -4847,7 +4854,8 @@ mod tests {
         during_listing: Option<Box<dyn FnOnce() + 'a>>,
     ) -> SyncResult {
         let graph = ScriptedGraph {
-            script: Some((view, identity, messages)),
+            script: Some((Ok(view), identity, messages)),
+            stale: false,
             bodies: Default::default(),
             pass: None,
             during_listing,
@@ -4864,13 +4872,45 @@ mod tests {
         messages: Vec<GraphFetched>,
     ) -> SyncResult {
         let graph = ScriptedGraph {
-            script: Some((changes(&messages), None, messages)),
+            script: Some((Ok(changes(&messages)), None, messages)),
+            stale: false,
             bodies: Default::default(),
             pass: None,
             during_listing: None,
             blind: true,
         };
         run_scripted(store, blobs, target, graph, 100)
+    }
+
+    /// A stale delta link is dropped even when the enumeration that was to
+    /// replace it fails: kept, every later pass would walk the dead link
+    /// again before enumerating.
+    #[test]
+    fn a_stale_link_is_dropped_when_the_enumeration_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let expired = format!("{GRAPH_BASE}/me/mailFolders('A')/messages/delta?t1");
+        crate::ingest::record_delta_token(&store, "acct", "inbox", 7, &expired);
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        // The walk answered 410, and the enumeration after it 503.
+        let graph = ScriptedGraph {
+            script: Some((
+                Err(anyhow!(
+                    "Fetch message IDs from 'Inbox' failed (HTTP 503 Service Unavailable)"
+                )),
+                Some(7),
+                Vec::new(),
+            )),
+            stale: true,
+            bodies: Default::default(),
+            pass: None,
+            during_listing: None,
+            blind: false,
+        };
+        let result = run_scripted(&store, &blobs, &inbox, graph, 100);
+        assert_eq!(result.saved, 0);
+        assert_eq!(stored_link(&store, "inbox"), None);
     }
 
     /// The real engine over `graph`.
@@ -5571,7 +5611,8 @@ mod tests {
         // read, so the read no longer holds the row and the listing takes the
         // source item for new: the order the journal is there for.
         let graph = ScriptedGraph {
-            script: Some((view, Some(7), source)),
+            script: Some((Ok(view), Some(7), source)),
+            stale: false,
             bodies: Default::default(),
             pass: None,
             during_listing: Some(Box::new(commit)),
