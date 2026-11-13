@@ -43,16 +43,23 @@
 //! `http/<host>`. Each connect, TLS included, has its timeout, and each call
 //! its own over every leg.
 //!
-//! A refused login stops at the transport: it is the place the login gate's
-//! hook goes (`crate::login_gate` names a refused secret per login identity),
-//! see [`EwsHttp::post`].
+//! A refused login is recorded in one place, [`hold`], which keeps the
+//! refused password from being asked again for an hour by any later
+//! transport of the same login, so a wrong password reaches TUM's directory
+//! once an hour rather than at every tick. It stands in for the daemon's
+//! login gate (`crate::login_gate`), which will take over that record, the
+//! health check and `account.credentials` reporting it, and the user's
+//! "set the password again" ending it.
 
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::sync::{Mutex as StdMutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use log::{debug, warn};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::fetch::{EwsFetch, EwsFetchError};
@@ -75,6 +82,62 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 
 /// The workstation name the type 3 announces; the server reads none.
 const WORKSTATION: &str = "MAILYPOPPINS";
+
+/// How long a refused password is not asked again.
+pub const REFUSAL_HOLD: Duration = Duration::from_secs(60 * 60);
+
+/// The EWS logins the server refused, held across transports: the one place
+/// a refusal is recorded and a held one answered, which the login gate will
+/// replace (`crate::login_gate`: a row per login identity and refused secret,
+/// 2, 10 and 60 minute holds, the user's action ending one).
+///
+/// A row is the endpoint's authority, the user name ASCII-lowercased and a
+/// hash of the password, never the password; it lives in memory, so a daemon
+/// restart forgets it. A password the server took drops its row, and another
+/// password has none, so storing a new one is asked at once.
+pub mod hold {
+    use super::*;
+
+    type Key = (String, String, [u8; 32]);
+
+    fn rows() -> std::sync::MutexGuard<'static, HashMap<Key, (Instant, SystemTime)>> {
+        static ROWS: OnceLock<StdMutex<HashMap<Key, (Instant, SystemTime)>>> = OnceLock::new();
+        ROWS.get_or_init(StdMutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn key(authority: &str, user: &str, password: &str) -> Key {
+        (
+            authority.to_ascii_lowercase(),
+            user.to_ascii_lowercase(),
+            Sha256::digest(password.as_bytes()).into(),
+        )
+    }
+
+    /// When the held refusal of `key` ends, while it holds.
+    pub(super) fn held(key: &Key) -> Option<SystemTime> {
+        let mut rows = rows();
+        match rows.get(key) {
+            Some((at, wall)) if at.elapsed() < REFUSAL_HOLD => Some(*wall + REFUSAL_HOLD),
+            Some(_) => {
+                rows.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// The server refused `key`'s password.
+    pub(super) fn refused(key: Key) {
+        rows().insert(key, (Instant::now(), SystemTime::now()));
+    }
+
+    /// The server took `key`'s password.
+    pub(super) fn accepted(key: &Key) {
+        rows().remove(key);
+    }
+}
 
 /// How long a connect and a whole call may take.
 #[derive(Debug, Clone, Copy)]
@@ -349,6 +412,16 @@ impl EwsHttp {
     /// the connection on success.
     async fn log_in(&self, state: &mut State, envelope: &str) -> Result<String, EwsFetchError> {
         let transport = EwsFetchError::Transport;
+        let row = hold::key(&self.endpoint.authority, &self.user, &self.password);
+        if let Some(until) = hold::held(&row) {
+            let at = chrono::DateTime::<chrono::Local>::from(until).format("%H:%M");
+            let why = format!(
+                "refused earlier; this password is asked again at {at}, or at once after a new \
+                 one is stored"
+            );
+            state.refused = Some(why.clone());
+            return Err(EwsFetchError::LoginRefused(why));
+        }
         let mut connection = self.connect().await.map_err(transport)?;
         let negotiate = ntlm::negotiate_message();
         let first = self
@@ -397,8 +470,10 @@ impl EwsHttp {
                 self.endpoint.host, self.user
             );
             state.refused = Some(why.clone());
+            hold::refused(row);
             return Err(EwsFetchError::LoginRefused(why));
         }
+        hold::accepted(&row);
         if !second.close {
             state.connection = Some(connection);
         }
@@ -435,11 +510,9 @@ impl EwsFetch for EwsHttp {
     /// Post `envelope` and answer the body.
     ///
     /// A refused login is answered as [`EwsFetchError::LoginRefused`] here
-    /// and by every later call of this transport without a request. This is
-    /// the login gate's hook: a refusal recorded at the `LoginRefused` of
-    /// [`EwsHttp::log_in`], and a held one answered before
-    /// [`EwsHttp::connect`], keep the next passes from asking before the
-    /// hold ends.
+    /// and by every later call of this transport without a request, and by
+    /// every later transport of the same login and password within
+    /// [`REFUSAL_HOLD`] ([`hold`]).
     async fn post(&self, envelope: &str) -> Result<String, EwsFetchError> {
         let mut state = self.state.lock().await;
         if let Some(why) = &state.refused {

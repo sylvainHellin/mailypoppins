@@ -453,10 +453,7 @@ mod tests {
             calendar_backend_line(&graph),
             "calendar_backend = graph (default)"
         );
-        assert_eq!(
-            calendar_backend_line(&tum),
-            "calendar_backend = ews (not supported yet)"
-        );
+        assert_eq!(calendar_backend_line(&tum), "calendar_backend = ews");
         assert_eq!(calendar_backend_line(&none), "calendar_backend = none");
     }
 

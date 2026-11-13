@@ -9,8 +9,9 @@
 //!
 //! [`choose_backend`] and [`backend_for`] decide which backend serves an
 //! account: the fake when [`fake::FAKE_CALENDAR_ENV`] arms it, Graph for
-//! `calendar_backend = "graph"`, nothing for `none`, and a refusal for the
-//! backends a later phase builds. [`AccountBackend`] is the closed set they
+//! `calendar_backend = "graph"`, EWS for `"ews"` over the transport that logs
+//! in over NTLM ([`ews::http::EwsHttp`]), nothing for `none`, and a refusal
+//! for CalDAV, which a later phase builds. [`AccountBackend`] is the closed set they
 //! return, dispatched statically.
 
 pub mod ews;
@@ -31,6 +32,8 @@ use crate::calendar_model::{
 use crate::calendar_write::{EventInput, EventPatch, ProposedTime};
 use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind, EwsLogin};
 
+use ews::http::EwsHttp;
+use ews::EwsCalendarBackend;
 use fake::FakeCalendarBackend;
 use graph::GraphCalendarBackend;
 
@@ -330,16 +333,18 @@ pub enum BackendChoice {
     Fake(FakeCalendarBackend),
     /// Microsoft Graph, signed in through the account's token.
     Graph,
+    /// Exchange Web Services, logged in as its checked `[accounts.ews]`
+    /// names.
+    Ews(EwsLogin),
 }
 
 /// The backend `account`'s calendar uses.
 ///
 /// The fake, when the daemon runs under [`fake::FAKE_CALENDAR_ENV`], stands
 /// in for every account whose `calendar_backend` is not `none`, whatever that
-/// backend is. A backend a later phase builds (`ews`, `caldav`) is refused
-/// with a sentence naming it; an `ews` account whose `[accounts.ews]` lacks a
-/// field is refused with the field first ([`EwsLogin::of`]), since its login
-/// to the server is not built yet either.
+/// backend is. An `ews` account whose `[accounts.ews]` lacks a field is
+/// refused with the field ([`EwsLogin::of`]), and `caldav`, which a later
+/// phase builds, with a sentence naming it.
 pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
     let kind = account.calendar_backend();
     if kind == CalendarBackendKind::None {
@@ -351,10 +356,7 @@ pub fn choose_backend(account: &AccountConfig) -> BackendResult<BackendChoice> {
     match kind {
         CalendarBackendKind::Graph => Ok(BackendChoice::Graph),
         CalendarBackendKind::None => Ok(BackendChoice::None),
-        CalendarBackendKind::Ews => {
-            EwsLogin::of(account)?;
-            Err(unsupported(kind))
-        }
+        CalendarBackendKind::Ews => Ok(BackendChoice::Ews(EwsLogin::of(account)?)),
         other => Err(unsupported(other)),
     }
 }
@@ -373,7 +375,7 @@ pub fn unsupported(kind: CalendarBackendKind) -> CalendarBackendError {
 pub fn has_backend(account: &AccountConfig) -> bool {
     matches!(
         choose_backend(account),
-        Ok(BackendChoice::Fake(_) | BackendChoice::Graph)
+        Ok(BackendChoice::Fake(_) | BackendChoice::Graph | BackendChoice::Ews(_))
     )
 }
 
@@ -385,6 +387,7 @@ pub fn features(account: &AccountConfig) -> Vec<CalendarFeature> {
     match choose_backend(account) {
         Ok(BackendChoice::Fake(fake)) => fake.features(),
         Ok(BackendChoice::Graph) => graph::FEATURES.to_vec(),
+        Ok(BackendChoice::Ews(_)) => ews::FEATURES.to_vec(),
         Ok(BackendChoice::None) | Err(_) => Vec::new(),
     }
 }
@@ -408,13 +411,15 @@ pub fn preflight_scope(account: &AccountConfig) -> BackendResult<()> {
     match choose_backend(account)? {
         BackendChoice::Fake(fake) => fake.check_scope(),
         BackendChoice::Graph => calendar_scope_check(account),
-        BackendChoice::None => Ok(()),
+        BackendChoice::None | BackendChoice::Ews(_) => Ok(()),
     }
 }
 
 /// The backend serving `account`, connected: `None` for an account without
 /// one. A Graph token without the calendar scope is
-/// [`CalendarBackendError::MissingScope`] before any network call.
+/// [`CalendarBackendError::MissingScope`] before any network call; an EWS
+/// backend reads its stored password here and opens no connection until its
+/// first call.
 pub async fn backend_for(account: &AccountConfig) -> BackendResult<Option<AccountBackend>> {
     Ok(match choose_backend(account)? {
         BackendChoice::None => None,
@@ -422,7 +427,46 @@ pub async fn backend_for(account: &AccountConfig) -> BackendResult<Option<Accoun
         BackendChoice::Graph => Some(AccountBackend::Graph(Box::new(
             GraphCalendarBackend::connect(account).await?,
         ))),
+        BackendChoice::Ews(login) => {
+            let password =
+                crate::config::get_secret(&login.password_from.secret_key(&account.name));
+            Some(AccountBackend::Ews(Box::new(ews_backend(
+                account,
+                &login,
+                password.ok(),
+            )?)))
+        }
     })
+}
+
+/// The EWS backend of `account` over the transport, logging in as `login`
+/// with `password`, the stored one `password_from` names; without one it is
+/// refused with the command that stores it.
+fn ews_backend(
+    account: &AccountConfig,
+    login: &EwsLogin,
+    password: Option<String>,
+) -> BackendResult<EwsCalendarBackend<EwsHttp>> {
+    let Some(password) = password.filter(|password| !password.is_empty()) else {
+        let source = login.password_from.as_str();
+        return Err(CalendarBackendError::Other(anyhow!(
+            "the EWS calendar of {} logs in with the {source} password, and none is stored; set \
+             it with `{}`",
+            account.name,
+            mp_core::mp_command::here(&[
+                "config",
+                "set-password",
+                source,
+                "--account",
+                &account.name,
+            ])
+        )));
+    };
+    let transport = EwsHttp::new(login, password)?;
+    Ok(
+        EwsCalendarBackend::with_fetch(&account.name, login.password_from, transport)
+            .with_delegate_calendars(login.delegate_calendars.clone()),
+    )
 }
 
 /// One connected backend of the closed set this build implements.
@@ -430,6 +474,8 @@ pub enum AccountBackend {
     Fake(FakeCalendarBackend),
     /// Boxed: the Graph client is a few hundred bytes the fake does not pay.
     Graph(Box<GraphCalendarBackend>),
+    /// Boxed as Graph's is.
+    Ews(Box<EwsCalendarBackend<EwsHttp>>),
 }
 
 impl CalendarBackend for AccountBackend {
@@ -437,6 +483,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.list_calendars().await,
             AccountBackend::Graph(b) => b.list_calendars().await,
+            AccountBackend::Ews(b) => b.list_calendars().await,
         }
     }
 
@@ -449,6 +496,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.sync_window(calendar, window, token).await,
             AccountBackend::Graph(b) => b.sync_window(calendar, window, token).await,
+            AccountBackend::Ews(b) => b.sync_window(calendar, window, token).await,
         }
     }
 
@@ -469,6 +517,10 @@ impl CalendarBackend for AccountBackend {
                 b.respond(event, response, comment, send_response, proposed)
                     .await
             }
+            AccountBackend::Ews(b) => {
+                b.respond(event, response, comment, send_response, proposed)
+                    .await
+            }
         }
     }
 
@@ -481,6 +533,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.create_event(calendar, input, transaction_id).await,
             AccountBackend::Graph(b) => b.create_event(calendar, input, transaction_id).await,
+            AccountBackend::Ews(b) => b.create_event(calendar, input, transaction_id).await,
         }
     }
 
@@ -493,6 +546,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.update_event(calendar, event, patch).await,
             AccountBackend::Graph(b) => b.update_event(calendar, event, patch).await,
+            AccountBackend::Ews(b) => b.update_event(calendar, event, patch).await,
         }
     }
 
@@ -500,6 +554,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.cancel_event(event, comment).await,
             AccountBackend::Graph(b) => b.cancel_event(event, comment).await,
+            AccountBackend::Ews(b) => b.cancel_event(event, comment).await,
         }
     }
 
@@ -507,6 +562,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.delete_event(event).await,
             AccountBackend::Graph(b) => b.delete_event(event).await,
+            AccountBackend::Ews(b) => b.delete_event(event).await,
         }
     }
 
@@ -514,6 +570,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.dismiss_reminder(event).await,
             AccountBackend::Graph(b) => b.dismiss_reminder(event).await,
+            AccountBackend::Ews(b) => b.dismiss_reminder(event).await,
         }
     }
 
@@ -521,6 +578,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.snooze_reminder(event, until).await,
             AccountBackend::Graph(b) => b.snooze_reminder(event, until).await,
+            AccountBackend::Ews(b) => b.snooze_reminder(event, until).await,
         }
     }
 
@@ -528,6 +586,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.free_busy(query).await,
             AccountBackend::Graph(b) => b.free_busy(query).await,
+            AccountBackend::Ews(b) => b.free_busy(query).await,
         }
     }
 
@@ -535,6 +594,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.remember_series(known),
             AccountBackend::Graph(b) => b.remember_series(known),
+            AccountBackend::Ews(b) => b.remember_series(known),
         }
     }
 
@@ -542,6 +602,7 @@ impl CalendarBackend for AccountBackend {
         match self {
             AccountBackend::Fake(b) => b.event_for_message(message_id).await,
             AccountBackend::Graph(b) => b.event_for_message(message_id).await,
+            AccountBackend::Ews(b) => b.event_for_message(message_id).await,
         }
     }
 }
@@ -606,9 +667,10 @@ mod tests {
         assert!(calendar_scope_check(&opted_out).is_ok());
     }
 
-    /// `none` has no backend, `graph` is Graph's, and the backends a later
-    /// phase builds are refused by name. The test process never arms the
-    /// fake, so the choice is the configured one.
+    /// `none` has no backend, `graph` is Graph's, `ews` is EWS's once its
+    /// `[accounts.ews]` names its login, and `caldav`, which a later phase
+    /// builds, is refused by name. The test process never arms the fake, so
+    /// the choice is the configured one.
     #[test]
     fn the_choice_follows_the_setting_and_refuses_the_later_backends() {
         assert!(std::env::var(fake::FAKE_CALENDAR_ENV).is_err());
@@ -625,24 +687,23 @@ mod tests {
             choice(AuthMethod::Graph, Some(CalendarBackendKind::None)),
             Ok(BackendChoice::None)
         ));
-        let ews = AccountConfig {
-            ews: Some(crate::config::EwsSettings {
-                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
-                username: "ab12cde".into(),
-                password_from: Some(crate::config::EwsPasswordSource::Imap),
-                delegate_calendars: Vec::new(),
-            }),
-            ..account(AuthMethod::Password, Some(CalendarBackendKind::Ews))
-        };
-        let caldav = account(AuthMethod::Password, Some(CalendarBackendKind::Caldav));
-        for (configured, name) in [(&ews, "ews"), (&caldav, "caldav")] {
-            let err = choose_backend(configured).unwrap_err();
-            assert_eq!(
-                err.to_string(),
-                format!("calendar backend {name} is not supported yet")
-            );
-            assert!(!has_backend(configured));
+        let ews = ews_account(&["room-1@tum.de"]);
+        match choose_backend(&ews) {
+            Ok(BackendChoice::Ews(login)) => {
+                assert_eq!(login.host, "mail.tum.de");
+                assert_eq!(login.delegate_calendars, ["room-1@tum.de"]);
+            }
+            other => panic!("not the EWS backend: {other:?}"),
         }
+        assert!(has_backend(&ews));
+        assert_eq!(features(&ews), ews::FEATURES);
+        assert!(preflight_scope(&ews).is_ok());
+        let caldav = account(AuthMethod::Password, Some(CalendarBackendKind::Caldav));
+        assert_eq!(
+            choose_backend(&caldav).unwrap_err().to_string(),
+            "calendar backend caldav is not supported yet"
+        );
+        assert!(!has_backend(&caldav));
         let bare_ews = account(AuthMethod::Password, Some(CalendarBackendKind::Ews));
         assert_eq!(
             choose_backend(&bare_ews).unwrap_err().to_string(),
@@ -652,5 +713,41 @@ mod tests {
         assert!(!has_backend(&bare_ews));
         assert!(has_backend(&account(AuthMethod::Graph, None)));
         assert!(!has_backend(&account(AuthMethod::Password, None)));
+    }
+
+    fn ews_account(delegates: &[&str]) -> AccountConfig {
+        AccountConfig {
+            ews: Some(crate::config::EwsSettings {
+                endpoint: "https://mail.tum.de/ews/exchange.asmx".into(),
+                username: "ab12cde".into(),
+                password_from: Some(crate::config::EwsPasswordSource::Imap),
+                delegate_calendars: delegates.iter().map(|d| d.to_string()).collect(),
+            }),
+            ..account(AuthMethod::Password, Some(CalendarBackendKind::Ews))
+        }
+    }
+
+    /// The EWS backend is built over the transport with the stored password
+    /// its `password_from` names and the delegate calendars its table lists;
+    /// without that password it is refused with the command that stores it,
+    /// before any connection.
+    #[test]
+    fn the_ews_backend_takes_its_password_and_its_delegate_calendars() {
+        let ews = ews_account(&["room-1@tum.de", "room-2@tum.de"]);
+        let login = crate::config::EwsLogin::of(&ews).unwrap();
+        let backend = ews_backend(&ews, &login, Some("secret".into())).unwrap();
+        assert_eq!(
+            backend.delegate_mailboxes(),
+            ["room-1@tum.de", "room-2@tum.de"]
+        );
+        let err = ews_backend(&ews, &login, None).err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "the EWS calendar of work logs in with the imap password, and none is stored; \
+                 set it with `{}`",
+                mp_core::mp_command::here(&["config", "set-password", "imap", "--account", "work"])
+            )
+        );
     }
 }

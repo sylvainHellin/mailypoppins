@@ -531,11 +531,11 @@ impl CalendarBackendKind {
         }
     }
 
-    /// Whether this release can serve the backend. `ews` and `caldav` load
-    /// so a config written ahead of their phase is not an error, and the
-    /// daemon refuses them with a message naming the account instead.
+    /// Whether this release can serve the backend. `caldav` loads so a
+    /// config written ahead of its phase is not an error, and the daemon
+    /// refuses it with a message naming the account instead.
     pub fn is_supported(self) -> bool {
-        matches!(self, CalendarBackendKind::Graph | CalendarBackendKind::None)
+        !matches!(self, CalendarBackendKind::Caldav)
     }
 }
 
@@ -2945,7 +2945,7 @@ calendar_backend = "graph"
         );
         assert_eq!(config.accounts[1].calendar_backend, None);
         let supported: Vec<bool> = kinds.iter().map(|k| k.is_supported()).collect();
-        assert_eq!(supported, [true, true, false, false, true, true]);
+        assert_eq!(supported, [true, true, true, false, true, true]);
         let spelled: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
         assert_eq!(spelled, ["graph", "none", "ews", "caldav", "none", "graph"]);
         assert_eq!(

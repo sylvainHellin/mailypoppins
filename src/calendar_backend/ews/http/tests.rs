@@ -441,3 +441,42 @@ fn a_user_name_splits_off_its_domain() {
     assert_eq!(split_user("ADS\\ab12cde"), ("ab12cde", "ADS"));
     assert_eq!(split_user("ab12cde@tum.de"), ("ab12cde@tum.de", ""));
 }
+
+/// A refused login holds its password across transports, so the next pass
+/// does not ask the server again with it within the hold: a second
+/// transport with the same login answers the refusal without a connection,
+/// and one with another password, a password stored anew, logs in at once.
+#[tokio::test]
+async fn a_refused_password_is_held_across_passes_and_a_new_one_is_asked() {
+    let server = Server::start(vec![
+        vec![
+            (Some(challenge(&[])), Then::Next),
+            (Some(refused()), Then::Next),
+        ],
+        vec![
+            (Some(challenge(&[])), Then::Next),
+            (Some(ok("<taken/>")), Then::Next),
+        ],
+    ]);
+    let pass = |password: &str| {
+        EwsHttp::plain_for_test(
+            &server.url(),
+            "ab12cde",
+            password,
+            Timeouts {
+                connect: Duration::from_secs(2),
+                request: Duration::from_secs(5),
+            },
+        )
+    };
+    let err = pass("wrong").post(ENVELOPE).await.unwrap_err();
+    assert!(matches!(err, EwsFetchError::LoginRefused(_)), "{err:?}");
+    let held = pass("wrong").post(ENVELOPE).await.unwrap_err();
+    assert!(
+        matches!(held, EwsFetchError::LoginRefused(ref why) if why.contains("asked again at")),
+        "{held:?}"
+    );
+    assert_eq!(server.connections(), 1, "the held pass asked nobody");
+    assert_eq!(pass("right").post(ENVELOPE).await.unwrap(), "<taken/>");
+    assert_eq!(server.connections(), 2);
+}

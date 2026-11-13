@@ -232,6 +232,12 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         Ok(calendars)
     }
 
+    /// The delegate mailboxes the backend lists, for a test.
+    #[cfg(test)]
+    pub(crate) fn delegate_mailboxes(&self) -> &[String] {
+        &self.delegates
+    }
+
     /// The seam, for a test that reads what was sent.
     #[cfg(test)]
     fn fetch(&self) -> &F {
