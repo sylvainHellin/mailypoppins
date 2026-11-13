@@ -820,7 +820,7 @@ pub async fn run_sync<B: SyncBackend>(
                         if outcome.inserted && target.role.is_inbox() && announced {
                             result
                                 .new_inbox_mail
-                                .push(super::InboxArrival::of(outcome.row_id, &email));
+                                .push(super::InboxArrival::of(&outcome, email));
                         }
                     }
                     // The copy a local move or delete is taking off the server

@@ -268,6 +268,9 @@ pub struct SyncResult {
 pub struct InboxArrival {
     /// `messages.id` of the row the pass inserted.
     pub row_id: i64,
+    /// The `Message-ID` ingest stored, which tells the row from one a later
+    /// insert gave the same id after this one was deleted.
+    pub message_id: String,
     /// The `From:` header as ingest stored it.
     pub from: String,
     /// The `Subject:` header as ingest stored it.
@@ -275,10 +278,14 @@ pub struct InboxArrival {
 }
 
 impl InboxArrival {
-    /// The arrival of `email`, written into row `row_id`.
-    pub fn of(row_id: i64, email: &crate::parse::FetchedEmail) -> InboxArrival {
+    /// The arrival of `email`, as ingest wrote it.
+    pub fn of(
+        outcome: &crate::ingest::IngestOutcome,
+        email: &crate::parse::FetchedEmail,
+    ) -> InboxArrival {
         InboxArrival {
-            row_id,
+            row_id: outcome.row_id,
+            message_id: outcome.message_id.clone(),
             from: email.from.clone(),
             subject: email.subject.clone(),
         }

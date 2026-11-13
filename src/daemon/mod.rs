@@ -10,6 +10,7 @@
 //! [`client`] is the other side of the socket: the policy a normal `mp` run
 //! applies before it reaches any of this.
 
+pub mod arrivals;
 pub mod client;
 pub mod config;
 pub mod diagnostics;
