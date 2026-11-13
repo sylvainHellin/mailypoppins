@@ -2153,3 +2153,59 @@ fn the_counts_name_the_discarded_rows_still_filing_apart() {
     assert_eq!(counts.total(), 0);
     assert_eq!(counts.filing, 1);
 }
+
+/// Stamp the store file with a schema version no build writes, so the next
+/// open drops it and rebuilds it, carrying the outbox (#0066).
+fn force_a_rebuild(account: &Account) {
+    let (store, _) = account.open();
+    mailypoppins::store::schema::set_meta(
+        store.conn(),
+        mailypoppins::store::schema::META_SCHEMA_VERSION,
+        "99",
+    )
+    .unwrap();
+}
+
+/// A store rebuilt between the discard and the APPEND that files the copy
+/// in Sent files the local copy again from the carried row: the agenda
+/// keeps the version, the next change of the invitation is built on it,
+/// and the APPEND that lands later makes it one row.
+#[tokio::test]
+async fn a_rebuild_before_the_append_files_the_discarded_version_again() {
+    let account = Account::new();
+    let mid = "<update-9@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    {
+        let (store, blobs) = account.open();
+        assert!(outbox::discard(&store, &blobs, id).unwrap());
+    }
+    force_a_rebuild(&account);
+
+    let (store, blobs) = account.open();
+    let row = outbox::load(&store, id)
+        .unwrap()
+        .expect("the rebuild carries the row");
+    assert!(row.is_filing());
+    assert_eq!(
+        local_sent_copies(&store, mid),
+        [mailypoppins::ingest::graph_uid(mid)],
+        "the local copy is filed again"
+    );
+    assert_eq!(agenda_rows(&store, &blobs), 1);
+    assert_eq!(
+        mailypoppins::reconcile::next_sequence(
+            &mailypoppins::reconcile::load_invites(&store, &blobs, ACCOUNT),
+            "review-1@example.com",
+            0
+        ),
+        2,
+        "the next change is built above the discarded version"
+    );
+
+    let mut sent = FakeSent::new();
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    assert_eq!(state_of(&account, id), OutboxState::Done);
+    assert_eq!(local_sent_copies(&store, mid), [100]);
+}

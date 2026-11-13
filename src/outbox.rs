@@ -1600,6 +1600,63 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
     Ok(true)
 }
 
+/// File again, from its own bytes, the local Sent copy of every row of
+/// `store` the user discarded and that still holds them (not `done`): what
+/// [`keep_the_version`] filed at the discard, which a store rebuild drops
+/// with the rest of `messages` while it carries the row (PERSO-304).
+/// [`crate::store::Store::open`] calls it once a rebuild has carried the
+/// outbox, before anything reads the agenda or the next `SEQUENCE`. The
+/// ingest is the one [`ingest_sent_copy`] does, so a copy already there is
+/// left as it is; one that cannot be filed is logged and the rest go on, as
+/// nothing may fail an open. Answers how many it filed.
+pub fn refile_discarded(store: &Store, blobs: &BlobStore) -> usize {
+    let ids: Vec<i64> = match store
+        .conn()
+        .prepare("SELECT id FROM outbox WHERE state <> 'done' ORDER BY id")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()
+        }) {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!("[outbox] could not list the discarded rows after a rebuild: {e}");
+            return 0;
+        }
+    };
+    let mut filed = 0;
+    for id in ids {
+        let row = match load(store, id) {
+            Ok(Some(row)) if row.is_discarded() => row,
+            Ok(_) => continue,
+            Err(e) => {
+                warn!("[outbox] row {id} could not be read after a rebuild: {e:#}");
+                continue;
+            }
+        };
+        let refiled = blobs.read(&row.raw_blob).and_then(|raw| {
+            ingest_sent_copy(
+                store,
+                blobs,
+                &row.account,
+                SENT_ROLE,
+                &raw,
+                &row.message_id,
+                None,
+            )
+        });
+        match refiled {
+            Ok(_) => filed += 1,
+            Err(e) => warn!(
+                "[outbox] the discarded row {} ({}) lost its local Sent copy in a store rebuild \
+                 and it could not be filed again ({e:#}); until its copy reaches Sent on the \
+                 server, the agenda shows the version before it",
+                row.id, row.message_id
+            ),
+        }
+    }
+    filed
+}
+
 /// Why `row` cannot be discarded or retried, when the user discarded it
 /// already ([`OutboxRow::is_discarded`]): it is no message to send, and
 /// what is left of it, the filing of its copy, happens on its own.

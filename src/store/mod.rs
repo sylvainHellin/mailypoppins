@@ -165,6 +165,17 @@ impl Store {
                 warn!("[store] outbox row {row} did not survive the rebuild: {why}");
             }
             span.mark("salvaged");
+            let store = Self { conn, path };
+            // A discarded invitation row carried across keeps the version an
+            // attendee may hold only while its local Sent copy is there, and
+            // that copy was a `messages` row of the file just dropped
+            // (PERSO-304). The one call up from the store layer, since the
+            // copy is an ingest, and only on a rebuild.
+            if let Some(root) = rebuild::blobs_root(&store.path) {
+                crate::outbox::refile_discarded(&store, &BlobStore::new(root));
+                span.mark("refiled");
+            }
+            return Ok(store);
         }
 
         Ok(Self { conn, path })

@@ -19,6 +19,11 @@
 //!    own bytes alive through the sweep.
 //! 3. It writes a `store-rebuild-<timestamp>.txt` note next to the store when
 //!    outbox rows were involved, so a discarded submission is never silent.
+//! 4. Once the fresh store is open, [`super::Store::open`] files again the
+//!    local Sent copy of every carried row the user discarded
+//!    ([`crate::outbox::refile_discarded`]): the copy was a `messages` row of
+//!    the dropped file, and the organizer's agenda and the next `SEQUENCE`
+//!    read the version an attendee may hold from it (PERSO-304).
 //!
 //! The Graph server cleanups `mp outbox discard` leaves (`graph_cleanups`,
 //! #0063) are carried the same way, for the same reason: each names drafts on
@@ -206,7 +211,7 @@ pub(super) struct RebuildReport {
 
 /// The blob root that belongs to a store file: `<account_dir>/blobs/`, the
 /// sibling layout [`crate::config::blobs_dir`] lays down.
-fn blobs_root(store_path: &Path) -> Option<PathBuf> {
+pub(super) fn blobs_root(store_path: &Path) -> Option<PathBuf> {
     store_path.parent().map(|dir| dir.join("blobs"))
 }
 
