@@ -9,7 +9,7 @@ Two of the Phase 6 exit gate lines (`.agents/workflow/native-gui-daemon/plan.md`
 
 Taken on 2026-09-21 on branch `daemon`, at the commit that adds the file.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS, 16 threads, 28 GiB RAM, `/var/tmp` on the root ext4 filesystem.
-Debug build, which is what `cargo test` runs: every latency below is therefore a pessimistic figure and is compared with a ceiling, never with a release baseline.
+Debug build, which is what `cargo test` runs: every latency below is therefore a pessimistic figure, compared with the same reads taken alone and with a loose bound, never with a release baseline.
 
 ## Method
 
@@ -74,6 +74,7 @@ Three consecutive short runs of the committed file took 15.5 s, 15.0 s and 15.0 
 | `RSS_CEILING_BYTES` | 192 MiB | worst measured growth is 76.7 MiB (row g, short run); the ceiling is twice that |
 | `CONVOY_FACTOR` | the four clients' p50 at most 3x the same reads taken alone | row (d) times a lone client's reads in the same rounds as the four clients', so the machine's load slows both alike; on the home server the ratio is 1.2x idle, 1.3x to 2.0x at a load of 20 to 35, and 7x to 11x with one lock held across every read (an injected convoy); the fixed 250 ms p95 it replaces failed at a load of 20 with no convoy and passed an idle run with the convoy |
 | `TAIL_FACTOR` | the four clients' p95 at most 6x the lone client's | measured 1.3x to 2.3x with no convoy, idle or at a load of 20 to 35; the injected convoy moves it only to about 2x, so the tail bound is for a read that stalls now and then, not for the convoy |
+| `LONE_CEILING_MS` | the lone client's p50 under 200 ms and its p95 under 2000 ms | the factors above pass a read that gets slower for every caller, so the lone client is bounded too; on the home server its p50 is 11 to 15 ms at a load of 4 to 10 and 34 to 50 ms at a load of 30 to 40, its p95 90 to 132 ms and 386 to 578 ms, and each bound is about four times the worst loaded figure; 300 ms added to every `message.list` and `message.search` (injected) took the lone p50 to 326 ms and failed the row while both factors stayed at 1.04 |
 | `STORE_MARGIN_BYTES` | 4 MiB | measured movement across 1200 passes that ingest nothing is 0 bytes |
 | `BURST` | 4000 events per bootstrap | above the 512-event queue plus the kernel socket buffer by a wide margin, which is what makes the overflow deterministic |
 | `DRAFT_BATCH` | 100 drafts | under the 512-event queue: a batch larger than it overflows the subscriber and the daemon is entitled to answer with a resync instead of the events |
@@ -106,5 +107,5 @@ The same change made the daemon markedly faster under sustained load, because `l
 ## What the rows deliberately do not claim
 
 - **They do not separate a fast client from a slow one under a burst.** The `MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST` hook commits its changes in a tight loop, faster than any client drains them, so at 4000 events per bootstrap every subscriber overflows and every subscriber is told to resync exactly once. That a stalled reader does not delay another client's round trip is `tests/daemon_events.rs`'s row, taken at a bootstrap latency, and it is not repeated here.
-- **They do not measure a release build.** Every number is from `cargo test`'s debug binary. The latency figures are ceilings-with-headroom, not a benchmark; P6-U10 owns the release-build rerun of the Phase 1a workloads.
+- **They do not measure a release build.** Every number is from `cargo test`'s debug binary. The latency figures are what the factors and the loose bounds are set from, not a benchmark; P6-U10 owns the release-build rerun of the Phase 1a workloads.
 - **They are not a test of a real IMAP sync.** `alpha` configures a host that does not resolve and has no stored secret, so each `sync.quick` runs the real pass, fails in about ten milliseconds and commits a real `sync.completed` outcome with `severity: error`. That is what makes 200 passes cost a second; it is also why row (c) can assert that the store did not move.

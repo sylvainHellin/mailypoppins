@@ -17,7 +17,7 @@
 //! | a | 200 connect/bootstrap/disconnect cycles from 8 threads | descriptors and `clients` return to their baseline |
 //! | b | one client that never reads, under an event burst, while four drain | RSS bounded, exactly one `resync`, every `sync.completed` delivered |
 //! | c | 200 `sync.quick` passes on one account | RSS bounded, `operations.active` back to 0, `store.size_bytes` stable |
-//! | d | 300 `message.list` / `message.search` calls from 4 clients | no error frame, p50 and p95 within a factor of the same reads taken alone, RSS bounded |
+//! | d | 300 `message.list` / `message.search` calls from 4 clients | no error frame, p50 and p95 within a factor of the same reads taken alone, the lone client's p50 and p95 under a loose bound, RSS bounded |
 //! | e | 100 draft files written then deleted under the watched directory | one event per draft either way, descriptors stable |
 //! | f | 50 held sends armed and cancelled from alternating clients | `holds` back to 0, the ledger empty, the draft still approved |
 //! | g | all of the above at once for `MAILYPOPPINS_SOAK_SECS` | RSS and descriptors stable, and a clean `daemon.stop` |
@@ -165,6 +165,25 @@ const CONVOY_FACTOR: f64 = 3.0;
 /// stays under (1.3 to 2.3 measured at a load of 20 to 35) and a read that
 /// stalls now and then while the median looks fine does not.
 const TAIL_FACTOR: f64 = 6.0;
+
+/// How slow row (d)'s lone client may be, at its p50 and its p95, in
+/// milliseconds.
+///
+/// The two factors above compare the four clients with the lone one, so a read
+/// that gets slower for every caller, a search that loses its index and scans,
+/// moves both sides alike and passes them. These bounds catch it. The lone
+/// client shares the daemon with nobody, so the convoy the factors look for
+/// does not touch them; machine load does, which is why they are loose.
+///
+/// Measured on the home server (12 threads, debug build): the lone p50 is 11
+/// to 15 ms at a load of 4 to 10 and 34 to 50 ms at a load of 30 to 40, and
+/// the lone p95 is 90 to 132 ms and 386 to 578 ms. The p50 falls on a
+/// `message.list` and the p95 on the `invoice` search, the costliest read,
+/// so the p50 bound catches a slowdown of every read and the p95 bound one
+/// of the searches alone. Each is about four times the worst loaded figure:
+/// an idle machine fails them at about fifteen times its usual latency, or
+/// at a few hundred milliseconds added to every read.
+const LONE_CEILING_MS: (f64, f64) = (200.0, 2000.0);
 
 /// How many rounds row (d) alternates, each one pass of the lone client and
 /// one pass of the four, so a load that comes and goes during the row lands on
@@ -1453,8 +1472,11 @@ fn ratio(churn: Duration, quiet: Duration) -> f64 {
 /// clients take them at once. The four clients' p50 and p95 are compared
 /// with the lone client's, which the same machine load slows as much, rather
 /// than with a number of milliseconds ([`CONVOY_FACTOR`], [`TAIL_FACTOR`]).
+/// The lone client's own p50 and p95 are held to a loose bound in
+/// milliseconds ([`LONE_CEILING_MS`]), which catches a read that gets slower
+/// for every caller.
 #[test]
-fn search_churn_from_four_clients_answers_every_call_inside_the_ceiling() {
+fn search_churn_from_four_clients_queues_no_read_behind_another() {
     let root = SoakRoot::new();
     let daemon = DaemonFixture::start_with(root.path(), None, &[]);
     let pid = daemon.pid();
@@ -1529,6 +1551,12 @@ fn search_churn_from_four_clients_answers_every_call_inside_the_ceiling() {
     assert!(
         r95 < TAIL_FACTOR,
         "the slowest reads stall among the other clients': {measured}, factor {TAIL_FACTOR}"
+    );
+    let (p50_ceiling, p95_ceiling) = LONE_CEILING_MS;
+    assert!(
+        q50.as_secs_f64() * 1000.0 < p50_ceiling && q95.as_secs_f64() * 1000.0 < p95_ceiling,
+        "the reads are slow for a client alone: {measured}, ceilings p50 {p50_ceiling} ms, \
+         p95 {p95_ceiling} ms"
     );
 
     println!(
