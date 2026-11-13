@@ -1594,6 +1594,146 @@ mod tests {
         }
     }
 
+    /// The real encrypted-file backend in a directory whose permissions are
+    /// switched to refuse every save from the write of `refuse_from` on, as
+    /// a disk that fills up mid-call (PERSO-297).
+    struct FillingDisk {
+        backend: crate::secrets::EncryptedFileBackend,
+        dir: std::path::PathBuf,
+        refuse_from: &'static str,
+        /// Whether the restore's write goes through again.
+        restore_saves: bool,
+        full: std::sync::atomic::AtomicBool,
+    }
+
+    impl FillingDisk {
+        fn new(
+            dir: &std::path::Path,
+            entries: &[(&str, &str)],
+            refuse_from: &'static str,
+            restore_saves: bool,
+        ) -> Self {
+            use crate::secrets::SecretsBackend;
+            let backend = crate::secrets::EncryptedFileBackend::open_with_ikm_for_test(
+                dir.join("secrets.enc"),
+                b"filling-disk",
+            )
+            .unwrap();
+            for (key, value) in entries {
+                backend.set(key, value).unwrap();
+            }
+            Self {
+                backend,
+                dir: dir.to_path_buf(),
+                refuse_from,
+                restore_saves,
+                full: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn set_full(&self, full: bool) {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if full { 0o555 } else { 0o755 };
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            self.full.store(full, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// What a daemon reading the backend now, and one started on the
+        /// file afresh, read for `key`.
+        fn read(&self, key: &str) -> (Option<String>, Option<String>) {
+            use crate::secrets::SecretsBackend;
+            let fresh = crate::secrets::EncryptedFileBackend::open_with_ikm_for_test(
+                self.dir.join("secrets.enc"),
+                b"filling-disk",
+            )
+            .unwrap();
+            (self.backend.get(key).ok(), fresh.get(key).ok())
+        }
+    }
+
+    impl Drop for FillingDisk {
+        fn drop(&mut self) {
+            self.set_full(false);
+        }
+    }
+
+    impl PasswordStore for FillingDisk {
+        fn get(&self, key: &str) -> anyhow::Result<String> {
+            crate::secrets::SecretsBackend::get(&self.backend, key)
+        }
+
+        fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+            let full = self.full.load(std::sync::atomic::Ordering::SeqCst);
+            if key == self.refuse_from && !full {
+                self.set_full(true);
+            } else if full && self.restore_saves {
+                self.set_full(false);
+            }
+            crate::secrets::SecretsBackend::set(&self.backend, key, value)
+        }
+
+        fn delete(&self, key: &str) -> anyhow::Result<()> {
+            if self.full.load(std::sync::atomic::Ordering::SeqCst) && self.restore_saves {
+                self.set_full(false);
+            }
+            crate::secrets::SecretsBackend::delete(&self.backend, key)
+        }
+    }
+
+    /// The disk fills up at the SMTP save and stays full for the restore:
+    /// the error says the new IMAP password is stored and the SMTP one is
+    /// not, and that is what the running daemon reads and what the file
+    /// holds, so a later `set-password smtp` keeps the new IMAP password.
+    #[test]
+    fn a_disk_full_for_the_smtp_write_and_the_restore_leaves_what_the_error_says() {
+        let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+        let disk = FillingDisk::new(
+            dir.path(),
+            &[
+                ("imap-password-tum", "previous"),
+                ("smtp-password-tum", "old"),
+            ],
+            "smtp-password-tum",
+            false,
+        );
+        let failure = write_passwords(&disk, "tum", &BOTH, "new").unwrap_err();
+        let WriteFailure::Partial { stored, .. } = &failure else {
+            panic!("the restore could not be saved: {failure:?}");
+        };
+        assert_eq!(stored, &[SecretKind::Imap]);
+        let new = Some("new".to_string());
+        let old = Some("old".to_string());
+        assert_eq!(disk.read("imap-password-tum"), (new.clone(), new.clone()));
+        assert_eq!(disk.read("smtp-password-tum"), (old.clone(), old.clone()));
+
+        disk.set_full(false);
+        crate::secrets::SecretsBackend::set(&disk.backend, "smtp-password-tum", "fixed").unwrap();
+        assert_eq!(disk.read("imap-password-tum"), (new.clone(), new));
+    }
+
+    /// The disk fills up at the SMTP save and has room again for the
+    /// restore: nothing was changed, as the error says, on disk and in the
+    /// running daemon.
+    #[test]
+    fn a_disk_full_for_the_smtp_write_alone_changes_nothing() {
+        let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+        let disk = FillingDisk::new(
+            dir.path(),
+            &[
+                ("imap-password-tum", "previous"),
+                ("smtp-password-tum", "old"),
+            ],
+            "smtp-password-tum",
+            true,
+        );
+        let failure = write_passwords(&disk, "tum", &BOTH, "new").unwrap_err();
+        assert!(matches!(failure, WriteFailure::Unchanged(_)), "{failure:?}");
+        let previous = Some("previous".to_string());
+        let old = Some("old".to_string());
+        assert_eq!(disk.read("imap-password-tum"), (previous.clone(), previous));
+        assert_eq!(disk.read("smtp-password-tum"), (old.clone(), old));
+    }
+
     /// The written half of a failed write lets go of its login's hold: the
     /// password is new, so the server is asked about it at once.
     #[test]

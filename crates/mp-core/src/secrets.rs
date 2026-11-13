@@ -391,7 +391,7 @@ fn decrypt_with_key(key: &DerivedKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
 /// rebuilding -- against our threat model (attacker with same-user shell
 /// access) it offers no real benefit, since the heap allocator already does
 /// not promise to clear freed memory.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct SecretsFile {
     #[serde(default)]
     entries: HashMap<String, String>,
@@ -476,8 +476,9 @@ impl EncryptedFileBackend {
     }
 
     /// Test-only: construct with a caller-supplied IKM. Used to simulate
-    /// "wrong machine" in unit tests without touching the real machine ID.
-    #[cfg(test)]
+    /// "wrong machine" in unit tests without touching the real machine ID,
+    /// and by the root crate's tests that need a real file backend.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_with_ikm_for_test(
         path: PathBuf,
         ikm: &[u8],
@@ -509,20 +510,25 @@ impl EncryptedFileBackend {
         Ok(())
     }
 
-    fn save_locked(&self, state: &mut EncryptedFileState) -> Result<()> {
+    /// Write `file` and make it the state, or on a failed write leave the
+    /// state as it was: memory never holds what the file does not, so a save
+    /// that failed is not served by `get` nor written by the next save
+    /// (PERSO-297).
+    fn save_locked(&self, state: &mut EncryptedFileState, file: SecretsFile) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create secrets dir: {}", parent.display()))?;
         }
-        let plaintext =
-            toml::to_string(&state.file).context("Failed to serialize secrets to TOML")?;
-        let blob = encrypt_with_key(&state.key, plaintext.as_bytes())?;
-        // Atomic write, created with 0600 from the start (no umask window).
-        write_secret_file_atomic(&self.path, &blob)?;
-        state.stamp = file_stamp(&self.path);
+        let plaintext = toml::to_string(&file).context("Failed to serialize secrets to TOML")?;
+        let written = encrypt_with_key(&state.key, plaintext.as_bytes())
+            // Atomic write, created with 0600 from the start (no umask window).
+            .and_then(|blob| write_secret_file_atomic(&self.path, &blob));
         // Drop our copy of the TOML plaintext.
         let mut s = plaintext.into_bytes();
         s.zeroize();
+        written?;
+        state.file = file;
+        state.stamp = file_stamp(&self.path);
         Ok(())
     }
 }
@@ -547,11 +553,10 @@ impl SecretsBackend for EncryptedFileBackend {
         // Refreshed first, so a password another process stored meanwhile is
         // kept rather than overwritten by this process's older copy.
         self.refresh_locked(&mut state)?;
-        state
-            .file
-            .entries
-            .insert(key.to_string(), value.to_string());
-        self.save_locked(&mut state)
+        // A copy, made the state only once it is on disk.
+        let mut file = state.file.clone();
+        file.entries.insert(key.to_string(), value.to_string());
+        self.save_locked(&mut state, file)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
@@ -560,10 +565,12 @@ impl SecretsBackend for EncryptedFileBackend {
             .write()
             .map_err(|_| anyhow!("secrets lock poisoned"))?;
         self.refresh_locked(&mut state)?;
-        if state.file.entries.remove(key).is_none() {
+        if !state.file.entries.contains_key(key) {
             return Ok(());
         }
-        self.save_locked(&mut state)
+        let mut file = state.file.clone();
+        file.entries.remove(key);
+        self.save_locked(&mut state, file)
     }
 }
 
@@ -850,6 +857,46 @@ mod tests {
     // -----------------------------------------------------------------------
     // What a user reads (PERSO-199)
     // -----------------------------------------------------------------------
+
+    /// A directory whose permissions refuse new files while `f` runs, so a
+    /// save into it fails as on a full or read-only disk.
+    fn read_only<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let answer = f();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        answer
+    }
+
+    /// A write whose save fails changes nothing, in memory either: the
+    /// process goes on reading what the file holds, and the next save does
+    /// not write the refused value (PERSO-297).
+    #[test]
+    fn a_write_whose_save_fails_leaves_memory_as_the_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.enc");
+        let backend =
+            EncryptedFileBackend::open_with_ikm_for_test(path.clone(), b"ikm-failed").unwrap();
+        backend.set("imap-password-work", "old").unwrap();
+        backend.set("smtp-password-work", "old").unwrap();
+
+        let refused = read_only(dir.path(), || backend.set("smtp-password-work", "new"));
+        assert!(
+            refused.is_err(),
+            "the save into a read-only directory fails"
+        );
+        assert_eq!(backend.get("smtp-password-work").unwrap(), "old");
+
+        let removal = read_only(dir.path(), || backend.delete("imap-password-work"));
+        assert!(removal.is_err());
+        assert_eq!(backend.get("imap-password-work").unwrap(), "old");
+
+        // The next save writes what memory holds, which is the file's.
+        backend.set("other", "x").unwrap();
+        let reopened = EncryptedFileBackend::open_with_ikm_for_test(path, b"ikm-failed").unwrap();
+        assert_eq!(reopened.get("smtp-password-work").unwrap(), "old");
+        assert_eq!(reopened.get("imap-password-work").unwrap(), "old");
+    }
 
     /// A removed password is missing, on disk too, and removing one that is
     /// not there is no error (PERSO-297: a kind-less `config.set_password`
