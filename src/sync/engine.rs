@@ -22,8 +22,8 @@ use anyhow::Result;
 use log::{info, warn};
 
 use super::{
-    stops_at, FreshObservation, MailboxFetch, ObservationSink, Stop, StopPoint, SyncBackend,
-    SyncResult, SyncTarget,
+    stops_at, BodyBatch, FreshObservation, MailboxListing, ObservationSink, Stop, StopPoint,
+    SyncBackend, SyncResult, SyncTarget,
 };
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
@@ -211,7 +211,7 @@ pub(crate) fn mark_below_unmet(pending: Option<u32>, unmet: &[u32]) -> Option<u3
 /// the next tick once the holder is gone.
 ///
 /// The refusal is decided before the transport is touched, because the engine's
-/// only call into it is [`SyncBackend::fetch_targets`] below and the lock is
+/// first call into it is [`SyncBackend::list_targets`] below and the lock is
 /// taken before this function delegates. A refused sync therefore costs no
 /// login and no server traffic.
 ///
@@ -256,23 +256,31 @@ pub async fn run_sync_guarded_at(
 /// than changing it, so the fake-backend tests below drive the mechanism
 /// without a lock file.
 ///
-/// The phases and their order are load-bearing and unchanged from the
-/// pre-#0059 IMAP orchestrator:
+/// The phases and their order are load-bearing:
 ///
 /// 1. every target's skip list is read from the store serially, before any
 ///    network call, so the fetch never races the single SQLite writer;
-/// 2. the backend fetches, in whatever order it likes, and hands the results
-///    back in target order;
-/// 3. ingest runs serially in target order, so per-mailbox transactions cannot
-///    interleave and the prune ordering below holds;
+/// 2. the backend lists every target, in whatever order it likes, and hands
+///    the listings back in target order;
+/// 3. each target in turn, in target order, has its new bodies downloaded a
+///    batch at a time, each batch ingested before the next is asked for
+///    (PERSO-300), then its flags applied and its cursor recorded, so
+///    per-mailbox writes cannot interleave and the prune ordering below holds;
 /// 4. every prune runs after every target has been ingested, gated on the whole
 ///    pass's coverage.
 ///
-/// [`SyncRun::stop`] is asked before phase 2 and before each target of phase
-/// 3 (PERSO-127). A target's ingest is never interrupted, because its rows,
-/// flags and cursor are written as one unit of progress, and a pass that
-/// stops skips the prune pass altogether: it has not ingested every target, so
-/// the coverage gate would refuse it anyway.
+/// Phase 3 is what bounds the pass's memory: the engine holds one batch of
+/// bodies at a time, where until PERSO-300 every mailbox was downloaded whole
+/// before the first was ingested, and a full sync of a 6,360-message folder
+/// peaked at about 8 GB.
+///
+/// [`SyncRun::stop`] is asked before phase 2, before each target of phase 3
+/// (PERSO-127) and between two batches of one target (PERSO-300). A stop
+/// between batches closes the target as a pass cut by its deadline is closed:
+/// the batches ingested stay, its flags and its cursor are written, and its
+/// arrival mark holds the prune gate shut over what it did not reach. A pass
+/// that stops skips the prune pass altogether: it has not ingested every
+/// target, so the coverage gate would refuse it anyway.
 pub async fn run_sync(
     backend: &mut impl SyncBackend,
     run: &SyncRun<'_>,
@@ -328,15 +336,15 @@ pub async fn run_sync(
         )?);
     }
 
-    // Phase 2: the transport. One result per target, in target order, whatever
-    // order the backend actually fetched them in (see [`SyncBackend`]).
-    let fetched_results = backend.fetch_targets(targets, limit, knowns).await;
-    span.mark("fetch");
+    // Phase 2: the listings. One per target, in target order, whatever order
+    // the backend actually listed them in (see [`SyncBackend`]).
+    let listings = backend.list_targets(targets, limit, knowns).await;
+    span.mark("list");
 
-    // Phase 3: ingest serially, in target order.
-    for (index, (target, fetched)) in targets.iter().zip(fetched_results).enumerate() {
+    // Phase 3: download and ingest serially, in target order.
+    for (index, (target, listing)) in targets.iter().zip(listings).enumerate() {
         // The mailbox boundary (PERSO-127): what earlier targets wrote stays,
-        // and this one's download, fetched or not, is dropped unwritten.
+        // and this one is not downloaded.
         if stops_at(stop, StopPoint::Mailbox(index)) {
             info!(
                 "[sync] {account}: stopped before '{}', {index} of {} mailbox(es) ingested",
@@ -345,7 +353,7 @@ pub async fn run_sync(
             );
             return Ok(result);
         }
-        let fetched: MailboxFetch = match fetched {
+        let listing: MailboxListing = match listing {
             Ok(v) => v,
             // A login the server refused ends the pass as its error
             // (PERSO-296): every later mailbox needs the same login, and a
@@ -370,21 +378,18 @@ pub async fn run_sync(
                 continue;
             }
         };
-        let new_messages = fetched.messages;
-        let state = fetched.state;
-        let pending_arrival_mark = fetched.pending_arrival_mark;
-        // A body pass that stopped at its deadline (#0113) left new mail on the
-        // server it never asked for. The backend already reports that through
-        // the coverage arithmetic and declines its own modseq; the flag is read
-        // here as well, so the two consequences hold whatever a backend fills
-        // `download_incomplete` and `highest_modseq` with, and so the status
-        // line can say which pass was cut.
-        let bodies_complete = fetched.bodies_complete;
-        if !bodies_complete {
-            result.bodies_truncated += 1;
-        }
-        result.skipped += fetched.skipped;
-        if fetched.uidvalidity_reset {
+        let MailboxListing {
+            skipped,
+            known_flags,
+            state,
+            vanished,
+            listed,
+            uidvalidity_reset,
+            enumeration_complete,
+            coverage: coverage_of,
+        } = listing;
+        result.skipped += skipped;
+        if uidvalidity_reset {
             result.uidvalidity_resets += 1;
             // The retry counters are keyed by UID, and the server has just
             // renumbered them: every recorded attempt now points at a message
@@ -403,15 +408,6 @@ pub async fn run_sync(
             if !dry_run {
                 clear_nonconverging(store, target.role.as_str());
             }
-        }
-
-        if dry_run {
-            coverage.push((
-                fetched.enumeration_complete,
-                (fetched.download_incomplete || !bodies_complete) && target.short_download_counts(),
-            ));
-            result.saved += new_messages.len();
-            continue;
         }
 
         // A message that was downloaded but not written is as absent from the
@@ -447,18 +443,17 @@ pub async fn run_sync(
         // which is what keeps N copies of one Message-ID from collapsing back
         // onto the lowest-id row.
         let mut server_uids: std::collections::HashSet<i64> =
-            if fetched.uidvalidity_reset || !fetched.enumeration_complete {
+            if uidvalidity_reset || !enumeration_complete {
                 std::collections::HashSet::new()
             } else {
-                fetched.listed.iter().map(|&uid| uid as i64).collect()
+                listed.iter().map(|&uid| uid as i64).collect()
             };
         // What the folder holds, for the departures watch to tell a departing
         // op's stale UID from a live one (PERSO-246), under the same
         // conditions: a reset or short listing cannot say.
-        let folder: Option<std::collections::HashSet<u32>> = (!fetched.uidvalidity_reset
-            && fetched.enumeration_complete
-            && !fetched.listed.is_empty())
-        .then(|| fetched.listed.iter().copied().collect());
+        let folder: Option<std::collections::HashSet<u32>> =
+            (!uidvalidity_reset && enumeration_complete && !listed.is_empty())
+                .then(|| listed.iter().copied().collect());
 
         let mut unmet: Vec<u32> = Vec::new();
         // #0115: a UID the store has given up on drops out of `unmet`, which is
@@ -485,89 +480,173 @@ pub async fn run_sync(
                 gave_up = true;
             }
         };
-        for message in &new_messages {
-            let Some(mut email) = parse_rfc822_to_fetched_email(&message.raw) else {
-                warn!(
-                    "Skipping UID {} in '{}': the message did not parse",
-                    message.uid, target.server_name
-                );
-                note_failure(message.uid, "the message did not parse");
-                continue;
-            };
-            email.flags = message.flags;
-
-            let outcome = ingest::ingest_listed(
-                store,
-                blobs,
-                &IngestInput {
-                    account,
-                    mailbox: target.role.as_str(),
-                    uid: message.uid as i64,
-                    email: &email,
-                    raw: Some(&message.raw),
-                },
-                &RebindPolicy::UnlessListed(&server_uids),
-                None,
-                &|message_id| {
-                    departures.departed(
-                        message_id,
-                        &super::departures::Listed {
-                            source: &target.server_name,
-                            uid: message.uid,
-                            uidvalidity: state.uid_validity,
-                            folder: folder.as_ref(),
-                        },
-                    )
-                },
-            );
-            match outcome {
-                Ok(outcome) => {
-                    // Whatever row now holds this UID is off limits to the rest
-                    // of the pass: see the gate's comment above.
-                    server_uids.insert(message.uid as i64);
-                    ingest::clear_ingest_failure(
-                        store,
-                        account,
-                        target.role.as_str(),
-                        message.uid as i64,
-                    );
-                    if outcome.inserted {
-                        result.saved += 1;
-                        result
-                            .fresh_observations
-                            .push(FreshObservation::of(&target.role, &email));
-                    }
-                    if outcome.uid_rebound {
-                        result.uid_rebound += 1;
-                    }
-                    if outcome.inserted && target.role.is_inbox() {
-                        result
-                            .new_inbox_mail
-                            .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
-                    }
-                }
-                // The copy a local move or delete is taking off the server
-                // (PERSO-240). No failure: nothing is owed, so it neither
-                // counts against the retry budget nor holds the prune back,
-                // since the message's own row is where the user put it, or
-                // gone because the user deleted it. A copy that is still
-                // listed once the departure has landed is a second one, and
-                // the pass that sees it then ingests it.
-                Err(e) if e.downcast_ref::<ingest::Departed>().is_some() => {
-                    withheld = true;
-                    info!(
-                        "[sync] '{}': not ingesting UID {}: {e}",
-                        target.server_name, message.uid
-                    );
+        // The body pass (PERSO-300): one batch in hand at a time, ingested
+        // before the next is asked for, so the pass holds one batch of mail
+        // whatever the size of the mailbox, and a stop asked between two
+        // batches waits for one batch's ingest at most. The first batch is not
+        // preceded by a question of its own: the mailbox boundary above has
+        // just been asked.
+        //
+        // `downloaded` is every UID whose body came back, written or not: the
+        // backend's coverage measures the download, and `unmet` above carries
+        // what the ingest then failed to write.
+        let mut downloaded: Vec<u32> = Vec::new();
+        let bodies_complete;
+        let mut stopped = false;
+        let mut failure: Option<anyhow::Error> = None;
+        let mut batches = 0usize;
+        loop {
+            if batches > 0 && stops_at(stop, StopPoint::Chunk) {
+                stopped = true;
+                bodies_complete = false;
+                break;
+            }
+            let batch = match backend.next_batch(index).await {
+                Ok(BodyBatch::Bodies(batch)) => batch,
+                Ok(BodyBatch::Done { complete }) => {
+                    bodies_complete = complete;
+                    break;
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to ingest UID {} from '{}': {:#}",
-                        message.uid, target.server_name, e
+                        "[sync] '{}': the body download failed after {} message(s): {e:#}",
+                        target.server_name,
+                        downloaded.len()
                     );
-                    note_failure(message.uid, &format!("{e:#}"));
+                    bodies_complete = false;
+                    failure = Some(e);
+                    break;
+                }
+            };
+            batches += 1;
+            downloaded.extend(batch.iter().map(|message| message.uid));
+            if dry_run {
+                result.saved += batch.len();
+                continue;
+            }
+            for message in &batch {
+                let Some(mut email) = parse_rfc822_to_fetched_email(&message.raw) else {
+                    warn!(
+                        "Skipping UID {} in '{}': the message did not parse",
+                        message.uid, target.server_name
+                    );
+                    note_failure(message.uid, "the message did not parse");
+                    continue;
+                };
+                email.flags = message.flags;
+
+                let outcome = ingest::ingest_listed(
+                    store,
+                    blobs,
+                    &IngestInput {
+                        account,
+                        mailbox: target.role.as_str(),
+                        uid: message.uid as i64,
+                        email: &email,
+                        raw: Some(&message.raw),
+                    },
+                    &RebindPolicy::UnlessListed(&server_uids),
+                    None,
+                    &|message_id| {
+                        departures.departed(
+                            message_id,
+                            &super::departures::Listed {
+                                source: &target.server_name,
+                                uid: message.uid,
+                                uidvalidity: state.uid_validity,
+                                folder: folder.as_ref(),
+                            },
+                        )
+                    },
+                );
+                match outcome {
+                    Ok(outcome) => {
+                        // Whatever row now holds this UID is off limits to the rest
+                        // of the pass: see the gate's comment above.
+                        server_uids.insert(message.uid as i64);
+                        ingest::clear_ingest_failure(
+                            store,
+                            account,
+                            target.role.as_str(),
+                            message.uid as i64,
+                        );
+                        if outcome.inserted {
+                            result.saved += 1;
+                            result
+                                .fresh_observations
+                                .push(FreshObservation::of(&target.role, &email));
+                        }
+                        if outcome.uid_rebound {
+                            result.uid_rebound += 1;
+                        }
+                        if outcome.inserted && target.role.is_inbox() {
+                            result
+                                .new_inbox_mail
+                                .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
+                        }
+                    }
+                    // The copy a local move or delete is taking off the server
+                    // (PERSO-240). No failure: nothing is owed, so it neither
+                    // counts against the retry budget nor holds the prune back,
+                    // since the message's own row is where the user put it, or
+                    // gone because the user deleted it. A copy that is still
+                    // listed once the departure has landed is a second one, and
+                    // the pass that sees it then ingests it.
+                    Err(e) if e.downcast_ref::<ingest::Departed>().is_some() => {
+                        withheld = true;
+                        info!(
+                            "[sync] '{}': not ingesting UID {}: {e}",
+                            target.server_name, message.uid
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to ingest UID {} from '{}': {:#}",
+                            message.uid, target.server_name, e
+                        );
+                        note_failure(message.uid, &format!("{e:#}"));
+                    }
                 }
             }
+        }
+        if stopped {
+            info!(
+                "[sync] {account}: stopped in '{}' after {} batch(es), {} message(s)",
+                target.server_name,
+                batches,
+                downloaded.len()
+            );
+        }
+        // A body pass that ended before asking for every new UID, at the
+        // backend's deadline (#0113), at a stop or at a failure, left new mail
+        // on the server. The backend's coverage reports that through its
+        // arithmetic and declines its own modseq; the flag is read here as
+        // well, so the two consequences hold whatever a backend answers, and
+        // so the status line can say which pass was cut.
+        if !bodies_complete {
+            result.bodies_truncated += 1;
+        }
+        let covered = coverage_of(&downloaded, bodies_complete);
+        // What makes a body failure end the pass rather than the mailbox, the
+        // same reading the listing's failure gets above.
+        let refused = failure
+            .as_ref()
+            .is_some_and(|e| crate::login_gate::login_rejected(e).is_some());
+
+        if dry_run {
+            coverage.push((
+                enumeration_complete,
+                failure.is_some()
+                    || ((covered.download_incomplete || !bodies_complete)
+                        && target.short_download_counts()),
+            ));
+            if refused {
+                return Err(failure.expect("a refused login is a failure"));
+            }
+            if stopped {
+                return Ok(result);
+            }
+            continue;
         }
 
         // The degradation above is granted to the pass that detects the reset,
@@ -600,9 +679,8 @@ pub async fn run_sync(
         //
         // Rows on UIDs the server does not list are left alone: they block
         // nothing, and the prune is the path that answers for them.
-        if fetched.uidvalidity_reset {
-            let unverified: Vec<u32> = fetched
-                .listed
+        if uidvalidity_reset {
+            let unverified: Vec<u32> = listed
                 .iter()
                 .copied()
                 .filter(|&uid| !server_uids.contains(&(uid as i64)))
@@ -611,14 +689,16 @@ pub async fn run_sync(
         }
 
         // A `status-only` target's window leaves the folder's history on the
-        // server by design (#0141), so only what it failed to write counts.
+        // server by design (#0141), so only what it failed to download or
+        // write counts.
         coverage.push((
-            fetched.enumeration_complete,
+            enumeration_complete,
             !unmet.is_empty()
-                || ((fetched.download_incomplete || !bodies_complete)
+                || failure.is_some()
+                || ((covered.download_incomplete || !bodies_complete)
                     && target.short_download_counts()),
         ));
-        let pending_arrival_mark = mark_below_unmet(pending_arrival_mark, &unmet);
+        let pending_arrival_mark = mark_below_unmet(covered.pending_arrival_mark, &unmet);
 
         // The IMAP server states the whole flag set, so it is truth for all
         // three bits of the second axis (#TKT-0051), not just for `\Seen`.
@@ -626,8 +706,7 @@ pub async fn run_sync(
             store,
             account,
             target.role.as_str(),
-            fetched
-                .known_flags
+            known_flags
                 .into_iter()
                 .map(|(uid, flags)| (uid as i64, flags)),
         );
@@ -635,8 +714,8 @@ pub async fn run_sync(
         // The other half of the same diff: the UIDs the store holds for this
         // mailbox that the server did not list. Held back until every target
         // has been ingested (see the second pass below).
-        if !fetched.vanished.is_empty() {
-            prunes.push((target.role.clone(), fetched.vanished));
+        if !vanished.is_empty() {
+            prunes.push((target.role.clone(), vanished));
         }
 
         // #0115: a pass that saw the whole mailbox, downloaded everything it
@@ -651,21 +730,18 @@ pub async fn run_sync(
         // A pass that gave up on a message (#0074) is the same shape: it wrote
         // less than it downloaded, and the give-up is what makes that permanent
         // rather than a bug to report.
-        let qualifies = fetched.enumeration_complete
-            && !fetched.download_incomplete
+        let qualifies = enumeration_complete
+            && !covered.download_incomplete
             && bodies_complete
-            && !fetched.uidvalidity_reset
+            && !uidvalidity_reset
             && unmet.is_empty()
             && !gave_up
             && !withheld;
-        if qualifies {
-            let uids: Vec<u32> = new_messages.iter().map(|m| m.uid).collect();
-            if note_download_fingerprint(store, account, target, &uids).is_some() {
-                result.non_converging.push(target.server_name.clone());
-            }
+        if qualifies && note_download_fingerprint(store, account, target, &downloaded).is_some() {
+            result.non_converging.push(target.server_name.clone());
         }
 
-        let highest_uid = new_messages.iter().map(|m| m.uid as i64).max();
+        let highest_uid = downloaded.iter().map(|&uid| uid as i64).max();
         ingest::record_mailbox_cursor(
             store,
             account,
@@ -679,7 +755,7 @@ pub async fn run_sync(
                 // modseq", not "clear it": the UPSERT COALESCEs, so a
                 // full-window pass leaves a CONDSTORE pass's resume point
                 // alone (#0041).
-                highest_modseq: fetched.highest_modseq.filter(|_| bodies_complete),
+                highest_modseq: covered.highest_modseq.filter(|_| bodies_complete),
                 deltalink: None,
                 // What this pass owes the next one: the mark below which the
                 // gate must stay shut because an arrival the server lists is
@@ -688,6 +764,19 @@ pub async fn run_sync(
                 arrival_mark: pending_arrival_mark.map(|m| m as i64),
             },
         )?;
+
+        if refused {
+            warn!(
+                "[sync] {account}: the server refused the login at '{}'; ending the pass",
+                target.server_name
+            );
+            return Err(failure.expect("a refused login is a failure"));
+        }
+        // The mailbox the stop landed in is closed, rows, flags and cursor;
+        // nothing after it is touched and the prune pass does not run.
+        if stopped {
+            return Ok(result);
+        }
     }
 
     span.mark("ingest");
@@ -762,12 +851,67 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::sync::{FetchedRaw, MailboxState};
+    use crate::sync::{FetchedRaw, MailboxCoverage, MailboxState};
     use crate::types::MessageFlags;
 
     // -----------------------------------------------------------------------
     // The fake backend (#0059)
     // -----------------------------------------------------------------------
+
+    /// How many bodies the fake backend hands over per batch, the IMAP
+    /// backend's chunk size.
+    const FAKE_BATCH: usize = 20;
+
+    /// One mailbox's whole fetch as a test scripts it: the listing, every new
+    /// body, and the coverage the backend reports once the bodies are in.
+    struct MailboxFetch {
+        messages: Vec<FetchedRaw>,
+        skipped: usize,
+        known_flags: Vec<(u32, MessageFlags)>,
+        state: MailboxState,
+        vanished: Vec<u32>,
+        listed: Vec<u32>,
+        uidvalidity_reset: bool,
+        enumeration_complete: bool,
+        download_incomplete: bool,
+        pending_arrival_mark: Option<u32>,
+        /// Whether the scripted body pass asks for every new UID, as a pass
+        /// cut at its deadline does not (#0113).
+        bodies_complete: bool,
+        highest_modseq: Option<i64>,
+    }
+
+    impl MailboxFetch {
+        /// The listing the engine sees first, and the body pass behind it.
+        fn split(self) -> (MailboxListing, FakeBodies) {
+            let covered = MailboxCoverage {
+                download_incomplete: self.download_incomplete,
+                pending_arrival_mark: self.pending_arrival_mark,
+                highest_modseq: self.highest_modseq,
+            };
+            let listing = MailboxListing {
+                skipped: self.skipped,
+                known_flags: self.known_flags,
+                state: self.state,
+                vanished: self.vanished,
+                listed: self.listed,
+                uidvalidity_reset: self.uidvalidity_reset,
+                enumeration_complete: self.enumeration_complete,
+                coverage: Box::new(move |_, _| covered),
+            };
+            let bodies = FakeBodies {
+                messages: self.messages.into(),
+                complete: self.bodies_complete,
+            };
+            (listing, bodies)
+        }
+    }
+
+    /// One target's scripted body pass, handed over [`FAKE_BATCH`] at a time.
+    struct FakeBodies {
+        messages: std::collections::VecDeque<FetchedRaw>,
+        complete: bool,
+    }
 
     /// A [`SyncBackend`] that answers from a script instead of a server.
     ///
@@ -782,12 +926,16 @@ mod tests {
         /// Every `(target, limit, skip-list size)` the engine asked for, in
         /// call order: what the engine handed the transport.
         seen: Vec<(String, usize, usize)>,
+        /// The body pass of each target of the last listing, by index.
+        bodies: Vec<Option<FakeBodies>>,
+        /// How many batches of bodies the engine has been handed.
+        batches: usize,
         /// Opt-in fidelity: drop the scripted messages whose UID the store's
         /// skip list already holds, resolved against the scripted UIDVALIDITY
         /// exactly as [`crate::ingest::KnownUids::resolve`] does it.
         ///
         /// That is what the real backend's pass 2 does
-        /// ([`crate::imap_client::fetch_new_raw_on_session`]): it downloads a
+        /// ([`crate::imap_client::ImapBackend`]): it downloads a
         /// UID only when the store does not hold it. Off by default, because
         /// the scripts here mostly say "this is what came back" rather than
         /// "this is what the mailbox holds", and a test that wants to state
@@ -807,15 +955,16 @@ mod tests {
     }
 
     impl SyncBackend for FakeBackend {
-        async fn fetch_targets(
+        async fn list_targets(
             &mut self,
             targets: &[SyncTarget],
             limit: usize,
             knowns: Vec<crate::ingest::KnownUids>,
-        ) -> Vec<Result<MailboxFetch>> {
+        ) -> Vec<Result<MailboxListing>> {
             if let Some(during_fetch) = self.during_fetch.take() {
                 during_fetch();
             }
+            self.bodies.clear();
             let mut out = Vec::with_capacity(targets.len());
             for (target, known) in targets.iter().zip(knowns) {
                 self.seen
@@ -837,9 +986,33 @@ mod tests {
                         fetch.messages.retain(|m| !skip.contains(&(m.uid as i64)));
                     }
                 }
-                out.push(next);
+                match next {
+                    Ok(fetch) => {
+                        let (listing, bodies) = fetch.split();
+                        self.bodies.push(Some(bodies));
+                        out.push(Ok(listing));
+                    }
+                    Err(e) => {
+                        self.bodies.push(None);
+                        out.push(Err(e));
+                    }
+                }
             }
             out
+        }
+
+        async fn next_batch(&mut self, index: usize) -> Result<BodyBatch> {
+            let Some(Some(bodies)) = self.bodies.get_mut(index) else {
+                panic!("the engine asked for the bodies of a target without a listing");
+            };
+            if bodies.messages.is_empty() {
+                return Ok(BodyBatch::Done {
+                    complete: bodies.complete,
+                });
+            }
+            let take = bodies.messages.len().min(FAKE_BATCH);
+            self.batches += 1;
+            Ok(BodyBatch::Bodies(bodies.messages.drain(..take).collect()))
         }
     }
 
@@ -879,11 +1052,7 @@ mod tests {
         MailboxFetch {
             messages: messages
                 .into_iter()
-                .map(|(uid, raw)| FetchedRaw {
-                    uid,
-                    raw,
-                    flags: MessageFlags::default(),
-                })
+                .map(|(uid, raw)| FetchedRaw::new(uid, raw, MessageFlags::default()))
                 .collect(),
             skipped: 0,
             known_flags: Vec::new(),
@@ -1100,8 +1269,54 @@ mod tests {
             vec![
                 StopPoint::Fetch,
                 StopPoint::Mailbox(0),
+                StopPoint::Chunk,
                 StopPoint::Mailbox(1)
             ],
+            "the stop is the last question the pass asks"
+        );
+    }
+
+    /// PERSO-300: a stop that lands while a mailbox's ingest is under way
+    /// ends the pass once the batch in hand is ingested. No further batch is
+    /// downloaded, the mailbox is closed with what it wrote, its cursor
+    /// included, and nothing after it is touched.
+    ///
+    /// Before PERSO-300 a mailbox's ingest was never interrupted, and the
+    /// daemon kept writing a 6,360-message folder for about three minutes
+    /// after the cancel was acknowledged.
+    #[test]
+    fn a_stop_during_a_mailbox_ingest_ends_the_pass_after_the_batch_in_hand() {
+        let fx = Fixture::new();
+        let mut backend = FakeBackend::default();
+        let inbox: Vec<(u32, Vec<u8>)> = (1..=5 * FAKE_BATCH as u32)
+            .map(|uid| (uid, raw(&format!("m{uid}"))))
+            .collect();
+        backend.script("INBOX", vec![Ok(fetch(inbox))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(201, raw("arch"))]))]);
+        // The cancel lands while the first batch is being ingested: the
+        // first question the engine asks after it is the next batch's.
+        let (stop, asked) = stop_from(StopPoint::Chunk);
+        let result = fx.run_until(&mut backend, &targets(), usize::MAX, false, Some(&stop));
+
+        assert_eq!(backend.batches, 1, "no batch is downloaded after the stop");
+        assert_eq!(
+            fx.rows("inbox"),
+            (1..=FAKE_BATCH as i64).collect::<Vec<_>>(),
+            "the batch in hand is written, and nothing after it"
+        );
+        assert_eq!(result.saved, FAKE_BATCH);
+        assert_eq!(result.bodies_truncated, 1, "the mailbox is closed short");
+        let cursor = ingest::load_mailbox_cursor(&fx.store, "acct", "inbox")
+            .unwrap()
+            .expect("the mailbox the stop landed in records its cursor");
+        assert_eq!(cursor.last_uid, Some(FAKE_BATCH as i64));
+        assert!(
+            fx.rows("archive").is_empty(),
+            "the next mailbox is untouched"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![StopPoint::Fetch, StopPoint::Mailbox(0), StopPoint::Chunk],
             "the stop is the last question the pass asks"
         );
     }
@@ -2218,7 +2433,7 @@ mod tests {
     /// nobody parked on a recycled UID.
     ///
     /// Full sync, not next tick, and the difference is the fetch window rather
-    /// than the skip list: `fetch_new_raw_on_session` builds it positionally
+    /// than the skip list: `list_mailbox_on_session` builds it positionally
     /// (`listed.iter().rev().take(n)`), so it is the top of the mailbox, and
     /// the rows this repairs are below it by construction. Freeing their UIDs
     /// does not get them asked for on the next ordinary tick; it gets them
@@ -2245,7 +2460,7 @@ mod tests {
     /// downloads `one` on 12 gives it back the row it always had.
     ///
     /// The window is modelled by hand, as everywhere else here
-    /// (`FakeBackend::fetch_targets` records `limit` and does not apply it),
+    /// (`FakeBackend::list_targets` records `limit` and does not apply it),
     /// and so is pass 3's download set, which is scripted as the whole
     /// remaining listing because that is what a full sync asks for. What that set *would* be under a stale
     /// skip list is the other half, and

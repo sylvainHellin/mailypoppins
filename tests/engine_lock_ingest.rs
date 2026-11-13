@@ -72,7 +72,8 @@ use mailypoppins::ingest::KnownUids;
 use mailypoppins::store::{BlobStore, Store};
 use mailypoppins::sync::engine::{run_sync_guarded_at, SyncRun};
 use mailypoppins::sync::{
-    FetchedRaw, MailboxFetch, MailboxState, ObservationSink, SyncBackend, SyncResult, SyncTarget,
+    BodyBatch, FetchedRaw, MailboxCoverage, MailboxListing, MailboxState, ObservationSink,
+    SyncBackend, SyncResult, SyncTarget,
 };
 use mailypoppins::timing::TimingSpan;
 use mailypoppins::types::{MailboxRole, MessageFlags};
@@ -102,25 +103,46 @@ async fn the_plain_form_takes_exactly_run_syncs_parameters(
 
 /// A backend that must never be reached.
 ///
-/// The "no IMAP session opened" half of the contract: the engine's only call
-/// into the transport is `fetch_targets`, and every session in the real backend
-/// is opened inside it ([`mailypoppins::imap_client::ImapBackend`] checks out
-/// of the pool per target). A guarded run that was refused the lock must return
-/// before this is called, so reaching it is the failure.
+/// The "no IMAP session opened" half of the contract: the engine's first call
+/// into the transport is `list_targets`, and every session in the real backend
+/// is opened inside it or after it ([`mailypoppins::imap_client::ImapBackend`]
+/// checks out of the pool per target). A guarded run that was refused the lock
+/// must return before this is called, so reaching it is the failure.
 struct PanickingBackend;
 
 impl SyncBackend for PanickingBackend {
-    async fn fetch_targets(
+    async fn list_targets(
         &mut self,
         _targets: &[SyncTarget],
         _limit: usize,
         _knowns: Vec<KnownUids>,
-    ) -> Vec<Result<MailboxFetch>> {
+    ) -> Vec<Result<MailboxListing>> {
         panic!(
             "run_sync_guarded opened a fetch while another process held the engine lock: \
              the refusal must happen before the transport is touched"
         );
     }
+
+    async fn next_batch(&mut self, _index: usize) -> Result<BodyBatch> {
+        panic!("run_sync_guarded downloaded a body while another process held the engine lock");
+    }
+}
+
+/// One mailbox's whole fetch as a test scripts it: the listing, every new
+/// body, and the coverage the backend reports once the bodies are in.
+struct MailboxFetch {
+    messages: Vec<FetchedRaw>,
+    skipped: usize,
+    known_flags: Vec<(u32, MessageFlags)>,
+    state: MailboxState,
+    vanished: Vec<u32>,
+    listed: Vec<u32>,
+    uidvalidity_reset: bool,
+    enumeration_complete: bool,
+    download_incomplete: bool,
+    bodies_complete: bool,
+    pending_arrival_mark: Option<u32>,
+    highest_modseq: Option<i64>,
 }
 
 /// Hands back scripted fetches per target, one per pass, ignoring the skip
@@ -133,6 +155,9 @@ struct ScriptedBackend {
     /// How many times the engine asked for a fetch, so a test can say "no pass
     /// ran" as well as "no session opened".
     calls: usize,
+    /// The bodies of each target of the last listing, by index, handed over
+    /// in one batch, and whether the scripted pass asked for every new UID.
+    bodies: Vec<Option<(Vec<FetchedRaw>, bool)>>,
 }
 
 impl ScriptedBackend {
@@ -141,29 +166,66 @@ impl ScriptedBackend {
         map.insert(server_name.to_string(), passes);
         Self {
             passes: map,
-            calls: 0,
+            ..Self::default()
         }
     }
 }
 
 impl SyncBackend for ScriptedBackend {
-    async fn fetch_targets(
+    async fn list_targets(
         &mut self,
         targets: &[SyncTarget],
         _limit: usize,
         _knowns: Vec<KnownUids>,
-    ) -> Vec<Result<MailboxFetch>> {
+    ) -> Vec<Result<MailboxListing>> {
         self.calls += 1;
-        targets
-            .iter()
-            .map(|target| {
-                self.passes
-                    .get_mut(&target.server_name)
-                    .filter(|queue| !queue.is_empty())
-                    .map(|queue| queue.remove(0))
-                    .ok_or_else(|| anyhow::anyhow!("nothing scripted for {}", target.server_name))
-            })
-            .collect()
+        self.bodies.clear();
+        let mut out = Vec::with_capacity(targets.len());
+        for target in targets {
+            let next = self
+                .passes
+                .get_mut(&target.server_name)
+                .filter(|queue| !queue.is_empty())
+                .map(|queue| queue.remove(0));
+            let Some(fetch) = next else {
+                self.bodies.push(None);
+                out.push(Err(anyhow::anyhow!(
+                    "nothing scripted for {}",
+                    target.server_name
+                )));
+                continue;
+            };
+            let covered = MailboxCoverage {
+                download_incomplete: fetch.download_incomplete,
+                pending_arrival_mark: fetch.pending_arrival_mark,
+                highest_modseq: fetch.highest_modseq,
+            };
+            self.bodies
+                .push(Some((fetch.messages, fetch.bodies_complete)));
+            out.push(Ok(MailboxListing {
+                skipped: fetch.skipped,
+                known_flags: fetch.known_flags,
+                state: fetch.state,
+                vanished: fetch.vanished,
+                listed: fetch.listed,
+                uidvalidity_reset: fetch.uidvalidity_reset,
+                enumeration_complete: fetch.enumeration_complete,
+                coverage: Box::new(move |_, _| covered),
+            }));
+        }
+        out
+    }
+
+    async fn next_batch(&mut self, index: usize) -> Result<BodyBatch> {
+        let Some(Some((messages, complete))) = self.bodies.get_mut(index) else {
+            panic!("the engine asked for the bodies of a target without a listing");
+        };
+        if messages.is_empty() {
+            return Ok(BodyBatch::Done {
+                complete: *complete,
+            });
+        }
+        Ok(BodyBatch::Bodies(std::mem::take(messages)))
     }
 }
 
@@ -177,11 +239,7 @@ fn fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
     MailboxFetch {
         messages: messages
             .into_iter()
-            .map(|(uid, raw)| FetchedRaw {
-                uid,
-                raw,
-                flags: MessageFlags::default(),
-            })
+            .map(|(uid, raw)| FetchedRaw::new(uid, raw, MessageFlags::default()))
             .collect(),
         skipped: 0,
         known_flags: Vec::new(),

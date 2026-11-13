@@ -22,8 +22,13 @@
 //! `SELECT` and `EXAMINE` report each one's UIDVALIDITY and UIDNEXT, and
 //! `UID FETCH` of `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` answers the
 //! Message-ID of each listed UID the selected folder holds, which is what a
-//! rename probe reads (PERSO-185). Nothing else reads the messages: a
-//! `SEARCH` still finds none.
+//! rename probe reads (PERSO-185). Such a folder has no bodies: a `SEARCH`
+//! of it finds none.
+//!
+//! A folder given whole messages ([`RejectingImapServer::set_mail`]) is one a
+//! sync can run against (PERSO-300): `UID SEARCH` lists its UIDs, and
+//! `UID FETCH` answers `(UID FLAGS)` and `(UID BODY.PEEK[] FLAGS)` for the
+//! UIDs of a sequence set, ranges included, with no flag set.
 //!
 //! Two test trees use it: the daemon suites through `mod support;`, and the
 //! library's own unit tests, which include this file by path from
@@ -116,7 +121,12 @@ struct Shared {
     connections: Mutex<Vec<TcpStream>>,
     /// What `LIST` names, in order.
     folders: Mutex<Vec<FakeFolder>>,
+    /// The whole messages of the folders a sync runs against, by folder name.
+    mail: Mutex<std::collections::HashMap<String, Vec<FakeMessage>>>,
 }
+
+/// One whole message of a folder a sync runs against: its UID and its bytes.
+pub type FakeMessage = (u32, Vec<u8>);
 
 impl Shared {
     /// The folder `name`, or an empty one for a name `LIST` does not give,
@@ -154,6 +164,7 @@ impl RejectingImapServer {
             policy: AtomicU8::new(policy.as_u8()),
             connections: Mutex::new(Vec::new()),
             folders: Mutex::new(vec![FakeFolder::empty("INBOX")]),
+            mail: Mutex::new(std::collections::HashMap::new()),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -202,6 +213,29 @@ impl RejectingImapServer {
     /// on.
     pub fn set_folders(&self, folders: Vec<FakeFolder>) {
         *self.shared.folders.lock().expect("the folder list") = folders;
+    }
+
+    /// Serve `name` with these whole messages, by ascending UID, under
+    /// `uidvalidity`, in place of any folder of that name, from the next
+    /// command on: what a sync downloads (PERSO-300).
+    pub fn set_mail(&self, name: &str, uidvalidity: u32, messages: Vec<FakeMessage>) {
+        let folder = FakeFolder {
+            name: name.to_string(),
+            uidvalidity,
+            uidnext: messages.iter().map(|(uid, _)| uid + 1).max().unwrap_or(1),
+            messages: messages
+                .iter()
+                .map(|(uid, _)| (*uid, format!("<{uid}@{name}.fake>")))
+                .collect(),
+        };
+        let mut folders = self.shared.folders.lock().expect("the folder list");
+        folders.retain(|f| f.name != name);
+        folders.push(folder);
+        self.shared
+            .mail
+            .lock()
+            .expect("the mail")
+            .insert(name.to_string(), messages);
     }
 
     /// Cut every open connection, the way a server drops the sessions of an
@@ -330,12 +364,40 @@ async fn serve(
                     folder.uidnext
                 )
             }
+            "FETCH"
+                if verb == "UID"
+                    && (line.contains("BODY.PEEK[]") || line.contains("(UID FLAGS)")) =>
+            {
+                let wanted = words.get(3).copied().unwrap_or_default();
+                let mail = selected
+                    .as_ref()
+                    .and_then(|f| shared.mail.lock().expect("the mail").get(&f.name).cloned())
+                    .unwrap_or_default();
+                let bodies = line.contains("BODY.PEEK[]");
+                let mut reply = String::new();
+                for (seq, (uid, raw)) in mail.iter().enumerate() {
+                    if !in_set(wanted, *uid) {
+                        continue;
+                    }
+                    if bodies {
+                        reply.push_str(&format!(
+                            "* {} FETCH (UID {uid} FLAGS () BODY[] {{{}}}\r\n{})\r\n",
+                            seq + 1,
+                            raw.len(),
+                            String::from_utf8_lossy(raw)
+                        ));
+                    } else {
+                        reply.push_str(&format!("* {} FETCH (UID {uid} FLAGS ())\r\n", seq + 1));
+                    }
+                }
+                format!("{reply}{tag} OK FETCH completed\r\n")
+            }
             "FETCH" if verb == "UID" => {
                 let wanted = words.get(3).copied().unwrap_or_default();
                 let mut reply = String::new();
                 for (seq, (uid, id)) in selected.iter().flat_map(|f| f.messages.iter()).enumerate()
                 {
-                    if wanted.split(',').any(|w| w == uid.to_string()) {
+                    if in_set(wanted, *uid) {
                         let header = format!("Message-ID: {id}\r\n\r\n");
                         reply.push_str(&format!(
                             "* {} FETCH (UID {uid} BODY[HEADER.FIELDS (MESSAGE-ID)] {{{}}}\r\n{header})\r\n",
@@ -346,7 +408,16 @@ async fn serve(
                 }
                 format!("{reply}{tag} OK FETCH completed\r\n")
             }
-            "SEARCH" => format!("* SEARCH\r\n{tag} OK SEARCH completed\r\n"),
+            "SEARCH" => {
+                let uids: String = selected
+                    .as_ref()
+                    .and_then(|f| shared.mail.lock().expect("the mail").get(&f.name).cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(uid, _)| format!(" {uid}"))
+                    .collect();
+                format!("* SEARCH{uids}\r\n{tag} OK SEARCH completed\r\n")
+            }
             "IDLE" => {
                 tls.get_mut().write_all(b"+ idling\r\n").await?;
                 tls.get_mut().flush().await?;
@@ -369,6 +440,18 @@ async fn serve(
             return Ok(());
         }
     }
+}
+
+/// Whether a sequence set (`3`, `1:20`, `5:*`, `1,4:6`) names `uid`.
+fn in_set(set: &str, uid: u32) -> bool {
+    set.split(',').any(|part| match part.split_once(':') {
+        Some((low, high)) => {
+            let bound = |end: &str| end.parse::<u32>().unwrap_or(u32::MAX);
+            let (low, high) = (bound(low), bound(high));
+            (low.min(high)..=low.max(high)).contains(&uid)
+        }
+        None => part.parse::<u32>().is_ok_and(|one| one == uid),
+    })
 }
 
 /// The mailbox a `SELECT`, `EXAMINE` or `STATUS` line names: its first

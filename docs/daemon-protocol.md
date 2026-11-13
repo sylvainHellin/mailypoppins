@@ -1368,10 +1368,11 @@ A cancel that lands before the commit point drops what was prepared: the cache s
 A cancel that lands after it cannot recall the write or the submission, which then completes under an operation that already reads `cancelled`.
 A client therefore words a cancelled end of these methods as having stopped waiting rather than undone.
 
-`sync.quick` and `sync.full` look before the fetch, before every body chunk of every mailbox's download, and before each mailbox's ingest.
-A cancel stops the download at its next chunk and the ingest at its next mailbox: the mailboxes already ingested stay written, since a pass is idempotent and the next one resumes from their cursors, and the mailbox the cancel landed before is dropped unwritten, its download included.
-Every mailbox of an IMAP pass is downloaded before the first is ingested, so a cancel during the download writes nothing at all; a Graph pass fetches and ingests one mailbox at a time and looks only before each.
-A mailbox whose ingest has begun is finished with its rows, flags and cursor, because that ingest is local work with no network wait in it; the prune pass never runs after a cancel, and the outbox and mutation drains at either end of the pass are not stopped.
+`sync.quick` and `sync.full` look before the fetch, before each mailbox, and on an IMAP pass between two batches of one mailbox's bodies.
+An IMAP pass downloads and ingests one mailbox at a time, a batch of at most 20 messages at a time, each batch ingested before the next is downloaded (PERSO-300), so a cancel waits for one batch at most.
+A cancel that lands before a mailbox leaves it untouched; one that lands inside a mailbox closes it once the batch in hand is ingested, with the rows written so far, its flags and its cursor, the way a pass cut by its body deadline is closed, and nothing after it is touched.
+The mailboxes already ingested stay written, since a pass is idempotent and the next one resumes from their cursors; a Graph pass fetches and ingests one mailbox at a time and looks only before each.
+The prune pass never runs after a cancel, and the outbox and mutation drains at either end of the pass are not stopped.
 A cancelled pass publishes no `sync.completed` and leaves the account's `sync_health` as it was.
 It does announce the mailboxes it kept: one `state.invalidate` of `mailbox:<account>/<slug>` with scope `{"query": "counts"}` per mailbox whose counts it moved, before its worker returns, so another client re-reads them without waiting for the next tick; a cancelled dry run announces nothing.
 A pass that joined an account tick already running, the scheduler's, the watcher's or another client's, does not stop that tick, which then completes and publishes its outcome as usual.

@@ -33,13 +33,14 @@ pub use engine::run_sync;
 /// Where a pass asks its caller whether it has been told to stop (PERSO-127).
 ///
 /// Every point is a boundary at which nothing is half done: the transport has
-/// not been asked yet, a body chunk has been collected in full, or one mailbox
-/// has been ingested and the next has not been touched.
+/// not been asked yet, a batch of bodies has been ingested in full, or one
+/// mailbox has been closed and the next has not been touched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopPoint {
     /// Before the transport is asked for anything.
     Fetch,
-    /// Before the next `UID FETCH` of one mailbox's body pass.
+    /// Before the next batch of one mailbox's bodies is downloaded, once the
+    /// batch before it is ingested (PERSO-300).
     Chunk,
     /// Before the target at this index, in target order, is ingested.
     Mailbox(usize),
@@ -261,6 +262,71 @@ pub struct FetchedRaw {
     pub raw: Vec<u8>,
     /// What the server says has happened to it: read, answered, forwarded.
     pub flags: MessageFlags,
+    /// The unit tests' count of the bodies alive at once (PERSO-300).
+    #[cfg(test)]
+    _held: held_bodies::Held,
+}
+
+impl FetchedRaw {
+    pub fn new(uid: u32, raw: Vec<u8>, flags: MessageFlags) -> FetchedRaw {
+        FetchedRaw {
+            uid,
+            raw,
+            flags,
+            #[cfg(test)]
+            _held: held_bodies::Held::new(),
+        }
+    }
+}
+
+/// How many [`FetchedRaw`] bodies the current thread holds, and the most it
+/// has held at once: the seam that shows a pass keeps one batch of bodies in
+/// memory and not a mailbox's worth (PERSO-300).
+///
+/// Per thread, because the tests run in parallel and each drives its pass on
+/// its own thread.
+#[cfg(test)]
+pub(crate) mod held_bodies {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// One body alive.
+    #[derive(Debug)]
+    pub(crate) struct Held(());
+
+    impl Held {
+        pub(crate) fn new() -> Held {
+            let live = LIVE.get() + 1;
+            LIVE.set(live);
+            PEAK.set(PEAK.get().max(live));
+            Held(())
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            LIVE.set(LIVE.get() - 1);
+        }
+    }
+
+    /// Start counting the peak from what the thread holds now.
+    pub(crate) fn reset_peak() {
+        PEAK.set(LIVE.get());
+    }
+
+    /// The most bodies alive at once since [`reset_peak`].
+    pub(crate) fn peak() -> usize {
+        PEAK.get()
+    }
+
+    /// The bodies alive now.
+    pub(crate) fn live() -> usize {
+        LIVE.get()
+    }
 }
 
 /// What the SELECT response said about the mailbox.
@@ -271,12 +337,17 @@ pub struct MailboxState {
     pub exists: u32,
 }
 
-/// What one backend fetch of one mailbox brought back: everything the engine
-/// needs to ingest, re-flag, prune and record a cursor, and nothing about how
-/// it was obtained.
-pub struct MailboxFetch {
-    /// Messages the store does not hold yet, with their bodies.
-    pub messages: Vec<FetchedRaw>,
+/// What one backend learned about one mailbox before downloading a body:
+/// everything the engine needs to re-flag, prune and record a cursor, and
+/// nothing about how it was obtained.
+///
+/// The bodies are not here (PERSO-300). The engine asks for them a batch at a
+/// time ([`SyncBackend::next_batch`]) and ingests each batch before it asks for
+/// the next, so a pass holds one batch of mail in memory whatever the size of
+/// the mailbox. Until PERSO-300 this struct carried every new body of the
+/// mailbox, and the engine ingested only once every mailbox had been
+/// downloaded: a full sync of a 6,360-message folder held all of it at once.
+pub struct MailboxListing {
     /// How many UIDs in the window the store already held.
     pub skipped: usize,
     /// The flags of those already-held UIDs, the only server-to-local channel
@@ -303,25 +374,28 @@ pub struct MailboxFetch {
     /// True when the enumeration [`vanished`] was computed from is the whole
     /// mailbox rather than a short answer.
     ///
-    /// [`vanished`]: MailboxFetch::vanished
+    /// [`vanished`]: MailboxListing::vanished
     pub enumeration_complete: bool,
+    /// The mailbox's coverage once its body pass has ended, from the UIDs whose
+    /// bodies the engine received and whether the pass asked for every new
+    /// UID. Asked once, after the last batch, whichever way the pass ended: run
+    /// to the end, cut by the backend's deadline, stopped or failed.
+    pub coverage: CoverageOf,
+}
+
+/// The question a [`MailboxListing`] answers once its body pass has ended:
+/// given the UIDs whose bodies came back and whether every new UID was asked
+/// for, what the mailbox's cursor records.
+pub type CoverageOf = Box<dyn FnOnce(&[u32], bool) -> MailboxCoverage + Send>;
+
+/// What one mailbox's body pass leaves for its cursor and the prune gate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MailboxCoverage {
     /// True when this pass did not ingest every message that arrived in the
     /// mailbox since the store last saw it: the `limit` window cut some off,
-    /// a body did not come back, or the caller failed to ingest one. Backlog
-    /// *older* than what the store already holds does not count.
+    /// a body did not come back, or the body pass ended early. Backlog *older*
+    /// than what the store already holds does not count.
     pub download_incomplete: bool,
-    /// False when the body pass stopped at its deadline with new UIDs it never
-    /// asked for (#0113), which is the one way this fetch is short *by design*
-    /// rather than by accident.
-    ///
-    /// It is not a second spelling of [`download_incomplete`], which the
-    /// coverage arithmetic already sets on such a pass: it names the reason, so
-    /// the engine can refuse to record a modseq off it, count the mailbox for
-    /// the status line, and leave everything else alone. Every path that ran to
-    /// the end of its new UIDs is `true`, backends without a deadline included.
-    ///
-    /// [`download_incomplete`]: MailboxFetch::download_incomplete
-    pub bodies_complete: bool,
     /// The arrival mark to persist for this mailbox: `Some(mark)` while an
     /// arrival above it is still missing, `None` once every arrival is in.
     /// Carried back in by the next fetch so the gate cannot open on a mark that
@@ -338,37 +412,62 @@ pub struct MailboxFetch {
     pub highest_modseq: Option<i64>,
 }
 
-/// The per-transport half of a sync: fetch the window of every target.
+/// One answer of [`SyncBackend::next_batch`].
+pub enum BodyBatch {
+    /// The next batch of new messages, with their bodies: at most one
+    /// backend's batch size.
+    Bodies(Vec<FetchedRaw>),
+    /// The body pass is over. `complete` is false when the backend stopped
+    /// before asking for every new UID (its deadline, #0113), which is the
+    /// one way a pass is short *by design*: the engine then records no modseq
+    /// off it and counts the mailbox for the status line.
+    Done { complete: bool },
+}
+
+/// The per-transport half of a sync: list the window of every target, then
+/// hand over its new bodies a batch at a time.
 ///
 /// Everything else, ingest, arrival marks, ingest-failure bookkeeping, flags,
 /// cursors and the deferred prune pass, is the engine's ([`run_sync`]), written
 /// once and tested against a fake implementation of this trait.
 ///
-/// The trait is deliberately one method wide. It is not the "list folders,
-/// move, delete, set read" surface the ticket sketched: those ops already have
-/// their own seam in [`crate::ops::run_op`], and widening this one would be
-/// generality no consumer has asked for.
+/// The trait is deliberately this narrow. It is not the "list folders, move,
+/// delete, set read" surface #0059 sketched: those ops already have their own
+/// seam in [`crate::ops::run_op`], and widening this one would be generality no
+/// consumer has asked for.
 ///
-/// Two contracts a backend must honour:
+/// Three contracts a backend must honour:
 ///
-/// - one result per target, in the order the targets were given, so the engine
-///   can zip them and keep the #0072 prune ordering (inbox before archive
-///   before sent) whatever order the fetches finished in;
+/// - one listing per target, in the order the targets were given, so the
+///   engine can zip them and keep the #0072 prune ordering (inbox before
+///   archive before sent) whatever order the listings finished in;
 /// - a per-target failure is an `Err` *element*, not an `Err` return: the
 ///   engine treats it as the strongest form of partial pass and keeps going,
-///   whereas an `Err` return fails the whole sync.
+///   whereas an `Err` return fails the whole sync;
+/// - [`next_batch`](SyncBackend::next_batch) downloads one batch per call and
+///   keeps nothing it has handed over (PERSO-300): the engine ingests the
+///   batch before it asks again, which is what bounds a pass's memory, and it
+///   asks its [`Stop`] between two batches, which is what bounds how long a
+///   cancel waits.
 ///
-/// `&mut self` is where a backend keeps what outlives one mailbox: a persistent
-/// session and its `HIGHESTMODSEQ` (#0041), a `deltaLink` (#0042). Today's
-/// [`crate::imap_client::ImapBackend`] keeps only its config.
+/// `&mut self` is where a backend keeps what outlives one call: each target's
+/// body pass between its batches, a persistent session and its `HIGHESTMODSEQ`
+/// (#0041), a `deltaLink` (#0042).
 pub trait SyncBackend {
-    /// Fetch every target's window. `knowns` is parallel to `targets`: the
+    /// List every target's window. `knowns` is parallel to `targets`: the
     /// store's skip list for each, already read under the single-writer
-    /// discipline before any network call.
-    fn fetch_targets(
+    /// discipline before any network call. No body is downloaded here.
+    fn list_targets(
         &mut self,
         targets: &[SyncTarget],
         limit: usize,
         knowns: Vec<KnownUids>,
-    ) -> impl std::future::Future<Output = Vec<Result<MailboxFetch>>>;
+    ) -> impl std::future::Future<Output = Vec<Result<MailboxListing>>>;
+
+    /// The next batch of new bodies of the target at `index` of the last
+    /// [`list_targets`](SyncBackend::list_targets) call, or the end of its body
+    /// pass. A target whose listing failed has no body pass, and the engine
+    /// does not ask for one. An `Err` ends the target's body pass: what came
+    /// before it is ingested, and the mailbox is closed as a short pass.
+    fn next_batch(&mut self, index: usize) -> impl std::future::Future<Output = Result<BodyBatch>>;
 }

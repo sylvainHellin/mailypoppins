@@ -1355,9 +1355,8 @@ async fn sync_once_imap(
     // (docs/baselines/decisions/read-pool.md).
     let store = Store::open(crate::config::store_path(&cfg.name))?;
     let blobs = BlobStore::for_account(&cfg.name);
-    let mut backend = crate::imap_client::ImapBackend::new(&imap_config)
-        .with_body_budget(ctx.body_deadline)
-        .with_stop(ctx.stop.clone());
+    let mut backend =
+        crate::imap_client::ImapBackend::new(&imap_config).with_body_budget(ctx.body_deadline);
     let mut span = crate::timing::TimingSpan::with_context("daemon_tick", cfg.name.clone());
 
     // Unguarded on purpose: this runtime is holding `store.lock` already. See

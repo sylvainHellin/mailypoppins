@@ -433,12 +433,13 @@ A new sign-in writes a new refresh token, which the list does not hold, and `con
 Two transports, one ingest path and one `SyncResult` shape: IMAP/SMTP for password accounts, on-premises Exchange included, and Microsoft Graph REST for Microsoft 365 accounts (see [auth.md](auth.md)).
 TUI actions branch on `app.is_graph()`.
 
-The shared half is `src/sync/` (#0059): the sync types (`SyncTarget`, `SyncResult`, `FreshObservation`, `MailboxFetch`), the `SyncBackend` trait, and `sync::engine::run_sync`, which is the orchestration itself: skip lists, ingest, arrival marks, the #0074 ingest-failure bound, flags, cursors and the deferred prune pass.
+The shared half is `src/sync/` (#0059): the sync types (`SyncTarget`, `SyncResult`, `FreshObservation`, `MailboxListing`, `BodyBatch`), the `SyncBackend` trait, and `sync::engine::run_sync`, which is the orchestration itself: skip lists, ingest, arrival marks, the #0074 ingest-failure bound, flags, cursors and the deferred prune pass.
 Since #0122 the live callers reach it through `sync::engine::run_sync_guarded`, which runs the pass under the per-account engine lock: a process that cannot take the lock returns `Ok(None)` before the transport is touched, so a second `mp sync` or an open TUI no longer downloads and ingests the same window into the same store.
 `run_sync` itself stays lock-free, so the fake-backend engine tests drive the mechanism without a lock file, and the refusal is a success everywhere (`mp sync` prints `Sync skipped: another engine is syncing '<account>'; leaving the ingest to it` and exits 0, the TUI shows the same sentence as an info status line).
-`SyncBackend` has one method, `fetch_targets`, and takes `&mut self`, which is where a backend keeps what outlives a mailbox (a persistent session and its `HIGHESTMODSEQ`, #0041; a `deltaLink`, #0042).
+`SyncBackend` has two methods, `list_targets`, which lists every target's window without downloading a body, and `next_batch`, which downloads one batch of one target's new bodies per call (PERSO-300); both take `&mut self`, which is where a backend keeps what outlives one call (each target's body pass between batches, a persistent session and its `HIGHESTMODSEQ`, #0041; a `deltaLink`, #0042).
+The engine ingests each batch before it asks for the next and walks the targets one at a time, so a pass holds one batch of bodies in memory whatever the size of the mailbox; until PERSO-300 every mailbox was downloaded whole before the first was ingested, and a full sync of a 6,360-message folder peaked at about 8 GB.
 The seam's first payoff is that the engine is driven by a fake backend in `src/sync/engine.rs`'s tests, offline, over the properties that used to be verifiable only against a live server.
-`SyncBackend::fetch_targets` is a native async fn in the trait, so its future is not `Send`; callers await it in place, and spawning a sync onto another task would need a `Send` bound first (noted in #0041).
+`SyncBackend`'s methods are native async fns in the trait, so their futures are not `Send`; callers await it in place, and spawning a sync onto another task would need a `Send` bound first (noted in #0041).
 The parity half of #0059 is parked with the Graph backend: `graph.rs` still runs its own loop rather than the engine, and #0042 deliberately landed the Graph delta in that loop rather than folding first (its "Shape" section carries the reasoning).
 
 ### IMAP
@@ -458,12 +459,14 @@ async-imap renders the answer as `code: {code:?}, info: {info:?}`, where a code 
 A tick whose login was refused ends with that error at the first mailbox, quick or full, so its outcome is `failed`, and the fetch logs in once before it fans out across the mailboxes, so a refusal is on the list before a second mailbox asks.
 A queued op (a move, a flag, a drafts-mirror push) whose run fails at a refused login spends no attempt, keeps its retry time, records the refusal as its `last_error`, and stays `queued` as still open, the way an op waiting behind an older one does, for as long as the login is refused: the server never saw the op, and the hold outlasts the `MAX_ATTEMPTS` budget, which would otherwise roll the user's change back unasked; it runs on the first drain after a login succeeds.
 
-IMAP allows one SELECTed mailbox per connection, so the mailboxes are fetched in parallel, each on its own borrowed session, up to `imap.fetch_concurrency` at once (default 4, clamped to [1, 8]); #0005.
-The store reads that seed each fetch happen serially first, the network fetches overlap, and ingest runs serially in target order afterwards, so `buffered` (which preserves input order) keeps the #0072 prune ordering and the single-writer SQLite discipline intact.
+IMAP allows one SELECTed mailbox per connection, so the mailboxes are listed in parallel, each on its own borrowed session, up to `imap.fetch_concurrency` at once (default 4, clamped to [1, 8]); #0005.
+The store reads that seed each listing happen serially first, the listings overlap, and the bodies are then downloaded and ingested serially in target order, a chunk at a time, so `buffered` (which preserves input order) keeps the #0072 prune ordering and the single-writer SQLite discipline intact.
+A mailbox's body pass borrows a session at its first chunk, `SELECT`s the mailbox again and checks its UIDVALIDITY against the listing's, and returns the session when the pass ends (PERSO-300).
 Per mailbox, `UID SEARCH ALL` gives the UID list, the last `limit` UIDs are the window, pass 1 fetches `(UID FLAGS)` over the whole window and pass 2 downloads `BODY.PEEK[]` only for UIDs the store does not hold.
 The store answers "which UIDs do I hold" with one query, so there is no local scan and no dedup pass.
 Pass 2 is chunked (20 UIDs per `UID FETCH`, newest chunk first) and, on a TUI tick, bounded by `imap.body_fetch_deadline_secs` per mailbox (default 30, clamped to [0, 600], 0 unbounded); `mp sync` passes no budget (#0113).
-The budget is checked between chunks and never inside one, because abandoning a `UID FETCH` mid-stream would poison the pooled session; a pass that stops sets `MailboxFetch.bodies_complete = false`, which suspends every prune in the pass and blocks the modseq, and the rest resumes from the cursor on the next pass.
+The budget is measured against the network time the mailbox has spent, its listing included, and not the wall clock, which since PERSO-300 also runs through the mailbox's own ingest and the mailboxes before it.
+The budget is checked between chunks and never inside one, because abandoning a `UID FETCH` mid-stream would poison the pooled session; a pass that stops ends with `BodyBatch::Done { complete: false }`, which suspends every prune in the pass and blocks the modseq, and the rest resumes from the cursor on the next pass.
 IMAP supports implicit TLS (port 993) and STARTTLS (any other port, for example 1143 for Proton Bridge); the `ImapStream` wrapper injects a fake greeting for STARTTLS because `async_imap` expects one.
 
 ### Graph
@@ -691,8 +694,8 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | **`src/imap_client/`** | |
 | `mod.rs` | `ImapStream` wrapper, `open_imap_session()`, re-exports |
 | `pool.rs` | The persistent session pool (`checkout`, `PooledSession`) and `ServerCaps`, the strict post-LOGIN capability gate (#0041) |
-| `fetch.rs` | `fetch_new_raw_on_session` (the two-pass store fetch), `vanished_uids`, `fetch_emails*`, `search_stubs_on_session` and `fetch_uids_on_session` (a server search's two passes: a pre-rendered `SEARCH`, the seam the unified grammar lowers to, answered as UID + `Date` + `Message-ID` stubs, then the survivors whole), the arrival-coverage arithmetic |
-| `store_sync.rs` | `ImapBackend` (the `SyncBackend` impl: the parallel per-mailbox fetch), `sync_mailboxes()`, `list_mailboxes()` |
+| `fetch.rs` | `list_mailbox_on_session` and `fetch_body_chunk_on_session` (the two-pass store fetch: the listing and flags, then one body chunk per call), `vanished_uids`, `fetch_emails*`, `search_stubs_on_session` and `fetch_uids_on_session` (a server search's two passes: a pre-rendered `SEARCH`, the seam the unified grammar lowers to, answered as UID + `Date` + `Message-ID` stubs, then the survivors whole), the arrival-coverage arithmetic |
+| `store_sync.rs` | `ImapBackend` (the `SyncBackend` impl: the parallel per-mailbox listing and each mailbox's chunked body pass), `sync_mailboxes()`, `list_mailboxes()` |
 | `search.rs` | `uid_search_with_literals()` (sends a rendered `SEARCH`, waiting for the server's continuation before each UTF-8 literal and wording a `NO [BADCHARSET]`, PERSO-214), `build_imap_search_query()`, `FetchCriteria` (the structured direct-lookup path; the user grammar moved to `crate::search`, and `normalize_message_id` / `bracketed_message_id` / `parse_date_to_imap` moved to `mp_core::imap_query` and are re-exported from here) |
 | `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
 | `ops.rs` | Single-message server ops: move, delete, read flags |

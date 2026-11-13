@@ -65,15 +65,15 @@
 //! ## A cancelled pass stops at the next boundary (PERSO-127)
 //!
 //! Both paths run the body under a [`Stop`] built over the operation's token
-//! ([`pass_stop`]), which the engine asks before the fetch, before every body
-//! chunk of every mailbox and before each mailbox's ingest. A cancel therefore
-//! stops the download at the next chunk and the ingest at the next mailbox:
-//! the mailboxes already ingested stay written, because a pass is idempotent
-//! and the next one resumes from their cursors, and the mailbox the cancel
-//! landed before is dropped unwritten, its download included. A mailbox whose
-//! ingest has begun is finished, rows, flags and cursor, because those are one
-//! unit of progress and the ingest is local work with no network wait in it.
-//! The prune pass never runs after a stop.
+//! ([`pass_stop`]), which the engine asks before the fetch, before each
+//! mailbox, and between two batches of one mailbox's bodies (PERSO-300). An
+//! IMAP pass ingests each batch before it downloads the next, so a cancel
+//! waits for one batch at most: the mailboxes already ingested stay written,
+//! because a pass is idempotent and the next one resumes from their cursors,
+//! a mailbox the cancel landed before is not touched, and the mailbox it
+//! landed in is closed once the batch in hand is ingested, rows, flags and
+//! cursor, the way a pass cut by its body deadline is closed. The prune pass
+//! never runs after a stop.
 //!
 //! The drains are not stopped: they finish work the user already committed to.
 //! A cancelled pass publishes no `sync.completed` and settles nothing of its
@@ -342,7 +342,7 @@ pub(super) fn syncable_account<'a>(
 }
 
 /// The [`Stop`] a pass of `method` runs under: the operation's token, asked at
-/// every point the engine and the transport offer (PERSO-127).
+/// every point the engine offers (PERSO-127).
 ///
 /// The second mailbox boundary, the first with an ingested mailbox behind it,
 /// is asked through [`commit_point_blocking`], which is the bare token check

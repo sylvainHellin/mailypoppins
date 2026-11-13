@@ -1250,7 +1250,7 @@ pub fn clear_mailbox_modseq(store: &Store, account: &str, mailbox: &str) {
 ///   a sentinel no prune touches (`vanished_uids` skips `uid <= 0`).
 ///
 /// Freeing a UID is not the same as asking for it. The fetch window is
-/// positional (`listed.iter().rev().take(n)` in `fetch_new_raw_on_session`), so
+/// positional (`listed.iter().rev().take(n)` in `list_mailbox_on_session`), so
 /// it covers the top of the mailbox, and a row unbound here sits below it by
 /// construction: the message that now wears the freed UID arrives on the first
 /// pass whose window reaches it, which is a full sync. What the unbinding buys

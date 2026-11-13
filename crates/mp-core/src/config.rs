@@ -507,10 +507,10 @@ pub struct ImapSettings {
     /// 1 restores the old serial ordering (one session per mailbox, opened in turn).
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: usize,
-    /// How long one mailbox's fetch may spend downloading bodies before it
-    /// stops and leaves the rest for the next pass (#0113). The budget is
-    /// checked between body chunks, never inside one, so a chunk already asked
-    /// for is always collected in full.
+    /// How long one mailbox's fetch may spend on the network before its body
+    /// download stops and leaves the rest for the next pass (#0113). The
+    /// budget is checked between body chunks, never inside one, so a chunk
+    /// already asked for is always collected in full.
     ///
     /// A tick is serial across accounts and one slow mailbox blocks every other
     /// one behind it: a 34 MB Sent mailbox took 160 seconds, which is 160

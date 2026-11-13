@@ -12,7 +12,7 @@ use super::{
 use crate::ingest::KnownUids;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
-use crate::sync::{stops_at, FetchedRaw, MailboxFetch, MailboxState, Stop, StopPoint};
+use crate::sync::{FetchedRaw, MailboxCoverage, MailboxListing, MailboxState};
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
 
@@ -247,7 +247,7 @@ pub async fn fetch_raw_by_message_id(
 
 // The store fetch's result types live in `crate::sync` since #0059: they are
 // the engine's contract with every backend, not this module's private shape.
-// See `MailboxFetch`, `FetchedRaw` and `MailboxState`.
+// See `MailboxListing`, `FetchedRaw` and `MailboxState`.
 
 /// The UIDs the store holds that the server did not list, up to `ceiling`.
 ///
@@ -273,7 +273,7 @@ pub async fn fetch_raw_by_message_id(
 ///   message is the one that was deleted.
 ///
 /// Whether the result may be *applied* is a separate question, answered by the
-/// coverage flags on [`MailboxFetch`] and by [`crate::ingest::pass_may_prune`].
+/// coverage of [`MailboxListing`] and by [`crate::ingest::pass_may_prune`].
 pub fn vanished_uids(
     known: &std::collections::HashSet<i64>,
     listed: &[u32],
@@ -591,59 +591,81 @@ pub(crate) fn body_chunks(new_uids: &[u32], chunk: usize) -> Vec<&[u32]> {
     new_uids.rchunks(chunk.max(1)).collect()
 }
 
-/// Whether the body pass must stop before asking for chunk `index`.
+/// Whether the body pass must stop before asking for chunk `index`, having
+/// spent `spent` of a `budget` on this mailbox's network work.
 ///
 /// Two rules, and both are load-bearing. The first chunk always goes out, so a
-/// deadline that has already passed still makes progress rather than turning
-/// the pass into a no-op that repeats forever. And the check sits *between*
+/// budget that is already spent still makes progress rather than turning the
+/// pass into a no-op that repeats forever. And the check sits *between*
 /// chunks: wrapping a `UID FETCH` in a timeout would abandon a command
 /// mid-stream and leave unread response bytes on a session that goes back into
 /// the pool ([`super::pool`]), so the next borrower reads this fetch's mail as
 /// the answer to its own command. A chunk that has been asked for is always
 /// collected in full.
-pub(crate) fn stop_before_chunk(index: usize, deadline: Option<Instant>, now: Instant) -> bool {
-    index > 0 && deadline.is_some_and(|d| now >= d)
+///
+/// The budget is spent, not elapsed (PERSO-300): the engine ingests each chunk
+/// before it asks for the next and walks the mailboxes one at a time, so the
+/// wall clock since the listing would charge this mailbox for its own ingest
+/// and for every mailbox ingested before it.
+pub(crate) fn stop_before_chunk(index: usize, budget: Option<Duration>, spent: Duration) -> bool {
+    index > 0 && budget.is_some_and(|budget| spent >= budget)
 }
 
-/// Two-pass fetch for the store ingest path.
+/// What one mailbox's body pass still has to download, from the listing that
+/// planned it to the last chunk the engine asks for (PERSO-300).
+pub(crate) struct BodyPlan {
+    /// The mailbox as the server names it, which the body pass `SELECT`s again
+    /// on whichever pooled session it borrows.
+    pub(crate) mailbox: String,
+    /// What the listing's `SELECT` reported: a body pass that finds another
+    /// one has lost the numbering its UIDs were planned under.
+    pub(crate) uid_validity: Option<u32>,
+    /// The `UID FETCH` commands still to send, newest first
+    /// ([`body_chunks`]).
+    pub(crate) chunks: std::collections::VecDeque<Vec<u32>>,
+    /// How many new UIDs the listing found, for the deadline's log line.
+    pub(crate) new: usize,
+    /// How many bodies the pass has handed over so far.
+    pub(crate) handed: usize,
+    /// How many chunks the pass has asked for so far.
+    pub(crate) asked: usize,
+    /// The network time this mailbox has spent, its listing included: what
+    /// the body budget is measured against ([`stop_before_chunk`]).
+    pub(crate) spent: Duration,
+}
+
+/// The listing half of the store ingest fetch: `SELECT`, `UID SEARCH ALL`,
+/// the flags of the window, and the plan of the body pass (PERSO-300).
 ///
-/// Pass 1 fetches `UID FLAGS` over the whole window, pass 2 downloads
-/// `BODY.PEEK[]` only for UIDs the store does not hold yet. Identity is the
-/// UID, so pass 1 no longer needs the `Message-ID` header the `.md` era
-/// compared against a directory scan.
+/// Pass 1 fetches `UID FLAGS` over the whole window; the plan it returns
+/// names the UIDs pass 2 downloads with `BODY.PEEK[]`, only those the store
+/// does not hold yet, a chunk at a time through [`fetch_body_chunk_on_session`]
+/// as the engine asks for them. Identity is the UID, so pass 1 no longer needs
+/// the `Message-ID` header the `.md` era compared against a directory scan.
 ///
 /// Pass 1 always covers the full `limit` window even when nothing is new: the
 /// `\Seen` flags it collects are the only server-to-local read-status channel
 /// (ticket #0004), so shrinking the window silently drops flag changes made in
-/// other clients. Pass 2 is skipped entirely when nothing is new.
+/// other clients. A plan with no chunk skips pass 2 entirely.
 ///
 /// The skip list is resolved against the server's UIDVALIDITY *after* SELECT
 /// (see [`KnownUids::resolve`]): a renumbering hands recycled UIDs to different
 /// messages, so carrying the stored list across one would make pass 2 skip
 /// bodies that were never downloaded.
 ///
-/// `body_budget` bounds pass 2 (#0113). The clock starts here, so the budget is
-/// this mailbox's whole fetch and each mailbox in a parallel sync gets its own;
-/// `None` is unbounded, which is what `mp sync` asks for. Running out is not an
-/// error: what was downloaded is returned with `bodies_complete: false`, the
-/// coverage arithmetic reports the pass short, and the rest resumes next pass.
-///
-/// `stop` is asked before every chunk, the first included (PERSO-127): a pass
-/// that was cancelled has no progress to make, so it stops before asking for
-/// another body, and what it already collected comes back the same way a
-/// deadline stop's does. The engine, asked the same question at the next
-/// mailbox boundary, then drops it unwritten.
-pub async fn fetch_new_raw_on_session(
+/// The listing's [`MailboxListing::coverage`] keeps what the coverage
+/// arithmetic needs, so the engine asks it once the body pass has ended,
+/// whichever way it ended: run to the end, cut at the budget, stopped or
+/// failed.
+pub(crate) async fn list_mailbox_on_session(
     session: &mut ImapSession,
     mailbox: &str,
     limit: Option<usize>,
     known: KnownUids,
     caps: ServerCaps,
-    body_budget: Option<Duration>,
-    stop: Option<&Stop>,
-) -> Result<MailboxFetch> {
-    let mut span = TimingSpan::with_context("fetch_new_raw", mailbox.to_string());
-    let deadline = body_budget.map(|budget| Instant::now() + budget);
+) -> Result<(MailboxListing, BodyPlan)> {
+    let started = Instant::now();
+    let mut span = TimingSpan::with_context("list_mailbox", mailbox.to_string());
 
     // `SELECT (CONDSTORE)` only where the server advertised CONDSTORE: it is
     // the command that makes the server report HIGHESTMODSEQ, and a server that
@@ -731,213 +753,142 @@ pub async fn fetch_new_raw_on_session(
         uidvalidity_reset,
     );
 
-    // A pass that downloads nothing still has to answer the coverage question:
-    // `mp sync -n 0` computes a whole vanished set and returns through here, so
-    // hardcoding "complete" would force the gate open on a prune-only pass
-    // (#0072 review note 3). An empty listing has no arrivals and stays open.
-    let empty = |state: MailboxState| {
-        let coverage = arrival_coverage(
-            &listed,
-            &known_uids,
-            ceiling,
-            &[],
-            carried_mark,
-            prior_high_water,
-        );
-        MailboxFetch {
-            messages: Vec::new(),
-            skipped: 0,
-            known_flags: Vec::new(),
-            state,
-            vanished: vanished.clone(),
-            listed: listed.clone(),
-            uidvalidity_reset,
-            enumeration_complete,
-            download_incomplete: coverage.incomplete,
-            pending_arrival_mark: coverage.pending_mark,
-            // Nothing was asked for, so nothing was left unasked: the deadline
-            // cannot have cut a pass that never reached the body fetch.
-            bodies_complete: true,
-            // An empty window covers the mailbox only when the mailbox is
-            // itself empty. `mp sync -n 0` over a populated mailbox fetched no
-            // flags and may not advance the resume point (#0041 review).
-            highest_modseq: modseq_to_record(
-                server_modseq,
-                window_is_whole_mailbox(0, listed.len()),
-                enumeration_complete,
-                true,
-            ),
-        }
-    };
-
-    if listed.is_empty() {
-        return Ok(empty(state));
-    }
-
     let mut window: Vec<u32> = match limit {
         Some(n) => listed.iter().rev().take(n).copied().collect(),
         None => listed.clone(),
     };
     window.sort_unstable();
-    if window.is_empty() {
-        return Ok(empty(state));
-    }
 
     // Pass 1: flags over the window (~40 bytes per message on the full form).
-    let window_set = compress_uid_set(&window);
-    let flagged: Vec<_> = session
-        .uid_fetch(&window_set, flag_query(pass))
-        .await
-        .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect flags: {}", e))?;
-    span.mark("pass1_flags");
-
+    // An empty window, an empty mailbox or `mp sync -n 0`, asks for none and
+    // has nothing new; it still answers the coverage question below, because
+    // `mp sync -n 0` computes a whole vanished set and hardcoding "complete"
+    // would force the gate open on a prune-only pass (#0072 review note 3).
     let mut new_uids: Vec<u32> = Vec::new();
     let mut known_flags: Vec<(u32, MessageFlags)> = Vec::new();
-    for msg in flagged.iter() {
-        let Some(uid) = msg.uid else { continue };
-        if known_uids.contains(&(uid as i64)) {
-            known_flags.push((uid, flags_of(msg)));
-        } else {
-            new_uids.push(uid);
-        }
-    }
-    let skipped = if matches!(pass, FlagPass::ChangedSince(_)) {
-        // A delta answers only for messages whose flags changed, so what came
-        // back says nothing about which UIDs are new: an unchanged message the
-        // store has never seen would look like an absence. The window and the
-        // skip list, both of which this pass already holds, say it exactly.
-        // Getting this backwards would silently stop downloading new mail.
-        new_uids = new_uids_in_window(&window, &known_uids);
-        info!(
-            "Store fetch for '{}': CONDSTORE delta since {:?} returned {} changed flag(s)",
-            mailbox,
-            known_modseq,
-            known_flags.len()
-        );
-        window.len() - new_uids.len()
-    } else {
-        known_flags.len()
-    };
-    let window_whole = window_is_whole_mailbox(window.len(), listed.len());
-
-    if new_uids.is_empty() {
-        let coverage = arrival_coverage(
-            &listed,
-            &known_uids,
-            ceiling,
-            &[],
-            carried_mark,
-            prior_high_water,
-        );
-        return Ok(MailboxFetch {
-            messages: Vec::new(),
-            skipped,
-            known_flags,
-            state,
-            vanished,
-            listed: listed.clone(),
-            uidvalidity_reset,
-            enumeration_complete,
-            download_incomplete: coverage.incomplete,
-            pending_arrival_mark: coverage.pending_mark,
-            bodies_complete: true,
-            highest_modseq: modseq_to_record(
-                server_modseq,
-                window_whole,
-                enumeration_complete,
-                true,
-            ),
-        });
-    }
-    info!(
-        "Store fetch for '{}': {} new, {} already ingested",
-        mailbox,
-        new_uids.len(),
-        skipped
-    );
-
-    // Pass 2: full bodies for the new UIDs only, one command per chunk so the
-    // deadline has somewhere to be answered (#0113).
-    let chunks = body_chunks(&new_uids, BODY_CHUNK_SIZE);
-    let mut out = Vec::new();
-    let mut bodies_complete = true;
-    for (index, chunk) in chunks.iter().enumerate() {
-        if stops_at(stop, StopPoint::Chunk) {
-            bodies_complete = false;
-            info!(
-                "[sync] '{}': body fetch stopped on request after {}/{} new message(s)",
-                mailbox,
-                out.len(),
-                new_uids.len()
-            );
-            break;
-        }
-        if stop_before_chunk(index, deadline, Instant::now()) {
-            bodies_complete = false;
-            warn!(
-                "[sync] '{}': body fetch stopped at the {}s deadline after {}/{} new message(s); \
-                 the rest resume on the next pass",
-                mailbox,
-                body_budget.map_or(0, |b| b.as_secs()),
-                out.len(),
-                new_uids.len()
-            );
-            break;
-        }
-        let chunk_set = compress_uid_set(chunk);
-        let fetched: Vec<_> = session
-            .uid_fetch(&chunk_set, "(UID BODY.PEEK[] FLAGS)")
+    let mut skipped = 0;
+    if !window.is_empty() {
+        let flagged: Vec<_> = session
+            .uid_fetch(compress_uid_set(&window), flag_query(pass))
             .await
-            .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+            .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?
             .try_collect()
             .await
-            .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
-        for msg in fetched.iter() {
-            let Some(uid) = msg.uid else { continue };
-            let Some(body) = msg.body() else { continue };
-            out.push(FetchedRaw {
-                uid,
-                raw: body.to_vec(),
-                flags: flags_of(msg),
-            });
-        }
-    }
-    span.mark("pass2_bodies");
-    // The chunks came back newest first; ingest sees the ascending order it saw
-    // when the whole window was one command.
-    out.sort_by_key(|m| m.uid);
+            .map_err(|e| anyhow!("Failed to collect flags: {}", e))?;
+        span.mark("pass1_flags");
 
-    let downloaded: Vec<u32> = out.iter().map(|m| m.uid).collect();
-    let coverage = arrival_coverage(
-        &listed,
-        &known_uids,
-        ceiling,
-        &downloaded,
-        carried_mark,
-        prior_high_water,
-    );
-    Ok(MailboxFetch {
-        messages: out,
+        for msg in flagged.iter() {
+            let Some(uid) = msg.uid else { continue };
+            if known_uids.contains(&(uid as i64)) {
+                known_flags.push((uid, flags_of(msg)));
+            } else {
+                new_uids.push(uid);
+            }
+        }
+        skipped = if matches!(pass, FlagPass::ChangedSince(_)) {
+            // A delta answers only for messages whose flags changed, so what
+            // came back says nothing about which UIDs are new: an unchanged
+            // message the store has never seen would look like an absence. The
+            // window and the skip list, both of which this pass already holds,
+            // say it exactly. Getting this backwards would silently stop
+            // downloading new mail.
+            new_uids = new_uids_in_window(&window, &known_uids);
+            info!(
+                "Store fetch for '{}': CONDSTORE delta since {:?} returned {} changed flag(s)",
+                mailbox,
+                known_modseq,
+                known_flags.len()
+            );
+            window.len() - new_uids.len()
+        } else {
+            known_flags.len()
+        };
+    }
+    if !new_uids.is_empty() {
+        info!(
+            "Store fetch for '{}': {} new, {} already ingested",
+            mailbox,
+            new_uids.len(),
+            skipped
+        );
+    }
+    // An empty window covers the mailbox only when the mailbox is itself
+    // empty: `mp sync -n 0` over a populated mailbox fetched no flags and may
+    // not advance the resume point (#0041 review).
+    let window_whole = window_is_whole_mailbox(window.len(), listed.len());
+
+    let plan = BodyPlan {
+        mailbox: mailbox.to_string(),
+        uid_validity: state.uid_validity,
+        chunks: body_chunks(&new_uids, BODY_CHUNK_SIZE)
+            .into_iter()
+            .map(<[u32]>::to_vec)
+            .collect(),
+        new: new_uids.len(),
+        handed: 0,
+        asked: 0,
+        spent: started.elapsed(),
+    };
+    let listing = MailboxListing {
         skipped,
         known_flags,
         state,
         vanished,
-        listed,
+        listed: listed.clone(),
         uidvalidity_reset,
         enumeration_complete,
-        download_incomplete: coverage.incomplete,
-        pending_arrival_mark: coverage.pending_mark,
-        bodies_complete,
-        highest_modseq: modseq_to_record(
-            server_modseq,
-            window_whole,
-            enumeration_complete,
-            bodies_complete,
-        ),
-    })
+        coverage: Box::new(move |downloaded: &[u32], bodies_complete: bool| {
+            let coverage = arrival_coverage(
+                &listed,
+                &known_uids,
+                ceiling,
+                downloaded,
+                carried_mark,
+                prior_high_water,
+            );
+            MailboxCoverage {
+                download_incomplete: coverage.incomplete,
+                pending_arrival_mark: coverage.pending_mark,
+                highest_modseq: modseq_to_record(
+                    server_modseq,
+                    window_whole,
+                    enumeration_complete,
+                    bodies_complete,
+                ),
+            }
+        }),
+    };
+    Ok((listing, plan))
+}
+
+/// One chunk of a body pass: the bodies and flags of `uids`, in one
+/// `UID FETCH`, on a session that has `SELECT`ed their mailbox (PERSO-300).
+///
+/// Each response is turned into a [`FetchedRaw`] as it is read, so the chunk
+/// is held once and not twice, and a UID the answer does not carry is simply
+/// absent: the coverage arithmetic counts it as not downloaded. Ascending, the
+/// order ingest saw when the whole window was one command.
+pub(crate) async fn fetch_body_chunk_on_session(
+    session: &mut ImapSession,
+    uids: &[u32],
+) -> Result<Vec<FetchedRaw>> {
+    let mut out: Vec<FetchedRaw> = session
+        .uid_fetch(compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
+        .await
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+        .try_filter_map(|msg| async move {
+            Ok(match (msg.uid, msg.body()) {
+                (Some(uid), Some(body)) => {
+                    Some(FetchedRaw::new(uid, body.to_vec(), flags_of(&msg)))
+                }
+                _ => None,
+            })
+        })
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+    out.sort_by_key(|m| m.uid);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1424,39 +1375,39 @@ mod tests {
 
     /// #0113: where the deadline is answered, and where it is not.
     ///
-    /// The first chunk always goes out even on a deadline that has already
-    /// passed, or a mailbox whose fetch starts late would download nothing on
-    /// every pass and never converge. From the second chunk on, an expired
-    /// deadline stops the pass. The check is between chunks by construction:
-    /// there is no point at which a `UID FETCH` in flight can be abandoned, so
-    /// a half-read response can never be left on a pooled session.
+    /// The first chunk always goes out even on a budget already spent, or a
+    /// mailbox whose listing was slow would download nothing on every pass and
+    /// never converge. From the second chunk on, a spent budget stops the
+    /// pass. The check is between chunks by construction: there is no point at
+    /// which a `UID FETCH` in flight can be abandoned, so a half-read response
+    /// can never be left on a pooled session.
     #[test]
     fn the_deadline_stops_the_next_chunk_and_never_the_first() {
-        let now = Instant::now();
-        let past = now - Duration::from_secs(1);
-        let future = now + Duration::from_secs(30);
+        let budget = Some(Duration::from_secs(30));
+        let spent = Duration::from_secs(31);
+        let left = Duration::from_secs(29);
 
         assert!(
-            !stop_before_chunk(0, Some(past), now),
-            "a deadline already spent still buys one chunk, so the pass makes progress"
+            !stop_before_chunk(0, budget, spent),
+            "a budget already spent still buys one chunk, so the pass makes progress"
         );
         assert!(
-            stop_before_chunk(1, Some(past), now),
+            stop_before_chunk(1, budget, spent),
             "and stops the pass at the next one"
         );
         assert!(
-            !stop_before_chunk(1, Some(future), now),
+            !stop_before_chunk(1, budget, left),
             "a live budget fetches on"
         );
         assert!(
-            !stop_before_chunk(9, None, now),
+            !stop_before_chunk(9, None, spent),
             "no budget never stops (`mp sync`)"
         );
     }
 
-    /// The #0041 review blocker, scripted at the only level `fetch_new_raw` is
-    /// testable without a live socket: `mp sync -n 0` against a CONDSTORE
-    /// server takes the empty-window return, having fetched no flags at all,
+    /// The #0041 review blocker, scripted at the only level
+    /// `list_mailbox_on_session` is testable without a live socket: `mp sync
+    /// -n 0` against a CONDSTORE server lists an empty window, fetching no flags
     /// and must leave the stored resume point alone. Recording the server's
     /// HIGHESTMODSEQ there would make the next `CHANGEDSINCE` start past every
     /// flag change made in between and lose them silently (#0004's failure).

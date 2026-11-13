@@ -17,36 +17,51 @@
 //!   pruned from the fetch's own enumeration of the mailbox, see
 //!   [`crate::imap_client::vanished_uids`]).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use log::info;
+use log::{info, warn};
 
-use super::fetch::fetch_new_raw_on_session;
-use super::pool;
+use super::fetch::{
+    fetch_body_chunk_on_session, list_mailbox_on_session, stop_before_chunk, BodyPlan,
+};
+use super::pool::{self, PooledSession};
 use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::store::{BlobStore, Store};
 use crate::sync::engine::{run_sync_guarded, SyncRun};
-use crate::sync::{MailboxFetch, ObservationSink, Stop, SyncBackend, SyncResult, SyncTarget};
+use crate::sync::{
+    BodyBatch, MailboxListing, ObservationSink, Stop, SyncBackend, SyncResult, SyncTarget,
+};
 use crate::timing::TimingSpan;
 
 /// The IMAP transport behind [`crate::sync::SyncBackend`] (#0059).
 ///
 /// It owns what a fetch needs and nothing the engine owns: no store handle, no
-/// cursors, no ingest bookkeeping. That is still only the config, because
-/// #0041 put the sessions themselves in [`super::pool`] rather than in this
-/// struct: they have to outlive the backend (a `mp sync` builds one per call,
+/// cursors, no ingest bookkeeping. That is the config, the body budget, and
+/// each mailbox's body pass between the engine's batches (PERSO-300); #0041
+/// put the sessions themselves in [`super::pool`] rather than in this struct,
+/// because they have to outlive the backend (a `mp sync` builds one per call,
 /// and the queued-op drain has no backend at all), and the pool is what every
 /// IMAP path in the process borrows from.
 pub struct ImapBackend<'a> {
     config: &'a ImapConfig,
-    /// How long one mailbox's fetch may spend on bodies before it stops and
-    /// leaves the rest for the next pass (#0113). `None` is unbounded.
+    /// How long one mailbox's fetch may spend on the network before its body
+    /// pass stops and leaves the rest for the next pass (#0113). `None` is
+    /// unbounded.
     body_budget: Option<Duration>,
-    /// Asked before every body chunk of every mailbox (PERSO-127). `None`
-    /// fetches to the end.
-    stop: Option<Stop>,
+    /// The body pass of each target of the last listing, by index; `None` for
+    /// a target whose listing failed.
+    passes: Vec<Option<BodyPass>>,
+}
+
+/// One mailbox's body pass between two of the engine's batches (PERSO-300).
+struct BodyPass {
+    plan: BodyPlan,
+    /// The session the pass `SELECT`ed its mailbox on, borrowed at its first
+    /// chunk and returned to the pool when the pass ends, so a pass holds one
+    /// connection only while the engine is working through it.
+    session: Option<PooledSession>,
 }
 
 impl<'a> ImapBackend<'a> {
@@ -54,24 +69,15 @@ impl<'a> ImapBackend<'a> {
         Self {
             config,
             body_budget: None,
-            stop: None,
+            passes: Vec::new(),
         }
     }
 
-    /// Stop each mailbox's body pass at its next chunk once `stop` says so
-    /// (PERSO-127). The same `Stop` goes into [`SyncRun::stop`], which is
-    /// where the engine drops what a stopped fetch brought back.
-    pub fn with_stop(mut self, stop: Option<Stop>) -> Self {
-        self.stop = stop;
-        self
-    }
-
-    /// Bound each mailbox's body download (#0113).
+    /// Bound each mailbox's network time (#0113).
     ///
-    /// The budget is per target rather than per sync: the targets run
-    /// concurrently, so a shared clock would spend one mailbox's budget on
-    /// another's download and truncate whichever finished last for no reason of
-    /// its own.
+    /// The budget is per target rather than per sync: one mailbox's slow
+    /// download must not spend another's budget and truncate it for no reason
+    /// of its own.
     pub fn with_body_budget(mut self, budget: Option<Duration>) -> Self {
         self.body_budget = budget;
         self
@@ -79,22 +85,27 @@ impl<'a> ImapBackend<'a> {
 }
 
 impl SyncBackend for ImapBackend<'_> {
-    /// Fetch every mailbox in parallel, one IMAP session each (#0005).
+    /// List every mailbox in parallel, one IMAP session each (#0005).
     ///
     /// IMAP allows one SELECTed mailbox per connection, so the old single
     /// session paid `N * latency` for N mailboxes; N connections overlap that
     /// latency. `buffered` caps how many run at once (servers throttle) and,
-    /// crucially, yields results in target order however the fetches finish, so
-    /// the engine's ordered ingest is unaffected by completion order. Swapping
-    /// in `buffer_unordered` would break the #0072 prune ordering; the test
-    /// below pins that property.
-    async fn fetch_targets(
+    /// crucially, yields results in target order however the listings finish,
+    /// so the engine's ordered ingest is unaffected by completion order.
+    /// Swapping in `buffer_unordered` would break the #0072 prune ordering; the
+    /// test below pins that property.
+    ///
+    /// The bodies are not downloaded here (PERSO-300): each listing's session
+    /// goes back to the pool with the plan of its body pass, which
+    /// [`next_batch`](SyncBackend::next_batch) works through as the engine asks.
+    async fn list_targets(
         &mut self,
         targets: &[SyncTarget],
         limit: usize,
         knowns: Vec<KnownUids>,
-    ) -> Vec<Result<MailboxFetch>> {
+    ) -> Vec<Result<MailboxListing>> {
         use futures::stream::StreamExt;
+        self.passes.clear();
         let concurrency = self.config.fetch_concurrency.clamp(1, 8);
         let config = self.config;
         // One checkout before the fan-out (PERSO-296), so the mailboxes do not
@@ -105,12 +116,11 @@ impl SyncBackend for ImapBackend<'_> {
         // A failure here is every mailbox's, since each would have met it.
         if !targets.is_empty() {
             if let Err(e) = pool::checkout(config).await {
+                self.passes = targets.iter().map(|_| None).collect();
                 return targets.iter().map(|_| Err(copy_of(&e))).collect();
             }
         }
-        let body_budget = self.body_budget;
-        let stop = self.stop.as_ref();
-        futures::stream::iter(
+        let listed: Vec<Result<(MailboxListing, BodyPlan)>> = futures::stream::iter(
             targets
                 .iter()
                 .zip(knowns)
@@ -124,14 +134,12 @@ impl SyncBackend for ImapBackend<'_> {
                     // it: `caps` is what *this* server said after *this* login, never a
                     // remembered or configured answer (#0041).
                     let caps = pooled.caps();
-                    let out = fetch_new_raw_on_session(
+                    let out = list_mailbox_on_session(
                         pooled.session(),
                         &target.server_name,
                         Some(target.limit(limit)),
                         known,
                         caps,
-                        body_budget,
-                        stop,
                     )
                     .await;
                     pooled.check(out)
@@ -139,8 +147,108 @@ impl SyncBackend for ImapBackend<'_> {
         )
         .buffered(concurrency)
         .collect()
-        .await
+        .await;
+        listed
+            .into_iter()
+            .map(|listed| match listed {
+                Ok((listing, plan)) => {
+                    self.passes.push(Some(BodyPass {
+                        plan,
+                        session: None,
+                    }));
+                    Ok(listing)
+                }
+                Err(e) => {
+                    self.passes.push(None);
+                    Err(e)
+                }
+            })
+            .collect()
     }
+
+    /// The next chunk of the target's body pass, on a session borrowed at its
+    /// first chunk and held until its last (PERSO-300).
+    ///
+    /// The session `SELECT`s the mailbox again, since whatever the pool hands
+    /// out was left on some other one, and a mailbox renumbered since its
+    /// listing fails the pass rather than download bodies under UIDs that now
+    /// name other messages. The budget is asked before every chunk but the
+    /// first ([`stop_before_chunk`]), against the network time the mailbox has
+    /// spent, its listing included.
+    async fn next_batch(&mut self, index: usize) -> Result<BodyBatch> {
+        let config = self.config;
+        let budget = self.body_budget;
+        let Some(pass) = self.passes.get_mut(index).and_then(Option::as_mut) else {
+            return Err(anyhow!("no listing for the mailbox at {index}"));
+        };
+        if pass.plan.chunks.is_empty() {
+            pass.session = None;
+            return Ok(BodyBatch::Done { complete: true });
+        }
+        if stop_before_chunk(pass.plan.asked, budget, pass.plan.spent) {
+            warn!(
+                "[sync] '{}': body fetch stopped at the {}s deadline after {}/{} new message(s); \
+                 the rest resume on the next pass",
+                pass.plan.mailbox,
+                budget.map_or(0, |b| b.as_secs()),
+                pass.plan.handed,
+                pass.plan.new
+            );
+            pass.session = None;
+            return Ok(BodyBatch::Done { complete: false });
+        }
+        let started = Instant::now();
+        let fetched = fetch_next_chunk(config, pass).await;
+        pass.plan.spent += started.elapsed();
+        pass.plan.asked += 1;
+        match fetched {
+            Ok(bodies) => {
+                pass.plan.handed += bodies.len();
+                Ok(BodyBatch::Bodies(bodies))
+            }
+            Err(e) => {
+                // `fetch_next_chunk` poisoned a session whose command failed
+                // (#0041); the pass is over either way.
+                pass.session = None;
+                pass.plan.chunks.clear();
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Borrow and `SELECT` the pass's session if it has none yet, then download
+/// its next chunk.
+async fn fetch_next_chunk(
+    config: &ImapConfig,
+    pass: &mut BodyPass,
+) -> Result<Vec<crate::sync::FetchedRaw>> {
+    if pass.session.is_none() {
+        let mut pooled = pool::checkout(config).await?;
+        let selected = pooled
+            .session()
+            .select(&pass.plan.mailbox)
+            .await
+            .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", pass.plan.mailbox, e));
+        let selected = pooled.check(selected)?;
+        if selected.uid_validity != pass.plan.uid_validity {
+            return Err(anyhow!(
+                "'{}' changed its UIDVALIDITY from {:?} to {:?} since it was listed",
+                pass.plan.mailbox,
+                pass.plan.uid_validity,
+                selected.uid_validity
+            ));
+        }
+        pass.session = Some(pooled);
+    }
+    let chunk = pass
+        .plan
+        .chunks
+        .pop_front()
+        .expect("the caller checked a chunk is left");
+    let session = pass.session.as_mut().expect("selected above");
+    let fetched = fetch_body_chunk_on_session(session.session(), &chunk).await;
+    session.check(fetched)
 }
 
 /// `error` again, for the next mailbox it fails: a refused login keeps its
@@ -172,8 +280,8 @@ fn copy_of(error: &anyhow::Error) -> anyhow::Error {
 /// no session, no ingest, no error. Every caller reads that as a success and
 /// says it skipped, the same way a refused outbox drain is read (#0116).
 ///
-/// `stop` is asked at every body chunk and every mailbox boundary
-/// (PERSO-127); a stopped pass returns `Ok(Some(..))` with what it ingested
+/// `stop` is asked at every mailbox boundary (PERSO-127) and between two
+/// batches of a mailbox's bodies (PERSO-300); a stopped pass returns `Ok(Some(..))` with what it ingested
 /// before the stop, and the caller that owns the `Stop` knows it stopped.
 ///
 /// Every row the pass inserts is recorded in `observations` as it is
@@ -205,9 +313,7 @@ pub async fn sync_mailboxes(
 
     let store = Store::open_for_pass(account_name, dry_run)?;
     let blobs = BlobStore::for_account(account_name);
-    let mut backend = ImapBackend::new(imap_config)
-        .with_body_budget(body_budget)
-        .with_stop(stop.clone());
+    let mut backend = ImapBackend::new(imap_config).with_body_budget(body_budget);
 
     run_sync_guarded(
         &mut backend,
@@ -504,6 +610,98 @@ mod tests {
             .await
         });
         assert_eq!(out, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// PERSO-300: a full sync holds one chunk of bodies at a time, from the
+    /// download through the ingest, whatever the size of the mailboxes: each
+    /// chunk is ingested before the next `UID FETCH` goes out, and nothing
+    /// keeps a body once it is written.
+    ///
+    /// Until PERSO-300 every mailbox was downloaded whole before the first was
+    /// ingested, and a full sync of a 6,360-message folder peaked at about
+    /// 8 GB. The count is taken through `FetchedRaw` itself
+    /// ([`crate::sync::held_bodies`]), not from the process's memory.
+    #[test]
+    fn a_full_sync_holds_one_chunk_of_bodies_at_a_time() {
+        use crate::config::ImapConfig;
+        use crate::imap_client::fake_imap::{LoginPolicy, RejectingImapServer};
+        use crate::imap_client::fetch::BODY_CHUNK_SIZE;
+        use crate::store::{BlobStore, Store};
+        use crate::sync::engine::{run_sync, SyncRun};
+        use crate::sync::{held_bodies, ObservationSink, SyncTarget};
+        use crate::types::MailboxRole;
+
+        let message = |folder: &str, uid: u32| {
+            format!(
+                "From: a@example.com\r\nTo: b@example.com\r\nSubject: {folder} {uid}\r\n\
+                 Message-ID: <{uid}@{folder}.example.com>\r\n\
+                 Date: Thu, 7 Aug 2025 10:00:00 +0000\r\n\r\n{folder} body {uid}\r\n"
+            )
+            .into_bytes()
+        };
+        let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+        let inbox = 3 * BODY_CHUNK_SIZE as u32 + 5;
+        let archive = 2 * BODY_CHUNK_SIZE as u32 + 3;
+        server.set_mail(
+            "INBOX",
+            3,
+            (1..=inbox)
+                .map(|uid| (uid, message("inbox", uid)))
+                .collect(),
+        );
+        server.set_mail(
+            "Archive",
+            4,
+            (1..=archive)
+                .map(|uid| (uid, message("archive", uid)))
+                .collect(),
+        );
+        let config = ImapConfig {
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            username: "bounded@example.com".into(),
+            password: "right".into(),
+            accept_invalid_certs: true,
+            fetch_concurrency: 4,
+            body_fetch_deadline_secs: 0,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(tmp.path().join("blobs"));
+        let targets = vec![
+            SyncTarget::new(MailboxRole::Inbox, "INBOX"),
+            SyncTarget::new(MailboxRole::Archive, "Archive"),
+        ];
+
+        held_bodies::reset_peak();
+        let result = futures::executor::block_on(run_sync(
+            &mut super::ImapBackend::new(&config),
+            &SyncRun {
+                store: &store,
+                blobs: &blobs,
+                account: "acct",
+                targets: &targets,
+                limit: usize::MAX,
+                dry_run: false,
+                stop: None,
+                observations: &ObservationSink::default(),
+            },
+            &mut crate::timing::TimingSpan::new("test"),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            result.saved,
+            (inbox + archive) as usize,
+            "every message is ingested"
+        );
+        assert_eq!(result.bodies_truncated, 0);
+        assert!(
+            held_bodies::peak() <= BODY_CHUNK_SIZE,
+            "the pass held {} bodies at once, more than one chunk of {BODY_CHUNK_SIZE}",
+            held_bodies::peak()
+        );
+        assert_eq!(held_bodies::live(), 0, "no body outlives the pass");
     }
 
     /// PERSO-185: the rename probe reads each gained folder's UIDVALIDITY and
