@@ -2410,6 +2410,14 @@ async fn event_update_resends_an_invitation_the_account_organised() {
             update(&id, json!({"attendees": []})),
             "at least one attendee",
         ),
+        (
+            json!({"account": IMIP, "event": id, "scope": "", "fields": {"summary": "x"}}),
+            "The scope is blank",
+        ),
+        (
+            json!({"account": SERVER, "event": "ev-own", "scope": " ", "fields": {"summary": "x"}}),
+            "The scope is blank",
+        ),
     ];
     for (params, words) in cases {
         let error = call_err(&mut conn, "event.update", params.clone()).await;
@@ -2483,6 +2491,28 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
         (
             json!({"account": IMIP, "event": series_id, "occurrence": at(13, 9).to_rfc3339()}),
             "is not one of them",
+        ),
+        // A blank occurrence or scope names nothing, and is never read as
+        // the whole series.
+        (
+            json!({"account": IMIP, "event": series_id, "occurrence": ""}),
+            "name the occurrence",
+        ),
+        (
+            json!({"account": IMIP, "event": series_id, "occurrence": "  "}),
+            "name the occurrence",
+        ),
+        (
+            json!({"account": IMIP, "event": id, "occurrence": " "}),
+            "name the occurrence",
+        ),
+        (
+            json!({"account": IMIP, "event": series_id, "scope": " "}),
+            "The scope is blank",
+        ),
+        (
+            json!({"account": SERVER, "event": "ev-own", "scope": ""}),
+            "The scope is blank",
         ),
         (
             json!({"account": SERVER, "event": "ev-own", "occurrence": occurrence}),

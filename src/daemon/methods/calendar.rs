@@ -723,14 +723,19 @@ fn change_store(
     Ok((account, store))
 }
 
-/// The scope a change names, or the sentence naming the two.
+/// The scope a change names, or the sentence naming the two. A scope
+/// present but blank is refused rather than read as none, which on a series
+/// reaches every occurrence.
 fn scope_param(scope: Option<&str>) -> Result<Option<EventScope>, RpcError> {
-    scope
-        .map(str::trim)
-        .filter(|word| !word.is_empty())
-        .map(EventScope::from_word)
-        .transpose()
-        .map_err(invalid_params)
+    match scope.map(str::trim) {
+        None => Ok(None),
+        Some("") => Err(invalid_params(
+            "The scope is blank: name it, occurrence or series, or leave it out",
+        )),
+        Some(word) => EventScope::from_word(word)
+            .map(Some)
+            .map_err(invalid_params),
+    }
 }
 
 /// The master of the series `master_id`, as the series cache holds it.
@@ -1132,14 +1137,18 @@ fn plan_imip_cancel(
     row_id: i64,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<Work, RpcError> {
-    let (account, found, row) = organised(&request.account, &request.event, row_id, snapshot)?;
     let scope = scope_param(request.scope.as_deref())?;
+    let occurrence = request.occurrence.as_deref().map(str::trim);
+    // A blank occurrence (an unset shell variable) names none; read as
+    // absent, it would cancel the whole series.
+    if occurrence == Some("") {
+        return Err(invalid_params(
+            "The occurrence is blank: name the occurrence to cancel by its start \
+             (2026-12-21T09:00), or leave it out to cancel the whole invitation",
+        ));
+    }
+    let (account, found, row) = organised(&request.account, &request.event, row_id, snapshot)?;
     let title = found.event.summary.as_str();
-    let occurrence = request
-        .occurrence
-        .as_deref()
-        .map(str::trim)
-        .filter(|when| !when.is_empty());
     let named = |when: &str| {
         crate::invite::occurrence_recurrence_id(&row.invite, when, local_zone())
             .map_err(|e| invalid_params(format!("{e:#}")))

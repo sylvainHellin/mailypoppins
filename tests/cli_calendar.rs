@@ -1273,6 +1273,11 @@ fn an_invitation_the_account_organised_changes_through_the_cli() {
     let unsent = slice.err(&["event", "update", &current, "--reminder", "10", "-A", IMIP]);
     assert!(unsent.contains("an invitation mail carries"), "{unsent}");
 
+    // An empty --occurrence (an unset shell variable) is refused, never read
+    // as the whole series.
+    let blank = slice.err(&["event", "cancel", &series, "--occurrence", "", "-A", IMIP]);
+    assert!(blank.contains("name the occurrence"), "{blank}");
+
     let occurrence = at(13, 8).to_rfc3339();
     let one = slice.ok(&[
         "event",
