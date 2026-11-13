@@ -130,40 +130,49 @@ pub fn cursor_attachment_files(app: &mut App) -> Option<crate::app::AttachmentFi
 /// a private temp copy, and `o` opens the very file that will be sent, which
 /// is the point of the key on a draft.
 ///
-/// Each entry is expanded by [`mp_core::draft::attachment_entry_files`], the
-/// send path's own expansion (PERSO-215): trimmed, `~` against the home
-/// directory, a relative entry beside the draft file rather than under the
-/// TUI's working directory, and a folder as the files inside it, so a draft
-/// that sends is a draft that opens the very files it sends.
-/// A path that is not there is named rather than skipped silently: a stale
-/// entry is precisely what `o` is being pressed to find out about, and it is
-/// the failure `mp send` would hit later (see the forwarded-attachment note in
-/// `docs/lessons-learned.md`).
+/// The entries are the daemon's `draft.attachments`, the call the desktop
+/// makes (PERSO-215): each lists the files its send attaches, resolved by
+/// the send path's own expansion, trimmed, `~` against the home directory, a
+/// relative entry beside the draft file rather than under the TUI's working
+/// directory, and a folder as the files inside it, so a draft that sends is
+/// a draft that opens the very files it sends.
+/// An entry with no file to send is named rather than skipped silently: a
+/// stale entry is precisely what `o` is being pressed to find out about, and
+/// it is the failure `mp send` would hit later (see the forwarded-attachment
+/// note in `docs/lessons-learned.md`).
 fn draft_attachment_files(app: &mut App) -> Option<Vec<PathBuf>> {
-    let (_id, path) = cursor_draft(app, "Attachments needs a draft or a received message")?;
-    let draft = match mp_core::draft::parse_email_draft(&path) {
-        Ok(draft) => draft,
+    let (id, _path) = cursor_draft(app, "Attachments needs a draft or a received message")?;
+    let account = app.account_config.name.clone();
+    let listed = daemon_door(app)
+        .call("draft.attachments", json!({"account": account, "id": id}))
+        .and_then(|answer| {
+            serde_json::from_value::<mp_protocol::draft::DraftAttachments>(answer)
+                .context("draft.attachments did not decode")
+        });
+    let listed = match listed {
+        Ok(listed) => listed,
         Err(e) => {
-            app.set_status_level(format!("Attachments failed: {e:#}"), StatusLevel::Error);
+            let why = match mp_client::session::refusal(&e) {
+                Some(refused) => refused.message.clone(),
+                None => format!("{e:#}"),
+            };
+            app.set_status_level(format!("Attachments failed: {why}"), StatusLevel::Error);
             return None;
         }
     };
 
-    let listed = draft.frontmatter.attachments.unwrap_or_default();
-    let dir = path.parent().unwrap_or(Path::new("/"));
-    let home = shellexpand::tilde("~");
-    let home = (home != "~").then(|| PathBuf::from(home.as_ref()));
     let mut files = Vec::new();
     let mut missing = Vec::new();
-    for entry in &listed {
-        match mp_core::draft::attachment_entry_files(entry, dir, home.as_deref()) {
-            Ok(found) if !found.is_empty() && found.iter().all(|f| f.is_file()) => {
-                files.extend(found);
-            }
+    for attachment in listed.attachments {
+        let entry = attachment.entry;
+        if !attachment.files.is_empty() {
+            files.extend(attachment.files.into_iter().map(PathBuf::from));
+        } else if entry.trim().is_empty() {
             // Empty after trimming: named by its spelling, or it is blank.
-            _ if entry.trim().is_empty() => missing.push(format!("{entry:?}")),
+            missing.push(format!("{entry:?}"));
+        } else {
             // Not there, an empty or unreadable folder: nothing to send.
-            _ => missing.push(entry.trim().to_string()),
+            missing.push(entry.trim().to_string());
         }
     }
 
@@ -3058,7 +3067,9 @@ mod tests {
     // `o` on a draft's attachments (PERSO-215)
     // -----------------------------------------------------------------------
 
-    /// A door that knows one draft, at `path`, for `draft.path`.
+    /// A door that knows one draft, at `path`, for `draft.path` and for
+    /// `draft.attachments`, which it answers as the daemon does, through
+    /// `mp_core::draft::list_attachment_entry`.
     struct DraftPathDoor {
         path: PathBuf,
     }
@@ -3071,14 +3082,46 @@ mod tests {
                     "id": params["id"],
                     "path": self.path.display().to_string(),
                 })),
+                "draft.attachments" => {
+                    let draft = mp_core::draft::parse_email_draft(&self.path)?;
+                    let dir = self.path.parent().expect("the draft's folder");
+                    let attachments: Vec<Value> = draft
+                        .frontmatter
+                        .attachments
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, entry)| {
+                            let listed = mp_core::draft::list_attachment_entry(&entry, dir, None);
+                            json!({
+                                "index": index,
+                                "entry": entry,
+                                "path": listed
+                                    .path
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default(),
+                                "exists": listed.exists,
+                                "folder": listed.folder,
+                                "files": listed.files,
+                            })
+                        })
+                        .collect();
+                    Ok(json!({
+                        "account": params["account"],
+                        "id": params["id"],
+                        "path": self.path.display().to_string(),
+                        "attachments": attachments,
+                    }))
+                }
                 other => Err(anyhow::anyhow!("unexpected {other}")),
             }
         }
     }
 
-    /// `o` on a draft opens the files its send would attach: a padded
-    /// relative entry is the file beside the draft, not one under the TUI's
-    /// working directory, and a folder entry is the files inside it.
+    /// `o` on a draft opens the files its send would attach, as the daemon's
+    /// `draft.attachments` lists them: a padded relative entry is the file
+    /// beside the draft, not one under the TUI's working directory, a folder
+    /// entry is the files inside it, and an empty folder is named missing.
     #[test]
     fn o_on_a_draft_opens_the_files_beside_the_draft_its_send_attaches() {
         let dir = tempfile::tempdir().unwrap();
@@ -3091,12 +3134,13 @@ mod tests {
         std::fs::write(dir.path().join("anlagen/b.txt"), b"b").unwrap();
         std::fs::write(dir.path().join("anlagen/a.txt"), b"a").unwrap();
         std::fs::write(dir.path().join("anlagen/.hidden"), b"h").unwrap();
+        std::fs::create_dir(dir.path().join("leer")).unwrap();
         let path = dir.path().join("draft.md");
         std::fs::write(
             &path,
             format!(
                 "---\nto: bob@example.com\nsubject: Anhang\nstatus: draft\n\
-                 attachments:\n  - \" {entry} \"\n  - anlagen\n---\n\nAnbei.\n"
+                 attachments:\n  - \" {entry} \"\n  - anlagen\n  - leer\n---\n\nAnbei.\n"
             ),
         )
         .unwrap();
@@ -3144,6 +3188,11 @@ mod tests {
             ],
             "status: {:?}",
             app.status_message
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("1 attachment missing: leer"),
+            "an empty folder sends nothing"
         );
     }
 }

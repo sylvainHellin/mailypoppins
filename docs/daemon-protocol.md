@@ -1926,3 +1926,6 @@ The fixtures are `crates/mp-protocol/fixtures/sender.{block,unblock,list}.{reque
 
 PERSO-222 added `message.attachments`, one query, additively; no field was renamed, none was dropped, and `message.get`'s `attachments` keep their stored order.
 `message.attachments` `{account, row_id|id|selector, mailbox?}` or `{account, hit}` -> `{account, selector, attachments: [{part, name, size, inline}]}` lists a message's parts in reading order with the `part` `message.materialise_attachment` takes on each ([The attachment listing](#the-attachment-listing)); the types are `mp_protocol::attachment::{MessageAttachments, MessageAttachment}`, the fixtures `crates/mp-protocol/fixtures/message.attachments.{request,response}.json`, and the capability list grew by its name.
+
+PERSO-215 added two members to a `draft.attachments`, `draft.attach` and `draft.detach` entry (`mp_protocol::draft::DraftAttachment`), additively: `folder`, whether the entry names a folder, and `files`, the files its send attaches, the entry's own file or a folder's regular files directly inside it, sorted, dotfiles skipped, none when nothing is there to send.
+Both default when absent, so an older daemon's answer decodes with no folder and no files; the TUI's `o` and the desktop's `to` open these files rather than resolving an entry themselves.

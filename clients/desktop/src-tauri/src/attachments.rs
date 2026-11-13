@@ -175,8 +175,15 @@ pub struct DraftAttachment {
     pub entry: String,
     /// Where the send path finds it.
     pub path: String,
-    /// Whether a file is there now; a send fails on a missing one.
+    /// Whether a file or a folder is there now; a send fails on a missing one.
     pub exists: bool,
+    /// Whether `path` is a folder, whose regular files the send attaches.
+    #[serde(default)]
+    pub folder: bool,
+    /// What the send attaches for the entry, as the daemon expanded it: the
+    /// file itself or a folder's files; none when nothing is there to send.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// A draft's attachments, from its file: `mp_protocol::draft::DraftAttachments`.
@@ -690,12 +697,15 @@ pub fn draft_attachment_remove_on(
 }
 
 /// Open entry `index` of the draft's list with the system opener (ATT-04):
-/// the very file a send would attach, where the daemon resolved it.
+/// the very file a send would attach, where the daemon resolved it. For a
+/// folder entry, `file` is the position of one of the files the daemon lists
+/// inside it (PERSO-215), the files the TUI's `o` offers for the entry.
 pub fn draft_attachment_open_on(
     door: &Door,
     account: &str,
     id: &str,
     index: u32,
+    file: Option<u32>,
 ) -> Result<OpenedFile, GuiError> {
     let listing = draft_attachments_on(door, account, id)?;
     let count = listing.attachments.len();
@@ -709,16 +719,32 @@ pub fn draft_attachment_open_on(
                 index + 1
             ))
         })?;
-    let file = PathBuf::from(&entry.path);
-    if !entry.exists || !file.is_file() {
+    let path = match (entry.folder, file) {
+        (true, Some(n)) => PathBuf::from(entry.files.get(n as usize).ok_or_else(|| {
+            GuiError::not_found(format!(
+                "{} holds {} files to send, no number {}",
+                entry.entry,
+                entry.files.len(),
+                n + 1
+            ))
+        })?),
+        (true, None) => {
+            return Err(GuiError::protocol(format!(
+                "{} is a folder; open one of its files",
+                entry.entry
+            )))
+        }
+        (false, _) => PathBuf::from(&entry.path),
+    };
+    if !entry.exists || !path.is_file() {
         return Err(GuiError::not_found(format!(
             "{} is missing: no file at {}",
             entry.entry,
-            file.display()
+            path.display()
         )));
     }
-    open_file(door, &file)?;
-    Ok(opened(&file))
+    open_file(door, &path)?;
+    Ok(opened(&path))
 }
 
 // ---------------------------------------------------------------------------
@@ -882,9 +908,10 @@ pub async fn draft_attachment_open(
     account: String,
     id: String,
     index: u32,
+    file: Option<u32>,
 ) -> Result<OpenedFile, GuiError> {
     with_door(&session, move |_, door| {
-        draft_attachment_open_on(door, &account, &id, index)
+        draft_attachment_open_on(door, &account, &id, index, file)
     })
     .await
 }
@@ -1294,7 +1321,7 @@ mod tests {
             "Type the path of the file to attach"
         );
 
-        let opened = draft_attachment_open_on(&door, "work", "angebot-antwort", 1).unwrap();
+        let opened = draft_attachment_open_on(&door, "work", "angebot-antwort", 1, None).unwrap();
         assert_eq!(fixture.opened(), vec![b.display().to_string()]);
         assert_eq!(opened.name, "b.pdf");
 
@@ -1304,12 +1331,51 @@ mod tests {
         assert!(a.exists(), "a remove leaves the file alone");
         assert_eq!(body(&draft), before);
         assert!(draft_attachment_remove_on(&door, "work", "angebot-antwort", 5).is_err());
-        assert!(draft_attachment_open_on(&door, "work", "angebot-antwort", 5).is_err());
+        assert!(draft_attachment_open_on(&door, "work", "angebot-antwort", 5, None).is_err());
 
         fs::remove_file(&b).unwrap();
         let listed = draft_attachments_on(&door, "work", "angebot-antwort").unwrap();
         assert!(!listed.attachments[0].exists);
-        let missing = draft_attachment_open_on(&door, "work", "angebot-antwort", 0).unwrap_err();
+        let missing =
+            draft_attachment_open_on(&door, "work", "angebot-antwort", 0, None).unwrap_err();
         assert!(missing.message().contains("is missing"));
+    }
+
+    /// A folder entry is listed as a folder with the files its send
+    /// attaches, as the daemon answers it, and opens one of them by its
+    /// position, the files the TUI's `o` offers (PERSO-215).
+    #[test]
+    fn a_folder_entry_lists_and_opens_the_files_its_send_attaches() {
+        let (door, fixture) = fixture_door();
+        let draft = crate::commands::draft_path_on(&door, "work", "angebot-antwort")
+            .unwrap()
+            .path;
+        let dir = Path::new(&draft).parent().unwrap().to_path_buf();
+        let folder = dir.join("perso-215-anlagen");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("b.txt"), "b").unwrap();
+        fs::write(folder.join("a.txt"), "a").unwrap();
+        fs::write(folder.join(".hidden"), "h").unwrap();
+        let text = fs::read_to_string(&draft).unwrap();
+        let text = text.replacen("---\n", "---\nattachments:\n  - perso-215-anlagen\n", 1);
+        fs::write(&draft, text).unwrap();
+
+        let listed = draft_attachments_on(&door, "work", "angebot-antwort").unwrap();
+        let entry = &listed.attachments[0];
+        assert!(entry.exists && entry.folder, "{entry:?}");
+        let (a, b) = (folder.join("a.txt"), folder.join("b.txt"));
+        assert_eq!(
+            entry.files,
+            [a.display().to_string(), b.display().to_string()]
+        );
+
+        let opened =
+            draft_attachment_open_on(&door, "work", "angebot-antwort", 0, Some(1)).unwrap();
+        assert_eq!(opened.name, "b.txt");
+        assert_eq!(fixture.opened(), vec![b.display().to_string()]);
+        let whole =
+            draft_attachment_open_on(&door, "work", "angebot-antwort", 0, None).unwrap_err();
+        assert!(whole.message().contains("is a folder"), "{whole:?}");
+        assert!(draft_attachment_open_on(&door, "work", "angebot-antwort", 0, Some(2)).is_err());
     }
 }

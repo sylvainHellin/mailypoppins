@@ -117,7 +117,10 @@ function OpenList({
 }) {
   const dispatch = useDispatch();
   const listRef = useRef<HTMLUListElement>(null);
-  const first = items.find((i) => !i.missing)?.part;
+  // The cursor is a position in the list: a draft's folder entry lists
+  // several files under one `part` (PERSO-215).
+  const firstAt = items.findIndex((i) => !i.missing);
+  const first = firstAt === -1 ? undefined : firstAt;
   const [cursor, setCursor] = useState(first);
   useEffect(() => {
     if (active) setCursor(first);
@@ -152,19 +155,19 @@ function OpenList({
 
   return (
     <ul ref={listRef} aria-label="Attachments" className="flex min-w-0 flex-col gap-1">
-      {items.map((item) => (
-        <li key={item.part}>
+      {items.map((item, at) => (
+        <li key={`${item.part}:${item.file ?? ""}`}>
           <Button
             type="button"
             variant="ghost"
-            ref={item.part === first ? firstRef : undefined}
-            data-attachment={item.part}
-            data-selected={item.part === cursor ? "true" : undefined}
-            aria-current={item.part === cursor ? "true" : undefined}
+            ref={at === first ? firstRef : undefined}
+            data-attachment={at}
+            data-selected={at === cursor ? "true" : undefined}
+            aria-current={at === cursor ? "true" : undefined}
             disabled={item.missing}
             className="w-full justify-start gap-2 focus-visible:border-transparent focus-visible:ring-0 data-selected:bg-selection data-selected:text-selection-foreground data-selected:hover:bg-selection data-selected:hover:text-selection-foreground dark:data-selected:hover:bg-selection data-selected:*:[svg]:text-selection-foreground"
             aria-label={`Open ${item.name}${item.missing ? " (missing)" : ""}`}
-            onFocus={() => setCursor(item.part)}
+            onFocus={() => setCursor(at)}
             onClick={() => {
               onDone();
               void openItem(owner, item, dispatch);

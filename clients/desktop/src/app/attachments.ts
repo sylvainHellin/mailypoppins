@@ -107,13 +107,40 @@ export function messageItems(parts: Attachment[]): AttachmentItem[] {
   return [...items.filter((i) => !i.inline), ...items.filter((i) => i.inline)];
 }
 
+/**
+ * One entry of a draft's list as the preview shows it: a file, or a folder
+ * with the files the daemon lists inside it, the ones its send attaches.
+ */
+export type DraftEntryItem = AttachmentItem & { folder: boolean; files: AttachmentItem[] };
+
+/**
+ * A draft's entries, each read from the daemon's answer (PERSO-215): a
+ * folder is missing when it holds nothing to send, as the TUI's `o` says.
+ */
+export function draftEntriesOf(list: DraftAttachments): DraftEntryItem[] {
+  return list.attachments.map((a) => {
+    const folder = a.folder;
+    const prefix = a.entry.trim().replace(/\/+$/, "");
+    const files = folder
+      ? a.files.map((f, file) => ({ part: a.index, file, name: `${prefix}/${f.slice(f.lastIndexOf("/") + 1)}`, size: null, missing: false }))
+      : [];
+    return { part: a.index, name: a.entry, size: null, missing: folder ? files.length === 0 : !a.exists, folder, files };
+  });
+}
+
+/**
+ * What `to` on a draft offers, the files the TUI's `o` offers: an entry's
+ * file, or each file of a folder entry; an entry with nothing to send stays,
+ * as missing.
+ */
 export function draftItemsOf(list: DraftAttachments): AttachmentItem[] {
-  return list.attachments.map((a) => ({
-    part: a.index,
-    name: a.entry,
-    size: null,
-    missing: !a.exists,
-  }));
+  return draftEntriesOf(list).flatMap((e) => (e.files.length > 0 ? e.files : [{ part: e.part, name: e.name, size: e.size, missing: e.missing }]));
+}
+
+/** One item opens at once, several open the picker, as the TUI's `o`. */
+export function openAmong(owner: AttachmentOwner, subject: string, items: AttachmentItem[], dispatch: Dispatch<Action>): void {
+  if (items.length === 1) return void openItem(owner, items[0], dispatch);
+  dispatch({ type: "open_attachments", dialog: { kind: "open", owner, subject, items } });
 }
 
 /**
@@ -138,8 +165,7 @@ export async function openAttachment(s: AppState, dispatch: Dispatch<Action>): P
     return failed(dispatch, subj.account, `Attachments failed: ${asGuiError(e).message}`);
   }
   if (items.length === 0) return notice(dispatch, "No attachments");
-  if (items.length === 1) return void openItem(owner, items[0], dispatch);
-  dispatch({ type: "open_attachments", dialog: { kind: "open", owner, subject: subj.subject, items } });
+  openAmong(owner, subj.subject, items, dispatch);
 }
 
 /** `ts`: the Save dialog, every part checked, the last directory offered. */
@@ -260,7 +286,7 @@ export async function openItem(owner: AttachmentOwner, item: AttachmentItem, dis
     const file =
       owner.kind === "message"
         ? await cmd.attachmentOpen(owner.account, owner.source, item.part)
-        : await cmd.draftAttachmentOpen(owner.account, owner.draftId, item.part);
+        : await cmd.draftAttachmentOpen(owner.account, owner.draftId, item.part, item.file);
     notice(dispatch, `Opened: ${file.name}`);
     return null;
   } catch (e: unknown) {

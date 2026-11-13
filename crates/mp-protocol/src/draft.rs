@@ -295,6 +295,16 @@ pub struct DraftAttachment {
     /// Whether something is there now: a file, or a directory whose regular
     /// files the send path attaches. A send fails on a missing one.
     pub exists: bool,
+    /// Whether `path` is a folder, whose regular files the send path
+    /// attaches, `files` (PERSO-215). Absent from an older daemon's answer.
+    #[serde(default)]
+    pub folder: bool,
+    /// What the send attaches for this entry: `path` itself when it is a
+    /// file, a folder's regular files directly inside it (sorted, dotfiles
+    /// skipped), and none for a missing entry, an empty folder or one that
+    /// does not read. A client opens these rather than resolving the entry.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// The `result` of `draft.attachments`, `draft.attach` and `draft.detach`:

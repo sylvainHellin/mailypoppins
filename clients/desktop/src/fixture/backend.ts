@@ -1076,7 +1076,21 @@ function resolveEntry(entry: string, draftPath: string): string | null {
   return path.startsWith("/") ? path : `${draftPath.slice(0, draftPath.lastIndexOf("/"))}/${path}`;
 }
 
-/** A draft's attachments as `draft_attachments` answers them. */
+/**
+ * The regular files directly inside `dir` among the mock's files, sorted and
+ * dotfiles skipped, as `mp_core::draft::attachment_entry_files` expands a
+ * folder; a folder is a path some mock file lies under.
+ */
+function folderFiles(dir: string): string[] {
+  const prefix = `${dir}/`;
+  return [...mock.files]
+    .filter((f) => f.startsWith(prefix) && !f.slice(prefix.length).includes("/") && !f.slice(prefix.length).startsWith("."))
+    .sort();
+}
+
+const isFolder = (path: string) => [...mock.files].some((f) => f.startsWith(`${path}/`));
+
+/** A draft's attachments as `draft_attachments` answers them, `mp_core::draft::list_attachment_entry`'s reading. */
 function draftAttachmentsOf(account: string, id: string) {
   const d = findDraft("draft.path", account, id);
   const entries = mock.draftAttachments[`${account}/${id}`] ?? [];
@@ -1086,7 +1100,10 @@ function draftAttachmentsOf(account: string, id: string) {
     path: d.path,
     attachments: entries.map((entry, index) => {
       const path = resolveEntry(entry, d.path);
-      return { index, entry, path: path ?? "", exists: path !== null && mock.files.has(path) };
+      const folder = path !== null && isFolder(path);
+      const file = path !== null && mock.files.has(path);
+      const files = folder ? folderFiles(path) : file ? [path] : [];
+      return { index, entry, path: path ?? "", exists: folder || file, folder, files };
     }),
   };
 }
@@ -2175,9 +2192,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "draft_attachment_open": {
       knownAccount(cmd, account);
-      const entry = (mock.draftAttachments[`${account}/${String(args.id)}`] ?? [])[Number(args.index)];
-      if (entry === undefined) throw { kind: "not_found", message: `no attachment ${Number(args.index) + 1}`, code: null };
-      const path = resolveEntry(entry, findDraft("draft.path", account, String(args.id)).path) ?? "";
+      const listed = draftAttachmentsOf(account, String(args.id)).attachments[Number(args.index)];
+      if (listed === undefined) throw { kind: "not_found", message: `no attachment ${Number(args.index) + 1}`, code: null };
+      const { entry } = listed;
+      let path = listed.path;
+      if (listed.folder) {
+        if (args.file === undefined || args.file === null) throw { kind: "protocol", message: `${entry} is a folder; open one of its files`, code: null };
+        const n = Number(args.file);
+        if (n >= listed.files.length) throw { kind: "not_found", message: `${entry} holds ${listed.files.length} files to send, no number ${n + 1}`, code: null };
+        path = listed.files[n];
+      }
       if (!mock.files.has(path)) throw { kind: "not_found", message: `${entry} is missing: no file at ${path}`, code: null };
       mock.opened.push(path);
       return { name: path.slice(path.lastIndexOf("/") + 1), path };

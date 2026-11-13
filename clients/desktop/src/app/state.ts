@@ -674,7 +674,8 @@ export type ComposeDialog =
 
 /** One attachment a dialog lists: a message's part, or a draft's entry by its index. */
 /** `inline`: an image the body shows by `cid:` URL, listed after the real attachments with a tag (PERSO-165). */
-export type AttachmentItem = { part: number; name: string; size: number | null; missing: boolean; inline?: boolean };
+/** `file`: one of the files a draft's folder entry sends, by its position in the daemon's list (PERSO-215). */
+export type AttachmentItem = { part: number; name: string; size: number | null; missing: boolean; inline?: boolean; file?: number };
 
 /** Whose attachments an open dialog lists. */
 export type AttachmentOwner =

@@ -1593,6 +1593,48 @@ pub fn attachment_entry_files(
     Ok(files)
 }
 
+/// One entry of a draft's `attachments:` list as the daemon's
+/// `draft.attachments` answers it, so no client resolves an entry itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedAttachmentEntry {
+    /// Where [`resolve_attachment_entry`] finds it; `None` for an entry
+    /// empty after trimming.
+    pub path: Option<PathBuf>,
+    /// Whether something is there now: a file or a folder.
+    pub exists: bool,
+    /// Whether `path` is a folder, which the send expands into `files`.
+    pub folder: bool,
+    /// What the send attaches for the entry: the file itself, a folder's
+    /// regular files as [`attachment_entry_files`] expands them, and none
+    /// for a missing entry, an empty folder or one that does not read.
+    pub files: Vec<PathBuf>,
+}
+
+/// The daemon's reading of one entry of a draft's `attachments:` list, which
+/// `draft.attachments`, `draft.attach` and `draft.detach` answer (PERSO-215):
+/// the TUI's `o` and the desktop open the `files` it lists, the very files
+/// the send attaches, and show a folder as one.
+pub fn list_attachment_entry(
+    entry: &str,
+    draft_dir: &Path,
+    home: Option<&Path>,
+) -> ListedAttachmentEntry {
+    let path = resolve_attachment_entry(entry, draft_dir, home);
+    let folder = path.as_deref().is_some_and(Path::is_dir);
+    let exists = folder || path.as_deref().is_some_and(Path::is_file);
+    let files = if exists {
+        attachment_entry_files(entry, draft_dir, home).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    ListedAttachmentEntry {
+        path,
+        exists,
+        folder,
+        files,
+    }
+}
+
 /// Two paths name one file: compared canonically when both exist.
 fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {

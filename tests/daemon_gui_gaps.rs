@@ -493,6 +493,62 @@ async fn a_draft_attaches_lists_and_detaches_its_files() {
     assert_eq!(out_of_range.code, -32602);
 }
 
+/// `draft.attachments` says which entry is a folder and lists, per entry,
+/// the files its send attaches: a file entry its own path, a folder entry
+/// the regular files directly inside it (sorted, dotfiles skipped), and a
+/// missing entry, an empty folder or an entry empty after trimming none, so
+/// the TUI's `o` and the desktop open what the send attaches without
+/// resolving an entry themselves (PERSO-215).
+#[tokio::test]
+async fn draft_attachments_names_a_folder_and_the_files_each_entry_sends() {
+    let slice = Slice::start();
+    let dir = fixture::drafts_dir(slice.root(), fixture::ACCOUNT);
+    std::fs::create_dir_all(dir.join("anlagen")).expect("a folder");
+    std::fs::write(dir.join("anlagen/b.txt"), b"b").expect("b");
+    std::fs::write(dir.join("anlagen/a.txt"), b"a").expect("a");
+    std::fs::write(dir.join("anlagen/.hidden"), b"h").expect("hidden");
+    std::fs::create_dir_all(dir.join("leer")).expect("an empty folder");
+    std::fs::write(dir.join("brief.pdf"), b"%PDF-1.4").expect("a file");
+    let id = "a0000000000000f7";
+    let document = fixture::document(id, "robin@example.com", "Anlagen", "draft", "Body.\n")
+        .replacen(
+            "date: ",
+            "attachments:\n  - \" anlagen \"\n  - brief.pdf\n  - fehlt.pdf\n  - leer\n  - \" \"\ndate: ",
+            1,
+        );
+    std::fs::write(dir.join(format!("anlagen-{id}.md")), document).expect("write the draft");
+    let mut conn = slice.connect().await;
+
+    let listed = call(
+        &mut conn,
+        "draft.attachments",
+        json!({"account": fixture::ACCOUNT, "id": id}),
+    )
+    .await;
+    let at = |p: &str| dir.join(p).display().to_string();
+    let rows: Vec<(bool, bool, Value)> = listed["attachments"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|a| (a["exists"] == true, a["folder"] == true, a["files"].clone()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                true,
+                true,
+                json!([at("anlagen/a.txt"), at("anlagen/b.txt")])
+            ),
+            (true, false, json!([at("brief.pdf")])),
+            (false, false, json!([])),
+            (true, true, json!([])),
+            (false, false, json!([])),
+        ],
+        "{listed:#}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 9. A draft's headers
 // ---------------------------------------------------------------------------

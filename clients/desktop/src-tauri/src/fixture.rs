@@ -2870,18 +2870,25 @@ impl State {
                     .into_iter()
                     .enumerate()
                     .map(|(index, entry)| {
-                        // An entry empty after trimming resolves to no
-                        // path: listed with an empty one, as missing.
-                        let resolved =
-                            mp_core::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
+                        // The daemon's reading of the entry: an entry empty
+                        // after trimming resolves to no path, listed with an
+                        // empty one, as missing; a folder lists its files.
+                        let listed =
+                            mp_core::draft::list_attachment_entry(&entry, dir, home.as_deref());
                         json!({
                             "index": index,
                             "entry": entry,
-                            "path": resolved
-                                .as_ref()
+                            "path": listed
+                                .path
                                 .map(|p| p.display().to_string())
                                 .unwrap_or_default(),
-                            "exists": resolved.is_some_and(|p| p.is_file()),
+                            "exists": listed.exists,
+                            "folder": listed.folder,
+                            "files": listed
+                                .files
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>(),
                         })
                     })
                     .collect();

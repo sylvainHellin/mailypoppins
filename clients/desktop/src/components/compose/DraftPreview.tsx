@@ -14,13 +14,13 @@
 // 0 on a draft the selection does not show.
 
 import { useEffect, useState } from "react";
-import { CircleAlert, CircleCheck, ExternalLink, FilePen, Paperclip, Stamp, Undo2, Users, X } from "lucide-react";
+import { CircleAlert, CircleCheck, ExternalLink, FilePen, Folder, Paperclip, Stamp, Undo2, Users, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { runAction } from "@/app/actions";
 import { openInEditor, setShownStatus } from "@/app/compose";
-import { draftItemsOf, openItem, removeItem } from "@/app/attachments";
+import { draftEntriesOf, openAmong, openItem, removeItem } from "@/app/attachments";
 import { ReaderBody, draftReaderUrl } from "@/components/reader/ReaderBody";
 import { useAppState, useDispatch } from "@/app/store";
 import { draftRevision, draftsShown, filteredDrafts, targetKey, type DraftItem } from "@/app/state";
@@ -126,7 +126,7 @@ export function DraftPreview({
   const report = last?.report ?? null;
   const subject = p?.subject || draft.subject || (invalid ? draft.id : "(no subject)");
   const status = draft.status;
-  const attachments = last?.attachments ? draftItemsOf(last.attachments) : [];
+  const attachments = last?.attachments ? draftEntriesOf(last.attachments) : [];
   const owner = { kind: "draft" as const, account, draftId: draft.id };
 
   return (
@@ -231,12 +231,20 @@ export function DraftPreview({
                   data-attachment={item.part}
                   className="flex items-center gap-2 rounded-md border border-border bg-card py-0.5 pr-0.5 pl-2 text-xs"
                 >
-                  <Paperclip aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+                  {item.folder ? (
+                    <Folder aria-label="Folder" className="size-3.5 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <Paperclip aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+                  )}
                   <span className="min-w-0 flex-1 truncate font-mono">{item.name}</span>
                   {item.missing ? (
                     <Badge variant="destructive" data-slot="attachment-missing">
                       missing
                     </Badge>
+                  ) : item.folder ? (
+                    <span data-slot="attachment-folder" className="shrink-0 text-muted-foreground">
+                      {`${item.files.length} file${item.files.length === 1 ? "" : "s"}`}
+                    </span>
                   ) : null}
                   <Button
                     size="icon-xs"
@@ -244,7 +252,7 @@ export function DraftPreview({
                     title="Open (t o)"
                     aria-label={`Open ${item.name}`}
                     disabled={item.missing}
-                    onClick={() => void openItem(owner, item, dispatch)}
+                    onClick={() => (item.folder ? openAmong(owner, subject, item.files, dispatch) : void openItem(owner, item, dispatch))}
                   >
                     <ExternalLink aria-hidden="true" />
                   </Button>

@@ -835,12 +835,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/selector.rs`
 - Daemon surface: `draft.materialize_attachment`, opened client-side
-- GUI location: clients/desktop: `to` on a draft opens its one file or picks among several, and the draft preview's attachment list has an Open button per entry, disabled with a "missing" badge when no file is there; `draft_attachment_open` opens the path `draft.attachments` resolved with the system opener (M3, #0131; reader.md, "Drafts and server-only hits")
+- GUI location: clients/desktop: `to` on a draft opens its one file or picks among several, a folder entry offering the files inside it, and the draft preview's attachment list has an Open button per entry, disabled with a "missing" badge when nothing is there to send, a folder entry marked as one with its file count and opening the picker over its files; `draft_attachment_open` opens with the system opener the path `draft.attachments` resolved, or for a folder entry one of the `files` it lists (M3, #0131, PERSO-215; reader.md, "Drafts and server-only hits")
 - Validation: `tests/cli_selector_contract.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`to on a draft picks among its files; ta outside Drafts and ts on a draft say why not`, `the preview lists the entries in order, opens one, flags a missing one and removes one`)
 - Status: GUI shipped (M3, #0131)
 - Note: `draft.materialize_attachment` is not served; a draft's file is already on disk, so the desktop opens the path the frontmatter lists, resolved as the send path resolves it.
-  The TUI's `o` on a draft expands each entry through `draft::attachment_entry_files`, the expansion `send::resolve_attachment_paths` uses: trimmed, a relative entry beside the draft file rather than under the TUI's working directory, a folder as the files inside it (PERSO-215; `o_on_a_draft_opens_the_files_beside_the_draft_its_send_attaches` in `clients/tui/src/actions.rs`).
-  The desktop opens per entry the path `draft.attachments` resolved, so a folder entry reads as missing there.
+  `draft.attachments` answers per entry whether it is a `folder` and the `files` its send attaches, expanded by `draft::attachment_entry_files`, the expansion `send::resolve_attachment_paths` uses: trimmed, a relative entry beside the draft file, a folder as the regular files directly inside it (PERSO-215; `draft_attachments_names_a_folder_and_the_files_each_entry_sends` in `tests/daemon_gui_gaps.rs`).
+  The TUI's `o` on a draft and the desktop's `to` both open those `files` and name an entry with none, a missing file, an empty folder or an entry empty after trimming, as missing (`o_on_a_draft_opens_the_files_beside_the_draft_its_send_attaches` in `clients/tui/src/actions.rs`; `offers a folder entry as the files the daemon lists inside it` in `clients/desktop/src/app/attachments.test.ts`).
 
 ### ATT-05 Open a message's HTML part in the browser
 

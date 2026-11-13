@@ -18,6 +18,15 @@ entry: string,
  */
 path: string,
 /**
- * Whether a file is there now; a send fails on a missing one.
+ * Whether a file or a folder is there now; a send fails on a missing one.
  */
-exists: boolean, };
+exists: boolean,
+/**
+ * Whether `path` is a folder, whose regular files the send attaches.
+ */
+folder: boolean,
+/**
+ * What the send attaches for the entry, as the daemon expanded it: the
+ * file itself or a folder's files; none when nothing is there to send.
+ */
+files: Array<string>, };

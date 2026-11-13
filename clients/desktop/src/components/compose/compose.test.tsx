@@ -526,6 +526,27 @@ describe("a draft's attachments", () => {
     expect(callsOf("attachment_open")).toEqual([]);
   });
 
+  it("the preview shows a folder entry as a folder of the files its send attaches and opens one (PERSO-215)", async () => {
+    const folder = `${MOCK_HOME}/Documents/anlagen`;
+    const { user } = renderApp(1400, () => {
+      mock.files.add(`${folder}/a.txt`);
+      mock.files.add(`${folder}/b.txt`);
+      mock.draftAttachments["work/angebot-antwort"] = ["~/Documents/anlagen"];
+    });
+    await shellReady();
+    await drafts(user);
+    const list = await within(reader()).findByRole("list", { name: "Attachments" });
+    const [row] = within(list).getAllByRole("listitem");
+    expect(row.querySelector('[data-slot="attachment-missing"]')).toBeNull();
+    expect(row.querySelector('[data-slot="attachment-folder"]')).toHaveTextContent("2 files");
+    expect(within(row).getByLabelText("Folder")).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Open ~/Documents/anlagen" }));
+    const picker = await screen.findByRole("dialog", { name: "Open attachment" });
+    await user.click(within(picker).getByRole("button", { name: "Open ~/Documents/anlagen/b.txt" }));
+    await waitFor(() => expect(callsOf("draft_attachment_open")).toEqual([{ account: "work", id: "angebot-antwort", index: 0, file: 1 }]));
+    expect(mock.opened).toEqual([`${folder}/b.txt`]);
+  });
+
   it("the preview's Attach file button opens the same dialog", async () => {
     const { user } = renderApp();
     await shellReady();

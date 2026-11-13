@@ -589,8 +589,9 @@ export const draftAttach = (account: string, id: string, path: string): Promise<
 export const draftAttachmentRemove = (account: string, id: string, index: number): Promise<DraftAttachments> =>
   invoke<DraftAttachments>("draft_attachment_remove", { account, id, index });
 
-export const draftAttachmentOpen = (account: string, id: string, index: number): Promise<OpenedFile> =>
-  invoke<OpenedFile>("draft_attachment_open", { account, id, index });
+/** `file`: for a folder entry, the position of one of the files `draft_attachments` lists inside it (PERSO-215). */
+export const draftAttachmentOpen = (account: string, id: string, index: number, file?: number): Promise<OpenedFile> =>
+  invoke<OpenedFile>("draft_attachment_open", file === undefined ? { account, id, index } : { account, id, index, file });
 
 /** Fetch a server-only message into the store; answers once the fetch has ended. */
 export const messageFetch = (account: string, mailbox: string, message_id: string): Promise<FetchOutcome> =>
