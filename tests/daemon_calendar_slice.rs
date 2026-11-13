@@ -3474,43 +3474,53 @@ async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
     );
 }
 
-/// Two updates of one invitation sent at once from two connections, the
-/// transport armed with `transport`: the refusal of the one not taken, after
-/// asserting that exactly one went out, as one row in the outbox.
+/// Two updates of one invitation planned before either is enqueued, from
+/// two connections, the transport armed with `transport`: the refusal of
+/// the second, after asserting that the first went out alone, as one row in
+/// the outbox.
+///
+/// The commit-hold hook keeps the first at its commit point, under the
+/// account's lock and before its row is enqueued, until the second has been
+/// planned and holds its operation id; only then is the first released. The
+/// plan-time guard has nothing to see, so the second can be refused only by
+/// the check under the lock (`still_as_planned`), once the first has gone
+/// out.
 async fn race_two_updates(transport: impl FnOnce(&Path) -> String) -> String {
     let ledger = tempfile::tempdir().unwrap();
     let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(transport(&log));
+    let hold = send_fixture::commit_hold_dir(ledger.path());
+    let slice = Slice::start_seeded(
+        false,
+        &[
+            (send_fixture::FAKE_TRANSPORT_ENV, transport(&log)),
+            (
+                mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV,
+                hold.to_string_lossy().into_owned(),
+            ),
+        ],
+        support::calendar_fixture::seed_organised,
+        Vec::new(),
+    );
     let mut first = slice.connect().await;
     let mut second = slice.connect().await;
     let own = imip_event(&mut first, IMIP, support::calendar_fixture::OWN_UID).await;
     let update = |summary: &str| json!({"account": IMIP, "event": own["id"], "fields": {"summary": summary}});
-    let (a, b) = tokio::join!(
-        first.call("event.update", update("Budget, A")),
+    let a = call(&mut first, "event.update", update("Budget, A")).await;
+    send_fixture::await_commit_marker(&hold, "event.update", "held", DEADLINE).await;
+    let b = match within(
+        "event.update",
         second.call("event.update", update("Budget, B")),
-    );
-    let mut taken = 0;
-    let mut refused = Vec::new();
-    for (conn, started) in [(&mut first, a), (&mut second, b)] {
-        match started {
-            Ok(started) => {
-                let status = wait_for(conn, "event.update", &started).await;
-                match status["state"].as_str() {
-                    Some("succeeded") => taken += 1,
-                    _ => refused.push(
-                        status["error"]["message"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                    ),
-                }
-            }
-            Err(ClientError::Rpc(error)) => refused.push(error.message),
-            Err(other) => panic!("event.update: {other:?}"),
-        }
-    }
-    assert_eq!(taken, 1, "refused: {refused:?}");
-    assert_eq!(refused.len(), 1, "{refused:?}");
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(other) => panic!("the second update was refused at its plan: {other:?}"),
+    };
+    send_fixture::release_commit_hold(&hold, "event.update");
+    let a = wait_for(&mut first, "event.update", &a).await;
+    succeeded(&a);
+    let b = wait_for(&mut second, "event.update", &b).await;
+    assert_eq!(b["state"], "failed", "both went out: {b}");
     let rows: i64 = read_fixture::store(slice.root(), IMIP)
         .conn()
         .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
@@ -3524,15 +3534,17 @@ async fn race_two_updates(transport: impl FnOnce(&Path) -> String) -> String {
         })
         .collect();
     assert_eq!(messages.len(), 1, "one message submitted: {messages:?}");
-    refused.remove(0)
+    b["error"]["message"].as_str().unwrap_or("").to_string()
 }
 
 /// Two updates of one invitation sent at once, from two connections (the
-/// desktop and the TUI, or a double submit): exactly one goes out and the
-/// other is refused, never sent at the same `SEQUENCE` on the version the
-/// first replaces. While the first waits in the outbox (Ada's server
-/// defers it) the refusal is the guard's; once it went out and was filed,
-/// the second says the meeting changed while it waited.
+/// desktop and the TUI, or a double submit), both planned on the same
+/// version before either is enqueued: the first goes out and the second is
+/// refused under the account's lock, saying nothing was sent, never sent at
+/// the same `SEQUENCE` on the version the first replaces. While the first
+/// waits in the outbox (Ada's server defers it) the refusal is the guard's;
+/// once it went out and was filed, the second says the meeting changed
+/// while it waited. Only the check under the lock says "nothing was sent".
 #[tokio::test]
 async fn two_updates_at_once_send_one() {
     let waiting = race_two_updates(|log| {
@@ -3540,13 +3552,14 @@ async fn two_updates_at_once_send_one() {
     })
     .await;
     assert!(
-        waiting.contains("has an earlier change waiting in the outbox"),
+        waiting.contains("has an earlier change waiting in the outbox")
+            && waiting.contains("nothing was sent"),
         "{waiting}"
     );
     let filed = race_two_updates(send_fixture::fake_transport).await;
     assert!(
-        filed.contains("has an earlier change waiting in the outbox")
-            || filed.contains("changed while this change waited to go out"),
+        filed.contains("changed while this change waited to go out")
+            && filed.contains("nothing was sent"),
         "{filed}"
     );
 }

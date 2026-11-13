@@ -90,8 +90,10 @@ pub fn fake_ready_delay() -> Option<Duration> {
 /// let a test put an
 /// `operation.cancel` between the work that prepares a write and the write
 /// itself: on the fake transport both sides take milliseconds. With the hook
-/// set, the worker creates `<dir>/<method>.held`, waits until its token is shut
-/// or [`COMMIT_HOLD_LIMIT`] has passed, and records its verdict as
+/// set, the worker creates `<dir>/<method>.held`, waits until its token is shut,
+/// the test creates `<dir>/<method>.release` (which lets a test order a second
+/// operation's plan before the first one's write without cancelling it), or
+/// [`COMMIT_HOLD_LIMIT`] has passed, and records its verdict as
 /// `<dir>/<method>.dropped` or `<dir>/<method>.committed` before it acts on
 /// it, so a test reads the decision instead of sleeping to guess it. On the
 /// [`FAKE_READY_ENV`] precedent: no flag exposes it, `mp --help` never moves,
@@ -118,11 +120,22 @@ pub fn fake_commit_hold_dir() -> Option<std::path::PathBuf> {
 /// answer and the write, so the hook in [`FAKE_COMMIT_HOLD_ENV`] observes the
 /// same check production makes.
 pub async fn commit_point(method: &str, token: &crate::daemon::dispatch::CancelToken) -> bool {
-    if fake_commit_hold_dir().is_none() {
+    let Some(dir) = fake_commit_hold_dir() else {
         return !token.is_cancelled();
-    }
+    };
     commit_hold_marker(method, "held");
-    let _ = tokio::time::timeout(COMMIT_HOLD_LIMIT, token.cancelled()).await;
+    let released = dir.join(format!("{method}.release"));
+    let _ = tokio::time::timeout(COMMIT_HOLD_LIMIT, async {
+        tokio::select! {
+            () = token.cancelled() => {}
+            () = async {
+                while !released.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+        }
+    })
+    .await;
     let proceed = !token.is_cancelled();
     commit_hold_marker(method, if proceed { "committed" } else { "dropped" });
     proceed
@@ -132,16 +145,17 @@ pub async fn commit_point(method: &str, token: &crate::daemon::dispatch::CancelT
 /// thread of its own and asks its [`crate::sync::Stop`] from there
 /// (PERSO-127).
 ///
-/// While the hook holds it, it blocks the calling thread, polling the token,
-/// so it is only ever called from such a thread and never from a tokio
-/// worker. Without the hook it is the bare token check.
+/// While the hook holds it, it blocks the calling thread, polling the token
+/// and the release file, so it is only ever called from such a thread and
+/// never from a tokio worker. Without the hook it is the bare token check.
 pub fn commit_point_blocking(method: &str, token: &crate::daemon::dispatch::CancelToken) -> bool {
-    if fake_commit_hold_dir().is_none() {
+    let Some(dir) = fake_commit_hold_dir() else {
         return !token.is_cancelled();
-    }
+    };
     commit_hold_marker(method, "held");
+    let released = dir.join(format!("{method}.release"));
     let started = std::time::Instant::now();
-    while !token.is_cancelled() && started.elapsed() < COMMIT_HOLD_LIMIT {
+    while !token.is_cancelled() && !released.exists() && started.elapsed() < COMMIT_HOLD_LIMIT {
         std::thread::sleep(Duration::from_millis(5));
     }
     let proceed = !token.is_cancelled();

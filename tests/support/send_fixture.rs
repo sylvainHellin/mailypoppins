@@ -401,6 +401,14 @@ pub async fn await_commit_marker(
     }
 }
 
+/// End the hold of every worker of `method` at its commit point without
+/// cancelling it, so it goes on to its write, by creating
+/// `<dir>/<method>.release`.
+pub fn release_commit_hold(dir: &Path, method: &str) {
+    let path = dir.join(format!("{method}.release"));
+    fs::write(&path, b"").unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
 /// How many `APPEND`s the fake transport served for `message_id`.
 pub fn appends_of(log: &Path, message_id: &str) -> usize {
     transport_events(log)
