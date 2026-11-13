@@ -85,6 +85,7 @@ All notable changes to this project are documented in this file.
 - Desktop: Cmd+P opens the command palette, beside `:` and Ctrl+P; the palette row and the key help list it.
 
 ### Changed
+- On a CONDSTORE server (OVH), every quick sync asks for only the flags changed since the last pass across the whole mailbox, so a message marked read elsewhere updates even when it is older than the sync window; Sent copies and draft pushes take their new UID from the server's APPENDUID where UIDPLUS is offered (PERSO-202).
 - The body download budget (`body_fetch_deadline_secs`) is spent by a whole sync of the account, all mailboxes together: once it runs out, the mailbox being downloaded and the ones after it keep what they have and resume on the next sync (PERSO-300).
 - `mp open`, `mp save`, the TUI's attachment keys and the desktop app's attachment actions list a message's parts through one daemon call, `message.attachments`, which names each part's index; no client derives an index from a position any more. The desktop app requires a daemon that has it (PERSO-222).
 - The daemon answers as soon as it starts instead of after opening every account's store: each account is `opening` until its store is open, its store commands wait for it (`mp` says so after a second), the TUI and the desktop app show it opening rather than an error, and a sender blocked meanwhile has its Inbox mail moved once the account is ready (PERSO-109).
@@ -137,6 +138,7 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- Moving, archiving, blocking or deleting a message on a server with UIDPLUS removes only that message (UID EXPUNGE), and no longer also removes messages another client had marked deleted in the same folder; a sync whose flag write fails keeps its previous resume point, on IMAP and on Graph, so the change is asked for again (PERSO-202).
 - A full sync no longer holds a whole mailbox in memory: each mailbox is downloaded and ingested one batch of at most twenty messages at a time, and cancelling a sync stops it after the batch in hand instead of after the whole mailbox (PERSO-300).
 - An RSVP (`calendar.rsvp`, the mail reply of `event.respond`) asks the server again about a refused SMTP login like every other send the user starts, and a fresh sign-in (`mp config oauth2-login`) lifts a held refusal and sends the queued mail as `set-password` does (PERSO-296).
 - A command that reaches a daemon while it is shutting down waits for it to go and starts a fresh one instead of failing after 5 s; under an installed service the start goes through the manager's restart, and two commands racing send one restart between them (PERSO-176).
