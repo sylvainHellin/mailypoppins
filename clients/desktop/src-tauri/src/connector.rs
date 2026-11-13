@@ -709,7 +709,7 @@ pub async fn connect_or_start(
         wait_until_gone(budget).await?;
     }
     let deadline = Instant::now() + budget;
-    start_daemon(budget).await?;
+    start_daemon(budget, leaving).await?;
     // Started with the expected binary, unless another starter won.
     let open = handshake_until(deadline, budget, "a daemon was started but did not answer").await?;
     check_version(open).await
@@ -995,9 +995,18 @@ enum Waited {
 }
 
 /// `mp daemon start`, waited for without blocking the runtime.
-async fn start_daemon(budget: Duration) -> Result<(), ConnectError> {
+///
+/// `after_stopping` passes on that a daemon refused the handshake as shutting
+/// down: under a login service the start is then the manager's restart, which
+/// `mp daemon start` cannot tell on its own once that daemon has gone
+/// (PERSO-176).
+async fn start_daemon(budget: Duration, after_stopping: bool) -> Result<(), ConnectError> {
     let secs = budget.as_secs().max(1).to_string();
-    let mut child = spawn_mp(&["daemon", "start", "--timeout-secs", &secs])?;
+    let mut args = vec!["daemon", "start", "--timeout-secs", secs.as_str()];
+    if after_stopping {
+        args.push("--after-stopping");
+    }
+    let mut child = spawn_mp(&args)?;
     let deadline = Instant::now() + budget + Duration::from_secs(1);
     wait_child(&mut child, deadline, "mp daemon start").await
 }

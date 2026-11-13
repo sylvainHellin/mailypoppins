@@ -85,8 +85,8 @@ use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
 use super::config::{start_configured, ConfigState, ConfigStore};
 use super::runtime::{
-    self, acquire_start_lock, ensure_runtime_dir, instance_path, pid_path, probe_socket,
-    remove_stale_socket, socket_path, InstanceMeta, SocketProbe,
+    self, acquire_restart_lock, acquire_start_lock, ensure_runtime_dir, instance_path, pid_path,
+    probe_socket, remove_stale_socket, socket_path, InstanceMeta, SocketProbe, StartLock,
 };
 use super::server::{serve, DaemonState};
 use super::shutdown::DEFAULT_GRACE_SECS;
@@ -202,6 +202,15 @@ pub enum DaemonAction {
         /// Seconds to wait for the daemon to answer; one that has bound its socket gets up to 120
         #[arg(long, default_value_t = ANSWER_WINDOW_SECS)]
         timeout_secs: u64,
+        /// The caller met a daemon shutting down, so a login service is restarted rather than started.
+        ///
+        /// The desktop app passes it after a daemon refused it as shutting
+        /// down (PERSO-176): that daemon may be gone by the time this command
+        /// probes, and the service manager may still count it running, so this
+        /// command could not tell on its own. Hidden, since only a client that
+        /// saw the refusal can know it.
+        #[arg(long, hide = true)]
+        after_stopping: bool,
     },
     /// Report whether a daemon is running against this data directory
     Status {
@@ -270,8 +279,16 @@ pub enum DaemonAction {
 pub async fn dispatch(action: DaemonAction) -> i32 {
     let outcome = match action {
         DaemonAction::Run { foreground_logs } => run(foreground_logs).await.map(|()| EXIT_OK),
-        DaemonAction::Start { timeout_secs } => {
-            start_command(Duration::from_secs(timeout_secs)).await
+        DaemonAction::Start {
+            timeout_secs,
+            after_stopping,
+        } => {
+            let before = if after_stopping {
+                Before::Stopping
+            } else {
+                Before::Unknown
+            };
+            start_command(Duration::from_secs(timeout_secs), before).await
         }
         DaemonAction::Status { json } => status(json).await,
         DaemonAction::Stop {
@@ -717,14 +734,27 @@ fn spawn_diagnostic_sweep(state: Arc<DaemonState>) {
 ///
 /// `timeout` is the answer window, and a daemon that has bound its socket gets
 /// up to [`STARTUP_CEILING`]; on-demand start passes its budget and no notice,
-/// since it may not print into another command's output.
-pub async fn start(timeout: Duration) -> Result<i32> {
+/// since it may not print into another command's output. `before` is what the
+/// caller already met at the socket.
+pub async fn start(timeout: Duration, before: Before) -> Result<i32> {
     start_via(
         super::service::start_route(super::service::StartKind::Start)?,
         timeout,
         Notice::Quiet,
+        before,
     )
     .await
+}
+
+/// What the caller of a start already met at the socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Before {
+    /// Nothing the start's own probe would not find.
+    Unknown,
+    /// A daemon that refused the caller as shutting down (PERSO-176), which
+    /// may have gone by the time the start probes. A start through a login
+    /// service is then the manager's restart, which [`start_via`] explains.
+    Stopping,
 }
 
 /// The detached start, saying on stderr when it waits past the window if
@@ -1282,7 +1312,7 @@ async fn replace(
     if code != EXIT_OK {
         return Ok(code);
     }
-    start_via(route, timeout, Notice::Stderr).await
+    start_via(route, timeout, Notice::Stderr, Before::Unknown).await
 }
 
 /// The pid of the daemon answering on this data directory's socket, as
@@ -1307,7 +1337,7 @@ pub(crate) async fn hand_over(route: super::service::StartRoute) -> Result<i32> 
 /// The line is this command's and not [`start`]'s, because on-demand start
 /// runs the same routine inside every other command and may not print into
 /// their output.
-async fn start_command(timeout: Duration) -> Result<i32> {
+async fn start_command(timeout: Duration, before: Before) -> Result<i32> {
     if let Some(status) = query_status().await.ok().filter(|s| !is_stopping(s)) {
         println!(
             "{} daemon already running (pid {})",
@@ -1320,6 +1350,7 @@ async fn start_command(timeout: Duration) -> Result<i32> {
         super::service::start_route(super::service::StartKind::Start)?,
         timeout,
         Notice::Stderr,
+        before,
     )
     .await
 }
@@ -1338,23 +1369,38 @@ async fn start_command(timeout: Duration) -> Result<i32> {
 /// exit with nothing running: a restart has already stopped the daemon by
 /// then. A service command that succeeded but whose daemon never answers is
 /// still exit 4, since a second, detached daemon would race the service's.
+///
+/// A supervised start that met a daemon shutting down, at its own probe or
+/// at the caller's handshake (`before`), waits for it to unbind and then asks
+/// for the manager's restart instead of its start ([`after_stopping`]).
 async fn start_via(
     route: super::service::StartRoute,
     timeout: Duration,
     notice: Notice,
+    before: Before,
 ) -> Result<i32> {
     use super::service::StartRoute;
     match route {
         StartRoute::Detached { note } => start_detached(note, timeout, notice).await,
         StartRoute::Supervised(plan) => {
-            // The manager still counts a stopping daemon as the running
-            // service, and its start would be a no-op.
             let socket = socket_path();
-            if matches!(probe(&socket, RPC_TIMEOUT).await, Probe::Stopping)
-                && !outlast_stopping(&socket, timeout).await
-            {
-                return Ok(EXIT_UNAVAILABLE);
-            }
+            let stopping = before == Before::Stopping
+                || matches!(probe(&socket, RPC_TIMEOUT).await, Probe::Stopping);
+            // Held until the restart's daemon answers, so a second client
+            // that met the same stopping daemon waits for it.
+            let (plan, _restart_lock) = if stopping {
+                match after_stopping(plan, &socket, timeout, notice).await? {
+                    AfterStopping::Restart(plan, lock) => (plan, Some(lock)),
+                    AfterStopping::Done(code) => {
+                        if code == EXIT_OK && notice == Notice::Stderr {
+                            print_started();
+                        }
+                        return Ok(code);
+                    }
+                }
+            } else {
+                (plan, None)
+            };
             info!(
                 "[daemon] start: through the service manager {:?}",
                 plan.lines()
@@ -1393,6 +1439,65 @@ async fn start_via(
             Ok(EXIT_OK)
         }
     }
+}
+
+/// How a supervised start that met a daemon shutting down goes on.
+enum AfterStopping {
+    /// Ask the manager for this restart, holding the restart lock until its
+    /// daemon answers.
+    Restart(super::service::SupervisedStart, StartLock),
+    /// Another client's daemon settled it, with this exit code.
+    Done(i32),
+}
+
+/// Wait for a daemon shutting down under a login service to unbind, and turn
+/// `plan` into the manager's restart (PERSO-176).
+///
+/// The daemon unbinds before its process exits, and the manager may still
+/// count the service running after that exit, so its start would be a no-op:
+/// the old daemon exits 0, `Restart=on-failure` does not bring it back, and
+/// the start ends with nothing answering. The manager's restart waits for that
+/// exit, as `mp daemon restart`'s does ([`restart`]).
+///
+/// A restart stops what the manager runs, so two clients that met the same
+/// stopping daemon must not both send one: the second would stop the daemon
+/// the first brought up and may already be using. The restart lock serialises
+/// them, and the probe under it settles the race: a daemon that answers is
+/// another client's, and one that is bound and silent is still coming up.
+async fn after_stopping(
+    plan: super::service::SupervisedStart,
+    socket: &Path,
+    timeout: Duration,
+    notice: Notice,
+) -> Result<AfterStopping> {
+    if !outlast_stopping(socket, timeout).await {
+        return Ok(AfterStopping::Done(EXIT_UNAVAILABLE));
+    }
+    let Some(lock) = acquire_restart_lock()? else {
+        info!("[daemon] start: another client is restarting the service; waiting for its daemon");
+        return waited_for_another(timeout, notice)
+            .await
+            .map(AfterStopping::Done);
+    };
+    match probe(socket, RPC_TIMEOUT).await {
+        Probe::Answered => {
+            info!("[daemon] start: another client's daemon answers; nothing to restart");
+            return Ok(AfterStopping::Done(EXIT_OK));
+        }
+        Probe::Bound => {
+            info!("[daemon] start: a daemon is bound and not answering yet; waiting for it");
+            return waited_for_another(timeout, notice)
+                .await
+                .map(AfterStopping::Done);
+        }
+        Probe::Stopping => {
+            if !outlast_stopping(socket, timeout).await {
+                return Ok(AfterStopping::Done(EXIT_UNAVAILABLE));
+            }
+        }
+        Probe::Unbound => {}
+    }
+    Ok(AfterStopping::Restart(plan.restarting(), lock))
 }
 
 /// A detached start, after the `note:` saying why the service was passed

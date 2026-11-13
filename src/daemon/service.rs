@@ -759,10 +759,30 @@ pub(crate) enum StartRoute {
 #[derive(Debug)]
 pub(crate) struct SupervisedStart {
     target: Target,
+    path: PathBuf,
+    kind: StartKind,
+    loaded: bool,
     commands: Vec<Invocation>,
 }
 
 impl SupervisedStart {
+    /// This start as the manager's restart, for a start that met a daemon
+    /// shutting down (PERSO-176): the daemon unbinds before its process exits
+    /// and the manager may count the service running after that exit, so its
+    /// start would be a no-op, for the reason [`StartKind::Restart`] gives. A
+    /// restart or a reinstall stays what it is.
+    pub(crate) fn restarting(self) -> Self {
+        if self.kind != StartKind::Start {
+            return self;
+        }
+        let commands = start_commands(self.target, &self.path, StartKind::Restart, self.loaded);
+        Self {
+            kind: StartKind::Restart,
+            commands,
+            ..self
+        }
+    }
+
     /// Run the commands in order, stopping at the first that fails, with
     /// their output where `output` says.
     pub(crate) fn run(&self, output: ManagerOutput) -> Result<()> {
@@ -905,6 +925,9 @@ fn decide_start(
         },
         Installed::This => StartRoute::Supervised(SupervisedStart {
             target,
+            path: path.to_path_buf(),
+            kind,
+            loaded,
             commands: start_commands(target, path, kind, loaded),
         }),
     }
@@ -1676,6 +1699,56 @@ mod tests {
                 "  launchctl bootstrap {} {}",
                 gui_domain(),
                 plist.display()
+            )]
+        );
+    }
+
+    /// A start that met a daemon shutting down becomes the manager's restart
+    /// (PERSO-176), on both managers and whether or not launchd has the agent
+    /// loaded, and a restart or a reinstall is left as it was.
+    #[test]
+    fn a_start_that_met_a_stopping_daemon_restarts_through_its_manager() {
+        let restarting = |target, path, kind, loaded| {
+            let route = decide_start(target, path, kind, Installed::This, true, None, loaded);
+            match route {
+                StartRoute::Supervised(plan) => plan.restarting().lines(),
+                StartRoute::Detached { .. } => panic!("expected a supervised start, got {route:?}"),
+            }
+        };
+        let as_decided = |target, path, kind, loaded| {
+            route_lines(&decide_start(
+                target,
+                path,
+                kind,
+                Installed::This,
+                true,
+                None,
+                loaded,
+            ))
+        };
+        let unit = Path::new("/home/u/.config/systemd/user/mailypoppins.service");
+        let plist = Path::new("/Users/u/Library/LaunchAgents/dev.mailypoppins.daemon.plist");
+        for (target, path) in [(Target::Linux, unit), (Target::Darwin, plist)] {
+            for loaded in [true, false] {
+                assert_eq!(
+                    restarting(target, path, StartKind::Start, loaded),
+                    as_decided(target, path, StartKind::Restart, loaded),
+                    "{target:?}, loaded {loaded}"
+                );
+                for kind in [StartKind::Restart, StartKind::Reinstall] {
+                    assert_eq!(
+                        restarting(target, path, kind, loaded),
+                        as_decided(target, path, kind, loaded),
+                        "{target:?} {kind:?}, loaded {loaded}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            restarting(Target::Darwin, plist, StartKind::Start, true),
+            [format!(
+                "  launchctl kickstart -k {}/{LAUNCHD_LABEL}",
+                gui_domain()
             )]
         );
     }

@@ -333,7 +333,8 @@ pub const TUI_REQUIRED_CAPABILITIES: &[&str] =
 /// A daemon that refuses it as shutting down is waited out, up to the start
 /// budget, before the on-demand start: it still holds the socket, so a daemon
 /// started beside it could not bind, and the next one comes up once it has
-/// gone (PERSO-176).
+/// gone (PERSO-176). The start is told so, since under a login service it is
+/// then the manager's restart ([`lifecycle::Before::Stopping`]).
 async fn open_session(required: &[&str]) -> Result<(Connection, String), String> {
     let socket = socket_path();
 
@@ -369,7 +370,12 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
         }
     }
     let deadline = Instant::now() + budget;
-    if let Err(e) = autostart(budget).await {
+    let before = if leaving {
+        lifecycle::Before::Stopping
+    } else {
+        lifecycle::Before::Unknown
+    };
+    if let Err(e) = autostart(budget, before).await {
         return Err(format!("{e:#}"));
     }
 
@@ -445,12 +451,12 @@ async fn connect(socket: &Path, required: &[&str]) -> Result<(Connection, String
 /// `std::env::current_exe()` in its own session with its stdio in the daemon
 /// log, and fails early when the child dies instead of waiting out the bound.
 /// A second implementation here would be a second set of those bugs.
-async fn autostart(budget: Duration) -> Result<()> {
+async fn autostart(budget: Duration, before: lifecycle::Before) -> Result<()> {
     info!(
         "[client] no daemon at the socket; starting one on demand (bound {} ms)",
         budget.as_millis()
     );
-    match lifecycle::start(budget).await? {
+    match lifecycle::start(budget, before).await? {
         0 => Ok(()),
         code => bail!("`mp daemon run` could not be started (exit {code})"),
     }

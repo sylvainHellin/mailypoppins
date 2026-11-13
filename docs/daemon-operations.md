@@ -68,7 +68,7 @@ The bound on the whole sequence is 5 s: the readiness wait first, then a connect
 One budget rather than two, so the worst case a user waits for a daemon that never binds is that number and not some multiple of it.
 The readiness wait is `mp daemon start`'s with the budget as its answer window, so a daemon that has bound its socket and is not answering yet is waited for up to the 120 s ceiling rather than killed at 5 s, and the wait prints nothing into the command's output.
 When it expires, or when the spawn dies, the run exits 4 naming the socket, the daemon log and the literal `mp daemon run` to type by hand.
-A daemon that refuses the handshake as shutting down (`-32009`) still holds the socket, so the client first waits for nothing to listen on it, up to the same budget, and then runs the on-demand start (PERSO-176); the window opens on its own on a profile, whose daemon stops a minute after its last client, and on the default profile after `mp daemon stop`, and the desktop app's connect does the same.
+A daemon that refuses the handshake as shutting down (`-32009`) still holds the socket, so the client first waits for nothing to listen on it, up to the same budget, and then runs the on-demand start, which under a login service is the manager's restart (PERSO-176, see [Starting under the login service](#starting-under-the-login-service)); the window opens on its own on a profile, whose daemon stops a minute after its last client, and on the default profile after `mp daemon stop`, and the desktop app's connect does the same.
 There is no fallback to answering in process: a command that quietly did the work locally would let the user believe the daemon did it.
 
 Six commands never reach any of that, because each of them either *is* the lifecycle surface or answers from a compiled-in structure:
@@ -244,6 +244,7 @@ A profile's daemon is not the long-lived one: once a client has come and gone, i
 <data_dir>/runtime/                    dir mode 0700
 <data_dir>/runtime/daemon.sock         socket mode 0600
 <data_dir>/runtime/daemon.start.lock   flock target, never unlinked
+<data_dir>/runtime/daemon.restart.lock flock target, never unlinked
 <data_dir>/runtime/daemon.pid          diagnostic only, never the lock
 <data_dir>/runtime/daemon.json         instance metadata
 <data_dir>/runtime/handles/<h>/<name>  one materialised handle's file, dir mode 0700
@@ -933,7 +934,11 @@ A service whose manager is not on `PATH` is passed over with a `note:` too, and 
 On Linux a `systemctl` binary proves no user manager is behind it (WSL without systemd, a container, a cron job with no session), so the unit is used only when `XDG_RUNTIME_DIR` is set and `$XDG_RUNTIME_DIR/systemd/private` is a socket; otherwise the start is detached with a `note:` naming which of the two was missing.
 Deciding reads the file system only; the one command run before the start itself is `launchctl print` on macOS, to choose between `kickstart` and `bootstrap`.
 
-The service-manager start does not take the start lock, because the `mp daemon run` it spawns takes it itself, and then waits for the socket exactly as a detached start does.
+A `start` that meets a daemon shutting down under the service, or an on-demand start whose handshake that daemon refused as shutting down, waits for it to unbind and then asks for the manager's restart rather than its start, for the reason above: the daemon unbinds before its process exits, so a `systemctl --user start` sent then is a no-op and the unit ends dead (PERSO-176).
+A restart stops what the manager runs, so two clients that met the same stopping daemon must not both send one, or the second would stop the daemon the first brought up and may be using; `daemon.restart.lock` serialises them, and the holder probes the socket again before it restarts anything: a daemon that answers is the other client's, and a client that finds the lock taken waits for that client's daemon.
+The desktop app, which starts the daemon through `mp daemon start`, passes the hidden `--after-stopping` flag after such a refusal, since that daemon may be gone by the time `mp daemon start` probes.
+
+The service-manager start does not take the start lock, because the `mp daemon run` it spawns takes it itself, and then waits for the socket exactly as a detached start does; that is also why the restart above has a lock of its own.
 It prints `✓ daemon started (pid N)` followed by the command it ran, indented: `  systemctl --user start mailypoppins.service` (`restart` for a restart).
 A service command that fails (or cannot be run) is a `note:` on stderr naming the command, its exit status and `systemctl --user status mailypoppins.service` (or `launchctl print …`), followed by a detached start, so a `restart` that has already stopped the daemon never ends with none running; the exit code is then the detached start's.
 A service that starts but whose daemon never answers is exit 4 with the same pointer, and no detached daemon is started, since it would race the service's own once that answers.

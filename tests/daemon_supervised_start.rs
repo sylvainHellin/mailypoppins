@@ -34,9 +34,15 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use mp_client::{ClientInfo, ClientKind, Connection, Identity};
+use serde_json::json;
 use tempfile::TempDir;
 
 const MP: &str = env!("CARGO_BIN_EXE_mp");
+
+/// The test hook that makes a daemon serve `test.operation`, a durable
+/// operation of a length the caller names.
+const FAKE_OPERATIONS_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_OPERATIONS";
 
 /// The systemd unit's name, as every `systemctl` line carries it.
 const UNIT_NAME: &str = "mailypoppins.service";
@@ -145,7 +151,9 @@ impl Sandbox {
     /// `stop` and `restart` signal the main process and wait for the unit to
     /// go inactive; `enable --now` starts it as `start` does, and `is-active`
     /// and `show -p MainPID --value` answer from the same state, the latter
-    /// with `0` for an inactive unit as systemd does.
+    /// with `0` for an inactive unit as systemd does. Jobs that change the
+    /// unit run one at a time, as systemd queues a unit's jobs, so a second
+    /// `restart` restarts the daemon the first one brought up.
     fn stateful_systemctl(&self, latency: Duration) {
         let state = self.dir("bin").join("unit.mainpid");
         let state = state.display();
@@ -153,6 +161,10 @@ impl Sandbox {
         self.write_systemctl(&format!(
             "PATH=/usr/bin:/bin\n\
              state='{state}'\n\
+             job() {{\n\
+             \x20 until mkdir \"$state.job\" 2>/dev/null; do sleep 0.05; done\n\
+             \x20 trap 'rmdir \"$state.job\"' EXIT\n\
+             }}\n\
              do_start() {{\n\
              \x20 [ -s \"$state\" ] && return 0\n\
              \x20 ( '{MP}' daemon run </dev/null >/dev/null 2>&1 &\n\
@@ -166,10 +178,10 @@ impl Sandbox {
              \x20 while [ -e \"$state\" ]; do sleep 0.05; done\n\
              }}\n\
              case \"$2\" in\n\
-             \x20 start) do_start ;;\n\
-             \x20 stop) do_stop ;;\n\
-             \x20 restart) do_stop; do_start ;;\n\
-             \x20 enable) if [ \"$3\" = --now ]; then do_start; fi ;;\n\
+             \x20 start) job; do_start ;;\n\
+             \x20 stop) job; do_stop ;;\n\
+             \x20 restart) job; do_stop; do_start ;;\n\
+             \x20 enable) if [ \"$3\" = --now ]; then job; do_start; fi ;;\n\
              \x20 is-active) if [ -s \"$state\" ]; then echo active; else echo inactive; exit 3; fi ;;\n\
              \x20 show) if [ -s \"$state\" ]; then cat \"$state\"; else echo 0; fi ;;\n\
              esac\n\
@@ -776,6 +788,164 @@ fn restart_brings_the_unit_back_although_systemd_still_counts_it_active() {
         sandbox.unit_main_pid(),
         Some(second),
         "the unit is active with the new daemon as its main process"
+    );
+
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(second), "the stopped daemon {second} exited");
+}
+
+/// Start the unit's daemon with `test.operation` served, so a stop can be
+/// held open by its grace ([`hold_a_stop`]), and answer its pid once the unit
+/// runs it.
+fn start_the_units_daemon(sandbox: &Sandbox) -> i32 {
+    let start = sandbox
+        .command(&["daemon", "start", "--timeout-secs", "15"])
+        .env(FAKE_OPERATIONS_ENV, "1")
+        .output()
+        .expect("run mp daemon start");
+    ok(&start, "start");
+    let pid = sandbox.recorded_pid();
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(pid),
+        "the unit runs the daemon"
+    );
+    pid
+}
+
+/// Put the sandbox daemon into a shutdown its grace holds open for
+/// `grace_secs`: a durable operation far longer than the grace is in flight
+/// when the stop is accepted, so the daemon refuses every handshake and still
+/// answers `daemon.status` with `stopping` until the grace runs out.
+fn hold_a_stop(sandbox: &Sandbox, grace_secs: u64) {
+    let socket = sandbox.socket();
+    let identity = Identity {
+        data_dir: sandbox.dir("data"),
+        config_dir: sandbox.dir("config"),
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(async {
+            let mut worker = Connection::connect(&socket).await.expect("connect");
+            worker
+                .initialize(
+                    ClientInfo {
+                        kind: ClientKind::Tui,
+                        app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    },
+                    identity,
+                    &[],
+                    &[],
+                )
+                .await
+                .expect("a compatible handshake succeeds");
+            worker
+                .call("test.operation", json!({"steps": 40, "step_ms": 500}))
+                .await
+                .expect("the fake operation method answers at once");
+            let mut stopper = Connection::connect(&socket).await.expect("connect");
+            let answer = stopper
+                .call("daemon.stop", json!({ "grace_secs": grace_secs }))
+                .await
+                .expect("daemon.stop answers");
+            assert_eq!(
+                answer["pending"].as_array().map(Vec::len),
+                Some(1),
+                "the operation holds the shutdown in its grace: {answer}"
+            );
+        });
+}
+
+/// The `systemctl --user restart` calls the fake was asked for.
+fn restarts(sandbox: &Sandbox) -> usize {
+    let restart = format!("--user restart {UNIT_NAME}");
+    sandbox
+        .systemctl_actions()
+        .iter()
+        .filter(|call| **call == restart)
+        .count()
+}
+
+/// `mp daemon start` that meets a daemon shutting down under the unit waits
+/// for it to go and brings the unit back with a new daemon (PERSO-176).
+///
+/// The stopping daemon unbinds before its process exits, and systemd still
+/// counts the unit active for a moment after that exit, so a
+/// `systemctl --user start` sent once the socket is gone is a no-op: the old
+/// daemon exits 0, `Restart=on-failure` does not bring it back, and the start
+/// exits 4. The manager's restart waits for that exit and starts the unit.
+#[test]
+fn a_start_that_meets_a_stopping_daemon_brings_the_unit_back_through_the_restart() {
+    let sandbox = Sandbox::new();
+    sandbox.stateful_systemctl(Duration::from_secs(2));
+    sandbox.install_unit(&sandbox.dir("data"));
+    let first = start_the_units_daemon(&sandbox);
+
+    hold_a_stop(&sandbox, 2);
+    let start = sandbox.mp(&["daemon", "start", "--timeout-secs", "15"]);
+    let lines = ok(&start, "start");
+    let second = sandbox.recorded_pid();
+    assert_ne!(second, first, "a new daemon, not the one that was leaving");
+    assert_eq!(
+        lines,
+        [
+            format!("\u{2713} daemon started (pid {second})"),
+            format!("  systemctl --user restart {UNIT_NAME}"),
+        ]
+    );
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(second),
+        "the unit is active with the new daemon as its main process"
+    );
+
+    ok(&sandbox.mp(&["daemon", "stop"]), "stop");
+    assert!(wait_gone(second), "the stopped daemon {second} exited");
+}
+
+/// A command that meets a daemon shutting down under the unit is served by
+/// the unit's next daemon, which its on-demand start brings up through the
+/// manager's restart for the reason the row above gives (PERSO-176), and two
+/// such commands racing restart the unit once: the second never restarts the
+/// daemon the first one brought up and is using.
+#[test]
+fn commands_that_meet_a_stopping_daemon_restart_the_unit_once() {
+    let sandbox = Sandbox::new();
+    sandbox.stateful_systemctl(Duration::from_secs(2));
+    sandbox.install_unit(&sandbox.dir("data"));
+    let first = start_the_units_daemon(&sandbox);
+
+    hold_a_stop(&sandbox, 2);
+    let outputs = std::thread::scope(|scope| {
+        let commands: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| sandbox.mp_on_demand(&["account", "list", "--daemon"])))
+            .collect();
+        commands
+            .into_iter()
+            .map(|command| command.join().expect("the command thread"))
+            .collect::<Vec<_>>()
+    });
+    for out in &outputs {
+        assert_eq!(
+            ok(out, "account list"),
+            ["No accounts configured"],
+            "each command is served by the unit's next daemon"
+        );
+    }
+    let second = sandbox.recorded_pid();
+    assert_ne!(second, first, "a new daemon, not the one that was leaving");
+    assert_eq!(
+        sandbox.unit_main_pid(),
+        Some(second),
+        "the unit is active with the new daemon as its main process"
+    );
+    assert_eq!(
+        restarts(&sandbox),
+        1,
+        "one restart, not one per command: {:?}",
+        sandbox.systemctl_actions()
     );
 
     ok(&sandbox.mp(&["daemon", "stop"]), "stop");

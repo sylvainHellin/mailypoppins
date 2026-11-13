@@ -8,6 +8,7 @@
 //! <data_dir>/runtime/                    dir mode 0700
 //! <data_dir>/runtime/daemon.sock         socket mode 0600
 //! <data_dir>/runtime/daemon.start.lock   flock target, never unlinked
+//! <data_dir>/runtime/daemon.restart.lock flock target, never unlinked
 //! <data_dir>/runtime/daemon.pid          diagnostic only, never the lock
 //! <data_dir>/runtime/daemon.json         InstanceMeta
 //! ```
@@ -21,6 +22,15 @@
 //! `daemon.start.lock` is the primitive. The lock file is **never unlinked**:
 //! two starters that each locked a different inode under the same name would
 //! both win.
+//!
+//! ## Why a restart through the service manager has a lock of its own
+//!
+//! A start that met a daemon shutting down under a login service asks the
+//! manager for a restart (PERSO-176), and two of those racing must restart the
+//! service once, so the second never stops the daemon the first brought up.
+//! The start lock cannot serialise them: the `mp daemon run` the manager spawns
+//! takes that lock itself, and fails if a client holds it. `daemon.restart.lock`
+//! is taken by nothing but those restarts.
 //!
 //! ## What else lives here
 //!
@@ -93,6 +103,12 @@ pub fn start_lock_path() -> PathBuf {
     runtime_dir().join("daemon.start.lock")
 }
 
+/// `<runtime>/daemon.restart.lock`, the `flock` target that serialises the
+/// service manager's restart after a daemon that was shutting down.
+pub fn restart_lock_path() -> PathBuf {
+    runtime_dir().join("daemon.restart.lock")
+}
+
 /// `<runtime>/daemon.pid`, diagnostic metadata and never a locking primitive.
 pub fn pid_path() -> PathBuf {
     runtime_dir().join("daemon.pid")
@@ -138,7 +154,7 @@ pub fn ensure_runtime_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// A held advisory lock on [`start_lock_path`].
+/// A held advisory lock on [`start_lock_path`] or [`restart_lock_path`].
 ///
 /// The `File` is kept alive purely to keep the fd open: `flock` is released by
 /// `close(2)`, so the lock lives exactly as long as this value and not one
@@ -156,23 +172,34 @@ pub struct StartLock {
 /// - `Err`: the lock file could not be opened, or `flock` failed for a reason
 ///   other than contention.
 pub fn acquire_start_lock() -> Result<Option<StartLock>> {
+    acquire(&start_lock_path(), "start")
+}
+
+/// Try to take the restart lock, non-blocking, with [`acquire_start_lock`]'s
+/// three answers: `Ok(None)` is another client restarting the service, whose
+/// daemon is the one to wait for.
+pub fn acquire_restart_lock() -> Result<Option<StartLock>> {
+    acquire(&restart_lock_path(), "restart")
+}
+
+/// Take the `flock` on `path`, the `what` lock, without blocking.
+fn acquire(path: &Path, what: &str) -> Result<Option<StartLock>> {
     ensure_runtime_dir()?;
-    let path = start_lock_path();
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
         .mode(SOCKET_MODE)
-        .open(&path)
-        .with_context(|| format!("opening the daemon start lock {}", path.display()))?;
+        .open(path)
+        .with_context(|| format!("opening the daemon {what} lock {}", path.display()))?;
 
     // SAFETY: `flock` takes a valid open file descriptor and a flag set; the fd
     // is owned by `file` and outlives the call. `LOCK_NB` makes it return
     // immediately rather than block behind the winning starter.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
-        debug!("[daemon] took the start lock {}", path.display());
+        debug!("[daemon] took the {what} lock {}", path.display());
         return Ok(Some(StartLock { _file: file }));
     }
 
@@ -181,7 +208,7 @@ pub fn acquire_start_lock() -> Result<Option<StartLock>> {
         // Both spellings a kernel may use for "already locked". Contention is
         // the expected outcome of a race, not a failure.
         Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => {
-            debug!("[daemon] another starter holds {}", path.display());
+            debug!("[daemon] another {what}er holds {}", path.display());
             Ok(None)
         }
         _ => Err(anyhow::Error::new(err).context(format!("locking {}", path.display()))),
