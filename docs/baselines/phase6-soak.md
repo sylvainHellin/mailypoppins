@@ -72,7 +72,8 @@ Three consecutive short runs of the committed file took 15.5 s, 15.0 s and 15.0 
 |---|---|---|
 | `FD_MARGIN` | 12 descriptors | measured drift against a warm baseline is +3 at 200 cycles and +4 at 1200; a leak of one descriptor per cycle would be two hundred |
 | `RSS_CEILING_BYTES` | 192 MiB | worst measured growth is 76.7 MiB (row g, short run); the ceiling is twice that |
-| `P95_CEILING` | 250 ms | measured p95 is 62 ms in a debug build with all seven rows competing for the machine; a lock convoy costs hundreds of milliseconds, not tens |
+| `CONVOY_FACTOR` | the four clients' p50 at most 3x the same reads taken alone | row (d) times a lone client's reads in the same rounds as the four clients', so the machine's load slows both alike; on the home server the ratio is 1.2x idle, 1.3x to 2.0x at a load of 20 to 35, and 7x to 11x with one lock held across every read (an injected convoy); the fixed 250 ms p95 it replaces failed at a load of 20 with no convoy and passed an idle run with the convoy |
+| `TAIL_FACTOR` | the four clients' p95 at most 6x the lone client's | measured 1.3x to 2.3x with no convoy, idle or at a load of 20 to 35; the injected convoy moves it only to about 2x, so the tail bound is for a read that stalls now and then, not for the convoy |
 | `STORE_MARGIN_BYTES` | 4 MiB | measured movement across 1200 passes that ingest nothing is 0 bytes |
 | `BURST` | 4000 events per bootstrap | above the 512-event queue plus the kernel socket buffer by a wide margin, which is what makes the overflow deterministic |
 | `DRAFT_BATCH` | 100 drafts | under the 512-event queue: a batch larger than it overflows the subscriber and the daemon is entitled to answer with a resync instead of the events |

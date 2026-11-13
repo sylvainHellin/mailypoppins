@@ -17,7 +17,7 @@
 //! | a | 200 connect/bootstrap/disconnect cycles from 8 threads | descriptors and `clients` return to their baseline |
 //! | b | one client that never reads, under an event burst, while four drain | RSS bounded, exactly one `resync`, every `sync.completed` delivered |
 //! | c | 200 `sync.quick` passes on one account | RSS bounded, `operations.active` back to 0, `store.size_bytes` stable |
-//! | d | 300 `message.list` / `message.search` calls from 4 clients | no error frame, p95 under a ceiling, RSS bounded |
+//! | d | 300 `message.list` / `message.search` calls from 4 clients | no error frame, p50 and p95 within a factor of the same reads taken alone, RSS bounded |
 //! | e | 100 draft files written then deleted under the watched directory | one event per draft either way, descriptors stable |
 //! | f | 50 held sends armed and cancelled from alternating clients | `holds` back to 0, the ledger empty, the draft still approved |
 //! | g | all of the above at once for `MAILYPOPPINS_SOAK_SECS` | RSS and descriptors stable, and a clean `daemon.stop` |
@@ -137,13 +137,39 @@ const RSS_CEILING_BYTES: u64 = 192 * 1024 * 1024;
 /// leak would be two hundred.
 const FD_MARGIN: usize = 12;
 
-/// The p95 ceiling for one read call in row (d).
+/// How many times slower the median read in row (d) may be among four
+/// clients than the same reads taken alone.
 ///
-/// A read of this fixture is a millisecond or two; the ceiling is two orders
-/// of magnitude above it because what it is looking for is a lock convoy - one
-/// client's read waiting behind three others - and a convoy costs hundreds of
-/// milliseconds, not tens.
-const P95_CEILING: Duration = Duration::from_millis(250);
+/// What row (d) looks for is a lock convoy: one client's read waiting behind
+/// the other three, because a lock is held across a call or the reads share
+/// one thread. A fixed ceiling in milliseconds cannot tell that from a machine
+/// that is merely busy, since every read slows down with the load: a 250 ms
+/// p95 failed at a load of 20 with no convoy and passed on an idle machine with
+/// one. So the row times each read against the same reads taken by a single
+/// client in the same rounds, which slow down with the machine as much.
+///
+/// Measured on the home server (12 threads, debug build): with no convoy the
+/// four clients' p50 is 1.2 to 1.3 times the lone client's on an idle machine
+/// and 1.3 to 2.0 times at a load of 20 to 35. With one lock held across every
+/// read (the convoy, injected) it is 7 to 11 times, idle or loaded, because
+/// the median read waits behind three others whose mix includes the slow
+/// searches. Three sits between the two with room on both sides.
+const CONVOY_FACTOR: f64 = 3.0;
+
+/// How many times slower the p95 read in row (d) may be among four clients
+/// than alone.
+///
+/// The median is what shows a convoy: the injected one moves the p95 ratio
+/// only to about 2, since the slowest reads are the searches that cost the
+/// most even alone. The tail is held to a looser bound that a busy machine
+/// stays under (1.3 to 2.3 measured at a load of 20 to 35) and a read that
+/// stalls now and then while the median looks fine does not.
+const TAIL_FACTOR: f64 = 6.0;
+
+/// How many rounds row (d) alternates, each one pass of the lone client and
+/// one pass of the four, so a load that comes and goes during the row lands on
+/// both.
+const READ_ROUNDS: usize = 15;
 
 /// How far `store.size_bytes` may move across a row that ingests nothing.
 ///
@@ -1393,8 +1419,40 @@ fn read_calls() -> Vec<(&'static str, Value)> {
     ]
 }
 
-/// 300 reads from four concurrent clients: none fails, and the p95 stays two
-/// orders of magnitude under a convoy.
+/// One read on `conn`, answered with how long it took.
+async fn timed_read(conn: &mut Connection, label: &str, method: &str, params: &Value) -> Duration {
+    let at = Instant::now();
+    let answer = conn
+        .call(method, params.clone())
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {method} failed: {e}"));
+    let taken = at.elapsed();
+    assert!(answer.is_object(), "{method} answers an object: {answer}");
+    taken
+}
+
+/// `(p50, p95, max)` of `latencies`, sorted in place.
+fn spread(latencies: &mut [Duration]) -> (Duration, Duration, Duration) {
+    latencies.sort();
+    (
+        latencies[latencies.len() / 2],
+        latencies[latencies.len() * 95 / 100],
+        *latencies.last().expect("at least one read"),
+    )
+}
+
+/// `churn` over `quiet`, as a factor.
+fn ratio(churn: Duration, quiet: Duration) -> f64 {
+    churn.as_secs_f64() / quiet.as_secs_f64().max(f64::MIN_POSITIVE)
+}
+
+/// 300 reads from four concurrent clients: none fails, and none waits behind
+/// the others.
+///
+/// Each round, one lone client takes the five reads in turn, then four
+/// clients take them at once. The four clients' p50 and p95 are compared
+/// with the lone client's, which the same machine load slows as much, rather
+/// than with a number of milliseconds ([`CONVOY_FACTOR`], [`TAIL_FACTOR`]).
 #[test]
 fn search_churn_from_four_clients_answers_every_call_inside_the_ceiling() {
     let root = SoakRoot::new();
@@ -1405,62 +1463,77 @@ fn search_churn_from_four_clients_answers_every_call_inside_the_ceiling() {
     }
 
     let clients = 4;
-    let calls = 300 * scale();
-    let per_client = calls / clients;
+    let rounds = READ_ROUNDS * scale();
     let (_, rss_before) = warmed_baseline(pid, root.path());
     let started = Instant::now();
 
-    let mut latencies: Vec<Duration> = runtime().block_on(async {
-        let mut tasks = Vec::new();
-        for client in 0..clients {
-            let path = root.path().to_path_buf();
-            tasks.push(tokio::spawn(async move {
-                let calls = read_calls();
-                let mut conn = connect(&path).await;
-                let mut taken = Vec::with_capacity(per_client);
-                for n in 0..per_client {
-                    let (method, params) = &calls[(n + client) % calls.len()];
-                    let at = Instant::now();
-                    let answer = conn.call(method, params.clone()).await.unwrap_or_else(|e| {
-                        panic!("client {client} call {n} to {method} failed: {e}")
-                    });
-                    taken.push(at.elapsed());
-                    assert!(answer.is_object(), "{method} answers an object: {answer}");
-                }
-                taken
-            }));
+    let (mut quiet, mut churn) = runtime().block_on(async {
+        let mut alone = connect(root.path()).await;
+        let mut crowd = Vec::new();
+        for _ in 0..clients {
+            crowd.push(connect(root.path()).await);
         }
-        let mut all = Vec::new();
-        for task in tasks {
-            all.extend(task.await.expect("a read client finishes"));
+        let mut quiet = Vec::new();
+        let mut churn = Vec::new();
+        for round in 0..rounds {
+            for (method, params) in read_calls() {
+                quiet.push(timed_read(&mut alone, "the quiet client", method, &params).await);
+            }
+            let mut tasks = Vec::new();
+            for (client, mut conn) in crowd.drain(..).enumerate() {
+                tasks.push(tokio::spawn(async move {
+                    let calls = read_calls();
+                    let mut taken = Vec::with_capacity(calls.len());
+                    for n in 0..calls.len() {
+                        let (method, params) = &calls[(n + client) % calls.len()];
+                        let label = format!("client {client} round {round}");
+                        taken.push(timed_read(&mut conn, &label, method, params).await);
+                    }
+                    (conn, taken)
+                }));
+            }
+            for task in tasks {
+                let (conn, taken) = task.await.expect("a read client finishes");
+                crowd.push(conn);
+                churn.extend(taken);
+            }
         }
-        all
+        (quiet, churn)
     });
     let elapsed = started.elapsed();
 
     let rss_after = rss_bytes(pid).expect("a readable /proc");
     let rss_growth = assert_rss_bounded("search churn", rss_before, rss_after);
 
-    latencies.sort();
-    assert_eq!(latencies.len(), per_client * clients);
-    let p50 = latencies[latencies.len() / 2];
-    let p95 = latencies[latencies.len() * 95 / 100];
-    let worst = *latencies.last().expect("at least one call");
+    assert_eq!(churn.len(), rounds * clients * read_calls().len());
+    let (q50, q95, quiet_worst) = spread(&mut quiet);
+    let (c50, c95, worst) = spread(&mut churn);
+    let (r50, r95) = (ratio(c50, q50), ratio(c95, q95));
+    let measured = format!(
+        "{} reads from {clients} clients: p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms; {} alone: \
+         p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms; p50 x{r50:.2}, p95 x{r95:.2}",
+        churn.len(),
+        c50.as_secs_f64() * 1000.0,
+        c95.as_secs_f64() * 1000.0,
+        worst.as_secs_f64() * 1000.0,
+        quiet.len(),
+        q50.as_secs_f64() * 1000.0,
+        q95.as_secs_f64() * 1000.0,
+        quiet_worst.as_secs_f64() * 1000.0,
+    );
     assert!(
-        p95 < P95_CEILING,
-        "the p95 of {} reads from {clients} clients is {p95:?}, ceiling {P95_CEILING:?} \
-         (p50 {p50:?}, max {worst:?})",
-        latencies.len()
+        r50 < CONVOY_FACTOR,
+        "the median read waits behind the other clients' (a convoy): {measured}, factor \
+         {CONVOY_FACTOR}"
+    );
+    assert!(
+        r95 < TAIL_FACTOR,
+        "the slowest reads stall among the other clients': {measured}, factor {TAIL_FACTOR}"
     );
 
     println!(
-        "[soak d] {} reads from {clients} clients in {:.1} s: p50 {:.1} ms, p95 {:.1} ms, max \
-         {:.1} ms, rss {:.1} -> {:.1} MiB ({:+.1})",
-        latencies.len(),
+        "[soak d] {measured}, in {:.1} s, rss {:.1} -> {:.1} MiB ({:+.1})",
         elapsed.as_secs_f64(),
-        p50.as_secs_f64() * 1000.0,
-        p95.as_secs_f64() * 1000.0,
-        worst.as_secs_f64() * 1000.0,
         rss_before as f64 / 1048576.0,
         rss_after as f64 / 1048576.0,
         rss_growth as f64 / 1048576.0,
