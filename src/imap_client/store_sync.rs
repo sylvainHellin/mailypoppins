@@ -238,7 +238,7 @@ impl SyncBackend for ImapBackend<'_> {
 async fn fetch_next_chunk(
     config: &ImapConfig,
     pass: &mut BodyPass,
-) -> Result<Vec<crate::sync::FetchedRaw>> {
+) -> Result<Vec<crate::sync::FetchedMessage>> {
     if pass.session.is_none() {
         let mut pooled = pool::checkout(config).await?;
         let selected = pooled
@@ -636,7 +636,7 @@ mod tests {
     ///
     /// Until PERSO-300 every mailbox was downloaded whole before the first was
     /// ingested, and a full sync of a 6,360-message folder peaked at about
-    /// 8 GB. The count is taken through `FetchedRaw` itself
+    /// 8 GB. The count is taken through `FetchedMessage` itself
     /// ([`crate::sync::held_bodies`]), not from the process's memory.
     #[test]
     fn a_full_sync_holds_one_chunk_of_bodies_at_a_time() {

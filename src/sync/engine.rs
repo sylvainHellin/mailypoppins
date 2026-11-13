@@ -22,8 +22,8 @@ use anyhow::Result;
 use log::{info, warn};
 
 use super::{
-    stops_at, BodyBatch, FreshObservation, MailboxListing, ObservationSink, Stop, StopPoint,
-    SyncBackend, SyncResult, SyncTarget,
+    stops_at, BodyBatch, FetchedBody, FreshObservation, MailboxListing, ObservationSink, Stop,
+    StopPoint, SyncBackend, SyncResult, SyncTarget,
 };
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
@@ -518,15 +518,32 @@ pub async fn run_sync(
                 continue;
             }
             for message in &batch {
-                let Some(mut email) = parse_rfc822_to_fetched_email(&message.raw) else {
-                    warn!(
-                        "Skipping UID {} in '{}': the message did not parse",
-                        message.uid, target.server_name
-                    );
-                    note_failure(message.uid, "the message did not parse");
-                    continue;
+                // The email, the raw bytes ingest keeps, the threading signals
+                // and the server's handle on the copy: a raw message carries
+                // the first three in its bytes, a parsed one beside its email
+                // (PERSO-213).
+                let from_raw;
+                let (email, raw, hints, item) = match &message.body {
+                    FetchedBody::Raw(raw) => {
+                        let Some(mut email) = parse_rfc822_to_fetched_email(raw) else {
+                            warn!(
+                                "Skipping UID {} in '{}': the message did not parse",
+                                message.uid, target.server_name
+                            );
+                            note_failure(message.uid, "the message did not parse");
+                            continue;
+                        };
+                        email.flags = message.flags;
+                        from_raw = email;
+                        (&from_raw, Some(raw.as_slice()), None, None)
+                    }
+                    FetchedBody::Parsed(parsed) => (
+                        &parsed.email,
+                        None,
+                        Some(&parsed.threading),
+                        Some(parsed.item.as_str()),
+                    ),
                 };
-                email.flags = message.flags;
 
                 let outcome = ingest::ingest_listed(
                     store,
@@ -535,15 +552,19 @@ pub async fn run_sync(
                         account,
                         mailbox: target.role.as_str(),
                         uid: message.uid,
-                        email: &email,
-                        raw: Some(&message.raw),
+                        email,
+                        raw,
                     },
                     &RebindPolicy::UnlessListed(&server_uids),
-                    None,
-                    // A UID no IMAP server issues names no copy the watch
-                    // could have journalled.
-                    &|message_id| {
-                        u32::try_from(message.uid).is_ok_and(|uid| {
+                    hints,
+                    // A copy with a handle of its own is asked about by it
+                    // (PERSO-245); a UID no IMAP server issues names no copy
+                    // the watch could have journalled.
+                    &|message_id| match item {
+                        Some(item) => {
+                            departures.departed_item(&target.server_name, message_id, item)
+                        }
+                        None => u32::try_from(message.uid).is_ok_and(|uid| {
                             departures.departed(
                                 message_id,
                                 &super::departures::Listed {
@@ -553,7 +574,7 @@ pub async fn run_sync(
                                     folder: folder.as_ref(),
                                 },
                             )
-                        })
+                        }),
                     },
                 );
                 match outcome {
@@ -571,7 +592,7 @@ pub async fn run_sync(
                             result.saved += 1;
                             result
                                 .fresh_observations
-                                .push(FreshObservation::of(&target.role, &email));
+                                .push(FreshObservation::of(&target.role, email));
                         }
                         if outcome.uid_rebound {
                             result.uid_rebound += 1;
@@ -597,11 +618,20 @@ pub async fn run_sync(
                         );
                     }
                     Err(e) => {
+                        // A parsed message's UID is a hash; its Message-ID is
+                        // what a reader of the failure can look up.
+                        let error = match &message.body {
+                            FetchedBody::Raw(_) => format!("{e:#}"),
+                            FetchedBody::Parsed(parsed) => format!(
+                                "{e:#} (message {})",
+                                ingest::resolve_message_id(&parsed.email, None)
+                            ),
+                        };
                         warn!(
-                            "Failed to ingest UID {} from '{}': {:#}",
-                            message.uid, target.server_name, e
+                            "Failed to ingest UID {} from '{}': {error}",
+                            message.uid, target.server_name
                         );
-                        note_failure(message.uid, &format!("{e:#}"));
+                        note_failure(message.uid, &error);
                     }
                 }
             }
@@ -853,7 +883,7 @@ mod tests {
 
     use super::*;
     use crate::ingest::ModseqMark;
-    use crate::sync::{FetchedRaw, MailboxCoverage, MailboxState};
+    use crate::sync::{FetchedMessage, MailboxCoverage, MailboxState, ParsedMessage};
     use crate::types::MessageFlags;
 
     /// A CONDSTORE mark: `modseq`, vouching for every UID from `from_uid` up.
@@ -872,7 +902,7 @@ mod tests {
     /// One mailbox's whole fetch as a test scripts it: the listing, every new
     /// body, and the coverage the backend reports once the bodies are in.
     struct MailboxFetch {
-        messages: Vec<FetchedRaw>,
+        messages: Vec<FetchedMessage>,
         skipped: usize,
         known_flags: Vec<(i64, MessageFlags)>,
         state: MailboxState,
@@ -964,7 +994,7 @@ mod tests {
     /// listing does, and the real backend takes its chunks off the end
     /// (`body_chunks`).
     struct FakeBodies {
-        messages: std::collections::VecDeque<FetchedRaw>,
+        messages: std::collections::VecDeque<FetchedMessage>,
         complete: bool,
     }
 
@@ -1115,7 +1145,7 @@ mod tests {
         MailboxFetch {
             messages: messages
                 .into_iter()
-                .map(|(uid, raw)| FetchedRaw::new(uid, raw, MessageFlags::default()))
+                .map(|(uid, raw)| FetchedMessage::raw(uid, raw, MessageFlags::default()))
                 .collect(),
             skipped: 0,
             known_flags: Vec::new(),
@@ -1281,6 +1311,61 @@ mod tests {
     // -----------------------------------------------------------------------
     // Engine tests: the loop itself, driven by the fake backend
     // -----------------------------------------------------------------------
+
+    /// PERSO-213: a message a backend hands over already parsed, as Graph
+    /// does since it never returns the original MIME, is ingested under the
+    /// UID the backend derived, with its flags and the threading signals it
+    /// carries, and with no raw blob.
+    #[test]
+    fn a_parsed_message_is_ingested_with_its_threading_signals_and_no_raw() {
+        let fx = Fixture::new();
+        let mut email = parse_rfc822_to_fetched_email(&raw("parsed")).unwrap();
+        email.flags = MessageFlags::seen(true);
+        let uid = ingest::graph_uid("<parsed@example.com>");
+        let mut inbox = fetch(Vec::new());
+        inbox.messages.push(FetchedMessage::parsed(
+            uid,
+            ParsedMessage {
+                email,
+                threading: ingest::ThreadHints {
+                    in_reply_to: None,
+                    references: None,
+                    conversation_id: Some("C1".into()),
+                },
+                item: "AAMk1".into(),
+            },
+        ));
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(inbox)]);
+        let result = fx.run(
+            &mut backend,
+            &[SyncTarget::new(MailboxRole::Inbox, "INBOX")],
+        );
+
+        assert_eq!(result.saved, 1);
+        assert_eq!(fx.rows("inbox"), vec![uid]);
+        let (flags, conversation): (Option<String>, Option<String>) = fx
+            .store
+            .conn()
+            .query_row(
+                "SELECT flags, conversation_id FROM messages WHERE uid = ?1",
+                [uid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(MessageFlags::parse(flags.as_deref().unwrap_or_default()).seen);
+        assert_eq!(conversation.as_deref(), Some("C1"));
+        let raws: i64 = fx
+            .store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM message_blobs WHERE kind = 'raw'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raws, 0, "a parsed message has no raw to keep");
+    }
 
     /// A `Stop` that answers yes from `from` on, recording every point it was
     /// asked at.

@@ -72,7 +72,7 @@ use mailypoppins::ingest::KnownUids;
 use mailypoppins::store::{BlobStore, Store};
 use mailypoppins::sync::engine::{run_sync_guarded_at, SyncRun};
 use mailypoppins::sync::{
-    BodyBatch, FetchedRaw, MailboxCoverage, MailboxListing, MailboxState, ObservationSink,
+    BodyBatch, FetchedMessage, MailboxCoverage, MailboxListing, MailboxState, ObservationSink,
     SyncBackend, SyncResult, SyncTarget,
 };
 use mailypoppins::timing::TimingSpan;
@@ -131,7 +131,7 @@ impl SyncBackend for PanickingBackend {
 /// One mailbox's whole fetch as a test scripts it: the listing, every new
 /// body, and the coverage the backend reports once the bodies are in.
 struct MailboxFetch {
-    messages: Vec<FetchedRaw>,
+    messages: Vec<FetchedMessage>,
     skipped: usize,
     known_flags: Vec<(i64, MessageFlags)>,
     state: MailboxState,
@@ -157,7 +157,7 @@ struct ScriptedBackend {
     calls: usize,
     /// The bodies of each target of the last listing, by index, still to be
     /// handed over, and whether the scripted pass asked for every new UID.
-    bodies: Vec<Option<(Vec<FetchedRaw>, bool)>>,
+    bodies: Vec<Option<(Vec<FetchedMessage>, bool)>>,
 }
 
 /// How many bodies [`ScriptedBackend`] hands over per batch: the IMAP
@@ -254,7 +254,7 @@ fn fetch(messages: Vec<(i64, Vec<u8>)>) -> MailboxFetch {
     MailboxFetch {
         messages: messages
             .into_iter()
-            .map(|(uid, raw)| FetchedRaw::new(uid, raw, MessageFlags::default()))
+            .map(|(uid, raw)| FetchedMessage::raw(uid, raw, MessageFlags::default()))
             .collect(),
         skipped: 0,
         known_flags: Vec::new(),

@@ -257,11 +257,11 @@ pub struct SyncResult {
 }
 
 /// One message downloaded for ingest, with the identity the store keys on.
-pub struct FetchedRaw {
+pub struct FetchedMessage {
     /// The row's `uid` in the store: the IMAP UID, or the synthetic
     /// [`crate::ingest::graph_uid`] a backend without UIDs derives.
     pub uid: i64,
-    pub raw: Vec<u8>,
+    pub body: FetchedBody,
     /// What the server says has happened to it: read, answered, forwarded.
     pub flags: MessageFlags,
     /// The unit tests' count of the bodies alive at once (PERSO-300).
@@ -269,19 +269,53 @@ pub struct FetchedRaw {
     _held: held_bodies::Held,
 }
 
-impl FetchedRaw {
-    pub fn new(uid: i64, raw: Vec<u8>, flags: MessageFlags) -> FetchedRaw {
-        FetchedRaw {
+/// The two shapes a backend hands a message over in (PERSO-213).
+pub enum FetchedBody {
+    /// The RFC 822 bytes the server stores (IMAP): the engine parses them, and
+    /// ingest keeps them as the row's raw blob and reads the threading headers
+    /// from them.
+    Raw(Vec<u8>),
+    /// A message the server only hands over parsed (Graph, which never returns
+    /// the original MIME).
+    Parsed(Box<ParsedMessage>),
+}
+
+/// A message as a backend without RFC 822 bytes hands it over.
+pub struct ParsedMessage {
+    pub email: crate::parse::FetchedEmail,
+    /// The threading signals the raw bytes would have carried (PERSO-147).
+    pub threading: crate::ingest::ThreadHints,
+    /// The server's own handle on this copy, Graph's message id: what the
+    /// departures watch is asked about, since the copy has no UID a local
+    /// move could have journalled (PERSO-245).
+    pub item: String,
+}
+
+impl FetchedMessage {
+    /// A message downloaded as its RFC 822 bytes.
+    pub fn raw(uid: i64, raw: Vec<u8>, flags: MessageFlags) -> FetchedMessage {
+        FetchedMessage {
             uid,
-            raw,
+            body: FetchedBody::Raw(raw),
             flags,
+            #[cfg(test)]
+            _held: held_bodies::Held::new(),
+        }
+    }
+
+    /// A message downloaded parsed, carrying the flags its email states.
+    pub fn parsed(uid: i64, message: ParsedMessage) -> FetchedMessage {
+        FetchedMessage {
+            uid,
+            flags: message.email.flags,
+            body: FetchedBody::Parsed(Box::new(message)),
             #[cfg(test)]
             _held: held_bodies::Held::new(),
         }
     }
 }
 
-/// How many [`FetchedRaw`] bodies the current thread holds, and the most it
+/// How many [`FetchedMessage`] bodies the current thread holds, and the most it
 /// has held at once: the seam that shows a pass keeps one batch of bodies in
 /// memory and not a mailbox's worth (PERSO-300).
 ///
@@ -423,7 +457,7 @@ pub struct MailboxCoverage {
 pub enum BodyBatch {
     /// The next batch of new messages, with their bodies: at most one
     /// backend's batch size.
-    Bodies(Vec<FetchedRaw>),
+    Bodies(Vec<FetchedMessage>),
     /// The body pass is over. `complete` is false when the backend stopped
     /// before asking for every new UID (its deadline, #0113), which is the
     /// one way a pass is short *by design*: the engine then records no modseq

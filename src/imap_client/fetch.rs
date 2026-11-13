@@ -12,7 +12,7 @@ use super::{
 use crate::ingest::{KnownUids, ModseqMark};
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
-use crate::sync::{FetchedRaw, MailboxCoverage, MailboxListing, MailboxState};
+use crate::sync::{FetchedMessage, MailboxCoverage, MailboxListing, MailboxState};
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
 
@@ -247,7 +247,7 @@ pub async fn fetch_raw_by_message_id(
 
 // The store fetch's result types live in `crate::sync` since #0059: they are
 // the engine's contract with every backend, not this module's private shape.
-// See `MailboxListing`, `FetchedRaw` and `MailboxState`.
+// See `MailboxListing`, `FetchedMessage` and `MailboxState`.
 
 /// The UIDs the store holds that the server did not list, up to `ceiling`.
 ///
@@ -979,21 +979,21 @@ where
 /// One chunk of a body pass: the bodies and flags of `uids`, in one
 /// `UID FETCH`, on a session that has `SELECT`ed their mailbox (PERSO-300).
 ///
-/// Each response is turned into a [`FetchedRaw`] as it is read, so the chunk
+/// Each response is turned into a [`FetchedMessage`] as it is read, so the chunk
 /// is held once and not twice, and a UID the answer does not carry is simply
 /// absent: the coverage arithmetic counts it as not downloaded. Ascending, the
 /// order ingest saw when the whole window was one command.
 pub(crate) async fn fetch_body_chunk_on_session(
     session: &mut ImapSession,
     uids: &[u32],
-) -> Result<Vec<FetchedRaw>> {
-    let mut out: Vec<FetchedRaw> = session
+) -> Result<Vec<FetchedMessage>> {
+    let mut out: Vec<FetchedMessage> = session
         .uid_fetch(compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
         .try_filter_map(|msg| async move {
             Ok(match (msg.uid, msg.body()) {
-                (Some(uid), Some(body)) => Some(FetchedRaw::new(
+                (Some(uid), Some(body)) => Some(FetchedMessage::raw(
                     i64::from(uid),
                     body.to_vec(),
                     flags_of(&msg),

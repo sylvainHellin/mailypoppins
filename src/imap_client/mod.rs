@@ -39,7 +39,7 @@ pub use store_sync::{
 pub(crate) use uidplus::append as append_with_uid;
 // The sync types moved to `crate::sync` with the engine (#0059); re-exported
 // here so the call sites that name them through this module keep compiling.
-pub use crate::sync::{FetchedRaw, FreshObservation, MailboxState, SyncResult, SyncTarget};
+pub use crate::sync::{FetchedMessage, FreshObservation, MailboxState, SyncResult, SyncTarget};
 pub use watch::{watch_mailbox, watch_mailbox_since};
 
 use std::fmt;
