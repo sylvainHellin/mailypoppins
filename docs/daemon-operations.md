@@ -23,6 +23,7 @@ Past the window a socket that accepts the connect is a daemon that is bound and 
 The daemon answers before it opens any account's store (PERSO-109), so `start` does not wait for the stores: each account is `opening` until its runtime has opened its store, which runs the file's integrity check on the first open (about 10 s for a 1.6 GB store), and turns `ready` on its own.
 A socket that refuses the connect, a file a dead daemon left behind included, is no daemon at all, and the start exits 4 at the end of the window; a bound daemon that has not answered by the ceiling is exit 4 with a message naming the ceiling.
 A start that finds a daemon bound and not answering yet waits for it the same way instead of spawning a second one, which would only find the socket taken.
+A daemon whose `daemon.status` answers `stopping: true` has accepted a stop and refuses every handshake, so it is not counted as running: the start waits up to the answer window for nothing to listen on the socket, then starts the next daemon, and exits 4 when the stopping one is still there at the end of the window (PERSO-176).
 The child is spawned through `setsid` with its stdio in the daemon log, so closing the launching terminal does not take it down.
 With a login service installed for this data directory, the start goes through the service manager instead; see [Starting under the login service](#starting-under-the-login-service).
 
@@ -67,6 +68,7 @@ The bound on the whole sequence is 5 s: the readiness wait first, then a connect
 One budget rather than two, so the worst case a user waits for a daemon that never binds is that number and not some multiple of it.
 The readiness wait is `mp daemon start`'s with the budget as its answer window, so a daemon that has bound its socket and is not answering yet is waited for up to the 120 s ceiling rather than killed at 5 s, and the wait prints nothing into the command's output.
 When it expires, or when the spawn dies, the run exits 4 naming the socket, the daemon log and the literal `mp daemon run` to type by hand.
+A daemon that refuses the handshake as shutting down (`-32009`) still holds the socket, so the client first waits for nothing to listen on it, up to the same budget, and then runs the on-demand start (PERSO-176); the window opens on its own on a profile, whose daemon stops a minute after its last client, and on the default profile after `mp daemon stop`, and the desktop app's connect does the same.
 There is no fallback to answering in process: a command that quietly did the work locally would let the user believe the daemon did it.
 
 Six commands never reach any of that, because each of them either *is* the lifecycle surface or answers from a compiled-in structure:

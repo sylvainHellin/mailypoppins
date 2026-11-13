@@ -106,7 +106,10 @@ use mp_protocol::{ErrorCode, Notification};
 
 use mailypoppins::engine_lock::EngineLock;
 
-use support::parity::{mp_command, pgrep_line_for, socket_path, DaemonFixture};
+use support::parity::{
+    daemon_pid_file, mp_autostart, mp_command, pgrep_line_for, socket_path, stop_daemon,
+    DaemonFixture,
+};
 use support::send_fixture as fixture;
 
 /// The grace a `daemon.stop` that named none gets, in seconds.
@@ -706,6 +709,106 @@ fn a_shutting_down_daemon_refuses_every_command_but_the_two_lifecycle_ones() {
         );
     });
 
+    drop(daemon);
+}
+
+/// Put the daemon over `root` into a shutdown its grace holds open for
+/// `grace_secs`: a durable operation far longer than the grace is in flight
+/// when the stop is accepted, so the daemon refuses work and still answers
+/// `daemon.status` until the grace runs out.
+fn stop_held_by_the_grace(root: &Path, grace_secs: u64) {
+    block_on(async {
+        let mut worker = tui_client(root).await;
+        start_operation(&mut worker, 40, 500).await;
+        let mut stopper = lifecycle_client(root).await;
+        let answer = stopper
+            .call("daemon.stop", json!({"grace_secs": grace_secs}))
+            .await
+            .expect("daemon.stop answers");
+        assert_eq!(
+            answer["pending"].as_array().map(Vec::len),
+            Some(1),
+            "the operation holds the shutdown in its grace: {answer}"
+        );
+    });
+}
+
+/// A command that reaches a daemon while it is shutting down is served by a
+/// fresh one (PERSO-176).
+///
+/// The handshake is refused with `shutting_down`, and the daemon on its way
+/// out still answers `daemon.status`: an on-demand start that took that answer
+/// for a live daemon would start nothing and leave the command to exit 4. The
+/// window opens on its own on a profile, whose daemon stops a minute after its
+/// last client, and on the default profile after `mp daemon stop`.
+#[test]
+fn a_command_that_meets_a_shutting_down_daemon_is_served_by_a_fresh_one() {
+    let tmp = bare_root();
+    let root = tmp.path();
+    let daemon = daemon_with_operations(root);
+    let stopping = daemon.pid();
+
+    stop_held_by_the_grace(root, 2);
+    let out = mp_autostart(&["account", "list", "--daemon"], root, 8_000, None);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the command waited out the stopping daemon and started a new one\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "No accounts configured\n",
+        "and the answer is the new daemon's"
+    );
+    let fresh = daemon_pid_file(root).expect("the new daemon wrote its pid file");
+    assert_ne!(
+        fresh, stopping,
+        "a new daemon, not the one that was leaving"
+    );
+
+    stop_daemon(root);
+    assert_eq!(pgrep_line_for(fresh), None, "and nothing is left running");
+    drop(daemon);
+}
+
+/// `mp daemon start` does not count a stopping daemon as running: it waits for
+/// it to go and starts the next one (PERSO-176).
+#[test]
+fn mp_daemon_start_waits_out_a_shutting_down_daemon_and_starts_a_fresh_one() {
+    let tmp = bare_root();
+    let root = tmp.path();
+    let daemon = daemon_with_operations(root);
+    let stopping = daemon.pid();
+
+    stop_held_by_the_grace(root, 2);
+    let out = mp_command(root)
+        .args(["daemon", "start"])
+        .output()
+        .expect("run mp daemon start");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("already running"),
+        "a daemon on its way out is not a running one: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let fresh = daemon_pid_file(root).expect("the new daemon wrote its pid file");
+    assert_ne!(
+        fresh, stopping,
+        "a new daemon, not the one that was leaving"
+    );
+
+    stop_daemon(root);
+    assert_eq!(pgrep_line_for(fresh), None, "and nothing is left running");
     drop(daemon);
 }
 

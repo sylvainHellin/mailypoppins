@@ -55,6 +55,7 @@ A binary that is missing or prints no version skips the check, with a warning in
 One mismatch skips the screen: the daemon an app update left behind (see Updates, "After an update").
 On a reconnect the same refusal turns `reconnecting` into `failed` with that error, pushed as soon as the session thread records it, while the thread keeps retrying; the next successful reconnect is `connected` again.
 The CLI and the TUI compare only the protocol range, since each is itself the `mp` that would start the daemon.
+A handshake refused as `shutting_down` on a connect that may start a daemon waits, up to the on-demand start budget, for nothing to listen on the socket and then starts the next daemon through `mp daemon start` (`connector::connect_or_start`, PERSO-176), as `mp` and the TUI do; a connect that may not start one reports the refusal as before.
 The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
 `setup` is the desktop's own configuration: an editor that did not start, a settings file that does not read, or a setting value its key cannot hold; its message names what to change.
 

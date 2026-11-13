@@ -681,11 +681,16 @@ async fn handshake_until(
 pub async fn connect_or_start(
     autostart: bool,
 ) -> Result<(Connection, InitializeResult), ConnectError> {
+    let mut leaving = false;
     match handshake().await {
         Ok(open) => return check_version(open).await,
         Err(e) => {
             if let Some(failure) = classify(&e) {
-                return Err(failure);
+                // A daemon on its way out is replaced once it has gone (PERSO-176).
+                if !(autostart && autostart_enabled() && shutting_down(&e)) {
+                    return Err(failure);
+                }
+                leaving = true;
             }
         }
     }
@@ -700,11 +705,40 @@ pub async fn connect_or_start(
     }
 
     let budget = autostart_budget();
+    if leaving {
+        wait_until_gone(budget).await?;
+    }
     let deadline = Instant::now() + budget;
     start_daemon(budget).await?;
     // Started with the expected binary, unless another starter won.
     let open = handshake_until(deadline, budget, "a daemon was started but did not answer").await?;
     check_version(open).await
+}
+
+/// Whether a handshake was refused by a daemon that is shutting down.
+fn shutting_down(e: &ClientError) -> bool {
+    matches!(e, ClientError::Rpc(rpc) if rpc.code == ErrorCode::ShuttingDown.code())
+}
+
+/// Wait up to `budget` for the daemon that refused the handshake as shutting
+/// down to stop listening, since a daemon started beside it could not bind.
+async fn wait_until_gone(budget: Duration) -> Result<(), ConnectError> {
+    let deadline = Instant::now() + budget;
+    while let Ok(Ok(_)) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, Connection::connect(&paths().socket)).await
+    {
+        if Instant::now() >= deadline {
+            return Err(error(
+                ConnectFailure::Unavailable,
+                format!(
+                    "the daemon is shutting down and was still listening after {} ms",
+                    budget.as_millis()
+                ),
+            ));
+        }
+        tokio::time::sleep(RETRY_MIN).await;
+    }
+    Ok(())
 }
 
 /// How long the session's first connect retries. Under `mp_client`'s

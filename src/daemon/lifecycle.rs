@@ -736,6 +736,13 @@ async fn start_noting(timeout: Duration, notice: Notice) -> Result<i32> {
             info!("[daemon] start: a daemon is already running");
             return Ok(EXIT_OK);
         }
+        // On its way out: once it has gone, this start is the one that brings
+        // the next daemon up.
+        Probe::Stopping => {
+            if !outlast_stopping(&socket, timeout).await {
+                return Ok(EXIT_UNAVAILABLE);
+            }
+        }
         // Bound and silent: a daemon that is still starting up, whose
         // start lock is already released. A second one spawned now would only
         // find the socket taken and exit.
@@ -772,6 +779,46 @@ async fn start_noting(timeout: Duration, notice: Notice) -> Result<i32> {
         _ => "the daemon did not become ready in time".to_string(),
     });
     Ok(EXIT_UNAVAILABLE)
+}
+
+/// Wait up to `budget` for nothing to be listening on `socket`, and say
+/// whether that happened.
+///
+/// What a client does with a daemon that refused its handshake as shutting
+/// down, and what a start does with one whose `daemon.status` says it is
+/// stopping, before starting the next one (PERSO-176): the stopping daemon
+/// still holds the socket, and a daemon spawned beside it would refuse to
+/// bind. A socket file nobody listens on counts as gone, since the start
+/// sweeps it under its lock.
+pub async fn wait_until_gone(socket: &Path, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        let listening = matches!(
+            tokio::time::timeout(RPC_TIMEOUT, Connection::connect(socket)).await,
+            Ok(Ok(_))
+        );
+        if !listening {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Wait out a daemon whose `daemon.status` said it is stopping, reporting it
+/// when it is still listening after `timeout`.
+async fn outlast_stopping(socket: &Path, timeout: Duration) -> bool {
+    info!("[daemon] start: the daemon is shutting down; waiting for it to go");
+    if wait_until_gone(socket, timeout).await {
+        return true;
+    }
+    report_start_failure(&format!(
+        "the daemon is shutting down and was still listening after {}s",
+        timeout.as_secs()
+    ));
+    false
 }
 
 /// Wait for a daemon this start did not spawn, and say why when it never
@@ -861,6 +908,10 @@ impl Notice {
 enum Probe {
     /// A daemon answered `daemon.status`.
     Answered,
+    /// A daemon answered `daemon.status` and said it is stopping: it refuses
+    /// every handshake and is about to unbind, so it is not a running daemon
+    /// (PERSO-176).
+    Stopping,
     /// The connect succeeded and no answer came: a daemon is bound and alive,
     /// and not serving yet.
     Bound,
@@ -893,9 +944,16 @@ async fn probe(socket: &Path, budget: Duration) -> Probe {
         return Probe::Unbound;
     };
     match tokio::time::timeout(budget, connection.call("daemon.status", json!({}))).await {
+        Ok(Ok(status)) if is_stopping(&status) => Probe::Stopping,
         Ok(Ok(_)) => Probe::Answered,
         _ => Probe::Bound,
     }
+}
+
+/// Whether a `daemon.status` answer comes from a daemon that accepted a stop;
+/// one that predates the key is taken at its word as running.
+fn is_stopping(status: &Value) -> bool {
+    status["stopping"].as_bool() == Some(true)
 }
 
 /// Wait for this data directory's daemon to answer, failing early if `child`
@@ -938,7 +996,8 @@ async fn wait_ready_at(
             .clamp(POLL, RPC_TIMEOUT);
         let bound = match probe(socket, budget).await {
             Probe::Answered => return Ok(Readiness::Answered),
-            Probe::Bound => true,
+            // Not the daemon being waited for, and bound until it leaves.
+            Probe::Stopping | Probe::Bound => true,
             Probe::Unbound => false,
         };
         if let Some(child) = child.as_mut() {
@@ -1249,7 +1308,7 @@ pub(crate) async fn hand_over(route: super::service::StartRoute) -> Result<i32> 
 /// runs the same routine inside every other command and may not print into
 /// their output.
 async fn start_command(timeout: Duration) -> Result<i32> {
-    if let Ok(status) = query_status().await {
+    if let Some(status) = query_status().await.ok().filter(|s| !is_stopping(s)) {
         println!(
             "{} daemon already running (pid {})",
             "\u{2713}".green(),
@@ -1288,6 +1347,14 @@ async fn start_via(
     match route {
         StartRoute::Detached { note } => start_detached(note, timeout, notice).await,
         StartRoute::Supervised(plan) => {
+            // The manager still counts a stopping daemon as the running
+            // service, and its start would be a no-op.
+            let socket = socket_path();
+            if matches!(probe(&socket, RPC_TIMEOUT).await, Probe::Stopping)
+                && !outlast_stopping(&socket, timeout).await
+            {
+                return Ok(EXIT_UNAVAILABLE);
+            }
             info!(
                 "[daemon] start: through the service manager {:?}",
                 plan.lines()

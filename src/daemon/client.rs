@@ -52,6 +52,7 @@ use colored::Colorize;
 use log::{info, warn};
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity, VersionRefusal};
+use mp_protocol::ErrorCode;
 
 use super::lifecycle::{self, EXIT_UNAVAILABLE};
 use super::runtime::socket_path;
@@ -328,10 +329,15 @@ pub const TUI_REQUIRED_CAPABILITIES: &[&str] =
 /// A daemon that refuses the handshake for a missing capability or a disjoint
 /// protocol range is answered at once: it is listening, so starting one on demand would find it running and
 /// the retries would meet the same refusal until the budget ran out.
+///
+/// A daemon that refuses it as shutting down is waited out, up to the start
+/// budget, before the on-demand start: it still holds the socket, so a daemon
+/// started beside it could not bind, and the next one comes up once it has
+/// gone (PERSO-176).
 async fn open_session(required: &[&str]) -> Result<(Connection, String), String> {
     let socket = socket_path();
 
-    match connect(&socket, required).await {
+    let leaving = match connect(&socket, required).await {
         Ok(open) => {
             ROUTED.store(true, Ordering::SeqCst);
             return Ok(open);
@@ -340,16 +346,28 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
             if let Some(why) = too_old(&e) {
                 return Err(why);
             }
+            shutting_down(&e)
         }
-    }
+    };
 
     if !autostart_enabled() {
-        return Err(format!(
-            "none is listening and {AUTOSTART_ENV} turned on-demand starting off"
-        ));
+        return Err(if leaving {
+            format!("the daemon is shutting down and {AUTOSTART_ENV} turned on-demand starting off")
+        } else {
+            format!("none is listening and {AUTOSTART_ENV} turned on-demand starting off")
+        });
     }
 
     let budget = autostart_budget();
+    if leaving {
+        info!("[client] the daemon is shutting down; waiting for it to go before starting one");
+        if !lifecycle::wait_until_gone(&socket, budget).await {
+            return Err(format!(
+                "the daemon is shutting down and was still listening after {} ms",
+                budget.as_millis()
+            ));
+        }
+    }
     let deadline = Instant::now() + budget;
     if let Err(e) = autostart(budget).await {
         return Err(format!("{e:#}"));
@@ -383,6 +401,11 @@ async fn open_session(required: &[&str]) -> Result<(Connection, String), String>
 fn too_old(error: &ClientError) -> Option<String> {
     let refusal = VersionRefusal::from_error(error)?;
     Some(refusal.sentence(env!("CARGO_PKG_VERSION"), ClientKind::Cli))
+}
+
+/// Whether a handshake was refused by a daemon that is shutting down.
+fn shutting_down(error: &ClientError) -> bool {
+    matches!(error, ClientError::Rpc(rpc) if rpc.code == ErrorCode::ShuttingDown.code())
 }
 
 /// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
@@ -582,6 +605,9 @@ mod tests {
             too_old(&shutting_down).is_none(),
             "a daemon on its way out is replaced by the on-demand start"
         );
+        assert!(super::shutting_down(&shutting_down));
+        assert!(!super::shutting_down(&missing));
+        assert!(!super::shutting_down(&ClientError::NotRunning));
     }
 
     #[test]

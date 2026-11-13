@@ -508,8 +508,15 @@ impl DaemonState {
     /// three things it is built from and writes the same object into a support
     /// bundle's `daemon-status.json`: two renderers would eventually be two
     /// answers.
+    ///
+    /// `stopping` is the one live key the bundle has no use for: a daemon that
+    /// accepted a stop still answers here, and a start that took the answer
+    /// for a running daemon would start nothing while this one refuses every
+    /// handshake on its way out (PERSO-176).
     pub fn status_result(&self) -> Value {
-        self.diagnostics.status_result()
+        let mut status = self.diagnostics.status_result();
+        status["stopping"] = Value::Bool(self.shutdown.is_stopping());
+        status
     }
 }
 

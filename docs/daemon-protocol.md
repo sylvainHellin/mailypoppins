@@ -149,11 +149,13 @@ Every other method, known or unknown, is gated.
   "started_at": "2026-01-01T09:12:44.512Z",
   "data_dir": "/home/alice/.local/share/mailypoppins",
   "config_dir": "/home/alice/.config/mailypoppins",
-  "accounts": [{"name": "work", "state": "opening"}]
+  "accounts": [{"name": "work", "state": "opening"}],
+  "stopping": false
 }
 ```
 
 The fields are the daemon's own `daemon.json` metadata plus the live account list, so a client comparing them against its own paths learns whether it is talking to the daemon it meant to.
+`stopping` turns `true` once the daemon has accepted a stop: it still answers `daemon.status` and refuses every handshake with `-32009`, so a start that meets it waits for it to go instead of counting it as running (PERSO-176); a daemon that predates the key is taken as running.
 `accounts` lists the configured accounts, and a state is one of `opening`, `ready`, `blocked`: `opening` while its runtime is still starting, then whichever the runtime reported (`blocked` covers both a lock held elsewhere and an account with no local store yet).
 The shape does not change with the opt-in, only which states appear in it.
 `mp daemon status --json` prints this object with a leading `"running": true`, or the same keys with null values and `"running": false` when nothing answers.
