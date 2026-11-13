@@ -86,6 +86,7 @@ export type { HealthCheck } from "./HealthCheck";
 export type { HoldListing } from "./HoldListing";
 export type { HoldStatus } from "./HoldStatus";
 export type { InlineHtmlRefusal } from "./InlineHtmlRefusal";
+export type { MailArrived } from "./MailArrived";
 export type { MailboxRow } from "./MailboxRow";
 export type { MessageAttachment } from "./MessageAttachment";
 export type { MessageAttachments } from "./MessageAttachments";

@@ -113,6 +113,7 @@ fn export_into(dir: &Path) -> usize {
         events::Arrival,
         events::Severity,
         events::SyncCompleted,
+        events::MailArrived,
         events::MutationsRolledBack,
         events::ConfigChanged,
         events::Diagnostic,

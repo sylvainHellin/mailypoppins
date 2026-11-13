@@ -36,8 +36,8 @@ pub struct AccountStateChanged {
     pub reason: Option<String>,
 }
 
-/// One message a tick ingested into an inbox, as the desktop notification of
-/// #0009 reads it (P5-U8).
+/// One message a tick ingested into an inbox, as the new-mail notification
+/// reads it (#0009, P5-U8, PERSO-186).
 ///
 /// Two fields and no more: the notifier prints a sender and a subject, and a
 /// payload that carried a row id or a uid would invite a client to treat an
@@ -123,6 +123,37 @@ pub struct SyncCompleted {
     /// about nothing.
     #[serde(default)]
     pub new_inbox_mail: Vec<Arrival>,
+}
+
+/// New mail in an account's Inbox that the daemon judged worth a system
+/// notification, as `mail.arrived` carries it (PERSO-186).
+///
+/// Published once the account's post-tick judges are done with the tick that
+/// brought it in: the blocked senders and the mail hooks, either of which may
+/// have moved a message to Junk. What is left is unread, still in the Inbox,
+/// not from a blocked sender and not from the account's own address, and was
+/// above what the account held before the tick, so a first sync, a backlog
+/// drain or a renumbered mailbox announces nothing.
+///
+/// The presenter is elected as a reminder's is
+/// ([`crate::reminder::CalendarReminder::presenter`]): only the client on
+/// `presenter_connection` raises the notification, so a desktop app and a TUI
+/// open together notify once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct MailArrived {
+    /// The account whose Inbox the mail arrived in.
+    pub account: String,
+    /// The messages, in the order the tick ingested them; never empty.
+    pub arrivals: Vec<Arrival>,
+    /// The kind of the connection that raises the system notification:
+    /// [`crate::reminder::PRESENTER_GUI`] when a desktop app is connected,
+    /// else [`crate::reminder::PRESENTER_TUI`] when a TUI is, else none.
+    pub presenter: Option<String>,
+    /// That connection itself, as its `state.bootstrap` named it
+    /// (`connection`).
+    #[serde(default)]
+    pub presenter_connection: Option<u64>,
 }
 
 /// The `kind` a mutation-queue drain outside a tick travels as, when it rolled
@@ -223,6 +254,11 @@ pub const KIND_CONTACT_CHANGED: &str = "contact.changed";
 /// a sync that changed the cache, an answer to an invitation, a calendar shown
 /// or hidden. The payload is [`crate::calendar::CalendarChanged`].
 pub const KIND_CALENDAR_CHANGED: &str = "calendar.changed";
+
+/// The `kind` new mail worth a notification travels as (PERSO-186), once per
+/// tick that brought some and to every client. The payload is
+/// [`MailArrived`].
+pub const KIND_MAIL_ARRIVED: &str = "mail.arrived";
 
 /// The `kind` a reminder that fell due travels as (PERSO-255), once per
 /// firing and to every client. The payload is
@@ -424,4 +460,27 @@ pub struct ConfigInvalid {
     pub line: Option<u32>,
     /// One line a user can act on.
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The committed `mail.arrived` fixture decodes whole, presenter and all.
+    #[test]
+    fn the_mail_arrived_fixture_decodes() {
+        let frame: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/notification.mail_arrived.json"))
+                .expect("JSON");
+        assert_eq!(frame["params"]["kind"], KIND_MAIL_ARRIVED);
+        let arrived: MailArrived =
+            serde_json::from_value(frame["params"]["payload"].clone()).expect("mail.arrived");
+        assert_eq!(arrived.account, "tum");
+        assert_eq!(arrived.arrivals.len(), 1);
+        assert_eq!(
+            arrived.presenter.as_deref(),
+            Some(crate::reminder::PRESENTER_GUI)
+        );
+        assert_eq!(arrived.presenter_connection, Some(7));
+    }
 }
