@@ -534,6 +534,7 @@ The runner waits until the blocked senders and, for an account with hooks, the m
 What survives is one `mail.arrived` to every client with the presenter of that moment, elected as a reminder's is, and an info line `[arrivals] <account>: N new message(s) (presenter ...)` in the log; a tick whose mail was all filtered out logs at debug level only.
 A hook that runs long holds its tick's notification back for as long, its `timeout_secs` at most.
 A pass a client asked for with `--mailbox` while the account's runtime is up hands its new inbox mail to that runtime, which queues it and moves its completed-tick record, so the judges and the arrival runner treat it as a tick's; a dry run and the first sync of an account announce nothing.
+A configuration reload or a daemon restart while a tick's mail waits for the judges drops that tick's notification, since the queue retires with the runtime and the mailbox's top has already moved past the mail; announcing it unjudged would notify about mail a blocked sender's move is about to take to Junk, which is worse than a missed notification.
 
 ## Mail hooks
 
