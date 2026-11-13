@@ -29,14 +29,24 @@ pub(crate) struct NewUid {
 }
 
 /// The server's own `NO` or `BAD` to an `APPEND`, before the literal or
-/// after it, with its words: the error [`append`] answers when the server
-/// refused, as against one that broke the connection or never answered.
+/// after it: the error [`append`] answers when the server refused, as
+/// against one that broke the connection or never answered.
 #[derive(Debug)]
-pub(crate) struct AppendRefused(pub String);
+pub(crate) struct AppendRefused {
+    pub mailbox: String,
+    /// The server's words, its response code among them when imap-proto
+    /// does not parse it (RFC 5530's `[UNAVAILABLE]` and the like), or the
+    /// parsed code first when it does.
+    pub answer: String,
+}
 
 impl fmt::Display for AppendRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        write!(
+            f,
+            "the server refused the APPEND to '{}': {}",
+            self.mailbox, self.answer
+        )
     }
 }
 
@@ -85,10 +95,15 @@ where
                 information,
             } if *done == tag => {
                 if *status != Status::Ok {
-                    return Err(anyhow::Error::new(AppendRefused(format!(
-                        "the server refused the APPEND to '{mailbox}': {}",
-                        information.as_deref().unwrap_or("no reason given")
-                    ))));
+                    let words = information.as_deref().unwrap_or("no reason given");
+                    let answer = match code {
+                        Some(code) => format!("[{code:?}] {words}"),
+                        None => words.to_string(),
+                    };
+                    return Err(anyhow::Error::new(AppendRefused {
+                        mailbox: mailbox.to_string(),
+                        answer,
+                    }));
                 }
                 if !sent {
                     bail!("the server ended the APPEND to '{mailbox}' before it took the message");
@@ -188,6 +203,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(new, None);
+    }
+
+    /// A response code imap-proto does not know (RFC 5530's) stays in the
+    /// refusal's words, where the outbox reads it.
+    #[tokio::test]
+    async fn a_refusal_keeps_a_response_code_the_parser_does_not_know() {
+        let (mut session, _) = scripted::session(&[
+            "A0001 OK logged in\r\n",
+            "A0002 NO [UNAVAILABLE] try again later\r\n",
+        ])
+        .await;
+
+        let error = append(&mut session, "[Gmail]/Sent Mail", "(\\Seen)", b"x")
+            .await
+            .unwrap_err();
+        let refused = error.downcast_ref::<AppendRefused>().unwrap();
+        assert_eq!(refused.answer, "[UNAVAILABLE] try again later");
+        assert_eq!(refused.mailbox, "[Gmail]/Sent Mail");
     }
 
     /// A refusal before the continuation is an error, and the message is

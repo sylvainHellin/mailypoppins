@@ -267,12 +267,12 @@ impl OutboxRow {
     }
 }
 
-/// How long after its discard a row keeps trying to file its copy in the
-/// server's Sent folder before a refusal from the server ends it: a row is
-/// given up only when this has passed and the server itself answered the
-/// Sent search or the APPEND with a refusal ([`AppendOutcome::Refused`]), so
-/// a machine that was shut or offline for the week never gives one up
-/// (PERSO-304).
+/// How long a discarded row keeps trying to file its copy in the server's
+/// Sent folder once the server first refused it: counted from that first
+/// refusal after the discard ([`Envelope::first_refused`]), and ended only
+/// by another refusal ([`AppendOutcome::Refused`]), so a machine that was
+/// shut or offline never gives a row up on its first contact, and a server
+/// that is only unreachable never ends one (PERSO-304).
 pub const DISCARDED_FILING_SECS: i64 = 7 * 24 * 3600;
 
 /// The SMTP envelope a resumed submission needs, and what became of each
@@ -321,6 +321,10 @@ pub struct Envelope {
     /// `sent_pending_append` only to file its copy in the server's Sent
     /// folder, out of every outbox view ([`discard`], PERSO-304).
     pub discarded: Option<i64>,
+    /// When the server itself first refused the copy of a discarded row
+    /// after its discard ([`AppendOutcome::Refused`]), as a unix time: the
+    /// week [`DISCARDED_FILING_SECS`] runs from here.
+    pub first_refused: Option<i64>,
 }
 
 /// Two recipient strings that name the same recipient.
@@ -388,6 +392,9 @@ impl Envelope {
         if let Some(at) = self.discarded {
             out.push_str(&format!("\ndiscarded:{at}"));
         }
+        if let Some(at) = self.first_refused {
+            out.push_str(&format!("\ndiscard-refused:{at}"));
+        }
         out
     }
 
@@ -419,6 +426,7 @@ impl Envelope {
                     }
                 }
                 "discarded" => env.discarded = addr.parse().ok(),
+                "discard-refused" => env.first_refused = addr.parse().ok(),
                 _ => {}
             }
         }
@@ -656,7 +664,8 @@ pub enum AppendOutcome {
     Failed(String),
     /// The copy is not there because the server answered the Sent search or
     /// the APPEND with a refusal ([`SentRefused`]). The row stays retryable,
-    /// but a discarded one a week after its discard is given up.
+    /// but a discarded one refused again a week after the server's first
+    /// refusal is given up ([`DISCARDED_FILING_SECS`]).
     Refused(String),
 }
 
@@ -1314,14 +1323,26 @@ pub fn record_append(
             // Only the server's own refusal ends a discarded row, and only a
             // week after the discard: a machine that was off or offline has
             // not offered the copy to anyone.
-            let refused = matches!(outcome, AppendOutcome::Refused(_));
-            let discarded = row
-                .envelope
-                .as_ref()
-                .and_then(|envelope| envelope.discarded);
-            if refused && discarded.is_some_and(|at| now - at >= DISCARDED_FILING_SECS) {
-                give_up_filing(store, blobs, &row, err, now)?;
-                return Ok(OutboxState::Done);
+            if matches!(outcome, AppendOutcome::Refused(_)) && row.is_discarded() {
+                let mut envelope = row.envelope.clone().unwrap_or_default();
+                match envelope.first_refused {
+                    Some(first) if now - first >= DISCARDED_FILING_SECS => {
+                        give_up_filing(store, blobs, &row, err, now)?;
+                        return Ok(OutboxState::Done);
+                    }
+                    Some(_) => {}
+                    None => {
+                        // The week starts at the server's first refusal.
+                        envelope.first_refused = Some(now);
+                        store
+                            .conn()
+                            .execute(
+                                "UPDATE outbox SET envelope = ?2 WHERE id = ?1",
+                                rusqlite::params![id, envelope.encode()],
+                            )
+                            .context("recording the first refusal of a discarded copy")?;
+                    }
+                }
             }
             // `attempts` was already incremented by `begin_append_attempt`
             // before the request went out, so a failure only records what went
@@ -1763,8 +1784,8 @@ fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<bool> {
     Ok(true)
 }
 
-/// End a discarded row whose copy the server's Sent folder refused a week
-/// or more after the discard ([`DISCARDED_FILING_SECS`]): `done`, its bytes
+/// End a discarded row whose copy the server's Sent folder refused again a
+/// week or more after its first refusal ([`DISCARDED_FILING_SECS`]): `done`, its bytes
 /// released, the local copy [`keep_the_version`] filed left as the only
 /// one. The row keeps a note saying so, which keeps it in
 /// [`unfinished_rows`] and in the counts until the user discards it, as a
@@ -1783,8 +1804,8 @@ fn give_up_filing(
          from the server will not have it"
     );
     warn!(
-        "[outbox] row {} ({}) gave up filing its copy in {mailbox}, which the server refused a \
-         week after the discard ({err}); the version stays in the local store only",
+        "[outbox] row {} ({}) gave up filing its copy in {mailbox}, which the server still \
+         refused a week after it first did ({err}); the version stays in the local store only",
         row.id, row.message_id
     );
     let tx = store

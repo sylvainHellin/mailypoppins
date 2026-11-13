@@ -316,7 +316,7 @@ impl SeriesCancel {
     /// row is left to file it again: on an account that APPENDs no copy of
     /// its own (`save_to_sent = "never"`, or a server that files its own and
     /// did not take this one), and after a discarded row's copy was given
-    /// up (the server refused it a week or more after the discard, which its
+    /// up (the server still refused it a week after it first did, which its
     /// outbox row says until the user discards it). That is why the
     /// fallback is kept.
     fn only_uninvites(&self, roster: &BTreeSet<String>) -> bool {

@@ -267,7 +267,7 @@ impl SentMailbox for FakeSent {
         }
         if self.refuse_next.replace(false) {
             return Err(anyhow::Error::new(outbox::SentRefused(
-                "NO [UNAVAILABLE] Sent is locked".into(),
+                "NO search refused".into(),
             )));
         }
         Ok(self
@@ -292,7 +292,7 @@ impl SentMailbox for FakeSent {
         }
         if self.refuse_next.replace(false) {
             return Err(anyhow::Error::new(outbox::SentRefused(
-                "NO [OVERQUOTA] mailbox full".into(),
+                "NO APPEND refused".into(),
             )));
         }
         let uid = self.store(mailbox, &message_id);
@@ -2006,12 +2006,14 @@ fn a_discarded_version_on_an_account_that_appends_nothing_is_kept_locally() {
     assert_eq!(local_sent_copies(&store, mid).len(), 1);
 }
 
-/// Move the discard of row `id` back by `secs`, as a machine that was shut
-/// for that long finds it.
+/// Move the discard of row `id` back by `secs`, and the server's first
+/// refusal of its copy with it when there was one, as a machine that was
+/// shut for that long finds them.
 fn backdate_discard(store: &Store, id: i64, secs: i64) {
     let row = outbox::load(store, id).unwrap().unwrap();
     let mut envelope = row.envelope.unwrap();
     envelope.discarded = envelope.discarded.map(|at| at - secs);
+    envelope.first_refused = envelope.first_refused.map(|at| at - secs);
     store
         .conn()
         .execute(
@@ -2053,8 +2055,39 @@ async fn a_discarded_version_whose_server_was_never_reached_waits_for_it() {
     assert_eq!(sent.copies(mid), 1);
 }
 
+/// A machine shut for eight days after a discard does not give the row up
+/// on its first contact with a server that refuses the copy: the week runs
+/// from that first refusal.
+#[tokio::test]
+async fn a_discarded_version_refused_after_eight_days_shut_is_not_given_up_at_once() {
+    let account = Account::new();
+    let mid = "<update-11@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    let (store, blobs) = account.open();
+    assert!(outbox::discard(&store, &blobs, id).unwrap());
+    backdate_discard(&store, id, 8 * 24 * 3600);
+
+    let mut sent = FakeSent::new();
+    *sent.refuse_next.borrow_mut() = true;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+        .await
+        .unwrap();
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    assert_eq!(row.state, OutboxState::SentPendingAppend, "not given up");
+    assert!(row.envelope.unwrap().first_refused.is_some());
+
+    // Refused again a week after that first refusal: given up.
+    backdate_discard(&store, id, outbox::DISCARDED_FILING_SECS + 1);
+    *sent.refuse_next.borrow_mut() = true;
+    let later = outbox::unix_now() + outbox::BACKOFF_MAX_SECS;
+    outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
+        .await
+        .unwrap();
+    assert_eq!(state_of(&account, id), OutboxState::Done);
+}
+
 /// A discarded row whose copy the server itself refuses is given up only
-/// once a week has passed since the discard: the row ends with a note that
+/// once a week has passed since its first refusal: the row ends with a note that
 /// the version exists only on this machine, which `mp outbox list` shows
 /// until the user discards it for good; nothing is tried again.
 #[tokio::test]
@@ -2065,7 +2098,7 @@ async fn a_discarded_version_the_server_refuses_for_a_week_is_given_up_with_a_no
     let (store, blobs) = account.open();
     assert!(outbox::discard(&store, &blobs, id).unwrap());
 
-    // Refused within the week: the row waits.
+    // Refused: the week starts, and the row waits.
     let mut sent = FakeSent::new();
     *sent.refuse_next.borrow_mut() = true;
     outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
@@ -2073,7 +2106,8 @@ async fn a_discarded_version_the_server_refuses_for_a_week_is_given_up_with_a_no
         .unwrap();
     assert_eq!(state_of(&account, id), OutboxState::SentPendingAppend);
 
-    // Refused a week on, by the dedup search the earlier attempt arms.
+    // Refused a week after that, by the dedup search the earlier attempt
+    // arms.
     backdate_discard(&store, id, outbox::DISCARDED_FILING_SECS + 1);
     *sent.refuse_next.borrow_mut() = true;
     let later = outbox::unix_now() + outbox::BACKOFF_MAX_SECS;
