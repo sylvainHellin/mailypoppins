@@ -4,7 +4,6 @@ mod batch;
 #[path = "../../tests/support/fake_imap.rs"]
 pub(crate) mod fake_imap;
 mod fetch;
-pub mod login_gate;
 mod ops;
 pub mod pool;
 pub mod search;
@@ -17,7 +16,6 @@ pub use fetch::{
     fetch_new_raw_on_session, fetch_raw_by_message_id, fetch_uids_on_session,
     search_stubs_on_session, vanished_uids,
 };
-pub use login_gate::{login_rejected, LoginRejected};
 pub use ops::{
     add_flag_on_server, delete_email_on_server, mark_read_on_server, mark_unread_on_server,
     move_email_on_server, remove_flag_on_server,
@@ -47,6 +45,8 @@ use futures::io::{AsyncRead, AsyncWrite};
 use log::info;
 
 use crate::config::ImapConfig;
+use crate::login_gate::{self, login_rejected, Login, LoginRejected};
+use mp_protocol::account::RejectedLogin;
 
 pub type ImapSession = async_imap::Session<ImapStream>;
 
@@ -131,7 +131,7 @@ impl fmt::Debug for ImapStream {
 /// Log an IMAP client in with the account's password.
 ///
 /// A `NO` the server meant about the password is a [`LoginRejected`]
-/// ([`login_gate::is_rejection`]); every other failure, a `BAD`, a lost
+/// ([`is_rejection`]); every other failure, a `BAD`, a lost
 /// connection, a `NO` with any other response code, stays a plain error that
 /// the pool retries.
 async fn authenticate_client(
@@ -147,11 +147,54 @@ async fn authenticate_client(
 /// The error a failed LOGIN surfaces as.
 fn login_error(error: async_imap::error::Error) -> anyhow::Error {
     match &error {
-        async_imap::error::Error::No(answer) if login_gate::is_rejection(answer) => {
-            LoginRejected::new(error.to_string()).into()
+        async_imap::error::Error::No(answer) if is_rejection(answer) => {
+            LoginRejected::new(RejectedLogin::Imap, error.to_string()).into()
         }
         _ => anyhow!("IMAP login failed: {error}"),
     }
+}
+
+/// The RFC 5530 response codes that make a `NO` to LOGIN an answer about the
+/// credential: the password or the user is wrong, the user may not act as
+/// the one named, or the password expired.
+const CREDENTIAL_CODES: [&str; 3] = ["AUTHENTICATIONFAILED", "AUTHORIZATIONFAILED", "EXPIRED"];
+
+/// Whether a `NO` to LOGIN, as async-imap renders it, refuses the password.
+///
+/// async-imap renders the answer as `code: {code:?}, info: {info:?}`. A code
+/// imap-proto parses is the `Some(..)` of the first half (`ALERT`, which
+/// Gmail sends to a correct password over its connection and bandwidth
+/// limits, renders as `code: Some(Alert), info: Some("Too many ...")`); it
+/// does not know RFC 5530's, which stay at the start of the text
+/// (`code: None, info: Some("[AUTHENTICATIONFAILED] ...")`).
+///
+/// A `NO` without a code (Exchange's `NO LOGIN failed.`) refuses, and so
+/// does one whose code is `AUTHENTICATIONFAILED`, `AUTHORIZATIONFAILED` or
+/// `EXPIRED`, ignoring case as IMAP atoms do. Any other code, the temporary
+/// ones (`UNAVAILABLE`, `INUSE`, `LIMIT`, `SERVERBUG`), `ALERT`,
+/// `CONTACTADMIN` or one nobody registered, says nothing certain about the
+/// password: the login is retried as any failed connection is, and nothing
+/// is recorded.
+fn is_rejection(answer: &str) -> bool {
+    let Some(rest) = answer.strip_prefix("code: None, info: ") else {
+        // A code imap-proto parsed, or an answer of an unknown shape: no
+        // certain answer about the password.
+        return false;
+    };
+    let Some(text) = rest
+        .strip_prefix("Some(\"")
+        .and_then(|text| text.strip_suffix("\")"))
+    else {
+        // `info: None`: a bare `NO`.
+        return rest == "None";
+    };
+    let Some(code) = text.strip_prefix('[') else {
+        return true;
+    };
+    let code = code.split([']', ' ']).next().unwrap_or_default();
+    CREDENTIAL_CODES
+        .iter()
+        .any(|credential| code.eq_ignore_ascii_case(credential))
 }
 
 /// How long the TCP connect of a new IMAP session may take before it is given
@@ -170,7 +213,7 @@ fn login_error(error: async_imap::error::Error) -> anyhow::Error {
 const CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Open an authenticated session, unless the server refused this login with
-/// this password within the hold ([`login_gate`], PERSO-296).
+/// this password within the hold ([`crate::login_gate`], PERSO-296).
 ///
 /// Every login the daemon makes goes through here: the pool, the IDLE
 /// watcher, the Sent mailbox and the one-off sessions of the message methods.
@@ -179,16 +222,19 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// login that succeeds clears whatever the list held about its server and
 /// user.
 pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
-    if let Some(refused) = login_gate::refused(imap_config) {
+    let login = Login::Imap(imap_config.login());
+    if let Some(refused) = login_gate::refused(&login, &imap_config.password) {
         return Err(refused.into());
     }
     match dial_imap_session(imap_config).await {
         Ok(session) => {
-            login_gate::accepted(imap_config);
+            login_gate::accepted(&login);
             Ok(session)
         }
         Err(e) => match login_rejected(&e) {
-            Some(rejected) => Err(login_gate::record(imap_config, rejected).into()),
+            Some(rejected) => {
+                Err(login_gate::record(&login, &imap_config.password, rejected).into())
+            }
             None => Err(e),
         },
     }
@@ -289,6 +335,60 @@ pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Resul
 mod tests {
     use super::*;
     use async_imap::error::Error;
+
+    /// The answers async-imap renders a tagged `NO` to LOGIN as: the code is
+    /// `None` because imap-proto does not parse RFC 5530's, and they sit at
+    /// the start of the text.
+    fn no(info: &str) -> String {
+        format!("code: None, info: Some({info:?})")
+    }
+
+    /// `NO [ALERT] ...`: imap-proto parses `ALERT`, so it is the code and the
+    /// text is what follows it.
+    fn alert(info: &str) -> String {
+        format!("code: Some(Alert), info: Some({info:?})")
+    }
+
+    /// A `NO` without a response code, Exchange's `NO LOGIN failed.`, and the
+    /// three RFC 5530 codes about the credential refuse the password,
+    /// whatever their case.
+    #[test]
+    fn a_no_without_a_code_or_with_a_credential_code_refuses_the_password() {
+        for refusal in [
+            no("LOGIN failed."),
+            "code: None, info: None".to_string(),
+            no("[AUTHENTICATIONFAILED] Invalid credentials (Failure)"),
+            no("[AUTHORIZATIONFAILED] No such authorization-ID"),
+            no("[EXPIRED] That password isn't valid any more"),
+            no("[authenticationFailed] LOGIN failed."),
+            no("[EXPIRED]"),
+        ] {
+            assert!(is_rejection(&refusal), "{refusal}");
+        }
+    }
+
+    /// Any other response code, one imap-proto parses (`ALERT`, which Gmail
+    /// sends to a correct password over its connection and bandwidth limits)
+    /// or one it leaves at the start of the text (RFC 5530's temporary codes,
+    /// `CONTACTADMIN`, a code nobody registered), is no answer about the
+    /// password, so it is not recorded.
+    #[test]
+    fn a_no_with_any_other_code_does_not_refuse_the_password() {
+        for passing in [
+            alert("Too many simultaneous connections. (Failure)"),
+            alert("Account exceeded command or bandwidth limits. (Failure)"),
+            no("[UNAVAILABLE] User's backend down for maintenance"),
+            no("[INUSE] Mailbox in use"),
+            no("[LIMIT] Too many connections"),
+            no("[SERVERBUG] Internal error"),
+            no("[CONTACTADMIN] Ask your administrator"),
+            no("[unavailable] try again later"),
+            no("[X-SOMETHING-NEW] LOGIN failed."),
+            no("[AUTHENTICATIONFAILED-ISH] LOGIN failed."),
+        ] {
+            assert!(!is_rejection(&passing), "{passing}");
+        }
+    }
 
     /// Only a `NO` about the password is a [`LoginRejected`]; a `NO` with
     /// another code, a `BAD` and a lost connection stay the plain errors the

@@ -53,6 +53,7 @@ fn export_into(dir: &Path) -> usize {
         account::TokenState,
         account::AccountCredential,
         account::AccountCredentials,
+        account::RejectedLogin,
         attachment::MessageAttachment,
         attachment::MessageAttachments,
         calendar::EventAttendee,

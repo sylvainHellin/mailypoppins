@@ -18,6 +18,7 @@ import messagesFx from "../../fixtures/messages.json";
 import signaturesFx from "../../fixtures/signatures.json";
 import type {
   AccountCredentials,
+  RejectedLogin,
   RefusedRebuild,
   AgendaEvent,
   BlockedSenders,
@@ -368,8 +369,8 @@ export const mock = {
   configInvalid: false,
   /** Every `config_set_password`, as fixture.rs journals it: the value redacted. */
   passwords: [] as { account: string; kind: string; value: string }[],
-  /** The accounts whose IMAP login the server rejected (PERSO-296): `account_credentials` says `login_rejected`, and an IMAP `config_set_password` lets go of it, as the daemon forgets the refusal. */
-  loginRejected: [] as string[],
+  /** The logins the server rejected (PERSO-296): `account_credentials` lists them in `rejected_logins`, and a `config_set_password` of the account lets go of them, as the daemon forgets its refusals. */
+  loginRejected: [] as { account: string; login: RejectedLogin }[],
   /** What a fixture IMAP server's `config_probe` lists, null for `PROBE_IMAP_MAILBOXES`. */
   probeListing: null as string[] | null,
   /** What `subscribe_events` and `bootstrap` answer; `config_add_account` and `config_init` add to it. */
@@ -2331,7 +2332,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
             imap_password: password ? stored("imap") : null,
             token: auth === "graph" ? ("valid" as const) : null,
             missing_scopes: [],
-            login_rejected: password && mock.loginRejected.includes(a.name),
+            rejected_logins: password ? mock.loginRejected.filter((r) => r.account === a.name).map((r) => r.login) : [],
           };
         }),
       } satisfies AccountCredentials;
@@ -2434,7 +2435,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         throw { kind: "not_found", message: `no account named ${account} is configured`, code: -32005 };
       }
       mock.passwords.push({ account, kind, value: REDACTED });
-      if (kind === "imap") mock.loginRejected = mock.loginRejected.filter((a) => a !== account);
+      mock.loginRejected = mock.loginRejected.filter((r) => r.account !== account);
       return { stored: true, account, kind, key: `${kind}-password-${account}` };
     }
     case "editor_setting_get":

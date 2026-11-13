@@ -211,7 +211,9 @@ impl Method for SyncPass {
             // refused within the hour (PERSO-296): the user may have fixed the
             // account on the server's side, and one login per request is
             // nowhere near a lockout. The TUI starts one at every launch.
-            crate::imap_client::login_gate::forget(&crate::config::ImapLogin::of(&request.account));
+            if let Some(login) = crate::login_gate::Login::of_mail(&request.account) {
+                crate::login_gate::forget(&login);
+            }
             let (id, handle) = self.operations.start(
                 ConnectionId(ctx.connection_id),
                 self.spec.cancel_scope,

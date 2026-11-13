@@ -27,6 +27,7 @@ pub mod graph_ops;
 pub mod imap_client;
 pub mod ingest;
 pub mod invite;
+pub mod login_gate;
 pub mod mutations;
 pub mod ops;
 pub mod outbox;

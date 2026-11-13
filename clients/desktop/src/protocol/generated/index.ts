@@ -108,6 +108,7 @@ export type { OutboxRow } from "./OutboxRow";
 export type { Progress } from "./Progress";
 export type { RecipientOutcome } from "./RecipientOutcome";
 export type { RefusedRebuild } from "./RefusedRebuild";
+export type { RejectedLogin } from "./RejectedLogin";
 export type { ReminderDismissed } from "./ReminderDismissed";
 export type { ReminderSnoozed } from "./ReminderSnoozed";
 export type { Request } from "./Request";

@@ -373,9 +373,16 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
     );
     // A stored password is the user's answer to a refused login (PERSO-296),
     // so the server is asked again at once, even with the password it
-    // refused: the user may have fixed the account on the server's side. The
-    // SMTP password counts too, since the IMAP login falls back to it.
-    crate::imap_client::login_gate::forget(&crate::config::ImapLogin::of(account));
+    // refused: the user may have fixed the account on the server's side.
+    // Either password lets go of both logins, since the IMAP login falls back
+    // to the SMTP password. The account's drain is asked for at once, so the
+    // messages and changes held behind a refusal go out now rather than at
+    // the next tick, and the health check drops the refusal now.
+    crate::login_gate::forget_account(account);
+    if let Some(runtime) = family.runtimes.get(&account.name) {
+        runtime.request_drain();
+    }
+    family.diagnostics.refresh();
 
     Ok(command(
         family,

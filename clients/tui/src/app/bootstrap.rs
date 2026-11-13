@@ -198,7 +198,7 @@ impl App {
         let moved: Vec<usize> = (0..self.accounts.len())
             .filter(|&index| {
                 let name = format!("account:{}", self.accounts[index].account_config.name);
-                self.login_rejected(index) || self.held_checks.contains_key(&name)
+                self.login_rejected(index).is_some() || self.held_checks.contains_key(&name)
             })
             .collect();
         for index in moved {

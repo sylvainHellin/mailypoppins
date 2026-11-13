@@ -119,6 +119,7 @@ use crate::outbox::{backoff_secs, unix_now};
 use crate::store::write::MutatedRow;
 use crate::store::{BlobStore, Store};
 use crate::types::MessageFlags;
+use mp_protocol::account::RejectedLogin;
 
 /// How many times the drain attempts a queued op before it gives up, rolls the
 /// local state back and parks the row as `failed`.
@@ -955,7 +956,7 @@ pub struct DrainResult {
 /// counted and left. A successful op retires the row; a failure bumps its
 /// attempt count and, once the budget is spent, rolls the local state back and
 /// parks the row as `failed`. A refused login
-/// ([`crate::imap_client::LoginRejected`]) is no failure of the op: the row
+/// ([`crate::login_gate::LoginRejected`]) is no failure of the op: the row
 /// is counted as still open with no attempt spent and its retry time left
 /// alone, for as long as the login is refused, and records the refusal as
 /// its `last_error` (PERSO-296).
@@ -1067,7 +1068,7 @@ pub(crate) async fn drain<E: OpExecutor>(
                 }
                 result.completed += 1;
             }
-            Err(e) if crate::imap_client::login_rejected(&e).is_some() => {
+            Err(e) if crate::login_gate::login_rejected(&e).is_some() => {
                 // The server refused the login, not the op (PERSO-296): the
                 // op was never asked about, and the gate holds the refusal
                 // for up to an hour, longer than the budget lasts. The row
@@ -1523,7 +1524,7 @@ pub struct OlderOps<'a> {
     ceiling: Duration,
     nudge: &'a dyn Fn(),
     turn_held: Option<&'a dyn Fn() -> bool>,
-    login_refused: Option<&'a dyn Fn() -> bool>,
+    login_refused: Option<&'a dyn Fn() -> Option<RejectedLogin>>,
 }
 
 impl<'a> OlderOps<'a> {
@@ -1559,11 +1560,14 @@ impl<'a> OlderOps<'a> {
         OlderOps { ceiling, ..self }
     }
 
-    /// Wait for no queued op while `login_refused` says the server refused
-    /// the account's login (PERSO-296): every drain fails at that login
-    /// until the password is set, so the wait would only run out its
+    /// Wait for no queued op while `login_refused` names a login of the
+    /// account's the server refused (PERSO-296): every drain fails at that
+    /// login until the user acts, so the wait would only run out its
     /// patience, and the caller is told what to do instead.
-    pub fn unless_login_refused(self, login_refused: &'a dyn Fn() -> bool) -> OlderOps<'a> {
+    pub fn unless_login_refused(
+        self,
+        login_refused: &'a dyn Fn() -> Option<RejectedLogin>,
+    ) -> OlderOps<'a> {
         OlderOps {
             login_refused: Some(login_refused),
             ..self
@@ -1682,14 +1686,14 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
         let held = ahead
             .iter()
             .find(|op| op.state == STATE_QUEUED)
-            .filter(|_| older.login_refused.is_some_and(|refused| refused()));
-        if let Some(queued) = held {
+            .and_then(|queued| Some((queued, older.login_refused.and_then(|refused| refused())?)));
+        if let Some((queued, login)) = held {
             anyhow::bail!(
                 "an earlier change to this message (op {}, {}) is still queued: {}; nothing \
-                 was changed, try again once the password is set",
+                 was changed, try again once that is done",
                 queued.id,
                 queued.kind,
-                mp_client::format::login_rejected_detail(&row.account)
+                mp_client::format::login_rejected_detail(&row.account, login)
             );
         }
         if let Some(refused) = ahead.iter().find(|op| op.attempts > 0) {
@@ -2511,7 +2515,10 @@ mod tests {
         let queued_at = row_by_id(&fx.store, star).unwrap().unwrap().updated;
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS * 2 {
-            let refused = crate::imap_client::LoginRejected::new("no response: refused".into());
+            let refused = crate::login_gate::LoginRejected::new(
+                mp_protocol::account::RejectedLogin::Imap,
+                "no response: refused".into(),
+            );
             let mut exec = FakeExecutor::scripted(vec![Err(refused.into())]);
             let r = drain(
                 &fx.store,

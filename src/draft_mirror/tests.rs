@@ -465,7 +465,11 @@ struct RefusedLogin;
 
 impl OpExecutor for RefusedLogin {
     async fn execute(&mut self, _op: &ServerOp) -> anyhow::Result<()> {
-        Err(crate::imap_client::LoginRejected::new("no response: LOGIN failed.".into()).into())
+        Err(crate::login_gate::LoginRejected::new(
+            mp_protocol::account::RejectedLogin::Imap,
+            "no response: LOGIN failed.".into(),
+        )
+        .into())
     }
 
     async fn execute_draft(&mut self, _store: &Store, op: &ServerOp) -> anyhow::Result<()> {

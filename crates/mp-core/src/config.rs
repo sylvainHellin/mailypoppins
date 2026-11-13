@@ -1455,14 +1455,28 @@ impl SmtpConfig {
             }
         }
         let password = get_secret(&format!("smtp-password-{}", account.name))?;
+        let ServerLogin {
+            host,
+            port,
+            username,
+        } = ServerLogin::smtp(account);
         Ok(Self {
-            host: account.smtp.host.clone(),
-            port: account.smtp.port,
-            username: account.smtp.username.clone(),
+            host,
+            port,
+            username,
             password,
             default_from: account.default_from.clone(),
             accept_invalid_certs: account.smtp.accept_invalid_certs,
         })
+    }
+
+    /// The server and user this configuration logs in as.
+    pub fn login(&self) -> ServerLogin {
+        ServerLogin {
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+        }
     }
 }
 
@@ -1486,11 +1500,11 @@ impl ImapConfig {
         let smtp_key = format!("smtp-password-{}", account.name);
         let password = get_secret(&imap_key).or_else(|_| get_secret(&smtp_key))?;
 
-        let ImapLogin {
+        let ServerLogin {
             host,
             port,
             username,
-        } = ImapLogin::of(account);
+        } = ServerLogin::imap(account);
         Ok(Self {
             host,
             port,
@@ -1503,8 +1517,8 @@ impl ImapConfig {
     }
 
     /// The server and user this configuration logs in as.
-    pub fn login(&self) -> ImapLogin {
-        ImapLogin {
+    pub fn login(&self) -> ServerLogin {
+        ServerLogin {
             host: self.host.clone(),
             port: self.port,
             username: self.username.clone(),
@@ -1512,25 +1526,35 @@ impl ImapConfig {
     }
 }
 
-/// The server and user an account's IMAP login goes to, without the password:
-/// what the daemon's list of refused logins is looked up by from a place that
-/// reads no secret, the health check and `account.credentials` (PERSO-296).
+/// The server and user an account's IMAP or SMTP login goes to, without the
+/// password: what the daemon's list of refused logins is looked up by from a
+/// place that reads no secret, the health check and `account.credentials`
+/// (PERSO-296).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ImapLogin {
+pub struct ServerLogin {
     pub host: String,
     pub port: u16,
     pub username: String,
 }
 
-impl ImapLogin {
+impl ServerLogin {
     /// The login [`ImapConfig::load`] makes for `account`: the username and
     /// the host each fall back to the SMTP one when the IMAP one is empty.
-    pub fn of(account: &AccountConfig) -> Self {
+    pub fn imap(account: &AccountConfig) -> Self {
         let pick = |imap: &str, smtp: &str| if imap.is_empty() { smtp } else { imap }.to_string();
         Self {
             host: pick(&account.imap.host, &account.smtp.host),
             port: account.imap.port,
             username: pick(&account.imap.username, &account.smtp.username),
+        }
+    }
+
+    /// The login [`SmtpConfig::load`] makes for `account`.
+    pub fn smtp(account: &AccountConfig) -> Self {
+        Self {
+            host: account.smtp.host.clone(),
+            port: account.smtp.port,
+            username: account.smtp.username.clone(),
         }
     }
 }

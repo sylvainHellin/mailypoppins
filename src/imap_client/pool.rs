@@ -350,7 +350,7 @@ async fn connect_with_backoff(config: &ImapConfig) -> Result<(ImapSession, Serve
                 return Ok((session, caps));
             }
             Err(e) => {
-                if super::login_rejected(&e).is_some() {
+                if crate::login_gate::login_rejected(&e).is_some() {
                     return Err(e);
                 }
                 let Some(pause) = CONNECT_BACKOFF.get(attempt).copied() else {
@@ -506,7 +506,7 @@ mod tests {
                 err.to_string().contains(shown),
                 "the server's answer ({answer}) is what surfaces: {err}"
             );
-            assert!(super::super::login_rejected(&err).is_none(), "{err}");
+            assert!(crate::login_gate::login_rejected(&err).is_none(), "{err}");
             assert_eq!(
                 server.logins(),
                 1 + CONNECT_BACKOFF.len(),

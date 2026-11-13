@@ -1,11 +1,13 @@
-//! An account whose IMAP login the server rejected (PERSO-296), in the TUI.
+//! An account whose IMAP or SMTP login the server rejected (PERSO-296), in
+//! the TUI.
 //!
 //! The daemon holds the password it was refused and says so twice: the
 //! `account:<name>` health check turns `warn`, published as a
 //! `diagnostic.check_changed`, and `account.credentials` answers
-//! `login_rejected`. The TUI reads the second when the first moves, and marks
-//! the account in the sidebar and the account picker with the sentence
-//! `mp daemon health` prints, which names the command that sets the password.
+//! `rejected_logins`. The TUI reads the second when the first moves, and
+//! marks the account in the sidebar and the account picker with the sentence
+//! `mp daemon health` prints, which names the login and the command that
+//! fixes it.
 //!
 //! The daemon is a door that answers `account.credentials` from a flag the
 //! row flips, and `state.bootstrap` for the resync row.
@@ -16,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use mp_protocol::account::RejectedLogin;
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::state::{AccountSnapshot, AccountState as WireAccountState, Bootstrap, Snapshot};
 use mp_protocol::EventEnvelope;
@@ -26,10 +29,11 @@ use crate::events::{drain, Incoming};
 const INSTANCE: &str = "login-rejected-tests";
 const ACCOUNT: &str = "home";
 
-/// The daemon: `account.credentials` answers `login_rejected` from `rejected`.
+/// The daemon: `account.credentials` answers `rejected_logins` from
+/// `rejected`.
 #[derive(Clone, Default)]
 struct Daemon {
-    rejected: Arc<Mutex<bool>>,
+    rejected: Arc<Mutex<Option<RejectedLogin>>>,
     diagnostics: Arc<Mutex<Vec<HealthCheck>>>,
     calls: Arc<Mutex<Vec<String>>>,
 }
@@ -45,7 +49,7 @@ impl crate::queries::Queries for Daemon {
                 "imap_password": true,
                 "token": null,
                 "missing_scopes": [],
-                "login_rejected": *self.rejected.lock().unwrap(),
+                "rejected_logins": self.rejected.lock().unwrap().iter().collect::<Vec<_>>(),
             }]})),
             "state.bootstrap" => {
                 let mut bootstrap = bootstrap(5);
@@ -104,15 +108,16 @@ fn app() -> (App, Daemon) {
     app.session = Some(crate::session::Session::serving(move || served));
     app.pending_actions.clear();
     app.refresh_credentials(0);
-    assert!(!rejected(&app));
+    assert_eq!(rejected(&app), None);
     (app, daemon)
 }
 
-/// The `account:home` check as the daemon publishes it.
+/// The `account:home` check as the daemon publishes it, with the IMAP login
+/// rejected unless it is `ok`.
 fn account_check(status: CheckStatus) -> HealthCheck {
     let detail = match status {
         CheckStatus::Ok => "serving".to_string(),
-        _ => mp_client::format::login_rejected_detail(ACCOUNT),
+        _ => mp_client::format::login_rejected_detail(ACCOUNT, RejectedLogin::Imap),
     };
     HealthCheck {
         name: format!("account:{ACCOUNT}"),
@@ -130,10 +135,10 @@ fn check_changed(revision: u64, check: &HealthCheck) -> EventEnvelope {
     }
 }
 
-fn rejected(app: &App) -> bool {
+fn rejected(app: &App) -> Option<RejectedLogin> {
     app.accounts[0]
         .credentials
-        .is_some_and(|credentials| credentials.login_rejected)
+        .and_then(|credentials| credentials.rejected_login)
 }
 
 /// The whole frame, row by row.
@@ -164,14 +169,18 @@ fn a_rejected_login_marks_the_account_until_its_check_clears() {
     let _data = mp_core::config::test_env::TestDataDir::new();
     let (mut app, daemon) = app();
 
-    *daemon.rejected.lock().unwrap() = true;
+    *daemon.rejected.lock().unwrap() = Some(RejectedLogin::Imap);
     app.apply_event(&check_changed(2, &account_check(CheckStatus::Warn)));
-    assert!(rejected(&app), "the check's change reads the credentials");
+    assert_eq!(
+        rejected(&app),
+        Some(RejectedLogin::Imap),
+        "the check's change reads the credentials"
+    );
 
     let screen = drawn(&mut app);
     assert!(screen.contains("login rejected"), "{screen}");
     assert!(
-        screen.contains("the server rejected the"),
+        screen.contains("the server rejected the IMAP"),
         "the sidebar says why: {screen}"
     );
     assert!(
@@ -187,11 +196,34 @@ fn a_rejected_login_marks_the_account_until_its_check_clears() {
     );
     app.overlay = Overlay::None;
 
-    *daemon.rejected.lock().unwrap() = false;
+    *daemon.rejected.lock().unwrap() = None;
     app.apply_event(&check_changed(3, &account_check(CheckStatus::Ok)));
-    assert!(!rejected(&app), "the recovery reads them again");
+    assert_eq!(rejected(&app), None, "the recovery reads them again");
     let screen = drawn(&mut app);
     assert!(!screen.contains("login rejected"), "{screen}");
+}
+
+/// A rejected SMTP login marks the account the same way, and the sidebar
+/// names the SMTP password and the command that sets it.
+#[test]
+fn a_rejected_smtp_login_names_the_smtp_password() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let (mut app, daemon) = app();
+
+    *daemon.rejected.lock().unwrap() = Some(RejectedLogin::Smtp);
+    app.apply_event(&check_changed(2, &account_check(CheckStatus::Warn)));
+    assert_eq!(rejected(&app), Some(RejectedLogin::Smtp));
+
+    let screen = drawn(&mut app);
+    assert!(screen.contains("login rejected"), "{screen}");
+    assert!(
+        screen.contains("the server rejected the SMTP"),
+        "the sidebar names the login: {screen}"
+    );
+    assert!(
+        screen.contains("set-password -A home smtp"),
+        "and the way out: {screen}"
+    );
 }
 
 /// A check about something else reads nothing: only an account's own check
@@ -221,7 +253,7 @@ fn a_resync_reads_the_credentials_of_an_account_whose_login_moved() {
     let (mut app, daemon) = app();
     let (sender, events) = mpsc::channel();
 
-    *daemon.rejected.lock().unwrap() = true;
+    *daemon.rejected.lock().unwrap() = Some(RejectedLogin::Imap);
     *daemon.diagnostics.lock().unwrap() = vec![account_check(CheckStatus::Warn)];
     sender
         .send(Incoming::Resync {
@@ -230,9 +262,12 @@ fn a_resync_reads_the_credentials_of_an_account_whose_login_moved() {
         })
         .unwrap();
     drain(&mut app, &daemon, &events);
-    assert!(rejected(&app), "the snapshot's check reads the credentials");
+    assert!(
+        rejected(&app).is_some(),
+        "the snapshot's check reads the credentials"
+    );
 
-    *daemon.rejected.lock().unwrap() = false;
+    *daemon.rejected.lock().unwrap() = None;
     daemon.diagnostics.lock().unwrap().clear();
     sender
         .send(Incoming::Resync {
@@ -241,8 +276,9 @@ fn a_resync_reads_the_credentials_of_an_account_whose_login_moved() {
         })
         .unwrap();
     drain(&mut app, &daemon, &events);
-    assert!(
-        !rejected(&app),
+    assert_eq!(
+        rejected(&app),
+        None,
         "a rejection the snapshot no longer reports is read again"
     );
 }

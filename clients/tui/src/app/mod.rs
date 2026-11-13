@@ -992,7 +992,7 @@ impl App {
 
     /// An `account:<name>` health check moved: the daemon refuses or accepts
     /// the account's login again (PERSO-296), which `account.credentials`
-    /// answers as `login_rejected`, so the account's answer is read again.
+    /// answers as `rejected_logins`, so the account's answer is read again.
     /// The check's detail is the daemon's sentence and is not parsed here.
     /// A check about anything else reads nothing.
     pub fn on_account_check(&mut self, check: &str) {
@@ -1008,13 +1008,13 @@ impl App {
         }
     }
 
-    /// Whether the server rejected the login of the account at `index`, as
-    /// the daemon last answered (PERSO-296).
-    pub fn login_rejected(&self, index: usize) -> bool {
+    /// The login of the account at `index` the server rejected, as the
+    /// daemon last answered (PERSO-296).
+    pub fn login_rejected(&self, index: usize) -> Option<mp_protocol::account::RejectedLogin> {
         self.accounts
             .get(index)
             .and_then(|acct| acct.credentials)
-            .is_some_and(|credentials| credentials.login_rejected)
+            .and_then(|credentials| credentials.rejected_login)
     }
 
     /// [`AccountState::has_imap`] for the active account.

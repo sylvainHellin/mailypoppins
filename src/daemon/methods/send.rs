@@ -336,11 +336,16 @@ enum Work {
 impl Work {
     /// The account this work sends from, which is what a hold is listed under.
     fn account(&self) -> &str {
+        &self.config().name
+    }
+
+    /// The configuration of the account this work sends from.
+    fn config(&self) -> &AccountConfig {
         match self {
             Work::Draft { account, .. }
             | Work::Approved { account, .. }
             | Work::Invite { account, .. }
-            | Work::Retry { account, .. } => &account.name,
+            | Work::Retry { account, .. } => account,
         }
     }
 }
@@ -841,6 +846,13 @@ async fn perform(
     runtimes: &crate::daemon::server::RuntimeTable,
 ) {
     handle.set_running();
+    // A send the user started asks the server again about a login it refused
+    // within the hour (PERSO-296): the user may have fixed the account on the
+    // server's side, and one login per send is nowhere near a lockout. It
+    // runs when the send does, after any hold.
+    if let Some(login) = crate::login_gate::Login::of_send(work.config()) {
+        crate::login_gate::forget(&login);
+    }
     match work {
         Work::Draft {
             account,

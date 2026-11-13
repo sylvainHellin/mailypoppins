@@ -168,7 +168,7 @@ pub fn credentials(
                 imap_password,
                 token,
                 missing_scopes: crate::calendar_backend::missing_scopes(account),
-                login_rejected: crate::daemon::diagnostics::login_refused(account),
+                rejected_logins: crate::login_gate::rejected_logins(account),
             }
         })
         .collect();

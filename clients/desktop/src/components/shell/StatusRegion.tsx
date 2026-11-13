@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { bannerFor, type AppState } from "@/app/state";
 import { checkAccount, checkLabel, loginRejected, shownChecks } from "@/app/health";
 import { openConfig } from "@/app/interop";
-import type { HealthCheck } from "@/protocol/types";
+import type { HealthCheck, RejectedLogin } from "@/protocol/types";
 import { queueDepth, queueText } from "@/app/outbox";
 import { useDispatch } from "@/app/store";
 import { LIFETIME_MS } from "@/app/activity";
@@ -34,12 +34,13 @@ function NoticeLine({ text }: { text: string }) {
  * One health check that is not ok, a line under the connection banner: the
  * icon carries the level, the text stays calm, and `config_loaded` offers the
  * file, which is where a warning about it is fixed. An account whose login
- * the server rejected (`passwordFor`, PERSO-296) offers the IMAP password
- * dialog, the in-app way to the command its detail names. Dismissing hides
+ * the server rejected (`passwordFor`, PERSO-296) offers the dialog that sets
+ * the IMAP or the SMTP password, the in-app way to the command its detail
+ * names. Dismissing hides
  * it until the check's detail changes: a blocked account is a normal state
  * of a machine running a second engine, and a line that cannot go is a nag.
  */
-function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: string | null }) {
+function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: RejectedPassword | null }) {
   const dispatch = useDispatch();
   return (
     <div
@@ -61,11 +62,11 @@ function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: s
         <Button
           size="xs"
           variant="outline"
-          aria-label={`Set IMAP password for ${passwordFor}`}
-          onClick={() => dispatch({ type: "open_password", account: passwordFor, kind: "imap" })}
+          aria-label={`Set ${passwordFor.kind.toUpperCase()} password for ${passwordFor.account}`}
+          onClick={() => dispatch({ type: "open_password", account: passwordFor.account, kind: passwordFor.kind })}
         >
           <KeyRound aria-hidden="true" />
-          Set IMAP password
+          Set {passwordFor.kind.toUpperCase()} password
         </Button>
       ) : null}
       <Button
@@ -80,10 +81,14 @@ function HealthLine({ check, passwordFor }: { check: HealthCheck; passwordFor: s
   );
 }
 
-/** The account of an `account:<name>` check whose login the server rejected, or null. */
-function rejectedAccount(state: AppState, check: HealthCheck): string | null {
+/** An account whose login the server rejected, and the password that login needs. */
+type RejectedPassword = { account: string; kind: RejectedLogin };
+
+/** The account of an `account:<name>` check whose login the server rejected, with that login, or null. */
+function rejectedAccount(state: AppState, check: HealthCheck): RejectedPassword | null {
   const account = checkAccount(check.name);
-  return account !== null && loginRejected(state, account) ? account : null;
+  const kind = account !== null ? loginRejected(state, account) : null;
+  return account !== null && kind !== null ? { account, kind } : null;
 }
 
 /**

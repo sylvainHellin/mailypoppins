@@ -957,10 +957,10 @@ pub struct Credentials {
     /// The account's server calendar needs a scope its sign-in was not
     /// granted (`missing_scopes`, PERSO-200): the Calendar view's banner.
     pub calendar_scope_missing: bool,
-    /// The server rejected the account's IMAP password within the hour, so
-    /// the daemon is not logging in with it again (`login_rejected`,
+    /// The account's login the server rejected within the hour, so the
+    /// daemon is not making it again (the first of `rejected_logins`,
     /// PERSO-296): the sidebar's and the account picker's mark.
-    pub login_rejected: bool,
+    pub rejected_login: Option<mp_protocol::account::RejectedLogin>,
 }
 
 impl Credentials {
@@ -974,7 +974,7 @@ impl Credentials {
                     imap: entry.imap_password.unwrap_or(false) || smtp,
                     smtp,
                     calendar_scope_missing,
-                    login_rejected: entry.login_rejected,
+                    rejected_login: entry.rejected_logins.first().copied(),
                 }
             }
             // A Graph account has neither transport; `graph_configured` is

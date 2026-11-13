@@ -684,7 +684,7 @@ mod tests {
             .port(port)
             .build();
         let from: lettre::Address = built.from.parse().unwrap();
-        let result = submit_through(built, &from, &mailer).await;
+        let result = submit_through(built, &from, &mailer).await.result;
         drop(mailer);
         let log = std::mem::take(&mut *log.lock().unwrap());
         (result, log)
@@ -2953,7 +2953,7 @@ async fn send_durably_via<S: SmtpSubmit>(
     smtp: &S,
 ) -> Result<SendReport> {
     let durable = begin_durably(account, built)?;
-    let report = submit_durably(durable, built, smtp_config, smtp).await?;
+    let report = submit_durably(&account.name, durable, built, smtp_config, smtp).await?;
     owe_rowless_send(account, built, &report);
     Ok(report)
 }
@@ -3064,6 +3064,7 @@ fn begin_durably(
 
 /// Submit over SMTP with the row committed, record what happened, append.
 async fn submit_durably<S: SmtpSubmit>(
+    account: &str,
     durable: Option<DurableSend>,
     built: &BuiltMessage,
     smtp_config: &SmtpConfig,
@@ -3093,18 +3094,32 @@ async fn submit_durably<S: SmtpSubmit>(
         Err(e) => {
             // The marker is already committed and nothing entered the
             // transport: everything `submit` can fail on (the envelope sender,
-            // the transport itself) happens before the first connection. Left
-            // as it is, the next resume would read the marker as "died inside
-            // the SMTP session" and park a message that was never sent, so the
-            // failure is recorded as the clean one it is, which puts the
-            // marker back to NULL (#0063).
+            // the transport itself, a login the server refuses) happens before
+            // the message could be accepted. Left as it is, the next resume
+            // would read the marker as "died inside the SMTP session" and park
+            // a message that was never sent, so the failure is recorded as the
+            // clean one it is, which puts the marker back to NULL (#0063); a
+            // refused login keeps the row queued with no attempt spent
+            // (PERSO-296).
             if let Some(durable) = durable.as_ref() {
-                let clean = crate::outbox::SubmitOutcome::CleanPreSubmission(format!("{e:#}"));
+                let clean = crate::outbox::classify_submission_error(&e);
                 if let Err(e) = durable.record(&clean) {
                     error!("[outbox] could not record a pre-submission failure: {e:#}");
                 }
             }
-            return Err(e);
+            if crate::login_gate::login_rejected(&e).is_none() {
+                return Err(e);
+            }
+            let detail = mp_client::format::login_rejected_detail(
+                account,
+                mp_protocol::account::RejectedLogin::Smtp,
+            );
+            return Err(match durable {
+                Some(_) => e.context(format!(
+                    "not sent, the message waits in the outbox: {detail}"
+                )),
+                None => e.context(format!("nothing was sent: {detail}")),
+            });
         }
     };
 
@@ -4246,10 +4261,25 @@ async fn resubmit_rows<S: SmtpSubmit>(
             );
             continue;
         };
-        if let Err(e) = resubmit_row(store, blobs, &row, smtp_config, smtp).await {
-            log::warn!("[outbox] could not resubmit row {}: {e:#}", row.id);
-        }
+        let resubmitted = resubmit_row(store, blobs, &row, smtp_config, smtp).await;
         retire_draft_of_row(drafts, store, row.id);
+        let Err(e) = resubmitted else {
+            continue;
+        };
+        match crate::login_gate::login_rejected(&e) {
+            // The login is the same for every row: the rest wait with this
+            // one, unasked, until the refusal is let go (PERSO-296). A refusal
+            // the list answered was logged when the server sent it.
+            Some(rejected) => {
+                if rejected.from_list() {
+                    log::debug!("[outbox] row {} waits for the SMTP login: {e:#}", row.id);
+                } else {
+                    log::warn!("[outbox] row {} waits for the SMTP login: {e:#}", row.id);
+                }
+                break;
+            }
+            None => log::warn!("[outbox] could not resubmit row {}: {e:#}", row.id),
+        }
     }
 }
 
@@ -4363,12 +4393,13 @@ async fn resubmit_row<S: SmtpSubmit>(
         Err(e) => {
             // Provably before the transport, as in `send_durably`: record it
             // as clean so the marker goes back to NULL and the row stays
-            // submittable instead of being swept into `failed`.
+            // submittable instead of being swept into `failed`, or, for a
+            // refused login, queued with no attempt spent (PERSO-296).
             crate::outbox::record_submission(
                 store,
                 blobs,
                 row.id,
-                &crate::outbox::SubmitOutcome::CleanPreSubmission(format!("{e:#}")),
+                &crate::outbox::classify_submission_error(&e),
             )?;
             return Err(e);
         }
@@ -4872,20 +4903,89 @@ pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<Se
     if let Some(fake) = crate::daemon::fake_transport::fake_transport() {
         return Ok(fake.submit(&built.message_id, &built.recipients));
     }
+    // Create SMTP transport (branching on auth method / TLS mode).
+    let mailer = build_smtp_transport(smtp_config)?;
+    submit_over(built, smtp_config, &mailer).await
+}
+
+/// [`submit`] over a transport already built, split out so a test can hand it
+/// a plain-TCP transport to a fake server.
+///
+/// The SMTP login goes through the daemon's list of refused logins
+/// ([`crate::login_gate`], PERSO-296): a login the server refused with this
+/// password within the hold fails at once with the same
+/// [`LoginRejected`](crate::login_gate::LoginRejected), without dialling, and
+/// a refusal the server sends now is recorded there. A submission refused at
+/// the login before any recipient took the message is that error, which the
+/// outbox reads as a refused login ([`crate::outbox::SubmitOutcome::LoginRefused`])
+/// and keeps the row queued for; one that reached a recipient first is its
+/// [`SendResult`], the recipients left after the refusal retryable.
+async fn submit_over(
+    built: &BuiltMessage,
+    smtp_config: &SmtpConfig,
+    mailer: &AsyncSmtpTransport<Tokio1Executor>,
+) -> Result<SendResult> {
     // Parse from address for envelope
     let from_addr: lettre::Address = built
         .from
         .parse::<Mailbox>()
         .context("Invalid 'from' address")?
         .email;
-
-    // Create SMTP transport (branching on auth method / TLS mode).
-    let mailer = build_smtp_transport(smtp_config)?;
-    Ok(submit_through(built, &from_addr, &mailer).await)
+    let login = crate::login_gate::Login::Smtp(smtp_config.login());
+    if let Some(refused) = crate::login_gate::refused(&login, &smtp_config.password) {
+        return Err(refused.into());
+    }
+    let Submitted {
+        result,
+        login_refused,
+    } = submit_through(built, &from_addr, mailer).await;
+    let Some(answer) = login_refused else {
+        if result.any_succeeded() {
+            crate::login_gate::accepted(&login);
+        }
+        return Ok(result);
+    };
+    let rejected = crate::login_gate::record(
+        &login,
+        &smtp_config.password,
+        &crate::login_gate::LoginRejected::new(mp_protocol::account::RejectedLogin::Smtp, answer),
+    );
+    if result.any_succeeded() {
+        Ok(result)
+    } else {
+        Err(rejected.into())
+    }
 }
 
-/// [`submit`]'s per-recipient loop over a transport already built, split out
-/// so a test can hand it a plain-TCP transport to a fake server.
+/// What [`submit_through`] did: the verdict of each recipient, and the
+/// server's answer when it refused the login.
+struct Submitted {
+    result: SendResult,
+    login_refused: Option<String>,
+}
+
+/// Whether an SMTP error is the server refusing the login itself (PERSO-296):
+/// a `535`, RFC 4954's answer to credentials it does not take, or any
+/// permanent reply carrying the enhanced code `5.7.8` (authentication
+/// credentials invalid). A temporary failure (`454 4.7.0`) is not one, and
+/// neither is any other refusal, which says nothing certain about the
+/// password.
+fn is_login_refusal(err: &lettre::transport::smtp::Error) -> bool {
+    let Some(code) = err.status().filter(|_| err.is_permanent()) else {
+        return false;
+    };
+    u16::from(code) == 535
+        || err
+            .to_string()
+            .split_whitespace()
+            .any(|word| word == "5.7.8")
+}
+
+/// [`submit`]'s per-recipient loop over a transport already built.
+///
+/// A login the server refuses ends the loop: the login is the same for every
+/// recipient, so the one refused and every one after it is left retryable
+/// without asking the server again, and the refusal is handed back.
 ///
 /// A server whose EHLO offers no `8BITMIME` gets the 7bit bytes of
 /// [`seven_bit_fallback`] once lettre refuses the 8bit ones. lettre refuses
@@ -4896,11 +4996,22 @@ async fn submit_through(
     built: &BuiltMessage,
     from_addr: &lettre::Address,
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
-) -> SendResult {
+) -> Submitted {
     let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
+    let mut login_refused = None;
 
     for (addr, role) in &built.recipients {
+        if login_refused.is_some() {
+            results.push(RecipientResult {
+                address: addr.clone(),
+                role: *role,
+                success: false,
+                error: Some("not sent: the server refused the SMTP login".to_string()),
+                verdict: RecipientVerdict::Retryable,
+            });
+            continue;
+        }
         let rcpt_addr: lettre::Address = match normalize_address_for_smtp(addr).parse::<Mailbox>() {
             Ok(mbox) => mbox.email,
             Err(e) => {
@@ -4958,6 +5069,17 @@ async fn submit_through(
                     verdict: RecipientVerdict::Delivered,
                 });
             }
+            Err(e) if is_login_refusal(&e) => {
+                warn!("The SMTP server refused the login: {e}");
+                results.push(RecipientResult {
+                    address: addr.clone(),
+                    role: *role,
+                    success: false,
+                    error: Some("not sent: the server refused the SMTP login".to_string()),
+                    verdict: RecipientVerdict::Retryable,
+                });
+                login_refused = Some(e.to_string());
+            }
             Err(e) => {
                 let err_msg = format!("{}", e);
                 error!("Failed to send to {} ({}): {}", addr, role, err_msg);
@@ -4972,7 +5094,10 @@ async fn submit_through(
         }
     }
 
-    SendResult { results }
+    Submitted {
+        result: SendResult { results },
+        login_refused,
+    }
 }
 
 /// lettre's refusal of a message with 8-bit octets to a server whose EHLO
@@ -5240,7 +5365,7 @@ mod smtp_durability_tests {
         };
         let smtp = CountingSmtp::default();
 
-        let refused = submit_durably(Some(durable), &built, &smtp_config(), &smtp)
+        let refused = submit_durably(ACCOUNT, Some(durable), &built, &smtp_config(), &smtp)
             .await
             .err()
             .expect("the send is held back");
@@ -5358,7 +5483,7 @@ mod smtp_durability_tests {
         };
         let smtp = CountingSmtp::default();
 
-        let refused = submit_durably(Some(durable), &built, &smtp_config(), &smtp)
+        let refused = submit_durably(ACCOUNT, Some(durable), &built, &smtp_config(), &smtp)
             .await
             .err()
             .expect("the send is held back");
@@ -5384,6 +5509,206 @@ mod smtp_durability_tests {
         assert_eq!(smtp.calls(), 0, "the resume holds it back as well");
         let row = outbox.row(row_id);
         assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.submission_started_at, None);
+    }
+
+    /// A plain-TCP SMTP server on localhost that offers `AUTH PLAIN` and
+    /// refuses every login with `535 5.7.8`, as a server answers a wrong
+    /// password, counting the logins it was asked.
+    async fn refusing_smtp() -> (u16, std::sync::Arc<AtomicUsize>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let logins = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = logins.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let logins = counted.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read);
+                    let _ = write.write_all(b"220 fake ESMTP\r\n").await;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let verb = line
+                            .split(' ')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_uppercase();
+                        let reply: &[u8] = match verb.as_str() {
+                            "EHLO" => b"250-fake\r\n250 AUTH PLAIN LOGIN\r\n",
+                            "AUTH" => {
+                                logins.fetch_add(1, Ordering::SeqCst);
+                                b"535 5.7.8 Authentication credentials invalid\r\n"
+                            }
+                            "QUIT" => {
+                                let _ = write.write_all(b"221 bye\r\n").await;
+                                return;
+                            }
+                            _ => b"250 OK\r\n",
+                        };
+                        if write.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, logins)
+    }
+
+    /// The real submission, [`submit_over`], against a server on localhost
+    /// over plain TCP, logging in with the configuration's password.
+    struct ServerSmtp;
+
+    impl SmtpSubmit for ServerSmtp {
+        fn submit(
+            &self,
+            built: &BuiltMessage,
+            smtp_config: &SmtpConfig,
+        ) -> impl std::future::Future<Output = Result<SendResult>> {
+            let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous("127.0.0.1")
+                .port(smtp_config.port)
+                .credentials(Credentials::new(
+                    smtp_config.username.clone(),
+                    smtp_config.password.clone(),
+                ))
+                .authentication(vec![
+                    lettre::transport::smtp::authentication::Mechanism::Plain,
+                ])
+                .build();
+            async move { submit_over(built, smtp_config, &mailer).await }
+        }
+    }
+
+    /// The SMTP configuration of `port`'s server, with a password it refuses.
+    fn refused_config(port: u16) -> SmtpConfig {
+        SmtpConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            username: format!("alice-{port}@example.com"),
+            password: "the-password-of-yesterday".to_string(),
+            default_from: "me@example.com".to_string(),
+            accept_invalid_certs: false,
+        }
+    }
+
+    /// PERSO-296: a server that refuses the SMTP login is asked once, not
+    /// once per recipient, and the queued message stays queued, with no
+    /// attempt spent and no recipient recorded as refused; the drains after
+    /// it do not ask the server again while the refusal is held, and once it
+    /// is let go the next drain asks again. It used to log in once per
+    /// recipient, on every drain, and park the message `failed` as refused by
+    /// every recipient.
+    #[tokio::test]
+    async fn a_refused_smtp_login_keeps_the_message_queued_and_is_not_asked_again() {
+        let (port, logins) = refusing_smtp().await;
+        let config = refused_config(port);
+        let outbox = Outbox::new();
+        let mut built = Outbox::built("<refused-login@example.com>", Some("id:refused-login"));
+        built
+            .recipients
+            .push(("carol@example.com".to_string(), RecipientRole::Cc));
+        let row_id = outbox.enqueue(&built);
+        let drafts = outbox.dir.path().join("drafts");
+        let resume = |now: i64| {
+            let rows = outbox::pending_send_rows(&outbox.store, ACCOUNT).unwrap();
+            resubmit_rows(
+                &outbox.store,
+                &outbox.blobs,
+                ACCOUNT,
+                &drafts,
+                rows,
+                now,
+                &config,
+                &ServerSmtp,
+            )
+        };
+
+        resume(outbox::unix_now()).await;
+        assert_eq!(
+            logins.load(Ordering::SeqCst),
+            1,
+            "one login, not one per recipient"
+        );
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::PendingSend, "{:?}", row.last_error);
+        assert_eq!(row.attempts, 0, "the refusal spends no attempt");
+        assert_eq!(row.submission_started_at, None);
+        let envelope = row.envelope.unwrap();
+        assert!(envelope.rejected.is_empty(), "{:?}", envelope.rejected);
+        assert!(envelope.delivered.is_empty());
+        assert!(
+            row.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("SMTP login failed") && e.contains("535")),
+            "{:?}",
+            row.last_error
+        );
+        let login = crate::login_gate::Login::Smtp(config.login());
+        assert!(crate::login_gate::is_refused(&login));
+
+        resume(outbox::unix_now() + 86_400).await;
+        assert_eq!(
+            logins.load(Ordering::SeqCst),
+            1,
+            "a held refusal is not asked again"
+        );
+        assert_eq!(outbox.row(row_id).state, OutboxState::PendingSend);
+
+        crate::login_gate::forget(&login);
+        resume(outbox::unix_now() + 86_400).await;
+        assert_eq!(logins.load(Ordering::SeqCst), 2, "asked again once let go");
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.attempts, 0);
+    }
+
+    /// A live send the server refuses the SMTP login of fails, saying the
+    /// message is queued and naming the command that sets the SMTP password;
+    /// its row stays queued with no attempt spent.
+    #[tokio::test]
+    async fn a_live_send_refused_at_the_smtp_login_says_it_is_queued_and_how_to_fix_it() {
+        let (port, logins) = refusing_smtp().await;
+        let config = refused_config(port);
+        let outbox = Outbox::new();
+        let built = Outbox::built("<refused-live@example.com>", Some("id:refused-live"));
+        let durable = DurableSend {
+            store: Store::open(outbox.dir.path().join("store.sqlite3")).unwrap(),
+            blobs: BlobStore::new(outbox.dir.path().join("blobs")),
+            account: crate::config::AccountConfig {
+                name: ACCOUNT.to_string(),
+                ..Default::default()
+            },
+            row_id: outbox.enqueue(&built),
+        };
+        let row_id = durable.row_id;
+
+        let refused = submit_durably(ACCOUNT, Some(durable), &built, &config, &ServerSmtp)
+            .await
+            .err()
+            .expect("the login is refused");
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains("the message waits in the outbox")
+                && message.contains(&mp_client::format::login_rejected_detail(
+                    ACCOUNT,
+                    mp_protocol::account::RejectedLogin::Smtp
+                )),
+            "{message}"
+        );
+        assert_eq!(logins.load(Ordering::SeqCst), 1);
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.attempts, 0);
         assert_eq!(row.submission_started_at, None);
     }
 
@@ -5445,7 +5770,7 @@ mod smtp_durability_tests {
         };
 
         let config = smtp_config();
-        let send = submit_durably(Some(durable), &built, &config, &smtp);
+        let send = submit_durably(ACCOUNT, Some(durable), &built, &config, &smtp);
         let tick = async {
             // The sync tick lands inside the session, as at 12:01:56.
             smtp.started.notified().await;
@@ -5494,7 +5819,7 @@ mod smtp_durability_tests {
         };
 
         let config = smtp_config();
-        let send = submit_durably(Some(durable), &built, &config, &smtp);
+        let send = submit_durably(ACCOUNT, Some(durable), &built, &config, &smtp);
         let discard = async {
             smtp.started.notified().await;
             let refused = crate::daemon::methods::send::discard_in(

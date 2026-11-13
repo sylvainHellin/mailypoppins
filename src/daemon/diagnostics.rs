@@ -504,10 +504,7 @@ impl Diagnostics {
             }
         };
         let check = account_check(account, health, opening_for);
-        if check.status == Status::Ok && login_refused(config) {
-            return refused_login_check(account);
-        }
-        check
+        with_rejected_logins(check, account, &crate::login_gate::rejected_logins(config))
     }
 
     /// Pretend `account` has been opening since `ago` before now.
@@ -604,25 +601,26 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
     }
 }
 
-/// Whether the server refused `account`'s IMAP login within the hold
-/// (PERSO-296), looked up by server and user so that nothing here reads the
-/// password. Never for an account that does not log in over IMAP.
-pub(crate) fn login_refused(account: &crate::config::AccountConfig) -> bool {
-    account.auth_method == crate::config::AuthMethod::Password
-        && !account.is_local_only()
-        && crate::imap_client::login_gate::is_refused(&crate::config::ImapLogin::of(account))
-}
-
-/// The check of an account whose login the server refused: a runtime that
-/// serves the store and moves no mail until a password the server takes is
-/// set, with the command that sets it, in the sentence every client shows
-/// ([`mp_client::format::login_rejected_detail`]).
-fn refused_login_check(account: &str) -> Check {
-    Check::new(
-        format!("account:{account}"),
-        Status::Warn,
-        mp_client::format::login_rejected_detail(account),
-    )
+/// An account's `check` with the logins the server refused within the hold
+/// (PERSO-296): a runtime that serves the store but moves no mail, or sends
+/// none, until the user acts is `warn`, with the command that fixes it in the
+/// sentence every client shows ([`mp_client::format::login_rejected_detail`]).
+/// The first of `rejected`, in the order of
+/// [`mp_protocol::account::RejectedLogin`], is the one named, as in every
+/// client; a check that is not `ok` already says more than the login.
+fn with_rejected_logins(
+    check: Check,
+    account: &str,
+    rejected: &[mp_protocol::account::RejectedLogin],
+) -> Check {
+    match rejected.first() {
+        Some(&login) if check.status == Status::Ok => Check::new(
+            format!("account:{account}"),
+            Status::Warn,
+            mp_client::format::login_rejected_detail(account, login),
+        ),
+        _ => check,
+    }
 }
 
 /// A Graph calendar account's sign-in, as the check `calendar:<name>`.
@@ -1257,6 +1255,40 @@ mod tests {
             "calendar needs a re-login (mp config oauth2-login -A work)"
         );
         assert_eq!(calendar_check("work", &[]).status, Status::Ok);
+    }
+
+    /// A serving account whose SMTP login the server refused warns, naming
+    /// the SMTP password and the command that sets it (PERSO-296); the IMAP
+    /// login comes first when both were refused, and a check that is not
+    /// `ok` keeps its own sentence.
+    #[test]
+    fn a_rejected_login_warns_naming_the_login() {
+        use mp_protocol::account::RejectedLogin;
+        let serving = || account_check("tum", RuntimeHealth::Ready, std::time::Duration::ZERO);
+        let smtp = with_rejected_logins(serving(), "tum", &[RejectedLogin::Smtp]);
+        assert_eq!(smtp.name, "account:tum");
+        assert_eq!(smtp.status, Status::Warn);
+        assert_eq!(
+            smtp.detail,
+            "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
+        );
+        let both = with_rejected_logins(
+            serving(),
+            "tum",
+            &[RejectedLogin::Imap, RejectedLogin::Smtp],
+        );
+        assert!(both.detail.contains("IMAP password"), "{}", both.detail);
+        assert_eq!(
+            with_rejected_logins(serving(), "tum", &[]).status,
+            Status::Ok
+        );
+        let blocked = account_check(
+            "tum",
+            RuntimeHealth::Blocked("held".into()),
+            std::time::Duration::ZERO,
+        );
+        let kept = with_rejected_logins(blocked, "tum", &[RejectedLogin::Smtp]);
+        assert_eq!(kept.detail, "blocked: held");
     }
 
     /// At `DEBUG` the writer adds the thread id and the module path, and both

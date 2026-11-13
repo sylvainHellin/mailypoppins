@@ -34,15 +34,15 @@
 //! and [`ProbeParams`]'s `Debug` prints [`REDACTED`] for it.
 //!
 //! A server that refuses is an answer, `{ok: false, error}`, not a refusal of
-//! the call: the wizard prints it and asks again. An IMAP probe dials past
-//! the daemon's list of refused logins and leaves it as it was
-//! ([`crate::imap_client::login_gate`], PERSO-296): the user is asking the
+//! the call: the wizard prints it and asks again. An IMAP or SMTP probe dials
+//! past the daemon's list of refused logins and leaves it as it was
+//! ([`crate::login_gate`], PERSO-296): the user is asking the
 //! server, so the server answers, whatever it answered the daemon earlier. A query, because it writes
 //! nothing here or on the server, as `mailbox.list_server` is one.
 
 use serde_json::{json, Value};
 
-use crate::config::{AccountConfig, AuthMethod, GraphConfig, ImapConfig, ImapLogin, SmtpConfig};
+use crate::config::{AccountConfig, AuthMethod, GraphConfig, ImapConfig, ServerLogin, SmtpConfig};
 
 use super::super::dispatch::DomainError;
 use super::config::{candidate_account, REDACTED};
@@ -242,11 +242,11 @@ fn smtp_config(account: &AccountConfig, password: String) -> SmtpConfig {
 /// The IMAP settings of the candidate, an empty host or username falling back
 /// to the SMTP one as `ImapConfig::load` does.
 fn imap_config(account: &AccountConfig, password: String) -> ImapConfig {
-    let ImapLogin {
+    let ServerLogin {
         host,
         port,
         username,
-    } = ImapLogin::of(account);
+    } = ServerLogin::imap(account);
     ImapConfig {
         host,
         port,

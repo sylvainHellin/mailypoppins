@@ -52,12 +52,12 @@ describe("the health banner", () => {
 
   // PERSO-296: the daemon holds a password its IMAP server rejected, and says
   // so in the account's check, with the sentence mp daemon health prints.
-  const REJECTED = "the server rejected the password; set it with mp config set-password -A work imap";
+  const REJECTED = "the server rejected the IMAP password; set it with mp config set-password -A work imap";
 
   it("offers the IMAP password dialog on an account whose login the server rejected", async () => {
     const { user } = renderApp(undefined, () => {
       mock.bootstrap.snapshot.diagnostics = [];
-      mock.loginRejected = ["work"];
+      mock.loginRejected = [{ account: "work", login: "imap" }];
     });
     await shellReady();
     act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail: REJECTED }));
@@ -70,6 +70,24 @@ describe("the health banner", () => {
     await user.click(await within(shown).findByRole("button", { name: "Set IMAP password for work" }));
     const dialog = await screen.findByRole("dialog", { name: "Set IMAP password" });
     expect(within(dialog).getByRole("form", { name: "IMAP password for work" })).toBeInTheDocument();
+  });
+
+  it("offers the SMTP password dialog on an account whose SMTP login the server rejected", async () => {
+    const smtp = "the server rejected the SMTP password; set it with mp config set-password -A work smtp";
+    const { user } = renderApp(undefined, () => {
+      mock.bootstrap.snapshot.diagnostics = [];
+      mock.loginRejected = [{ account: "work", login: "smtp" }];
+    });
+    await shellReady();
+    act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail: smtp }));
+    const shown = await waitFor(() => {
+      const el = line("account:work");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    await user.click(await within(shown).findByRole("button", { name: "Set SMTP password for work" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set SMTP password" });
+    expect(within(dialog).getByRole("form", { name: "SMTP password for work" })).toBeInTheDocument();
   });
 
   it("offers no password on an account check about something else", async () => {

@@ -351,7 +351,7 @@ pub async fn run_sync(
             // (PERSO-296): every later mailbox needs the same login, and a
             // pass that logged and skipped each one ended `ok` while no mail
             // could move. What earlier targets ingested stays.
-            Err(e) if crate::imap_client::login_rejected(&e).is_some() => {
+            Err(e) if crate::login_gate::login_rejected(&e).is_some() => {
                 warn!(
                     "[sync] {account}: the server refused the login at '{}'; ending the pass",
                     target.server_name
@@ -1698,16 +1698,18 @@ mod tests {
     /// later target is ingested.
     #[test]
     fn a_refused_login_ends_the_pass_as_its_error() {
-        use crate::imap_client::{login_rejected, LoginRejected};
+        use crate::login_gate::{login_rejected, LoginRejected};
 
         let fx = Fixture::new();
         let targets = targets();
         let mut backend = FakeBackend::default();
         backend.script(
             "INBOX",
-            vec![Err(
-                LoginRejected::new("no response: LOGIN failed.".into()).into()
-            )],
+            vec![Err(LoginRejected::new(
+                mp_protocol::account::RejectedLogin::Imap,
+                "no response: LOGIN failed.".into(),
+            )
+            .into())],
         );
         backend.script("Archive", vec![Ok(fetch(vec![(55, raw("two"))]))]);
         let run = SyncRun {

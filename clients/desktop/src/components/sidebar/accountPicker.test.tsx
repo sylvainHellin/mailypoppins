@@ -113,12 +113,12 @@ describe("the account picker", () => {
     const { user } = renderApp(1400, () => {
       const work = mock.bootstrap.snapshot.accounts.find((a) => a.name === "work");
       if (work) work.sync_health = { state: "failed", reason: "no response: LOGIN failed.", at: "2026-07-02T09:20:11+02:00" };
-      mock.loginRejected = ["work"];
+      mock.loginRejected = [{ account: "work", login: "imap" }];
       // No other account check, so the recovery is the last one up.
       mock.bootstrap.snapshot.diagnostics = [];
     });
     await shellReady();
-    const detail = "the server rejected the password; set it with mp config set-password -A work imap";
+    const detail = "the server rejected the IMAP password; set it with mp config set-password -A work imap";
     act(() => emitEnvelope("diagnostic.check_changed", { name: "account:work", status: "warn", detail }));
     await user.keyboard("ga");
     await picker();

@@ -2126,9 +2126,13 @@ async fn mutate_with<E: OpExecutor>(
         // A tick holds the account's turn for its whole body, and no drain
         // runs until it ends: that wait spends none of the settle's patience.
         let turn_held = || runtimes.get(&name).is_some_and(|r| r.turn_held());
-        // A refused login holds every queued op until the password is set
+        // A refused login holds every queued op until the user acts
         // (PERSO-296): the settle does not wait for one then.
-        let login_refused = || super::super::diagnostics::login_refused(account);
+        let login_refused = || {
+            crate::login_gate::Login::of_mail(account)
+                .filter(crate::login_gate::is_refused)
+                .map(|login| login.kind())
+        };
         // The ops committed earlier on this message reach the server first
         // (PERSO-241): the settle waits for the drain it asks for here.
         let older = pending_ops::OlderOps::wait_for(patience, &ask_for_drain)
@@ -4351,10 +4355,11 @@ mod tests {
 
         impl OpExecutor for RefusedLogin {
             async fn execute(&mut self, _op: &ServerOp) -> anyhow::Result<()> {
-                Err(
-                    crate::imap_client::LoginRejected::new("no response: LOGIN failed.".into())
-                        .into(),
+                Err(crate::login_gate::LoginRejected::new(
+                    mp_protocol::account::RejectedLogin::Imap,
+                    "no response: LOGIN failed.".into(),
                 )
+                .into())
             }
         }
 
@@ -4375,7 +4380,7 @@ mod tests {
             // A login of its own: the gate is one list for the whole process.
             account.imap.host = "held-settle.example.test".to_string();
             account.imap.username = "alice".to_string();
-            let login = crate::config::ImapLogin::of(&account);
+            let login = crate::login_gate::Login::of_mail(&account).unwrap();
             let idle = || -> crate::daemon::runtime::account::DrainHook {
                 Arc::new(|_ctx| async { String::new() }.boxed())
             };
@@ -4391,7 +4396,7 @@ mod tests {
             star["flagged"] = json!(true);
             star["settle"] = json!(false);
             daemon.call(Kind::SetFlag, star, no_server).await.unwrap();
-            crate::imap_client::login_gate::refuse_for_test(login.clone());
+            crate::login_gate::refuse_for_test(login.clone());
             let held = pending_ops::drain(
                 &daemon.fx.store,
                 &daemon.fx.blobs,
@@ -4418,7 +4423,10 @@ mod tests {
             assert!(
                 err.message.contains(&format!(
                     "is still queued: {}; nothing was changed",
-                    mp_client::format::login_rejected_detail("alice")
+                    mp_client::format::login_rejected_detail(
+                        "alice",
+                        mp_protocol::account::RejectedLogin::Imap
+                    )
                 )),
                 "{}",
                 err.message
@@ -4444,7 +4452,7 @@ mod tests {
             assert_eq!(row.mailbox, "inbox", "the archive was undone");
             assert!(row.is_flagged(), "the held star stands");
 
-            crate::imap_client::login_gate::forget(&login);
+            crate::login_gate::forget(&login);
             let mut requests = daemon.runtime.drain_requests();
             requests.borrow_and_update();
             let server = FakeServer::new("caller", &log, &daemon.fx.store);

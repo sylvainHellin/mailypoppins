@@ -278,8 +278,8 @@ Asking which accounts exist may not create or destroy a cache, so a file that fa
 
 ```json
 {"accounts": [
-  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null, "missing_scopes": [], "login_rejected": false},
-  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired", "missing_scopes": ["Calendars.ReadWrite"], "login_rejected": false}
+  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null, "missing_scopes": [], "rejected_logins": ["smtp"]},
+  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired", "missing_scopes": ["Calendars.ReadWrite"], "rejected_logins": []}
 ]}
 ```
 
@@ -287,7 +287,7 @@ It lists every configured account in the file's order, or the one `account` name
 `smtp_password` and `imap_password` say whether `smtp-password-<account>` and `imap-password-<account>` are in the secrets backend, `null` for any account but a password one; `imap_password` is the IMAP key alone, and a client says "falls back to smtp" itself from the two booleans.
 `token` is `valid`, `expired`, `invalid` (a cache file that does not decrypt or parse) or `not_cached` for a `graph` account, and `null` for any other.
 `missing_scopes` lists, by short name, the scopes the account's server calendar needs and its token was not granted: `["Calendars.ReadWrite"]` for a `graph` account whose calendar is Graph's and whose token predates the calendar scope (PERSO-200), which a new sign-in fixes; it is `[]` for every other account and for one with no readable token, whose `token` already asks for a sign-in.
-`login_rejected` is `true` while the server's refusal of the account's IMAP login is on the daemon's list (PERSO-296): the daemon does not log in again with that password for an hour, until `config.set_password` stores one or the user starts a sync; it is `false` for any account but a password one, and a client reads an absent member as `false`.
+`rejected_logins` lists the account's logins whose refusal by the server is on the daemon's list (PERSO-296), in the order `imap`, `smtp`: the daemon does not log in again with that password for an hour, until `config.set_password` stores one or the user starts what needs the login (a sync for `imap`, a send for `smtp`); it is `[]` for any account but a password one, a client reads an absent member as `[]`, and a client that names one login names the first.
 An account whose config still names the retired `auth_method = "oauth2"` reports that word and `null` for all three.
 No value, length, prefix or key name travels.
 It is a query of its own rather than a field of `config.get`, which stays contracted never to look a secret up: a settings screen asks this question, and every configuration read would otherwise be a secret read.
@@ -777,8 +777,9 @@ Each candidate sign-in first drops the staged sign-ins written more than a day b
 The daemon drops them by the same rule as it starts, before it binds its socket, so the sign-in of a wizard never run again does not stay until `config.reset_secrets`.
 A candidate named other than `account` is `-32602`.
 
-**`config.set_password` publishes no event.**
+**`config.set_password` publishes no event of its own.**
 A stored password changes nothing a client can observe, because `config.get` said `<redacted>` before and says `<redacted>` after; its `affected` names `account:<name>` so a client holding a per-account view re-reads what depends on credentials.
+It drops the account's refused logins from the daemon's list (PERSO-296), asks the account's runtime for a drain so what they held goes out now, and re-evaluates the health checks, which publishes the `diagnostic.check_changed` of an account check that recovers.
 The key is the one the existing backend already uses, `smtp-password-<account>` or `imap-password-<account>`, so the daemon and the pre-daemon binary agree about where a password is.
 An unknown account is `-32005` with `{account}`, and neither its message nor its payload echoes the value: an error message is the single most likely place for a secret to escape.
 The backend is opened on first use rather than at startup, because a first run has no configuration to select one from; a daemon that has already opened one keeps it, so changing `secrets_backend` takes a restart.
@@ -1702,6 +1703,7 @@ P6-U2 added the `hold` boolean to the other two and the two hold methods, below.
 An update of an invitation already sent names that invitation's `uid` and a higher `sequence`, a `u32` that is `0` when absent and is checked after the Graph refusal (#0140).
 A bare-date `start` (`2026-12-24`) is an all-day event: `end` is then the last day, inclusive, `duration` a whole number of days, and neither is needed.
 `send.outbox_list` answers `ever_used: false` for an account with no store rather than refusing, because "nothing has been queued yet" is a fact a client renders and not an error.
+A send of any of the four lets go of a refusal of the account's SMTP login on the daemon's list, so it asks the server again (PERSO-296); one the server refuses at the login fails, its message kept `pending_send` in the outbox with no attempt spent, with an error that says so and names `mp config set-password -A <account> smtp`, and the drains after it do not log in again until a send or `config.set_password` lets go of the refusal or the hour is out.
 `send.outbox_retry` accepts a `failed` row, which it re-arms, and a `sent_pending_append` row whose APPEND has already been attempted, which it re-drives behind the Message-ID dedup search; anything else is `-32602`, except while another retry for the same account is running, when the row's state is that retry's to decide and the second call is admitted and settles on what it finds.
 The admin slice (P4-U14) added three families' worth of methods and three to `config.*`, every one of them since 1 and `durable`, and every one taking a required `account` with no `all_accounts`: the loops and the "default account" are the client's, over `config.get`'s list in configuration order.
 `contact.search` `{account, query, limit}` -> `{account, query, contacts}` and `contact.stats` `{account}` -> `{account, total, sent_to, sent_cc, received, built_at, cache_path, top}` are queries over the frecency index, `top` holding at most ten rows; `contact.rebuild` `{account}` is an operation reporting `{phase: "contacts", message: "<account>"}` and settling `{account, contacts, kept, saved, cache_path}`, where `saved` is `written`, `refused_empty` or `refused_shrunk` (#0067).
@@ -1791,7 +1793,7 @@ An `accounts` entry is `{name, runtime, watcher, last_sync: {finished_at, outcom
 `store` is one entry and not one per account, because the only question a health report is asked about the store is whether the cache is large.
 `checks` is four fixed checks in this order - `config_loaded`, `store_open`, `socket_owner`, `log_writable` - then one `account:<name>` per configured account in configuration order, each followed by a `calendar:<name>` when the account is a `graph` one whose calendar is Graph's, each `{name, status, detail}` with a `status` of `ok`, `warn` or `fail` and a `detail` that is never empty.
 `calendar:<name>` is `warn` with the detail `calendar needs a re-login (mp config oauth2-login -A <name>)` while the account's token lacks `Calendars.ReadWrite` (PERSO-200), the prompt every client shows as `<name>: <detail>`, and `ok` otherwise; `config.oauth2_login` re-evaluates it once a sign-in succeeds, so the recovery reaches the clients without waiting for the sweep.
-An account whose runtime serves but whose IMAP login the server refused within the hour is `warn` with the detail `the server rejected the password; set it with mp config set-password -A <name> imap` (`mp_client::format::login_rejected_detail`, the sentence the TUI and the desktop app show too), the same state `account.credentials` reports as `login_rejected` (PERSO-296).
+An account whose runtime serves but whose IMAP or SMTP login the server refused within the hour is `warn` with the detail `the server rejected the IMAP password; set it with mp config set-password -A <name> imap`, or the same sentence about the SMTP password ending in `smtp` (`mp_client::format::login_rejected_detail`, the sentence the TUI and the desktop app show too, naming the first of the refused logins), the same state `account.credentials` reports as `rejected_logins` (PERSO-296); `config.set_password` re-evaluates it at once.
 An account blocked because another engine holds its lock is `warn` and one whose runtime never came up at all is `fail`: a second `mp` holding a lock is a normal state of a developer's machine, and a daemon that called it a failure would cry wolf.
 An account whose start is still in flight is `ok` ("opening its store") for its first 30 seconds and `warn` ("still opening its store after Ns") past them, so a normal start with several accounts publishes no warning and no recovery.
 `diagnostic.log_path` `{}` -> `{path}` names the file the daemon is writing, `<data_dir>/logs/mailypoppins-<date>.log`, which is the surface `docs/parity-matrix.md` `INT-02` and `OBS-05` reach the log through.
@@ -1866,7 +1868,7 @@ The method took `message.search`'s field filters, `from`, `to`, `cc`, `subject`,
 The key list in `tests/daemon_server_leg_slice.rs` is nine names.
 
 The daemon leftovers (2026-10-22) added nine methods, three optional parameters, one answer member and two event kinds, and retired one method; no field of a shape that stayed was renamed or dropped.
-`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token, missing_scopes, login_rejected}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`.
+`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token, missing_scopes, rejected_logins}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState, RejectedLogin}`.
 `config.probe` `{account, check, password?}` -> `{ok, mailboxes?}` or `{ok: false, error}` is a query that dials a candidate account for the setup wizards; `config.init` gained `replace`, and `config.oauth2_login` gained `candidate`.
 `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default` complete the `signature.*` family, with `mp_protocol::signature::SignatureFile`; the watcher publishes `signature.removed` `{name}` (`mp_protocol::events::SignatureRemoved`) for a signature file deleted or renamed away.
 `contact.vcard_draft` `{account, name, address, display_name}` -> `{draft, vcf}` (`mp_protocol::contact::VcardDraft`) is a command; `contact.search` gained `rebuild`, `null` or the `mp_protocol::contact::RefusedRebuild` of a build the cache guard refused; and every write of a contact index publishes `contact.changed` `{account, contacts}` (`mp_protocol::events::ContactChanged`).

@@ -1335,7 +1335,7 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
     assert_eq!(text(&alpha, "status"), "warn", "{alpha}");
     assert_eq!(
         text(&alpha, "detail"),
-        mp_client::format::login_rejected_detail(ALPHA),
+        mp_client::format::login_rejected_detail(ALPHA, mp_protocol::account::RejectedLogin::Imap),
         "in the sentence the TUI and the desktop app show"
     );
     let credentials = block_on(async {
@@ -1343,8 +1343,8 @@ fn a_quick_tick_after_a_good_listing_fails_on_a_refused_login() {
         call(&mut conn, "account.credentials", json!({"account": ALPHA})).await
     });
     assert_eq!(
-        credentials["accounts"][0]["login_rejected"],
-        json!(true),
+        credentials["accounts"][0]["rejected_logins"],
+        json!(["imap"]),
         "{credentials}"
     );
 

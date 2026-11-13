@@ -230,7 +230,7 @@ async fn watch(
             Err(e) => {
                 source.failed();
                 failures = failures.saturating_add(1);
-                let refusal = crate::imap_client::login_rejected(&e).and_then(|r| r.entry());
+                let refusal = crate::login_gate::login_rejected(&e).and_then(|r| r.entry());
                 if refusal.is_some() && refusal == logged_refusal {
                     debug!(
                         "[watcher] watching {} failed ({failures} in a row): {e:#}",

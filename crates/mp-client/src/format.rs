@@ -16,6 +16,7 @@
 //! `completed` count the payload does not carry - and they take the TUI's
 //! wording at the glyph their severity contribution earns.
 
+use mp_protocol::account::RejectedLogin;
 use mp_protocol::events::SyncCompleted;
 
 /// What a drain report line carries when it came from the tail of a tick.
@@ -491,16 +492,24 @@ pub fn oauth2_stored_line(account: &str) -> String {
     format!("\u{2713} OAuth2 token acquired and cached for account '{account}'")
 }
 
-/// What every surface says about an account whose IMAP login the server
-/// refused (PERSO-296): the daemon's `account:<name>` health check detail,
-/// which `mp daemon health` prints and the desktop app's health line shows,
-/// the settle error of a change held behind the refusal, and the TUI's
-/// sidebar and account picker. Lower-case and without a full stop, since
-/// each caller puts it after the account's name or inside a longer line.
-pub fn login_rejected_detail(account: &str) -> String {
-    format!(
-        "the server rejected the password; set it with mp config set-password -A {account} imap"
-    )
+/// What every surface says about an account whose `login` the server refused
+/// (PERSO-296), naming the login and the command that fixes it: the daemon's
+/// `account:<name>` health check detail, which `mp daemon health` prints and
+/// the desktop app's health line shows, the error of a change or a send held
+/// behind the refusal, and the TUI's sidebar. Lower-case and without a full
+/// stop, since each caller puts it after the account's name or inside a
+/// longer line.
+pub fn login_rejected_detail(account: &str, login: RejectedLogin) -> String {
+    match login {
+        RejectedLogin::Imap => format!(
+            "the server rejected the IMAP password; set it with mp config set-password -A \
+             {account} imap"
+        ),
+        RejectedLogin::Smtp => format!(
+            "the server rejected the SMTP password; set it with mp config set-password -A \
+             {account} smtp"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -878,13 +887,18 @@ mod tests {
     }
 
     /// The sentence every surface shows for a login the server refused
-    /// (PERSO-296) says so and names the command that sets the password, with
-    /// the account in it so it can be pasted as it is.
+    /// (PERSO-296) names the login and the command that fixes it, with the
+    /// account in it so it can be pasted as it is.
     #[test]
-    fn a_rejected_login_names_the_command_that_sets_the_password() {
+    fn a_rejected_login_names_the_login_and_the_command_that_fixes_it() {
+        use mp_protocol::account::RejectedLogin;
         assert_eq!(
-            login_rejected_detail("tum"),
-            "the server rejected the password; set it with mp config set-password -A tum imap"
+            login_rejected_detail("tum", RejectedLogin::Imap),
+            "the server rejected the IMAP password; set it with mp config set-password -A tum imap"
+        );
+        assert_eq!(
+            login_rejected_detail("tum", RejectedLogin::Smtp),
+            "the server rejected the SMTP password; set it with mp config set-password -A tum smtp"
         );
     }
 

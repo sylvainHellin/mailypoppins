@@ -1288,7 +1288,7 @@ async fn refresh_catalogue(cfg: &AccountConfig, kind: TickKind, listed: &AtomicB
     }
     match crate::catalogue::discover::refresh(cfg).await {
         Ok(_) => listed.store(true, Ordering::SeqCst),
-        Err(e) if crate::imap_client::login_rejected(&e).is_some() => return Err(e),
+        Err(e) if crate::login_gate::login_rejected(&e).is_some() => return Err(e),
         Err(e) => warn!(
             "[catalogue] listing the folders of {} failed; this tick syncs the ones it knew: {e:#}",
             cfg.name
@@ -1334,7 +1334,7 @@ async fn sync_once(
 fn login_was_refused<T>(result: &Result<T>) -> bool {
     result
         .as_ref()
-        .is_err_and(|e| crate::imap_client::login_rejected(e).is_some())
+        .is_err_and(|e| crate::login_gate::login_rejected(e).is_some())
 }
 
 /// The IMAP body of a tick: the engine over the account's targets.

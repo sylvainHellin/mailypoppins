@@ -566,6 +566,12 @@ pub enum SubmitOutcome {
     /// no transport, no auth, a rejected recipient address, an unparseable
     /// envelope. Nothing was delivered, so the row stays submittable.
     CleanPreSubmission(String),
+    /// The server refused the login itself (PERSO-296), before any recipient
+    /// could take the message. Nothing was delivered, and nothing will be
+    /// until the user acts, so the row stays submittable with no attempt
+    /// spent and its retry time kept: the login gate, not the backoff, is
+    /// what keeps the server from being asked again.
+    LoginRefused(String),
     /// The failure leaves it unknown whether the server accepted the message:
     /// a dropped connection, a timeout. The row goes to `failed` for a human.
     Ambiguous(String),
@@ -609,10 +615,14 @@ impl std::fmt::Display for AmbiguousSubmission {
 impl std::error::Error for AmbiguousSubmission {}
 
 /// Read a failed submission's error chain: ambiguous when it carries an
-/// [`AmbiguousSubmission`], a clean pre-submission failure otherwise.
+/// [`AmbiguousSubmission`], a refused login when it carries a
+/// [`crate::login_gate::LoginRejected`], a clean pre-submission failure
+/// otherwise.
 pub fn classify_submission_error(err: &anyhow::Error) -> SubmitOutcome {
     if err.chain().any(|c| c.is::<AmbiguousSubmission>()) {
         SubmitOutcome::Ambiguous(format!("{err:#}"))
+    } else if crate::login_gate::login_rejected(err).is_some() {
+        SubmitOutcome::LoginRefused(format!("{err:#}"))
     } else {
         SubmitOutcome::CleanPreSubmission(format!("{err:#}"))
     }
@@ -1015,6 +1025,21 @@ pub fn record_submission(
                     rusqlite::params![id, err, now],
                 )
                 .context("recording a clean pre-submission failure")?;
+            Ok(OutboxState::PendingSend)
+        }
+        SubmitOutcome::LoginRefused(err) => {
+            // As a clean failure, the marker goes back to NULL; unlike one,
+            // no attempt is spent and `updated` stays, so the row goes out on
+            // the first drain after the login is taken again, with no backoff
+            // grown over the hour the refusal was held (PERSO-296).
+            store
+                .conn()
+                .execute(
+                    "UPDATE outbox SET last_error = ?2, submission_started_at = NULL
+                     WHERE id = ?1",
+                    rusqlite::params![id, err],
+                )
+                .context("recording a refused login")?;
             Ok(OutboxState::PendingSend)
         }
         SubmitOutcome::Ambiguous(err) => {

@@ -31,10 +31,10 @@ pub(super) struct Alert {
 /// account's login is accepted or its sync works.
 pub(super) fn account_alert(app: &App) -> Option<Alert> {
     let acct = app.accounts.get(app.active_account)?;
-    if app.login_rejected(app.active_account) {
+    if let Some(login) = app.login_rejected(app.active_account) {
         return Some(Alert {
             headline: "\u{26a0} login rejected".to_string(),
-            reason: mp_client::format::login_rejected_detail(&acct.account_config.name),
+            reason: mp_client::format::login_rejected_detail(&acct.account_config.name, login),
             rows: LOGIN_REASON_ROWS,
         });
     }

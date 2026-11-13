@@ -4,7 +4,7 @@
 // hidden until its check's status or detail changes. Pure; the reducer applies,
 // StatusRegion shows (clients/desktop/docs/shell.md, "Health checks").
 
-import type { CheckStatus, HealthCheck } from "@/protocol/types";
+import type { CheckStatus, HealthCheck, RejectedLogin } from "@/protocol/types";
 import type { ActivityLevel, AppState } from "@/app/state";
 
 const STATUSES: ReadonlySet<string> = new Set<CheckStatus>(["ok", "warn", "fail"]);
@@ -59,13 +59,19 @@ export function checkAccount(name: string): string | null {
 }
 
 /**
- * Whether the server rejected `account`'s IMAP login (PERSO-296), as
- * `account.credentials` last answered: the daemon holds that password and
- * says so in the account's check, whose line then offers the IMAP password
- * dialog, and the account picker names it.
+ * The login of `account` the server rejected (PERSO-296), as
+ * `account.credentials` last answered, null when none: the first of
+ * `rejected_logins`, the one the daemon's sentence names. The daemon holds
+ * that password and says so in the account's check, whose line then offers
+ * the dialog that sets it, and the account picker names it.
  */
-export function loginRejected(s: Pick<AppState, "credentials">, account: string): boolean {
-  return s.credentials.data?.accounts.some((c) => c.account === account && c.login_rejected) ?? false;
+export function loginRejected(s: Pick<AppState, "credentials">, account: string): RejectedLogin | null {
+  return s.credentials.data?.accounts.find((c) => c.account === account)?.rejected_logins[0] ?? null;
+}
+
+/** Whether `account.credentials` last said any account's login is rejected. */
+function anyLoginRejected(s: Pick<AppState, "credentials">): boolean {
+  return s.credentials.data?.accounts.some((c) => c.rejected_logins.length > 0) ?? false;
 }
 
 /**
@@ -79,7 +85,7 @@ export function credentialsWanted(s: Pick<AppState, "view" | "health" | "credent
   return (
     s.view === "settings" ||
     s.health.some((c) => checkAccount(c.name) !== null) ||
-    (s.credentials.data?.accounts.some((c) => c.login_rejected) ?? false)
+    anyLoginRejected(s)
   );
 }
 
@@ -92,7 +98,7 @@ export function credentialsWanted(s: Pick<AppState, "view" | "health" | "credent
 export function loginMayHaveMoved(s: Pick<AppState, "health" | "credentials">, health: readonly HealthCheck[]): boolean {
   return (
     health.some((c) => checkAccount(c.name) !== null && !knownCheck(s.health, c)) ||
-    (s.credentials.data?.accounts.some((c) => c.login_rejected) ?? false)
+    anyLoginRejected(s)
   );
 }
 

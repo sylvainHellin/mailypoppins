@@ -52,12 +52,28 @@ pub struct AccountCredential {
     /// with no readable token, whose `token` already says it needs a sign-in.
     #[serde(default)]
     pub missing_scopes: Vec<String>,
-    /// Whether the server refused the account's IMAP login within the last
-    /// hour, so the daemon is not asking it again until a password is set or
-    /// a sync is started (PERSO-296). `false` for any account but a password
-    /// one, and when absent, so an older daemon's answer still parses.
+    /// The account's logins the server refused within the last hour, which
+    /// the daemon is not making again until the user acts (PERSO-296): sets
+    /// the password, or starts a sync or a send. In the order
+    /// of [`RejectedLogin`], empty when none was refused, and when absent, so
+    /// an older daemon's answer still parses.
     #[serde(default)]
-    pub login_rejected: bool,
+    pub rejected_logins: Vec<RejectedLogin>,
+}
+
+/// A login of an account that the server refused (PERSO-296), named by what
+/// the user does about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum RejectedLogin {
+    /// The IMAP password of a password account: no mail moves until a
+    /// password the server takes is set (`mp config set-password imap`).
+    Imap,
+    /// The SMTP password of a password account: queued messages wait in the
+    /// outbox until a password the server takes is set
+    /// (`mp config set-password smtp`).
+    Smtp,
 }
 
 /// The `result` of `account.credentials`: every configured account in the

@@ -749,7 +749,7 @@ pub(super) fn render_account_picker(
             };
             let current = i == active;
             let runtime = runtime_tag(acct);
-            let warning = if acct.credentials.is_some_and(|c| c.login_rejected) {
+            let warning = if acct.credentials.is_some_and(|c| c.rejected_login.is_some()) {
                 Some(LOGIN_REJECTED_TAG)
             } else if acct.sync_health.is_failed() {
                 Some(SYNC_FAILED_TAG)

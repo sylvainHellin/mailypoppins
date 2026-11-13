@@ -146,7 +146,7 @@ impl SyncBackend for ImapBackend<'_> {
 /// `error` again, for the next mailbox it fails: a refused login keeps its
 /// type, which is what ends the pass, and any other failure its text.
 fn copy_of(error: &anyhow::Error) -> anyhow::Error {
-    match super::login_rejected(error) {
+    match crate::login_gate::login_rejected(error) {
         Some(rejected) => rejected.clone().into(),
         None => anyhow!("{error:#}"),
     }
