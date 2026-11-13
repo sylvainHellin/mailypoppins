@@ -6370,7 +6370,7 @@ impl Fixture {
             None => self.settle(
                 op,
                 "succeeded",
-                Some(json!({"blocked": false, "outcome": outcome, "new_inbox_mail": []})),
+                Some(json!({"blocked": false, "outcome": outcome})),
             ),
             Some(message) => self.fail(op, &message),
         }

@@ -511,7 +511,7 @@ fn a_quick_sync_starts_an_operation_and_polls_nothing() {
 }
 
 /// The finished operation lands where the poll's answer landed: on the status
-/// line, with the arrivals it carried.
+/// line, and notifies nobody.
 ///
 /// The id is read off the daemon's own answer rather than invented, so the row
 /// pins the correspondence and not a string: an implementation that ignored the
@@ -535,11 +535,7 @@ fn the_finished_operation_lands_where_the_poll_landed() {
         json!({
             "operation_id": id,
             "state": "succeeded",
-            "result": {
-                "blocked": false,
-                "outcome": tick(3, 4, None),
-                "new_inbox_mail": [{"from": "Ada <ada@example.com>", "subject": "Engine"}],
-            },
+            "result": {"blocked": false, "outcome": tick(3, 4, None)},
         }),
     ));
 

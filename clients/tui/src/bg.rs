@@ -1930,7 +1930,7 @@ mod tests {
 
         let finished = serde_json::json!({
             "state": "succeeded",
-            "result": {"outcome": outcome, "new_inbox_mail": []},
+            "result": {"outcome": outcome},
         });
         for awaited in [
             crate::events::Awaited::Quick {
@@ -2076,7 +2076,7 @@ mod tests {
         };
         let finished = serde_json::json!({
             "state": "succeeded",
-            "result": {"outcome": tick("alice", 1), "new_inbox_mail": []},
+            "result": {"outcome": tick("alice", 1)},
         });
         let land = |app: &mut App, trigger: &str| match trigger {
             "mutations.rolled_back" => {

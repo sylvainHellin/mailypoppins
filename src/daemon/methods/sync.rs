@@ -94,6 +94,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
+use mp_protocol::events::SyncCompleted;
 use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, AuthMethod, ImapConfig};
@@ -621,21 +622,7 @@ async fn run_pass_to_end(
             None => handle.succeed(blocked_result()),
             Some(outcome) => match outcome.error {
                 Some(error) => handle.fail(DomainError::internal(error)),
-                // The arrivals ride the outcome itself since P5-U8, so a pass
-                // through the tick reports the same list a guarded pass does
-                // and the answer carries it in the same place.
-                None => {
-                    let arrivals = outcome
-                        .sync
-                        .as_ref()
-                        .map(|sync| json!(sync.new_inbox_mail))
-                        .unwrap_or_else(|| json!([]));
-                    handle.succeed(json!({
-                        "blocked": false,
-                        "outcome": outcome.sync,
-                        "new_inbox_mail": arrivals,
-                    }))
-                }
+                None => handle.succeed(ran_result(outcome.sync.as_ref())),
             },
         };
     }
@@ -673,7 +660,6 @@ async fn run_pass_to_end(
         // skip rather than a summary of a pass that never happened.
         Ok(None) => handle.succeed(blocked_result()),
         Ok(Some(mut pass)) => {
-            let arrivals = new_inbox_mail(&pass);
             let outcome = from_sync_result(
                 &request.account.name,
                 &pass,
@@ -687,11 +673,7 @@ async fn run_pass_to_end(
                 canonical.apply(super::super::state::Change::SyncCompleted(outcome.clone()));
             }
             hand_arrivals_to_runtime(&runtimes, &request.account.name, request.dry_run, &mut pass);
-            handle.succeed(json!({
-                "blocked": false,
-                "outcome": outcome,
-                "new_inbox_mail": arrivals,
-            }));
+            handle.succeed(ran_result(Some(&outcome)));
         }
     }
 }
@@ -753,26 +735,15 @@ async fn publish_cancelled(request: &PassRequest, canonical: &Arc<CanonicalState
 
 /// The result of a pass another engine was already running (#0122).
 fn blocked_result() -> Value {
-    json!({"blocked": true, "outcome": null, "new_inbox_mail": []})
+    json!({"blocked": true, "outcome": null})
 }
 
-/// The inbox arrivals of one pass: what it inserted above what the account
-/// held before it, before the blocked senders and the hooks judged it.
-///
-/// A sibling of `outcome` rather than a member of it: `outcome` is the
-/// [`SyncCompleted`] summary as the event publishes it, which carries the same
-/// list ([`SyncCompleted::new_inbox_mail`]). No client notifies from either;
-/// the notification is `mail.arrived`'s, which the account's arrival runner
-/// publishes once the judges are done (PERSO-186).
-///
-/// [`SyncCompleted`]: mp_protocol::events::SyncCompleted
-fn new_inbox_mail(pass: &SyncResult) -> Value {
-    Value::Array(
-        pass.new_inbox_mail
-            .iter()
-            .map(|mail| json!({"from": mail.from, "subject": mail.subject}))
-            .collect(),
-    )
+/// The result of a pass that ran: its `sync.completed` payload and nothing
+/// beside it. The pass's new inbox mail reaches a client as `mail.arrived`,
+/// once the blocked senders and the hooks have judged it (PERSO-186), so the
+/// answer carries no list of its own (PERSO-306).
+fn ran_result(outcome: Option<&SyncCompleted>) -> Value {
+    json!({"blocked": false, "outcome": outcome})
 }
 
 /// One end of the tick: the outbox, then the mutation queue, each reported as
@@ -1117,6 +1088,31 @@ mod tests {
             QUICK_TICK_LIMIT
         );
         assert_eq!(pass_limit(TickKind::Quick, 2500), 2500);
+    }
+
+    /// PERSO-306: a pass answers `{blocked, outcome}` and nothing beside them,
+    /// whether it ran or another engine held the account; the arrivals of a
+    /// pass reach a client as `mail.arrived`, never through its answer.
+    #[test]
+    fn a_pass_answers_blocked_and_outcome_and_nothing_else() {
+        let keys = |answer: &Value| {
+            let mut keys: Vec<String> = answer
+                .as_object()
+                .expect("a pass answers an object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+        let blocked = blocked_result();
+        assert_eq!(keys(&blocked), ["blocked", "outcome"]);
+        assert_eq!(blocked, json!({"blocked": true, "outcome": null}));
+
+        let outcome = from_sync_result("alpha", &SyncResult::default(), 0, None);
+        let ran = ran_result(Some(&outcome));
+        assert_eq!(keys(&ran), ["blocked", "outcome"]);
+        assert_eq!(ran, json!({"blocked": false, "outcome": outcome}));
     }
 
     /// PERSO-186: a guarded pass (`mp sync --mailbox INBOX`) of an account

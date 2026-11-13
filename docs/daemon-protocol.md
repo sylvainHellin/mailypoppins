@@ -947,9 +947,7 @@ The refusal arrives before anything opens a socket, and before either drain runs
 A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
 A pass that ran answers `{blocked: false, outcome: <sync.completed payload>}` and publishes the same payload as a `sync.completed` event, unless it was a dry run, whose counts describe mail that was not ingested and would read to every other client as mail that arrived.
 
-Both answers also carry `new_inbox_mail`, `[{from, subject}]` for every message the pass inserted into the inbox above what the account held before it, and `[]` for a pass that inserted none, a first sync or a blocked pass (PERSO-186).
-No client notifies from it, nor from the same list on `sync.completed`: the list is taken before the blocked senders and the hooks judge the mail, and the notification is `mail.arrived`'s, published once they have.
-Since P5-U8 the `sync.completed` payload carries the same list under the same name, and the answer's copy is the same list for the client that asked: a tick nobody asked for - an account runtime's watcher noticing the mailbox move - has no answer for the arrivals to ride, and the desktop notification of #0009 is scoped to the client that is looking rather than to the one that typed a command.
+Neither answer lists the mail the pass brought in: new inbox mail worth a notification reaches every client as `mail.arrived`, once the blocked senders and the hooks have judged it (PERSO-186, PERSO-306).
 
 Each of the five slots of a tick is one `operation.progress` report whose `phase` is one of `head_outbox`, `head_mutations`, `body`, `tail_outbox`, `tail_mutations`, in that order (#0114).
 For the four drain phases, `done` is what the drain completed and `total` what it left behind - still-pending sends, or rolled-back mutations - and both are `null` when the drain had nothing a user would want told.
@@ -1984,3 +1982,6 @@ The fixtures are `crates/mp-protocol/fixtures/daemon.status.{request,response}.j
 
 PERSO-223 added a second `operation.progress` report per draft to `send.approved`, phase `draft_done`, after the phase `draft` report it already sent, and one optional member to `Progress`, `outcome`, which that report fills with the draft's `SendOutcome` and every other report leaves absent; no field was renamed or dropped, `message` is null on the new report, and the settled `ApprovedOutcome` is the one it was.
 `mp send-approved` prints each draft's line as it settles instead of all of them at the end, with the same bytes, the same summary and the same exit code.
+
+PERSO-306 dropped `new_inbox_mail` from the `sync.quick` and `sync.full` answers, which are `{blocked, outcome}` now; no client read it since PERSO-186 moved the new-mail notification onto `mail.arrived`, and a client that predates PERSO-186 reads its absence as a pass that brought nothing in.
+No method was added or renamed, and no command's output moved.
