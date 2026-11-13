@@ -1044,6 +1044,14 @@ pub const GRAPH_IMIP_CHANGE_REFUSAL: &str =
 /// organise, one cancelled already, and one with an earlier change the
 /// outbox holds with no final verdict ([`crate::invite::unsettled_change`]),
 /// which a change built now on the agenda's version would contradict.
+///
+/// That last check runs first, before the agenda and the stored versions
+/// are read: a sync pass that settles the earlier change files its copy
+/// before it marks the row `done` (`outbox::finish_done` ingests, then
+/// writes the state, each committed in turn), so once the check finds no
+/// row unsettled every read after it sees the version that row carried. Run
+/// after those reads, a row settling between them and the check would let
+/// through a change built on the version before it.
 fn organised(
     name: &str,
     id: &str,
@@ -1060,6 +1068,8 @@ fn organised(
     }
     super::account::ready_account(&snapshot.accounts, name)?;
     let store = open_store(name)?;
+    let blobs = BlobStore::for_account(name);
+    refuse_while_unsettled(&store, &blobs, name, row_id)?;
     let found = crate::calendar_view::get(&account, id, local_zone())
         .map_err(|e| server_error(name, &e))?
         .ok_or_else(|| {
@@ -1068,7 +1078,6 @@ fn organised(
                  at all)"
             ))
         })?;
-    let blobs = BlobStore::for_account(name);
     let row = crate::invite::organized_row(&store, &blobs, &account, row_id)
         .map_err(|e| invalid_params(format!("{e:#}")))?;
     if found.event.cancelled {
@@ -1077,16 +1086,38 @@ fn organised(
             found.event.summary
         )));
     }
-    if let Some(waiting) = crate::invite::unsettled_change(&store, &blobs, name, &row.invite.uid)
-        .map_err(|e| server_error(name, &e))?
-    {
-        return Err(invalid_params(unsettled_refusal(
-            &found.event.summary,
+    Ok((account, found, row))
+}
+
+/// The guard's refusal of a change of the invitation on row `row_id` of
+/// `name` while the outbox holds an earlier change of its `UID` with no
+/// final verdict ([`crate::invite::unsettled_change`]), read from the row's
+/// own `invite.ics`; a row that carries no invitation passes, and the reads
+/// after it refuse it in their own words.
+fn refuse_while_unsettled(
+    store: &Store,
+    blobs: &BlobStore,
+    name: &str,
+    row_id: i64,
+) -> Result<(), RpcError> {
+    let Some(invite) = crate::store::read::load_invite_ics(store, blobs, row_id)
+        .and_then(|ics| crate::calendar::parse_ics(&ics))
+    else {
+        return Ok(());
+    };
+    let Some(uid) = invite.uid.as_deref() else {
+        return Ok(());
+    };
+    let waiting = crate::invite::unsettled_change(store, blobs, name, uid)
+        .map_err(|e| server_error(name, &e))?;
+    match waiting {
+        Some(waiting) => Err(invalid_params(unsettled_refusal(
+            invite.summary.as_deref().unwrap_or(uid),
             name,
             &waiting,
-        )));
+        ))),
+        None => Ok(()),
     }
-    Ok((account, found, row))
 }
 
 /// The refusal of a change of `summary` while an earlier one waits in
