@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Profiles: `mp --profile <name>` or `MAILYPOPPINS_PROFILE` runs mp, the TUI, the daemon and the desktop app (`open -n -a mailypoppins --args --profile demo`) on their own config, store, secrets, keyring entries, logs and daemon under `profiles/<name>`; the TUI and the desktop app show the profile's name, the service commands refuse a profile, and a profile's daemon exits 60 s after its last client left (PERSO-176).
 - `mp config set-password --stdin` reads the password from a pipe (first line, newline removed, nothing else trimmed), so a script or a password manager can set it; it is refused on a terminal or for an empty line (PERSO-281).
 - The activity log filters by level in the TUI and the desktop app: `l` cycles all, warnings and errors, errors, and the overlay names the level shown; the TUI overlay's footer still fits an 80-column terminal (PERSO-218).
 - Blocked senders: `mp block <address|@domain>` moves a sender's mail from every account's Inbox to its Junk folder, and mail arriving from them later follows after each sync; `mp unblock` and `mp blocked` manage the list, kept by the daemon for all accounts (PERSO-261).
@@ -135,6 +136,10 @@ All notable changes to this project are documented in this file.
 - TUI event form: the availability rows read like the desktop grid, with You first and each person by name, a legend, hour labels on the gridlines, a glyph and colour per status, the chosen time a band across the rows marked under them, the edit form's own time marked as "this event", and the last rows kept dimmed while the next answer comes; rows that would read the same keep the part of the address that tells them apart (PERSO-255).
 
 ### Fixed
+- A command that reaches a daemon while it is shutting down waits for it to go and starts a fresh one instead of failing after 5 s; under an installed service the start goes through the manager's restart, and two commands racing send one restart between them (PERSO-176).
+- The desktop app shows a folder attached to a draft as a folder with its file count and opens the files a send attaches, instead of calling the entry missing; the TUI's `o` on a draft opens the same files from the daemon's answer (PERSO-215).
+- The desktop app's version-mismatch screen offers Restart daemon only when the daemon is not the newer side; with a newer daemon it says which app version to update to (PERSO-277).
+- Blocked senders: the Inbox moves owed to an account removed from the config are dropped instead of kept forever.
 - A refused SMTP login (535 or 5.7.8) no longer fails the queued message as refused by every recipient: it stays in the outbox, the server is asked once instead of once per recipient and not again for an hour, `mp config set-password` sends it, and health and both clients say the server rejected the SMTP password (PERSO-296).
 - A Graph sign-in Microsoft refused (`invalid_grant`) is no longer refreshed on every tick: it is held for an hour, health and both clients say the sign-in expired or was revoked and name `mp config oauth2-login -A <account>`, and the desktop app offers Sign in again (PERSO-296).
 - An IMAP folder renamed on the server keeps its local mail and sync position under the new name when the server keeps its UIDVALIDITY and the Message-IDs at its UIDs match (Proton Bridge does); anything less certain, such as OVH, which changes UIDVALIDITY on a rename, still shows the new folder syncing from scratch beside the old one marked missing. A rename, on IMAP or Graph, now moves the listing row and the mail in one transaction (PERSO-185).
