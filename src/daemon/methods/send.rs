@@ -404,12 +404,12 @@ fn plan(
     match method {
         "send.outbox_list" => Ok(Request::List(listing(&account.name)?)),
         "send.outbox_discard" => Ok(Request::Discard {
-            row_id: existing_row(&account.name, params)?.id,
+            row_id: existing_row(&account.name, params, false)?.id,
             graph: account.auth_method == AuthMethod::Graph,
             account: account.name,
         }),
         "send.outbox_retry" => {
-            let row = existing_row(&account.name, params)?;
+            let row = existing_row(&account.name, params, true)?;
             if !retryable(&row) && !retry_running(&account.name) {
                 return Err(invalid_params(format!(
                     "outbox row {} is {}, and only a failed row can be retried",
@@ -599,10 +599,15 @@ fn bound_to(selector: &str, account: &AccountConfig) -> Result<(), RpcError> {
 
 /// The row `row_id` names, or the sentence `mp outbox` has always refused with.
 ///
-/// A row the user discarded already, which stays only to file its copy in
-/// Sent and which no listing shows, is refused too: it is neither discarded
-/// nor sent a second time ([`outbox::discarded_refusal`], PERSO-304).
-fn existing_row(account: &str, params: &Value) -> Result<crate::outbox::OutboxRow, RpcError> {
+/// A row the user discarded already is refused too: one that stays only to
+/// file its copy in Sent, which no listing shows, is neither discarded nor
+/// retried ([`outbox::discarded_refusal`]), and no discarded row is retried
+/// ([`outbox::retry_refusal`], PERSO-304).
+fn existing_row(
+    account: &str,
+    params: &Value,
+    retry: bool,
+) -> Result<crate::outbox::OutboxRow, RpcError> {
     let id = params
         .get("row_id")
         .and_then(Value::as_i64)
@@ -617,7 +622,12 @@ fn existing_row(account: &str, params: &Value) -> Result<crate::outbox::OutboxRo
         .map_err(|e| server_error(account, &e))?
         .filter(|row| row.account == account)
         .ok_or_else(missing)?;
-    match outbox::discarded_refusal(&row) {
+    let refusal = if retry {
+        outbox::retry_refusal(&row)
+    } else {
+        outbox::discarded_refusal(&row)
+    };
+    match refusal {
         Some(refusal) => Err(invalid_params(refusal)),
         None => Ok(row),
     }

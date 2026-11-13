@@ -1495,9 +1495,11 @@ fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result
     if let Some(refusal) = discarded_refusal(&row) {
         anyhow::bail!("{refusal}");
     }
+    // A row discarded once and listed again (given up, or parked by a store
+    // rebuild) filed its version at that discard and goes for good now.
     // Before the release, so the blob passes from the row's reference to
     // the copy's without touching zero, as in [`finish_done`].
-    let kept = keep_the_version(store, blobs, &row)?;
+    let kept = !row.is_discarded() && keep_the_version(store, blobs, &row)?;
     if kept && !graph && row.target_mailbox.is_some() {
         keep_for_filing(store, &row)?;
         return Ok(true);
@@ -1671,6 +1673,23 @@ pub fn discarded_refusal(row: &OutboxRow) -> Option<String> {
             row.target_mailbox.as_deref().unwrap_or("Sent")
         ),
         _ => format!("outbox row {id} was discarded already"),
+    })
+}
+
+/// Why `row` cannot be retried, when the user discarded it: a discarded row
+/// is never sent again, whatever state it is in. One still filing its copy
+/// says so ([`discarded_refusal`]); one that ended otherwise (given up, or
+/// parked by a store rebuild that could not read its state) is the user's
+/// to drop with a discard.
+pub fn retry_refusal(row: &OutboxRow) -> Option<String> {
+    if !row.is_discarded() {
+        return None;
+    }
+    discarded_refusal(row).or_else(|| {
+        Some(format!(
+            "outbox row {} was discarded, so it is not sent again; discard it to remove it",
+            row.id
+        ))
     })
 }
 
@@ -2010,6 +2029,9 @@ pub fn sweep_pending_sends(store: &Store, account: &str) -> Result<PendingSends>
 /// the next resume submits it exactly once.
 pub fn retry(store: &Store, id: i64) -> Result<()> {
     let row = load(store, id)?.with_context(|| format!("no outbox row {id}"))?;
+    if let Some(refusal) = retry_refusal(&row) {
+        return Err(anyhow::anyhow!("{refusal}"));
+    }
     if row.state != OutboxState::Failed {
         return Err(anyhow::anyhow!(
             "outbox row {id} is {}, and only a failed row can be retried",

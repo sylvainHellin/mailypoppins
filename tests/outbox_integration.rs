@@ -2209,3 +2209,53 @@ async fn a_rebuild_before_the_append_files_the_discarded_version_again() {
     assert_eq!(state_of(&account, id), OutboxState::Done);
     assert_eq!(local_sent_copies(&store, mid), [100]);
 }
+
+/// A discarded row whose state a store rebuild could not read is parked in
+/// `failed`, where the user sees it and can drop it: listed and counted,
+/// never sent again by a retry, and removed for good by a discard, the
+/// local copy staying.
+#[test]
+fn a_discarded_row_a_rebuild_parked_is_listed_and_can_be_discarded() {
+    let account = Account::new();
+    let mid = "<update-10@example.com>";
+    let id = parked_invitation(&account, mid, Some(SENT), None);
+    {
+        let (store, blobs) = account.open();
+        assert!(outbox::discard(&store, &blobs, id).unwrap());
+        store
+            .conn()
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE outbox SET state = 'almost_sent' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+    }
+    force_a_rebuild(&account);
+
+    let (store, blobs) = account.open();
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    assert_eq!(row.state, OutboxState::Failed);
+    assert!(row.is_discarded());
+    let listed = outbox::unfinished_rows(&store, ACCOUNT).unwrap();
+    assert_eq!(listed.iter().map(|r| r.id).collect::<Vec<_>>(), [id]);
+    assert_eq!(outbox::counts(&store, ACCOUNT).unwrap().failed, 1);
+    assert_eq!(local_sent_copies(&store, mid).len(), 1);
+
+    let err = outbox::retry(&store, id).unwrap_err();
+    assert!(format!("{err:#}").contains("was discarded"), "{err:#}");
+    assert_eq!(state_of(&account, id), OutboxState::Failed);
+
+    assert!(outbox::discarded_refusal(&row).is_none());
+    outbox::discard(&store, &blobs, id).unwrap();
+    assert!(outbox::load(&store, id).unwrap().is_none(), "gone for good");
+    assert!(outbox_looks_empty(&store));
+    assert_eq!(
+        local_sent_copies(&store, mid).len(),
+        1,
+        "the local copy stays"
+    );
+}
