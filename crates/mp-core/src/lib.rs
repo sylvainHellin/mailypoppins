@@ -34,6 +34,7 @@ pub mod draft;
 pub mod imap_query;
 pub mod invite;
 pub mod logfile;
+pub mod mp_command;
 pub mod notify;
 pub mod oauth2;
 pub mod parse;

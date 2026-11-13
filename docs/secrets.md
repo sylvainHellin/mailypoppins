@@ -79,11 +79,11 @@ Each error a user can meet between `mp config init` and a login names what happe
 No SMTP password is stored for account 'tum'. Run `mp config set-password smtp --account tum`.
 No IMAP password is stored for account 'tum', nor an SMTP password to fall back to. Run `mp config set-password imap --account tum`.
 No SMTP password is stored for account 'tum' in the system keyring (service 'mailypoppins'). Run `mp config set-password smtp --account tum`.
-Could not read the SMTP password of account 'tum' from the system keyring: <the keyring's reason>. Unlock the system keyring (on macOS, the login Keychain) and retry, or set `secrets_backend = "encrypted-file"` in config.toml, restart the daemon (`mp daemon restart`) and store the password again.
-Could not read this machine's ID, from which the encrypted secrets file's key is derived (<reason>). To store passwords, create /etc/machine-id (`sudo systemd-machine-id-setup`), or set `secrets_backend = "keyring"` in config.toml and restart the daemon (`mp daemon restart`).
+Could not read the SMTP password of account 'tum' from the system keyring: <the keyring's reason>. Unlock the system keyring (on macOS, the login Keychain) and retry, or set `secrets_backend = "encrypted-file"` in /home/me/.config/mailypoppins/config.toml and restart the daemon (`mp daemon restart`), then store the password again.
+Could not read this machine's ID, from which the encrypted secrets file's key is derived (<reason>). To store passwords, create /etc/machine-id (`sudo systemd-machine-id-setup`), or set `secrets_backend = "keyring"` in /home/me/.config/mailypoppins/config.toml and restart the daemon (`mp daemon restart`).
 ```
 
-On a named profile the command carries `--profile <name>`, and the keyring service is `mailypoppins-<name>`.
+On a named profile every command carries `--profile <name>`, the configuration named is the profile's (`~/.config/mailypoppins/profiles/<name>/config.toml`), and the keyring service is `mailypoppins-<name>`.
 The `/etc/machine-id` advice is printed on Linux only.
 With no configuration at all, the first line a command prints says to run `mp config init`, and no password is mentioned.
 

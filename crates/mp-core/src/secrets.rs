@@ -171,10 +171,21 @@ fn password_key_parts(key: &str) -> Option<(&str, &str)> {
 
 /// The command that stores the `kind` password of `account` on `profile`.
 fn set_password_command(kind: &str, account: &str, profile: Option<&str>) -> String {
-    let profile = profile
-        .map(|name| format!(" --profile {name}"))
-        .unwrap_or_default();
-    format!("mp{profile} config set-password {kind} --account {account}")
+    crate::mp_command::on(
+        profile,
+        &["config", "set-password", kind, "--account", account],
+    )
+}
+
+/// The way back from a backend that cannot serve this process: name
+/// `backend` in this profile's configuration and restart this profile's
+/// daemon, since the backend is chosen once per process.
+fn switch_backend_steps(backend: &str) -> String {
+    format!(
+        "set `secrets_backend = \"{backend}\"` in {} and restart the daemon (`{}`)",
+        crate::config::config_path().display(),
+        crate::mp_command::here(&["daemon", "restart"])
+    )
 }
 
 /// `key` in words: "the SMTP password of account 'work'".
@@ -223,8 +234,8 @@ fn machine_id_error(cause: &str) -> anyhow::Error {
     };
     anyhow!(
         "Could not read this machine's ID, from which the encrypted secrets file's key is \
-         derived ({cause}). To store passwords, {create}set `secrets_backend = \"keyring\"` \
-         in config.toml and restart the daemon (`mp daemon restart`)."
+         derived ({cause}). To store passwords, {create}{}.",
+        switch_backend_steps("keyring")
     )
 }
 
@@ -638,10 +649,10 @@ fn keyring_failure(action: &str, key: &str, error: &keyring::Error) -> anyhow::E
     };
     anyhow!(
         "Could not {action} {} {preposition} the system keyring: {error}. Unlock the system \
-         keyring (on macOS, the login Keychain) and retry, or set \
-         `secrets_backend = \"encrypted-file\"` in config.toml, restart the daemon \
-         (`mp daemon restart`) and store the password again.",
-        secret_in_words(key)
+         keyring (on macOS, the login Keychain) and retry, or {}, then store the password \
+         again.",
+        secret_in_words(key),
+        switch_backend_steps("encrypted-file")
     )
 }
 
@@ -941,6 +952,36 @@ mod tests {
         );
         #[cfg(target_os = "linux")]
         assert!(said.contains("systemd-machine-id-setup"), "{said}");
+    }
+
+    /// On a profile, the configuration to edit and the daemon to restart are
+    /// the profile's: a bare `mp daemon restart` restarts the default
+    /// profile's daemon and leaves this one on the backend that failed.
+    #[test]
+    fn the_recovery_steps_name_the_profiles_config_and_daemon() {
+        use crate::config::test_env::{ConfigDirOverride, ProfileOverride};
+        let home = tempdir().unwrap();
+        let _home = ConfigDirOverride::new(home.path());
+        let _demo = ProfileOverride::set(Some("demo"));
+        let config = home
+            .path()
+            .join(".config/mailypoppins/profiles/demo/config.toml");
+        let config = config.display().to_string();
+
+        let keyring = keyring_failure(
+            "store",
+            "imap-password-tum",
+            &keyring::Error::PlatformFailure("locked".into()),
+        )
+        .to_string();
+        let machine = machine_id_error("No such file or directory").to_string();
+        for said in [keyring, machine] {
+            assert!(
+                said.contains(&format!(" in {config}"))
+                    && said.contains("(`mp --profile demo daemon restart`)"),
+                "{said}"
+            );
+        }
     }
 
     #[test]
