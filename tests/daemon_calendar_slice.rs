@@ -194,6 +194,24 @@ fn succeeded(status: &Value) -> &Value {
     &status["result"]
 }
 
+/// The lines of the daemon's log under `root` that contain `needle`, for a
+/// failure message to say what the daemon did.
+fn daemon_log(root: &Path, needle: &str) -> Vec<String> {
+    let Ok(files) = std::fs::read_dir(root.join("logs")) else {
+        return Vec::new();
+    };
+    files
+        .flatten()
+        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter(|line| line.contains(needle))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// `calendar.rebuild`'s resync of the server cache, its `server` member.
 async fn rebuild(conn: &mut Connection, account: &str) -> Value {
     let status = run_operation(conn, "calendar.rebuild", json!({"account": account})).await;
@@ -669,21 +687,29 @@ async fn a_tick_syncs_the_calendar_and_announces_it() {
 
     let listed = call(&mut conn, "calendar.list", json!({"account": SERVER})).await;
     assert_eq!(listed["calendars"].as_array().unwrap().len(), 1, "{listed}");
-    run_operation(&mut conn, "sync.quick", json!({"account": SERVER})).await;
+    let status = run_operation(&mut conn, "sync.quick", json!({"account": SERVER})).await;
 
-    let start = Instant::now();
-    let mut announced = false;
-    while start.elapsed() < SETTLE_DEADLINE {
-        let Some(notification) = within("state.event", watcher.next_notification()).await else {
-            break;
-        };
-        if notification.params["kind"] == "calendar.changed" {
-            assert_eq!(notification.params["payload"]["account"], SERVER);
-            announced = true;
-            break;
+    // The tick publishes `calendar.changed` before its operation settles, so
+    // the event is on its way by now. One deadline covers the whole wait,
+    // whatever else the watcher is sent first, rather than one per frame.
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let mut seen = Vec::new();
+    let announced = loop {
+        match tokio::time::timeout_at(deadline, watcher.next_notification()).await {
+            Ok(Some(notification)) if notification.params["kind"] == "calendar.changed" => {
+                assert_eq!(notification.params["payload"]["account"], SERVER);
+                break true;
+            }
+            Ok(Some(notification)) => seen.push(notification.params["kind"].clone()),
+            Ok(None) | Err(_) => break false,
         }
-    }
-    assert!(announced, "a client was told the calendar changed");
+    };
+    assert!(
+        announced,
+        "no client was told the calendar changed within {SETTLE_DEADLINE:?}: sync.quick \
+         settled as {status}, the watcher was sent {seen:?}, and the daemon logged {:#?}",
+        daemon_log(slice.root(), "[calendar]")
+    );
     let listed = call(&mut conn, "calendar.list", json!({"account": SERVER})).await;
     assert_eq!(listed["calendars"].as_array().unwrap().len(), 3, "{listed}");
 }
