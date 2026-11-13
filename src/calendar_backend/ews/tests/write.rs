@@ -856,3 +856,66 @@ async fn a_dismissal_and_a_snooze_are_reminder_actions_on_the_item() {
         ))
     );
 }
+
+/// Who an update tells: nobody for a change to the user's own reminder or
+/// free/busy, only the attendees added or removed for a change to the list
+/// alone (the user's own fields beside it telling nobody more), and every
+/// attendee for anything else.
+#[tokio::test]
+async fn an_update_tells_only_whom_the_change_concerns() {
+    let mut fetch = ScriptedFetch::default();
+    for _ in 0..4 {
+        fetch = fetch
+            .answer("UpdateItem", &saved("UpdateItem", SINGLE_ID))
+            .answer("GetItem", &get_item(&[SINGLE]));
+    }
+    let backend = backend(fetch);
+    let own = EventPatch {
+        reminder: Some(None),
+        show_as: Some(ShowAs::Free),
+        ..Default::default()
+    };
+    let list = EventPatch {
+        attendees: Some(vec![person(
+            "ada@example.com",
+            None,
+            AttendeeRole::Required,
+        )]),
+        ..Default::default()
+    };
+    let list_and_own = EventPatch {
+        reminder: Some(Some(5)),
+        ..list.clone()
+    };
+    let moved = EventPatch {
+        time: Some(berlin(10, 11)),
+        reminder: Some(Some(5)),
+        ..list.clone()
+    };
+    for patch in [&own, &list, &list_and_own, &moved] {
+        backend
+            .update_event(CALENDAR_ID, SINGLE_ID, patch)
+            .await
+            .unwrap();
+    }
+    let told: Vec<String> = backend
+        .fetch()
+        .sent()
+        .iter()
+        .filter(|sent| sent.contains("<m:UpdateItem "))
+        .map(|sent| {
+            let key = "SendMeetingInvitationsOrCancellations=\"";
+            let start = sent.find(key).unwrap() + key.len();
+            sent[start..start + sent[start..].find('"').unwrap()].to_string()
+        })
+        .collect();
+    assert_eq!(
+        told,
+        [
+            "SendToNone",
+            "SendToChangedAndSaveCopy",
+            "SendToChangedAndSaveCopy",
+            "SendToAllAndSaveCopy"
+        ]
+    );
+}

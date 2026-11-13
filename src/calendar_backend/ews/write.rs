@@ -19,8 +19,8 @@
 //!   (`SendMeetingInvitations`); a room is a `Resources` attendee.
 //! - An update is one `UpdateItem` with a `SetItemField` per field the patch
 //!   sets and a `DeleteItemField` per field it empties, overwriting a change
-//!   made meanwhile as Graph's PATCH does (`AlwaysOverwrite`), and sending
-//!   the attendees the update. A change to one occurrence goes to the
+//!   made meanwhile as Graph's PATCH does (`AlwaysOverwrite`), and telling
+//!   whom the change concerns ([`update_notice`]). A change to one occurrence goes to the
 //!   occurrence's own ItemId, which makes it an exception; a change to the
 //!   series goes to the master's.
 //! - A reminder dismissed or snoozed is a `PerformReminderAction`
@@ -530,6 +530,30 @@ pub(super) fn create_body(
     ))
 }
 
+/// Whom an update of `patch` tells (`SendMeetingInvitationsOrCancellations`):
+/// nobody when it changes only the user's own reminder or free/busy, which
+/// no attendee holds; only the attendees added or removed when it changes the
+/// list and otherwise only those own fields; every attendee otherwise.
+///
+/// The rule reads the patch alone. On an event without attendees Exchange
+/// has nobody to tell whatever it is sent; on a meeting the user attends, the
+/// daemon lets through only the reminder and the free/busy, which tell
+/// nobody, so an attendee never sends the organizer's attendees an update.
+pub(super) fn update_notice(patch: &EventPatch) -> &'static str {
+    let own_only = EventPatch {
+        reminder: None,
+        show_as: None,
+        attendees: None,
+        ..patch.clone()
+    }
+    .is_empty();
+    match (own_only, patch.attendees.is_some()) {
+        (true, false) => "SendToNone",
+        (true, true) => "SendToChangedAndSaveCopy",
+        (false, _) => "SendToAllAndSaveCopy",
+    }
+}
+
 /// The `SetItemField` of the field `uri` to `element`.
 fn set_field(uri: &str, element: &str) -> String {
     format!(
@@ -740,9 +764,10 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         }
         let body = format!(
             "<m:UpdateItem MessageDisposition=\"SaveOnly\" ConflictResolution=\"AlwaysOverwrite\" \
-             SendMeetingInvitationsOrCancellations=\"SendToAllAndSaveCopy\"><m:ItemChanges>\
+             SendMeetingInvitationsOrCancellations=\"{}\"><m:ItemChanges>\
              <t:ItemChange><t:ItemId Id=\"{}\"/><t:Updates>{updates}</t:Updates></t:ItemChange>\
              </m:ItemChanges></m:UpdateItem>",
+            update_notice(patch),
             xml::escape(event)
         );
         let answer = self.call("UpdateItem", &body).await?;
