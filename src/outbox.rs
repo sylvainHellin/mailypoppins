@@ -1691,16 +1691,17 @@ fn keep_for_filing(store: &Store, row: &OutboxRow) -> Result<()> {
     let mut envelope = row.envelope.clone().unwrap_or_default();
     envelope.discarded = Some(now);
     envelope.draft_key = None;
-    let attempts = match row.state {
-        OutboxState::SentPendingAppend => row.attempts,
-        _ => 0,
-    };
+    // Kept or reset in the statement, from the row as it is now: a drain
+    // may have committed an APPEND attempt since `row` was read, and writing
+    // back the count read then would hide that attempt from the dedup
+    // search.
     store
         .conn()
         .execute(
-            "UPDATE outbox SET state = 'sent_pending_append', envelope = ?2, attempts = ?3,
-             last_error = NULL, updated = ?4 WHERE id = ?1",
-            rusqlite::params![row.id, envelope.encode(), attempts, now],
+            "UPDATE outbox SET state = 'sent_pending_append', envelope = ?2,
+             attempts = CASE WHEN state = 'sent_pending_append' THEN attempts ELSE 0 END,
+             last_error = NULL, updated = ?3 WHERE id = ?1",
+            rusqlite::params![row.id, envelope.encode(), now],
         )
         .context("keeping a discarded invitation row to file its copy")?;
     info!(
@@ -2407,6 +2408,57 @@ pub fn ingest_sent_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row as the discard read it, then moved by a drain before the
+    /// discard writes it back: the discard keeps the attempt the drain
+    /// committed on a row already waiting for its APPEND, which arms the
+    /// dedup search, and starts any other row at none (PERSO-304).
+    #[test]
+    fn keeping_a_discarded_row_never_writes_back_a_stale_attempt_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let envelope = Envelope {
+            from: "alice@example.com".into(),
+            recipients: vec![("bob@example.com".into(), crate::send::RecipientRole::To)],
+            ..Default::default()
+        };
+        let row_in = |message_id: &str, state: &str, attempts: i64| {
+            let id = enqueue(
+                &store,
+                &blobs,
+                "alice",
+                Some("Sent"),
+                message_id,
+                format!("Message-ID: {message_id}\r\n\r\nx").as_bytes(),
+                &envelope,
+            )
+            .unwrap();
+            store
+                .conn()
+                .execute(
+                    "UPDATE outbox SET state = ?2, attempts = ?3 WHERE id = ?1",
+                    rusqlite::params![id, state, attempts],
+                )
+                .unwrap();
+            id
+        };
+
+        let appending = row_in("<a@x>", "sent_pending_append", 1);
+        let read = load(&store, appending).unwrap().unwrap();
+        assert!(begin_append_attempt(&store, appending, unix_now()).unwrap());
+        keep_for_filing(&store, &read).unwrap();
+        let kept = load(&store, appending).unwrap().unwrap();
+        assert_eq!(kept.attempts, 2, "the drain's attempt stands");
+        assert!(kept.is_filing());
+
+        let parked = row_in("<b@x>", "failed", 3);
+        let read = load(&store, parked).unwrap().unwrap();
+        keep_for_filing(&store, &read).unwrap();
+        let kept = load(&store, parked).unwrap().unwrap();
+        assert_eq!(kept.attempts, 0, "no APPEND was started for it");
+        assert_eq!(kept.state, OutboxState::SentPendingAppend);
+    }
 
     #[test]
     fn states_round_trip_through_their_sql_spelling() {
