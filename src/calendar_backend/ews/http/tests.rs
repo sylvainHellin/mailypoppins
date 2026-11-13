@@ -686,3 +686,99 @@ fn a_hostile_body_size_is_refused_before_it_is_read() {
         assert!(answer_of(raw.as_bytes()).is_err(), "{length}");
     }
 }
+
+/// The IMAP login of a fresh user whose password `wrong` the gate holds a
+/// refusal of, its hold ended by the user acting, so the next dial asks.
+fn refused_once(what: &str) -> (String, Login) {
+    let user = fresh_user(what);
+    let login = imap_login(&user);
+    login_gate::record(
+        &login,
+        "wrong",
+        &login_gate::LoginRejected::new(RejectedLogin::Imap, "NO LOGIN failed.".into()),
+    );
+    login_gate::forget(&login);
+    assert_eq!(login_gate::in_a_row_for_test(&login, "wrong"), 1);
+    (user, login)
+}
+
+/// After the type 3 went out, an answer that is neither a refusal nor one
+/// past the login (a 503), a connection reset with no answer, and the call's
+/// own timeout cancelling the login are each counted as the gate's
+/// unanswered login: a step of the hold of a password refused before, and
+/// nothing for a password never refused.
+#[tokio::test]
+async fn an_outcome_after_the_type_3_that_is_no_answer_steps_a_refused_password_only() {
+    let unavailable = response("503 Service Unavailable", &[], "busy");
+    let reset = String::new();
+    for (what, answer, then) in [
+        ("odd-status", Some(unavailable), Then::Next),
+        ("reset", Some(reset), Then::Close),
+    ] {
+        let script = || {
+            vec![vec![
+                (Some(challenge(&[])), Then::Next),
+                (answer.clone(), then.clone()),
+            ]]
+        };
+        let (user, login) = refused_once(what);
+        let server = Server::start(script());
+        let err = transport_as(&server, &user, "wrong", timeouts(Duration::from_secs(5)))
+            .post(ENVELOPE)
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(err, EwsFetchError::LoginRefused(_)),
+            "{what}: {err:?}"
+        );
+        assert_eq!(
+            login_gate::in_a_row_for_test(&login, "wrong"),
+            2,
+            "{what}: a step of the refused password's hold"
+        );
+        assert!(login_gate::dial(&login, "wrong").is_err(), "{what}: held");
+
+        let fresh = fresh_user(&format!("{what}-fresh"));
+        let server = Server::start(script());
+        transport_as(&server, &fresh, "fresh", timeouts(Duration::from_secs(5)))
+            .post(ENVELOPE)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            login_gate::in_a_row_for_test(&imap_login(&fresh), "fresh"),
+            0,
+            "{what}: a password never refused counts nothing"
+        );
+        assert!(login_gate::dial(&imap_login(&fresh), "fresh").is_ok());
+    }
+
+    // The call's timeout, shorter here than the login's deadline, cancels a
+    // login whose type 3 went out and got no answer.
+    let (user, login) = refused_once("cancelled");
+    let server = Server::start(vec![vec![
+        (Some(challenge(&[])), Then::Next),
+        (None, Then::Next),
+    ]]);
+    let cancelling = Timeouts {
+        request: Duration::from_millis(300),
+        ..timeouts(Duration::from_secs(5))
+    };
+    let err = transport_as(&server, &user, "wrong", cancelling)
+        .post(ENVELOPE)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("did not answer within"), "{err}");
+    assert_eq!(server.requests().len(), 2, "the type 3 went out");
+    assert_eq!(login_gate::in_a_row_for_test(&login, "wrong"), 2);
+    assert!(login_gate::dial(&login, "wrong").is_err(), "held");
+
+    // Cancelled before its type 3 went out, it counts nothing.
+    let (user, login) = refused_once("cancelled-early");
+    let server = Server::start(vec![vec![(None, Then::Next)]]);
+    transport_as(&server, &user, "wrong", cancelling)
+        .post(ENVELOPE)
+        .await
+        .unwrap_err();
+    assert_eq!(login_gate::in_a_row_for_test(&login, "wrong"), 1);
+    assert!(login_gate::dial(&login, "wrong").is_ok(), "the row is free");
+}

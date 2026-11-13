@@ -121,7 +121,12 @@
 //!   handshake and both NTLM legs; one that runs out once the type 3 was
 //!   written counts, one that runs out before counts nothing, since no
 //!   password reached the server (`calendar_backend::ews::http`'s
-//!   `an_unanswered_type_3_steps_the_hold_of_a_refused_password_only`).
+//!   `an_unanswered_type_3_steps_the_hold_of_a_refused_password_only`). Any
+//!   other outcome after the type 3 that is neither a 401 nor an answer past
+//!   the login (another status, a reset, the call's timeout cancelling it)
+//!   counts as such a login too
+//!   (`an_outcome_after_the_type_3_that_is_no_answer_steps_a_refused_password_only`);
+//!   the IMAP dial counts only its deadline.
 //!
 //! A mark older than `MARK_LIFETIME` holds nothing whatever left it
 //! (`a_mark_older_than_any_dial_is_free`). So a wrong password reaches the

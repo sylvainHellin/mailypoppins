@@ -49,12 +49,14 @@
 //! connect: a password it holds is [`EwsFetchError::LoginRefused`] without a
 //! connection, saying where the password was refused and when it is asked
 //! again. A 401 to the type 3 is reported refused, an answer past it
-//! accepted, and a login that has no answer by [`Timeouts::login`] (the
-//! gate's [`LOGIN_DEADLINE`], from the end of the TCP connect) is reported
-//! unanswered once its type 3 was written, which counts as a step of the
-//! hold of a password refused before; before the type 3 it counts nothing,
-//! as does any other failure.
+//! accepted, and any other outcome once the type 3 was written (no answer by
+//! [`Timeouts::login`], the gate's [`LOGIN_DEADLINE`] from the end of the TCP
+//! connect; another status; a reset; the call's timeout cancelling the
+//! login) is reported unanswered, which counts as a step of the hold of a
+//! password refused before and nothing for one never refused; before the
+//! type 3 nothing counts.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -212,6 +214,46 @@ impl Answer {
             "no WWW-Authenticate".to_string()
         } else {
             format!("WWW-Authenticate: {}", offers.join(", "))
+        }
+    }
+}
+
+/// One login's dial, reported to the gate whatever ends it: dropped with
+/// its type 3 written and its outcome unreported (the call's timeout
+/// cancelling the login), it is the gate's unanswered login.
+struct Attempt {
+    dial: login_gate::Dial,
+    /// Set once the type 3 went out whole, when the password may have
+    /// reached the server; atomic, as the call's future is `Send`.
+    type3_written: AtomicBool,
+    reported: bool,
+}
+
+impl Attempt {
+    fn accepted(&mut self) {
+        self.reported = true;
+        self.dial.accepted();
+    }
+
+    fn refused(&mut self, rejected: &LoginRejected) -> LoginRejected {
+        self.reported = true;
+        self.dial.refused(rejected)
+    }
+
+    /// No answer to the login: [`login_gate::Dial::unanswered`] once the
+    /// type 3 went out, and nothing before, when the dial is only dropped.
+    fn unanswered(&mut self) {
+        self.reported = true;
+        if self.type3_written.load(Ordering::SeqCst) {
+            self.dial.unanswered();
+        }
+    }
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        if !self.reported {
+            self.unanswered();
         }
     }
 }
@@ -404,7 +446,7 @@ impl EwsHttp {
         &self,
         tcp: async_std::net::TcpStream,
         envelope: &str,
-        type3_written: &mut bool,
+        type3_written: &AtomicBool,
     ) -> Result<Handshake, EwsFetchError> {
         let transport = EwsFetchError::Transport;
         let mut connection = self.secure(tcp).await.map_err(transport)?;
@@ -444,7 +486,7 @@ impl EwsHttp {
         self.write_request(&mut connection, envelope, Some(&authenticate))
             .await
             .map_err(|error| transport(error.context("the NTLM login failed")))?;
-        *type3_written = true;
+        type3_written.store(true, Ordering::SeqCst);
         let second = read_answer(&mut connection)
             .await
             .map_err(|error| transport(error.context("the NTLM login failed")))?;
@@ -454,32 +496,43 @@ impl EwsHttp {
 
     /// Log in on a new connection with `envelope` as the request, through
     /// the login gate, keeping the connection on success.
+    ///
+    /// Once the type 3 went out, every outcome is reported to the gate: a 401
+    /// is a refusal, an answer past the login (a SOAP answer or fault) is the
+    /// server taking it, and anything else (another status, a reset with no
+    /// answer, the login's deadline, the call's timeout cancelling it) is no
+    /// answer ([`login_gate::Dial::unanswered`]), a step of the hold of a
+    /// password refused before and nothing for one never refused. Before the
+    /// type 3, nothing reached the server, and the dial is dropped.
     async fn log_in(&self, state: &mut State, envelope: &str) -> Result<String, EwsFetchError> {
-        let mut dial = login_gate::dial(&self.login, &self.password).map_err(|held| {
+        let dial = login_gate::dial(&self.login, &self.password).map_err(|held| {
             let why = held.to_string();
             state.refused = Some(why.clone());
             EwsFetchError::LoginRefused(why)
         })?;
-        // Any failure from here on that is not one of the three reported
-        // below drops the dial, which counts nothing.
+        let mut attempt = Attempt {
+            dial,
+            type3_written: AtomicBool::new(false),
+            reported: false,
+        };
         let tcp = self.connect_tcp().await.map_err(EwsFetchError::Transport)?;
-        let mut type3_written = false;
         let handshake = tokio::time::timeout(
             self.timeouts.login,
-            self.handshake(tcp, envelope, &mut type3_written),
+            self.handshake(tcp, envelope, &attempt.type3_written),
         )
         .await;
         let (answer, connection, logged_in) = match handshake {
             Err(_) => {
-                if type3_written {
-                    dial.unanswered();
-                }
+                attempt.unanswered();
                 return Err(EwsFetchError::Transport(anyhow!(
                     "the Exchange server did not answer the NTLM login within {}s",
                     self.timeouts.login.as_secs_f32()
                 )));
             }
-            Ok(Err(error)) => return Err(error),
+            Ok(Err(error)) => {
+                attempt.unanswered();
+                return Err(error);
+            }
             Ok(Ok(Handshake::NotAsked(answer, connection))) => (answer, connection, false),
             Ok(Ok(Handshake::Answered(answer, _))) if answer.status == 401 => {
                 warn!(
@@ -487,7 +540,7 @@ impl EwsHttp {
                     self.endpoint.host, self.user
                 );
                 let why = format!("HTTP 401 after the NTLM login as {}", self.user);
-                let rejected = dial.refused(&LoginRejected::new(RejectedLogin::Ews, why));
+                let rejected = attempt.refused(&LoginRejected::new(RejectedLogin::Ews, why));
                 let why = rejected.to_string();
                 state.refused = Some(why.clone());
                 return Err(EwsFetchError::LoginRefused(why));
@@ -496,7 +549,9 @@ impl EwsHttp {
                 // An answer past the login (a SOAP answer or fault) says the
                 // server took it; any other status says nothing about it.
                 if matches!(answer.status, 200 | 500) {
-                    dial.accepted();
+                    attempt.accepted();
+                } else {
+                    attempt.unanswered();
                 }
                 (answer, connection, true)
             }
