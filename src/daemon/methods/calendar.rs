@@ -2587,12 +2587,14 @@ struct ItipSent {
 /// end of the meeting for those it names and never as the meeting's end
 /// ([`crate::reconcile`]), even when the update replaces every attendee
 /// and the cancellation names all those of the version it still holds.
-/// Only the cancellation's `SEQUENCE` is stored before the queued update
-/// goes out ([`crate::reconcile::next_sequence`] counts the invitations the
-/// store holds), so a change made meanwhile takes the queued update's own
-/// `SEQUENCE`, one above the cancellation, and an attendee who gets both
-/// keeps the later change by its newer `DTSTAMP`. A later message the transport could not take
-/// at all leaves its recipients refused with the reason.
+/// Until the queued update goes out and its copy is filed, the agenda
+/// holds the version before it and [`crate::reconcile::next_sequence`]
+/// does not count its `SEQUENCE`, so no change of the invitation is taken
+/// meanwhile: [`organised`] refuses one while the outbox holds a row of the
+/// `UID` with no final verdict ([`crate::invite::unsettled_change`]), and
+/// the next change is built on the filed version, above every `SEQUENCE`
+/// sent. A later message the transport could not take at all leaves its
+/// recipients refused with the reason.
 async fn send_itip(
     account: &AccountConfig,
     messages: &[crate::invite::ItipMessage],
