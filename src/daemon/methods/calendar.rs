@@ -2546,9 +2546,9 @@ struct Dropped {
     told: Vec<String>,
     /// The recipients it did not reach, with why.
     refused: Vec<RecipientOutcome>,
-    /// The recipients it has not reached yet, with why: the transport
-    /// failed before any took it and its outbox row goes out on a later
-    /// pass.
+    /// The recipients it has not reached yet, with why: the server deferred
+    /// them, or the transport failed before any took it, and its outbox row
+    /// goes out to them on a later pass.
     queued: Vec<RecipientOutcome>,
 }
 
@@ -2634,7 +2634,16 @@ async fn send_itip(
             match crate::send::send_durably(follow, account, &smtp).await {
                 Ok(report) => {
                     dropped.told.extend(delivered_of(&report));
-                    dropped.refused.extend(refused_of(&report));
+                    // A row still pending submits its deferred recipients
+                    // again on a later pass; the rest were refused.
+                    let pending = report.state == Some(crate::outbox::OutboxState::PendingSend);
+                    for result in report.send_result.results.iter().filter(|r| !r.success) {
+                        if pending && result.verdict == crate::send::RecipientVerdict::Retryable {
+                            dropped.queued.push(unreached_outcome(result));
+                        } else {
+                            dropped.refused.push(unreached_outcome(result));
+                        }
+                    }
                 }
                 Err(e) => {
                     let recipients = message
@@ -2705,13 +2714,19 @@ fn refused_of(report: &crate::send::SendReport) -> Vec<RecipientOutcome> {
         .results
         .iter()
         .filter(|result| !result.success)
-        .map(|result| RecipientOutcome {
-            address: result.address.clone(),
-            role: result.role.to_string(),
-            delivered: false,
-            error: result.error.clone(),
-        })
+        .map(unreached_outcome)
         .collect()
+}
+
+/// One recipient a submission did not reach, with the reason the server
+/// gave.
+fn unreached_outcome(result: &crate::send::RecipientResult) -> RecipientOutcome {
+    RecipientOutcome {
+        address: result.address.clone(),
+        role: result.role.to_string(),
+        delivered: false,
+        error: result.error.clone(),
+    }
 }
 
 /// The new version an update sent, as the agenda shows it: its sent copy's

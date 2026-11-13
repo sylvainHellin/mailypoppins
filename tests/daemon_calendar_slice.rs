@@ -2862,6 +2862,41 @@ async fn refused_while_queued(conn: &mut Connection, method: &str, params: Value
     refused.message
 }
 
+/// An update the server defers, whose cancellation of the attendee it
+/// drops it defers too, says both wait in the outbox: the cancellation's
+/// row stays pending for a later pass, so it was not refused.
+#[tokio::test]
+async fn a_deferred_cancellation_of_a_dropped_attendee_waits_in_the_outbox() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
+        &log,
+        &[
+            ("ada@example.com", "451 4.7.1 try again later"),
+            ("bob@example.com", "451 4.7.1 try again later"),
+        ],
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"attendees": [{"email": "ada@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(
+            "the cancellation to the attendees it drops waits in the outbox for \
+             bob@example.com (451 4.7.1 try again later)"
+        ) && !error.contains("was not taken"),
+        "{status}"
+    );
+    assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 2);
+}
+
 /// An update that replaces every attendee and the server defers cancels
 /// the old ones at once and leaves the organizer's meeting live; a change
 /// made before the update goes out would be built on the old version (a
