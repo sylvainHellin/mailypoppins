@@ -66,7 +66,8 @@
 //! (`a_dial_held_by_one_in_flight_says_a_login_is_being_tried`); the mark is a
 //! guard ([`Dial`]) that clears on a success, a refusal, any other error, a
 //! timeout and a cancelled task alike (`a_dial_in_flight_holds_the_others_of_its_row`,
-//! `one_dial_asks_when_a_hold_ends_and_a_cancelled_one_frees_the_row`).
+//! `imap_client::pool`'s `one_dial_asks_when_a_hold_ends` and
+//! `a_dial_cancelled_before_its_login_went_out_frees_the_row`).
 //!
 //! No dial keeps its mark past [`LOGIN_DEADLINE`]. A login that may have
 //! reached the server and got no answer by then, made with a secret the row
@@ -82,7 +83,12 @@
 //!   greeting, STARTTLS, the TLS handshake) counts nothing (`imap_client::pool`'s
 //!   `a_login_of_a_refused_password_unanswered_by_the_deadline_is_a_step_of_its_hold`,
 //!   `a_login_of_a_password_never_refused_unanswered_by_the_deadline_records_nothing`,
-//!   `a_deadline_before_the_login_was_written_counts_nothing`);
+//!   `a_deadline_before_the_login_was_written_counts_nothing`). Any other
+//!   outcome once the LOGIN step started that is neither `OK` nor a refusal
+//!   (the connection closed or reset, a `BAD`, a `NO` about something else,
+//!   the task cancelled) counts as such a login too (PERSO-307:
+//!   `a_login_of_a_refused_password_ending_without_an_answer_is_a_step_of_its_hold`,
+//!   `a_dial_cancelled_after_its_login_went_out_is_a_step_of_its_hold`);
 //! - an SMTP submission has it from the start of the send, the connect, the
 //!   greeting, EHLO and TLS included, and since lettre does not say whether
 //!   AUTH went out, every unanswered deadline counts; the send goes on, and
@@ -593,8 +599,9 @@ impl Dial {
         recorded
     }
 
-    /// The login got no answer by its deadline, once it may have reached the
-    /// server. A password the list holds a refusal of counts it as one more
+    /// The login got no answer about the password, by its deadline or before
+    /// it (a connection lost, an answer about something else, a cancelled
+    /// task), once it may have reached the server. A password the list holds a refusal of counts it as one more
     /// step of the row's hold, since the missing answer may well have been
     /// a refusal; a password never refused is only let go of.
     pub fn unanswered(&mut self) {

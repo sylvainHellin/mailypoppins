@@ -45,6 +45,7 @@ pub use watch::{watch_mailbox, watch_mailbox_since};
 use std::fmt;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::anyhow;
@@ -241,27 +242,73 @@ pub(crate) async fn open_imap_session_within(
     deadline: std::time::Duration,
 ) -> anyhow::Result<ImapSession> {
     let login = Login::Imap(imap_config.login());
-    // Dropped on any other outcome, the deadline and a cancelled task
-    // included, it frees the row it held for this dial.
-    let mut dial = login_gate::dial(&login, &imap_config.password)?;
-    match dial_imap_session_within(imap_config, deadline).await {
+    let mut attempt = Attempt {
+        dial: login_gate::dial(&login, &imap_config.password)?,
+        login_sent: AtomicBool::new(false),
+        reported: false,
+    };
+    match dial_imap_session_within(imap_config, deadline, &attempt.login_sent).await {
         Ok(session) => {
-            dial.accepted();
+            attempt.accepted();
             Ok(session)
         }
         Err(e) => match login_rejected(&e) {
-            Some(rejected) => Err(dial.refused(rejected).into()),
+            Some(rejected) => Err(attempt.refused(rejected).into()),
             None => {
-                // A LOGIN unanswered by the deadline may have been a refusal
-                // on its way; one that never went out was never asked.
-                if e.downcast_ref::<StepTimedOut>()
-                    .is_some_and(StepTimedOut::login_sent)
-                {
-                    dial.unanswered();
-                }
+                attempt.unanswered();
                 Err(e)
             }
         },
+    }
+}
+
+/// One gated IMAP dial, reported to the gate whatever ends it (PERSO-307).
+///
+/// Once the LOGIN may have gone out, every outcome other than the server
+/// taking it or refusing the password is no answer
+/// ([`login_gate::Dial::unanswered`]): the deadline, a connection closed or
+/// reset, a `BAD`, a `NO` about something else, and the task cancelled
+/// (the future dropped), since the answer the dial never read may well have
+/// been a refusal. That is a step of the hold of a password the server
+/// refused before, and nothing for one never refused. Before the LOGIN,
+/// nothing reached the server, and the dial is only let go of.
+struct Attempt {
+    dial: login_gate::Dial,
+    /// Set as the LOGIN step starts, before its write: the command may leave
+    /// even when the write fails, and a login counted with its bytes unsent
+    /// is the safe side of one sent and never counted. Atomic, as the dial's
+    /// future is `Send`.
+    login_sent: AtomicBool,
+    reported: bool,
+}
+
+impl Attempt {
+    fn accepted(&mut self) {
+        self.reported = true;
+        self.dial.accepted();
+    }
+
+    fn refused(&mut self, rejected: &LoginRejected) -> LoginRejected {
+        self.reported = true;
+        self.dial.refused(rejected)
+    }
+
+    /// No answer about the password: [`login_gate::Dial::unanswered`] once
+    /// the LOGIN may have gone out, and nothing before, when the dial is
+    /// only dropped.
+    fn unanswered(&mut self) {
+        self.reported = true;
+        if self.login_sent.load(Ordering::SeqCst) {
+            self.dial.unanswered();
+        }
+    }
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        if !self.reported {
+            self.unanswered();
+        }
     }
 }
 
@@ -269,18 +316,26 @@ pub(crate) async fn open_imap_session_within(
 /// logins and without adding to it: what `config.probe` takes, since a probe
 /// is the user asking the server, and what [`open_imap_session`] wraps.
 pub(crate) async fn dial_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
-    dial_imap_session_within(imap_config, login_gate::LOGIN_DEADLINE).await
+    dial_imap_session_within(
+        imap_config,
+        login_gate::LOGIN_DEADLINE,
+        &AtomicBool::new(false),
+    )
+    .await
 }
 
 /// [`dial_imap_session`] with the deadline of everything after the TCP
 /// connect handed in: the greeting and STARTTLS, the TLS handshake and the
 /// login together have `deadline` from the moment the connection is open,
 /// and a step still waiting at its end fails with an error naming the server
-/// and the step, which is no refusal (PERSO-296); [`open_imap_session`]
-/// counts a LOGIN unanswered by then as a step of a refused password's hold.
+/// and the step, which is no refusal (PERSO-296). `login_sent` is set as the
+/// LOGIN step starts, before the command is written, so [`open_imap_session`]
+/// can count a LOGIN that got no answer, by the deadline or otherwise, as a
+/// step of a refused password's hold (PERSO-307).
 async fn dial_imap_session_within(
     imap_config: &ImapConfig,
     deadline: std::time::Duration,
+    login_sent: &AtomicBool,
 ) -> anyhow::Result<ImapSession> {
     use crate::timing::TimingSpan;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
@@ -327,7 +382,7 @@ async fn dial_imap_session_within(
 
         let client = async_imap::Client::new(ImapStream::passthrough(tls_stream));
         let session = by
-            .step(Step::Login, authenticate_client(client, imap_config))
+            .login(authenticate_client(client, imap_config), login_sent)
             .await?;
         span.mark("login");
         Ok(session)
@@ -384,7 +439,7 @@ async fn dial_imap_session_within(
 
         let client = async_imap::Client::new(ImapStream::with_greeting(tls_stream));
         let session = by
-            .step(Step::Login, authenticate_client(client, imap_config))
+            .login(authenticate_client(client, imap_config), login_sent)
             .await?;
         span.mark("login");
         Ok(session)
@@ -418,6 +473,20 @@ impl Deadline<'_> {
                 step,
                 deadline: self.deadline,
             })?
+    }
+
+    /// Run the LOGIN step `run`, setting `login_sent` as it starts, before
+    /// `run` writes the command.
+    async fn login<T>(
+        &self,
+        run: impl std::future::Future<Output = anyhow::Result<T>>,
+        login_sent: &AtomicBool,
+    ) -> anyhow::Result<T> {
+        self.step(Step::Login, async {
+            login_sent.store(true, Ordering::SeqCst);
+            run.await
+        })
+        .await
     }
 }
 
@@ -453,14 +522,6 @@ struct StepTimedOut {
     addr: String,
     step: Step,
     deadline: std::time::Duration,
-}
-
-impl StepTimedOut {
-    /// Whether the LOGIN may have reached the server: the step that ran out
-    /// of time is the login itself, which writes the command first.
-    fn login_sent(&self) -> bool {
-        self.step == Step::Login
-    }
 }
 
 impl fmt::Display for StepTimedOut {

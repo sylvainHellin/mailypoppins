@@ -12,7 +12,8 @@
 //! while the server runs: by default the TUM server's tagged
 //! `NO [AUTHENTICATIONFAILED] LOGIN failed.`, or the temporary
 //! `NO [UNAVAILABLE]` of RFC 5530, or Gmail's `NO [ALERT]` over its
-//! connection limit, or `OK`. It counts every LOGIN and keeps the password
+//! connection limit, or a `BAD`, or no answer at all, the connection closed
+//! (PERSO-307), or `OK`. It counts every LOGIN and keeps the password
 //! each one carried ([`RejectingImapServer::passwords`]). A login it
 //! accepts gets an empty `INBOX` and nothing else: enough of a session for a
 //! daemon tick to list, select, search and IDLE, so a test can let the
@@ -60,6 +61,9 @@ pub const LOGIN_UNAVAILABLE: &str = "NO [UNAVAILABLE] User's backend down for ma
 /// Gmail's answer to a correct password over its connection limit.
 pub const LOGIN_ALERT: &str = "NO [ALERT] Too many simultaneous connections. (Failure)";
 
+/// A `BAD` to LOGIN, which says nothing about the password.
+pub const LOGIN_BAD: &str = "BAD LOGIN command garbled";
+
 /// What the server answers a LOGIN with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginPolicy {
@@ -71,6 +75,11 @@ pub enum LoginPolicy {
     Alert,
     /// `OK`, and a session with an empty `INBOX`.
     Accept,
+    /// No answer: the server closes the connection once the LOGIN came, as
+    /// a server that drops a bad password's connection does (PERSO-307).
+    Hangup,
+    /// [`LOGIN_BAD`], an answer that is neither `OK` nor `NO`.
+    Bad,
 }
 
 impl LoginPolicy {
@@ -79,6 +88,8 @@ impl LoginPolicy {
             1 => LoginPolicy::Unavailable,
             2 => LoginPolicy::Accept,
             3 => LoginPolicy::Alert,
+            4 => LoginPolicy::Hangup,
+            5 => LoginPolicy::Bad,
             _ => LoginPolicy::Reject,
         }
     }
@@ -89,6 +100,8 @@ impl LoginPolicy {
             LoginPolicy::Unavailable => 1,
             LoginPolicy::Accept => 2,
             LoginPolicy::Alert => 3,
+            LoginPolicy::Hangup => 4,
+            LoginPolicy::Bad => 5,
         }
     }
 }
@@ -375,6 +388,12 @@ async fn serve(
                     LoginPolicy::Reject => format!("{tag} {LOGIN_FAILED}\r\n"),
                     LoginPolicy::Unavailable => format!("{tag} {LOGIN_UNAVAILABLE}\r\n"),
                     LoginPolicy::Alert => format!("{tag} {LOGIN_ALERT}\r\n"),
+                    LoginPolicy::Bad => format!("{tag} {LOGIN_BAD}\r\n"),
+                    LoginPolicy::Hangup => {
+                        // The connection list keeps a clone of the socket,
+                        // so dropping this end would leave it open.
+                        return tls.get_ref().get_ref().shutdown(std::net::Shutdown::Both);
+                    }
                     LoginPolicy::Accept => {
                         logged_in = true;
                         format!("{tag} OK LOGIN completed\r\n")
