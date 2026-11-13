@@ -2794,6 +2794,88 @@ async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
     assert_eq!(now["cancelled"], false, "{now}");
 }
 
+/// An update that replaces every attendee and the server defers cancels
+/// the old ones at once, and the organizer's meeting, whose agenda still
+/// holds the old version, stays live and changeable: the cancellation
+/// names every attendee that version invites, yet it uninvites them and
+/// does not end the meeting.
+#[tokio::test]
+async fn an_update_replacing_every_attendee_the_server_defers_keeps_the_meeting_live() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
+        &log,
+        &[("carol@example.com", "451 4.7.1 try again later")],
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let replace = json!({"account": IMIP, "event": own["id"],
+                         "fields": {"attendees": [{"email": "carol@example.com"}]}});
+    let status = run_operation(&mut conn, "event.update", replace).await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(error.contains("waits in the outbox"), "{status}");
+    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["cancelled"], false, "{now}");
+    assert_eq!(now["id"], own["id"], "the old version stands: {now}");
+    // A later change is taken, not refused as a change of a cancelled
+    // meeting.
+    let again = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"summary": "Budget, moved"}}),
+    )
+    .await;
+    let error = again["error"]["message"].as_str().unwrap_or_default();
+    assert!(!error.contains("cancelled already"), "{again}");
+}
+
+/// The same update, the server giving no verdict for the new attendee:
+/// the outbox parks it for a human and never resends it, so the meeting
+/// must not read as cancelled for as long as that row stays failed.
+#[tokio::test]
+async fn an_update_replacing_every_attendee_with_no_verdict_keeps_the_meeting_live() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(send_fixture::fake_transport_unconfirming(
+        &log,
+        &[("carol@example.com", send_fixture::AMBIGUOUS)],
+    ));
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"],
+               "fields": {"attendees": [{"email": "carol@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("gave no verdict") && error.contains("told ada@example.com"),
+        "{status}"
+    );
+    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+
+    let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(now["cancelled"], false, "{now}");
+    let cancel = run_operation(
+        &mut conn,
+        "event.cancel",
+        json!({"account": IMIP, "event": own["id"]}),
+    )
+    .await;
+    assert_eq!(cancel["state"], "succeeded", "{cancel}");
+    let after = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    assert_eq!(
+        after["cancelled"], true,
+        "a whole cancellation still ends the meeting: {after}"
+    );
+}
+
 /// An update some of whose attendees the server refuses settles, naming
 /// them with the server's reason, and the dropped attendee is told after
 /// the update went out.

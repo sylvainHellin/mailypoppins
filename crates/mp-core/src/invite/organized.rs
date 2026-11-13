@@ -190,6 +190,31 @@ pub fn build_cancel_ics(
     occurrence: Option<&Property>,
     attendees: &[String],
 ) -> Result<String> {
+    cancel_ics(invite, sequence, occurrence, attendees, false)
+}
+
+/// Build the `METHOD:CANCEL` of the whole of `invite` at `sequence` that an
+/// update sends `dropped`, the attendees it no longer invites: the
+/// cancellation [`build_cancel_ics`] writes, marked with
+/// [`crate::calendar::UNINVITE_PROPERTY`] so the organizer's agenda reads
+/// its sent copy as their uninvitation and never as the meeting's end.
+pub fn build_uninvite_ics(
+    invite: &OrganizedInvite,
+    sequence: u32,
+    dropped: &[String],
+) -> Result<String> {
+    cancel_ics(invite, sequence, None, dropped, true)
+}
+
+/// The cancellation both builders write, marked as an uninvitation when
+/// `uninvite` is set.
+fn cancel_ics(
+    invite: &OrganizedInvite,
+    sequence: u32,
+    occurrence: Option<&Property>,
+    attendees: &[String],
+    uninvite: bool,
+) -> Result<String> {
     if attendees.is_empty() {
         return Err(anyhow!(
             "A cancellation needs at least one attendee to tell"
@@ -209,6 +234,9 @@ pub fn build_cancel_ics(
         organizer.add_parameter("CN", &cn);
     }
     event.append_property(organizer);
+    if uninvite {
+        event.add_property(crate::calendar::UNINVITE_PROPERTY, "TRUE");
+    }
     match occurrence {
         Some(rid) => {
             event.append_property(renamed(rid, "RECURRENCE-ID"));
@@ -795,6 +823,28 @@ mod tests {
         assert!(!before.cancelled);
         let after = as_attendee_sees(&request, &[&cancel]);
         assert!(after.cancelled, "the CANCEL lands on the REQUEST it names");
+        let parsed = crate::calendar::parse_ics(cancel.as_bytes()).unwrap();
+        assert!(!parsed.uninvite, "a whole cancellation carries no mark");
+    }
+
+    /// The cancellation an update sends the attendees it drops is the same
+    /// cancellation, which ends the meeting for them, marked as an
+    /// uninvitation the organizer's own agenda reads back.
+    #[test]
+    fn an_uninvitation_is_a_marked_cancel() {
+        let request = build_invite_ics(&spec()).unwrap();
+        let dropped = ["bob@example.com".to_string()];
+        let cancel = build_uninvite_ics(&sent(), 1, &dropped).unwrap();
+        assert!(cancel.contains("METHOD:CANCEL"), "{cancel}");
+        assert!(cancel.contains("X-MAILYPOPPINS-UNINVITE:TRUE"), "{cancel}");
+        assert!(!cancel.contains("mailto:ada@example.com"), "{cancel}");
+        assert!(
+            crate::calendar::parse_ics(cancel.as_bytes())
+                .unwrap()
+                .uninvite
+        );
+        let after = as_attendee_sees(&request, &[&cancel]);
+        assert!(after.cancelled, "the dropped attendee's copy is cancelled");
     }
 
     #[test]

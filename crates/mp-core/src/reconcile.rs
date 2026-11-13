@@ -249,18 +249,29 @@ struct SeriesCancel {
     /// On the account's own sent copy, the attendees it names, lower-cased,
     /// the organizer left out; `None` on a cancellation the account received.
     told: Option<BTreeSet<String>>,
+    /// Whether the account's own sent copy carries
+    /// [`crate::calendar::UNINVITE_PROPERTY`], the mark of the cancellation
+    /// an update sends the attendees it drops; `false` on a cancellation
+    /// the account received, whatever it carries.
+    uninvite: bool,
 }
 
 impl SeriesCancel {
     /// Whether this cancellation, which the account sent as the organizer,
-    /// only uninvites some attendees of a version that invites `roster`: it
-    /// names a strict subset of them (RFC 5546 3.2.5, the organizer tells
-    /// the attendees it removes with a CANCEL). Such a cancellation ends the
-    /// meeting for those it names, never on the organizer's agenda, whatever
-    /// its `SEQUENCE` against the version filed beside it.
+    /// only uninvites some attendees of a version that invites `roster`
+    /// (RFC 5546 3.2.5, the organizer tells the attendees it removes with a
+    /// CANCEL): it carries the uninvitation mark, or, a cancellation sent
+    /// before mp marked them, it names a strict subset of them. Such a
+    /// cancellation ends the meeting for those it names, never on the
+    /// organizer's agenda, whatever its `SEQUENCE` against the version filed
+    /// beside it. The mark settles the case the subset cannot: an update
+    /// that replaces every attendee and waits in the outbox, its own copy
+    /// not filed yet, leaves a cancellation naming every attendee of the
+    /// version the agenda still holds. A whole cancellation is never marked.
     fn only_uninvites(&self, roster: &BTreeSet<String>) -> bool {
         self.told.as_ref().is_some_and(|told| {
-            !told.is_empty() && told.len() < roster.len() && told.is_subset(roster)
+            !told.is_empty()
+                && (self.uninvite || (told.len() < roster.len() && told.is_subset(roster)))
         })
     }
 }
@@ -321,6 +332,7 @@ pub fn fold_status(invites: &[InviteMessage]) -> StatusIndex {
                                 invite.parsed.organizer.as_deref(),
                             )
                         }),
+                        uninvite: invite.is_sent_copy() && invite.parsed.uninvite,
                     }),
                 }
             }
@@ -352,8 +364,9 @@ impl StatusIndex {
     /// - a CANCEL cancels a copy whose `SEQUENCE` is at or below its own; a
     ///   *stale* CANCEL (lower sequence than the surviving REQUEST) is a
     ///   cancellation of a version that was already replaced, and is ignored;
-    /// - a whole-event CANCEL the account sent that names a strict subset of
-    ///   the copy's attendees uninvites them and leaves the copy live
+    /// - a whole-event CANCEL the account sent as an update's uninvitation
+    ///   (marked, or naming a strict subset of the copy's attendees)
+    ///   uninvites the attendees it names and leaves the copy live
     ///   ([`SeriesCancel::only_uninvites`]), whatever its `SEQUENCE`;
     /// - a REQUEST is superseded only by a strictly greater
     ///   `(SEQUENCE, DTSTAMP)`, so a re-delivered or replayed copy at an equal
@@ -541,6 +554,32 @@ mod tests {
         let everyone = told(2, "sent", "CANCEL", 1, &["ada@x", "bob@x"]);
         assert!(cancelled(&[request("sent"), everyone]));
         let nobody = told(2, "sent", "CANCEL", 1, &[]);
+        assert!(cancelled(&[request("sent"), nobody]));
+    }
+
+    /// The uninvitation an update that replaces every attendee sends names
+    /// all those of the version the organizer's agenda holds while the
+    /// update waits in the outbox; its mark keeps that meeting live, while
+    /// the attendees' copies, and a mark on a cancellation received, still
+    /// end it.
+    #[test]
+    fn a_marked_uninvitation_of_every_attendee_keeps_the_organizers_meeting() {
+        let request = |mailbox| told(1, mailbox, "REQUEST", 0, &["me@x", "ada@x", "bob@x"]);
+        let uninvite = |mailbox| {
+            let mut cancel = told(2, mailbox, "CANCEL", 1, &["ada@x", "bob@x"]);
+            cancel.parsed.uninvite = true;
+            cancel
+        };
+        assert!(
+            !cancelled(&[request("sent"), uninvite("sent")]),
+            "the organizer's meeting stays live"
+        );
+        assert!(
+            cancelled(&[request("inbox"), uninvite("inbox")]),
+            "the attendee's copy is cancelled"
+        );
+        let mut nobody = told(2, "sent", "CANCEL", 1, &[]);
+        nobody.parsed.uninvite = true;
         assert!(cancelled(&[request("sent"), nobody]));
     }
 }

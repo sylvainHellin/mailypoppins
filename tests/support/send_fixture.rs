@@ -291,6 +291,16 @@ pub fn fake_transport_deferring(log: &Path, deferred: &[(&str, &str)]) -> String
     serde_json::json!({"log": log.to_string_lossy(), "defer": map}).to_string()
 }
 
+/// The same, with `unknown` naming the recipients the server gives no
+/// verdict for, which the outbox parks for a human.
+pub fn fake_transport_unconfirming(log: &Path, unknown: &[(&str, &str)]) -> String {
+    let mut map = serde_json::Map::new();
+    for (address, reason) in unknown {
+        map.insert((*address).to_string(), serde_json::json!(reason));
+    }
+    serde_json::json!({"log": log.to_string_lossy(), "unknown": map}).to_string()
+}
+
 /// The same, with every submission failing with `error` before any
 /// recipient is asked, as a server that cannot be reached does.
 pub fn fake_transport_down(log: &Path, error: &str) -> String {

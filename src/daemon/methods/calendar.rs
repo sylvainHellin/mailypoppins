@@ -2501,9 +2501,11 @@ struct ItipSent {
 /// verdict) reaches its attendees later or already did, so the dropped
 /// ones are told now: the update's own copy is filed in Sent only once it
 /// goes out, and nothing would tell them afterwards. On the organizer's
-/// agenda the cancellation, filed first, names a strict subset of the
-/// attendees of the version it holds, which the agenda reads as their
-/// uninvitation and not as the meeting's end ([`crate::reconcile`]); it
+/// agenda the cancellation, filed first, carries the uninvitation mark
+/// ([`crate::invite::build_uninvite_ics`]), which the agenda reads as the
+/// end of the meeting for those it names and never as the meeting's end
+/// ([`crate::reconcile`]), even when the update replaces every attendee
+/// and the cancellation names all those of the version it still holds; it
 /// stores its `SEQUENCE`, so a change made before the queued update goes
 /// out takes one above both. A later message the transport could not take
 /// at all leaves its recipients refused with the reason.

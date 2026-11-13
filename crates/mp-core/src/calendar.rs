@@ -46,7 +46,19 @@ pub struct ParsedEvent {
     pub organizer: Option<String>,
     pub recurrence: Option<String>,
     pub attendees: Vec<ParsedAttendee>,
+    /// Whether the payload carries [`UNINVITE_PROPERTY`]: a `METHOD:CANCEL`
+    /// mp sent as the organizer to the attendees an update dropped, which
+    /// uninvites them and never ends the meeting (PERSO-204).
+    pub uninvite: bool,
 }
+
+/// The property mp writes, `TRUE`, on the cancellation an organizer's
+/// update sends the attendees it drops, so the organizer's own agenda reads
+/// its sent copy as their uninvitation even when it names every attendee of
+/// the version the agenda still holds (an update that replaces them all and
+/// waits in the outbox). The attendees get the same bytes; a receiver
+/// ignores an `X-` property it does not know (RFC 5545 3.8.8.2).
+pub const UNINVITE_PROPERTY: &str = "X-MAILYPOPPINS-UNINVITE";
 
 /// Detect whether a MIME content-type is an iCalendar payload.
 pub fn is_calendar_mimetype(mimetype: &str) -> bool {
@@ -141,6 +153,9 @@ pub fn parse_ics(bytes: &[u8]) -> Option<ParsedEvent> {
         })
         .filter(|a| !a.address.is_empty())
         .collect();
+    let uninvite = event
+        .property_value(UNINVITE_PROPERTY)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("TRUE"));
 
     Some(ParsedEvent {
         uid,
@@ -155,6 +170,7 @@ pub fn parse_ics(bytes: &[u8]) -> Option<ParsedEvent> {
         organizer,
         recurrence,
         attendees,
+        uninvite,
     })
 }
 

@@ -15,6 +15,7 @@
 //!   "log": "<path>",
 //!   "reject": {"carol@example.com": "550 5.1.1 unknown recipient"},
 //!   "defer": {"dan@example.com": "451 4.7.1 try again later"},
+//!   "unknown": {"eve@example.com": "connection reset while waiting for the 250"},
 //!   "down": "connection refused",
 //!   "append": "ok" | "fail" | "swallow_ack",
 //!   "append_delay_ms": 0
@@ -64,6 +65,9 @@ pub struct FakeTransport {
     /// The recipients the server refuses for now (a 4xx), each left
     /// retryable on the outbox row.
     deferred: Vec<(String, String)>,
+    /// The recipients the server gave no verdict for, each of whom may or
+    /// may not hold the message.
+    unknown: Vec<(String, String)>,
     /// The error every submission fails with before any recipient is
     /// asked, as a server that cannot be reached does; `None` serves them.
     down: Option<String>,
@@ -103,6 +107,7 @@ pub fn fake_transport() -> Option<FakeTransport> {
         log: value.get("log").and_then(Value::as_str).map(PathBuf::from),
         rejected: refusals("reject", "rejected"),
         deferred: refusals("defer", "deferred"),
+        unknown: refusals("unknown", "no verdict"),
         down: value
             .get("down")
             .and_then(Value::as_str)
@@ -149,7 +154,10 @@ impl FakeTransport {
                     Some(reason) => (RecipientVerdict::Rejected, Some(reason)),
                     None => match named(&self.deferred, address) {
                         Some(reason) => (RecipientVerdict::Retryable, Some(reason)),
-                        None => (RecipientVerdict::Delivered, None),
+                        None => match named(&self.unknown, address) {
+                            Some(reason) => (RecipientVerdict::Unknown, Some(reason)),
+                            None => (RecipientVerdict::Delivered, None),
+                        },
                     },
                 };
                 self.record(&format!(
@@ -157,7 +165,8 @@ impl FakeTransport {
                     match verdict {
                         RecipientVerdict::Rejected => "rejected",
                         RecipientVerdict::Retryable => "deferred",
-                        _ => "accepted",
+                        RecipientVerdict::Unknown => "unknown",
+                        RecipientVerdict::Delivered => "accepted",
                     }
                 ));
                 RecipientResult {

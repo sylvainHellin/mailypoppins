@@ -304,8 +304,11 @@ pub fn organized_row(
 ///
 /// The update goes first because it is the change: one that can reach
 /// nobody must cancel nobody, while one the outbox still holds tells the
-/// dropped attendees at once ([`crate::reconcile`] reads the cancellation
-/// on the organizer's own agenda as the uninvitation it is). The cancellation takes
+/// dropped attendees at once. The cancellation is marked as their
+/// uninvitation ([`build_uninvite_ics`]), which [`crate::reconcile`] reads
+/// on the organizer's own agenda, so it never ends the meeting there, even
+/// while the update waits in the outbox and the agenda holds the version
+/// it names every attendee of. The cancellation takes
 /// `next_sequence` and the update the one above it, so a dropped attendee's
 /// copy, at most at `next_sequence - 1`, is cancelled by it, while on the
 /// organizer's agenda it is a stale CANCEL below the update's sequence.
@@ -320,8 +323,8 @@ pub fn update_messages(
         None
     } else {
         spec.sequence = next_sequence.saturating_add(1);
-        let ics = build_cancel_ics(invite, next_sequence, None, &removed)
-            .map_err(|e| format!("{e:#}"))?;
+        let ics =
+            build_uninvite_ics(invite, next_sequence, &removed).map_err(|e| format!("{e:#}"))?;
         Some(cancellation(invite.title(), &removed, ics, None, None))
     };
     let ics = build_invite_ics(&spec).map_err(|e| format!("{e:#}"))?;
