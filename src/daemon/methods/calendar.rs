@@ -2356,8 +2356,9 @@ async fn imip_change(work: ImipChangeWork, handle: OperationHandle) {
 
 /// The failure of an organizer's change no attendee accepted yet: one
 /// that goes nowhere, naming the addresses the server refused and why, or
-/// one the outbox still holds, saying so and what became of the
-/// cancellation of the attendees it drops.
+/// one the outbox still holds, saying so, apart from the recipients the
+/// server refused for good, which no later pass reaches, and what became
+/// of the cancellation of the attendees it drops.
 fn unreached(name: &str, sent: &ItipSent) -> String {
     let listed = |list: &[RecipientOutcome]| {
         list.iter()
@@ -2368,10 +2369,23 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let held = |lead: &str, detail: &Option<String>| match (sent.refused.is_empty(), detail) {
-        (false, _) => format!(": the server {lead} {}", listed(&sent.refused)),
+    let (for_good, waiting): (Vec<RecipientOutcome>, Vec<RecipientOutcome>) = sent
+        .refused
+        .iter()
+        .cloned()
+        .partition(|recipient| sent.rejected.contains(&recipient.address));
+    let held = |lead: &str, detail: &Option<String>| match (waiting.is_empty(), detail) {
+        (false, _) => format!(": the server {lead} {}", listed(&waiting)),
         (true, Some(detail)) => format!(": {detail}"),
         (true, None) => String::new(),
+    };
+    let lost = if for_good.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; the server refused it for good for {}, who will not get it",
+            listed(&for_good)
+        )
     };
     let mut told = Vec::new();
     if !sent.dropped.told.is_empty() {
@@ -2400,19 +2414,24 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
     match &sent.reach {
         Reach::Queued(detail) => format!(
             "No attendee has the message yet{}; it waits in the outbox and goes out on its \
-             own, so do not send the change again{dropped}; mp outbox list -A {name} shows it",
+             own, so do not send the change again{lost}{dropped}; mp outbox list -A {name} \
+             shows it",
             held("did not take it for", detail)
         ),
         Reach::Unconfirmed(detail) => format!(
             "No attendee is known to have the message{}; the server gave no verdict for some, \
-             who may have it, and mp does not send it again on its own{dropped}; mp outbox \
-             list -A {name} shows it",
+             who may have it, and mp does not send it again on its own{lost}{dropped}; mp \
+             outbox list -A {name} shows it",
             held("did not confirm it for", detail)
         ),
         Reach::Delivered | Reach::Nowhere => format!(
             "No attendee accepted the message{}; nothing else was sent, and mp outbox list \
              -A {name} shows it",
-            held("refused", &None)
+            if sent.refused.is_empty() {
+                String::new()
+            } else {
+                format!(": the server refused {}", listed(&sent.refused))
+            }
         ),
     }
 }
@@ -2500,6 +2519,9 @@ struct ItipSent {
     reach: Reach,
     /// The recipients the change itself did not reach, with why.
     refused: Vec<RecipientOutcome>,
+    /// The addresses among `refused` the server refused for good (a 5xx),
+    /// which no later pass of the outbox reaches.
+    rejected: Vec<String>,
     /// What the cancellation of the attendees an update drops did.
     dropped: Dropped,
     /// How many contacts the index holds once the recipients were counted.
@@ -2523,9 +2545,12 @@ struct ItipSent {
 /// ([`crate::invite::build_uninvite_ics`]), which the agenda reads as the
 /// end of the meeting for those it names and never as the meeting's end
 /// ([`crate::reconcile`]), even when the update replaces every attendee
-/// and the cancellation names all those of the version it still holds; it
-/// stores its `SEQUENCE`, so a change made before the queued update goes
-/// out takes one above both. A later message the transport could not take
+/// and the cancellation names all those of the version it still holds.
+/// Only the cancellation's `SEQUENCE` is stored before the queued update
+/// goes out ([`crate::reconcile::next_sequence`] counts the invitations the
+/// store holds), so a change made meanwhile takes the queued update's own
+/// `SEQUENCE`, one above the cancellation, and an attendee who gets both
+/// keeps the later change by its newer `DTSTAMP`. A later message the transport could not take
 /// at all leaves its recipients refused with the reason.
 async fn send_itip(
     account: &AccountConfig,
@@ -2547,18 +2572,19 @@ async fn send_itip(
     if !commit_point(method, token).await {
         return Ok(None);
     }
-    let (delivered, reach, refused) = match crate::send::send_durably(change, account, &smtp).await
-    {
-        Ok(report) => (
-            delivered_of(&report),
-            Reach::of(&report),
-            refused_of(&report),
-        ),
-        Err(e) => match Reach::after(account, change, &e) {
-            Some(reach) => (Vec::new(), reach, Vec::new()),
-            None => return Err(e),
-        },
-    };
+    let (delivered, reach, refused, rejected) =
+        match crate::send::send_durably(change, account, &smtp).await {
+            Ok(report) => (
+                delivered_of(&report),
+                Reach::of(&report),
+                refused_of(&report),
+                rejected_of(&report),
+            ),
+            Err(e) => match Reach::after(account, change, &e) {
+                Some(reach) => (Vec::new(), reach, Vec::new(), Vec::new()),
+                None => return Err(e),
+            },
+        };
     let mut dropped = Dropped::default();
     if !matches!(reach, Reach::Nowhere) {
         for (message, follow) in messages.iter().skip(1).zip(rest) {
@@ -2600,9 +2626,21 @@ async fn send_itip(
         delivered,
         reach,
         refused,
+        rejected,
         dropped,
         contacts,
     }))
+}
+
+/// The addresses one submission's server refused for good (a 5xx).
+fn rejected_of(report: &crate::send::SendReport) -> Vec<String> {
+    report
+        .send_result
+        .results
+        .iter()
+        .filter(|result| result.verdict == crate::send::RecipientVerdict::Rejected)
+        .map(|result| result.address.clone())
+        .collect()
 }
 
 /// The addresses that accepted one submission.

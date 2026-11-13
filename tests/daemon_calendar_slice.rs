@@ -2798,6 +2798,42 @@ async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
     assert_eq!(now["cancelled"], false, "{now}");
 }
 
+/// An update the server defers for one attendee it keeps and refuses for
+/// good for the other waits in the outbox for the first alone: the failure
+/// names the second as refused for good, never as waiting.
+#[tokio::test]
+async fn an_update_deferred_for_one_and_refused_for_another_says_which_waits() {
+    let ledger = tempfile::tempdir().unwrap();
+    let log = ledger.path().join("transport.log");
+    let slice = organised_slice_with(
+        json!({"log": log.to_string_lossy(),
+               "defer": {"ada@example.com": "451 4.7.1 try again later"},
+               "reject": {"cy@example.com": "550 no such user"}})
+        .to_string(),
+    );
+    let mut conn = slice.connect().await;
+    let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
+    let status = run_operation(
+        &mut conn,
+        "event.update",
+        json!({"account": IMIP, "event": own["id"], "fields": {"attendees": [
+            {"email": "ada@example.com"}, {"email": "cy@example.com"}]}}),
+    )
+    .await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(
+            "No attendee has the message yet: the server did not take it for ada@example.com \
+             (451 4.7.1 try again later); it waits in the outbox"
+        ) && error.contains(
+            "the server refused it for good for cy@example.com (550 no such user), who will \
+             not get it"
+        ) && error.contains("told bob@example.com"),
+        "{status}"
+    );
+}
+
 /// An update that replaces every attendee and the server defers cancels
 /// the old ones at once, and the organizer's meeting, whose agenda still
 /// holds the old version, stays live and changeable: the cancellation
