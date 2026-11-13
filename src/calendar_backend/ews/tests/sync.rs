@@ -561,7 +561,7 @@ async fn a_refused_login_stops_the_pass_and_is_never_retried() {
 
 /// The writes, free/busy and the reminders are not built on EWS: each is
 /// refused with a sentence before any request, and the backend lists no
-/// feature beyond reading.
+/// feature for them.
 #[tokio::test]
 async fn the_calls_not_built_yet_are_refused_without_a_request() {
     let backend = backend(ScriptedFetch::default());
@@ -570,20 +570,9 @@ async fn the_calls_not_built_yet_are_refused_without_a_request() {
         err.to_string(),
         "the EWS calendar of tum cannot delete an event yet"
     );
-    let err = backend
-        .respond(
-            SINGLE_ID,
-            crate::calendar_backend::Response::Accept,
-            None,
-            true,
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "the EWS calendar of tum cannot answer an invitation yet"
-    );
     assert!(backend.fetch().sent().is_empty());
-    assert!(super::super::FEATURES.is_empty());
+    assert_eq!(
+        super::super::FEATURES,
+        [crate::calendar_model::CalendarFeature::ProposeTime]
+    );
 }

@@ -15,8 +15,51 @@ mod parse;
 /// The read path through the scripted seam.
 mod sync;
 
+/// The writes through the scripted seam.
+mod write;
+
 const CALENDAR_VIEW: &str = include_str!("../../../tests/fixtures/ews/finditem_calendarview.xml");
 const GET_FOLDER: &str = include_str!("../../../tests/fixtures/ews/getfolder_calendar.xml");
+
+/// An answer of `operation` with `messages` as its response messages, in the
+/// frame of the spike's answers (the `ServerVersionInfo` header, the `m:` and
+/// `t:` prefixes).
+///
+/// The spike ran no write, so the answers of the writes are built with this
+/// from Microsoft's schema documentation rather than captured: their shape
+/// is unverified live.
+pub(super) fn built_answer(operation: &str, messages: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope \
+         xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Header>\
+         <h:ServerVersionInfo MajorVersion=\"15\" MinorVersion=\"2\" MajorBuildNumber=\"2562\" \
+         MinorBuildNumber=\"57\" Version=\"V2017_07_11\" \
+         xmlns:h=\"http://schemas.microsoft.com/exchange/services/2006/types\"/></s:Header>\
+         <s:Body><m:{operation}Response \
+         xmlns:m=\"http://schemas.microsoft.com/exchange/services/2006/messages\" \
+         xmlns:t=\"http://schemas.microsoft.com/exchange/services/2006/types\">\
+         <m:ResponseMessages>{messages}</m:ResponseMessages></m:{operation}Response>\
+         </s:Body></s:Envelope>"
+    )
+}
+
+/// One successful response message of `operation` carrying `payload`.
+pub(super) fn success_message(operation: &str, payload: &str) -> String {
+    format!(
+        "<m:{operation}ResponseMessage ResponseClass=\"Success\">\
+         <m:ResponseCode>NoError</m:ResponseCode>{payload}</m:{operation}ResponseMessage>"
+    )
+}
+
+/// One failed response message of `operation`: the server's `code` and
+/// `text`.
+pub(super) fn error_message(operation: &str, code: &str, text: &str) -> String {
+    format!(
+        "<m:{operation}ResponseMessage ResponseClass=\"Error\">\
+         <m:MessageText>{text}</m:MessageText><m:ResponseCode>{code}</m:ResponseCode>\
+         <m:DescriptiveLinkKey>0</m:DescriptiveLinkKey></m:{operation}ResponseMessage>"
+    )
+}
 
 /// An Exchange server that answers from a script, in order: each entry names
 /// the operation it answers (`GetItem`), so a request the test did not

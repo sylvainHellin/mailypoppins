@@ -38,12 +38,15 @@
 //! ([`CalendarBackendError::LoginRefused`]): the session holds it, so no
 //! later call of the pass asks the server again.
 //!
-//! Writes, free/busy and the server reminders are not built yet: [`FEATURES`]
-//! lists none, and each such call is refused with a sentence.
+//! An answer to an invitation, a proposed time included, goes through
+//! [`write`]. Writes, free/busy and the server reminders are not built yet:
+//! [`FEATURES`] lists none of them, and each such call is refused with a
+//! sentence.
 
 pub mod fetch;
 pub mod ntlm;
 pub mod parse;
+mod write;
 pub mod xml;
 
 use std::collections::{HashMap, HashSet};
@@ -63,8 +66,8 @@ use crate::config::EwsPasswordSource;
 use fetch::{EwsFetch, EwsFetchError, EwsSession};
 use parse::{AnswerError, Change, ItemType, Message, SyncAnswer, ViewItem};
 
-/// What this build serves on an EWS calendar beyond reading: nothing yet.
-pub const FEATURES: &[CalendarFeature] = &[];
+/// What this build serves on an EWS calendar beyond reading and answering.
+pub const FEATURES: &[CalendarFeature] = &[CalendarFeature::ProposeTime];
 
 /// The most changes one SyncFolderItems page may carry, the server's limit.
 const MAX_CHANGES: usize = 512;
@@ -602,13 +605,20 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
 
     async fn respond(
         &self,
-        _event: &str,
-        _response: Response,
-        _comment: Option<String>,
-        _send_response: bool,
-        _proposed: Option<ProposedTime>,
+        event: &str,
+        response: Response,
+        comment: Option<String>,
+        send_response: bool,
+        proposed: Option<ProposedTime>,
     ) -> BackendResult<()> {
-        Err(self.not_built("answer an invitation"))
+        self.send_response(
+            event,
+            response,
+            comment.as_deref(),
+            send_response,
+            proposed.as_ref(),
+        )
+        .await
     }
 
     async fn create_event(

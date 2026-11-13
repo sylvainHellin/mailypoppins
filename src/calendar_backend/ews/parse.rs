@@ -140,7 +140,7 @@ pub fn messages(body: &str, operation: &str) -> Result<Vec<Message>, AnswerError
 
 /// The single response message of `operation`'s answer, its error as
 /// [`AnswerError::Refused`].
-fn only_message(body: &str, operation: &str) -> Result<Element, AnswerError> {
+pub fn only_message(body: &str, operation: &str) -> Result<Element, AnswerError> {
     let mut found = messages(body, operation)?;
     if found.len() != 1 {
         return Err(malformed(format!(
