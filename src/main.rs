@@ -57,6 +57,28 @@ struct SignatureFlags {
     no_signature: bool,
 }
 
+/// `--body-file` of the commands that create a draft: the text goes in at
+/// creation, above the signature (and the quote of a reply or a forward),
+/// where a person would type it.
+#[derive(clap::Args, Clone, Debug, Default)]
+struct BodyFileFlag {
+    /// The draft's text, read from a file (- for stdin), above the signature
+    #[arg(long, value_name = "PATH")]
+    body_file: Option<std::path::PathBuf>,
+}
+
+impl BodyFileFlag {
+    /// The `body` parameter of the `draft.*` writers, `{}` without the flag.
+    /// Read once, before any call: stdin cannot be read a second time when a
+    /// miss fetches the message and asks the daemon again.
+    fn read(&self) -> Result<serde_json::Value> {
+        Ok(match &self.body_file {
+            Some(path) => serde_json::json!({"body": read_text_file(path, "the draft's body")?}),
+            None => serde_json::json!({}),
+        })
+    }
+}
+
 /// The global `-A` shadowed on a command that names no account, hidden from
 /// its help and refused by [`refuse_account_where_meaningless`], so
 /// `mp daemon status -A work` is an error rather than an account nobody reads.
@@ -223,6 +245,17 @@ enum Commands {
     New {
         /// Name for the new draft file
         name: String,
+        /// A recipient (repeatable)
+        #[arg(long = "to", value_name = "ADDR")]
+        to: Vec<String>,
+        /// A Cc recipient (repeatable)
+        #[arg(long = "cc", value_name = "ADDR")]
+        cc: Vec<String>,
+        /// The subject
+        #[arg(long, value_name = "TEXT")]
+        subject: Option<String>,
+        #[command(flatten)]
+        body: BodyFileFlag,
         #[command(flatten)]
         signature: SignatureFlags,
     },
@@ -251,6 +284,8 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<String>,
         #[command(flatten)]
+        body: BodyFileFlag,
+        #[command(flatten)]
         signature: SignatureFlags,
     },
     /// Forward an email to new recipients
@@ -265,6 +300,8 @@ enum Commands {
         /// Attach the original as an .eml (message/rfc822) instead of its attachments
         #[arg(long)]
         as_attachment: bool,
+        #[command(flatten)]
+        body: BodyFileFlag,
         #[command(flatten)]
         signature: SignatureFlags,
     },
@@ -1396,7 +1433,7 @@ impl CreateFlags {
     fn params(&self, account: &str) -> Result<mp_protocol::calendar::EventCreateParams> {
         use mp_protocol::calendar::{EventCreateParams, EventInputParams};
         let body = match &self.body_file {
-            Some(path) => Some(read_description(path)?),
+            Some(path) => Some(read_text_file(path, "the description")?),
             None => self.body.clone(),
         };
         let attendees = attendee_inputs(&self.to, &self.optional, &self.room);
@@ -1528,7 +1565,7 @@ impl UpdateFlags {
         use mp_protocol::calendar::{EventPatchParams, EventUpdateParams};
         let body = match (&self.body_file, self.clear_body) {
             (_, true) => Some(None),
-            (Some(path), false) => Some(Some(read_description(path)?)),
+            (Some(path), false) => Some(Some(read_text_file(path, "the description")?)),
             (None, false) => self.body.clone().map(Some),
         };
         let attendees = (!self.to.is_empty() || !self.optional.is_empty() || !self.room.is_empty())
@@ -1591,16 +1628,16 @@ impl UpdateFlags {
     }
 }
 
-/// A description read from `path`, `-` for stdin.
-fn read_description(path: &std::path::Path) -> Result<String> {
+/// The text of `what` (an event's description, a draft's body) read from
+/// `path`, `-` for stdin.
+fn read_text_file(path: &std::path::Path, what: &str) -> Result<String> {
     if path.as_os_str() == "-" {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
-            .context("reading the description from stdin")?;
+            .with_context(|| format!("reading {what} from stdin"))?;
         return Ok(text);
     }
-    std::fs::read_to_string(path)
-        .with_context(|| format!("reading the description from {}", path.display()))
+    std::fs::read_to_string(path).with_context(|| format!("reading {what} from {}", path.display()))
 }
 
 /// The attendees `--to`, `--optional` and `--room` name, in that order.
@@ -3466,6 +3503,8 @@ async fn routed_mark(account: &str, selector: &str, approve: bool) -> Result<()>
 /// `as_attachment` is `mp forward --as-attachment` (PERSO-174): the daemon
 /// attaches the source's `.eml`, which for a Graph row is a round trip to the
 /// server, so that call waits as long as a server query does.
+///
+/// `extra` is the signature flags' and `--body-file`'s parameters.
 async fn routed_from_source(
     account: &str,
     method: &str,
@@ -3473,7 +3512,7 @@ async fn routed_from_source(
     mailbox: Option<&str>,
     all: bool,
     as_attachment: bool,
-    signature: serde_json::Value,
+    extra: serde_json::Value,
 ) -> Result<mp_protocol::draft::DraftCreated> {
     let mut source = serde_json::json!({"selector": selector});
     if let Some(mailbox) = mailbox {
@@ -3481,7 +3520,7 @@ async fn routed_from_source(
     }
     let mut params = with_params(
         serde_json::json!({"account": account, "source": source, "all": all}),
-        signature,
+        extra,
     );
     if !as_attachment {
         return draft_call(account, method, params).await;
@@ -6721,18 +6760,31 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
             routed_mark(&account_config.name, &selector, false).await?;
         }
 
-        Some(Commands::New { name, signature }) => {
+        Some(Commands::New {
+            name,
+            to,
+            cc,
+            subject,
+            body,
+            signature,
+        }) => {
             // The `.md` suffixing rule is the daemon's, because the daemon owns
-            // the directory the file lands in.
-            let created: mp_protocol::draft::DraftCreated = draft_call(
-                &account_config.name,
-                "draft.create",
-                with_params(
-                    serde_json::json!({"account": account_config.name, "name": name}),
-                    signature.params(),
-                ),
-            )
-            .await?;
+            // the directory the file lands in. Recipients, subject and body go
+            // in with the create, so the draft is whole when it is written.
+            let mut params = with_params(
+                serde_json::json!({"account": account_config.name, "name": name}),
+                with_params(signature.params(), body.read()?),
+            );
+            if !to.is_empty() || !cc.is_empty() || subject.is_some() {
+                params["headers"] = serde_json::json!({
+                    "to": to.join(", "),
+                    "cc": cc.join(", "),
+                    "bcc": "",
+                    "subject": subject.unwrap_or_default(),
+                });
+            }
+            let created: mp_protocol::draft::DraftCreated =
+                draft_call(&account_config.name, "draft.create", params).await?;
             hand_back(
                 &format!("{} {}", "\u{2713}".green(), created.selector),
                 &created.selector,
@@ -6778,9 +6830,12 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
             selector,
             all,
             mailbox,
+            body,
             signature,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
+            // Read once: a miss fetches the message and asks again.
+            let extra = with_params(signature.params(), body.read()?);
             let created = fetch_on_miss(
                 &account_config,
                 &selector,
@@ -6794,7 +6849,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
                         mailbox,
                         all,
                         false,
-                        signature.params(),
+                        extra.clone(),
                     )
                     .await
                 },
@@ -6815,9 +6870,12 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
             selector,
             mailbox,
             as_attachment,
+            body,
             signature,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
+            // Read once: a miss fetches the message and asks again.
+            let extra = with_params(signature.params(), body.read()?);
             let created = fetch_on_miss(
                 &account_config,
                 &selector,
@@ -6831,7 +6889,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
                         mailbox,
                         false,
                         as_attachment,
-                        signature.params(),
+                        extra.clone(),
                     )
                     .await
                 },

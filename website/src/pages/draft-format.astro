@@ -261,6 +261,8 @@ Email body here.`;
         <code>ca</code> to reply-all, in the TUI). They record the source message in <code>in_reply_to</code>. The account signature
         (if configured) is appended to the reply area, above a <code>&lt;!-- mp:quote --&gt;</code>
         comment that marks the boundary with the quoted original message.
+        <code>mp reply --body-file &lt;path&gt;</code> (<code>-</code> for stdin) writes the text of
+        a file first in the reply area, above the signature, where you would type it.
       </p>
       <p>
         A reply goes to the message's <code>Reply-To</code> address, or to its sender when it has

@@ -217,6 +217,9 @@ mp new meeting-followup
 # Open it in your editor and fill in recipients, subject, body
 mp edit mp://work/drafts/9f2c1ab30d5e4471
 
+# Or give them at creation, the body read from a file (- for stdin)
+mp new meeting-notes --to alice@example.com --subject "Follow-up" --body-file notes.md
+
 # Mark it as reviewed and ready to send
 mp mark-approved mp://work/drafts/9f2c1ab30d5e4471
 

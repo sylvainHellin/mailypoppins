@@ -159,6 +159,10 @@ Arguments:
   <NAME>  Name for the new draft file
 
 Options:
+      --to <ADDR>              A recipient (repeatable)
+      --cc <ADDR>              A Cc recipient (repeatable)
+      --subject <TEXT>         The subject
+      --body-file <PATH>       The draft's text, read from a file (- for stdin), above the signature
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use
@@ -202,6 +206,7 @@ Arguments:
 Options:
       --all                    Reply to all recipients
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
+      --body-file <PATH>       The draft's text, read from a file (- for stdin), above the signature
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use
@@ -219,6 +224,7 @@ Arguments:
 Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
       --as-attachment          Attach the original as an .eml (message/rfc822) instead of its attachments
+      --body-file <PATH>       The draft's text, read from a file (- for stdin), above the signature
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use

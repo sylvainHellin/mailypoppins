@@ -105,6 +105,11 @@ fn account_name_of(store: &crate::store::Store) -> String {
 /// reply area above the quoted text so it is visible and editable; `None`
 /// leaves no signature block.
 ///
+/// `body` is text the caller wrote before the draft existed (`mp reply
+/// --body-file`), put first in the reply area above the signature, where a
+/// person types it ([`prepend_draft_body_text`]); `None` leaves the area
+/// empty.
+///
 /// A forward as attachment expects `source` to carry the message's `.eml` as
 /// its one attachment, and writes the [`ATTACHED_FORWARD_BODY`] (PERSO-174).
 pub fn create_draft_from_source(
@@ -114,6 +119,7 @@ pub fn create_draft_from_source(
     kind: DraftFromSource,
     headers: Option<&DraftRecipientEdit>,
     signature: Option<&str>,
+    body: Option<&str>,
 ) -> Result<(PathBuf, crate::selector::Selector)> {
     let dir = crate::config::drafts_dir(account);
     let path = match kind {
@@ -129,6 +135,9 @@ pub fn create_draft_from_source(
             create_forward_draft_with(source, body, default_from, Some(&dir), signature)?
         }
     };
+    if let Some(body) = body {
+        prepend_draft_body_text(&path, body)?;
+    }
     if let Some(edit) = headers {
         rewrite_draft_recipients(&path, edit)?;
     }

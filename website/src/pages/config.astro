@@ -423,6 +423,13 @@ mirror = false`} />
         <code>sent_body</code> once it is sent.
       </p>
       <p>
+        The copy is taken the moment the draft is created, so text written into the file
+        afterwards is only in <code>sent_body</code>. A script or an agent that writes the draft
+        hands its text over at creation instead: <code>mp new --to --cc --subject --body-file</code>,
+        <code>mp reply --body-file</code> and <code>mp forward --body-file</code> put it in the
+        draft, above the signature, before the copy is taken.
+      </p>
+      <p>
         The list defaults to <code>["tum"]</code>; <code>accounts = []</code> turns snapshots off.
         Like <code>[email]</code>, the table is top-level, not under <code>[[accounts]]</code>.
         Snapshots older than 90 days are deleted the next time one is written for that account, and

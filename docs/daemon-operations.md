@@ -101,14 +101,14 @@ The table is what routes and through what:
 | `mp dump-mailbox --json [--mailbox ...]` | `message.list` with `projection: "envelope"` | P4-U4 |
 | `mp search --local` | `message.search` | P4-U4 |
 | `mp search [--mailbox] [filters]` | `message.search_server` | PERSO-175 |
-| `mp new <name>` | `draft.create` | P4-U6 |
+| `mp new <name> [--to]... [--cc]... [--subject] [--body-file]` | `draft.create` | P4-U6 |
 | `mp list [--status]` | `draft.list` | P4-U6 |
 | `mp validate [selector]` | `draft.validate` | P4-U6 |
 | `mp mark-approved`, `mp mark-draft` | `draft.path`, then `draft.approve` / `draft.demote` | P4-U6 |
 | `mp path <selector>` | `draft.path` | P4-U6 |
 | `mp edit <selector>` | `draft.path`, then `$EDITOR` in the client | P4-U6 |
-| `mp reply [--all] [--mailbox]` | `draft.reply` | P4-U6 |
-| `mp forward [--mailbox]` | `draft.forward` | P4-U6 |
+| `mp reply [--all] [--mailbox] [--body-file]` | `draft.reply` | P4-U6 |
+| `mp forward [--mailbox] [--body-file]` | `draft.forward` | P4-U6 |
 | `mp <selector>` (the dry run) | `draft.preview` | P4-U6 |
 | `mp archive <selector>... [--mailbox]` | `message.archive` | P4-U8 |
 | `mp move <selector>... <mailbox> [--mailbox]` | `message.move` with `destination` | PERSO-235 |

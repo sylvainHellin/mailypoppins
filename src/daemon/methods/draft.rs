@@ -630,11 +630,7 @@ pub(super) fn create(
 ) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
     let name = string_param(params, "name")?;
-    let body = match params.get("body") {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(body)) => body.clone(),
-        Some(_) => return Err(invalid_params("body is the draft's text, a string")),
-    };
+    let body = body_param(params)?.unwrap_or_default();
     let headers = recipient_headers(params)?;
     let file_name = match Path::new(&name).extension() {
         Some(_) => name.clone(),
@@ -791,6 +787,10 @@ fn create_from_message(
 /// `eml` is the forward-as-attachment case: the path of the source's own
 /// `.eml`, which the draft carries instead of the original's parts (they are
 /// inside it).
+///
+/// `body` is [`body_param`]'s: the text `mp reply --body-file` and
+/// `mp forward --body-file` hand over, first in the reply area above the
+/// signature, so the draft is complete when its snapshot is taken.
 fn from_source(
     params: &Value,
     accounts: &[AccountConfig],
@@ -832,6 +832,7 @@ fn from_source(
         kind,
         headers.as_ref(),
         signature_of(account, params, email).as_deref(),
+        body_param(params)?.as_deref(),
     )
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
 
@@ -900,6 +901,7 @@ async fn forward_hit_inline(
         },
         headers.as_ref(),
         signature_of(&account, params, email).as_deref(),
+        body_param(params)?.as_deref(),
     )
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
     created(&account, &written.key, &draft, None)
@@ -999,9 +1001,22 @@ async fn forward_hit_as_attachment(
         },
         headers.as_ref(),
         signature_of(account, params, email).as_deref(),
+        body_param(params)?.as_deref(),
     )
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
     created(account, &written.key, &draft, None)
+}
+
+/// The `body` of `draft.create`, `draft.reply` and `draft.forward`: text the
+/// caller wrote before the draft existed, which goes where a person types it,
+/// above the signature block (and the quote of a reply or a forward). Absent
+/// or `null` is no text, and the draft is the one written without it.
+fn body_param(params: &Value) -> Result<Option<String>, RpcError> {
+    match params.get("body") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(body)) => Ok(Some(body.clone())),
+        Some(_) => Err(invalid_params("body is the draft's text, a string")),
+    }
 }
 
 /// The `headers` override of `draft.reply`, `draft.forward` (P5-U6) and

@@ -171,6 +171,7 @@ mod store_backed_drafts {
             DraftFromSource::Reply { all: false },
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -222,6 +223,7 @@ mod store_backed_drafts {
             DraftFromSource::Reply { all: true },
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -262,6 +264,7 @@ mod store_backed_drafts {
                 DraftFromSource::Reply { all },
                 None,
                 None,
+                None,
             )
             .unwrap();
             let draft = crate::draft::parse_email_draft(&path).unwrap();
@@ -293,6 +296,7 @@ mod store_backed_drafts {
             DraftFromSource::Forward {
                 as_attachment: false,
             },
+            None,
             None,
             None,
         )
@@ -400,6 +404,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             },
             None,
             None,
+            None,
         )
         .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -498,6 +503,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
                 subject: "FW: Report (for review)".to_string(),
             }),
             None,
+            None,
         )
         .unwrap();
 
@@ -532,6 +538,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             "me@example.com",
             &source,
             DraftFromSource::Reply { all: false },
+            None,
             None,
             None,
         )
@@ -607,6 +614,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             DraftFromSource::Reply { all: false },
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -660,6 +668,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             DraftFromSource::Forward {
                 as_attachment: false,
             },
+            None,
             None,
             None,
         )
@@ -783,6 +792,7 @@ mod store_backed_mutations {
             "me@example.com",
             &source,
             DraftFromSource::Reply { all: false },
+            None,
             None,
             None,
         )

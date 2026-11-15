@@ -810,12 +810,12 @@ The family is the sixteen methods below, all served from protocol 1 and all dura
 | `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
 | `draft.detach` | command | `{account, id\|selector, index}` | `DraftAttachments` |
 | `draft.discard` | command | `{account, id\|selector, force?}` or `{account, sent: true}` | `{account, id, selector, status}` or `{account, cleared, kept}` |
-| `draft.forward` | command | `{account, source, as_attachment?, headers?, no_signature?, signature?}` | `DraftCreated` |
+| `draft.forward` | command | `{account, source, as_attachment?, body?, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.html` | query | `{account, id\|selector}` | `DraftHtml` |
 | `draft.list` | query | `{account, status?}` | `DraftListing` |
 | `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
 | `draft.preview` | query | `{account, id\|selector, full?}` | `DraftPreview` |
-| `draft.reply` | command | `{account, source, all?, headers?, no_signature?, signature?}` | `DraftCreated` |
+| `draft.reply` | command | `{account, source, all?, body?, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.set_headers` | command | `{account, id\|selector, headers?, splice_signature?, no_signature?, signature?}` | `DraftLocation` |
 | `draft.validate` | query | `{account, id?\|selector?}` | `DraftValidation` |
 
@@ -862,6 +862,8 @@ There is no `headers` override: the compose wizard writes its recipients over a 
 `headers` is `{to, cc, bcc, subject}`, all four required once it is present and an empty string clearing the field, and it rewrites the built draft's frontmatter in place.
 `draft.create` takes the same `headers` and a `body`, the compose wizard's inline body (#0131): the trimmed text goes above the signature block with one blank line between, and an absent or blank `body` writes the skeleton `mp new` always wrote, so the wizard's draft is written whole in one call instead of rewritten by the client.
 A `signature` it names, unless `no_signature` drops it, is recorded in the draft's `signature:` frontmatter as well as spliced into the body, so a later header edit preselects it.
+`draft.reply` and `draft.forward` take a `body` too (`mp reply --body-file`, `mp forward --body-file`): the trimmed text goes first in the reply area, where a person types it, one blank line above the signature block, or above the quote marker when there is no signature, and the rest of the draft is byte for byte the one written without it (`mp_core::draft::prepend_body_text`); it goes in before the id is minted and the index refreshed, so the draft a voice snapshot records holds it, and an absent or blank `body` writes the draft as before.
+A `body` that is not a string is `-32602` on all three methods.
 It exists for a compose wizard that collects the recipients and the subject *before* the draft is written and keeps them over the ones the builder derived; without it such a client would have to build the draft through the daemon and then rewrite the file behind its back.
 A partial object is `-32602`: which fields the override covers is not a thing to leave ambiguous.
 
@@ -1986,3 +1988,5 @@ PERSO-306 dropped `new_inbox_mail` from the `sync.completed` payload (`mp_protoc
 A client that predates PERSO-186 decoded the field as `default` and read the answer's list as `[]` when absent, so against this daemon it decodes every tick and every answer and raises no new-mail notification; a client of this build ignores the list an older daemon still sends.
 `crates/mp-protocol/fixtures/notification.sync_completed.json` lost the member, `tests/daemon_sync_outcome.rs`'s payload key list is thirteen names and pins the fixture too, and the regenerated `SyncCompleted.ts` has no `new_inbox_mail`.
 No method was added or renamed, and no command's output moved.
+
+The voice snapshots added `body` to `draft.reply` and `draft.forward`, optional and additively, with `draft.create`'s contract: the text a caller wrote before the draft existed, placed above the signature and the quote; no field was renamed or dropped, no method was added, and a call without it writes the draft it wrote before.

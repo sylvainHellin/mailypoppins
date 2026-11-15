@@ -294,31 +294,10 @@ pub fn rewrite_draft_signature(
         "\n"
     };
 
-    let after_open = content
-        .strip_prefix("---\n")
-        .or_else(|| content.strip_prefix("---\r\n"))
-        .ok_or_else(|| anyhow!("No frontmatter found (file does not start with '---')"))?;
-
-    // Split the frontmatter (kept verbatim) from the body at the closing fence.
-    let mut header_end: Option<usize> = None;
-    let mut body = String::new();
-    let mut cursor = 0usize;
-    while cursor < after_open.len() {
-        let rest = &after_open[cursor..];
-        let (line, advance) = match rest.find('\n') {
-            Some(nl) => (&rest[..nl], nl + 1),
-            None => (rest, rest.len()),
-        };
-        if line.trim_end_matches('\r') == "---" {
-            header_end = Some(cursor);
-            body = after_open[cursor + advance..].to_string();
-            break;
-        }
-        cursor += advance;
-    }
-    let header_end =
-        header_end.ok_or_else(|| anyhow!("Malformed frontmatter: no closing '---' fence"))?;
-    let header = &after_open[..header_end];
+    // The frontmatter is kept verbatim; the body is what follows its fence.
+    let fences = frontmatter_fences(&content)?;
+    let header = &content[fences.header..fences.close];
+    let body = &content[fences.body..];
 
     let new_body = set_signature_block(body.trim(), new_sig_markdown);
 
@@ -343,6 +322,90 @@ pub fn rewrite_draft_signature(
     let final_content = rewrite_frontmatter_scalars(&rebuilt, &updates)?;
 
     write_atomic(path, final_content.as_bytes())
+        .with_context(|| format!("Failed to write file: {}", path.display()))
+}
+
+/// Where a draft's frontmatter block sits in its file, as byte offsets.
+struct FrontmatterFences {
+    /// The first byte after the opening `---` line.
+    header: usize,
+    /// The first byte of the closing `---` line.
+    close: usize,
+    /// The first byte after the closing `---` line: the body.
+    body: usize,
+}
+
+/// Find the opening and closing `---` fences of a draft's frontmatter, either
+/// line ending accepted.
+fn frontmatter_fences(content: &str) -> Result<FrontmatterFences> {
+    let header = if content.starts_with("---\n") {
+        4
+    } else if content.starts_with("---\r\n") {
+        5
+    } else {
+        bail!("No frontmatter found (file does not start with '---')");
+    };
+    let mut cursor = header;
+    while cursor < content.len() {
+        let rest = &content[cursor..];
+        let (line, advance) = match rest.find('\n') {
+            Some(nl) => (&rest[..nl], nl + 1),
+            None => (rest, rest.len()),
+        };
+        if line.trim_end_matches('\r') == "---" {
+            return Ok(FrontmatterFences {
+                header,
+                close: cursor,
+                body: cursor + advance,
+            });
+        }
+        cursor += advance;
+    }
+    bail!("Malformed frontmatter: no closing '---' fence")
+}
+
+/// `content`, a draft file, with `text` first in its body: where a person
+/// types in a reply or a forward, above the signature block and the quote,
+/// which follow after one blank line, exactly as [`new_draft_with_body`] lays
+/// out a new draft's typed body.
+///
+/// The text is trimmed; blank text is `content` unchanged. The frontmatter
+/// and everything after the text are kept byte for byte, but for the blank
+/// lines between the fence and the old body's first line, which the text now
+/// fills.
+pub fn prepend_body_text(content: &str, text: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(content.to_string());
+    }
+    let fences = frontmatter_fences(content)?;
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let rest = content[fences.body..].trim_start_matches(['\r', '\n']);
+    let mut out = String::with_capacity(content.len() + text.len() + 4);
+    out.push_str(&content[..fences.body]);
+    out.push_str(newline);
+    out.push_str(text);
+    out.push_str(newline);
+    if !rest.is_empty() {
+        out.push_str(newline);
+        out.push_str(rest);
+    }
+    Ok(out)
+}
+
+/// [`prepend_body_text`] on the draft file at `path`, in place.
+pub fn prepend_draft_body_text(path: &Path, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let content = prepend_body_text(&content, text)?;
+    write_atomic(path, content.as_bytes())
         .with_context(|| format!("Failed to write file: {}", path.display()))
 }
 
@@ -2659,6 +2722,36 @@ mod tests {
             new_draft_with_body("a@x", "d", "i1", " \n", Some("Gruss")),
             new_draft_skeleton_with_id("a@x", "d", "i1", Some("Gruss"))
         );
+    }
+
+    /// Text given at creation goes where a person types it in a reply or a
+    /// forward: first in the body, a blank line above the signature or the
+    /// quote, the frontmatter and the rest byte for byte; blank text changes
+    /// nothing.
+    #[test]
+    fn prepended_text_sits_above_the_signature_and_the_quote() {
+        let fm = "---\nto: \"b@x\"\nsubject: \"Re: Hi\"\nstatus: draft\n---\n";
+        let signed = format!(
+            "{fm}\n\n{SIG_START}\nGruss\n{SIG_END}\n{QUOTE_MARKER}\n\nOn d, a wrote:\n> hi\n"
+        );
+        assert_eq!(
+            prepend_body_text(&signed, "  Hallo\nzusammen \n").unwrap(),
+            format!(
+                "{fm}\nHallo\nzusammen\n\n{SIG_START}\nGruss\n{SIG_END}\n{QUOTE_MARKER}\n\nOn d, a wrote:\n> hi\n"
+            )
+        );
+        let unsigned = format!("{fm}\n\n{QUOTE_MARKER}\n\nOn d, a wrote:\n> hi\n");
+        assert_eq!(
+            prepend_body_text(&unsigned, "Hallo").unwrap(),
+            format!("{fm}\nHallo\n\n{QUOTE_MARKER}\n\nOn d, a wrote:\n> hi\n")
+        );
+        // A forward as attachment without a signature has an empty body.
+        assert_eq!(
+            prepend_body_text(&format!("{fm}\n"), "Hallo").unwrap(),
+            format!("{fm}\nHallo\n")
+        );
+        assert_eq!(prepend_body_text(&signed, " \n").unwrap(), signed);
+        assert!(prepend_body_text("no frontmatter", "Hallo").is_err());
     }
 
     // -----------------------------------------------------------------------

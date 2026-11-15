@@ -7,17 +7,38 @@
 
 mod support;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
 use mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV;
-use support::parity::{pin_font_size, DaemonFixture};
+use mailypoppins::draft::{QUOTE_MARKER, SIG_START};
+use support::parity::{mp_command, pin_font_size, DaemonFixture, REQUIRE_ENV};
 use support::send_fixture as fixture;
 
 const ACCOUNT: &str = fixture::ACCOUNT;
+
+/// The signature the body-file rows ask for by name, and its one line.
+const SIGNATURE: &str = "voice";
+const SIGNATURE_LINE: &str = "Gruss vom Agenten";
+
+/// The text an agent hands `--body-file`, with the blank line and the
+/// trailing newline a file has.
+const AGENT_TEXT: &str = "Dear Bob,\n\nThe agent wrote this before the draft existed.\n";
+
+/// Write the [`SIGNATURE`] file into a root, as a `Root::start` hook.
+fn with_signature(root: &Path) {
+    let dir = root.join("signatures");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{SIGNATURE}.md")),
+        format!("{SIGNATURE_LINE}\n"),
+    )
+    .unwrap();
+}
 
 /// A seeded root whose config lists `accounts` for snapshots (or leaves the
 /// table out when `None`), and a daemon over it with the fake transport.
@@ -103,6 +124,42 @@ impl Root {
         (selector, id)
     }
 
+    /// [`Root::create`] with `stdin` piped into the command.
+    fn create_with_stdin(&self, args: &[&str], stdin: &str) -> (String, String) {
+        let mut child = mp_command(self.root())
+            .env(REQUIRE_ENV, "1")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "`mp {}`\nstderr: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let selector = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let id = selector.rsplit('/').next().unwrap().to_string();
+        (selector, id)
+    }
+
+    /// A file in the root holding `text`, for `--body-file`.
+    fn body_file(&self, text: &str) -> String {
+        let path = self.root().join("agent-body.md");
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    }
+
     fn draft_path(&self, selector: &str) -> PathBuf {
         let out = self.mp(&["path", selector]);
         PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
@@ -160,6 +217,110 @@ fn mp_new_snapshots_a_draft_of_a_listed_account() {
     assert_eq!(snapshot["to_domain"], Value::Null);
     assert_eq!(snapshot["body"], draft.body_markdown.as_str());
     assert!(snapshot.get("sent_message_id").is_none());
+}
+
+/// `mp new` with `--to`, `--cc`, `--subject` and `--body-file` writes the
+/// agent's draft whole at creation, the text above the signature, so the
+/// snapshot holds the agent's text rather than an empty scaffold.
+#[test]
+fn mp_new_with_its_flags_snapshots_the_agents_text() {
+    let root = Root::start(Some(&[ACCOUNT]), with_signature);
+    let body = root.body_file(AGENT_TEXT);
+    let (selector, id) = root.create(&[
+        "-A",
+        ACCOUNT,
+        "new",
+        "agent-note",
+        "--to",
+        "bob@example.com",
+        "--to",
+        "dan@example.org",
+        "--cc",
+        "eve@example.net",
+        "--subject",
+        "Voice from the agent",
+        "--body-file",
+        &body,
+        "-s",
+        SIGNATURE,
+    ]);
+    let draft = mailypoppins::draft::parse_email_draft(&root.draft_path(&selector)).unwrap();
+    let fm = &draft.frontmatter;
+    assert_eq!(fm.to.as_deref(), Some("bob@example.com, dan@example.org"));
+    assert_eq!(fm.cc.as_deref(), Some("eve@example.net"));
+    assert_eq!(fm.subject, "Voice from the agent");
+    assert!(
+        draft
+            .body_markdown
+            .starts_with(&format!("{}\n\n{SIG_START}", AGENT_TEXT.trim_end())),
+        "the text, then the signature: {:?}",
+        draft.body_markdown
+    );
+    assert!(draft.body_markdown.contains(SIGNATURE_LINE));
+
+    let snapshot = root.snapshot(&id);
+    assert_eq!(snapshot["body"], draft.body_markdown.as_str());
+    assert!(snapshot["body"]
+        .as_str()
+        .unwrap()
+        .contains("The agent wrote this before the draft existed."));
+    assert_eq!(snapshot["subject"], "Voice from the agent");
+    assert_eq!(snapshot["to_domain"], "example.com");
+}
+
+/// `--body-file -` reads the body from stdin.
+#[test]
+fn mp_new_reads_its_body_from_stdin() {
+    let root = Root::start(Some(&[ACCOUNT]), |_| {});
+    let (selector, id) = root.create_with_stdin(
+        &["-A", ACCOUNT, "new", "piped", "--body-file", "-"],
+        AGENT_TEXT,
+    );
+    let draft = mailypoppins::draft::parse_email_draft(&root.draft_path(&selector)).unwrap();
+    assert!(
+        draft.body_markdown.starts_with(AGENT_TEXT.trim_end()),
+        "{:?}",
+        draft.body_markdown
+    );
+    assert_eq!(root.snapshot(&id)["body"], draft.body_markdown.as_str());
+}
+
+/// `mp reply --body-file` and `mp forward --body-file` put the text where a
+/// person types it: above the signature, which stays above the quote, and
+/// the rest of the draft is the one the command writes without the flag.
+#[test]
+fn reply_and_forward_with_a_body_file_carry_the_text_above_signature_and_quote() {
+    let root = Root::start(Some(&[ACCOUNT]), with_signature);
+    let body = root.body_file(AGENT_TEXT);
+    let source = support::read_fixture::BERICHT;
+    for command in ["reply", "forward"] {
+        let base = ["-A", ACCOUNT, command, source, "-s", SIGNATURE];
+        let (plain, _) = root.create(&base);
+        let plain = mailypoppins::draft::parse_email_draft(&root.draft_path(&plain)).unwrap();
+        let mut args = base.to_vec();
+        args.extend(["--body-file", &body]);
+        let (selector, id) = root.create(&args);
+        let draft = mailypoppins::draft::parse_email_draft(&root.draft_path(&selector)).unwrap();
+
+        let text = AGENT_TEXT.trim_end();
+        let rest = draft
+            .body_markdown
+            .strip_prefix(&format!("{text}\n\n"))
+            .unwrap_or_else(|| panic!("{command}: the text first: {:?}", draft.body_markdown));
+        assert_eq!(
+            rest,
+            plain.body_markdown.trim_start_matches('\n'),
+            "{command}: the signature and the quote as without the flag"
+        );
+        let at = |needle: &str| draft.body_markdown.find(needle).unwrap();
+        assert!(at(text) < at(SIG_START) && at(SIG_START) < at(QUOTE_MARKER));
+        assert_eq!(draft.frontmatter.subject, plain.frontmatter.subject);
+        assert_eq!(draft.frontmatter.to, plain.frontmatter.to);
+
+        let snapshot = root.snapshot(&id);
+        assert_eq!(snapshot["body"], draft.body_markdown.as_str(), "{command}");
+        assert!(snapshot["body"].as_str().unwrap().starts_with(text));
+    }
 }
 
 /// `mp reply` creates a draft through another method, and it is snapshotted

@@ -958,7 +958,7 @@ Layout under the data dir:
 ```
 
 `voice-snapshots/` holds the drafts of the accounts `[voice_snapshots] accounts` lists (default `["tum"]`, `[]` turns it off), for the voice lane of the nightly reflection loop (`src/voice_snapshot.rs`).
-The daemon writes `<draft-id>.json` when one of its draft-creating methods (`draft.create`, `draft.reply`, `draft.forward`, `draft.create_from_message`, `contact.vcard_draft`) has written the file, before the answer goes out: `draft_id`, `account`, `created` (RFC 3339, UTC), `subject`, `to_domain` (the first `to:` recipient's domain, never an address) and `body`, the Markdown body as created.
+The daemon writes `<draft-id>.json` when one of its draft-creating methods (`draft.create`, `draft.reply`, `draft.forward`, `draft.create_from_message`, `contact.vcard_draft`) has written the file, before the answer goes out: `draft_id`, `account`, `created` (RFC 3339, UTC), `subject`, `to_domain` (the first `to:` recipient's domain, never an address) and `body`, the Markdown body as created; text written into the file later is only in the send's `sent_body`, so a writer that has its text first hands it over at creation (`mp new --to --cc --subject --body-file`, `mp reply --body-file`, `mp forward --body-file`, the `body` of the three methods).
 The send that delivers the draft, live (`send::send_draft`) or completed by a resume (`send::retire_draft_of_row`), adds `sent_message_id`, `sent_at` and `sent_body` before the draft file is settled, and only to a snapshot that exists, so the send side reads no setting.
 Every write prunes the account's snapshots created more than 90 days ago, and a snapshot that cannot be written is a logged warning that blocks neither the draft nor the send.
 
