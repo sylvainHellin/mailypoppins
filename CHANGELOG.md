@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Voice snapshots: `[voice_snapshots] accounts` (default `["tum"]`) keeps each draft mp creates for those accounts as created and as sent under `<data_dir>/voice-snapshots/<account>/`, with the subject, the first recipient's domain and the writer's own text and signature; a reply's or forward's attribution, header block and quoted mail are left out, and snapshots older than 90 days are pruned.
+- `mp new --to --cc --subject --body-file`, `mp reply --body-file` and `mp forward --body-file` put the text in the draft when it is created, above the signature and the quote.
 - `mp daemon status` now names any client that is falling behind on daemon events, with how much is waiting for it and whether its queue overflowed; a healthy daemon prints what it always did, and `--json` lists every connected client under `connections` (PERSO-221).
 - `mp send-approved` prints each draft's result as soon as that draft is sent, failures included, instead of all of them at the end; the summary and exit code are unchanged (PERSO-223).
 - Profiles: `mp --profile <name>` or `MAILYPOPPINS_PROFILE` runs mp, the TUI, the daemon and the desktop app (`open -n -a mailypoppins --args --profile demo`) on their own config, store, secrets, keyring entries, logs and daemon under `profiles/<name>`; the TUI and the desktop app show the profile's name, the service commands refuse a profile, and a profile's daemon exits 60 s after its last client left (PERSO-176).
