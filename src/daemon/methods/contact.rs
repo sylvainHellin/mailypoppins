@@ -191,6 +191,14 @@ impl Method for ContactMethod {
                     let accounts = snapshot.accounts.as_slice();
                     let email = &snapshot.config.email;
                     let answer = vcard_draft(&params, accounts, email)?;
+                    // The draft family's own dispatch snapshots what it
+                    // creates; this draft is created through `draft::create`
+                    // directly, so it is snapshotted here, attachment and all.
+                    crate::voice_snapshot::record_created(
+                        &snapshot.config.voice_snapshots,
+                        &answer.draft.account,
+                        std::path::Path::new(&answer.draft.path),
+                    );
                     let resource = format!("draft:{}/{}", answer.draft.account, answer.draft.id);
                     let answer = serde_json::to_value(answer)
                         .map_err(|e| internal(format!("serialising contact.vcard_draft: {e}")))?;

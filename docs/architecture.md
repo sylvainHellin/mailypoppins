@@ -675,6 +675,7 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | `src/send.rs` | `markdown_to_html`, message building, `send_draft` + `SendContext`, per-recipient submission, `DurableSend`, `resume_outbox` |
 | `src/send/graph_submit.rs` | The Graph submission: the plan (one MIME `sendMail`, or a draft with attachments added separately), the staged send behind the `GraphSendApi` seam, and the resume that settles a Graph `pending_send` row against the mailbox |
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
+| `src/voice_snapshot.rs` | Draft snapshots for the voice lane: `record_created` (the daemon's draft-creating methods), `record_sent` (both send paths, before the settle), the 90-day prune; best effort, never blocking a draft or a send (see "Data and config layout") |
 | `src/draft_mirror/` | The server drafts mirror (#0143): the policy (`mirror_enabled`, `approval_travels`, `file_hash`, the Drafts folder from the catalogue, the 30-day prune of `drafts/.retired/`), `folder.rs` (the `DraftsFolder` seam, its IMAP implementation over the pool and the test fake), `push.rs` (the queued push and delete, and `enqueue_owed`, which every drain point runs), `reconcile.rs` (the pass after every sync: pull, conflict copy, retire, the recovery of a lost row, the import of a draft mp pushed elsewhere) |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
@@ -950,10 +951,16 @@ Layout under the data dir:
   accounts/<name>/drafts/*.md            # the only local truth
   accounts/<name>/attachments/<message-id>/   # materialised for forward drafts (#0006)
   accounts/<name>/contacts-cache.json
+  voice-snapshots/<name>/<draft-id>.json # a draft as created and as sent, for the listed accounts
   tokens/<name>.enc                      # Graph encrypted refresh tokens
   state.json                             # app state (#0107): per-account default signature
   logs/mailypoppins-YYYY-MM-DD.log       # capped at 200 MB in total (crates/mp-core/src/logfile.rs)
 ```
+
+`voice-snapshots/` holds the drafts of the accounts `[voice_snapshots] accounts` lists (default `["tum"]`, `[]` turns it off), for the voice lane of the nightly reflection loop (`src/voice_snapshot.rs`).
+The daemon writes `<draft-id>.json` when one of its draft-creating methods (`draft.create`, `draft.reply`, `draft.forward`, `draft.create_from_message`, `contact.vcard_draft`) has written the file, before the answer goes out: `draft_id`, `account`, `created` (RFC 3339, UTC), `subject`, `to_domain` (the first `to:` recipient's domain, never an address) and `body`, the Markdown body as created.
+The send that delivers the draft, live (`send::send_draft`) or completed by a resume (`send::retire_draft_of_row`), adds `sent_message_id`, `sent_at` and `sent_body` before the draft file is settled, and only to a snapshot that exists, so the send side reads no setting.
+Every write prunes the account's snapshots created more than 90 days ago, and a snapshot that cannot be written is a logged warning that blocks neither the draft nor the send.
 
 Nothing under `accounts/<name>/` is created eagerly: `mp config init` makes the account directory, the first sync makes the store and its blob directory, and the first draft makes `drafts/`.
 Override the root via the `MAILYPOPPINS_DATA_DIR` env var, which tests use and which doubles as the escape hatch for a portable location.

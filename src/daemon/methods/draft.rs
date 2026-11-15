@@ -233,6 +233,9 @@ impl Method for DraftMethod {
                 _ => validate(&params, accounts),
             };
             let result = result.map_err(DomainError::from)?;
+            if CREATING_METHODS.contains(&self.spec.name) {
+                snapshot_created(&snapshot.config.voice_snapshots, &result);
+            }
             if self.spec.kind == MethodKind::Query {
                 return Ok(Outcome::query(result));
             }
@@ -252,6 +255,25 @@ impl Method for DraftMethod {
                 vec![ResourceId::new(resource)],
             ))
         })
+    }
+}
+
+/// The methods of this family that write a new draft, every one of them
+/// answering with [`created`]'s `DraftCreated`.
+const CREATING_METHODS: [&str; 4] = [
+    "draft.create",
+    "draft.create_from_message",
+    "draft.forward",
+    "draft.reply",
+];
+
+/// Snapshot the draft a creating method just answered with, for the voice
+/// lane ([`crate::voice_snapshot`]): after the file is complete and before
+/// the client that asked for it can open it in an editor. Best effort: the
+/// draft is created whatever happens here.
+fn snapshot_created(config: &crate::config::VoiceSnapshotsConfig, created: &Value) {
+    if let (Some(account), Some(path)) = (created["account"].as_str(), created["path"].as_str()) {
+        crate::voice_snapshot::record_created(config, account, Path::new(path));
     }
 }
 

@@ -238,6 +238,7 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
   accounts/<name>/drafts/                # your drafts, one .md file each
   accounts/<name>/attachments/<msg-id>/  # attachments a forward carries into a draft
   accounts/<name>/contacts-cache.json    # contacts index
+  voice-snapshots/<name>/<draft-id>.json # drafts as created and as sent (see Draft Snapshots)
   tokens/<name>.enc                      # Graph tokens
   state.json                             # app state: each account's default signature
   logs/mailypoppins-YYYY-MM-DD.log       # daily logs, 200 MB at most in total`} />
@@ -405,6 +406,30 @@ name = "personal"
 
 [accounts.drafts]
 mirror = false`} />
+    </section>
+
+    <!-- Voice snapshots -->
+    <section>
+      <h2 id="voice-snapshots">Draft Snapshots</h2>
+      <p>
+        For the accounts <code>[voice_snapshots] accounts</code> lists, mp keeps a copy of every
+        draft it creates (<code>mp new</code>, <code>mp reply</code>, <code>mp forward</code>, the
+        TUI and the desktop app alike) as it was created, and adds the text that was actually sent
+        when mp sends it, so the two can be compared. Each draft is one JSON file,
+        <code>voice-snapshots/&lt;account&gt;/&lt;draft-id&gt;.json</code> under the data directory,
+        with <code>draft_id</code>, <code>account</code>, <code>created</code>, <code>subject</code>,
+        <code>to_domain</code> (the first recipient's domain, never an address) and
+        <code>body</code>, then <code>sent_message_id</code>, <code>sent_at</code> and
+        <code>sent_body</code> once it is sent.
+      </p>
+      <p>
+        The list defaults to <code>["tum"]</code>; <code>accounts = []</code> turns snapshots off.
+        Like <code>[email]</code>, the table is top-level, not under <code>[[accounts]]</code>.
+        Snapshots older than 90 days are deleted the next time one is written for that account, and
+        a snapshot that cannot be written only logs a warning: the draft and the send go ahead.
+      </p>
+      <ConfigExample title="Snapshot two accounts" code={`[voice_snapshots]
+accounts = ["tum", "work"]`} />
     </section>
 
     <!-- Multi-Account Setup -->
