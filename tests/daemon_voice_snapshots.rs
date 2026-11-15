@@ -318,8 +318,59 @@ fn reply_and_forward_with_a_body_file_carry_the_text_above_signature_and_quote()
         assert_eq!(draft.frontmatter.to, plain.frontmatter.to);
 
         let snapshot = root.snapshot(&id);
-        assert_eq!(snapshot["body"], draft.body_markdown.as_str(), "{command}");
+        let above_quote = draft.body_markdown[..at(QUOTE_MARKER)].trim_end();
+        assert_eq!(snapshot["body"], above_quote, "{command}");
         assert!(snapshot["body"].as_str().unwrap().starts_with(text));
+    }
+}
+
+/// The raw snapshot of a reply or an inline forward, as created and as sent,
+/// holds the writer's text and signature and nothing of the mail it quotes:
+/// no attribution line, no forwarded header block, no quoted original, and
+/// so no address but the sent Message-ID.
+#[test]
+fn a_reply_or_forward_snapshot_holds_no_address_and_no_quote() {
+    let root = Root::start(Some(&[ACCOUNT]), with_signature);
+    let body = root.body_file(AGENT_TEXT);
+    for command in ["reply", "forward"] {
+        let (selector, id) = root.create(&[
+            "-A",
+            ACCOUNT,
+            command,
+            support::read_fixture::BERICHT,
+            "-s",
+            SIGNATURE,
+            "--body-file",
+            &body,
+        ]);
+        let path = root.draft_path(&selector);
+        let check = |stage: &str| {
+            let raw = std::fs::read_to_string(root.snapshot_file(&id)).unwrap();
+            let snapshot: Value = serde_json::from_str(&raw).unwrap();
+            let mid = snapshot["sent_message_id"].as_str().unwrap_or("\u{0}");
+            assert!(
+                !raw.replace(mid, "").contains('@'),
+                "{command} {stage}: an address in the snapshot:\n{raw}"
+            );
+            for quoted in ["quarterly ledger", "Ivana", "wrote:", "From:", QUOTE_MARKER] {
+                assert!(
+                    !raw.contains(quoted),
+                    "{command} {stage}: {quoted:?} in the snapshot:\n{raw}"
+                );
+            }
+            assert!(raw.contains("The agent wrote this before the draft existed."));
+            assert!(raw.contains(SIGNATURE_LINE), "{command} {stage}: {raw}");
+            snapshot
+        };
+        check("created");
+
+        fill_in_and_approve(&root, &selector, &path, "Edited by hand before sending.");
+        root.mp(&["send", &selector, "-y"]);
+        let sent = check("sent");
+        assert!(sent["sent_body"]
+            .as_str()
+            .expect("the send was recorded")
+            .starts_with("Edited by hand before sending."));
     }
 }
 

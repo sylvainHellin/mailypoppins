@@ -569,6 +569,14 @@ pub fn quoted_tail(body: &str) -> Option<&str> {
     None
 }
 
+/// The part of a draft body above the quote marker, the whole body when it
+/// has none: what the writer typed and the signature, without the reply's
+/// attribution line, the forward's header block or the quoted original, which
+/// mp writes below the marker. The complement of [`quoted_tail`].
+pub fn reply_area(body: &str) -> &str {
+    quoted_tail(body).map_or(body, |tail| &body[..body.len() - tail.len()])
+}
+
 /// Which draft a [`SourceMessage`] is turned into.
 ///
 /// It lives beside the source rather than beside the builder that consumes it
@@ -2840,6 +2848,19 @@ mod tests {
         assert_eq!(&body[6..19], LEGACY_QUOTE_MARKER);
         assert_eq!(find_quote_marker("<!-- mp:quote -->"), Some(0..17));
         assert_eq!(find_quote_marker("No boundary here.\n"), None);
+    }
+
+    #[test]
+    fn reply_area_is_the_body_above_the_first_quote_marker() {
+        let body = "Reply\n\n<!-- mp:quote -->\n\nOn d, a wrote:\n> q";
+        assert_eq!(reply_area(body), "Reply\n\n");
+        assert_eq!(
+            format!("{}{}", reply_area(body), quoted_tail(body).unwrap()),
+            body
+        );
+        assert_eq!(reply_area("Reply\n{{SIGNATURE}}\n> q"), "Reply\n");
+        assert_eq!(reply_area("No boundary here.\n"), "No boundary here.\n");
+        assert_eq!(reply_area("<!-- mp:quote -->\n> q"), "");
     }
 
     #[test]

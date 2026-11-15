@@ -420,7 +420,9 @@ mirror = false`} />
         with <code>draft_id</code>, <code>account</code>, <code>created</code>, <code>subject</code>,
         <code>to_domain</code> (the first recipient's domain, never an address) and
         <code>body</code>, then <code>sent_message_id</code>, <code>sent_at</code> and
-        <code>sent_body</code> once it is sent.
+        <code>sent_body</code> once it is sent. Both bodies keep only your own text and signature:
+        of a reply or a forward, the attribution line, the forwarded header block and the quoted
+        message below them are left out, so a snapshot holds no one else's writing or address.
       </p>
       <p>
         The copy is taken the moment the draft is created, so text written into the file

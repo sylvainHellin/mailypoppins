@@ -7,9 +7,12 @@
 //! out. The pair is what the weekly voice lane reads: the draft as it was
 //! written against the text that was actually sent.
 //!
-//! What a snapshot keeps is deliberately narrow: the subject and the two
-//! bodies, and of the recipients only the domain of the first `to:`, never an
-//! address. Every write prunes the account's snapshots created more than
+//! What a snapshot keeps is deliberately narrow: the subject, the two bodies
+//! cut to the writer's own text, and of the recipients only the domain of the
+//! first `to:`, never an address. A body is cut at the quote marker of a
+//! reply or forward ([`own_text`]), since what mp writes below it (the
+//! attribution line, the forwarded header block and the quoted original)
+//! names the original's people and is their writing. Every write prunes the account's snapshots created more than
 //! [`RETENTION_DAYS`] ago.
 //!
 //! Best effort throughout: a snapshot that cannot be written is a warning in
@@ -46,8 +49,8 @@ pub struct VoiceSnapshot {
     /// The domain of the first `to:` recipient, lowercased; `None` when the
     /// draft was created with nobody on `to:`.
     pub to_domain: Option<String>,
-    /// The draft's Markdown body as created, signature and quoted thread
-    /// included.
+    /// The draft's Markdown body as created, signature included, cut above
+    /// the quote of a reply or forward ([`own_text`]).
     pub body: String,
     /// The `Message-ID` of the send that delivered the draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,7 +58,7 @@ pub struct VoiceSnapshot {
     /// When that send went out, RFC 3339 in UTC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<String>,
-    /// The draft's Markdown body as it was sent.
+    /// The draft's Markdown body as it was sent, cut the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_body: Option<String>,
 }
@@ -122,7 +125,7 @@ fn write_created(account: &str, path: &Path, now: DateTime<Utc>) -> Result<()> {
         created: rfc3339(now),
         subject: draft.frontmatter.subject.clone(),
         to_domain: first_domain(draft.frontmatter.to.as_deref()),
-        body: draft.body_markdown.clone(),
+        body: own_text(&draft.body_markdown),
         sent_message_id: None,
         sent_at: None,
         sent_body: None,
@@ -148,8 +151,15 @@ fn write_sent(
         serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
     snapshot.sent_message_id = Some(message_id.to_string());
     snapshot.sent_at = Some(rfc3339(now));
-    snapshot.sent_body = Some(draft.body_markdown.clone());
+    snapshot.sent_body = Some(own_text(&draft.body_markdown));
     write(&file, &snapshot, now)
+}
+
+/// The writer's own text of a draft body: the part above the quote marker,
+/// signature included ([`crate::draft::reply_area`]), with the blank lines
+/// before the marker dropped; a body without a quote whole.
+fn own_text(body: &str) -> String {
+    crate::draft::reply_area(body).trim_end().to_string()
 }
 
 /// The draft's trimmed frontmatter `id:`, `None` when it has none.
@@ -313,6 +323,107 @@ mod tests {
                 !raw.contains(address),
                 "the snapshot names {address}:\n{raw}"
             );
+        }
+    }
+
+    /// The message the reply and forward rows answer: a named sender, a
+    /// named Cc and a body that is someone else's writing.
+    fn source() -> crate::draft::SourceMessage {
+        crate::draft::SourceMessage {
+            from: "\"Doe, Jane\" <jane.doe@example.org>".to_string(),
+            to: "Me <me@tum.de>".to_string(),
+            cc: Some("Carol <carol@other.org>".to_string()),
+            subject: "Budget".to_string(),
+            message_id: Some("<budget-1@example.org>".to_string()),
+            date: Some("Thu, 2 Jul 2026 13:57:30 +0200".to_string()),
+            body: "Jane's own words about the budget.\nWrite to jane.doe@example.org.\n"
+                .to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A reply or inline forward as mp writes it, with `text` typed above
+    /// the signature and the frontmatter `id:` the daemon's file carries.
+    fn write_quoting_draft(id: &str, forward: bool, text: &str) -> PathBuf {
+        let dir = crate::config::drafts_dir(ACCOUNT);
+        let signature = Some("Best,\nSylvain");
+        let path = if forward {
+            crate::draft::create_forward_draft_from(&source(), "me@tum.de", Some(&dir), signature)
+        } else {
+            crate::draft::create_reply_draft_from(
+                &source(),
+                false,
+                "me@tum.de",
+                Some(&dir),
+                signature,
+            )
+        }
+        .unwrap();
+        let file = std::fs::read_to_string(&path).unwrap();
+        let (fm, body) = file[4..].split_once("\n---\n").unwrap();
+        std::fs::write(&path, format!("---\nid: {id}\n{fm}\n---\n\n{text}\n{body}")).unwrap();
+        path
+    }
+
+    /// The raw snapshot holds no address and none of the quoted mail: the
+    /// attribution, the forward header block and the original stay out.
+    fn assert_only_own_text(id: &str, kind: &str) {
+        let raw = raw_snapshot(id);
+        let snapshot: VoiceSnapshot = serde_json::from_str(&raw).unwrap();
+        let without_mid = match snapshot.sent_message_id.as_deref() {
+            Some(mid) => raw.replace(mid, ""),
+            None => raw.clone(),
+        };
+        assert!(
+            !without_mid.contains('@'),
+            "{kind}: the snapshot names an address:\n{raw}"
+        );
+        for quoted in [
+            "Jane's own words",
+            "Doe, Jane",
+            "wrote:",
+            "From:",
+            "Subject:",
+            crate::draft::QUOTE_MARKER,
+        ] {
+            assert!(
+                !raw.contains(quoted),
+                "{kind}: the snapshot holds {quoted:?}:\n{raw}"
+            );
+        }
+    }
+
+    /// A reply and an inline forward are snapshotted as the text above the
+    /// quote, signature included, as created and as sent.
+    #[test]
+    fn a_quoting_draft_keeps_only_the_text_above_the_quote() {
+        let _data = TestDataDir::new();
+        for (id, forward) in [("reply1", false), ("fwd1", true)] {
+            let kind = if forward { "forward" } else { "reply" };
+            let path = write_quoting_draft(id, forward, "Thanks Jane, agreed.");
+            record_created(&tum_only(), ACCOUNT, &path);
+            let created = load(ACCOUNT, id).expect("the snapshot was written");
+            assert!(
+                created.body.starts_with("Thanks Jane, agreed."),
+                "{kind}: {:?}",
+                created.body
+            );
+            assert!(
+                created.body.ends_with(crate::draft::SIG_END),
+                "{kind}: the signature stays, the quote goes: {:?}",
+                created.body
+            );
+            assert_only_own_text(id, kind);
+
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, text.replace("agreed.", "agreed, see you.")).unwrap();
+            let draft = crate::draft::parse_email_draft(&path).unwrap();
+            record_sent(ACCOUNT, &draft, "<sent-q@tum.de>");
+            let sent = load(ACCOUNT, id).unwrap();
+            let sent_body = sent.sent_body.expect("the send was recorded");
+            assert!(sent_body.starts_with("Thanks Jane, agreed, see you."));
+            assert!(sent_body.ends_with(crate::draft::SIG_END), "{sent_body:?}");
+            assert_only_own_text(id, kind);
         }
     }
 
