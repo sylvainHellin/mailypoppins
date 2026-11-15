@@ -41,6 +41,42 @@ pub struct GlobalConfig {
     /// Default: "encrypted-file" (machine-bound). Opt-in: "keyring".
     #[serde(default)]
     pub secrets_backend: crate::secrets::SecretsBackendKind,
+    /// Which accounts' drafts are snapshotted for the voice lane. See
+    /// [`VoiceSnapshotsConfig`].
+    #[serde(default)]
+    pub voice_snapshots: VoiceSnapshotsConfig,
+}
+
+/// `[voice_snapshots]`: the accounts whose drafts are snapshotted when mp
+/// creates them and completed when mp sends them, so the draft as written can
+/// be compared with what went out (the voice lane of the nightly reflection
+/// loop; the files are `mailypoppins::voice_snapshot`'s).
+///
+/// `accounts` defaults to `["tum"]`, the absent table and the bare table
+/// alike; `accounts = []` turns the snapshots off.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct VoiceSnapshotsConfig {
+    #[serde(default = "default_voice_snapshot_accounts")]
+    pub accounts: Vec<String>,
+}
+
+impl Default for VoiceSnapshotsConfig {
+    fn default() -> Self {
+        VoiceSnapshotsConfig {
+            accounts: default_voice_snapshot_accounts(),
+        }
+    }
+}
+
+impl VoiceSnapshotsConfig {
+    /// Whether the drafts of `account` are snapshotted.
+    pub fn covers(&self, account: &str) -> bool {
+        self.accounts.iter().any(|name| name == account)
+    }
+}
+
+fn default_voice_snapshot_accounts() -> Vec<String> {
+    vec!["tum".to_string()]
 }
 
 /// Authentication method for an account.
@@ -1631,6 +1667,7 @@ impl ServerLogin {
 //
 //   accounts/<account>/{inbox,archive,sent,drafts,<extra_slug>}/
 //   accounts/<account>/contacts-cache.json
+//   voice-snapshots/<account>/<draft-id>.json
 //   tokens/<account>.enc
 //   logs/mailypoppins-YYYY-MM-DD.log
 //
@@ -1893,6 +1930,15 @@ pub fn store_path_in(account_dir: &Path) -> PathBuf {
 /// `<account_dir>/blobs/`, the content-addressed blob store root.
 pub fn blobs_dir(account_name: &str) -> PathBuf {
     account_dir(account_name).join("blobs")
+}
+
+/// `<data_dir>/voice-snapshots/<account_name>/`, one `<draft-id>.json` per
+/// snapshotted draft. Beside `accounts/` rather than inside it: the snapshots
+/// are not mail the account holds, and a store rebuild never reads them.
+pub fn voice_snapshots_dir(account_name: &str) -> PathBuf {
+    mailypoppins_data_dir()
+        .join("voice-snapshots")
+        .join(account_name)
 }
 
 /// `<data_dir>/tokens/`
@@ -2208,6 +2254,43 @@ mirror = false
         assert!(!config.accounts[1].drafts.mirror);
         assert!(AccountConfig::default().drafts.mirror);
         assert!(config_warnings(toml_str).is_empty());
+    }
+
+    /// `[voice_snapshots] accounts` names the accounts whose drafts are
+    /// snapshotted: `["tum"]` when the table or the key is absent, the list
+    /// as written otherwise, and `[]` turns the snapshots off. A known key: no
+    /// warning.
+    #[test]
+    fn voice_snapshots_cover_tum_unless_the_config_names_other_accounts() {
+        let absent: GlobalConfig = toml::from_str("[[accounts]]\nname = \"tum\"\n").unwrap();
+        assert_eq!(absent.voice_snapshots.accounts, vec!["tum".to_string()]);
+        assert!(absent.voice_snapshots.covers("tum"));
+        assert!(!absent.voice_snapshots.covers("proton"));
+        assert!(GlobalConfig::default().voice_snapshots.covers("tum"));
+
+        let bare_table: GlobalConfig = toml::from_str("[voice_snapshots]\n").unwrap();
+        assert_eq!(bare_table.voice_snapshots.accounts, vec!["tum".to_string()]);
+
+        let listed = "[voice_snapshots]\naccounts = [\"proton\", \"hines\"]\n";
+        let config: GlobalConfig = toml::from_str(listed).unwrap();
+        assert!(config.voice_snapshots.covers("proton"));
+        assert!(config.voice_snapshots.covers("hines"));
+        assert!(!config.voice_snapshots.covers("tum"));
+        assert!(config_warnings(listed).is_empty());
+
+        let off: GlobalConfig = toml::from_str("[voice_snapshots]\naccounts = []\n").unwrap();
+        assert!(!off.voice_snapshots.covers("tum"));
+    }
+
+    /// The snapshots of an account live under the data dir, beside
+    /// `accounts/` rather than inside it.
+    #[test]
+    fn voice_snapshots_live_under_the_data_dir() {
+        let _data = test_env::TestDataDir::new();
+        assert_eq!(
+            voice_snapshots_dir("tum"),
+            mailypoppins_data_dir().join("voice-snapshots").join("tum")
+        );
     }
 
     /// `calendar_backend` (PERSO-200) defaults from `auth_method`, an explicit
