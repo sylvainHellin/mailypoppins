@@ -246,6 +246,10 @@ pub fn validate_document(text: &str, path: &Path) -> Result<GlobalConfig, Diagno
         line: None,
         message: format!("{e:#}"),
     })?;
+    crate::config::validate_notes(&config).map_err(|e| Diagnostic {
+        line: None,
+        message: format!("{e:#}"),
+    })?;
     check_secrets_backend(&config, crate::secrets::active_backend())?;
     Ok(config)
 }

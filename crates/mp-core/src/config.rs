@@ -45,6 +45,191 @@ pub struct GlobalConfig {
     /// [`VoiceSnapshotsConfig`].
     #[serde(default)]
     pub voice_snapshots: VoiceSnapshotsConfig,
+    /// The notes on mail (PERSO-315). See [`NotesConfig`].
+    #[serde(default)]
+    pub notes: NotesConfig,
+    /// The coding agent the clients hand the notes to (PERSO-315). See
+    /// [`AgentConfig`].
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+/// `[notes]`: the presets a note prompt offers (PERSO-315).
+///
+/// `presets` replaces the built-in list whole when it is set, since its order
+/// is the order the prompt and the batch prompt list them in; the daemon
+/// serves it as `note.presets`, and no client keeps a copy of its own.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct NotesConfig {
+    #[serde(default = "default_note_presets")]
+    pub presets: Vec<mp_protocol::note::NotePreset>,
+}
+
+impl Default for NotesConfig {
+    fn default() -> Self {
+        NotesConfig {
+            presets: default_note_presets(),
+        }
+    }
+}
+
+/// The presets that ship built in, in prompt order.
+pub fn default_note_presets() -> Vec<mp_protocol::note::NotePreset> {
+    let preset = |key: &str, label: &str, needs_text: bool, instruction: &str| {
+        mp_protocol::note::NotePreset {
+            key: key.to_string(),
+            label: label.to_string(),
+            needs_text,
+            instruction: instruction.to_string(),
+        }
+    };
+    vec![
+        preset(
+            "r",
+            "Reply",
+            true,
+            "Draft a reply in my voice from this gist.",
+        ),
+        preset(
+            "d",
+            "Decline",
+            true,
+            "Draft a polite refusal; use my reason if I gave one.",
+        ),
+        preset(
+            "s",
+            "Summarize",
+            false,
+            "Summarize in three lines: who, what is asked, by when. Post it as the result.",
+        ),
+        preset(
+            "e",
+            "Explain",
+            false,
+            "Explain the context from the vault and past mail: who this is, what came before. \
+             Post it as the result.",
+        ),
+        preset(
+            "p",
+            "Review",
+            false,
+            "Review this draft before I approve it: spelling and grammar (fix them in the \
+             draft), an attachment the text mentions but the draft lacks, a question from the \
+             mail it answers that it leaves unanswered, wrong names or dates. Post what you \
+             found as the result; change nothing beyond spelling and grammar.",
+        ),
+        preset(
+            "t",
+            "Task",
+            false,
+            "Turn this mail into a Plane task or a vault note, whichever fits; post the link \
+             as the result.",
+        ),
+        preset(
+            "f",
+            "Forward",
+            true,
+            "Draft a forward to the person named, with a short cover line.",
+        ),
+    ]
+}
+
+/// Where a client opens the coding agent it hands the notes to (PERSO-315).
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentOpenIn {
+    /// The first that applies: a Herdr pane, a tmux pane, a WezTerm pane, the
+    /// terminal the TUI runs in.
+    #[default]
+    Auto,
+    Herdr,
+    Tmux,
+    Wezterm,
+    /// The terminal the TUI runs in, the TUI suspended until the agent exits.
+    Terminal,
+    /// The desktop app's terminal panel beside the reading pane.
+    DesktopPanel,
+    /// A detached `paseo run`.
+    Paseo,
+    /// No agent: the batch prompt is copied to the clipboard.
+    Clipboard,
+}
+
+/// `[agent]`: the coding agent a client hands the notes to (PERSO-315).
+///
+/// The clients read it, since starting the agent is the client's work: the
+/// daemon only renders the batch prompt. A command is a program and its
+/// arguments, in which `{batch}` is the file the client writes the batch
+/// prompt to and `{date}` today's date; `[agent.commands]` adds commands to
+/// the built-in `pi` and `claude`, or replaces them by name.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct AgentConfig {
+    /// The command `[agent.commands]` names to run.
+    #[serde(default = "default_agent")]
+    pub default: String,
+    #[serde(default)]
+    pub open_in: AgentOpenIn,
+    /// The directory the agent starts in, `~` for the home directory.
+    #[serde(default = "default_agent_cwd")]
+    pub cwd: String,
+    /// The configured commands, on top of [`default_agent_commands`].
+    #[serde(default)]
+    commands: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        AgentConfig {
+            default: default_agent(),
+            open_in: AgentOpenIn::default(),
+            cwd: default_agent_cwd(),
+            commands: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Every command by name: the built-in ones, then the configured ones,
+    /// which replace a built-in one of the same name.
+    pub fn commands(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut commands = default_agent_commands();
+        commands.extend(self.commands.clone());
+        commands
+    }
+
+    /// The command [`AgentConfig::default`] names, `None` when nothing does.
+    pub fn default_command(&self) -> Option<Vec<String>> {
+        self.commands().remove(&self.default)
+    }
+}
+
+fn default_agent() -> String {
+    "pi".to_string()
+}
+
+fn default_agent_cwd() -> String {
+    "~/pi-remote".to_string()
+}
+
+/// The agent commands that ship built in.
+pub fn default_agent_commands() -> std::collections::BTreeMap<String, Vec<String>> {
+    let words = |words: &[&str]| words.iter().map(|word| word.to_string()).collect();
+    std::collections::BTreeMap::from([
+        (
+            "pi".to_string(),
+            words(&[
+                "pi",
+                "--name",
+                "mail notes {date}",
+                "@{batch}",
+                "Work through these notes.",
+            ]),
+        ),
+        (
+            "claude".to_string(),
+            words(&["claude", "Work through the notes in {batch}."]),
+        ),
+    ])
 }
 
 /// `[voice_snapshots]`: the accounts whose drafts are snapshotted when mp
@@ -1298,6 +1483,7 @@ pub fn load_global_config_with_warnings() -> Result<(GlobalConfig, Vec<String>)>
     validate_account_names(&config)
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
     validate_hooks(&config).with_context(|| format!("Invalid config file: {}", path.display()))?;
+    validate_notes(&config).with_context(|| format!("Invalid config file: {}", path.display()))?;
     let warnings = config_warnings(&content);
     for warning in &warnings {
         log::warn!("{}: {warning}", path.display());
@@ -1430,6 +1616,48 @@ fn ignored_key_warning(config: &GlobalConfig, steps: &[KeyStep]) -> String {
         format!(" ({})", entries.join(", "))
     };
     format!("{prefix}unknown key `{key}`{entries} is ignored")
+}
+
+/// Refuse a `[notes]` preset a prompt could not offer, and an `[agent]`
+/// default that names no command (PERSO-315): a key is one character other
+/// than a space, no two presets share one, and a label and an instruction
+/// are never empty; a command names a program.
+pub fn validate_notes(config: &GlobalConfig) -> Result<()> {
+    let mut seen: Vec<&str> = Vec::new();
+    for (index, preset) in config.notes.presets.iter().enumerate() {
+        let at = format!("notes.presets entry {}", index + 1);
+        let key = preset.key.as_str();
+        if key.chars().count() != 1 || key.trim().is_empty() {
+            anyhow::bail!("{at}: key {key:?} is one character other than a space");
+        }
+        if seen.contains(&key) {
+            anyhow::bail!("{at}: two presets share the key {key:?}");
+        }
+        seen.push(key);
+        if preset.label.trim().is_empty() {
+            anyhow::bail!("{at}: label is empty");
+        }
+        if preset.instruction.trim().is_empty() {
+            anyhow::bail!("{at}: instruction is empty");
+        }
+    }
+    let commands = config.agent.commands();
+    for (name, command) in &commands {
+        if command
+            .first()
+            .is_none_or(|program| program.trim().is_empty())
+        {
+            anyhow::bail!("agent.commands.{name} names no program");
+        }
+    }
+    if !commands.contains_key(&config.agent.default) {
+        anyhow::bail!(
+            "agent.default is {:?}, which no command names; the commands are {}",
+            config.agent.default,
+            commands.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Reject out-of-range retention values at load time rather than at the first
@@ -2280,6 +2508,99 @@ mirror = false
 
         let off: GlobalConfig = toml::from_str("[voice_snapshots]\naccounts = []\n").unwrap();
         assert!(!off.voice_snapshots.covers("tum"));
+    }
+
+    /// `[notes] presets` is the built-in seven, Reply first, when the table
+    /// or the key is absent, and the list as written otherwise, in its order;
+    /// `needs_text` defaults to false. Known keys: no warning (PERSO-315).
+    #[test]
+    fn note_presets_are_the_built_in_ones_unless_the_config_lists_its_own() {
+        let absent: GlobalConfig = toml::from_str("[[accounts]]\nname = \"tum\"\n").unwrap();
+        let keys: Vec<&str> = absent
+            .notes
+            .presets
+            .iter()
+            .map(|preset| preset.key.as_str())
+            .collect();
+        assert_eq!(keys, ["r", "d", "s", "e", "p", "t", "f"]);
+        assert_eq!(absent.notes, NotesConfig::default());
+        validate_notes(&absent).expect("the built-in presets are valid");
+
+        let listed = "[notes]\npresets = [\n  { key = \"x\", label = \"Translate\", instruction = \"Translate it.\" },\n  { key = \"r\", label = \"Reply\", needs_text = true, instruction = \"Reply.\" },\n]\n";
+        let config: GlobalConfig = toml::from_str(listed).unwrap();
+        assert_eq!(config.notes.presets.len(), 2);
+        assert_eq!(config.notes.presets[0].key, "x");
+        assert!(!config.notes.presets[0].needs_text);
+        assert!(config.notes.presets[1].needs_text);
+        assert!(config_warnings(listed).is_empty());
+        validate_notes(&config).expect("two distinct keys");
+    }
+
+    /// A preset a prompt could not offer is refused at load, naming the entry.
+    #[test]
+    fn a_preset_with_a_bad_or_shared_key_or_an_empty_field_is_refused() {
+        let refusal = |presets: &str| {
+            let config: GlobalConfig =
+                toml::from_str(&format!("[notes]\npresets = [{presets}]\n")).unwrap();
+            format!("{:#}", validate_notes(&config).unwrap_err())
+        };
+        assert!(refusal(r#"{ key = "rr", label = "R", instruction = "I" }"#)
+            .contains("entry 1: key \"rr\" is one character"));
+        assert!(refusal(r#"{ key = " ", label = "R", instruction = "I" }"#)
+            .contains("other than a space"));
+        assert!(refusal(
+            r#"{ key = "r", label = "R", instruction = "I" }, { key = "r", label = "S", instruction = "J" }"#
+        )
+        .contains("entry 2: two presets share the key \"r\""));
+        assert!(
+            refusal(r#"{ key = "r", label = "", instruction = "I" }"#).contains("label is empty")
+        );
+        assert!(refusal(r#"{ key = "r", label = "R", instruction = " " }"#)
+            .contains("instruction is empty"));
+    }
+
+    /// `[agent]` defaults to pi, opened wherever applies first, in
+    /// `~/pi-remote`; `[agent.commands]` adds to the built-in pi and claude
+    /// or replaces one by name, and a default naming no command is refused
+    /// (PERSO-315).
+    #[test]
+    fn the_agent_defaults_to_pi_and_its_commands_add_to_the_built_in_ones() {
+        let absent = GlobalConfig::default();
+        assert_eq!(absent.agent.default, "pi");
+        assert_eq!(absent.agent.open_in, AgentOpenIn::Auto);
+        assert_eq!(absent.agent.cwd, "~/pi-remote");
+        assert_eq!(
+            absent.agent.default_command().unwrap()[..2],
+            ["pi".to_string(), "--name".to_string()]
+        );
+        validate_notes(&absent).expect("the built-in agent is valid");
+
+        let text = "[agent]\ndefault = \"codex\"\nopen_in = \"desktop-panel\"\n\n[agent.commands]\ncodex = [\"codex\", \"{batch}\"]\nclaude = [\"claude\", \"--resume\"]\n";
+        let config: GlobalConfig = toml::from_str(text).unwrap();
+        assert!(config_warnings(text).is_empty());
+        assert_eq!(config.agent.open_in, AgentOpenIn::DesktopPanel);
+        let commands = config.agent.commands();
+        assert_eq!(
+            commands.keys().collect::<Vec<_>>(),
+            ["claude", "codex", "pi"]
+        );
+        assert_eq!(commands["claude"], ["claude", "--resume"]);
+        assert_eq!(
+            config.agent.default_command().unwrap(),
+            ["codex", "{batch}"]
+        );
+        validate_notes(&config).expect("codex is configured");
+
+        let unnamed: GlobalConfig = toml::from_str("[agent]\ndefault = \"aider\"\n").unwrap();
+        let refusal = format!("{:#}", validate_notes(&unnamed).unwrap_err());
+        assert!(
+            refusal.contains("agent.default is \"aider\", which no command names"),
+            "{refusal}"
+        );
+        let empty: GlobalConfig = toml::from_str("[agent.commands]\npi = []\n").unwrap();
+        assert!(format!("{:#}", validate_notes(&empty).unwrap_err())
+            .contains("agent.commands.pi names no program"));
+        assert!(toml::from_str::<GlobalConfig>("[agent]\nopen_in = \"window\"\n").is_err());
     }
 
     /// The snapshots of an account live under the data dir, beside
