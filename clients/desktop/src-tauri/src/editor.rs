@@ -196,6 +196,9 @@ pub enum EditorSource {
     Probe,
     /// `open -t` (macOS) or `xdg-open`.
     Fallback,
+    /// Not an editor: the `[agent]` command of `config.toml` the notes are
+    /// handed to (PERSO-315), in a terminal session of its own.
+    Agent,
 }
 
 /// A started editor.

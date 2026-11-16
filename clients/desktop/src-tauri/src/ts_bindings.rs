@@ -121,6 +121,8 @@ fn export_into(dir: &Path) -> usize {
         configuration::ProbeCheck,
         configuration::ProbeAnswer,
         editor::EditorSource,
+        agent::AgentRoute,
+        agent::AgentSettings,
         editor::EditorLaunch,
         editor::EditorSetting,
         editor::EditorRoute,

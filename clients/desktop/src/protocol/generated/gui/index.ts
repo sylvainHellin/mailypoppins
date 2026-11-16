@@ -4,6 +4,8 @@ export type { AccountDraftMailboxes } from "./AccountDraftMailboxes";
 export type { AccountDraftOverride } from "./AccountDraftOverride";
 export type { AccountDraftServer } from "./AccountDraftServer";
 export type { AccountInfo } from "./AccountInfo";
+export type { AgentRoute } from "./AgentRoute";
+export type { AgentSettings } from "./AgentSettings";
 export type { Attachment } from "./Attachment";
 export type { AuthMethod } from "./AuthMethod";
 export type { BootstrapCause } from "./BootstrapCause";

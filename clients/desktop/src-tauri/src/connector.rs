@@ -178,6 +178,15 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "sender.block",
     "sender.unblock",
     "sender.list",
+    "note.presets",
+    "note.list",
+    "note.get",
+    "note.set",
+    "note.set_many",
+    "note.clear",
+    "note.clear_done",
+    "note.export",
+    "note.handoff",
     "draft.attachments",
     "draft.attach",
     "draft.detach",
@@ -1376,6 +1385,27 @@ mod tests {
     fn the_required_capabilities_cover_the_streamed_listing() {
         assert!(REQUIRED_CAPABILITIES.contains(&"message.list_stream"));
         assert!(REQUIRED_CAPABILITIES.contains(&"message.list"));
+    }
+
+    /// The notes on mail (PERSO-315) are required, so a daemon from before
+    /// them is a `capability_missing` at the handshake rather than an `n`
+    /// that fails; `note.done` is the agent's, which the app never calls.
+    #[test]
+    fn the_required_capabilities_cover_the_notes() {
+        for method in [
+            "note.presets",
+            "note.list",
+            "note.get",
+            "note.set",
+            "note.set_many",
+            "note.clear",
+            "note.clear_done",
+            "note.export",
+            "note.handoff",
+        ] {
+            assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
+        }
+        assert!(!REQUIRED_CAPABILITIES.contains(&"note.done"));
     }
 
     /// A mailbox in conversation mode opens through

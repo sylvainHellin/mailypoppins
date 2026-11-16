@@ -605,7 +605,11 @@ pub fn search_dirs(login_path: &str, home: Option<&str>) -> Vec<String> {
 
 /// `program` located: a path with a slash when it is a file, a bare name in
 /// the first of `dirs` that has it.
-fn find(program: &str, dirs: &[String], is_file: &dyn Fn(&Path) -> bool) -> Option<String> {
+pub(crate) fn find(
+    program: &str,
+    dirs: &[String],
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Option<String> {
     if program.contains('/') {
         return is_file(Path::new(program)).then(|| program.to_string());
     }

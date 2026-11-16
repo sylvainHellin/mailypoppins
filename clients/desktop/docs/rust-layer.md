@@ -20,6 +20,9 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
 | `reminders.rs` | The calendar reminders: the waiting list, dismiss and snooze, the system notification and its click, and a test notification |
 | `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
+| `notes.rs` | The notes on mail: one `note.*` call per command |
+| `agent.rs` | `[agent]` as the desktop reads it: the route, the command, the batch file and the `{batch}`/`{date}` words |
+| `handoff.rs` | Starting the agent the notes are handed to: in a terminal session of the panel, or a detached `paseo run` |
 | `daemon_files.rs` | The daemon's `config.toml` and its log file in the editor |
 | `configuration.rs` | The Settings view's `config.get`, reload and password store, the account wizard's writes and the device-code sign-in |
 | `reader.rs` | The `mpmsg` scheme serving `message.html`, and `draft.html` for a draft |
@@ -496,6 +499,36 @@ Every command in `src/senders.rs` is one call of the daemon's `sender.*` family,
 An entry that is neither a full address nor `@domain` is the daemon's `-32602` carrying its sentence ("'nobody' is not a sender to block: it has no @; give a full address (spam@example.com) or a domain (@example.com)"), a `protocol` error with no code.
 Both writers publish `sender.blocklist_changed {entries}` when the list changed, which the event channel hands the webview as it is, and the moves publish the mailbox counts a `message.move` does ([shell.md](shell.md), "Blocked senders").
 The fixture keeps the list in memory with the daemon's sentences; no fixture account has a Junk folder, so a block moves nothing and names each in `skipped`.
+
+## Notes on mail
+
+The daemon keeps every note in one file for every account (PERSO-315) and renders the batch prompt a hand-off gives the agent.
+Every command in `src/notes.rs` is one call of the daemon's `note.*` family, as the TUI's `n` prompt and `N` list make it, and answers the `mp_protocol::note` type as it stands (`src/protocol/generated/`).
+
+- `note_presets` is `note.presets`: `{presets: [{key, label, needs_text, instruction}]}`, in the prompt's order.
+- `note_list` is `note.list`: `{notes}`, newest first, each with its `orphaned` flag.
+- `note_get {selector}` is `note.get`: `{note}`, `null` when the message or draft has none; any copy's selector names the note on a message.
+- `note_set {params}` is `note.set` with `NoteSetParams` as they are: by `selector`, by `id` (an edit, which keeps what it leaves out), or by neither with `account`, a note asking for a new email; it answers the note.
+- `note_set_many {params}` is `note.set_many`: the same note on each of `selectors`; `{notes}`, the notes it set.
+- `note_clear {id}` is `note.clear` by id, and `note_clear_done` is `note.clear_done`: `{removed}`.
+- `note_export {ids?}` is `note.export` and `note_handoff {ids?}` is `note.handoff`: `{text, ids}`, the second marking the open notes among them handed off.
+
+A refusal (a note with neither a preset nor a text, a preset the configuration lacks, an id no note has) is the daemon's `-32602` carrying its sentence, a `protocol` error with no code.
+Every writer publishes `note.changed {notes}`, the whole list, which the event channel hands the webview as it is ([shell.md](shell.md), "Notes on mail").
+The app never calls `note.done`, which is the agent's.
+The fixture keeps the notes in memory (`src/fixture/notes.rs`) with the daemon's sentences, and its listings (`message.list`, `message.list_conversations`, `message.thread`, `draft.list`) carry each row's note state.
+
+### The agent
+
+`src/agent.rs` reads `[agent]`, and `src/handoff.rs` starts the agent the notes are handed to.
+The daemon does not serve `[agent]` (`config.get` answers the keys the Settings view shows), so the Rust layer reads it as the TUI does, with `mp_core::config::load_global_config`, from the `config.toml` the daemon reads (the connector refuses a daemon of another config directory), again at every hand-off; fixture mode takes the built-in defaults.
+
+- `agent_settings` answers `{route, name, command, cwd}`: `route` is `clipboard` or `paseo` when `open_in` says so and `panel` for every other `open_in`, `command` is the default command before substitution, `cwd` has `~` expanded; a `default` naming no command is `setup`.
+- `agent_spawn {text, date, cols, rows, theme, output}` writes `text` to `<data>/notes/batch-<date>-<millis>.md` (the directory private to the user), replaces `{batch}` and `{date}` in every word of the command, locates its program as a terminal editor's is, and runs it in a terminal session ("Terminal sessions") in `cwd`, with the editor's environment; it answers `TerminalStarted` with `source: "agent"`, and `terminal_write`, `terminal_resize` and `terminal_kill` drive it as an editor's session. A `date` other than `YYYY-MM-DD` is `protocol`; a program found nowhere and a `cwd` that does not exist are `setup`.
+- `agent_paseo {text, date}` writes the batch the same way and runs `paseo run --background --provider <name> --title "mail notes <date>" --cwd <cwd> "Work through the notes in <batch>."`, answering what it printed; a failed run is `setup` with its stderr.
+
+Neither marks a note: the frontend calls `note_handoff` with the exported ids once the start answered.
+In fixture mode nothing starts: the command is journaled as `editor_open` journals one, and the batch goes under the fixture's root.
 
 ## config.toml, the daemon log and a message's Markdown rendition
 

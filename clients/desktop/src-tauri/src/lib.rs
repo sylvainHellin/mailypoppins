@@ -22,7 +22,10 @@
 //! - [`terminal`]: the embedded terminal editor's PTY sessions.
 //! - [`updates`]: the app's own updates from GitHub Releases.
 //! - [`reminders`]: the calendar reminders' system notifications and calls.
+//! - [`notes`]: the notes on mail, one `note.*` call per command.
+//! - [`agent`] and [`handoff`]: the coding agent the notes are handed to.
 
+pub mod agent;
 pub mod attachments;
 pub mod calendar;
 pub mod chrome;
@@ -36,10 +39,12 @@ mod e2e;
 pub mod editor;
 pub mod error;
 pub mod fixture;
+pub mod handoff;
 pub mod logging;
 pub mod menu;
 pub mod navigation;
 pub mod new_mail;
+pub mod notes;
 pub mod paths;
 pub mod reader;
 pub mod reminders;
@@ -301,6 +306,18 @@ pub fn run() {
             senders::sender_block,
             senders::sender_unblock,
             senders::sender_list,
+            notes::note_presets,
+            notes::note_list,
+            notes::note_get,
+            notes::note_set,
+            notes::note_set_many,
+            notes::note_clear,
+            notes::note_clear_done,
+            notes::note_export,
+            notes::note_handoff,
+            handoff::agent_settings,
+            handoff::agent_spawn,
+            handoff::agent_paseo,
             editor::editor_open,
             editor::editor_setting_get,
             editor::editor_setting_set,

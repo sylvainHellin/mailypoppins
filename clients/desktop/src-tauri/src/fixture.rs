@@ -143,6 +143,7 @@
 //! conversation but one canned thread (`fixture/conversations.rs`).
 
 mod conversations;
+mod notes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -168,9 +169,10 @@ use mp_protocol::draft::{
 };
 use mp_protocol::events::{
     Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
-    KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS, KIND_SENDER_BLOCKLIST_CHANGED,
-    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
-    KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
+    KIND_NOTE_CHANGED, KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS,
+    KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED,
+    KIND_SYNC_COMPLETED,
 };
 use mp_protocol::reminder::{CalendarReminder, PRESENTER_GUI};
 use mp_protocol::send::{
@@ -938,6 +940,8 @@ struct State {
     signatures: Value,
     /// The blocked senders, lowercase and sorted (PERSO-261).
     blocked: Vec<String>,
+    /// The notes on mail (PERSO-315).
+    notes: notes::NoteBook,
     /// Every stubbed `editor_open`, oldest first.
     editor_opens: Vec<EditorOpen>,
     /// Every file the system opener was asked to open, oldest first.
@@ -2096,6 +2100,152 @@ impl State {
             }
             other => Err(refused(other, -32601, &format!("unknown method {other}"))),
         }
+    }
+}
+
+/// The rows and drafts the notes are on (PERSO-315): a selector names the
+/// row of its account whose Message-ID is its key, preferring the copy in its
+/// mailbox, or the draft of its account with that id.
+struct NoteWorld<'a> {
+    messages: &'a BTreeMap<String, BTreeMap<String, Vec<Value>>>,
+    drafts: &'a BTreeMap<String, DraftListing>,
+}
+
+impl NoteWorld<'_> {
+    /// The row of `account` whose Message-ID is `key`, the copy in
+    /// `mailbox` first.
+    fn message(&self, account: &str, mailbox: Option<&str>, key: &str) -> Option<&Value> {
+        let boxes = self.messages.get(account)?;
+        let bare = |r: &&Value| {
+            r["message_id"]
+                .as_str()
+                .is_some_and(|m| m.trim_start_matches('<').trim_end_matches('>') == key)
+        };
+        mailbox
+            .and_then(|m| boxes.get(m))
+            .and_then(|rows| rows.iter().find(bare))
+            .or_else(|| boxes.values().flat_map(|rows| rows.iter()).find(bare))
+    }
+
+    fn draft(&self, account: &str, id: &str) -> Option<&DraftEntry> {
+        self.drafts.get(account)?.drafts.iter().find(|d| d.id == id)
+    }
+}
+
+impl notes::World for NoteWorld<'_> {
+    fn target(
+        &self,
+        account: Option<&str>,
+        selector: &str,
+    ) -> Result<notes::Target, notes::Refusal> {
+        let mailbox = selector
+            .strip_prefix("mp://")
+            .unwrap_or(selector)
+            .split('/')
+            .nth(if selector.starts_with("mp://") { 1 } else { 0 });
+        match notes::key_of(selector, account)? {
+            notes::Key::Message {
+                account,
+                message_id,
+            } => {
+                let row = self
+                    .message(&account, mailbox, &message_id)
+                    .ok_or_else(|| (-32602, format!("no message matches {selector}")))?;
+                let field = |k: &str| row[k].as_str().unwrap_or_default().to_string();
+                Ok(notes::Target {
+                    selector: field("selector"),
+                    account,
+                    message_id: Some(message_id),
+                    draft_id: None,
+                    from: field("from"),
+                    to: field("to"),
+                    subject: field("subject"),
+                })
+            }
+            notes::Key::Draft { account, id } => {
+                let d = self
+                    .draft(&account, &id)
+                    .ok_or_else(|| (-32602, format!("no draft matches {selector}")))?;
+                Ok(notes::Target {
+                    selector: d.selector.clone(),
+                    message_id: None,
+                    draft_id: Some(id),
+                    from: FIXTURE_FROM.to_string(),
+                    to: d.to.clone().unwrap_or_default(),
+                    subject: d.subject.clone().unwrap_or_default(),
+                    account,
+                })
+            }
+        }
+    }
+
+    fn locate(&self, note: &mp_protocol::note::Note) -> Option<String> {
+        let hinted = note.selector.as_deref().and_then(|s| {
+            s.strip_prefix("mp://")
+                .and_then(|rest| rest.split('/').nth(1))
+        });
+        match (&note.message_id, &note.draft_id) {
+            (Some(m), _) => self
+                .message(&note.account, hinted, m)
+                .and_then(|r| r["selector"].as_str())
+                .map(str::to_string),
+            (None, Some(id)) => self.draft(&note.account, id).map(|d| d.selector.clone()),
+            (None, None) => None,
+        }
+    }
+
+    fn knows(&self, account: &str) -> bool {
+        self.messages.contains_key(account)
+    }
+}
+
+/// The notes on mail (PERSO-315), kept in memory: every write publishes
+/// `note.changed` with the whole list, and a listing row carries the state of
+/// the note on its message or draft.
+impl State {
+    fn note_method(&mut self, method: &str, params: &Value) -> Result<Answered> {
+        let world = NoteWorld {
+            messages: &self.messages,
+            drafts: &self.drafts,
+        };
+        let (answer, changed) = self
+            .notes
+            .call(method, params, &world)
+            .map_err(|(code, why)| refused(method, code, &why))?;
+        let events = if changed {
+            vec![(
+                KIND_NOTE_CHANGED,
+                json!({"notes": self.notes.listing(&world)}),
+            )]
+        } else {
+            Vec::new()
+        };
+        Ok((answer, events))
+    }
+
+    /// `boxes` with each row's `note`, the state of the note on its message.
+    fn noted(
+        &self,
+        account: &str,
+        boxes: &BTreeMap<String, Vec<Value>>,
+    ) -> BTreeMap<String, Vec<Value>> {
+        boxes
+            .iter()
+            .map(|(mailbox, rows)| {
+                let rows = rows
+                    .iter()
+                    .map(|row| {
+                        let mut row = row.clone();
+                        let id = row["message_id"].as_str();
+                        if let Some(state) = self.notes.state_of(account, id, None) {
+                            row["note"] = json!(state);
+                        }
+                        row
+                    })
+                    .collect();
+                (mailbox.clone(), rows)
+            })
+            .collect()
     }
 }
 
@@ -3856,6 +4006,7 @@ impl Fixture {
             root,
             signatures,
             blocked: Vec::new(),
+            notes: notes::NoteBook::default(),
             editor_opens: Vec::new(),
             opened: Vec::new(),
             home: crate::attachments::home_dir(),
@@ -4554,7 +4705,8 @@ impl Fixture {
                 if !known {
                     return Err(refused(method, -32602, &format!("no mailbox `{mailbox}`")));
                 }
-                let rows: Vec<Value> = boxes
+                let rows: Vec<Value> = s
+                    .noted(account, boxes)
                     .get(mailbox)
                     .map(|rows| rows.iter().map(wire_row).collect())
                     .unwrap_or_default();
@@ -4584,7 +4736,8 @@ impl Fixture {
                     return Err(refused(method, -32602, &format!("no mailbox `{mailbox}`")));
                 }
                 let drafts = s.conversation_drafts(account);
-                let listing = conversations::list(account, mailbox, boxes, &drafts);
+                let boxes = s.noted(account, boxes);
+                let listing = conversations::list(account, mailbox, &boxes, &drafts);
                 Ok(serde_json::to_value(listing)?)
             }
             "message.thread" => {
@@ -4603,18 +4756,22 @@ impl Fixture {
                     Vec::new()
                 };
                 let prefer = params["prefer_mailbox"].as_str();
+                let boxes = s.noted(account, boxes);
                 let thread =
-                    conversations::thread(account, boxes, row_id, prefer, &drafts, FIXTURE_FROM)
+                    conversations::thread(account, &boxes, row_id, prefer, &drafts, FIXTURE_FROM)
                         .ok_or_else(|| {
-                            refused(method, -32602, &format!("no message has row_id {row_id}"))
-                        })?;
+                        refused(method, -32602, &format!("no message has row_id {row_id}"))
+                    })?;
                 Ok(serde_json::to_value(thread)?)
             }
             "draft.list" => {
                 let account = param_str(method, &params, "account")?;
-                let listing = s.drafts.get(account).cloned().ok_or_else(|| {
+                let mut listing = s.drafts.get(account).cloned().ok_or_else(|| {
                     refused(method, -32005, &format!("account_unknown: {account}"))
                 })?;
+                for d in &mut listing.drafts {
+                    d.note = s.notes.state_of(account, None, Some(d.id.as_str()));
+                }
                 Ok(serde_json::to_value(listing)?)
             }
             "draft.create"
@@ -4644,6 +4801,15 @@ impl Fixture {
             | "signature.delete"
             | "signature.set_default" => {
                 let (answer, events) = s.signature_method(method, &params)?;
+                for (kind, payload) in events {
+                    self.emit_locked(&mut s, kind, payload);
+                }
+                Ok(answer)
+            }
+            "note.set" | "note.set_many" | "note.list" | "note.get" | "note.done"
+            | "note.clear" | "note.clear_done" | "note.export" | "note.handoff"
+            | "note.presets" => {
+                let (answer, events) = s.note_method(method, &params)?;
                 for (kind, payload) in events {
                     self.emit_locked(&mut s, kind, payload);
                 }
