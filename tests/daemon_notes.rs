@@ -1,0 +1,659 @@
+//! The notes on mail over a real socket (PERSO-315).
+//!
+//! The file, its order and the batch prompt are unit-tested beside their code
+//! (`src/daemon/notes.rs`, whose snapshot pins the prompt); this file pins
+//! what a client sees: each `note.*` answer and refusal, the `note.changed`
+//! every write publishes, the `note` a message listing row and a draft row
+//! carry, and the notes outliving a rebuilt store.
+//!
+//! One account with a server and no credentials, on the discard port with the
+//! scheduler off, so nothing ever connects; its store holds two Inbox
+//! messages, and its drafts directory one draft.
+
+mod support;
+
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tempfile::TempDir;
+
+use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
+use mp_protocol::events::KIND_NOTE_CHANGED;
+use mp_protocol::note::{Note, NoteExport, NoteListing, NoteState};
+
+use mailypoppins::ingest::{ingest_message, record_mailbox_cursor, IngestInput, MailboxCursor};
+use mailypoppins::store::{BlobStore, Store};
+
+use support::events::next_event;
+use support::parity::{socket_path, DaemonFixture};
+
+const DEADLINE: Duration = Duration::from_secs(20);
+const ACCOUNT: &str = "alpha";
+const THESIS: &str = "mp://alpha/inbox/thesis@tum.de";
+const BUDGET: &str = "mp://alpha/inbox/budget@tum.de";
+const DRAFT: &str = "mp://alpha/drafts/a3f9c2e1b4d5f607";
+
+const CONFIG: &str = r#"
+[[accounts]]
+name = "alpha"
+default_from = "alpha@example.com"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 9
+username = "alpha@example.com"
+sync_interval_secs = 0
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+"#;
+
+/// A seeded root and a daemon serving it. The field order is the drop order.
+struct Slice {
+    daemon: DaemonFixture,
+    tmp: TempDir,
+}
+
+fn store_path(root: &Path) -> std::path::PathBuf {
+    root.join("accounts").join(ACCOUNT).join("store.sqlite3")
+}
+
+/// Ingest one Inbox message; its Message-ID is `<id>`.
+fn ingest(root: &Path, uid: i64, id: &str, from: &str, subject: &str) {
+    let dir = root.join("accounts").join(ACCOUNT);
+    let store = Store::open(store_path(root)).unwrap();
+    let blobs = BlobStore::new(dir.join("blobs"));
+    let raw = format!(
+        "From: {from}\r\nTo: alpha@example.com\r\nSubject: {subject}\r\nMessage-ID: <{id}>\r\nDate: Mon, 16 Nov 2026 09:00:00 +0100\r\n\r\nbody\r\n"
+    );
+    let email = mailypoppins::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+    ingest_message(
+        &store,
+        &blobs,
+        &IngestInput {
+            account: ACCOUNT,
+            mailbox: "inbox",
+            uid,
+            email: &email,
+            raw: Some(raw.as_bytes()),
+        },
+    )
+    .unwrap();
+}
+
+/// The configuration, a synced store holding the two messages, and the draft.
+fn seed(root: &Path, config: &str) {
+    std::fs::write(root.join("config.toml"), config).unwrap();
+    let dir = root.join("accounts").join(ACCOUNT);
+    std::fs::create_dir_all(dir.join("drafts")).unwrap();
+    let store = Store::open(store_path(root)).unwrap();
+    record_mailbox_cursor(
+        &store,
+        ACCOUNT,
+        "inbox",
+        &MailboxCursor {
+            uidvalidity: Some(7),
+            last_uid: Some(10),
+            ..MailboxCursor::default()
+        },
+    )
+    .unwrap();
+    ingest(
+        root,
+        1,
+        "thesis@tum.de",
+        "Stefan Fuchs <stefan.fuchs@tum.de>",
+        "Master Thesis Presentation",
+    );
+    ingest(
+        root,
+        2,
+        "budget@tum.de",
+        "Jana Weber <jana@tum.de>",
+        "Budget",
+    );
+    std::fs::write(
+        dir.join("drafts").join("2026-11-16-review.md"),
+        "---\nid: a3f9c2e1b4d5f607\nto: Ada Lovelace <ada@example.com>\nsubject: \"Re: Review\"\nstatus: draft\n---\n\nThanks, Ada.\n",
+    )
+    .unwrap();
+}
+
+impl Slice {
+    fn start() -> Slice {
+        Slice::with_config(CONFIG)
+    }
+
+    fn with_config(config: &str) -> Slice {
+        let tmp = TempDir::new().unwrap();
+        seed(tmp.path(), config);
+        let daemon = DaemonFixture::start(tmp.path());
+        Slice { daemon, tmp }
+    }
+
+    fn root(&self) -> &Path {
+        self.tmp.path()
+    }
+
+    async fn connect(&self) -> Connection {
+        connect(self.root()).await
+    }
+}
+
+async fn connect(root: &Path) -> Connection {
+    let mut conn = tokio::time::timeout(DEADLINE, Connection::connect(&socket_path(root)))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(
+        DEADLINE,
+        conn.initialize(
+            ClientInfo {
+                kind: ClientKind::Cli,
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            Identity {
+                data_dir: root.to_path_buf(),
+                config_dir: root.to_path_buf(),
+            },
+            &[],
+            &[],
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    conn
+}
+
+async fn call(conn: &mut Connection, method: &str, params: Value) -> Result<Value, ClientError> {
+    tokio::time::timeout(DEADLINE, conn.call(method, params))
+        .await
+        .unwrap_or_else(|_| panic!("{method} went unanswered"))
+}
+
+async fn ok(conn: &mut Connection, method: &str, params: Value) -> Value {
+    call(conn, method, params)
+        .await
+        .unwrap_or_else(|e| panic!("{method}: {e}"))
+}
+
+/// The refusal's code and sentence.
+async fn refused(conn: &mut Connection, method: &str, params: Value) -> (i32, String) {
+    match call(conn, method, params).await {
+        Err(ClientError::Rpc(error)) => (error.code, error.message),
+        other => panic!("{method} was not refused: {other:?}"),
+    }
+}
+
+/// The next `note.changed` on a bootstrapped connection.
+async fn next_notes_event(conn: &mut Connection) -> NoteListing {
+    loop {
+        let event = next_event(conn, DEADLINE, "note.changed").await;
+        if event.kind == KIND_NOTE_CHANGED {
+            return serde_json::from_value(event.payload).unwrap();
+        }
+    }
+}
+
+fn note(value: Value) -> Note {
+    serde_json::from_value(value).unwrap()
+}
+
+fn listing(value: Value) -> NoteListing {
+    serde_json::from_value(value).unwrap()
+}
+
+/// The `note` of the Inbox row whose selector is `selector`, as `message.list`
+/// answers it.
+async fn row_note(conn: &mut Connection, selector: &str) -> Value {
+    let listed = ok(
+        conn,
+        "message.list",
+        json!({"account": ACCOUNT, "mailbox": "inbox"}),
+    )
+    .await;
+    let row = listed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["selector"] == selector)
+        .unwrap_or_else(|| panic!("no row {selector} in {listed}"))
+        .clone();
+    row.get("note").cloned().unwrap_or(Value::Null)
+}
+
+/// A note set on a message by an elided selector is held by its canonical
+/// one, with the snapshot of its headers; every client hears `note.changed`
+/// with the whole list, and the message's listing row, its search hit and
+/// its streamed row carry the note's state while the other row carries none.
+#[tokio::test]
+async fn a_note_on_a_message_marks_its_row_and_every_client_hears_it() {
+    let slice = Slice::start();
+    let mut watcher = slice.connect().await;
+    ok(&mut watcher, "state.bootstrap", json!({})).await;
+    let mut conn = slice.connect().await;
+
+    let set = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"account": ACCOUNT, "selector": "inbox/thesis@tum.de", "preset": "s"}),
+        )
+        .await,
+    );
+    assert_eq!(set.selector.as_deref(), Some(THESIS));
+    assert_eq!(set.account, ACCOUNT);
+    assert_eq!(set.state, NoteState::Open);
+    assert_eq!(set.from, "Stefan Fuchs <stefan.fuchs@tum.de>");
+    assert_eq!(set.subject, "Master Thesis Presentation");
+    assert!(!set.orphaned);
+
+    let heard = next_notes_event(&mut watcher).await;
+    assert_eq!(heard.notes, std::slice::from_ref(&set));
+
+    assert_eq!(row_note(&mut conn, THESIS).await, json!("open"));
+    assert_eq!(row_note(&mut conn, BUDGET).await, Value::Null);
+    let hits = ok(
+        &mut conn,
+        "message.search",
+        json!({"account": ACCOUNT, "query": "subject:Thesis"}),
+    )
+    .await;
+    assert_eq!(hits["hits"][0]["note"], json!("open"), "{hits}");
+
+    // A UID-qualified selector, as a listing prints for a twin, names the
+    // same note.
+    let got = ok(
+        &mut conn,
+        "note.get",
+        json!({"selector": format!("{THESIS}/1")}),
+    )
+    .await;
+    assert_eq!(note(got["note"].clone()).id, set.id);
+    let none = ok(&mut conn, "note.get", json!({"selector": BUDGET})).await;
+    assert_eq!(none, json!({"note": null}));
+}
+
+/// Setting a note again replaces it and opens it again; `note.done` closes it
+/// with its result, which the row shows as `done`; `note.clear` removes it and
+/// a second clear removes nothing, which publishes nothing.
+#[tokio::test]
+async fn a_note_is_replaced_closed_and_cleared() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let first = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": THESIS, "preset": "s"}),
+        )
+        .await,
+    );
+    ok(
+        &mut conn,
+        "note.done",
+        json!({"selector": THESIS, "result": "three lines"}),
+    )
+    .await;
+    let again = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": THESIS, "preset": "r", "text": "Yes, Thursday works."}),
+        )
+        .await,
+    );
+    assert_eq!(again.id, first.id);
+    assert_eq!((again.state, again.result), (NoteState::Open, None));
+    assert_eq!(again.text, "Yes, Thursday works.");
+
+    let closed = note(
+        ok(
+            &mut conn,
+            "note.done",
+            json!({"id": first.id, "result": "Drafted the reply"}),
+        )
+        .await,
+    );
+    assert_eq!(closed.state, NoteState::Done);
+    assert_eq!(closed.result.as_deref(), Some("Drafted the reply"));
+    assert_eq!(row_note(&mut conn, THESIS).await, json!("done"));
+
+    let mut watcher = slice.connect().await;
+    ok(&mut watcher, "state.bootstrap", json!({})).await;
+    let cleared = ok(&mut conn, "note.clear", json!({"selector": THESIS})).await;
+    assert_eq!(cleared, json!({"removed": 1}));
+    assert!(next_notes_event(&mut watcher).await.notes.is_empty());
+    let cleared = ok(&mut conn, "note.clear", json!({"selector": THESIS})).await;
+    assert_eq!(cleared, json!({"removed": 0}));
+    assert_eq!(row_note(&mut conn, THESIS).await, Value::Null);
+    support::events::assert_no_domain_event_within(
+        &mut watcher,
+        Duration::from_millis(300),
+        "a clear of nothing",
+    )
+    .await;
+}
+
+/// The refusals name what is wrong: no preset and no text, a preset the
+/// configuration lacks, mail the store does not hold, a new email with no
+/// account, an id no note has, a note addressed twice, an empty result.
+#[tokio::test]
+async fn the_refusals_say_why() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let cases = [
+        (
+            "note.set",
+            json!({"selector": THESIS}),
+            "a note needs a preset or a text",
+        ),
+        (
+            "note.set",
+            json!({"selector": THESIS, "preset": "q"}),
+            "preset q is not configured; the presets are r, d, s, e, p, t, f",
+        ),
+        (
+            "note.set",
+            json!({"selector": "mp://alpha/inbox/nobody@tum.de", "text": "x"}),
+            "no match for nobody@tum.de",
+        ),
+        (
+            "note.set",
+            json!({"text": "write to Ada"}),
+            "a note for a new email names the account it goes out from",
+        ),
+        (
+            "note.set",
+            json!({"id": "zzzzzzzz", "text": "x"}),
+            "no note has the id zzzzzzzz",
+        ),
+        (
+            "note.set",
+            json!({"selector": THESIS, "id": "zzzzzzzz", "text": "x"}),
+            "selector and id are two addresses",
+        ),
+        (
+            "note.set",
+            json!({"selector": "mp://beta/inbox/x@y", "text": "x"}),
+            "no account named beta is configured",
+        ),
+        (
+            "note.done",
+            json!({"selector": THESIS, "result": " "}),
+            "result is the line a client shows",
+        ),
+        (
+            "note.done",
+            json!({"selector": THESIS, "result": "x"}),
+            "no note is on mp://alpha/inbox/thesis@tum.de",
+        ),
+        (
+            "note.clear",
+            json!({}),
+            "a note is addressed by selector or by id",
+        ),
+        (
+            "note.export",
+            json!({"ids": ["zzzzzzzz"]}),
+            "no note has the id zzzzzzzz",
+        ),
+        (
+            "note.list",
+            json!({"state": "closed"}),
+            "the parameters of note.list",
+        ),
+        (
+            "note.list",
+            json!({"all": true}),
+            "note.list has no all parameter",
+        ),
+    ];
+    for (method, params, sentence) in cases {
+        let (code, message) = refused(&mut conn, method, params.clone()).await;
+        assert!(
+            message.contains(sentence),
+            "{method} {params}: {message:?} does not say {sentence:?}"
+        );
+        let expected = if sentence.starts_with("no account named") {
+            -32005
+        } else {
+            -32602
+        };
+        assert_eq!(code, expected, "{method} {params}: {message}");
+    }
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    assert!(listed.notes.is_empty(), "a refusal wrote nothing");
+}
+
+/// `note.set_many` sets one note on each mail, a draft's row carries its
+/// note, a new-email note is edited by id, and `note.list` filters by state.
+#[tokio::test]
+async fn several_notes_a_draft_and_a_new_email() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let many = listing(
+        ok(
+            &mut conn,
+            "note.set_many",
+            json!({"selectors": [THESIS, BUDGET, THESIS], "preset": "r", "text": "Yes."}),
+        )
+        .await,
+    );
+    let selectors: Vec<_> = many.notes.iter().map(|n| n.selector.as_deref()).collect();
+    assert_eq!(selectors, [Some(THESIS), Some(BUDGET)]);
+
+    let review = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"account": ACCOUNT, "selector": "drafts/a3f9c2e1b4d5f607", "preset": "p"}),
+        )
+        .await,
+    );
+    assert_eq!(review.selector.as_deref(), Some(DRAFT));
+    assert_eq!(review.to, "Ada Lovelace <ada@example.com>");
+    assert_eq!(review.from, "alpha@example.com");
+    assert_eq!(review.subject, "Re: Review");
+    let drafts = ok(&mut conn, "draft.list", json!({"account": ACCOUNT})).await;
+    assert_eq!(drafts["drafts"][0]["note"], json!("open"), "{drafts}");
+
+    let new = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"account": ACCOUNT, "text": "Ask Ada about Friday."}),
+        )
+        .await,
+    );
+    assert_eq!((new.selector.as_deref(), new.from.as_str()), (None, ""));
+    let edited = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"id": new.id, "text": "Ask Ada and Bo about Friday."}),
+        )
+        .await,
+    );
+    assert_eq!(edited.id, new.id);
+    assert_eq!(edited.text, "Ask Ada and Bo about Friday.");
+
+    ok(
+        &mut conn,
+        "note.done",
+        json!({"selector": BUDGET, "result": "Replied"}),
+    )
+    .await;
+    let ids =
+        |value: Value| -> Vec<String> { listing(value).notes.into_iter().map(|n| n.id).collect() };
+    assert_eq!(
+        ids(ok(&mut conn, "note.list", json!({})).await),
+        [
+            new.id.clone(),
+            review.id.clone(),
+            many.notes[1].id.clone(),
+            many.notes[0].id.clone()
+        ],
+        "newest first"
+    );
+    assert_eq!(
+        ids(ok(&mut conn, "note.list", json!({"state": "done"})).await),
+        [many.notes[1].id.clone()]
+    );
+    assert_eq!(
+        ok(&mut conn, "note.clear_done", json!({})).await,
+        json!({"removed": 1})
+    );
+}
+
+/// `note.export` renders the open notes and changes nothing; `note.handoff`
+/// renders the same text and marks them handed off, which the next export no
+/// longer gives; named ids are given whatever their state.
+#[tokio::test]
+async fn the_export_changes_nothing_and_the_hand_off_marks_its_notes() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let thesis = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": THESIS, "preset": "s"}),
+        )
+        .await,
+    );
+    let new = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"account": ACCOUNT, "text": "Ask Ada about Friday."}),
+        )
+        .await,
+    );
+
+    let export: NoteExport =
+        serde_json::from_value(ok(&mut conn, "note.export", json!({})).await).unwrap();
+    assert_eq!(export.ids, [new.id.clone(), thesis.id.clone()]);
+    assert!(export.text.starts_with("I have notes on 2 emails.\n"));
+    assert!(export.text.contains(&format!(
+        "1. New email from account alpha (note {})\n   Ask Ada about Friday.\n2. {THESIS}\n   From Stefan Fuchs <stefan.fuchs@tum.de>, subject \"Master Thesis Presentation\"\n   Summarize: ",
+        new.id
+    )), "{}", export.text);
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    assert!(listed.notes.iter().all(|n| n.state == NoteState::Open));
+
+    let mut watcher = slice.connect().await;
+    ok(&mut watcher, "state.bootstrap", json!({})).await;
+    let handed: NoteExport =
+        serde_json::from_value(ok(&mut conn, "note.handoff", json!({})).await).unwrap();
+    assert_eq!(handed, export);
+    let heard = next_notes_event(&mut watcher).await;
+    assert!(heard.notes.iter().all(|n| n.state == NoteState::HandedOff));
+    assert_eq!(row_note(&mut conn, THESIS).await, json!("handed_off"));
+
+    let empty: NoteExport =
+        serde_json::from_value(ok(&mut conn, "note.export", json!({})).await).unwrap();
+    assert_eq!(empty, NoteExport::default());
+    let named: NoteExport =
+        serde_json::from_value(ok(&mut conn, "note.export", json!({"ids": [thesis.id]})).await)
+            .unwrap();
+    assert_eq!(named.ids, [thesis.id]);
+}
+
+/// The notes outlive the store: with the store deleted and the daemon started
+/// again, as a failed integrity check would have it, every note is still
+/// listed with the snapshot it took. A store that is not there yet orphans
+/// nothing, since the next sync may bring the message back; a draft whose
+/// file is gone orphans its note, and nothing is deleted.
+#[tokio::test]
+async fn the_notes_survive_a_store_rebuild() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let thesis = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": THESIS, "preset": "s"}),
+        )
+        .await,
+    );
+    let review = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": DRAFT, "preset": "p"}),
+        )
+        .await,
+    );
+    drop(conn);
+    let Slice { daemon, tmp } = slice;
+    daemon.stop();
+
+    for file in ["store.sqlite3", "store.sqlite3-wal", "store.sqlite3-shm"] {
+        let path = tmp.path().join("accounts").join(ACCOUNT).join(file);
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    std::fs::remove_file(
+        tmp.path()
+            .join("accounts")
+            .join(ACCOUNT)
+            .join("drafts")
+            .join("2026-11-16-review.md"),
+    )
+    .unwrap();
+    let daemon = DaemonFixture::start(tmp.path());
+    let mut conn = connect(tmp.path()).await;
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    let orphaned: Vec<bool> = listed.notes.iter().map(|n| n.orphaned).collect();
+    assert_eq!(orphaned, [true, false], "{listed:?}");
+    let survived: Vec<Note> = listed
+        .notes
+        .into_iter()
+        .map(|n| Note {
+            orphaned: false,
+            ..n
+        })
+        .collect();
+    assert_eq!(survived, [review, thesis]);
+    drop(daemon);
+}
+
+/// `note.presets` answers the configuration's presets in its order, which
+/// replace the built-in ones, and `config.validate` refuses two presets
+/// sharing a key.
+#[tokio::test]
+async fn the_presets_come_from_the_configuration() {
+    let config = format!(
+        "{CONFIG}\n[notes]\npresets = [\n  {{ key = \"x\", label = \"Translate\", instruction = \"Translate it into German.\" }},\n]\n"
+    );
+    let slice = Slice::with_config(&config);
+    let mut conn = slice.connect().await;
+    let presets = ok(&mut conn, "note.presets", json!({})).await;
+    assert_eq!(
+        presets,
+        json!({"presets": [{"key": "x", "label": "Translate", "needs_text": false, "instruction": "Translate it into German."}]})
+    );
+    let (_, why) = refused(
+        &mut conn,
+        "note.set",
+        json!({"selector": THESIS, "preset": "s"}),
+    )
+    .await;
+    assert!(why.contains("the presets are x"), "{why}");
+
+    let doubled = format!(
+        "{CONFIG}\n[notes]\npresets = [\n  {{ key = \"x\", label = \"A\", instruction = \"A.\" }},\n  {{ key = \"x\", label = \"B\", instruction = \"B.\" }},\n]\n"
+    );
+    let verdict = ok(&mut conn, "config.validate", json!({"toml": doubled})).await;
+    assert_eq!(verdict["ok"], json!(false), "{verdict}");
+    assert!(
+        verdict["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("two presets share the key \"x\""),
+        "{verdict}"
+    );
+}

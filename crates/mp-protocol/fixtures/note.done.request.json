@@ -4,6 +4,6 @@
   "method": "note.done",
   "params": {
     "result": "Stefan asks to present on 3 December at 14:00; he needs the slides by 1 December.",
-    "selector": "mp://tum/inbox/thesis-42%40tum.de"
+    "selector": "mp://tum/inbox/thesis-42@tum.de"
   }
 }

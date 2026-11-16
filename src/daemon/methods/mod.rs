@@ -34,6 +34,7 @@ pub mod message;
 pub mod message_body;
 pub mod message_eml;
 pub mod message_server;
+pub mod note;
 pub mod reminder;
 pub mod send;
 pub mod sender;
@@ -205,6 +206,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&canonical),
         Arc::clone(&runtimes),
     );
+    self::note::register(dispatcher, Arc::clone(&config), Arc::clone(&canonical));
     self::diagnostic::register(
         dispatcher,
         Arc::clone(&config),

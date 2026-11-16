@@ -5,6 +5,6 @@
   "params": {
     "account": "tum",
     "preset": "s",
-    "selector": "mp://tum/inbox/thesis-42%40tum.de"
+    "selector": "mp://tum/inbox/thesis-42@tum.de"
   }
 }

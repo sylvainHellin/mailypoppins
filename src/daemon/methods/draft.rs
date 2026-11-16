@@ -361,14 +361,19 @@ fn list(params: &Value, accounts: &[AccountConfig], watch: &DraftWatch) -> Resul
 
     let (rows, collisions, skipped) =
         crate::store::drafts::index_dir_parsed(&crate::config::drafts_dir(&account.name));
+    let marks = super::super::notes::NoteMarks::load(&super::super::notes::path(), &account.name);
     let listing = DraftListing {
         account: account.name.clone(),
         drafts: rows
             .iter()
             .filter(|(row, _)| status.as_deref().is_none_or(|status| row.status == status))
-            .map(|(row, draft)| DraftEntry {
-                server: watch.server_of(&account.name, &row.id, &row.path),
-                ..entry(&account.name, row, draft)
+            .map(|(row, draft)| {
+                let entry = entry(&account.name, row, draft);
+                DraftEntry {
+                    server: watch.server_of(&account.name, &row.id, &row.path),
+                    note: marks.of_selector(&entry.selector),
+                    ..entry
+                }
             })
             .collect(),
         skipped: skipped

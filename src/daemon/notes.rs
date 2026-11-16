@@ -1,0 +1,958 @@
+//! The notes on mail (PERSO-315): one file the daemon keeps for every
+//! account, and the batch prompt it renders from them.
+//!
+//! # The file
+//!
+//! A note is a short instruction the user attached to a received message, to
+//! a draft, or to nothing, which asks for a new email; `mp_protocol::note`
+//! is its wire shape. Every note lives in `<data_dir>/notes.json` ([`path`]):
+//! the user typed it, so it may not live only in a store the daemon drops and
+//! rebuilds, and `config.toml` is the user's file, which the daemon never
+//! writes. The file is replaced atomically, private to the user, the way the
+//! blocked senders are ([`super::senders`]), and a file that does not parse
+//! is an error rather than an empty list, so a broken file is never
+//! overwritten with one.
+//!
+//! A note on mail is held by the canonical selector of its message or draft,
+//! without a UID segment, and at most one note is on a selector: setting
+//! another replaces its preset and text and opens it again. A note keeps a
+//! snapshot of the `From`, the `To` and the subject taken when it was set, so
+//! the list and the batch prompt render with no store read and outlive a
+//! rebuilt store. A selector whose message or draft is gone leaves its note
+//! where it is; the answers mark it orphaned, and only a clear removes it.
+//!
+//! # Order
+//!
+//! The file holds the notes in the order they were first set, so newest
+//! first is the file read backwards; a note set again keeps its place.
+//!
+//! Every read-modify-write holds one lock ([`LOCK`]), so two clients setting
+//! notes at once never drop one of them.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use anyhow::Context;
+use log::warn;
+use serde::{Deserialize, Serialize};
+
+use mp_protocol::note::{Note, NotePreset, NoteState};
+
+use crate::selector::{MessageRowRef, Selector};
+
+/// The file name of the notes under the data directory.
+pub const NOTES_FILE: &str = "notes.json";
+
+/// Serialises every read-modify-write of the file in the process.
+static LOCK: Mutex<()> = Mutex::new(());
+
+fn locked() -> std::sync::MutexGuard<'static, ()> {
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `<data_dir>/notes.json`.
+pub fn path() -> PathBuf {
+    crate::config::mailypoppins_data_dir().join(NOTES_FILE)
+}
+
+/// Why a notes call did not go through.
+#[derive(Debug)]
+pub enum NotesError {
+    /// The caller named something that is not there; one sentence it shows.
+    Refused(String),
+    /// The file could not be read or written.
+    File(anyhow::Error),
+}
+
+impl From<anyhow::Error> for NotesError {
+    fn from(error: anyhow::Error) -> Self {
+        NotesError::File(error)
+    }
+}
+
+type Result<T> = std::result::Result<T, NotesError>;
+
+/// The file as it lies on disk.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct NotesFile {
+    #[serde(default)]
+    notes: Vec<Stored>,
+}
+
+/// One note as the file holds it: the wire [`Note`] without `orphaned`,
+/// which is decided at every answer and never stored.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Stored {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+    account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preset: Option<String>,
+    #[serde(default)]
+    text: String,
+    state: NoteState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    created: String,
+    updated: String,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    subject: String,
+}
+
+impl Stored {
+    fn to_wire(&self) -> Note {
+        Note {
+            id: self.id.clone(),
+            selector: self.selector.clone(),
+            account: self.account.clone(),
+            preset: self.preset.clone(),
+            text: self.text.clone(),
+            state: self.state,
+            result: self.result.clone(),
+            created: self.created.clone(),
+            updated: self.updated.clone(),
+            from: self.from.clone(),
+            to: self.to.clone(),
+            subject: self.subject.clone(),
+            orphaned: false,
+        }
+    }
+
+    /// Set the note's instruction again and open it.
+    fn reset(&mut self, content: &Content, now: &str) {
+        self.preset = content.preset.clone();
+        self.text = content.text.clone();
+        self.state = NoteState::Open;
+        self.result = None;
+        self.updated = now.to_string();
+    }
+}
+
+/// The file at `path`, in the order the notes were set; an absent file holds
+/// none.
+fn read(path: &Path) -> anyhow::Result<NotesFile> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not a notes file", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NotesFile::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Replace the file at `path` atomically, private to the user.
+fn write(path: &Path, file: &NotesFile) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let bytes = serde_json::to_vec_pretty(file).context("serialising the notes")?;
+    let parent = path
+        .parent()
+        .context("the notes file has no parent directory")?;
+    crate::config::create_private_dir_all(parent)
+        .with_context(|| format!("creating {}", parent.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("opening {}", tmp.display()))?;
+    out.write_all(&bytes)
+        .and_then(|()| out.sync_all())
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+/// Every note at `path`, newest first, none of them marked orphaned yet.
+pub fn load(path: &Path) -> anyhow::Result<Vec<Note>> {
+    Ok(read(path)?
+        .notes
+        .iter()
+        .rev()
+        .map(Stored::to_wire)
+        .collect())
+}
+
+/// The instruction a note carries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Content {
+    /// The key of a configured preset, checked by the caller.
+    pub preset: Option<String>,
+    /// What the user typed, `""` for none.
+    pub text: String,
+}
+
+/// What a `set` puts a note on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A message or a draft, by canonical selector, with the snapshot of its
+    /// headers.
+    Mail {
+        selector: String,
+        account: String,
+        from: String,
+        to: String,
+        subject: String,
+    },
+    /// A new email from `account`: always a note of its own.
+    NewEmail { account: String },
+    /// The note with this id, whatever it is on.
+    Id(String),
+}
+
+/// How a caller names one note it closes or clears.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Key {
+    Id(String),
+    /// A canonical selector.
+    Selector(String),
+}
+
+impl Key {
+    fn names(&self, note: &Stored) -> bool {
+        match self {
+            Key::Id(id) => note.id == *id,
+            Key::Selector(selector) => note.selector.as_deref() == Some(selector.as_str()),
+        }
+    }
+
+    /// The refusal of a key no note answers to.
+    fn missing(&self) -> NotesError {
+        NotesError::Refused(match self {
+            Key::Id(id) => format!("no note has the id {id}"),
+            Key::Selector(selector) => format!("no note is on {selector}"),
+        })
+    }
+}
+
+/// Set `content` on each of `targets`, in one write, and answer the notes
+/// set, in the order of `targets`.
+///
+/// A target that already has a note replaces its preset and text and opens it
+/// again, keeping its id and its place; a [`Target::Mail`] also takes the
+/// snapshot again. An id no note has is refused and nothing is written.
+pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Result<Vec<Note>> {
+    let _turn = locked();
+    let mut file = read(path)?;
+    let mut set = Vec::with_capacity(targets.len());
+    for target in targets {
+        let at = match target {
+            Target::Id(id) => Some(
+                file.notes
+                    .iter()
+                    .position(|note| note.id == *id)
+                    .ok_or_else(|| Key::Id(id.clone()).missing())?,
+            ),
+            Target::Mail { selector, .. } => file
+                .notes
+                .iter()
+                .position(|note| note.selector.as_deref() == Some(selector.as_str())),
+            Target::NewEmail { .. } => None,
+        };
+        let index = match at {
+            Some(index) => {
+                let note = &mut file.notes[index];
+                note.reset(content, now);
+                if let Target::Mail {
+                    account,
+                    from,
+                    to,
+                    subject,
+                    ..
+                } = target
+                {
+                    note.account = account.clone();
+                    note.from = from.clone();
+                    note.to = to.clone();
+                    note.subject = subject.clone();
+                }
+                index
+            }
+            None => {
+                let id = mint_id(|id| file.notes.iter().any(|note| note.id == id));
+                let (selector, account, from, to, subject) = match target {
+                    Target::Mail {
+                        selector,
+                        account,
+                        from,
+                        to,
+                        subject,
+                    } => (
+                        Some(selector.clone()),
+                        account.clone(),
+                        from.clone(),
+                        to.clone(),
+                        subject.clone(),
+                    ),
+                    Target::NewEmail { account } => (
+                        None,
+                        account.clone(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ),
+                    Target::Id(_) => unreachable!("an id target is found or refused above"),
+                };
+                file.notes.push(Stored {
+                    id,
+                    selector,
+                    account,
+                    preset: content.preset.clone(),
+                    text: content.text.clone(),
+                    state: NoteState::Open,
+                    result: None,
+                    created: now.to_string(),
+                    updated: now.to_string(),
+                    from,
+                    to,
+                    subject,
+                });
+                file.notes.len() - 1
+            }
+        };
+        set.push(index);
+    }
+    write(path, &file)?;
+    Ok(set
+        .into_iter()
+        .map(|index| file.notes[index].to_wire())
+        .collect())
+}
+
+/// Close the note `key` names with `result`, whatever its state.
+pub fn done(path: &Path, key: &Key, result: &str, now: &str) -> Result<Note> {
+    let _turn = locked();
+    let mut file = read(path)?;
+    let note = file
+        .notes
+        .iter_mut()
+        .find(|note| key.names(note))
+        .ok_or_else(|| key.missing())?;
+    note.state = NoteState::Done;
+    note.result = Some(result.to_string());
+    note.updated = now.to_string();
+    let closed = note.to_wire();
+    write(path, &file)?;
+    Ok(closed)
+}
+
+/// Remove the note `key` names, answering how many went: `0` when none
+/// answers to it, which writes nothing.
+pub fn clear(path: &Path, key: &Key) -> Result<u64> {
+    remove(path, |note| key.names(note))
+}
+
+/// Remove every done note, answering how many went.
+pub fn clear_done(path: &Path) -> Result<u64> {
+    remove(path, |note| note.state == NoteState::Done)
+}
+
+fn remove(path: &Path, gone: impl Fn(&Stored) -> bool) -> Result<u64> {
+    let _turn = locked();
+    let mut file = read(path)?;
+    let before = file.notes.len();
+    file.notes.retain(|note| !gone(note));
+    let removed = (before - file.notes.len()) as u64;
+    if removed > 0 {
+        write(path, &file)?;
+    }
+    Ok(removed)
+}
+
+/// The notes a batch prompt numbers: the ones `ids` names, in any state and
+/// in list order, or every open note when it names none. An id no note has
+/// is refused.
+pub fn select(notes: &[Note], ids: Option<&[String]>) -> Result<Vec<Note>> {
+    let Some(ids) = ids else {
+        return Ok(notes
+            .iter()
+            .filter(|note| note.state == NoteState::Open)
+            .cloned()
+            .collect());
+    };
+    if let Some(unknown) = ids.iter().find(|id| !notes.iter().any(|n| n.id == **id)) {
+        return Err(Key::Id(unknown.clone()).missing());
+    }
+    Ok(notes
+        .iter()
+        .filter(|note| ids.contains(&note.id))
+        .cloned()
+        .collect())
+}
+
+/// The notes [`select`] picks out of the file, and every open one among them
+/// marked handed off, in one write: what `note.handoff` renders the prompt
+/// from. The answer is the notes newest first, the marks applied, and
+/// whether any was open, which is whether the file changed.
+pub fn hand_off(path: &Path, ids: Option<&[String]>, now: &str) -> Result<(Vec<Note>, bool)> {
+    let _turn = locked();
+    let mut file = read(path)?;
+    let listed: Vec<Note> = file.notes.iter().rev().map(Stored::to_wire).collect();
+    let picked: Vec<String> = select(&listed, ids)?
+        .into_iter()
+        .map(|note| note.id)
+        .collect();
+    let mut changed = false;
+    for note in file.notes.iter_mut() {
+        if picked.contains(&note.id) && note.state == NoteState::Open {
+            note.state = NoteState::HandedOff;
+            note.updated = now.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        write(path, &file)?;
+    }
+    let given = file
+        .notes
+        .iter()
+        .rev()
+        .filter(|note| picked.contains(&note.id))
+        .map(Stored::to_wire)
+        .collect();
+    Ok((given, changed))
+}
+
+/// Now, as a note's `created` and `updated` spell it: RFC 3339 in UTC, to the
+/// second.
+pub fn now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// A fresh note id: eight characters, a letter first so it never reads as a
+/// number, and none `taken` already.
+fn mint_id(taken: impl Fn(&str) -> bool) -> String {
+    loop {
+        let n = rand::random::<u32>();
+        let first = b"abcdef"[(n >> 28) as usize % 6] as char;
+        let id = format!("{first}{:07x}", n & 0x0fff_ffff);
+        if !taken(&id) {
+            return id;
+        }
+    }
+}
+
+/// The batch prompt for `notes`, in their order: what `note.export` and
+/// `note.handoff` answer, rendered here alone so every client hands an agent
+/// the same text. `""` for no notes.
+///
+/// A preset note reads `<label>: <instruction>` from `presets`, the
+/// configuration's, followed by the user's text; a preset the configuration
+/// no longer has is named by its key.
+pub fn render(notes: &[Note], presets: &[NotePreset]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&match notes.len() {
+        1 => "I have a note on one email.\n".to_string(),
+        n => format!("I have notes on {n} emails.\n"),
+    });
+    out.push_str(
+        "Read each with `mp show <selector>` (a draft: `mp path <selector>`), carry out the \
+         instruction, and close it with `mp notes done <selector> --result \"...\"`.\n\
+         A note without a selector asks for a new email: write it with `mp -A <account> new`, \
+         then close it with `mp notes done --id <id> --result \"...\"`.\n\
+         Never send or approve anything.\n\n",
+    );
+    for (index, note) in notes.iter().enumerate() {
+        let mut lines: Vec<String> = Vec::new();
+        match &note.selector {
+            Some(selector) => {
+                lines.push(selector.clone());
+                lines.push(headline(note, selector));
+                if note.orphaned {
+                    lines.push(
+                        "This selector names nothing any more; find the mail with `mp search`, \
+                         or report that as the result."
+                            .to_string(),
+                    );
+                }
+            }
+            None => lines.push(format!(
+                "New email from account {} (note {})",
+                note.account, note.id
+            )),
+        }
+        if let Some(key) = &note.preset {
+            lines.push(match presets.iter().find(|preset| preset.key == *key) {
+                Some(preset) => format!("{}: {}", preset.label, preset.instruction),
+                None => format!("Preset {key}, which the configuration no longer has."),
+            });
+        }
+        lines.extend(note.text.lines().map(str::to_string));
+        let number = format!("{}. ", index + 1);
+        let indent = " ".repeat(number.len());
+        for (at, line) in lines.iter().enumerate() {
+            let lead = if at == 0 { &number } else { &indent };
+            out.push_str(lead);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The line under a selector: who the mail is from, or who a draft is to,
+/// and its subject.
+fn headline(note: &Note, selector: &str) -> String {
+    let is_draft = crate::selector::parse(selector)
+        .ok()
+        .and_then(|parts| parts.mailbox)
+        .is_some_and(|mailbox| mailbox == crate::selector::DRAFTS_MAILBOX);
+    let who = if is_draft {
+        let to = note.to.trim();
+        if to.is_empty() {
+            "Draft with no recipient yet".to_string()
+        } else {
+            format!("Draft to {to}")
+        }
+    } else {
+        format!("From {}", crate::parse::readable_sender(&note.from))
+    };
+    format!("{who}, subject \"{}\"", note.subject)
+}
+
+/// The states of one account's notes on mail, by selector: what a listing
+/// row's `note` is read from, one file read per listing.
+#[derive(Debug, Default)]
+pub struct NoteMarks(HashMap<String, NoteState>);
+
+impl NoteMarks {
+    /// The marks of `account`'s notes in the file at `path`. A file that does
+    /// not read marks nothing and says so in the log: a listing is not
+    /// refused over its glyphs.
+    pub fn load(path: &Path, account: &str) -> NoteMarks {
+        match read(path) {
+            Ok(file) => NoteMarks(
+                file.notes
+                    .into_iter()
+                    .filter(|note| note.account == account)
+                    .filter_map(|note| note.selector.map(|selector| (selector, note.state)))
+                    .collect(),
+            ),
+            Err(e) => {
+                warn!("[notes] listing {account} with no note marks: {e:#}");
+                NoteMarks::default()
+            }
+        }
+    }
+
+    /// The state of the note on `row`, a message of `account`.
+    pub fn of_message<R: MessageRowRef>(&self, account: &str, row: &R) -> Option<NoteState> {
+        if self.0.is_empty() {
+            return None;
+        }
+        self.of_selector(&Selector::for_message(account, row).to_string())
+    }
+
+    /// The state of the note on a canonical selector.
+    pub fn of_selector(&self, selector: &str) -> Option<NoteState> {
+        self.0.get(selector).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: &str = "2026-11-16T09:30:00Z";
+    const LATER: &str = "2026-11-16T10:05:00Z";
+
+    fn mail(selector: &str, subject: &str) -> Target {
+        Target::Mail {
+            selector: selector.to_string(),
+            account: "tum".to_string(),
+            from: "Stefan Fuchs <stefan.fuchs@tum.de>".to_string(),
+            to: "sylvain@tum.de".to_string(),
+            subject: subject.to_string(),
+        }
+    }
+
+    fn content(preset: Option<&str>, text: &str) -> Content {
+        Content {
+            preset: preset.map(str::to_string),
+            text: text.to_string(),
+        }
+    }
+
+    fn file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(NOTES_FILE);
+        (dir, path)
+    }
+
+    fn refused<T: std::fmt::Debug>(result: Result<T>) -> String {
+        match result {
+            Err(NotesError::Refused(why)) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// A note is set on a selector, listed newest first, and a second set on
+    /// the same selector replaces its instruction and opens it again in its
+    /// place, keeping its id; a new email is always a note of its own.
+    #[test]
+    fn a_selector_holds_one_note_and_setting_it_again_reopens_it() {
+        let (_dir, path) = file();
+        let first = set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A")],
+            &content(Some("s"), ""),
+            NOW,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(first.state, NoteState::Open);
+        assert_eq!(first.id.len(), 8);
+        assert!(first.id.starts_with(|c: char| c.is_ascii_lowercase()));
+        set(
+            &path,
+            &[mail("mp://tum/inbox/b", "B")],
+            &content(None, "x"),
+            NOW,
+        )
+        .unwrap();
+        done(&path, &Key::Id(first.id.clone()), "summed up", NOW).unwrap();
+
+        let again = set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A, renamed")],
+            &content(Some("r"), "yes"),
+            LATER,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.state, NoteState::Open);
+        assert_eq!(again.result, None);
+        assert_eq!(again.preset.as_deref(), Some("r"));
+        assert_eq!(again.subject, "A, renamed");
+        assert_eq!(again.created, NOW);
+        assert_eq!(again.updated, LATER);
+
+        let new = NewEmailNote::set(&path);
+        let other = NewEmailNote::set(&path);
+        assert_ne!(new, other);
+        let order: Vec<String> = load(&path)
+            .unwrap()
+            .into_iter()
+            .map(|note| note.selector.unwrap_or(note.id))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                other,
+                new,
+                "mp://tum/inbox/b".into(),
+                "mp://tum/inbox/a".into()
+            ]
+        );
+    }
+
+    /// A new-email note, by its id.
+    struct NewEmailNote;
+
+    impl NewEmailNote {
+        fn set(path: &Path) -> String {
+            set(
+                path,
+                &[Target::NewEmail {
+                    account: "tum".to_string(),
+                }],
+                &content(None, "write to Ada"),
+                NOW,
+            )
+            .unwrap()
+            .remove(0)
+            .id
+        }
+    }
+
+    /// A note set again by its id keeps what it is on; an unknown id is
+    /// refused and writes nothing.
+    #[test]
+    fn a_note_is_set_again_by_id_and_an_unknown_id_is_refused() {
+        let (_dir, path) = file();
+        let id = NewEmailNote::set(&path);
+        let edited = set(
+            &path,
+            &[Target::Id(id.clone())],
+            &content(None, "to Ada and Bo"),
+            LATER,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(edited.text, "to Ada and Bo");
+        assert_eq!(edited.selector, None);
+        let before = std::fs::read(&path).unwrap();
+        let why = refused(set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A"), Target::Id("zzzzzzzz".into())],
+            &content(None, "x"),
+            NOW,
+        ));
+        assert_eq!(why, "no note has the id zzzzzzzz");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// `done` closes by selector or id with the result; `clear` removes one,
+    /// `0` for a key nothing answers to; `clear_done` removes the done ones.
+    #[test]
+    fn done_closes_and_clear_removes() {
+        let (_dir, path) = file();
+        set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A"), mail("mp://tum/inbox/b", "B")],
+            &content(Some("s"), ""),
+            NOW,
+        )
+        .unwrap();
+        let closed = done(
+            &path,
+            &Key::Selector("mp://tum/inbox/a".into()),
+            "three lines",
+            LATER,
+        )
+        .unwrap();
+        assert_eq!(closed.state, NoteState::Done);
+        assert_eq!(closed.result.as_deref(), Some("three lines"));
+        assert_eq!(
+            refused(done(
+                &path,
+                &Key::Selector("mp://tum/inbox/c".into()),
+                "x",
+                NOW
+            )),
+            "no note is on mp://tum/inbox/c"
+        );
+        assert_eq!(clear(&path, &Key::Id("zzzzzzzz".into())).unwrap(), 0);
+        assert_eq!(clear_done(&path).unwrap(), 1);
+        assert_eq!(clear_done(&path).unwrap(), 0);
+        assert_eq!(
+            clear(&path, &Key::Selector("mp://tum/inbox/b".into())).unwrap(),
+            1
+        );
+        assert!(load(&path).unwrap().is_empty());
+    }
+
+    /// The export picks the open notes, or the ones named in any state; the
+    /// hand-off marks only the open ones among them handed off.
+    #[test]
+    fn a_hand_off_marks_the_open_notes_it_gives() {
+        let (_dir, path) = file();
+        let notes = set(
+            &path,
+            &[
+                mail("mp://tum/inbox/a", "A"),
+                mail("mp://tum/inbox/b", "B"),
+                mail("mp://tum/inbox/c", "C"),
+            ],
+            &content(Some("s"), ""),
+            NOW,
+        )
+        .unwrap();
+        done(&path, &Key::Id(notes[2].id.clone()), "done", NOW).unwrap();
+        let listed = load(&path).unwrap();
+        assert_eq!(select(&listed, None).unwrap().len(), 2);
+        let why = refused(select(&listed, Some(&["nope0000".to_string()])));
+        assert_eq!(why, "no note has the id nope0000");
+
+        let (given, changed) = hand_off(
+            &path,
+            Some(&[notes[0].id.clone(), notes[2].id.clone()]),
+            LATER,
+        )
+        .unwrap();
+        assert!(changed);
+        let states: Vec<NoteState> = given.iter().map(|note| note.state).collect();
+        assert_eq!(states, [NoteState::Done, NoteState::HandedOff]);
+        let (open, _) = hand_off(&path, None, LATER).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, notes[1].id);
+        assert_eq!(hand_off(&path, None, LATER).unwrap(), (Vec::new(), false));
+        let (again, changed) = hand_off(&path, Some(&[notes[2].id.clone()]), LATER).unwrap();
+        assert_eq!((again.len(), changed), (1, false));
+    }
+
+    /// A file that does not parse is an error for every edit and is left as
+    /// it is, and marks nothing in a listing.
+    #[test]
+    fn a_broken_file_is_never_overwritten() {
+        let (_dir, path) = file();
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(matches!(
+            set(
+                &path,
+                &[mail("mp://tum/inbox/a", "A")],
+                &content(None, "x"),
+                NOW
+            ),
+            Err(NotesError::File(_))
+        ));
+        assert!(matches!(clear_done(&path), Err(NotesError::File(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        assert_eq!(
+            NoteMarks::load(&path, "tum").of_selector("mp://tum/inbox/a"),
+            None
+        );
+    }
+
+    /// The file is private to the user and holds no `orphaned`.
+    #[test]
+    fn the_file_is_private_and_stores_no_orphaned_flag() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, path) = file();
+        set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A")],
+            &content(None, "x"),
+            NOW,
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("orphaned"), "{text}");
+    }
+
+    /// A listing row is marked by its message's canonical selector, a UID
+    /// left out, and only with its own account's notes.
+    #[test]
+    fn a_row_is_marked_by_its_canonical_selector() {
+        struct Row(&'static str, &'static str, i64);
+        impl MessageRowRef for Row {
+            fn mailbox(&self) -> &str {
+                self.0
+            }
+            fn message_id(&self) -> &str {
+                self.1
+            }
+            fn uid(&self) -> i64 {
+                self.2
+            }
+        }
+        let (_dir, path) = file();
+        set(
+            &path,
+            &[mail("mp://tum/inbox/a@x", "A")],
+            &content(None, "x"),
+            NOW,
+        )
+        .unwrap();
+        let marks = NoteMarks::load(&path, "tum");
+        assert_eq!(
+            marks.of_message("tum", &Row("inbox", "<a@x>", 7)),
+            Some(NoteState::Open)
+        );
+        assert_eq!(marks.of_message("tum", &Row("archive", "<a@x>", 7)), None);
+        assert_eq!(
+            NoteMarks::load(&path, "perso").of_message("tum", &Row("inbox", "<a@x>", 7)),
+            None
+        );
+    }
+
+    /// The batch prompt every client hands an agent, over a received
+    /// message, a draft whose target is gone, a new email with a two-line
+    /// text, and a preset the configuration dropped.
+    #[test]
+    fn the_batch_prompt() {
+        let note = |id: &str, selector: Option<&str>, preset: Option<&str>, text: &str| Note {
+            id: id.to_string(),
+            selector: selector.map(str::to_string),
+            account: "tum".to_string(),
+            preset: preset.map(str::to_string),
+            text: text.to_string(),
+            state: NoteState::Open,
+            result: None,
+            created: NOW.to_string(),
+            updated: NOW.to_string(),
+            from: String::new(),
+            to: String::new(),
+            subject: String::new(),
+            orphaned: false,
+        };
+        let notes = vec![
+            note(
+                "e5a7712c",
+                None,
+                None,
+                "Ask Ada whether the review moves to Friday.\nCopy Bo.",
+            ),
+            Note {
+                from: "\"Fuchs, Stefan\" <stefan.fuchs@tum.de>".to_string(),
+                to: "sylvain@tum.de".to_string(),
+                subject: "Master Thesis Presentation".to_string(),
+                ..note(
+                    "c41f09ab",
+                    Some("mp://tum/inbox/thesis-42@tum.de"),
+                    Some("s"),
+                    "",
+                )
+            },
+            Note {
+                from: "sylvain@tum.de".to_string(),
+                to: "Ada Lovelace <ada@example.com>".to_string(),
+                subject: "Re: Review".to_string(),
+                orphaned: true,
+                ..note(
+                    "d0e83b21",
+                    Some("mp://tum/drafts/a3f9c2e1b4d5f607"),
+                    Some("p"),
+                    "",
+                )
+            },
+            Note {
+                from: "Jana Weber <jana.weber@tum.de>".to_string(),
+                subject: "Budget".to_string(),
+                ..note(
+                    "f2b6a0c9",
+                    Some("mp://tum/inbox/budget-7@tum.de"),
+                    Some("q"),
+                    "Say yes.",
+                )
+            },
+        ];
+        let presets = crate::config::default_note_presets();
+        insta::assert_snapshot!(render(&notes, &presets));
+        assert_eq!(render(&[], &presets), "");
+        assert!(render(&notes[..1], &presets).starts_with("I have a note on one email.\n"));
+    }
+
+    /// The committed `note.export` fixture is what this renderer writes for
+    /// the notes of `note.list`'s fixture, so a client reading the fixture
+    /// reads the daemon's text.
+    #[test]
+    fn the_export_fixture_is_the_rendered_prompt() {
+        let frame = |raw: &str| serde_json::from_str::<serde_json::Value>(raw).unwrap();
+        let listed: mp_protocol::note::NoteListing = serde_json::from_value(
+            frame(include_str!(
+                "../../crates/mp-protocol/fixtures/note.list.response.json"
+            ))["result"]
+                .clone(),
+        )
+        .unwrap();
+        let exported: mp_protocol::note::NoteExport = serde_json::from_value(
+            frame(include_str!(
+                "../../crates/mp-protocol/fixtures/note.export.response.json"
+            ))["result"]
+                .clone(),
+        )
+        .unwrap();
+        let open = select(&listed.notes, None).unwrap();
+        let ids: Vec<String> = open.iter().map(|note| note.id.clone()).collect();
+        assert_eq!(ids, exported.ids);
+        assert_eq!(
+            render(&open, &crate::config::default_note_presets()),
+            exported.text
+        );
+    }
+}

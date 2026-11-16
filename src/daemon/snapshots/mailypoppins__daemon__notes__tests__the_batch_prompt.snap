@@ -1,0 +1,23 @@
+---
+source: src/daemon/notes.rs
+expression: "render(&notes, &presets)"
+---
+I have notes on 4 emails.
+Read each with `mp show <selector>` (a draft: `mp path <selector>`), carry out the instruction, and close it with `mp notes done <selector> --result "..."`.
+A note without a selector asks for a new email: write it with `mp -A <account> new`, then close it with `mp notes done --id <id> --result "..."`.
+Never send or approve anything.
+
+1. New email from account tum (note e5a7712c)
+   Ask Ada whether the review moves to Friday.
+   Copy Bo.
+2. mp://tum/inbox/thesis-42@tum.de
+   From Fuchs, Stefan <stefan.fuchs@tum.de>, subject "Master Thesis Presentation"
+   Summarize: Summarize in three lines: who, what is asked, by when. Post it as the result.
+3. mp://tum/drafts/a3f9c2e1b4d5f607
+   Draft to Ada Lovelace <ada@example.com>, subject "Re: Review"
+   This selector names nothing any more; find the mail with `mp search`, or report that as the result.
+   Review: Review this draft before I approve it: spelling and grammar (fix them in the draft), an attachment the text mentions but the draft lacks, a question from the mail it answers that it leaves unanswered, wrong names or dates. Post what you found as the result; change nothing beyond spelling and grammar.
+4. mp://tum/inbox/budget-7@tum.de
+   From Jana Weber <jana.weber@tum.de>, subject "Budget"
+   Preset q, which the configuration no longer has.
+   Say yes.

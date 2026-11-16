@@ -4,6 +4,6 @@
   "method": "note.get",
   "params": {
     "account": "tum",
-    "selector": "mp://tum/inbox/thesis-42%40tum.de"
+    "selector": "mp://tum/inbox/thesis-42@tum.de"
   }
 }

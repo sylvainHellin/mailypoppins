@@ -21,6 +21,7 @@ pub mod hold;
 pub mod hooks;
 pub mod lifecycle;
 pub mod methods;
+pub mod notes;
 pub mod opening;
 pub mod operations;
 pub mod reminders;

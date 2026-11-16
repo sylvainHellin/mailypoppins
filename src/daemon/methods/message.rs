@@ -51,6 +51,7 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::listing::{ThreadListing, ThreadMessage};
+use mp_protocol::note::NoteState;
 use mp_protocol::{RpcError, MAX_RESPONSE_BYTES};
 
 use crate::config::AccountConfig;
@@ -68,6 +69,7 @@ use super::super::dispatch::{
 use super::super::handles::{
     handle_dir, reap, remove_handle_dir, HandleId, HandleKind, HandleTable,
 };
+use super::super::notes::NoteMarks;
 use super::super::operations::{OperationHandle, OperationRegistry};
 use super::super::server_copies::ServerCopies;
 use super::super::state::events::Event;
@@ -283,6 +285,8 @@ struct ListRead {
     mailbox: String,
     limit: Option<usize>,
     path: std::path::PathBuf,
+    /// The notes file the rows' `note` is read from (PERSO-315).
+    notes: std::path::PathBuf,
 }
 
 /// Validate the `list` projection's parameters and gate the account.
@@ -299,6 +303,7 @@ fn list_read(params: &Value, accounts: &[AccountConfig]) -> Result<ListRead, Rpc
         mailbox,
         limit,
         path,
+        notes: super::super::notes::path(),
     })
 }
 
@@ -316,6 +321,7 @@ impl ListRead {
             mailbox,
             limit,
             path,
+            notes,
         } = self;
         let store = Store::open(&path)
             .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
@@ -330,6 +336,7 @@ impl ListRead {
             read::twins_of(&store, &name, listed)
                 .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?
         };
+        let marks = NoteMarks::load(&notes, &name);
         let messages = rows
             .iter()
             .map(|(row, stamped)| {
@@ -338,6 +345,7 @@ impl ListRead {
                     row,
                     wire_date_sort(row, *stamped),
                     &twins,
+                    marks.of_message(&name, row),
                 ))
             })
             .collect::<Result<Vec<Value>, _>>()
@@ -432,9 +440,12 @@ fn wire_date_sort_of(date_display: Option<&str>, stamped: Option<i64>) -> String
 /// A row read without its `date_sort` column, which is what a search hit is,
 /// takes it from [`resolve_date`]; a listing formats the column instead
 /// ([`ListRead::run`]). Both serialise the one [`WireRow`].
-pub fn to_json(account: &str, row: &MessageRow, twins: &Twins) -> Value {
+///
+/// `note` is the state of the note on the message (PERSO-315), absent when it
+/// has none.
+pub fn to_json(account: &str, row: &MessageRow, twins: &Twins, note: Option<NoteState>) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
-    serde_json::to_value(WireRow::new(account, row, date_sort, twins))
+    serde_json::to_value(WireRow::new(account, row, date_sort, twins, note))
         .expect("a row of strings, integers and booleans serialises")
 }
 
@@ -456,6 +467,10 @@ struct WireRow<'a> {
     id: i64,
     is_invite: bool,
     message_id: &'a str,
+    /// Absent when the message has no note, so a row without one is the row
+    /// it was before notes existed, byte for byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<NoteState>,
     reply_to: Option<&'a str>,
     #[serde(serialize_with = "serialize_display")]
     selector: Selector,
@@ -474,7 +489,13 @@ struct WireFlags {
 }
 
 impl<'a> WireRow<'a> {
-    fn new(account: &str, row: &'a MessageRow, date_sort: String, twins: &Twins) -> Self {
+    fn new(
+        account: &str,
+        row: &'a MessageRow,
+        date_sort: String,
+        twins: &Twins,
+        note: Option<NoteState>,
+    ) -> Self {
         let flags = row.flags();
         WireRow {
             bcc: row.bcc.as_deref(),
@@ -492,6 +513,7 @@ impl<'a> WireRow<'a> {
             id: row.id,
             is_invite: row.is_invite,
             message_id: &row.message_id,
+            note,
             reply_to: row.reply_to.as_deref(),
             selector: Selector::for_listed(account, row, twins),
             subject: row.subject.as_deref().unwrap_or_default(),
@@ -661,6 +683,7 @@ async fn start_stream(
         name,
         mailbox,
         path,
+        notes,
         ..
     } = list_read(&params, &accounts)?;
     let Some(sink) = ctx.rows.clone() else {
@@ -673,8 +696,9 @@ async fn start_stream(
     // The whole read before the answer, on the blocking pool: every refusal
     // is the call's own error, no operation id is issued for a call that
     // cannot succeed, and `total` is exactly what the stream will carry.
-    let (name, mailbox, rows) = tokio::task::spawn_blocking(move || {
-        read(&name, &mailbox, &path).map(|rows| (name, mailbox, rows))
+    let (name, mailbox, rows, marks) = tokio::task::spawn_blocking(move || {
+        let marks = NoteMarks::load(&notes, &name);
+        read(&name, &mailbox, &path).map(|rows| (name, mailbox, rows, marks))
     })
     .await
     .map_err(|e| internal(format!("the listing worker did not finish: {e}")))??;
@@ -696,6 +720,7 @@ async fn start_stream(
         account: name,
         mailbox,
         rows,
+        marks,
         handle,
         sink,
         chunk_bytes,
@@ -819,12 +844,13 @@ impl StreamRows {
         }
     }
 
-    /// Encode row `index` into `chunks`.
+    /// Encode row `index` into `chunks`, its `note` read from `marks`.
     fn push(
         &self,
         account: &str,
         index: usize,
         chunks: &mut ChunkEncoder,
+        marks: &NoteMarks,
     ) -> Result<(), ChunkError> {
         match self {
             StreamRows::Flat(rows, twins) => {
@@ -834,10 +860,11 @@ impl StreamRows {
                     row,
                     wire_date_sort(row, *stamped),
                     twins,
+                    marks.of_message(account, row),
                 ))
             }
             StreamRows::Conversations(rows, twins) => {
-                chunks.push(&WireConversation::new(account, &rows[index], twins))
+                chunks.push(&WireConversation::new(account, &rows[index], twins, marks))
             }
         }
     }
@@ -866,7 +893,13 @@ struct WireConversation<'a> {
 }
 
 impl<'a> WireConversation<'a> {
-    fn new(account: &str, conversation: &'a read::Conversation, twins: &Twins) -> Self {
+    /// The conversation, its `latest` row's `note` read from `marks`.
+    fn new(
+        account: &str,
+        conversation: &'a read::Conversation,
+        twins: &Twins,
+        marks: &NoteMarks,
+    ) -> Self {
         let (latest, latest_stamp) = &conversation.latest;
         let date_display = conversation.date_display.as_deref();
         WireConversation {
@@ -881,6 +914,7 @@ impl<'a> WireConversation<'a> {
                 latest,
                 wire_date_sort(latest, *latest_stamp),
                 twins,
+                marks.of_message(account, latest),
             ),
             mailboxes: &conversation.mailboxes,
             member_ids: &conversation.member_ids,
@@ -902,6 +936,8 @@ struct StreamJob {
     account: String,
     mailbox: String,
     rows: StreamRows,
+    /// The note states the rows carry (PERSO-315).
+    marks: NoteMarks,
     handle: OperationHandle,
     sink: RowsSink,
     chunk_bytes: usize,
@@ -921,6 +957,7 @@ impl StreamJob {
             account,
             mailbox,
             rows,
+            marks,
             handle,
             sink,
             chunk_bytes,
@@ -939,7 +976,7 @@ impl StreamJob {
         };
 
         for index in 0..rows.len() {
-            if let Err(error) = rows.push(&account, index, &mut chunks) {
+            if let Err(error) = rows.push(&account, index, &mut chunks, &marks) {
                 handle.fail(error.into_domain(&account, &mailbox, index));
                 return;
             }
@@ -1563,12 +1600,13 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     // A hit's twin need not match, or be within the limit (PERSO-244).
     let twins = read::twins_of(&store, &name, hits.iter().map(|hit| &hit.row))
         .map_err(|e| internal(format!("the twins of the hits in {name}: {e:#}")))?;
+    let marks = NoteMarks::load(&super::super::notes::path(), &name);
     let hits: Vec<Value> = hits
         .iter()
         .map(|hit| {
             // A listing row plus the mailbox it was found in, which is what
             // `Selector::for_listed` needs to render the line.
-            let mut wire = to_json(&name, &hit.row, &twins);
+            let mut wire = to_json(&name, &hit.row, &twins, marks.of_message(&name, &hit.row));
             wire["mailbox"] = json!(hit.row.mailbox);
             if wants_body {
                 // The body as every surface reads it (PERSO-291): the
@@ -3073,6 +3111,7 @@ mod tests {
                 mailbox: "inbox".into(),
                 limit,
                 path: path.clone(),
+                notes: dir.path().join(crate::daemon::notes::NOTES_FILE),
             }
             .run()
             .expect("lists");
@@ -3084,7 +3123,7 @@ mod tests {
             // `to_json`, which search answers through, is the same row too.
             for row in &rows {
                 assert_eq!(
-                    serde_json::to_string(&to_json("alpha", row, &Twins::default())).unwrap(),
+                    serde_json::to_string(&to_json("alpha", row, &Twins::default(), None)).unwrap(),
                     serde_json::to_string(&legacy_row("alpha", row)).unwrap()
                 );
             }
@@ -3127,6 +3166,7 @@ mod tests {
                     row,
                     wire_date_sort(row, Some(0)),
                     &Twins::default(),
+                    None,
                 ))
                 .expect("a row serialises")
             })
@@ -3163,6 +3203,7 @@ mod tests {
                     row,
                     wire_date_sort(row, Some(0)),
                     &Twins::default(),
+                    None,
                 ))
                 .expect("a small row fits");
             while let Some(frame) = chunks.next_frame() {
@@ -3220,6 +3261,7 @@ mod tests {
                     row,
                     wire_date_sort(row, Some(0)),
                     &Twins::default(),
+                    None,
                 ))
                 .expect("encodes")
             })
@@ -3239,6 +3281,7 @@ mod tests {
                     row,
                     wire_date_sort(row, Some(0)),
                     &Twins::default(),
+                    None,
                 ))
                 .expect("every row fits alone");
         }
@@ -3265,6 +3308,7 @@ mod tests {
                     row,
                     wire_date_sort(row, Some(0)),
                     &Twins::default(),
+                    None,
                 ))
                 .expect("fits");
         }
@@ -3288,6 +3332,7 @@ mod tests {
                 &rows[0],
                 wire_date_sort(&rows[0], Some(0)),
                 &Twins::default(),
+                None,
             ))
             .expect_err("the row does not fit in any frame");
         let ChunkError::TooLarge { limit, seen } = refused else {
@@ -3366,7 +3411,7 @@ mod tests {
         let mut chunks = ChunkEncoder::new(rows.method(), id, 2000, MAX_RESPONSE_BYTES);
         let mut frames = Vec::new();
         for index in 0..rows.len() {
-            rows.push("alpha", index, &mut chunks)
+            rows.push("alpha", index, &mut chunks, &NoteMarks::default())
                 .expect("a small row fits");
         }
         chunks.finish();
@@ -3384,8 +3429,13 @@ mod tests {
             let values: Vec<Value> = conversations[offset..offset + count]
                 .iter()
                 .map(|c| {
-                    serde_json::to_value(WireConversation::new("alpha", c, &Twins::default()))
-                        .expect("a value")
+                    serde_json::to_value(WireConversation::new(
+                        "alpha",
+                        c,
+                        &Twins::default(),
+                        &NoteMarks::default(),
+                    ))
+                    .expect("a value")
                 })
                 .collect();
             let expected = mp_protocol::frame::encode(&json!({
@@ -3406,6 +3456,7 @@ mod tests {
                         latest,
                         wire_date_sort(latest, *stamped),
                         &Twins::default(),
+                        None,
                     ))
                     .expect("a value"),
                 )
@@ -3507,6 +3558,7 @@ mod tests {
                     row,
                     wire_date_sort(row, *stamped),
                     &Twins::default(),
+                    None,
                 ));
             }
         });
@@ -3519,6 +3571,7 @@ mod tests {
                         row,
                         wire_date_sort(row, *stamped),
                         &Twins::default(),
+                        None,
                     )
                 })
                 .collect();
@@ -3554,6 +3607,7 @@ mod tests {
                         row,
                         wire_date_sort(row, *stamped),
                         &Twins::default(),
+                        None,
                     ))
                     .expect("a row fits");
                 while let Some(frame) = chunks.next_frame() {
@@ -3583,7 +3637,8 @@ mod tests {
             );
             let mut frames = Vec::new();
             for index in 0..rows.len() {
-                rows.push("alpha", index, &mut chunks).expect("a row fits");
+                rows.push("alpha", index, &mut chunks, &NoteMarks::default())
+                    .expect("a row fits");
                 while let Some(frame) = chunks.next_frame() {
                     frames.push(frame);
                 }
@@ -3608,9 +3663,14 @@ mod tests {
         let largest_conversation = listed
             .iter()
             .map(|c| {
-                serde_json::to_vec(&WireConversation::new("alpha", c, twins))
-                    .expect("encodes")
-                    .len()
+                serde_json::to_vec(&WireConversation::new(
+                    "alpha",
+                    c,
+                    twins,
+                    &NoteMarks::default(),
+                ))
+                .expect("encodes")
+                .len()
             })
             .max()
             .unwrap_or(0);
