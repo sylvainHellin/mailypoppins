@@ -447,6 +447,16 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
         <code>[agent]</code> names (see <a href="/config/#agent">Agent Hand-off</a>) and marks them
         handed off once it started, and <kbd>y</kbd> copies the prompt instead.
       </p>
+      <p>
+        In the desktop app, <kbd>n</kbd> on a message, a draft or the marked rows opens the note
+        prompt with the presets as buttons, a glyph beside the star shows whether a note is open,
+        handed off or done, <kbd>f</kbd><kbd>N</kbd> keeps the noted mail, and the reader shows the
+        note and its result above the body. <kbd>N</kbd> lists every note; there <kbd>x</kbd> hands
+        the open ones to the agent <code>[agent]</code> names, in a terminal panel to the right of the
+        reader that stays until you close it, whatever <code>open_in</code> says, except
+        <code>clipboard</code>, which only copies the prompt, and <code>paseo</code>, which starts a
+        detached <code>paseo run</code>. A note is marked handed off only once its agent started.
+      </p>
     </section>
 
     <section>
