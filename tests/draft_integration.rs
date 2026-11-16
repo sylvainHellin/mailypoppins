@@ -85,6 +85,49 @@ fn test_create_reply_draft() {
     assert!(content.contains("alice@example.com wrote:"));
 }
 
+/// A reply and a forward write `date:` with the moment they were created, in
+/// the RFC 2822 form `mp new` writes, so the drafts listing orders them by
+/// creation without reading the file name.
+#[test]
+fn reply_and_forward_drafts_carry_their_creation_date() {
+    let tmp = tempdir().unwrap();
+    let drafts = tmp.path().join("drafts");
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Hello",
+        "Original body",
+    );
+
+    let before = chrono::Utc::now().timestamp();
+    let reply = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
+    let forward =
+        create_forward_draft_from(&source, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let after = chrono::Utc::now().timestamp();
+
+    for path in [reply, forward] {
+        let draft = parse_email_draft(&path).unwrap();
+        let date = draft
+            .frontmatter
+            .date
+            .unwrap_or_else(|| panic!("no date: in {}", path.display()));
+        let created = chrono::DateTime::parse_from_rfc2822(&date)
+            .unwrap_or_else(|e| panic!("{date} is not RFC 2822: {e}"))
+            .timestamp();
+        assert!(
+            (before..=after).contains(&created),
+            "{date} is not the creation time"
+        );
+    }
+}
+
 /// A per-account signature (#0099) is spliced into the reply body above the
 /// quoted text, so it is visible and editable in the draft rather than
 /// injected at send time. The quote marker is kept for the send-time quote

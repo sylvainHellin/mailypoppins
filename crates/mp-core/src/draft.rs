@@ -966,6 +966,10 @@ pub fn create_reply_draft_from(
     }
     fm.push_str(&format!("subject: {}\n", yaml_dq_escape(&reply_subject)));
     fm.push_str("status: draft\n");
+    // When the draft was created, as `mp new` writes it: what the drafts
+    // listing orders by, so an edit or an approval never moves it. Nothing
+    // in the send path reads it.
+    fm.push_str(&format!("date: {}\n", Utc::now().to_rfc2822()));
     // What the post-send hook flags `\Answered` (#TKT-0051). Written here
     // rather than acted on here: a draft that is never sent has answered
     // nothing.
@@ -1126,6 +1130,8 @@ pub fn create_forward_draft_with(
     fm.push_str("to: \"\"\n");
     fm.push_str(&format!("subject: {}\n", yaml_dq_escape(&fwd_subject)));
     fm.push_str("status: draft\n");
+    // The creation time, as on a reply.
+    fm.push_str(&format!("date: {}\n", Utc::now().to_rfc2822()));
     // The forward half of the same hook: `$Forwarded` on send (#TKT-0051).
     if let Some(message_id) = source_message_id(inbox) {
         fm.push_str(&format!("forwarded_from: \"{message_id}\"\n"));
@@ -2011,8 +2017,8 @@ enum FieldWrite {
 /// with the local sent `.md` in #0037).
 /// They used to parse into [`EmailFrontmatter`] and re-serialize, which
 /// silently dropped every field that struct does not model -- including
-/// `date:`, the key the TUI sorts on, so an approved draft teleported to
-/// the bottom of the list. Line surgery keeps unknown and user-added
+/// `date:`, the creation time the drafts listing orders on, so an approved
+/// draft teleported to the bottom of the list. Line surgery keeps unknown and user-added
 /// fields intact.
 ///
 /// Matching is the same as [`rewrite_draft_recipients`]: only zero-indent
@@ -2562,8 +2568,8 @@ pub fn mark_as_approved(path: &Path) -> Result<String> {
 
     // Surgical `status:` rewrite: re-serializing `EmailFrontmatter` would
     // drop every field it does not model, including the `date:` line the
-    // TUI sorts on (the approved draft then jumped to the bottom of the
-    // list) and any user-added key.
+    // drafts listing orders on (the approved draft then jumped to the bottom
+    // of the list) and any user-added key.
     rewrite_frontmatter_scalars_at(
         path,
         &[("status", FieldWrite::Set(EmailStatus::Approved.to_string()))],
@@ -4290,7 +4296,11 @@ mod tests {
         let raw = fs::read_to_string(&reply).unwrap();
         let fm: Vec<&str> = raw.lines().skip(1).take_while(|l| *l != "---").collect();
         let keys: Vec<&str> = fm.iter().map(|l| l.split(':').next().unwrap()).collect();
-        assert_eq!(keys, ["from", "to", "cc", "subject", "status"], "{raw}");
+        assert_eq!(
+            keys,
+            ["from", "to", "cc", "subject", "status", "date"],
+            "{raw}"
+        );
 
         let fwd = create_forward_draft_from(
             &SourceMessage {
