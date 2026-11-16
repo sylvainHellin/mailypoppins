@@ -417,8 +417,8 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                 return;
             }
             // The cursor's identity must be read from the OLD list: a
-            // reload re-sorts (an approved draft changes status/date) and
-            // grows (new inbox mail shifts every row down), so the bare
+            // reload can reorder and grow the list (new inbox mail shifts
+            // every row down), so the bare
             // `list_index` would land on a different email. Anchor on the
             // message ref, fall back to the clamped index when that email
             // is gone from the fresh list.

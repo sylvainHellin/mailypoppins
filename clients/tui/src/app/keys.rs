@@ -4825,8 +4825,8 @@ mod tests {
     //
     // `list_index` is a bare position into `visible`, so any reload that
     // re-sorts or grows the entry list used to move the cursor to a
-    // different email (approving a draft re-sorted the list; new inbox mail
-    // shifted every row down under queued keystrokes). The cursor is
+    // different email (new inbox mail shifted every row down under queued
+    // keystrokes; a new draft does the same in Drafts). The cursor is
     // anchored on the entry's `MessageRef` and restored after the rebuild.
     // -----------------------------------------------------------------------
 
