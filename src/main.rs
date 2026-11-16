@@ -6175,9 +6175,7 @@ fn render_notes(notes: &[mp_protocol::note::Note]) -> String {
         out.push_str(&note_line(note));
         out.push('\n');
         if note.selector.is_some() {
-            let who = if note.selector.as_deref().is_some_and(|selector| {
-                selector.contains(&format!("/{}/", mailypoppins::selector::DRAFTS_MAILBOX))
-            }) {
+            let who = if note.draft_id.is_some() {
                 format!("to {}", note.to)
             } else {
                 format!("from {}", mailypoppins::parse::readable_sender(&note.from))

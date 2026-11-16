@@ -48,6 +48,9 @@ sync_interval_secs = 0
 
 [accounts.mailboxes.inbox]
 server = "INBOX"
+
+[accounts.mailboxes.archive]
+server = "Archive"
 "#;
 
 /// A seeded root and a daemon serving it. The field order is the drop order.
@@ -135,6 +138,16 @@ impl Slice {
 
     fn root(&self) -> &Path {
         self.tmp.path()
+    }
+
+    /// Stop the daemon, let `change` edit the root it served, and start a
+    /// daemon over it again: the store is the daemon's while it runs.
+    fn restarted(self, change: impl FnOnce(&Path)) -> Slice {
+        let Slice { daemon, tmp } = self;
+        daemon.stop();
+        change(tmp.path());
+        let daemon = DaemonFixture::start(tmp.path());
+        Slice { daemon, tmp }
     }
 
     async fn connect(&self) -> Connection {
@@ -256,6 +269,8 @@ async fn a_note_on_a_message_marks_its_row_and_every_client_hears_it() {
     );
     assert_eq!(set.selector.as_deref(), Some(THESIS));
     assert_eq!(set.account, ACCOUNT);
+    assert_eq!(set.message_id.as_deref(), Some("thesis@tum.de"));
+    assert_eq!(set.draft_id, None);
     assert_eq!(set.state, NoteState::Open);
     assert_eq!(set.from, "Stefan Fuchs <stefan.fuchs@tum.de>");
     assert_eq!(set.subject, "Master Thesis Presentation");
@@ -473,7 +488,7 @@ async fn the_refusals_say_why() {
         (
             "note.done",
             json!({"selector": THESIS, "result": "x"}),
-            "no note is on mp://alpha/inbox/thesis@tum.de",
+            "no note is on the message thesis@tum.de of alpha",
         ),
         (
             "note.clear",
@@ -539,6 +554,8 @@ async fn several_notes_a_draft_and_a_new_email() {
         .await,
     );
     assert_eq!(review.selector.as_deref(), Some(DRAFT));
+    assert_eq!(review.draft_id.as_deref(), Some("a3f9c2e1b4d5f607"));
+    assert_eq!(review.message_id, None);
     assert_eq!(review.to, "Ada Lovelace <ada@example.com>");
     assert_eq!(review.from, "alpha@example.com");
     assert_eq!(review.subject, "Re: Review");
@@ -644,6 +661,127 @@ async fn the_export_changes_nothing_and_the_hand_off_marks_its_notes() {
         serde_json::from_value(ok(&mut conn, "note.export", json!({"ids": [thesis.id]})).await)
             .unwrap();
     assert_eq!(named.ids, [thesis.id]);
+}
+
+/// The rows `alpha` holds for one Message-ID, in every mailbox.
+fn copies_of(root: &Path, message_id: &str) -> Vec<mailypoppins::store::read::MessageRow> {
+    let store = Store::open(store_path(root)).unwrap();
+    mailypoppins::store::read::find_by_message_id(&store, ACCOUNT, message_id).unwrap()
+}
+
+/// A note is on the message, not on a mailbox: with the message archived,
+/// the note is not orphaned, its selector names the archived copy, the
+/// archived row carries it, and the agent's stale Inbox selector still reads
+/// and closes it.
+#[tokio::test]
+async fn a_note_follows_its_message_into_the_archive() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let set = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": THESIS, "preset": "s"}),
+        )
+        .await,
+    );
+    drop(conn);
+    let slice = slice.restarted(|root| {
+        let store = Store::open(store_path(root)).unwrap();
+        let row = &copies_of(root, "<thesis@tum.de>")[0];
+        mailypoppins::store::write::move_row(&store, row.id, "archive")
+            .unwrap()
+            .expect("the row moves");
+    });
+    let archived = "mp://alpha/archive/thesis@tum.de";
+    let mut conn = slice.connect().await;
+
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    assert_eq!(listed.notes.len(), 1);
+    assert!(!listed.notes[0].orphaned, "{listed:?}");
+    assert_eq!(listed.notes[0].selector.as_deref(), Some(archived));
+    let rows = ok(
+        &mut conn,
+        "message.list",
+        json!({"account": ACCOUNT, "mailbox": "archive"}),
+    )
+    .await;
+    assert_eq!(rows["messages"][0]["selector"], json!(archived), "{rows}");
+    assert_eq!(rows["messages"][0]["note"], json!("open"), "{rows}");
+
+    let got = ok(&mut conn, "note.get", json!({"selector": THESIS})).await;
+    assert_eq!(note(got["note"].clone()).id, set.id);
+    drop(conn);
+    let (out, err, code) = slice.mp(&["notes", "done", THESIS, "--result", "Summed up"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains(archived), "{out}");
+    let mut conn = slice.connect().await;
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    assert_eq!(listed.notes[0].state, NoteState::Done);
+    assert_eq!(listed.notes[0].result.as_deref(), Some("Summed up"));
+}
+
+/// A message no mailbox of its account holds any more orphans its note,
+/// which stays, still read by its selector.
+#[tokio::test]
+async fn a_note_whose_message_is_gone_everywhere_is_orphaned() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    ok(
+        &mut conn,
+        "note.set",
+        json!({"selector": THESIS, "preset": "s"}),
+    )
+    .await;
+    drop(conn);
+    let slice = slice.restarted(|root| {
+        let store = Store::open(store_path(root)).unwrap();
+        let blobs = BlobStore::new(root.join("accounts").join(ACCOUNT).join("blobs"));
+        for row in copies_of(root, "<thesis@tum.de>") {
+            mailypoppins::store::write::delete_row(&store, &blobs, row.id).unwrap();
+        }
+    });
+    let mut conn = slice.connect().await;
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    assert_eq!(listed.notes.len(), 1);
+    assert!(listed.notes[0].orphaned, "{listed:?}");
+    assert_eq!(listed.notes[0].selector.as_deref(), Some(THESIS));
+    let got = ok(&mut conn, "note.get", json!({"selector": THESIS})).await;
+    assert_eq!(got["note"]["orphaned"], json!(true), "{got}");
+}
+
+/// An account the configuration no longer names orphans every note on its
+/// mail; the notes stay.
+#[tokio::test]
+async fn dropping_the_account_orphans_its_notes() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    ok(
+        &mut conn,
+        "note.set",
+        json!({"selector": THESIS, "preset": "s"}),
+    )
+    .await;
+    ok(
+        &mut conn,
+        "note.set",
+        json!({"selector": DRAFT, "preset": "p"}),
+    )
+    .await;
+    drop(conn);
+    let slice = slice.restarted(|root| {
+        std::fs::write(
+            root.join("config.toml"),
+            CONFIG
+                .replace("\"alpha\"", "\"beta\"")
+                .replace("alpha@", "beta@"),
+        )
+        .unwrap();
+    });
+    let mut conn = slice.connect().await;
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    let orphaned: Vec<bool> = listed.notes.iter().map(|n| n.orphaned).collect();
+    assert_eq!(orphaned, [true, true], "{listed:?}");
 }
 
 /// The notes outlive the store: with the store deleted and the daemon started

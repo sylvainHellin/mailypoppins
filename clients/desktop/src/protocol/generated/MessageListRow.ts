@@ -92,7 +92,8 @@ selector: string,
 /**
  * The state of the note on this message (PERSO-315), absent when it has
  * none, so a list draws the note glyph beside the star with no second
- * call. A note is on a message's canonical selector, so both copies of a
- * Message-ID held twice in one mailbox carry it.
+ * call. A note is on the message's account and Message-ID, so every copy
+ * carries it: in the Inbox and in Sent, under a label, and both copies
+ * of a Message-ID held twice in one mailbox.
  */
 note?: NoteState, };

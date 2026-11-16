@@ -361,7 +361,7 @@ fn list(params: &Value, accounts: &[AccountConfig], watch: &DraftWatch) -> Resul
 
     let (rows, collisions, skipped) =
         crate::store::drafts::index_dir_parsed(&crate::config::drafts_dir(&account.name));
-    let marks = super::super::notes::NoteMarks::load(&super::super::notes::path(), &account.name);
+    let marks = super::super::notes::NoteMarks::load(&super::super::notes::path());
     let listing = DraftListing {
         account: account.name.clone(),
         drafts: rows
@@ -371,7 +371,7 @@ fn list(params: &Value, accounts: &[AccountConfig], watch: &DraftWatch) -> Resul
                 let entry = entry(&account.name, row, draft);
                 DraftEntry {
                     server: watch.server_of(&account.name, &row.id, &row.path),
-                    note: marks.of_selector(&entry.selector),
+                    note: marks.of_draft(&account.name, &row.id),
                     ..entry
                 }
             })

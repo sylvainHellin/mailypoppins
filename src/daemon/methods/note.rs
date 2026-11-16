@@ -18,17 +18,21 @@
 //! own `mp://<account>/` segment or else from `account`, and a selector whose
 //! mailbox is `drafts` names a draft. `note.set` resolves it against the
 //! store, or the drafts directory for a draft, so a note is only ever set on
-//! mail the daemon holds, under its canonical selector, with the snapshot of
-//! its headers; `note.get`, `note.done` and `note.clear` read the canonical
-//! selector off one that names its mailbox, a UID segment dropped, and need
-//! the store only for one that does not.
+//! mail the daemon holds, with the snapshot of its headers; the note is held
+//! by the message's account and Message-ID, or the draft's id, and keeps the
+//! mailbox it was found in as a hint. `note.get`, `note.done` and
+//! `note.clear` read the account and the key off the selector and nothing
+//! else, so a selector of any copy, in any mailbox, a stale one included,
+//! names the note on its message, and no store is read.
 //!
-//! Every answer decides `orphaned` afresh: a note whose draft is no longer in
-//! the drafts directory, or whose message the account's store no longer holds
-//! under its selector, is orphaned; an account whose store cannot be read now
-//! orphans nothing, and an account the configuration no longer names orphans
-//! every note on its mail. Every call that wrote the file publishes
-//! `note.changed` with the whole list.
+//! Every answer decides `orphaned` and `selector` afresh ([`resolve`]): a
+//! note whose draft is no longer in the drafts directory, or whose message no
+//! mailbox of the account's store holds, is orphaned; an account whose store
+//! cannot be read now orphans nothing, and an account the configuration no
+//! longer names orphans every note on its mail. The selector names the copy
+//! in the hinted mailbox when there is one, else the account's first copy.
+//! Every call that wrote the file publishes `note.changed` with the whole
+//! list.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -50,7 +54,7 @@ use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
     ResourceId,
 };
-use super::super::notes::{self, Content, Key, NotesError, Target};
+use super::super::notes::{self, Content, Key, NoteKey, NotesError, Target};
 use super::super::state::events::Event;
 use super::super::state::CanonicalState;
 use super::{internal, invalid_params, only_params};
@@ -196,7 +200,9 @@ impl NoteMethod {
             let mut targets: Vec<Target> = Vec::new();
             for selector in &request.selectors {
                 let target = resolve_target(selector, request.account.as_deref(), &accounts)?;
-                if !targets.contains(&target) {
+                // Two selectors of one message, in two mailboxes or not, are
+                // one note.
+                if !targets.iter().any(|known| known.on() == target.on()) {
                     targets.push(target);
                 }
             }
@@ -233,10 +239,10 @@ impl NoteMethod {
         let accounts = self.config.accounts();
         let path = notes::path();
         let note = blocking(move || {
-            let selector = canonical(&request.selector, request.account.as_deref(), &accounts)?;
+            let on = key_on(&request.selector, request.account.as_deref())?;
             Ok(listed(&path, &accounts)?
                 .into_iter()
-                .find(|note| note.selector.as_deref() == Some(selector.as_str())))
+                .find(|note| is_on(note, &on)))
         })
         .await?;
         Ok(Outcome::query(to_value(
@@ -264,7 +270,6 @@ impl NoteMethod {
                 request.selector.as_deref(),
                 request.id.as_deref(),
                 request.account.as_deref(),
-                &accounts,
             )?;
             let closed =
                 notes::done(&path, &key, &request.result, &notes::now()).map_err(refusal)?;
@@ -289,7 +294,6 @@ impl NoteMethod {
                 request.selector.as_deref(),
                 request.id.as_deref(),
                 request.account.as_deref(),
-                &accounts,
             )?;
             let removed = notes::clear(&path, &key).map_err(refusal)?;
             Ok(Written {
@@ -460,8 +464,8 @@ fn resolve_target(
     if query.namespace == Namespace::Drafts {
         let row = super::draft::resolve(&query.account, &query.key)?;
         return Ok(Target::Mail {
-            selector: Selector::for_draft(&query.account, &row.id).to_string(),
-            account: query.account,
+            on: NoteKey::draft(&query.account, &row.id),
+            mailbox: None,
             from: configured.default_from.clone(),
             to: row.to.unwrap_or_default(),
             subject: row.subject.unwrap_or_default(),
@@ -469,8 +473,8 @@ fn resolve_target(
     }
     let row = received(&query, accounts)?;
     Ok(Target::Mail {
-        selector: Selector::for_message(&query.account, &row).to_string(),
-        account: query.account,
+        on: NoteKey::message(&query.account, &row.message_id),
+        mailbox: Some(row.mailbox),
         from: row.from.unwrap_or_default(),
         to: row.to.unwrap_or_default(),
         subject: row.subject.unwrap_or_default(),
@@ -490,29 +494,29 @@ fn received(
         .map_err(|e| invalid_params(format!("{e:#}")).into())
 }
 
-/// The canonical selector a note on `selector` is held by: read off it when
-/// it names its mailbox, its UID segment dropped, and resolved against the
-/// store when it does not.
-fn canonical(
-    selector: &str,
-    account: Option<&str>,
-    accounts: &[AccountConfig],
-) -> Result<String, DomainError> {
+/// What a note on `selector` is held by: its account and its key, a message's
+/// Message-ID or a draft's id. The mailbox and the UID segment of a message
+/// selector are not read, so the selector of any copy, in any mailbox, names
+/// the note on its message; nothing is resolved against the store.
+fn key_on(selector: &str, account: Option<&str>) -> Result<NoteKey, DomainError> {
     let query = query_of(selector, account)?;
-    super::account::configured_account(accounts, &query.account)?;
-    Ok(match (query.namespace, &query.mailbox) {
-        (Namespace::Drafts, _) => Selector::for_draft(&query.account, &query.key).to_string(),
-        (Namespace::Received, Some(mailbox)) => Selector::new(
-            query.account.as_str(),
-            mailbox.as_str(),
-            crate::selector::message_key(&query.key),
-        )
-        .to_string(),
-        (Namespace::Received, None) => {
-            let row = received(&query, accounts)?;
-            Selector::for_message(&query.account, &row).to_string()
-        }
+    Ok(match query.namespace {
+        Namespace::Drafts => NoteKey::draft(&query.account, &query.key),
+        Namespace::Received => NoteKey::message(&query.account, &query.key),
     })
+}
+
+/// Whether `note` is on the mail `on` names.
+fn is_on(note: &Note, on: &NoteKey) -> bool {
+    match on {
+        NoteKey::Message {
+            account,
+            message_id,
+        } => note.account == *account && note.message_id.as_deref() == Some(message_id.as_str()),
+        NoteKey::Draft { account, id } => {
+            note.account == *account && note.draft_id.as_deref() == Some(id.as_str())
+        }
+    }
 }
 
 /// The note a `note.done` or `note.clear` names: by selector or by id,
@@ -521,10 +525,9 @@ fn key_of(
     selector: Option<&str>,
     id: Option<&str>,
     account: Option<&str>,
-    accounts: &[AccountConfig],
 ) -> Result<Key, DomainError> {
     match (selector, id) {
-        (Some(selector), None) => Ok(Key::Selector(canonical(selector, account, accounts)?)),
+        (Some(selector), None) => Ok(Key::On(key_on(selector, account)?)),
         (None, Some(id)) => Ok(Key::Id(id.to_string())),
         _ => {
             Err(invalid_params("a note is addressed by selector or by id; send exactly one").into())
@@ -532,15 +535,15 @@ fn key_of(
     }
 }
 
-/// Every note, newest first, each marked orphaned when its mail is gone.
+/// Every note, newest first, each with its selector and `orphaned` decided.
 fn listed(path: &std::path::Path, accounts: &[AccountConfig]) -> Result<Vec<Note>, DomainError> {
     let mut notes = notes::load(path).map_err(|e| DomainError::from(internal(format!("{e:#}"))))?;
-    mark_orphans(&mut notes, accounts);
+    resolve(&mut notes, accounts);
     Ok(notes)
 }
 
 /// The notes of `listing` that `wanted` names, in `wanted`'s order, so an
-/// answer carries the orphan marks the listing decided.
+/// answer carries the selector and the orphan mark the listing decided.
 fn pick(listing: &[Note], wanted: &[Note]) -> Vec<Note> {
     wanted
         .iter()
@@ -554,70 +557,90 @@ fn pick(listing: &[Note], wanted: &[Note]) -> Vec<Note> {
         .collect()
 }
 
-/// Mark each note whose message or draft is gone, reading each account's
-/// store and drafts directory at most once.
-fn mark_orphans(notes: &mut [Note], accounts: &[AccountConfig]) {
+/// Decide each note's `selector` and `orphaned` against the mail as it is
+/// now, reading each account's store and drafts directory at most once.
+///
+/// A draft note is orphaned when its id is not in the drafts index. A message
+/// note is orphaned when no mailbox of its account holds its Message-ID, in
+/// either form; otherwise its selector names the copy in the mailbox it was
+/// set in when that mailbox still holds one, else the first copy, with a UID
+/// segment when that mailbox holds the message twice. A note of an account
+/// the configuration no longer names is orphaned, and one whose store cannot
+/// be read now is not, keeping the selector of the mailbox it was set in.
+pub fn resolve(notes: &mut [Note], accounts: &[AccountConfig]) {
     let mut stores: HashMap<String, Option<Store>> = HashMap::new();
     let mut drafts: HashMap<String, HashSet<String>> = HashMap::new();
     for note in notes.iter_mut() {
-        let Some(selector) = note.selector.as_deref() else {
+        if note.message_id.is_none() && note.draft_id.is_none() {
+            continue;
+        }
+        if !accounts
+            .iter()
+            .any(|configured| configured.name == note.account)
+        {
+            note.orphaned = true;
+            continue;
+        }
+        if let Some(id) = &note.draft_id {
+            let ids = drafts.entry(note.account.clone()).or_insert_with(|| {
+                crate::store::drafts::index_dir(&crate::config::drafts_dir(&note.account))
+                    .0
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect()
+            });
+            note.orphaned = !ids.contains(id);
+            continue;
+        }
+        let Some(key) = note.message_id.clone() else {
             continue;
         };
-        note.orphaned = gone(selector, accounts, &mut stores, &mut drafts);
+        let store = stores.entry(note.account.clone()).or_insert_with(|| {
+            super::account::ready_account(accounts, &note.account)
+                .ok()
+                .and_then(|_| Store::open(crate::config::store_path(&note.account)).ok())
+        });
+        let Some(store) = store else {
+            continue;
+        };
+        match copies(store, &note.account, &key) {
+            Ok(rows) if rows.is_empty() => note.orphaned = true,
+            Ok(rows) => {
+                let hint = note
+                    .selector
+                    .as_deref()
+                    .and_then(|selector| crate::selector::parse(selector).ok())
+                    .and_then(|parts| parts.mailbox);
+                let row = rows
+                    .iter()
+                    .find(|row| Some(&row.mailbox) == hint.as_ref())
+                    .unwrap_or(&rows[0]);
+                let twins = crate::selector::Twins::among(rows.iter());
+                note.selector = Some(Selector::for_listed(&note.account, row, &twins).to_string());
+                note.orphaned = false;
+            }
+            Err(e) => {
+                log::warn!(
+                    "[notes] reading the message {key} in the store of {}: {e:#}",
+                    note.account
+                );
+            }
+        }
     }
 }
 
-/// Whether the mail a canonical selector names is gone.
-fn gone(
-    selector: &str,
-    accounts: &[AccountConfig],
-    stores: &mut HashMap<String, Option<Store>>,
-    drafts: &mut HashMap<String, HashSet<String>>,
-) -> bool {
-    let Ok(parts) = crate::selector::parse(selector) else {
-        return true;
-    };
-    let (Some(account), Some(mailbox)) = (parts.account, parts.mailbox) else {
-        return true;
-    };
-    if !accounts.iter().any(|configured| configured.name == account) {
-        return true;
+/// Every row `account`'s store holds for the Message-ID `key`, in any
+/// mailbox, under the bracketed form ingest stores or the bare one.
+fn copies(
+    store: &Store,
+    account: &str,
+    key: &str,
+) -> anyhow::Result<Vec<crate::store::read::MessageRow>> {
+    let rows = crate::store::read::find_by_message_id(store, account, &format!("<{key}>"))?;
+    if !rows.is_empty() {
+        return Ok(rows);
     }
-    if mailbox == DRAFTS_MAILBOX {
-        let ids = drafts.entry(account.clone()).or_insert_with(|| {
-            crate::store::drafts::index_dir(&crate::config::drafts_dir(&account))
-                .0
-                .into_iter()
-                .map(|row| row.id)
-                .collect()
-        });
-        return !ids.contains(&parts.key);
-    }
-    let store = stores.entry(account.clone()).or_insert_with(|| {
-        super::account::ready_account(accounts, &account)
-            .ok()
-            .and_then(|_| Store::open(crate::config::store_path(&account)).ok())
-    });
-    let Some(store) = store else {
-        return false;
-    };
-    let key = crate::selector::message_key(&parts.key);
-    let find = |id: &str| crate::store::read::find_by_message_id(store, &account, id);
-    match find(&format!("<{key}>")).and_then(
-        |rows| {
-            if rows.is_empty() {
-                find(key)
-            } else {
-                Ok(rows)
-            }
-        },
-    ) {
-        Ok(rows) => !rows.iter().any(|row| row.mailbox == mailbox),
-        Err(e) => {
-            log::warn!("[notes] reading {selector} in the store of {account}: {e:#}");
-            false
-        }
-    }
+    crate::store::read::find_by_message_id(store, account, key)
 }
 
 /// A notes-file refusal as the caller's error, a file that will not read or

@@ -23,6 +23,7 @@
           "created": "2026-11-16T09:30:00Z",
           "from": "Stefan Fuchs <stefan.fuchs@tum.de>",
           "id": "c41f09ab",
+          "message_id": "thesis-42@tum.de",
           "orphaned": false,
           "preset": "s",
           "selector": "mp://tum/inbox/thesis-42@tum.de",
@@ -35,6 +36,7 @@
         {
           "account": "tum",
           "created": "2026-11-16T09:20:00Z",
+          "draft_id": "a3f9c2e1b4d5f607",
           "from": "sylvain@tum.de",
           "id": "d0e83b21",
           "orphaned": true,

@@ -9,7 +9,8 @@ export type NoteGetParams = {
  */
 account?: string,
 /**
- * The message or draft; a listing row's selector, a UID segment
- * included, names the note on its message.
+ * The message or draft. Of a message selector only the account and the
+ * key count: any copy's selector, in any mailbox and with or without a
+ * UID segment, names the note on the message.
  */
 selector: string, };

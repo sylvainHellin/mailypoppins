@@ -374,7 +374,8 @@ It goes on the row rather than behind a `message.selector` query, because the da
 A client could compose it from `message_id`, the answer's `mailbox` and its own account name, since `mp_core::selector` is a shared module; it may not, because that is a second implementation of the percent-encoding and of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins only the CLI's spelling.
 The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fourteen keys, and this is the fifteenth, about forty bytes of ASCII, paid once per listing rather than once per copy.
 `note` is the state of the note on the message (`open`, `handed_off` or `done`, [The `note.*` family](#the-note-family)), absent when it has none, so a list draws the note glyph beside the star without a second call (PERSO-315).
-A note is held by the message's canonical selector, without a UID segment, so both copies of a `Message-ID` held twice in one mailbox carry it; the streamed rows, a conversation's `latest`, `message.search` hits and `draft.list` rows carry it too, a `draft.list` row by its draft selector.
+A note is held by the message's account and `Message-ID`, whatever mailbox holds it, so every copy carries it: the Inbox and the Sent copy, a copy under a label, and both copies of a `Message-ID` held twice in one mailbox.
+The streamed rows, a conversation's `latest`, `message.search` hits and `draft.list` rows carry it too, a `draft.list` row by its draft id.
 The daemon reads `<data_dir>/notes.json` once per listing for it, and a file that does not read marks no row and logs why rather than refusing the listing.
 
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
@@ -1038,17 +1039,23 @@ The agent never sends or approves anything, and no method here sends.
 | `note.handoff` | command | `{ids?}` | `{text, ids}` |
 | `note.presets` | query | `{}` | `{presets: [{key, label, needs_text, instruction}]}` |
 
-A `Note` is `{id, selector?, account, preset?, text, state, result?, created, updated, from, to, subject, orphaned}`.
+A `Note` is `{id, selector?, account, message_id?, draft_id?, preset?, text, state, result?, created, updated, from, to, subject, orphaned}`.
+A note on a received message is held by its `account` and `message_id`, the `Message-ID` without its angle brackets, and not by a mailbox: it follows the message when it is archived or moved.
+A note on a draft is held by its `account` and `draft_id`, and a note asking for a new email carries neither.
+A client matches a note against its rows by `account` with `message_id` (against `message_key` of the row's `message_id`) or `draft_id`, never by `selector`, which would miss a copy in another mailbox and a UID-qualified twin row.
+`selector` is decided at every answer: the full `mp://<account>/<mailbox>/<key>` of the copy in the mailbox the note was set in when that mailbox still holds one, else of the account's first copy, with a UID segment when that mailbox holds the message twice, and the draft selector for a draft; it is never the elided form.
 `id` is eight characters, a letter first; `state` is `open`, `handed_off` or `done`; `created` and `updated` are RFC 3339 in UTC, to the second.
 `from`, `to` and `subject` are a snapshot the daemon took when the note was set, the account's `default_from` standing as a draft's `from`, so a list and the prompt render without a store read and survive a rebuilt store.
-`orphaned` is decided at every answer and never stored: a note on a draft that is no longer in the drafts directory, or on a message the account's store no longer holds under its selector, is orphaned, and so is a note of an account the configuration no longer names; an account whose store cannot be read now orphans nothing, since its next sync may bring the message back.
-An orphaned note stays until it is cleared: a draft sent or deleted and a message moved to another mailbox leave their notes behind, never deleted silently.
+`orphaned` is decided at every answer and never stored: a note on a draft that is no longer in the drafts index, or on a message no mailbox of the account's store holds any more, is orphaned, and so is a note of an account the configuration no longer names.
+An account whose store cannot be read now orphans nothing, since its next sync may bring the message back, and its notes keep the selector of the mailbox they were set in.
+An orphaned note stays until it is cleared, never deleted silently.
 
 A selector is read in the grammar `mp show` takes, its account from its own `mp://<account>/` segment or else from `account`, and one whose mailbox is `drafts` names a draft.
-`note.set` resolves it against the account's store, or the drafts directory for a draft, so a note is only set on mail the daemon holds, and is held by the canonical selector, without a UID segment; at most one note is on a selector, and setting another replaces its preset and text, takes the snapshot again and opens it, keeping its id and its place.
+`note.set` resolves it against the account's store, or the drafts directory for a draft, so a note is only set on mail the daemon holds, and keeps the mailbox it found the message in as the hint for the selector its answers print.
+At most one note is on a message or a draft, and setting another, through a selector of any of its copies, replaces its preset and text, takes the snapshot again and opens it, keeping its id and its place.
 `note.set` with `id` does the same to the note with that id, a new-email note included; with neither `selector` nor `id` it adds a new-email note from `account`, which it requires.
-`note.set_many` sets the same note on each selector in one write, a selector named twice counted once, and refuses them all when one does not resolve.
-`note.get`, `note.done` and `note.clear` read the canonical selector off one that names its mailbox, a listing row's UID-qualified selector included, and resolve one that does not against the store.
+`note.set_many` sets the same note on each selector in one write, two selectors of one message counted once, and refuses them all when one does not resolve.
+`note.get`, `note.done` and `note.clear` read only the account and the key off a selector and read no store: the mailbox and a UID segment are ignored, so the selector of any copy names the note on its message, and an agent holding a stale `mp://<account>/inbox/<key>` closes the note on a message since archived.
 A note needs a preset, a text, or both; a preset is the `key` of one of `note.presets`, and `needs_text` is a hint for a client's prompt, never a refusal.
 
 `note.list` answers newest first, by when a note was first set, and `state` keeps the notes in that state.
@@ -1574,7 +1581,7 @@ It is a lifecycle event and reduces into no snapshot: signatures are global rath
 
 `sender.blocklist_changed` says that the blocked senders changed, with a payload of `{entries}`, the whole sorted list (`mp_protocol::sender::BlockedSenders`), published by a `sender.block` that added an entry and a `sender.unblock` that removed one. It is a lifecycle event, and a client showing the list replaces it with the payload.
 
-`note.changed` says that the notes on mail changed, with a payload of `{notes}`, every note newest first with `orphaned` decided (`mp_protocol::note::NoteListing`), published by every `note.*` call that wrote the notes file (PERSO-315). It is a lifecycle event: a client showing the notes list replaces it with the payload, and one showing rows sets each row's note glyph from the note on its selector.
+`note.changed` says that the notes on mail changed, with a payload of `{notes}`, every note newest first with `selector` and `orphaned` decided (`mp_protocol::note::NoteListing`), published by every `note.*` call that wrote the notes file (PERSO-315). It is a lifecycle event: a client showing the notes list replaces it with the payload, and one showing rows sets each row's note glyph from the note whose `account` and `message_id` (or `draft_id`) match the row, never by selector, so every copy of the message and both UID-qualified twin rows take it.
 
 `calendar.reminder` says that a reminder fell due, with a `CalendarReminder` as its payload ([The calendar reminders](#the-calendar-reminders)); `calendar.reminders_changed` `{account}` (`CalendarRemindersChanged`) says that one was dismissed, snoozed or left the list, and a client showing reminders reads `calendar.reminders` again. Both are lifecycle events.
 
@@ -2050,4 +2057,5 @@ The voice snapshots added `body` to `draft.reply` and `draft.forward`, optional 
 PERSO-315 added the `note.*` family, ten methods, one lifecycle kind and one member of two rows, all additively; no field was renamed, none was dropped, and no command's output moved.
 `note.clear`, `note.clear_done`, `note.done`, `note.handoff`, `note.set` and `note.set_many` are commands and `note.export`, `note.get`, `note.list` and `note.presets` queries, with the shapes of [the family's section](#the-note-family) and the types of `mp_protocol::note`; `note.changed` `{notes}` is the lifecycle kind.
 A `message.list` row (`MessageListRow`, and with it the streamed rows, a conversation's `latest` and a `message.search` hit) and a `draft.list` row (`DraftEntry`) gained `note`, the state of the note on the mail, absent when it has none, so a row from an older daemon decodes as one with no note.
+A `Note` names its mail by `account` with `message_id` or `draft_id`, and its `selector` is decided at every answer.
 The fixtures are `crates/mp-protocol/fixtures/note.{set,set_many,list,get,done,clear,clear_done,export,handoff,presets}.{request,response}.json` and `notification.note_changed.json`, and the capability list grew by the ten names.

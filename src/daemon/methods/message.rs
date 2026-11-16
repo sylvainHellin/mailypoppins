@@ -336,7 +336,7 @@ impl ListRead {
             read::twins_of(&store, &name, listed)
                 .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?
         };
-        let marks = NoteMarks::load(&notes, &name);
+        let marks = NoteMarks::load(&notes);
         let messages = rows
             .iter()
             .map(|(row, stamped)| {
@@ -697,7 +697,7 @@ async fn start_stream(
     // is the call's own error, no operation id is issued for a call that
     // cannot succeed, and `total` is exactly what the stream will carry.
     let (name, mailbox, rows, marks) = tokio::task::spawn_blocking(move || {
-        let marks = NoteMarks::load(&notes, &name);
+        let marks = NoteMarks::load(&notes);
         read(&name, &mailbox, &path).map(|rows| (name, mailbox, rows, marks))
     })
     .await
@@ -1600,7 +1600,7 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     // A hit's twin need not match, or be within the limit (PERSO-244).
     let twins = read::twins_of(&store, &name, hits.iter().map(|hit| &hit.row))
         .map_err(|e| internal(format!("the twins of the hits in {name}: {e:#}")))?;
-    let marks = NoteMarks::load(&super::super::notes::path(), &name);
+    let marks = NoteMarks::load(&super::super::notes::path());
     let hits: Vec<Value> = hits
         .iter()
         .map(|hit| {

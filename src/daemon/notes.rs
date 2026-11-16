@@ -13,13 +13,19 @@
 //! is an error rather than an empty list, so a broken file is never
 //! overwritten with one.
 //!
-//! A note on mail is held by the canonical selector of its message or draft,
-//! without a UID segment, and at most one note is on a selector: setting
-//! another replaces its preset and text and opens it again. A note keeps a
-//! snapshot of the `From`, the `To` and the subject taken when it was set, so
-//! the list and the batch prompt render with no store read and outlive a
-//! rebuilt store. A selector whose message or draft is gone leaves its note
-//! where it is; the answers mark it orphaned, and only a clear removes it.
+//! A note on mail is held by what it is on ([`NoteKey`]): a received message
+//! by its account and Message-ID, whatever mailbox holds it, so a note follows
+//! its message into the archive and every copy carries it; a draft by its
+//! id, the two namespaces kept apart. The mailbox the note was set in is kept
+//! beside the key as a hint for the selector an answer prints, never as part
+//! of the key. At most one note is on a key: setting another replaces its
+//! preset and text and opens it again. When a draft is sent, its note moves
+//! onto the Message-ID it went out with ([`follow_sent_draft`]).
+//!
+//! A note keeps a snapshot of the `From`, the `To` and the subject taken when
+//! it was set, so the list and the batch prompt render with no store read and
+//! outlive a rebuilt store. A note whose mail is gone stays where it is; the
+//! answers mark it orphaned, and only a clear removes it.
 //!
 //! # Order
 //!
@@ -80,13 +86,68 @@ struct NotesFile {
     notes: Vec<Stored>,
 }
 
+/// What a note on mail is on: a received message or a draft, in namespaces
+/// of their own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NoteKey {
+    /// A received message, by its Message-ID in the `message_key` form,
+    /// without angle brackets.
+    Message { account: String, message_id: String },
+    /// A draft, by its id.
+    Draft { account: String, id: String },
+}
+
+impl NoteKey {
+    /// The key of the message `message_id` names, in either form.
+    pub fn message(account: &str, message_id: &str) -> NoteKey {
+        NoteKey::Message {
+            account: account.to_string(),
+            message_id: crate::selector::message_key(message_id).to_string(),
+        }
+    }
+
+    /// The key of the draft `id`.
+    pub fn draft(account: &str, id: &str) -> NoteKey {
+        NoteKey::Draft {
+            account: account.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    /// The account the mail is in.
+    pub fn account(&self) -> &str {
+        match self {
+            NoteKey::Message { account, .. } | NoteKey::Draft { account, .. } => account,
+        }
+    }
+}
+
+impl std::fmt::Display for NoteKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoteKey::Message {
+                account,
+                message_id,
+            } => write!(f, "the message {message_id} of {account}"),
+            NoteKey::Draft { account, id } => write!(f, "the draft {id} of {account}"),
+        }
+    }
+}
+
 /// One note as the file holds it: the wire [`Note`] without `orphaned`,
-/// which is decided at every answer and never stored.
+/// which is decided at every answer and never stored, and with what it is on
+/// in place of the selector, which an answer decides too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Stored {
     id: String,
+    /// What the note is on; absent for a note asking for a new email.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    selector: Option<String>,
+    on: Option<NoteKey>,
+    /// The mailbox a message note was set in: the hint for the selector an
+    /// answer prints, never part of the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mailbox: Option<String>,
     account: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preset: Option<String>,
@@ -106,11 +167,36 @@ struct Stored {
 }
 
 impl Stored {
+    /// The note on the wire, its selector the one the hint names: the copy
+    /// in the mailbox the note was set in, which an answer replaces with a
+    /// copy the store still holds.
     fn to_wire(&self) -> Note {
+        let (selector, message_id, draft_id) = match &self.on {
+            Some(NoteKey::Message {
+                account,
+                message_id,
+            }) => (
+                Some(hinted_selector(
+                    account,
+                    self.mailbox.as_deref(),
+                    message_id,
+                )),
+                Some(message_id.clone()),
+                None,
+            ),
+            Some(NoteKey::Draft { account, id }) => (
+                Some(Selector::for_draft(account, id).to_string()),
+                None,
+                Some(id.clone()),
+            ),
+            None => (None, None, None),
+        };
         Note {
             id: self.id.clone(),
-            selector: self.selector.clone(),
+            selector,
             account: self.account.clone(),
+            message_id,
+            draft_id,
             preset: self.preset.clone(),
             text: self.text.clone(),
             state: self.state,
@@ -190,14 +276,21 @@ pub struct Content {
     pub text: String,
 }
 
+/// The selector the hint names for a message note: the full
+/// `mp://<account>/<mailbox>/<key>`, never the elided form, which a message
+/// held in several mailboxes does not resolve.
+pub fn hinted_selector(account: &str, mailbox: Option<&str>, message_id: &str) -> String {
+    Selector::new(account, mailbox.unwrap_or("inbox"), message_id).to_string()
+}
+
 /// What a `set` puts a note on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// A message or a draft, by canonical selector, with the snapshot of its
-    /// headers.
+    /// A message or a draft, with the mailbox a message was found in and the
+    /// snapshot of its headers.
     Mail {
-        selector: String,
-        account: String,
+        on: NoteKey,
+        mailbox: Option<String>,
         from: String,
         to: String,
         subject: String,
@@ -208,19 +301,29 @@ pub enum Target {
     Id(String),
 }
 
+impl Target {
+    /// What the target puts its note on, `None` for a new email or an id.
+    pub fn on(&self) -> Option<&NoteKey> {
+        match self {
+            Target::Mail { on, .. } => Some(on),
+            Target::NewEmail { .. } | Target::Id(_) => None,
+        }
+    }
+}
+
 /// How a caller names one note it closes or clears.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
     Id(String),
-    /// A canonical selector.
-    Selector(String),
+    /// The note on a message or a draft.
+    On(NoteKey),
 }
 
 impl Key {
     fn names(&self, note: &Stored) -> bool {
         match self {
             Key::Id(id) => note.id == *id,
-            Key::Selector(selector) => note.selector.as_deref() == Some(selector.as_str()),
+            Key::On(on) => note.on.as_ref() == Some(on),
         }
     }
 
@@ -228,7 +331,7 @@ impl Key {
     fn missing(&self) -> NotesError {
         NotesError::Refused(match self {
             Key::Id(id) => format!("no note has the id {id}"),
-            Key::Selector(selector) => format!("no note is on {selector}"),
+            Key::On(on) => format!("no note is on {on}"),
         })
     }
 }
@@ -251,10 +354,10 @@ pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Res
                     .position(|note| note.id == *id)
                     .ok_or_else(|| Key::Id(id.clone()).missing())?,
             ),
-            Target::Mail { selector, .. } => file
+            Target::Mail { on, .. } => file
                 .notes
                 .iter()
-                .position(|note| note.selector.as_deref() == Some(selector.as_str())),
+                .position(|note| note.on.as_ref() == Some(on)),
             Target::NewEmail { .. } => None,
         };
         let index = match at {
@@ -262,14 +365,14 @@ pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Res
                 let note = &mut file.notes[index];
                 note.reset(content, now);
                 if let Target::Mail {
-                    account,
+                    mailbox,
                     from,
                     to,
                     subject,
                     ..
                 } = target
                 {
-                    note.account = account.clone();
+                    note.mailbox = mailbox.clone();
                     note.from = from.clone();
                     note.to = to.clone();
                     note.subject = subject.clone();
@@ -278,21 +381,23 @@ pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Res
             }
             None => {
                 let id = mint_id(|id| file.notes.iter().any(|note| note.id == id));
-                let (selector, account, from, to, subject) = match target {
+                let (on, mailbox, account, from, to, subject) = match target {
                     Target::Mail {
-                        selector,
-                        account,
+                        on,
+                        mailbox,
                         from,
                         to,
                         subject,
                     } => (
-                        Some(selector.clone()),
-                        account.clone(),
+                        Some(on.clone()),
+                        mailbox.clone(),
+                        on.account().to_string(),
                         from.clone(),
                         to.clone(),
                         subject.clone(),
                     ),
                     Target::NewEmail { account } => (
+                        None,
                         None,
                         account.clone(),
                         String::new(),
@@ -303,7 +408,8 @@ pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Res
                 };
                 file.notes.push(Stored {
                     id,
-                    selector,
+                    on,
+                    mailbox,
                     account,
                     preset: content.preset.clone(),
                     text: content.text.clone(),
@@ -468,7 +574,7 @@ pub fn render(notes: &[Note], presets: &[NotePreset]) -> String {
         match &note.selector {
             Some(selector) => {
                 lines.push(selector.clone());
-                lines.push(headline(note, selector));
+                lines.push(headline(note));
                 if note.orphaned {
                     lines.push(
                         "This selector names nothing any more; find the mail with `mp search`, \
@@ -503,12 +609,8 @@ pub fn render(notes: &[Note], presets: &[NotePreset]) -> String {
 
 /// The line under a selector: who the mail is from, or who a draft is to,
 /// and its subject.
-fn headline(note: &Note, selector: &str) -> String {
-    let is_draft = crate::selector::parse(selector)
-        .ok()
-        .and_then(|parts| parts.mailbox)
-        .is_some_and(|mailbox| mailbox == crate::selector::DRAFTS_MAILBOX);
-    let who = if is_draft {
+fn headline(note: &Note) -> String {
+    let who = if note.draft_id.is_some() {
         let to = note.to.trim();
         if to.is_empty() {
             "Draft with no recipient yet".to_string()
@@ -521,42 +623,60 @@ fn headline(note: &Note, selector: &str) -> String {
     format!("{who}, subject \"{}\"", note.subject)
 }
 
-/// The states of one account's notes on mail, by selector: what a listing
-/// row's `note` is read from, one file read per listing.
+/// The states of the notes on mail, by account and then by Message-ID or
+/// draft id: what a listing row's `note` is read from, one file read per
+/// listing.
 #[derive(Debug, Default)]
-pub struct NoteMarks(HashMap<String, NoteState>);
+pub struct NoteMarks {
+    messages: HashMap<String, HashMap<String, NoteState>>,
+    drafts: HashMap<String, HashMap<String, NoteState>>,
+}
 
 impl NoteMarks {
-    /// The marks of `account`'s notes in the file at `path`. A file that does
-    /// not read marks nothing and says so in the log: a listing is not
-    /// refused over its glyphs.
-    pub fn load(path: &Path, account: &str) -> NoteMarks {
-        match read(path) {
-            Ok(file) => NoteMarks(
-                file.notes
-                    .into_iter()
-                    .filter(|note| note.account == account)
-                    .filter_map(|note| note.selector.map(|selector| (selector, note.state)))
-                    .collect(),
-            ),
+    /// The marks of the notes in the file at `path`. A file that does not
+    /// read marks nothing and says so in the log: a listing is not refused
+    /// over its glyphs.
+    pub fn load(path: &Path) -> NoteMarks {
+        let file = match read(path) {
+            Ok(file) => file,
             Err(e) => {
-                warn!("[notes] listing {account} with no note marks: {e:#}");
-                NoteMarks::default()
+                warn!("[notes] listing with no note marks: {e:#}");
+                return NoteMarks::default();
             }
+        };
+        let mut marks = NoteMarks::default();
+        for note in file.notes {
+            let (map, account, key) = match note.on {
+                Some(NoteKey::Message {
+                    account,
+                    message_id,
+                }) => (&mut marks.messages, account, message_id),
+                Some(NoteKey::Draft { account, id }) => (&mut marks.drafts, account, id),
+                None => continue,
+            };
+            map.entry(account).or_default().insert(key, note.state);
         }
+        marks
     }
 
-    /// The state of the note on `row`, a message of `account`.
+    /// The state of the note on `row`, a message of `account`, in whatever
+    /// mailbox the row is.
     pub fn of_message<R: MessageRowRef>(&self, account: &str, row: &R) -> Option<NoteState> {
-        if self.0.is_empty() {
-            return None;
-        }
-        self.of_selector(&Selector::for_message(account, row).to_string())
+        self.of_message_id(account, row.message_id())
     }
 
-    /// The state of the note on a canonical selector.
-    pub fn of_selector(&self, selector: &str) -> Option<NoteState> {
-        self.0.get(selector).copied()
+    /// The state of the note on the message `message_id` of `account`, in
+    /// either form.
+    pub fn of_message_id(&self, account: &str, message_id: &str) -> Option<NoteState> {
+        self.messages
+            .get(account)?
+            .get(crate::selector::message_key(message_id))
+            .copied()
+    }
+
+    /// The state of the note on the draft `id` of `account`.
+    pub fn of_draft(&self, account: &str, id: &str) -> Option<NoteState> {
+        self.drafts.get(account)?.get(id).copied()
     }
 }
 
@@ -567,10 +687,12 @@ mod tests {
     const NOW: &str = "2026-11-16T09:30:00Z";
     const LATER: &str = "2026-11-16T10:05:00Z";
 
+    /// A message of `tum`, found in the mailbox `selector` names.
     fn mail(selector: &str, subject: &str) -> Target {
+        let parts = crate::selector::parse(selector).unwrap();
         Target::Mail {
-            selector: selector.to_string(),
-            account: "tum".to_string(),
+            on: NoteKey::message("tum", &parts.key),
+            mailbox: parts.mailbox,
             from: "Stefan Fuchs <stefan.fuchs@tum.de>".to_string(),
             to: "sylvain@tum.de".to_string(),
             subject: subject.to_string(),
@@ -597,11 +719,12 @@ mod tests {
         }
     }
 
-    /// A note is set on a selector, listed newest first, and a second set on
-    /// the same selector replaces its instruction and opens it again in its
-    /// place, keeping its id; a new email is always a note of its own.
+    /// A note is set on a message, listed newest first, and a second set on
+    /// the same message, found in another mailbox this time, replaces its
+    /// instruction, its hint and its snapshot and opens it again in its place,
+    /// keeping its id; a new email is always a note of its own.
     #[test]
-    fn a_selector_holds_one_note_and_setting_it_again_reopens_it() {
+    fn a_message_holds_one_note_and_setting_it_again_reopens_it() {
         let (_dir, path) = file();
         let first = set(
             &path,
@@ -625,7 +748,7 @@ mod tests {
 
         let again = set(
             &path,
-            &[mail("mp://tum/inbox/a", "A, renamed")],
+            &[mail("mp://tum/archive/a", "A, renamed")],
             &content(Some("r"), "yes"),
             LATER,
         )
@@ -636,6 +759,8 @@ mod tests {
         assert_eq!(again.result, None);
         assert_eq!(again.preset.as_deref(), Some("r"));
         assert_eq!(again.subject, "A, renamed");
+        assert_eq!(again.selector.as_deref(), Some("mp://tum/archive/a"));
+        assert_eq!(again.message_id.as_deref(), Some("a"));
         assert_eq!(again.created, NOW);
         assert_eq!(again.updated, LATER);
 
@@ -653,7 +778,7 @@ mod tests {
                 other,
                 new,
                 "mp://tum/inbox/b".into(),
-                "mp://tum/inbox/a".into()
+                "mp://tum/archive/a".into()
             ]
         );
     }
@@ -718,7 +843,7 @@ mod tests {
         .unwrap();
         let closed = done(
             &path,
-            &Key::Selector("mp://tum/inbox/a".into()),
+            &Key::On(NoteKey::message("tum", "a")),
             "three lines",
             LATER,
         )
@@ -728,17 +853,17 @@ mod tests {
         assert_eq!(
             refused(done(
                 &path,
-                &Key::Selector("mp://tum/inbox/c".into()),
+                &Key::On(NoteKey::message("tum", "<c>")),
                 "x",
                 NOW
             )),
-            "no note is on mp://tum/inbox/c"
+            "no note is on the message c of tum"
         );
         assert_eq!(clear(&path, &Key::Id("zzzzzzzz".into())).unwrap(), 0);
         assert_eq!(clear_done(&path).unwrap(), 1);
         assert_eq!(clear_done(&path).unwrap(), 0);
         assert_eq!(
-            clear(&path, &Key::Selector("mp://tum/inbox/b".into())).unwrap(),
+            clear(&path, &Key::On(NoteKey::message("tum", "b"))).unwrap(),
             1
         );
         assert!(load(&path).unwrap().is_empty());
@@ -800,10 +925,7 @@ mod tests {
         ));
         assert!(matches!(clear_done(&path), Err(NotesError::File(_))));
         assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
-        assert_eq!(
-            NoteMarks::load(&path, "tum").of_selector("mp://tum/inbox/a"),
-            None
-        );
+        assert_eq!(NoteMarks::load(&path).of_message_id("tum", "a"), None);
     }
 
     /// The file is private to the user and holds no `orphaned`.
@@ -824,10 +946,11 @@ mod tests {
         assert!(!text.contains("orphaned"), "{text}");
     }
 
-    /// A listing row is marked by its message's canonical selector, a UID
-    /// left out, and only with its own account's notes.
+    /// A listing row is marked by its account and Message-ID, in whatever
+    /// mailbox it is and whichever form its Message-ID takes, and a draft row
+    /// by its id; another account's row with the same Message-ID is not.
     #[test]
-    fn a_row_is_marked_by_its_canonical_selector() {
+    fn a_row_is_marked_by_its_message_id_in_any_mailbox() {
         struct Row(&'static str, &'static str, i64);
         impl MessageRowRef for Row {
             fn mailbox(&self) -> &str {
@@ -848,16 +971,37 @@ mod tests {
             NOW,
         )
         .unwrap();
-        let marks = NoteMarks::load(&path, "tum");
-        assert_eq!(
-            marks.of_message("tum", &Row("inbox", "<a@x>", 7)),
-            Some(NoteState::Open)
-        );
-        assert_eq!(marks.of_message("tum", &Row("archive", "<a@x>", 7)), None);
-        assert_eq!(
-            NoteMarks::load(&path, "perso").of_message("tum", &Row("inbox", "<a@x>", 7)),
-            None
-        );
+        set(
+            &path,
+            &[Target::Mail {
+                on: NoteKey::draft("tum", "d1"),
+                mailbox: None,
+                from: String::new(),
+                to: String::new(),
+                subject: String::new(),
+            }],
+            &content(Some("p"), ""),
+            NOW,
+        )
+        .unwrap();
+        let marks = NoteMarks::load(&path);
+        for row in [
+            Row("inbox", "<a@x>", 7),
+            Row("archive", "<a@x>", 3),
+            Row("sent", "a@x", 9),
+        ] {
+            assert_eq!(
+                marks.of_message("tum", &row),
+                Some(NoteState::Open),
+                "{}",
+                row.0
+            );
+        }
+        assert_eq!(marks.of_message("perso", &Row("inbox", "<a@x>", 7)), None);
+        assert_eq!(marks.of_message("tum", &Row("inbox", "<b@x>", 7)), None);
+        assert_eq!(marks.of_draft("tum", "d1"), Some(NoteState::Open));
+        assert_eq!(marks.of_draft("tum", "a@x"), None);
+        assert_eq!(marks.of_message_id("tum", "d1"), None);
     }
 
     /// The batch prompt every client hands an agent, over a received
@@ -865,20 +1009,29 @@ mod tests {
     /// text, and a preset the configuration dropped.
     #[test]
     fn the_batch_prompt() {
-        let note = |id: &str, selector: Option<&str>, preset: Option<&str>, text: &str| Note {
-            id: id.to_string(),
-            selector: selector.map(str::to_string),
-            account: "tum".to_string(),
-            preset: preset.map(str::to_string),
-            text: text.to_string(),
-            state: NoteState::Open,
-            result: None,
-            created: NOW.to_string(),
-            updated: NOW.to_string(),
-            from: String::new(),
-            to: String::new(),
-            subject: String::new(),
-            orphaned: false,
+        let note = |id: &str, selector: Option<&str>, preset: Option<&str>, text: &str| {
+            let key = selector.map(|s| crate::selector::parse(s).unwrap());
+            let draft = key
+                .as_ref()
+                .is_some_and(|parts| parts.mailbox.as_deref() == Some("drafts"));
+            let key = key.map(|parts| parts.key);
+            Note {
+                id: id.to_string(),
+                selector: selector.map(str::to_string),
+                account: "tum".to_string(),
+                message_id: key.clone().filter(|_| !draft),
+                draft_id: key.filter(|_| draft),
+                preset: preset.map(str::to_string),
+                text: text.to_string(),
+                state: NoteState::Open,
+                result: None,
+                created: NOW.to_string(),
+                updated: NOW.to_string(),
+                from: String::new(),
+                to: String::new(),
+                subject: String::new(),
+                orphaned: false,
+            }
         };
         let notes = vec![
             note(

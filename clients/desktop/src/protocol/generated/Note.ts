@@ -4,6 +4,13 @@ import type { NoteState } from "./NoteState";
 /**
  * One note, as every `note.*` answer and `note.changed` carry it.
  *
+ * A note on a received message is held by the message's identity, its
+ * account and Message-ID, not by a mailbox: it follows the message when it
+ * is archived or moved, and every copy of the message carries it. A note on
+ * a draft is held by the draft's id, and a note asking for a new email by
+ * neither. A client matches a note against its rows by `account` with
+ * `message_id` or `draft_id`, never by `selector`.
+ *
  * `from`, `to` and `subject` are a snapshot the daemon took from the message
  * or the draft when the note was set, so a list and the export render without
  * a store read and survive a store rebuild.
@@ -14,15 +21,28 @@ export type Note = {
  */
 id: string,
 /**
- * The canonical `mp://` selector of the message or draft the note is on,
- * without a UID segment; absent for a note asking for a new email.
+ * A full `mp://<account>/<mailbox>/<key>` selector of the message or
+ * draft the note is on, decided at every answer: the copy in the mailbox
+ * the note was set in when one is still there, else the first copy the
+ * account holds, with a UID segment when that mailbox holds the message
+ * twice. Absent for a note asking for a new email.
  */
 selector?: string,
 /**
- * The account the note belongs to: the selector's, or the one a new
- * email goes out from.
+ * The account the note belongs to: the message's or the draft's, or the
+ * one a new email goes out from.
  */
 account: string,
+/**
+ * The Message-ID of the received message the note is on, without its
+ * angle brackets; absent for a draft or a new email.
+ */
+message_id?: string,
+/**
+ * The id of the draft the note is on; absent for a message or a new
+ * email.
+ */
+draft_id?: string,
 /**
  * The key of the preset the note uses, absent for free text.
  */
@@ -61,8 +81,9 @@ to: string,
  */
 subject: string,
 /**
- * Whether the message or draft the selector names is gone: a draft sent
- * or deleted, a message moved or expunged. Decided at every answer; such
- * a note stays until it is cleared.
+ * Whether the mail the note is on is gone: a draft deleted, a message no
+ * mailbox of its account holds any more, or an account the configuration
+ * no longer names. Decided at every answer; such a note stays until it is
+ * cleared.
  */
 orphaned: boolean, };

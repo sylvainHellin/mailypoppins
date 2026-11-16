@@ -12,7 +12,8 @@ Nothing in the store may be the only copy of anything the user typed.
 They are Markdown files with YAML frontmatter under `<account_dir>/drafts/`, written by `mp new` and by `$EDITOR`, and the `drafts` table is a derived index over them.
 Each draft is mirrored to the account's server Drafts folder (PERSO-139, `src/draft_mirror/`): the copy there is a rendering of the file, and a change made on the server reaches mp only by rewriting the file.
 - What the user typed outside a draft lives in the data directory beside the stores, never in them: the blocked senders in `<data_dir>/blocked-senders.json` (PERSO-261) and the notes on mail in `<data_dir>/notes.json` (PERSO-315), each replaced atomically, private to the user, and read and written by the daemon alone.
-A note keeps a snapshot of the headers of the mail it is on, so it survives a rebuilt store; a note whose mail is gone is marked orphaned and stays until it is cleared, never deleted silently.
+A note is held by the account and `Message-ID` of the message it is on, or by the id of its draft, never by a mailbox, so it follows its message when it is archived and every copy carries it.
+A note keeps a snapshot of the headers of the mail it is on, so it survives a rebuilt store; a note whose mail is gone from every mailbox is marked orphaned and stays until it is cleared, never deleted silently.
 - Received mail is read-only locally.
 The client never edits a message body; it changes flags and mailbox membership, and the server is told immediately.
 - No migration paths until v1.0.
@@ -695,7 +696,7 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | `src/calendar_sync.rs` | One account's calendar sync from its stored tokens, the daily re-baseline, the per-account lock, and the invitation mail to server event lookup (PERSO-200) |
 | `src/daemon/methods/freebusy.rs` | `calendar.freebusy`, the client-scoped free/busy query (PERSO-255) |
 | `src/daemon/reminders.rs` | The calendar reminders: the due minutes, the firing and the decisions over the cache, the reminder clock, and the task that sleeps until the next due minute (PERSO-255) |
-| `src/daemon/notes.rs` + `src/daemon/methods/note.rs` | The notes on mail (PERSO-315): `<data_dir>/notes.json` and its edits under one lock, the batch prompt the daemon alone renders, and `NoteMarks`, the note state a listing row carries; the `note.*` family resolves a selector to the canonical one and the snapshot a note keeps, decides `orphaned` at every answer, and publishes `note.changed` on every write |
+| `src/daemon/notes.rs` + `src/daemon/methods/note.rs` | The notes on mail (PERSO-315): `<data_dir>/notes.json` and its edits under one lock, the batch prompt the daemon alone renders, and `NoteMarks`, the note state a listing row carries; the `note.*` family keys a note by the message's account and `Message-ID` or the draft's id, resolves `note.set`'s selector to the snapshot a note keeps, decides `selector` and `orphaned` at every answer, and publishes `note.changed` on every write |
 | `src/store/reminders.rs` | `calendar_reminders`, what fired, was dismissed or is snoozed per account and event, kept apart from the disposable cache (PERSO-255) |
 | `src/calendar_view.rs` | The merged view `calendar.view` and `event.get` serve: the cached server events and the invitation mails' events, deduplicated on `UID` plus `RECURRENCE-ID`, filtered by visibility (PERSO-200) |
 | `mp-core/notify.rs` | The new-mail and reminder notification text both clients show, and the TUI's notifier, shelling out to `osascript` / `notify-send` |

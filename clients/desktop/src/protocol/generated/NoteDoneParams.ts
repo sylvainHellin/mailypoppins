@@ -10,7 +10,7 @@ export type NoteDoneParams = {
  */
 account?: string,
 /**
- * The message or draft the note is on.
+ * The message or draft the note is on, read as `note.get` reads it.
  */
 selector?: string,
 /**
