@@ -3608,3 +3608,15 @@ A command whose moves the client did not make row by row (a block) is followed b
 
 What the blocked-senders list takes (`mp_core::blocklist`: no quoted local part, never the user's own address or domain) is one function the daemon, the TUI and the Tauri fixture call, and the desktop's TypeScript mirror is one function its fixture reads too.
 A client offers a sender as `comparable_address` reads it, not as `extract_email_address` answers it, or the chooser offers `"john.doe"@x`, which the daemon always refuses.
+
+## Anything attached to a received message is keyed by account and Message-ID (2026-11-16, PERSO-315)
+
+A note keyed by its selector was orphaned when its mail was archived, since the selector names the mailbox and a twin's UID, and both change on a move.
+Key such data by account plus `message_key(message_id)` (drafts by their id, in a separate namespace) and work out the selector when answering, preferring the mailbox it was set in.
+A row then matches by `account` and `message_id`, never by selector, so every copy (Inbox and Sent, labels, twins) carries it.
+A selector keeps `@` unescaped (`mp_core::selector::encode` treats it as unreserved), so a fixture that writes `%40` names no canonical selector and matches no row.
+
+## An event carrying a whole list is built and published under the file's lock (2026-11-16, PERSO-315)
+
+Publishing after the blocking task returns let two writers publish out of order, so a stale list could be the last event every client applied; `note.changed` and `sender.blocklist_changed` now publish while the lock is held.
+Anything judged against the store while building such a list (a note's `orphaned`) treats "store not readable" as "cannot tell": a deleted store is not recreated until the next sync, and reading it as "gone" would flash every note orphaned during a resync.
