@@ -28,12 +28,20 @@ pub enum AgentRoute {
     Paseo,
 }
 
-/// Where `open_in` opens the agent in the desktop app.
+/// Where `open_in` opens the agent in the desktop app: every place the TUI
+/// opens a terminal in is the panel here, named one by one so a new
+/// `open_in` value is a compile error until it is placed.
 pub fn route(open_in: AgentOpenIn) -> AgentRoute {
     match open_in {
         AgentOpenIn::Clipboard => AgentRoute::Clipboard,
         AgentOpenIn::Paseo => AgentRoute::Paseo,
-        _ => AgentRoute::Panel,
+        AgentOpenIn::Auto
+        | AgentOpenIn::HerdrApp
+        | AgentOpenIn::Herdr
+        | AgentOpenIn::Tmux
+        | AgentOpenIn::Wezterm
+        | AgentOpenIn::Terminal
+        | AgentOpenIn::DesktopPanel => AgentRoute::Panel,
     }
 }
 
@@ -128,6 +136,7 @@ mod tests {
     fn the_desktop_opens_every_route_in_its_panel_but_clipboard_and_paseo() {
         for (open_in, expected) in [
             (AgentOpenIn::Auto, AgentRoute::Panel),
+            (AgentOpenIn::HerdrApp, AgentRoute::Panel),
             (AgentOpenIn::Herdr, AgentRoute::Panel),
             (AgentOpenIn::Tmux, AgentRoute::Panel),
             (AgentOpenIn::Wezterm, AgentRoute::Panel),
