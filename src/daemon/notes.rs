@@ -33,7 +33,10 @@
 //! first is the file read backwards; a note set again keeps its place.
 //!
 //! Every read-modify-write holds one lock ([`LOCK`]), so two clients setting
-//! notes at once never drop one of them.
+//! notes at once never drop one of them. A writer hands its caller's
+//! `publish` the list it wrote while it still holds the lock, so the lists
+//! the callers publish as `note.changed` leave in the order the file changed
+//! and the last one a client hears is the file as it is.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -259,12 +262,24 @@ fn write(path: &Path, file: &NotesFile) -> anyhow::Result<()> {
 
 /// Every note at `path`, newest first, none of them marked orphaned yet.
 pub fn load(path: &Path) -> anyhow::Result<Vec<Note>> {
-    Ok(read(path)?
-        .notes
-        .iter()
-        .rev()
-        .map(Stored::to_wire)
-        .collect())
+    Ok(listing(&read(path)?))
+}
+
+/// Every note `file` holds, newest first.
+fn listing(file: &NotesFile) -> Vec<Note> {
+    file.notes.iter().rev().map(Stored::to_wire).collect()
+}
+
+/// What a writer is handed to announce the list it wrote: called once per
+/// write, with every note newest first, while the lock is held.
+pub type Publish<'a> = &'a mut dyn FnMut(Vec<Note>);
+
+/// Replace the file at `path` with `file` and hand `publish` what it now
+/// holds, both inside the caller's turn of the lock.
+fn commit(path: &Path, file: &NotesFile, publish: Publish<'_>) -> anyhow::Result<()> {
+    write(path, file)?;
+    publish(listing(file));
+    Ok(())
 }
 
 /// The instruction a note carries.
@@ -342,7 +357,13 @@ impl Key {
 /// A target that already has a note replaces its preset and text and opens it
 /// again, keeping its id and its place; a [`Target::Mail`] also takes the
 /// snapshot again. An id no note has is refused and nothing is written.
-pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Result<Vec<Note>> {
+pub fn set(
+    path: &Path,
+    targets: &[Target],
+    content: &Content,
+    now: &str,
+    publish: Publish<'_>,
+) -> Result<Vec<Note>> {
     let _turn = locked();
     let mut file = read(path)?;
     let mut set = Vec::with_capacity(targets.len());
@@ -426,7 +447,7 @@ pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Res
         };
         set.push(index);
     }
-    write(path, &file)?;
+    commit(path, &file, publish)?;
     Ok(set
         .into_iter()
         .map(|index| file.notes[index].to_wire())
@@ -434,7 +455,7 @@ pub fn set(path: &Path, targets: &[Target], content: &Content, now: &str) -> Res
 }
 
 /// Close the note `key` names with `result`, whatever its state.
-pub fn done(path: &Path, key: &Key, result: &str, now: &str) -> Result<Note> {
+pub fn done(path: &Path, key: &Key, result: &str, now: &str, publish: Publish<'_>) -> Result<Note> {
     let _turn = locked();
     let mut file = read(path)?;
     let note = file
@@ -446,29 +467,29 @@ pub fn done(path: &Path, key: &Key, result: &str, now: &str) -> Result<Note> {
     note.result = Some(result.to_string());
     note.updated = now.to_string();
     let closed = note.to_wire();
-    write(path, &file)?;
+    commit(path, &file, publish)?;
     Ok(closed)
 }
 
 /// Remove the note `key` names, answering how many went: `0` when none
 /// answers to it, which writes nothing.
-pub fn clear(path: &Path, key: &Key) -> Result<u64> {
-    remove(path, |note| key.names(note))
+pub fn clear(path: &Path, key: &Key, publish: Publish<'_>) -> Result<u64> {
+    remove(path, |note| key.names(note), publish)
 }
 
 /// Remove every done note, answering how many went.
-pub fn clear_done(path: &Path) -> Result<u64> {
-    remove(path, |note| note.state == NoteState::Done)
+pub fn clear_done(path: &Path, publish: Publish<'_>) -> Result<u64> {
+    remove(path, |note| note.state == NoteState::Done, publish)
 }
 
-fn remove(path: &Path, gone: impl Fn(&Stored) -> bool) -> Result<u64> {
+fn remove(path: &Path, gone: impl Fn(&Stored) -> bool, publish: Publish<'_>) -> Result<u64> {
     let _turn = locked();
     let mut file = read(path)?;
     let before = file.notes.len();
     file.notes.retain(|note| !gone(note));
     let removed = (before - file.notes.len()) as u64;
     if removed > 0 {
-        write(path, &file)?;
+        commit(path, &file, publish)?;
     }
     Ok(removed)
 }
@@ -498,10 +519,15 @@ pub fn select(notes: &[Note], ids: Option<&[String]>) -> Result<Vec<Note>> {
 /// marked handed off, in one write: what `note.handoff` renders the prompt
 /// from. The answer is the notes newest first, the marks applied, and
 /// whether any was open, which is whether the file changed.
-pub fn hand_off(path: &Path, ids: Option<&[String]>, now: &str) -> Result<(Vec<Note>, bool)> {
+pub fn hand_off(
+    path: &Path,
+    ids: Option<&[String]>,
+    now: &str,
+    publish: Publish<'_>,
+) -> Result<(Vec<Note>, bool)> {
     let _turn = locked();
     let mut file = read(path)?;
-    let listed: Vec<Note> = file.notes.iter().rev().map(Stored::to_wire).collect();
+    let listed = listing(&file);
     let picked: Vec<String> = select(&listed, ids)?
         .into_iter()
         .map(|note| note.id)
@@ -515,7 +541,7 @@ pub fn hand_off(path: &Path, ids: Option<&[String]>, now: &str) -> Result<(Vec<N
         }
     }
     if changed {
-        write(path, &file)?;
+        commit(path, &file, publish)?;
     }
     let given = file
         .notes
@@ -731,6 +757,7 @@ mod tests {
             &[mail("mp://tum/inbox/a", "A")],
             &content(Some("s"), ""),
             NOW,
+            &mut |_| {},
         )
         .unwrap()
         .remove(0);
@@ -742,15 +769,24 @@ mod tests {
             &[mail("mp://tum/inbox/b", "B")],
             &content(None, "x"),
             NOW,
+            &mut |_| {},
         )
         .unwrap();
-        done(&path, &Key::Id(first.id.clone()), "summed up", NOW).unwrap();
+        done(
+            &path,
+            &Key::Id(first.id.clone()),
+            "summed up",
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
 
         let again = set(
             &path,
             &[mail("mp://tum/archive/a", "A, renamed")],
             &content(Some("r"), "yes"),
             LATER,
+            &mut |_| {},
         )
         .unwrap()
         .remove(0);
@@ -795,6 +831,7 @@ mod tests {
                 }],
                 &content(None, "write to Ada"),
                 NOW,
+                &mut |_| {},
             )
             .unwrap()
             .remove(0)
@@ -813,6 +850,7 @@ mod tests {
             &[Target::Id(id.clone())],
             &content(None, "to Ada and Bo"),
             LATER,
+            &mut |_| {},
         )
         .unwrap()
         .remove(0);
@@ -824,6 +862,7 @@ mod tests {
             &[mail("mp://tum/inbox/a", "A"), Target::Id("zzzzzzzz".into())],
             &content(None, "x"),
             NOW,
+            &mut |_| {},
         ));
         assert_eq!(why, "no note has the id zzzzzzzz");
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -839,6 +878,7 @@ mod tests {
             &[mail("mp://tum/inbox/a", "A"), mail("mp://tum/inbox/b", "B")],
             &content(Some("s"), ""),
             NOW,
+            &mut |_| {},
         )
         .unwrap();
         let closed = done(
@@ -846,6 +886,7 @@ mod tests {
             &Key::On(NoteKey::message("tum", "a")),
             "three lines",
             LATER,
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(closed.state, NoteState::Done);
@@ -855,15 +896,19 @@ mod tests {
                 &path,
                 &Key::On(NoteKey::message("tum", "<c>")),
                 "x",
-                NOW
+                NOW,
+                &mut |_| {},
             )),
             "no note is on the message c of tum"
         );
-        assert_eq!(clear(&path, &Key::Id("zzzzzzzz".into())).unwrap(), 0);
-        assert_eq!(clear_done(&path).unwrap(), 1);
-        assert_eq!(clear_done(&path).unwrap(), 0);
         assert_eq!(
-            clear(&path, &Key::On(NoteKey::message("tum", "b"))).unwrap(),
+            clear(&path, &Key::Id("zzzzzzzz".into()), &mut |_| {}).unwrap(),
+            0
+        );
+        assert_eq!(clear_done(&path, &mut |_| {}).unwrap(), 1);
+        assert_eq!(clear_done(&path, &mut |_| {}).unwrap(), 0);
+        assert_eq!(
+            clear(&path, &Key::On(NoteKey::message("tum", "b")), &mut |_| {}).unwrap(),
             1
         );
         assert!(load(&path).unwrap().is_empty());
@@ -883,9 +928,17 @@ mod tests {
             ],
             &content(Some("s"), ""),
             NOW,
+            &mut |_| {},
         )
         .unwrap();
-        done(&path, &Key::Id(notes[2].id.clone()), "done", NOW).unwrap();
+        done(
+            &path,
+            &Key::Id(notes[2].id.clone()),
+            "done",
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
         let listed = load(&path).unwrap();
         assert_eq!(select(&listed, None).unwrap().len(), 2);
         let why = refused(select(&listed, Some(&["nope0000".to_string()])));
@@ -895,17 +948,52 @@ mod tests {
             &path,
             Some(&[notes[0].id.clone(), notes[2].id.clone()]),
             LATER,
+            &mut |_| {},
         )
         .unwrap();
         assert!(changed);
         let states: Vec<NoteState> = given.iter().map(|note| note.state).collect();
         assert_eq!(states, [NoteState::Done, NoteState::HandedOff]);
-        let (open, _) = hand_off(&path, None, LATER).unwrap();
+        let (open, _) = hand_off(&path, None, LATER, &mut |_| {}).unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].id, notes[1].id);
-        assert_eq!(hand_off(&path, None, LATER).unwrap(), (Vec::new(), false));
-        let (again, changed) = hand_off(&path, Some(&[notes[2].id.clone()]), LATER).unwrap();
+        assert_eq!(
+            hand_off(&path, None, LATER, &mut |_| {}).unwrap(),
+            (Vec::new(), false)
+        );
+        let (again, changed) =
+            hand_off(&path, Some(&[notes[2].id.clone()]), LATER, &mut |_| {}).unwrap();
         assert_eq!((again.len(), changed), (1, false));
+    }
+
+    /// Writers racing each other publish in the order they wrote: each list
+    /// handed to `publish` holds one note more than the one before, and the
+    /// last is the file as it is, so the last `note.changed` a client hears
+    /// is never a stale list.
+    #[test]
+    fn racing_writers_publish_in_the_order_they_wrote() {
+        let (_dir, path) = file();
+        let published = std::sync::Mutex::new(Vec::<Vec<Note>>::new());
+        std::thread::scope(|scope| {
+            for n in 0..16 {
+                let (path, published) = (&path, &published);
+                scope.spawn(move || {
+                    set(
+                        path,
+                        &[mail(&format!("mp://tum/inbox/m{n}"), "M")],
+                        &content(None, "x"),
+                        NOW,
+                        &mut |notes| published.lock().unwrap().push(notes),
+                    )
+                    .unwrap();
+                });
+            }
+        });
+        let published = published.into_inner().unwrap();
+        let sizes: Vec<usize> = published.iter().map(Vec::len).collect();
+        assert_eq!(sizes, (1..=16).collect::<Vec<_>>());
+        let ids = |notes: &[Note]| notes.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(published.last().unwrap()), ids(&load(&path).unwrap()));
     }
 
     /// A file that does not parse is an error for every edit and is left as
@@ -919,11 +1007,15 @@ mod tests {
                 &path,
                 &[mail("mp://tum/inbox/a", "A")],
                 &content(None, "x"),
-                NOW
+                NOW,
+                &mut |_| {},
             ),
             Err(NotesError::File(_))
         ));
-        assert!(matches!(clear_done(&path), Err(NotesError::File(_))));
+        assert!(matches!(
+            clear_done(&path, &mut |_| {}),
+            Err(NotesError::File(_))
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
         assert_eq!(NoteMarks::load(&path).of_message_id("tum", "a"), None);
     }
@@ -938,6 +1030,7 @@ mod tests {
             &[mail("mp://tum/inbox/a", "A")],
             &content(None, "x"),
             NOW,
+            &mut |_| {},
         )
         .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
@@ -969,6 +1062,7 @@ mod tests {
             &[mail("mp://tum/inbox/a@x", "A")],
             &content(None, "x"),
             NOW,
+            &mut |_| {},
         )
         .unwrap();
         set(
@@ -982,6 +1076,7 @@ mod tests {
             }],
             &content(Some("p"), ""),
             NOW,
+            &mut |_| {},
         )
         .unwrap();
         let marks = NoteMarks::load(&path);

@@ -129,15 +129,43 @@ impl Method for NoteMethod {
     }
 }
 
-/// What one writer leaves behind: the list after it, orphans decided, and
-/// whether the file changed, which is what publishes `note.changed`.
-struct Written<T> {
-    answer: T,
-    listing: Vec<Note>,
-    changed: bool,
+/// What a writer hands the notes file to announce the list it wrote: it
+/// decides each note's selector and orphan mark, publishes `note.changed`
+/// while the file's lock is still held, so two writers' events leave in the
+/// order their writes did, and keeps the list for the answer.
+struct Announcer {
+    canonical: Arc<CanonicalState>,
+    accounts: Arc<Vec<AccountConfig>>,
+    published: Option<Vec<Note>>,
+}
+
+impl Announcer {
+    fn publish(&mut self, mut notes: Vec<Note>) {
+        resolve(&mut notes, &self.accounts);
+        self.canonical.publish(note_changed(notes.clone()));
+        self.published = Some(notes);
+    }
+
+    /// The list after the call: the one published, or the file read now
+    /// when the call wrote nothing.
+    fn listing(self, path: &std::path::Path) -> Result<Vec<Note>, DomainError> {
+        match self.published {
+            Some(notes) => Ok(notes),
+            None => listed(path, &self.accounts),
+        }
+    }
 }
 
 impl NoteMethod {
+    /// An announcer for one writer over the live configuration's accounts.
+    fn announcer(&self, accounts: &Arc<Vec<AccountConfig>>) -> Announcer {
+        Announcer {
+            canonical: Arc::clone(&self.canonical),
+            accounts: Arc::clone(accounts),
+            published: None,
+        }
+    }
+
     async fn set(&self, params: &Value) -> Result<Outcome, DomainError> {
         let request: NoteSetParams = params_of(
             self.spec.name,
@@ -146,8 +174,9 @@ impl NoteMethod {
         )?;
         let content = content(&request.preset, &request.text, &self.configured_presets())?;
         let accounts = self.config.accounts();
+        let mut announcer = self.announcer(&accounts);
         let path = notes::path();
-        let written = blocking(move || {
+        let answer = blocking(move || {
             let target = match (&request.selector, &request.id) {
                 (Some(_), Some(_)) => {
                     return Err(invalid_params(
@@ -172,16 +201,14 @@ impl NoteMethod {
                     }
                 }
             };
-            let set = notes::set(&path, &[target], &content, &notes::now()).map_err(refusal)?;
-            let listing = listed(&path, &accounts)?;
-            Ok(Written {
-                answer: pick(&listing, &set).remove(0),
-                listing,
-                changed: true,
+            let set = notes::set(&path, &[target], &content, &notes::now(), &mut |notes| {
+                announcer.publish(notes)
             })
+            .map_err(refusal)?;
+            Ok(pick(&announcer.listing(&path)?, &set).remove(0))
         })
         .await?;
-        self.wrote(written)
+        self.command(&answer)
     }
 
     async fn set_many(&self, params: &Value) -> Result<Outcome, DomainError> {
@@ -195,8 +222,9 @@ impl NoteMethod {
         }
         let content = content(&request.preset, &request.text, &self.configured_presets())?;
         let accounts = self.config.accounts();
+        let mut announcer = self.announcer(&accounts);
         let path = notes::path();
-        let written = blocking(move || {
+        let answer = blocking(move || {
             let mut targets: Vec<Target> = Vec::new();
             for selector in &request.selectors {
                 let target = resolve_target(selector, request.account.as_deref(), &accounts)?;
@@ -206,18 +234,16 @@ impl NoteMethod {
                     targets.push(target);
                 }
             }
-            let set = notes::set(&path, &targets, &content, &notes::now()).map_err(refusal)?;
-            let listing = listed(&path, &accounts)?;
-            Ok(Written {
-                answer: NoteListing {
-                    notes: pick(&listing, &set),
-                },
-                listing,
-                changed: true,
+            let set = notes::set(&path, &targets, &content, &notes::now(), &mut |notes| {
+                announcer.publish(notes)
+            })
+            .map_err(refusal)?;
+            Ok(NoteListing {
+                notes: pick(&announcer.listing(&path)?, &set),
             })
         })
         .await?;
-        self.wrote(written)
+        self.command(&answer)
     }
 
     async fn list(&self, params: &Value) -> Result<Outcome, DomainError> {
@@ -264,62 +290,52 @@ impl NoteMethod {
             .into());
         }
         let accounts = self.config.accounts();
+        let mut announcer = self.announcer(&accounts);
         let path = notes::path();
-        let written = blocking(move || {
+        let answer = blocking(move || {
             let key = key_of(
                 request.selector.as_deref(),
                 request.id.as_deref(),
                 request.account.as_deref(),
             )?;
-            let closed =
-                notes::done(&path, &key, &request.result, &notes::now()).map_err(refusal)?;
-            let listing = listed(&path, &accounts)?;
-            Ok(Written {
-                answer: pick(&listing, &[closed]).remove(0),
-                listing,
-                changed: true,
+            let closed = notes::done(&path, &key, &request.result, &notes::now(), &mut |notes| {
+                announcer.publish(notes)
             })
+            .map_err(refusal)?;
+            Ok(pick(&announcer.listing(&path)?, &[closed]).remove(0))
         })
         .await?;
-        self.wrote(written)
+        self.command(&answer)
     }
 
     async fn clear(&self, params: &Value) -> Result<Outcome, DomainError> {
         let request: NoteClearParams =
             params_of(self.spec.name, params, &["account", "selector", "id"])?;
         let accounts = self.config.accounts();
+        let mut announcer = self.announcer(&accounts);
         let path = notes::path();
-        let written = blocking(move || {
+        let removed = blocking(move || {
             let key = key_of(
                 request.selector.as_deref(),
                 request.id.as_deref(),
                 request.account.as_deref(),
             )?;
-            let removed = notes::clear(&path, &key).map_err(refusal)?;
-            Ok(Written {
-                answer: NoteCleared { removed },
-                listing: listed(&path, &accounts)?,
-                changed: removed > 0,
-            })
+            notes::clear(&path, &key, &mut |notes| announcer.publish(notes)).map_err(refusal)
         })
         .await?;
-        self.wrote(written)
+        self.command(&NoteCleared { removed })
     }
 
     async fn clear_done(&self, params: &Value) -> Result<Outcome, DomainError> {
         let _: Value = params_of(self.spec.name, params, &[])?;
         let accounts = self.config.accounts();
+        let mut announcer = self.announcer(&accounts);
         let path = notes::path();
-        let written = blocking(move || {
-            let removed = notes::clear_done(&path).map_err(refusal)?;
-            Ok(Written {
-                answer: NoteCleared { removed },
-                listing: listed(&path, &accounts)?,
-                changed: removed > 0,
-            })
+        let removed = blocking(move || {
+            notes::clear_done(&path, &mut |notes| announcer.publish(notes)).map_err(refusal)
         })
         .await?;
-        self.wrote(written)
+        self.command(&NoteCleared { removed })
     }
 
     /// `note.export`, and with `hand_off` `note.handoff`, which marks the
@@ -328,33 +344,29 @@ impl NoteMethod {
         let request: NoteExportParams = params_of(self.spec.name, params, &["ids"])?;
         let presets = self.configured_presets();
         let accounts = self.config.accounts();
+        let mut announcer = self.announcer(&accounts);
         let path = notes::path();
-        let written = blocking(move || {
+        let answer = blocking(move || {
             let ids = request.ids.as_deref();
-            let given = if hand_off {
-                Some(notes::hand_off(&path, ids, &notes::now()).map_err(refusal)?)
+            let picked = if hand_off {
+                let (given, _) = notes::hand_off(&path, ids, &notes::now(), &mut |notes| {
+                    announcer.publish(notes)
+                })
+                .map_err(refusal)?;
+                pick(&announcer.listing(&path)?, &given)
             } else {
-                None
+                notes::select(&listed(&path, &accounts)?, ids).map_err(refusal)?
             };
-            let listing = listed(&path, &accounts)?;
-            let (picked, changed) = match given {
-                Some((given, changed)) => (pick(&listing, &given), changed),
-                None => (notes::select(&listing, ids).map_err(refusal)?, false),
-            };
-            Ok(Written {
-                answer: NoteExport {
-                    text: notes::render(&picked, &presets),
-                    ids: picked.into_iter().map(|note| note.id).collect(),
-                },
-                listing,
-                changed,
+            Ok(NoteExport {
+                text: notes::render(&picked, &presets),
+                ids: picked.into_iter().map(|note| note.id).collect(),
             })
         })
         .await?;
         if hand_off {
-            self.wrote(written)
+            self.command(&answer)
         } else {
-            Ok(Outcome::query(to_value(self.spec.name, &written.answer)?))
+            Ok(Outcome::query(to_value(self.spec.name, &answer)?))
         }
     }
 
@@ -372,14 +384,11 @@ impl NoteMethod {
         self.config.snapshot().config.notes.presets.clone()
     }
 
-    /// The outcome of a writer: `note.changed` published when the file
-    /// changed, then the answer at the revision that left the daemon at.
-    fn wrote<T: serde::Serialize>(&self, written: Written<T>) -> Result<Outcome, DomainError> {
-        if written.changed {
-            self.canonical.publish(note_changed(written.listing));
-        }
+    /// The outcome of a writer, whose `note.changed`, when it wrote, is
+    /// already published: the answer at the revision the daemon is at.
+    fn command<T: serde::Serialize>(&self, answer: &T) -> Result<Outcome, DomainError> {
         Ok(Outcome::command(
-            to_value(self.spec.name, &written.answer)?,
+            to_value(self.spec.name, answer)?,
             self.canonical.revision().get(),
             vec![ResourceId::new(NOTES_RESOURCE)],
         ))

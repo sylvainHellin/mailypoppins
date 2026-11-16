@@ -1071,7 +1071,8 @@ The daemon alone renders it (`src/daemon/notes.rs`, pinned by a snapshot test), 
 A refusal is `-32602` with a sentence: no preset and no text, a preset the configuration lacks (naming the ones it has), a selector that resolves to no message or draft (the resolver's own sentence), a new-email note with no `account`, an id no note has, a note addressed by both `selector` and `id` or by neither, a blank `result`, and a parameter the method does not take; an account the configuration does not name is `-32005`.
 A notes file that does not parse is `-32603`, and the file is left as it is.
 
-Every call that wrote the file publishes `note.changed` with the whole list, `{notes}` newest first with `orphaned` decided, so every client redraws its glyphs and its list from the payload; a `note.clear` that removed nothing and a `note.handoff` that marked nothing publish nothing.
+Every call that wrote the file publishes `note.changed` with the whole list, `{notes}` newest first with `selector` and `orphaned` decided, so every client redraws its glyphs and its list from the payload; a `note.clear` that removed nothing and a `note.handoff` that marked nothing publish nothing.
+The daemon publishes it while it still holds the notes file's lock, so the events of two clients writing at once leave in the order their writes did, and the last `note.changed` a client hears is the file as it is.
 Every writer names the one resource `note:list` in its `affected`.
 
 ### The server search leg
