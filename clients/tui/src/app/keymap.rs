@@ -86,6 +86,9 @@ pub enum KeyCtx {
     EventCard,
     /// Activity-log overlay.
     Activity,
+    /// The notes list overlay (`N`, PERSO-315), hand-dispatched by
+    /// `handle_notes_key`.
+    Notes,
     /// Help overlay.
     Help,
 }
@@ -105,6 +108,7 @@ impl KeyCtx {
             KeyCtx::Headers => "HEADERS",
             KeyCtx::Preview => "BODY",
             KeyCtx::Activity => "ACTIVITY LOG",
+            KeyCtx::Notes => "NOTES",
             KeyCtx::Help => "HELP",
         }
     }
@@ -116,6 +120,7 @@ impl KeyCtx {
         KeyCtx::Sidebar,
         KeyCtx::List,
         KeyCtx::ServerSearch,
+        KeyCtx::Notes,
         KeyCtx::Contacts,
         KeyCtx::Calendar,
         KeyCtx::EventCard,
@@ -323,6 +328,15 @@ pub enum KeyAction {
     ToggleFlag,
     /// Narrow the list to flagged messages, or widen it back (#0079).
     ToggleFlaggedFilter,
+    /// Narrow the list to the messages with a note, or widen it back
+    /// (PERSO-315).
+    ToggleNotedFilter,
+    /// `n`: the note prompt on the cursor row or the selection (PERSO-315):
+    /// a preset letter, Space for free text, a line of text, Enter.
+    NoteMessage,
+    /// `N`: the notes of every account, to edit, drop, copy or hand off to
+    /// the coding agent (PERSO-315).
+    OpenNotes,
     /// Advance the list cursor to the next / previous message from any reading
     /// pane (`J`/`K`, `gj`/`gk`), so triage does not need a focus hop (#0092).
     NextMessage,
@@ -760,6 +774,16 @@ pub static KEYMAP: &[KeyBinding] = &[
         ),
         "Send",
     ),
+    // The notes of every account (PERSO-315): Mail-only, like the list it
+    // jumps back into; the overlay's own keys are the NOTES section.
+    b(
+        "N",
+        Chord::Char('N'),
+        KeyCtx::Global,
+        KeyAction::OpenNotes,
+        "Notes for the agent (every account)",
+        false,
+    ),
     // Family leaders.
     leader('f', KeyCtx::Global, KeyAction::ArmPrefix),
     leader('c', KeyCtx::Global, KeyAction::ArmPrefix),
@@ -1053,6 +1077,18 @@ pub static KEYMAP: &[KeyBinding] = &[
         Guard::NonEmptyList,
         KeyAction::CopyMessageRef,
         "Copy selector (mp://)",
+        false,
+    ),
+    // A note for the coding agent on the message, the draft or the
+    // selection (PERSO-315): a one-line prompt over the list with the
+    // daemon's presets.
+    bg(
+        "n",
+        Chord::Char('n'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::NoteMessage,
+        "Note for the agent (a preset, or Space for free text)",
         false,
     ),
     // PERSO-261: `B` is bound in no context of either client.
@@ -1478,6 +1514,16 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Show flagged only (toggle)",
         false,
     ),
+    // `fN` beside it (PERSO-315): the mail that carries a note, any state.
+    p(
+        "fN",
+        Chord::Char('N'),
+        'f',
+        KeyCtx::List,
+        KeyAction::ToggleNotedFilter,
+        "Show noted only (toggle)",
+        false,
+    ),
     // -- SERVER SEARCH (overlay-internal; hand-dispatched) ----------------
     manual("j/k", KeyCtx::ServerSearch, "Navigate results", true),
     manual(
@@ -1539,6 +1585,50 @@ pub static KEYMAP: &[KeyBinding] = &[
     ),
     manual("Tab", KeyCtx::ServerSearch, "Switch focus", true),
     manual("Esc", KeyCtx::ServerSearch, "Close overlay", true),
+    // -- NOTES (overlay-internal; hand-dispatched, PERSO-315) -------------
+    // The notes of every account, newest first. `a` and `e` open the note
+    // prompt over the list, which takes the keyboard until Enter or Esc.
+    short(
+        manual("j/k", KeyCtx::Notes, "Navigate notes", true),
+        "Navigate",
+    ),
+    short(
+        manual(
+            "Enter",
+            KeyCtx::Notes,
+            "Open the mail (a note for a new email: edit it)",
+            true,
+        ),
+        "Open",
+    ),
+    manual(
+        "a",
+        KeyCtx::Notes,
+        "New note asking for a new email (this account)",
+        false,
+    ),
+    manual("e", KeyCtx::Notes, "Edit the note", false),
+    manual("d", KeyCtx::Notes, "Drop the note", false),
+    manual("D", KeyCtx::Notes, "Clear every done note", false),
+    manual(
+        "y",
+        KeyCtx::Notes,
+        "Copy the batch prompt of the open notes",
+        false,
+    ),
+    short(
+        manual(
+            "x",
+            KeyCtx::Notes,
+            "Hand the open notes to the agent ([agent] open_in)",
+            true,
+        ),
+        "Hand off",
+    ),
+    short(
+        manual("Esc / q", KeyCtx::Notes, "Close the list", true),
+        "Close",
+    ),
     // -- CONTACTS (#0033) -------------------------------------------------
     // Read-only list + fuzzy search + detail. Live only in the Contacts view;
     // dispatched via the pane context like the Mail list. The `/` search input
@@ -2248,6 +2338,7 @@ mod tests {
             KeyCtx::Calendar,
             KeyCtx::EventCard,
             KeyCtx::Activity,
+            KeyCtx::Notes,
             KeyCtx::Help,
         ] {
             // ` 2 SELECTED ` is the widest badge, plus its two trailing

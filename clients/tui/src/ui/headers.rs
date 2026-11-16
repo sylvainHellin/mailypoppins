@@ -200,6 +200,7 @@ mod tests {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            note: None,
             conv: None,
         }
     }

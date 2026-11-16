@@ -36,6 +36,7 @@ fn received(from: &str) -> EmailEntry {
         forwarded: false,
         flagged: false,
         is_invite: false,
+        note: None,
         conv: None,
     }
 }

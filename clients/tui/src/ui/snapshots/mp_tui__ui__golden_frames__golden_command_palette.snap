@@ -23,14 +23,14 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 17 |││                            │Toggle activity log                                       │                            ││
 18 |││                            │Calendar reminders (snooze, dismiss, open)                │                            ││
 19 |││                            │Send current draft (approve + send)                       │                            ││
-20 |││                            │Search all mail (sender, subject, body)                   │                            ││
-21 |││                            │New draft                                                 │                            ││
-22 |││                            │Manage signatures                                         │                            ││
-23 |││                            │Go to mailboxes (sidebar)                                 │                            ││
-24 |││                            │Go to message list                                        │                            ││
-25 |││                            │Go to reader (body)                                       │                            ││
-26 |│╰────────────────────────────│Go to mailbox (fuzzy picker)                              │                            ││
-27 |│╭ Activity ──────────────────│Switch account                                            │                            ││
+20 |││                            │Notes for the agent (every account)                       │                            ││
+21 |││                            │Search all mail (sender, subject, body)                   │                            ││
+22 |││                            │New draft                                                 │                            ││
+23 |││                            │Manage signatures                                         │                            ││
+24 |││                            │Go to mailboxes (sidebar)                                 │                            ││
+25 |││                            │Go to message list                                        │                            ││
+26 |│╰────────────────────────────│Go to reader (body)                                       │                            ││
+27 |│╭ Activity ──────────────────│Go to mailbox (fuzzy picker)                              │                            ││
 28 |││  No activity yet           │type filter  ↑/↓ nav  Enter run  Esc cancel               │                            ││
 29 |││                            ╰──────────────────────────────────────────────────────────╯                            ││
 30 |││                                       ││                                                                           ││

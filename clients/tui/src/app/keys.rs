@@ -28,6 +28,10 @@ impl App {
             Overlay::Signatures(_) => return self.handle_signatures_key(key),
             Overlay::BlockSender(_) => return self.handle_block_chooser_key(key),
             Overlay::BlockedSenders(_) => return self.handle_blocked_senders_key(key),
+            Overlay::Notes(_) => {
+                self.handle_notes_key(key);
+                return None;
+            }
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
             Overlay::EventForm(_) => return self.handle_event_form_key(key),
             Overlay::EventRemove(_) => return self.handle_event_remove_key(key),
@@ -62,6 +66,13 @@ impl App {
         // the jump-to-date prompt above.
         if self.attach_file_input.is_some() {
             return self.handle_attach_file_key(key);
+        }
+
+        // The note prompt (`n`, PERSO-315): it owns the keyboard until it
+        // saves, clears or is cancelled, like the two prompts above.
+        if self.note_prompt.is_some() {
+            self.handle_note_prompt_key(key);
+            return None;
         }
 
         // Contacts view fuzzy-search input (#0033): free-text, hand-dispatched
@@ -885,6 +896,31 @@ impl App {
                 } else {
                     self.set_status("Showing all messages".to_string());
                 }
+            }
+            A::ToggleNotedFilter => {
+                self.pending_prefix = None;
+                self.noted_only = !self.noted_only;
+                let anchor = self.cursor_anchor();
+                let fallback = self.list_index;
+                self.selection.clear();
+                self.rebuild_visible();
+                self.restore_cursor(anchor, fallback);
+                self.headers_scroll = 0;
+                self.preview_scroll = 0;
+                let shown = self.visible.len();
+                if self.noted_only {
+                    self.set_status(format!("Noted only ({shown})"));
+                } else {
+                    self.set_status("Showing all messages".to_string());
+                }
+            }
+            A::NoteMessage => {
+                self.pending_prefix = None;
+                self.open_note_prompt();
+            }
+            A::OpenNotes => {
+                self.pending_prefix = None;
+                self.open_notes();
             }
             A::MovePicker => {
                 self.pending_prefix = None;
@@ -4136,6 +4172,7 @@ mod tests {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            note: None,
             conv: None,
         }
     }

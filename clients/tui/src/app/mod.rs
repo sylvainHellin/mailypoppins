@@ -5,6 +5,7 @@ mod event_form;
 pub(crate) mod jump_date;
 mod keymap;
 mod keys;
+mod notes;
 mod reminders;
 mod types;
 
@@ -15,6 +16,11 @@ pub use keymap::{
     dump_json, dump_markdown, help_sections, hint_bindings, leader_is_view_agnostic,
     palette_actions, palette_match_text, prefix_continuations, resolve, Guard, KeyAction,
     KeyBinding, KeyCtx, KEYMAP,
+};
+#[cfg(test)]
+pub(crate) use notes::presets_answer as notes_presets_answer;
+pub use notes::{
+    note_state_of, NotePrompt, NotePromptOutcome, NoteStage, NoteTarget, NotesOverlay, PreviewNote,
 };
 pub use reminders::SNOOZE_MINUTES;
 pub use types::*;
@@ -124,6 +130,10 @@ pub struct App {
     /// state: it survives a mailbox or account switch, the way a filter the
     /// user armed deliberately should.
     pub flagged_only: bool,
+    /// Narrow the list to the messages that carry a note (PERSO-315), the
+    /// flagged view's twin over `EmailEntry::note`: session state, composed
+    /// with the search and the flagged view as one more intersection.
+    pub noted_only: bool,
     /// The jump-to-date prompt's buffer while it is armed, `None` when it is
     /// not (#0017).
     ///
@@ -144,6 +154,15 @@ pub struct App {
     /// pane is focused. `Some` means armed; the key handler and the list
     /// renderer both read exactly that.
     pub attach_file_input: Option<String>,
+    /// The note prompt `n` opened over the list (PERSO-315), `None` when it
+    /// is not armed: the one-`Option` state machine of the two prompts
+    /// above, borrowing the same one-line slot.
+    pub note_prompt: Option<NotePrompt>,
+    /// The note the reading pane shows above the body (PERSO-315).
+    pub preview_note: PreviewNote,
+    /// Bumped by every `note.changed`, so the reading pane's band reads its
+    /// note again (PERSO-315).
+    pub notes_epoch: u64,
     pub archive_server_name: String,
     pub drafts_dir: Option<PathBuf>,
     pub account_config: mp_core::config::AccountConfig,
@@ -181,6 +200,10 @@ pub struct App {
     /// when the fresh list arrives. Cleared the moment it lands, so it never
     /// hijacks a later unrelated mailbox switch.
     pub pending_select: Option<MessageRef>,
+    /// The row a notes-list jump waits for (PERSO-315), by the selector the
+    /// note carried: a note names its mail by selector, not by store row.
+    /// Consumed like [`Self::pending_select`].
+    pub pending_select_selector: Option<String>,
     pub queued_action: Option<Action>,
     /// The undo-send hold the daemon is counting down, as its last
     /// `send.hold_*` event described it (`SND-04`, P6-U2).
@@ -425,9 +448,13 @@ impl App {
             preview_lines: Default::default(),
             search_query: String::new(),
             flagged_only: false,
+            noted_only: false,
             zoomed: false,
             jump_date_input: None,
             attach_file_input: None,
+            note_prompt: None,
+            preview_note: PreviewNote::default(),
+            notes_epoch: 0,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             account_config: mp_core::config::AccountConfig::default(),
@@ -443,6 +470,7 @@ impl App {
             bg_spin_tick: 0,
             mailbox_load_generation: 0,
             pending_select: None,
+            pending_select_selector: None,
             queued_action: None,
             hold: None,
             holds: Vec::new(),
@@ -515,9 +543,13 @@ impl App {
             preview_lines: Default::default(),
             search_query: String::new(),
             flagged_only: false,
+            noted_only: false,
             zoomed: false,
             jump_date_input: None,
             attach_file_input: None,
+            note_prompt: None,
+            preview_note: PreviewNote::default(),
+            notes_epoch: 0,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             account_config: mp_core::config::AccountConfig::default(),
@@ -533,6 +565,7 @@ impl App {
             bg_spin_tick: 0,
             mailbox_load_generation: 0,
             pending_select: None,
+            pending_select_selector: None,
             queued_action: None,
             hold: None,
             holds: Vec::new(),
@@ -827,6 +860,9 @@ impl App {
             // The event card's keys depend on the event, so the hint bar
             // reads them from the card itself (PERSO-270).
             Overlay::EventCard(_) => Some(KeyCtx::EventCard),
+            // The notes list's keys, unless its prompt has the keyboard.
+            Overlay::Notes(overlay) if overlay.prompt.is_none() => Some(KeyCtx::Notes),
+            Overlay::Notes(_) => None,
             // Modal overlays (confirm / pickers / rsvp / error / compose) have
             // their own inline chips; the hint bar defers to them.
             Overlay::Confirm(_)
@@ -1706,7 +1742,8 @@ impl App {
     }
 
     /// Drop everything unflagged from `visible` when the flagged view is on
-    /// (#0079).
+    /// (#0079), and everything without a note when the noted view is
+    /// (PERSO-315).
     ///
     /// Applied after the search filter rather than inside it, because the two
     /// are independent narrowings of the same list and every path that rebuilds
@@ -1723,6 +1760,13 @@ impl App {
                 emails
                     .get(i)
                     .is_some_and(|e| e.flagged || e.member_mailbox().is_some())
+            });
+        }
+        if self.noted_only {
+            self.visible.retain(|&i| {
+                emails
+                    .get(i)
+                    .is_some_and(|e| e.note.is_some() || e.member_mailbox().is_some())
             });
         }
         if emails.iter().any(|e| e.conv.is_some()) {
@@ -2512,11 +2556,24 @@ impl App {
         self.consume_pending_select();
     }
 
-    /// Put the cursor on [`Self::pending_select`] when the current list holds
+    /// Put the cursor on [`Self::pending_select`] (or on the row
+    /// [`Self::pending_select_selector`] names) when the current list holds
     /// it, clearing the target once it lands (#0008). A no-op when nothing is
     /// pending or the message is not in the visible list yet (a cross-mailbox
     /// jump whose async load has not arrived).
     pub(crate) fn consume_pending_select(&mut self) {
+        if let Some(selector) = self.pending_select_selector.clone() {
+            if let Some(pos) = self.visible.iter().position(|&i| {
+                self.emails
+                    .get(i)
+                    .is_some_and(|e| Self::row_is_selector(e, &selector))
+            }) {
+                self.list_index = pos;
+                self.headers_scroll = 0;
+                self.preview_scroll = 0;
+                self.pending_select_selector = None;
+            }
+        }
         let Some(target) = self.pending_select else {
             return;
         };

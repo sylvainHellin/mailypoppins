@@ -1,10 +1,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
-use super::super::app::{App, EmailEntry, Focus};
+use super::super::app::{App, EmailEntry, Focus, NotePrompt, NoteStage};
 use super::super::theme;
 use super::util::{display_width, pane_border_style, truncate};
 
@@ -28,6 +28,13 @@ const FORWARDED_GLYPH: &str = "\u{f028d}";
 /// as the standout marker it is, orthogonally to the status glyph (a message
 /// can be flagged and unread at once).
 const FLAG_GLYPH: &str = "\u{f024}";
+
+/// The Nerd Font glyphs of a row's note (PERSO-315), drawn after the flag:
+/// a sticky note while it is open, a paper plane once it was handed to the
+/// agent, a checked box once the agent closed it with its result.
+const NOTE_OPEN_GLYPH: &str = "\u{f249}";
+const NOTE_HANDED_OFF_GLYPH: &str = "\u{f1d8}";
+const NOTE_DONE_GLYPH: &str = "\u{f14a}";
 
 /// Nerd Font warning triangle shown before the filename of a draft the index
 /// could not parse (#0080). The whole row is drawn in the theme's `error`
@@ -230,13 +237,13 @@ fn narrow_subject_prefix(
 /// after it stays visible: the label takes what the sender leaves of the
 /// subject column, and never more than half of it while the sender needs it.
 fn member_lead(place: Place, label: &str, email: &EmailEntry, width: usize) -> Vec<Span<'static>> {
-    let flag = if email.flagged { 2 } else { 0 };
+    let marks = 2 * (usize::from(email.flagged) + usize::from(email.note.is_some()));
     let sender = display_width(&format!(
         "{}{}",
         invite_and_attachment_prefix(email),
         member_sender(email)
     ));
-    let avail = width.saturating_sub(flag + display_width(place.branch()) + 2);
+    let avail = width.saturating_sub(marks + display_width(place.branch()) + 2);
     let room = avail.saturating_sub(sender).max(avail / 2);
     vec![
         Span::raw(place.branch()),
@@ -316,18 +323,30 @@ fn subject_cell_with(
     tinted: bool,
     width: usize,
 ) -> Cell<'static> {
+    Cell::from(Line::from(subject_spans(email, lead, body, tinted, width)))
+}
+
+/// The spans of [`subject_cell_with`]: the flag and the note glyph, each
+/// with its space, then `lead`, then the badges and `body` in what is left.
+fn subject_spans(
+    email: &EmailEntry,
+    lead: Vec<Span<'static>>,
+    body: &str,
+    tinted: bool,
+    width: usize,
+) -> Vec<Span<'static>> {
     let text = format!("{}{body}", invite_and_attachment_prefix(email));
     let lead_width: usize = lead.iter().map(|span| display_width(&span.content)).sum();
     let mut spans = Vec::new();
     let mut room = width.saturating_sub(lead_width);
-    if let Some(flag) = flag_span(email) {
-        spans.push(flag);
+    for mark in [flag_span(email), note_span(email)].into_iter().flatten() {
+        spans.push(mark);
         spans.push(Span::raw(" "));
         room = room.saturating_sub(2);
     }
     spans.extend(lead);
     spans.push(member_label_span(truncate(&text, room), tinted));
-    Cell::from(Line::from(spans))
+    spans
 }
 
 /// The coloured flag glyph for a starred message, or `None` for an unflagged
@@ -336,6 +355,64 @@ fn flag_span(email: &EmailEntry) -> Option<Span<'static>> {
     email
         .flagged
         .then(|| Span::styled(FLAG_GLYPH, Style::default().fg(theme::active().warning)))
+}
+
+/// The glyph of a note's state and its colour (PERSO-315): the accent while
+/// it waits, the second accent once handed off, success once done.
+pub(super) fn note_glyph(state: mp_protocol::note::NoteState) -> (&'static str, Color) {
+    use mp_protocol::note::NoteState;
+    let theme = theme::active();
+    match state {
+        NoteState::Open => (NOTE_OPEN_GLYPH, theme.accent),
+        NoteState::HandedOff => (NOTE_HANDED_OFF_GLYPH, theme.accent_alt),
+        NoteState::Done => (NOTE_DONE_GLYPH, theme.success),
+    }
+}
+
+/// The glyph of the note on a row, or `None` for a row with no note, in its
+/// own span so it takes its state's colour.
+fn note_span(email: &EmailEntry) -> Option<Span<'static>> {
+    let (glyph, colour) = note_glyph(email.note?);
+    Some(Span::styled(glyph, Style::default().fg(colour)))
+}
+
+/// The note prompt's one line (PERSO-315), over the list or over the notes
+/// list: the presets to choose from (with `choices`; over the list they are
+/// in [`render_note_presets`]'s box instead), or the instruction being typed
+/// with its cursor.
+pub(super) fn note_prompt_line(prompt: &NotePrompt, width: usize, choices: bool) -> Line<'static> {
+    let accent = Style::default().fg(theme::active().accent);
+    let text = Style::default().fg(theme::active().text);
+    match &prompt.stage {
+        NoteStage::Choose => {
+            let prefix = "note: ";
+            Line::from(vec![
+                Span::styled(prefix, accent),
+                Span::styled(
+                    truncate(
+                        &if choices {
+                            prompt.choices()
+                        } else {
+                            "pick a preset, or Space for text".to_string()
+                        },
+                        width.saturating_sub(prefix.len()),
+                    ),
+                    text,
+                ),
+            ])
+        }
+        NoteStage::Text { text: typed, .. } => {
+            let prefix = prompt.text_prefix();
+            let avail = width
+                .saturating_sub(display_width(&prefix))
+                .saturating_sub(1);
+            Line::from(vec![
+                Span::styled(prefix, accent),
+                Span::styled(super::util::scrolled_input_value(typed, avail), text),
+                Span::styled("\u{2588}", accent),
+            ])
+        }
+    }
 }
 
 /// Build the subject-cell prefix: invite calendar badge (if any) followed by
@@ -435,6 +512,9 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     if app.flagged_only {
         narrowings.push("flagged");
     }
+    if app.noted_only {
+        narrowings.push("noted");
+    }
     let title = if narrowings.is_empty() {
         format!(" {} ", app.active_label())
     } else {
@@ -458,7 +538,8 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let search_visible = app.focus == Focus::Search
         || !app.search_query.is_empty()
         || app.jump_date_input.is_some()
-        || app.attach_file_input.is_some();
+        || app.attach_file_input.is_some()
+        || app.note_prompt.is_some();
     let (search_area, list_area) = if search_visible {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -471,7 +552,13 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     // The paging keys read this back; the table's column header takes a row.
     app.list_viewport_rows = list_area.height.saturating_sub(1);
 
-    if let Some(search_rect) = search_area {
+    if let (Some(search_rect), Some(prompt)) = (search_area, app.note_prompt.as_ref()) {
+        // The note prompt (PERSO-315) takes the slot over the search line.
+        frame.render_widget(
+            Paragraph::new(note_prompt_line(prompt, search_rect.width as usize, false)),
+            search_rect,
+        );
+    } else if let Some(search_rect) = search_area {
         // The attach-file prompt (#0098) and the jump-to-date prompt (#0017)
         // both borrow this one-line slot; only one is ever armed at a time.
         let jumping = app.jump_date_input.as_deref();
@@ -510,6 +597,8 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     if app.visible.is_empty() {
         let msg = if !app.search_query.is_empty() {
             "  No matching emails".to_string()
+        } else if app.noted_only {
+            "  No noted emails (press fN to show all)".to_string()
         } else if app.flagged_only {
             "  No flagged emails (press F to show all)".to_string()
         } else {
@@ -609,6 +698,71 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let mut state = TableState::default();
     state.select(Some(app.list_index));
     frame.render_stateful_widget(table, list_area, &mut state);
+    if let Some(prompt) = app.note_prompt.as_ref() {
+        render_note_presets(prompt, frame, list_area);
+    }
+}
+
+/// The presets of a note prompt still choosing (PERSO-315), one per line in
+/// a box at the bottom of the list, as the which-key popup lists a leader's
+/// keys: the prompt line above the list is too narrow to name them all. A
+/// done note leads with its result and the clear key.
+pub(super) fn render_note_presets(prompt: &NotePrompt, frame: &mut Frame, area: Rect) {
+    if prompt.stage != NoteStage::Choose {
+        return;
+    }
+    let key = Style::default().fg(theme::active().accent);
+    let text = Style::default().fg(theme::active().text);
+    let muted = Style::default().fg(theme::active().text_muted);
+    let width = area.width.saturating_sub(2).min(40) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(result) = prompt
+        .existing
+        .as_ref()
+        .filter(|note| note.state == mp_protocol::note::NoteState::Done)
+        .and_then(|note| note.result.as_deref())
+    {
+        lines.push(Line::from(Span::styled(
+            truncate(&format!("done: {result}"), width),
+            muted,
+        )));
+    }
+    if prompt.existing.is_some() {
+        lines.push(Line::from(vec![
+            Span::styled("\u{232b}     ", key),
+            Span::styled("clear the note", text),
+        ]));
+    }
+    for preset in &prompt.presets {
+        let needs = if preset.needs_text { " \u{2026}" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<6}", preset.key), key),
+            Span::styled(
+                truncate(&format!("{}{needs}", preset.label), width.saturating_sub(6)),
+                text,
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Space ", key),
+        Span::styled("free text", text),
+    ]));
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_width = (width as u16 + 2).min(area.width);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(box_width),
+        y: area.y + area.height.saturating_sub(height),
+        width: box_width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let block = Block::default()
+        .title(" Note ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::active().accent))
+        .style(Style::default().bg(theme::active().panel_bg));
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 /// The columns a list row fills, by the width of the pane: the wide layout
@@ -684,6 +838,7 @@ mod badge_tests {
             forwarded: false,
             flagged: false,
             is_invite,
+            note: None,
             conv: None,
         }
     }
@@ -922,6 +1077,34 @@ mod badge_tests {
         // Orthogonal to the read axis: still starred once read.
         e.read = true;
         assert!(flag_span(&e).is_some());
+    }
+
+    /// The note glyph (PERSO-315) names its state, each in its own colour,
+    /// and follows the star, both costing the subject two columns each.
+    #[test]
+    fn the_note_glyph_names_its_state_after_the_star() {
+        use mp_protocol::note::NoteState;
+        let mut e = entry(false, false);
+        assert!(note_span(&e).is_none(), "a row with no note has no glyph");
+        for (state, glyph, colour) in [
+            (NoteState::Open, NOTE_OPEN_GLYPH, theme::active().accent),
+            (
+                NoteState::HandedOff,
+                NOTE_HANDED_OFF_GLYPH,
+                theme::active().accent_alt,
+            ),
+            (NoteState::Done, NOTE_DONE_GLYPH, theme::active().success),
+        ] {
+            e.note = Some(state);
+            let span = note_span(&e).expect("a noted row shows the glyph");
+            assert_eq!(span.content, glyph, "{state:?}");
+            assert_eq!(span.style.fg, Some(colour), "{state:?}");
+        }
+        e.flagged = true;
+        let spans = subject_spans(&e, Vec::new(), "Hello", false, 40);
+        let contents: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(contents[..4], [FLAG_GLYPH, " ", NOTE_DONE_GLYPH, " "]);
+        assert_eq!(contents[4], "Hello");
     }
 
     /// Each glyph carries its own colour slot, so a theme can tell the three

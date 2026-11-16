@@ -43,6 +43,23 @@ pub(super) fn render_body(app: &mut App, frame: &mut Frame, area: Rect) {
         area
     };
 
+    // The note on the mail (PERSO-315), in a band above the body: what was
+    // asked and, once the agent closed it, its result. Read with `note.get`
+    // for the cursor row by `App::refresh_preview_note`, so a row with no
+    // note costs no call and shows no band.
+    let body_area = match note_band_lines(app, body_area.width.saturating_sub(2) as usize) {
+        Some((title, lines)) => {
+            let band_height = (lines.len() as u16 + 2).min(body_area.height.saturating_sub(3));
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(band_height), Constraint::Min(0)])
+                .split(body_area);
+            render_note_band(title, lines, frame, chunks[0]);
+            chunks[1]
+        }
+        None => body_area,
+    };
+
     // The body is not part of the entry: it is loaded from the blob store for
     // the selected message only and memoised in `App::preview_body`, refreshed
     // at the top of the render pass (#0038 scope item 5).
@@ -148,6 +165,103 @@ impl PreviewLinesCache {
     fn cached_width(&self) -> u16 {
         self.width
     }
+}
+
+/// The note band's title and lines for the cursor row, wrapped to `width`,
+/// or `None` when the row has no note (PERSO-315). The instruction is its
+/// preset's label and the text typed; a done note adds its result.
+fn note_band_lines(app: &App, width: usize) -> Option<(String, Vec<Line<'static>>)> {
+    use mp_protocol::note::NoteState;
+    app.selected_email().filter(|e| e.note.is_some())?;
+    let note = app.preview_note.note.as_ref()?;
+    let (glyph, _) = super::list::note_glyph(note.state);
+    let words = match note.state {
+        NoteState::Open => "Note",
+        NoteState::HandedOff => "Note, handed to the agent",
+        NoteState::Done => "Note, done",
+    };
+    let title = format!(" {glyph} {words} ");
+    let instruction = match (app.preview_note.label.as_deref(), note.text.trim()) {
+        (Some(label), "") => label.to_string(),
+        (Some(label), text) => format!("{label}: {text}"),
+        (None, text) => text.to_string(),
+    };
+    let width = width.max(10);
+    let text = Style::default().fg(theme::active().text);
+    let mut lines: Vec<Line<'static>> = wrap_words(&instruction, width)
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, text)))
+        .collect();
+    if let Some(result) = note.result.as_deref().filter(|r| !r.trim().is_empty()) {
+        let style = Style::default().fg(theme::active().success);
+        for (i, line) in wrap_words(&format!("Result: {result}"), width)
+            .into_iter()
+            .enumerate()
+        {
+            let style = if i == 0 {
+                style.add_modifier(Modifier::BOLD)
+            } else {
+                style
+            };
+            lines.push(Line::from(Span::styled(line, style)));
+        }
+    }
+    if note.orphaned {
+        lines.push(Line::from(Span::styled(
+            "Its mail is gone".to_string(),
+            Style::default().fg(theme::active().text_faint),
+        )));
+    }
+    Some((title, lines))
+}
+
+/// `text` broken into lines of at most `width` columns at spaces, a word
+/// longer than the width cut where it overflows; at most eight lines, the
+/// band giving way to the body after that.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    const MAX_LINES: usize = 8;
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let next = if line.is_empty() {
+                word.chars().count()
+            } else {
+                line.chars().count() + 1 + word.chars().count()
+            };
+            if next > width && !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+            while line.chars().count() > width {
+                let head: String = line.chars().take(width).collect();
+                line = line.chars().skip(width).collect();
+                lines.push(head);
+            }
+        }
+        lines.push(line);
+    }
+    if lines.len() > MAX_LINES {
+        lines.truncate(MAX_LINES);
+        if let Some(last) = lines.last_mut() {
+            last.push('\u{2026}');
+        }
+    }
+    lines
+}
+
+/// Render the bordered note band into `area`, in its state's title.
+fn render_note_band(title: String, lines: Vec<Line<'static>>, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::active().accent_alt))
+        .style(Style::default().bg(theme::active().bg));
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Render the bordered event summary card into `area`.

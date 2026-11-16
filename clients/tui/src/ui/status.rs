@@ -253,6 +253,7 @@ fn mode_label(app: &App, ctx: KeyCtx) -> String {
         KeyCtx::Calendar => "CALENDAR",
         KeyCtx::EventCard => "EVENT",
         KeyCtx::Activity => "ACTIVITY",
+        KeyCtx::Notes => "NOTES",
         KeyCtx::Help => "HELP",
     };
     format!("{base}{zoom}")

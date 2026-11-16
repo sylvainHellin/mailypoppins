@@ -69,6 +69,7 @@ fn entry(subject: &str, id: i64, is_invite: bool) -> EmailEntry {
         forwarded: false,
         flagged: false,
         is_invite,
+        note: None,
         conv: None,
     }
 }
@@ -96,6 +97,7 @@ fn draft_entry(id: &str, status: &str) -> EmailEntry {
         forwarded: false,
         flagged: false,
         is_invite: false,
+        note: None,
         conv: None,
     }
 }

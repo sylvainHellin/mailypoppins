@@ -193,6 +193,11 @@ pub fn route(action: &Action) -> ActionRoute {
             ActionRoute::Daemon(&["signature.read", "signature.create"])
         }
         Action::AttachFileToDraft { .. } => ActionRoute::Daemon(&["draft.attach"]),
+        // The batch prompt, then the clipboard (PERSO-315).
+        Action::CopyNotesExport => ActionRoute::Daemon(&["note.export"]),
+        // The batch prompt, the agent the launcher starts, then the hand-off
+        // mark on what was exported (PERSO-315).
+        Action::HandOffNotes => ActionRoute::Daemon(&["note.export", "note.handoff"]),
     }
 }
 

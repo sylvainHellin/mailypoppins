@@ -1,0 +1,59 @@
+---
+source: clients/tui/src/ui/golden_frames.rs
+expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
+---
+== text 120x40 (trailing spaces trimmed) ==
+00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Mail ─────────────────────────────────╮╭ Headers ──────────────────────────────────────────────────────────────────╮│
+02 |││> 󰅲 Inbox  5                           ││ From: Planung Muller <planung@example.org>                                ││
+03 |││  󰏫 Drafts  2                          ││ To: sylvain@example.org                                                   ││
+04 |││  󰑫 Sent 41                            ││ Subj: Einladung: Baustellenübergabe — 会 議  ✓                              ││
+05 |││  󰄼 Archive 128                        ││ Date: 2026-07-28  [inbox]                                                 ││
+06 |││                                       ││ Attach:  yes                                                             ││
+07 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+08 |│╭ Inbox ────────────────────────────────╮╭ 󰃭 Invitation ─────────────────────────────────────────────────────────────╮│
+09 |││note: pick a preset, or Space for text ││Bauprojekt Ubergabe                                                        ││
+10 |││   DATE       SUBJECT                  ││When: 2026-08-03T09:00:00+02:00  →  2026-08-03T10:30:00+02:00              ││
+11 |││  2026-07-28 󰃭  Einladung: Baustell… ││Where: Raum 2.14, Arcisstrasse                                             ││
+12 |││   2026-07-27 Re: Statusbericht KW31   ││Organizer: planung@example.org                                             ││
+13 |││  2026-07-26  Scan 2026-07-26 (3 Se… ││Your RSVP: No response yet                                                 ││
+14 |││   2026-07-24 Wochenrückblick: sehr l… ││RSVP is emailed to the organizer; not synced to Exchange (no Graph in v1). ││
+15 |││   2026-07-21  Rechnung 2026-0714     │╰───────────────────────────────────────────────────────────────────────────╯│
+16 |││╭ Note ───────────────────────────────╮│╭ Body ─────────────────────────────────────────────────────────────────────╮│
+17 |│││r     Reply …                        │││Danke, sieht gut aus.                                                      ││
+18 |│││d     Decline …                      │││                                                                           ││
+19 |│││s     Summarize                      │││Ein Punkt bleibt offen: der export-Schritt.                                ││
+20 |│││e     Explain                        │││                                                                           ││
+21 |│││p     Review                         │││                                                                           ││
+22 |│││t     Task                           │││                                                                           ││
+23 |│││f     Forward …                      │││                                                                           ││
+24 |│││Space free text                      │││                                                                           ││
+25 |││╰─────────────────────────────────────╯││                                                                           ││
+26 |│╰───────────────────────────────────────╯│                                                                           ││
+27 |│╭ Activity ─────────────────────────────╮│                                                                           ││
+28 |││  No activity yet                      ││                                                                           ││
+29 |││                                       ││                                                                           ││
+30 |││                                       ││                                                                           ││
+31 |││                                       ││                                                                           ││
+32 |│╰───────────────────────────────────────╯│                                                                           ││
+33 |│╭ View ─────────────────────────────────╮│                                                                           ││
+34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
+35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
+37 |││ MAIL   j/k Navigate  v Select  J / K Next/prev  Enter Read  e Editor  r Reply  a Archive  d Delete  Esc Back       ││
+38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
+39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+== style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
+02 |bold@43..50
+03 |bold@43..48
+04 |bold@43..50
+05 |bold@43..50
+06 |bold@43..52
+09 |bold@43..62
+10 |bold@43..49
+11 |bg:surface+fg:selection+bold@2..41 bold@43..50
+12 |bold@43..54
+13 |bold@2..41 bold@43..54
+19 |bg:surface+fg:selection@71..77
+34 |bold@5..11
+37 |bold@2..8 bold@10..13 bold@24..25 bold@34..39 bold@51..56 bold@63..64 bold@73..74 bold@82..83 bold@93..94 bold@103..106

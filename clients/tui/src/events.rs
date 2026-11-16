@@ -51,10 +51,10 @@ use mp_protocol::events::{
     KIND_ACCOUNT_STATE_CHANGED, KIND_CALENDAR_CHANGED, KIND_CALENDAR_REMINDER,
     KIND_CALENDAR_REMINDERS_CHANGED, KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN,
     KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MAIL_ARRIVED,
-    KIND_MESSAGE_BODY_FETCHED, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
-    KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
-    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED,
-    KIND_SYNC_COMPLETED,
+    KIND_MESSAGE_BODY_FETCHED, KIND_MUTATIONS_ROLLED_BACK, KIND_NOTE_CHANGED,
+    KIND_OPERATION_FINISHED, KIND_SENDER_BLOCKLIST_CHANGED, KIND_SEND_HOLD_CANCELLED,
+    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
+    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -416,6 +416,23 @@ impl App {
                 ) {
                     Ok(listed) => self.apply_blocklist(listed.entries),
                     Err(e) => log::warn!("[events] a blocklist_changed payload is not a list: {e}"),
+                }
+                Applied::Ignored
+            }
+            // A note was set, closed, handed off or cleared, here, in another
+            // client or by the agent's `mp notes done` (PERSO-315): the
+            // payload is every note, which the rows' glyphs, an open notes
+            // list and the reading pane's band follow.
+            KIND_NOTE_CHANGED => {
+                match serde_json::from_value::<mp_protocol::note::NoteListing>(
+                    event.payload.clone(),
+                ) {
+                    Ok(listed) => {
+                        if self.apply_notes(listed.notes) {
+                            return Applied::Rows;
+                        }
+                    }
+                    Err(e) => log::warn!("[events] a note.changed payload is not a list: {e}"),
                 }
                 Applied::Ignored
             }

@@ -106,10 +106,10 @@ use crate::tui::ui::golden_frames::{
     calendar_fixture, calendar_view_cancelled_event_detail_app, command_palette_app,
     compose_wizard_with_body_app, contacts_fixture, drafts_fixture, drafts_view_attach_prompt_app,
     frame_snapshot, help_overlay_app, mail_fixture, mail_view_flagged_filter_app,
-    mail_view_jump_date_prompt_app, mail_view_with_selection_app,
-    mail_view_with_the_status_axis_app, mail_view_zoomed_list_app, mail_view_zoomed_preview_app,
-    pin_theme, search_form_empty_app, search_form_filled_app, signatures_overlay_app, HEIGHT,
-    WIDTH,
+    mail_view_jump_date_prompt_app, mail_view_note_prompt_app, mail_view_with_notes_app,
+    mail_view_with_selection_app, mail_view_with_the_status_axis_app, mail_view_zoomed_list_app,
+    mail_view_zoomed_preview_app, notes_overlay_app, pin_theme, search_form_empty_app,
+    search_form_filled_app, signatures_overlay_app, HEIGHT, WIDTH,
 };
 
 /// The one account the fixture configures for a hand-built app that names none,
@@ -498,6 +498,24 @@ fn golden_block_chooser_own_domain_daemon() {
 #[test]
 fn golden_blocked_senders_daemon() {
     same_frame(blocked_senders_app, "blocked senders");
+}
+
+/// The notes on mail (PERSO-315): the row glyphs and the reading pane's band.
+#[test]
+fn golden_mail_view_with_notes_daemon() {
+    same_frame(mail_view_with_notes_app, "mail view with notes");
+}
+
+/// The note prompt over the list, its presets in the box below it.
+#[test]
+fn golden_mail_view_note_prompt_daemon() {
+    same_frame(mail_view_note_prompt_app, "mail view note prompt");
+}
+
+/// The notes list (`N`, PERSO-315).
+#[test]
+fn golden_notes_overlay_daemon() {
+    same_frame(notes_overlay_app, "notes list");
 }
 
 /// The server-search form (#0086b), empty.

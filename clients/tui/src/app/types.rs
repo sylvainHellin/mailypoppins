@@ -188,6 +188,14 @@ pub struct EmailEntry {
     /// and unread at once, so the list renders it as its own coloured marker
     /// rather than folding it into the single status glyph.
     pub flagged: bool,
+    /// Where the note on this row stands (PERSO-315), as the listing carried
+    /// it, `None` when it has none: the list draws its glyph beside the star.
+    ///
+    /// A conversation header carries the most pressing state among its
+    /// members' notes, as `message.list_conversations` decided it. A
+    /// `note.changed` patches it on a flat list and a Drafts list, and
+    /// re-streams a conversation list, which only the daemon can fold.
+    pub note: Option<mp_protocol::note::NoteState>,
     /// True when the message carries an iMIP payload, i.e. the store row has
     /// an `invite.ics` attachment blob (#0029, #0038 scope item 6).
     ///
@@ -374,6 +382,7 @@ pub fn entry_from_conversation(row: ConversationRow, status: &str) -> EmailEntry
     let mut entry = entry_from_row(row.latest, status);
     entry.read = row.unread == 0;
     entry.flagged = row.flagged;
+    entry.note = row.note;
     entry.has_attachments = row.has_attachments;
     entry.conv = Some(ConvRole::Header(ConvHeader {
         thread_id: row.thread_id,
@@ -437,6 +446,7 @@ pub fn entry_from_member(member: &ThreadMessage, thread_id: &str, subject: &str)
         forwarded: member.flags.forwarded,
         flagged: member.flags.flagged,
         is_invite: false,
+        note: member.note,
         draft_id: draft,
         conv: Some(ConvRole::Member {
             thread_id: thread_id.to_string(),
@@ -606,6 +616,7 @@ pub fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
         flagged: row.flags.flagged,
         has_attachments: row.has_attachments,
         is_invite: row.is_invite,
+        note: row.note,
         conv: None,
     }
 }
@@ -650,6 +661,7 @@ pub fn entry_from_draft(row: DraftEntry) -> EmailEntry {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        note: row.note,
         conv: None,
     }
 }
@@ -691,6 +703,7 @@ pub fn entry_from_skip(skip: DraftSkip) -> EmailEntry {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        note: None,
         conv: None,
     }
 }
@@ -2309,6 +2322,16 @@ pub enum Action {
     AttachFileToDraft {
         path: String,
     },
+    /// `y` in the notes list (PERSO-315): the batch prompt for every open
+    /// note, as `note.export` renders it, to the clipboard; no state moves.
+    CopyNotesExport,
+    /// `x` in the notes list (PERSO-315): the open notes to the coding agent.
+    /// `note.export` renders the batch prompt, the launcher writes it to the
+    /// batch file and starts the agent as `[agent] open_in` says, and only a
+    /// launch that went through marks the notes handed off with
+    /// `note.handoff` on the ids it exported. `open_in = "terminal"` hands
+    /// the terminal to the agent until it exits.
+    HandOffNotes,
 }
 
 impl Action {
@@ -2360,6 +2383,9 @@ impl Action {
             Action::SearchResultReply(_)
             | Action::SearchResultForward
             | Action::SearchResultForwardAsAttachment => true,
+            // `agent_launch::launch` -> the agent in the foreground, for
+            // `open_in = "terminal"`; every other place starts it elsewhere.
+            Action::HandOffNotes => true,
 
             // Everything else stays inside the alternate screen. Browser and
             // attachment opens go through `parse::open_file_with_system`,
@@ -2408,7 +2434,8 @@ impl Action {
             | Action::CopyContactEmail { .. }
             | Action::LoadContacts { .. }
             | Action::RefreshContacts
-            | Action::AttachFileToDraft { .. } => false,
+            | Action::AttachFileToDraft { .. }
+            | Action::CopyNotesExport => false,
         }
     }
 }
@@ -2794,6 +2821,9 @@ pub enum Overlay {
     BlockSender(BlockChooser),
     /// The blocked senders, to unblock one (`sb`, PERSO-261).
     BlockedSenders(BlockedSendersOverlay),
+    /// The notes of every account, to edit, drop, copy or hand off to the
+    /// coding agent (`N`, PERSO-315).
+    Notes(Box<super::NotesOverlay>),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
     /// The event form (`n` in the Calendar view, `E` on an event, PERSO-255).
@@ -3352,6 +3382,7 @@ mod tests {
             Action::SearchResultReply(false),
             Action::SearchResultForward,
             Action::SearchResultForwardAsAttachment,
+            Action::HandOffNotes,
         ];
         for action in suspending {
             assert!(
@@ -3392,6 +3423,7 @@ mod tests {
             Action::AttachFileToDraft {
                 path: "/tmp/a.pdf".to_string(),
             },
+            Action::CopyNotesExport,
         ];
         for action in safe {
             assert!(

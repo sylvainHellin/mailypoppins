@@ -1228,6 +1228,8 @@ pub(super) fn handle_action(
         Action::AttachFileToDraft { path } => {
             attach_file_to_draft(app, &path);
         }
+        Action::CopyNotesExport => copy_notes_export(app, terminal),
+        Action::HandOffNotes => hand_off_notes(app, terminal)?,
         Action::ComposeWizardCancel => {
             cancel_compose_wizard(app);
         }
@@ -2356,6 +2358,174 @@ fn fetch_search_hit(app: &mut App) {
         generation,
         message_id,
     );
+}
+
+// ---------------------------------------------------------------------------
+// The notes for the coding agent (PERSO-315)
+// ---------------------------------------------------------------------------
+
+/// `note.export` (or with `hand_off` `note.handoff`) over `ids`, or every open
+/// note when `ids` is `None`.
+fn note_export(
+    app: &App,
+    method: &str,
+    ids: Option<&[String]>,
+) -> std::result::Result<mp_protocol::note::NoteExport, String> {
+    let params = match ids {
+        Some(ids) => serde_json::json!({ "ids": ids }),
+        None => serde_json::json!({}),
+    };
+    let answer = app.daemon_call(method, params)?;
+    serde_json::from_value(answer).map_err(|e| format!("reading {method}: {e}"))
+}
+
+/// `y` in the notes list: the batch prompt for every open note to the
+/// clipboard, changing no note.
+fn copy_notes_export(app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    match note_export(app, mp_protocol::note::METHOD_NOTE_EXPORT, None) {
+        Ok(export) if export.ids.is_empty() => app.set_status("No open notes to copy".to_string()),
+        Ok(export) => {
+            let outcome = super::clipboard::copy_text(terminal, &export.text);
+            let summary = format!("the prompt for {} notes", export.ids.len());
+            let (line, level) = outcome.status(&summary);
+            app.set_status_level(line, level);
+        }
+        Err(e) => app.set_status_level(format!("Cannot export the notes: {e}"), StatusLevel::Error),
+    }
+}
+
+/// `x` in the notes list: the open notes to the coding agent `[agent]`
+/// names, opened where `open_in` says (`agent_launch`).
+///
+/// `note.export` renders the prompt first and changes nothing; the batch
+/// file is written and the agent started; only then does `note.handoff` mark
+/// the notes it exported handed off, so a launch that failed leaves every
+/// note open and says why. In this terminal the agent is spawned with the TUI
+/// suspended, as for `$EDITOR`, and the notes are marked once the spawn went
+/// through, before the agent is waited for.
+fn hand_off_notes(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    use super::agent_launch::{self as launch, Launch, Place};
+    let export = match note_export(app, mp_protocol::note::METHOD_NOTE_EXPORT, None) {
+        Ok(export) if export.ids.is_empty() => {
+            app.set_status("No open notes to hand off".to_string());
+            return Ok(());
+        }
+        Ok(export) => export,
+        Err(e) => {
+            app.set_status_level(format!("Cannot export the notes: {e}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
+    let agent = app.global_config.agent.clone();
+    let place = launch::place(agent.open_in, launch::Env::from_process());
+    let failed = |app: &mut App, e: String| {
+        app.set_status_level(
+            format!("Cannot start the agent: {e}; the notes stay open"),
+            StatusLevel::Error,
+        )
+    };
+    if place == Place::Clipboard {
+        let outcome = super::clipboard::copy_text(terminal, &export.text);
+        if matches!(outcome, super::clipboard::CopyOutcome::Failed { .. }) {
+            let (line, level) = outcome.status("the batch prompt");
+            app.set_status_level(line, level);
+            return Ok(());
+        }
+        mark_handed_off(app, &export.ids, place);
+        return Ok(());
+    }
+    let Some(command) = agent.default_command() else {
+        failed(
+            app,
+            format!("[agent.commands] names no {:?}", agent.default),
+        );
+        return Ok(());
+    };
+    let cwd = launch::agent_cwd(&agent.cwd);
+    if !cwd.is_dir() {
+        failed(
+            app,
+            format!("[agent] cwd {} is not a directory", cwd.display()),
+        );
+        return Ok(());
+    }
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let batch = match launch::write_batch(
+        &launch::batch_dir(),
+        &now.format("%Y%m%d-%H%M%S").to_string(),
+        &export.text,
+    ) {
+        Ok(batch) => batch,
+        Err(e) => {
+            failed(app, e);
+            return Ok(());
+        }
+    };
+    let argv = launch::agent_argv(&command, &batch, &date);
+    match launch::plan(place, argv, &cwd, &agent.default, &export.text, &date) {
+        Launch::Run(argv) => match launch::run_to_end(&argv) {
+            Ok(_) => mark_handed_off(app, &export.ids, place),
+            Err(e) => failed(app, e),
+        },
+        Launch::Herdr { split, line } => match launch::run_in_herdr(&split, &line) {
+            Ok(()) => mark_handed_off(app, &export.ids, place),
+            Err(e) => failed(app, e),
+        },
+        Launch::Foreground { argv, cwd } => {
+            let Some((program, args)) = argv.split_first() else {
+                failed(app, "an empty agent command".to_string());
+                return Ok(());
+            };
+            suspend_terminal(terminal)?;
+            let spawned = std::process::Command::new(program)
+                .args(args)
+                .current_dir(&cwd)
+                .spawn();
+            match spawned {
+                Ok(mut child) => {
+                    mark_handed_off(app, &export.ids, place);
+                    let waited = child.wait();
+                    resume_terminal(terminal)?;
+                    if let Err(e) = waited {
+                        app.set_status_level(format!("Lost the agent: {e}"), StatusLevel::Warning);
+                    }
+                }
+                Err(e) => {
+                    resume_terminal(terminal)?;
+                    failed(app, format!("{program}: {e}"));
+                }
+            }
+        }
+        Launch::Clipboard => {}
+    }
+    Ok(())
+}
+
+/// `note.handoff` on the notes a launch gave the agent, and the status line
+/// that says where it went.
+fn mark_handed_off(app: &mut App, ids: &[String], place: super::agent_launch::Place) {
+    let done = match place {
+        super::agent_launch::Place::Clipboard => format!(
+            "Copied the prompt for {} notes and marked them handed off",
+            ids.len()
+        ),
+        _ => format!(
+            "Handed {} notes to the agent in {}",
+            ids.len(),
+            place.word()
+        ),
+    };
+    match note_export(app, mp_protocol::note::METHOD_NOTE_HANDOFF, Some(ids)) {
+        Ok(_) => app.set_status_level(done, StatusLevel::Success),
+        Err(e) => app.set_status_level(
+            format!("The agent started, but the notes were not marked handed off: {e}"),
+            StatusLevel::Warning,
+        ),
+    }
 }
 
 #[cfg(test)]

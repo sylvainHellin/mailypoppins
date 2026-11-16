@@ -795,6 +795,7 @@ fn surface_headings(section: &str) -> &'static [&'static str] {
         "SERVER SEARCH" => &["Server search overlay"],
         "ACTIVITY LOG" => &["Activity overlay"],
         "EVENT CARD" => &["Event card overlay"],
+        "NOTES" => &["Notes list overlay"],
         other => panic!(
             "no `docs/baselines/pre-daemon/manual-keys.md` surface is mapped to the dump-keys \
              section {other:?}; a new KeyAction::Manual family needs a mapping here and a section \
@@ -853,7 +854,7 @@ fn the_manual_rows_are_exactly_what_this_runs_binary_dumps() {
             .to_string();
         if !matches!(
             title.as_str(),
-            "SERVER SEARCH" | "ACTIVITY LOG" | "EVENT CARD"
+            "SERVER SEARCH" | "ACTIVITY LOG" | "EVENT CARD" | "NOTES"
         ) {
             continue;
         }
@@ -867,18 +868,18 @@ fn the_manual_rows_are_exactly_what_this_runs_binary_dumps() {
 
     assert_eq!(
         derived, printed,
-        "the `KeyAction::Manual` rows of `KEYMAP` and the three hand-dispatched sections of \
+        "the `KeyAction::Manual` rows of `KEYMAP` and the four hand-dispatched sections of \
          `mp dump-keys --json` must be the same set: the checklist below is built from the first \
          and the gate is stated over the second"
     );
     assert_eq!(
         derived.len(),
-        34,
+        43,
         "Phase 0 counted 20 documented-only Manual rows (15 server search, 5 activity log), \
          PERSO-174 added the server search's `cF` and `te`, PERSO-255 the event card's `p`, \
          `Tab` and `m`, PERSO-270 the card's `V`, `E`, `D`, `e`, `j/k` and \
          `Esc / q / Enter`, PERSO-273 the server search's `S`, PERSO-261 its `B`, and PERSO-218 \
-         the activity log's `l`; a new one needs a `docs/baselines/pre-daemon/manual-keys.md` row and a \
+         the activity log's `l`, and PERSO-315 the notes list's nine; a new one needs a `docs/baselines/pre-daemon/manual-keys.md` row and a \
          checklist row"
     );
 }

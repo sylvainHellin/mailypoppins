@@ -143,6 +143,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
     // key comparison. The invite behind the event card is memoised beside it
     // (#0038 scope item 6) and costs nothing for a message that is not one.
     app.refresh_preview_body();
+    app.refresh_preview_note();
     app.refresh_preview_invite();
 
     // Bottom row: the herdr-style mode/hint bar (#0032), drawn as a bordered
@@ -321,6 +322,7 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         Overlay::Signatures(overlay) => overlays::render_signatures_overlay(overlay, frame, area),
         Overlay::BlockSender(chooser) => overlays::render_block_chooser(chooser, frame, area),
         Overlay::BlockedSenders(overlay) => overlays::render_blocked_senders(overlay, frame, area),
+        Overlay::Notes(overlay) => overlays::render_notes(overlay, frame, area),
         Overlay::Rsvp(overlay) => overlays::render_rsvp_overlay(overlay, frame, area),
         Overlay::EventForm(form) => {
             overlays::render_event_form(form, &app.calendar_view.availability, frame, area)

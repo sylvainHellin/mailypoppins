@@ -7,9 +7,9 @@ use ratatui::Frame;
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, BlockChooser,
     BlockedSendersOverlay, CommandPalette, ConfirmDialog, DirPicker, DirPickerMode, EventForm,
-    EventFormRow, EventRemoveOverlay, EventScopeChooser, MailboxPicker, PersistentError,
-    PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay, ThreadEntry,
-    ThreadOverlay,
+    EventFormRow, EventRemoveOverlay, EventScopeChooser, MailboxPicker, NotesOverlay,
+    PersistentError, PickerPurpose, RsvpOverlay, RsvpRow, SignaturesMode, SignaturesOverlay,
+    ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -1002,6 +1002,134 @@ pub(super) fn render_blocked_senders(
             )),
             footer,
         );
+    }
+}
+
+/// The notes of every account (`N`, PERSO-315): one row per note, its state's
+/// glyph, its account, what it is on and its instruction, the cursor row kept
+/// in view; under the rows the cursor note in full, its result when done; the
+/// footer is the keys, or the note prompt `a` and `e` open.
+pub(super) fn render_notes(overlay: &NotesOverlay, frame: &mut Frame, area: Rect) {
+    const MAX_ROWS: usize = 12;
+    const DETAIL_ROWS: usize = 4;
+    let rows = overlay.notes.len().clamp(1, MAX_ROWS);
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        96,
+        (rows + DETAIL_ROWS) as u16 + 5,
+        theme::active().border_focused,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let stack = modal_stack_areas(inner, 1, 1);
+    render_modal_title(frame, stack.header, "Notes for the agent");
+    let width = inner.width as usize;
+    let content = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(DETAIL_ROWS as u16 + 1),
+        ])
+        .split(stack.content);
+
+    let shown = (content[0].height as usize).max(1);
+    let first = overlay.selected.saturating_sub(shown - 1);
+    let lines: Vec<Line> = if overlay.notes.is_empty() {
+        vec![Line::from(Span::styled(
+            "No notes; n on a message sets one, a here asks for a new email",
+            Style::default().fg(theme::active().text_faint),
+        ))]
+    } else {
+        overlay
+            .notes
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(shown)
+            .map(|(i, note)| {
+                let style = if i == overlay.selected {
+                    Style::default()
+                        .fg(theme::active().heading)
+                        .bg(theme::active().surface)
+                } else if note.orphaned {
+                    Style::default().fg(theme::active().text_faint)
+                } else {
+                    Style::default().fg(theme::active().text)
+                };
+                let (glyph, colour) = super::list::note_glyph(note.state);
+                let on = if note.selector.is_none() {
+                    "New email".to_string()
+                } else if note.subject.trim().is_empty() {
+                    "(no subject)".to_string()
+                } else {
+                    note.subject.clone()
+                };
+                let row = format!(
+                    "{}  {on}  \u{b7}  {}",
+                    note.account,
+                    overlay.instruction(note)
+                );
+                Line::from(vec![
+                    Span::styled(glyph, Style::default().fg(colour)),
+                    Span::raw(" "),
+                    Span::styled(truncate(&row, width.saturating_sub(2)), style),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(lines), content[0]);
+
+    if let Some(note) = overlay.selected_note() {
+        let muted = Style::default().fg(theme::active().text_muted);
+        let text = Style::default().fg(theme::active().text);
+        let mut detail: Vec<Line> = vec![Line::from("")];
+        let who = if note.selector.is_none() {
+            format!("A new email from {}", note.account)
+        } else if note.from.trim().is_empty() {
+            format!("To {}", note.to)
+        } else {
+            format!("From {}", note.from)
+        };
+        detail.push(Line::from(Span::styled(truncate(&who, width), muted)));
+        detail.push(Line::from(Span::styled(
+            truncate(&overlay.instruction(note), width),
+            text,
+        )));
+        let last = match (&note.result, note.orphaned) {
+            (_, true) => Some("Its mail is gone; d drops the note".to_string()),
+            (Some(result), _) => Some(format!("Result: {result}")),
+            (None, _) if note.state == mp_protocol::note::NoteState::HandedOff => {
+                Some("Handed to the agent".to_string())
+            }
+            _ => None,
+        };
+        if let Some(last) = last {
+            detail.push(Line::from(Span::styled(
+                truncate(&last, width),
+                Style::default().fg(theme::active().success),
+            )));
+        }
+        frame.render_widget(Paragraph::new(detail), content[1]);
+    }
+
+    if let Some(footer) = stack.footer {
+        let line = match &overlay.prompt {
+            Some(prompt) => super::list::note_prompt_line(prompt, width, true),
+            None => Line::from(Span::styled(
+                truncate(
+                    &format!(
+                        "j/k nav  Enter open  a new  e edit  d drop  D clear done  y copy  \
+                         x hand off {} open  Esc close",
+                        overlay.open_count()
+                    ),
+                    width,
+                ),
+                Style::default().fg(theme::active().text_muted),
+            )),
+        };
+        frame.render_widget(Paragraph::new(line), footer);
     }
 }
 

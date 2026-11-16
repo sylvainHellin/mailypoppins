@@ -18,6 +18,8 @@ mod hold_tests;
 #[cfg(test)]
 mod login_rejected_tests;
 #[cfg(test)]
+mod notes_tests;
+#[cfg(test)]
 mod opening_tests;
 pub mod prefs;
 pub mod queries;

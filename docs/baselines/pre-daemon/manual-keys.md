@@ -128,6 +128,21 @@ Catalogued as `EVENT CARD`, every key below (PERSO-270), and its footer names wh
 - `j` / `Down` and `k` / `Up` scroll the card.
 - `Esc` / `q` / `Enter` close it.
 
+## Notes list overlay
+
+`handle_notes_key` in `clients/tui/src/app/notes.rs`, added by PERSO-315 after the freeze.
+Catalogued as `NOTES`, every key below, and its footer names them.
+
+- `j` / `Down` and `k` / `Up` move the cursor through the notes.
+- `Enter` closes the list and puts the mail view's cursor on the note's mail; on a note asking for a new email it opens the prompt on it instead.
+- `a` opens the note prompt for a new email from the active account.
+- `e` opens the note prompt on the cursor note, its preset and text filled in.
+- `d` drops the cursor note (`note.clear`).
+- `D` clears every done note (`note.clear_done`).
+- `y` copies the batch prompt of the open notes (`note.export`).
+- `x` hands the open notes to the agent `[agent]` names (`note.export`, the launch, then `note.handoff`).
+- `Esc` / `q` close the list; while the prompt is open they are the prompt's, and `Esc` cancels it.
+
 ## Compose wizard
 
 `handle_compose_wizard_key` (1326). The field footers in `src/tui/ui/compose.rs:55-67` advertise most

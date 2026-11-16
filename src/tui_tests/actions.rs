@@ -460,6 +460,19 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         ActionRoute::Daemon(&["draft.attach"]),
         false,
     ),
+    // The batch prompt the daemon renders, to the clipboard (PERSO-315).
+    (
+        "CopyNotesExport",
+        ActionRoute::Daemon(&["note.export"]),
+        false,
+    ),
+    // The batch prompt, the agent launched, then the notes it gave marked
+    // handed off; the agent may run in this terminal (PERSO-315).
+    (
+        "HandOffNotes",
+        ActionRoute::Daemon(&["note.export", "note.handoff"]),
+        true,
+    ),
 ];
 
 /// One of every [`Action`] variant, for the exhaustiveness of the table above.
@@ -591,6 +604,8 @@ fn one_of_each_action() -> Vec<Action> {
         Action::AttachFileToDraft {
             path: "/tmp/a.pdf".to_string(),
         },
+        Action::CopyNotesExport,
+        Action::HandOffNotes,
     ]
 }
 
@@ -666,6 +681,8 @@ fn variant_name(action: &Action) -> &'static str {
         Action::OpenEventSource { .. } => "OpenEventSource",
         Action::EditSignatureFile { .. } => "EditSignatureFile",
         Action::AttachFileToDraft { .. } => "AttachFileToDraft",
+        Action::CopyNotesExport => "CopyNotesExport",
+        Action::HandOffNotes => "HandOffNotes",
     }
 }
 

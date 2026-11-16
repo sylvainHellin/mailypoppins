@@ -461,6 +461,35 @@ presets = [
 ]`} />
     </section>
 
+    <!-- Agent hand-off -->
+    <section>
+      <h2 id="agent">Agent Hand-off</h2>
+      <p>
+        <kbd>x</kbd> in the TUI's notes list (<kbd>N</kbd>) writes the batch prompt to a file under
+        the data directory's <code>notes/</code> and starts the coding agent on it.
+        <code>[agent] default</code> names the command to run, out of <code>[agent.commands]</code>
+        and the built-in <code>pi</code> and <code>claude</code>; in each word <code>{'{batch}'}</code>
+        is the batch file and <code>{'{date}'}</code> today's date. <code>cwd</code> is the directory
+        the agent starts in (default <code>~/pi-remote</code>).
+      </p>
+      <p>
+        <code>open_in</code> says where: <code>auto</code> (the default) splits a pane to the right
+        in Herdr, tmux or WezTerm, whichever the TUI runs inside, else runs the agent in the TUI's
+        own terminal until it exits; <code>herdr</code>, <code>tmux</code>, <code>wezterm</code> and
+        <code>terminal</code> force one of those; <code>paseo</code> starts a background
+        <code>paseo run</code> with the prompt as its task; <code>clipboard</code> only copies the
+        prompt. The notes are marked handed off once the agent started; a launch that failed leaves
+        them open and says why.
+      </p>
+      <ConfigExample title="Claude in a tmux pane" code={`[agent]
+default = "claude"
+open_in = "tmux"
+cwd = "~/notes"
+
+[agent.commands]
+claude = ["claude", "Work through the notes in {batch}."]`} />
+    </section>
+
     <!-- Multi-Account Setup -->
     <section>
       <h2>Multi-Account Setup</h2>

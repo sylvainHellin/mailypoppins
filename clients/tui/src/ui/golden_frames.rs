@@ -252,6 +252,7 @@ pub fn email(
         forwarded: false,
         flagged: false,
         is_invite,
+        note: None,
         conv: None,
     }
 }
@@ -642,6 +643,7 @@ pub fn drafts_fixture() -> App {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        note: None,
         conv: None,
     };
     let draft = EmailEntry {
@@ -665,6 +667,7 @@ pub fn drafts_fixture() -> App {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        note: None,
         conv: None,
     };
     app.emails = Arc::new(vec![skip, draft]);
@@ -764,6 +767,115 @@ pub fn mail_view_flagged_filter_app() -> App {
 #[test]
 pub fn golden_mail_view_flagged_filter() {
     let mut app = mail_view_flagged_filter_app();
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// A note (PERSO-315) as the frames show it, on `key` of the fixture.
+pub fn fixture_note(
+    id: &str,
+    key: &str,
+    state: mp_protocol::note::NoteState,
+) -> mp_protocol::note::Note {
+    mp_protocol::note::Note {
+        id: id.to_string(),
+        selector: Some(format!("mp://work/INBOX/{key}")),
+        account: "work".to_string(),
+        message_id: Some(key.to_string()),
+        draft_id: None,
+        preset: Some("r".to_string()),
+        text: "Yes for Tuesday, ask for the agenda".to_string(),
+        state,
+        result: (state == mp_protocol::note::NoteState::Done)
+            .then(|| "Drafted a reply: mp://work/drafts/d-tuesday".to_string()),
+        created: "2026-11-16T09:00:00Z".to_string(),
+        updated: "2026-11-16T09:30:00Z".to_string(),
+        from: "Stefan Fuchs <s.fuchs@example.org>".to_string(),
+        to: "sylvain@example.org".to_string(),
+        subject: format!("Subject of {key}"),
+        orphaned: false,
+    }
+}
+
+/// The notes on mail (PERSO-315): three rows carrying a note in each state,
+/// one of them flagged too, and the cursor on the done one, whose band above
+/// the body names the instruction and the agent's result.
+pub fn mail_view_with_notes_app() -> App {
+    use mp_protocol::note::NoteState;
+    let mut app = mail_fixture();
+    let mut emails = (*app.emails).clone();
+    for (i, email) in emails.iter_mut().enumerate() {
+        email.selector = Some(format!("mp://work/INBOX/m{i}@example.org"));
+    }
+    emails[1].note = Some(NoteState::Done);
+    emails[2].note = Some(NoteState::Open);
+    emails[2].flagged = true;
+    emails[3].note = Some(NoteState::HandedOff);
+    app.emails = Arc::new(emails);
+    app.email_cache = vec![Some(Arc::clone(&app.emails)), None, None, None];
+    app.rebuild_visible();
+    app.list_index = 1;
+    app.prime_preview_body(BODY_ROW_2);
+    app.prime_preview_note(
+        fixture_note("n1", "m1@example.org", NoteState::Done),
+        Some("Reply".to_string()),
+    );
+    app
+}
+
+#[test]
+pub fn golden_mail_view_with_notes() {
+    let mut app = mail_view_with_notes_app();
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The note prompt `n` opens over the list (PERSO-315), on the presets the
+/// daemon ships built in.
+pub fn mail_view_note_prompt_app() -> App {
+    let mut app = mail_fixture();
+    app.prime_preview_body(BODY_ROW_2);
+    app.note_prompt = Some(crate::app::NotePrompt::new(
+        crate::app::NoteTarget::Rows(vec!["mp://work/INBOX/m1@example.org".to_string()]),
+        mp_core::config::default_note_presets(),
+        None,
+    ));
+    app
+}
+
+#[test]
+pub fn golden_mail_view_note_prompt() {
+    let mut app = mail_view_note_prompt_app();
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The notes list (`N`, PERSO-315): a note in each state and one asking for
+/// a new email, the cursor on the done one, its result under the rows.
+pub fn notes_overlay_app() -> App {
+    use mp_protocol::note::NoteState;
+    let mut app = mail_fixture();
+    let mut new_email = fixture_note("n4", "none", NoteState::Open);
+    new_email.selector = None;
+    new_email.message_id = None;
+    new_email.preset = None;
+    new_email.text = "Ask Anna for the slides of Thursday".to_string();
+    new_email.from = String::new();
+    new_email.subject = String::new();
+    app.overlay = Overlay::Notes(Box::new(crate::app::NotesOverlay {
+        notes: vec![
+            new_email,
+            fixture_note("n3", "m3@example.org", NoteState::HandedOff),
+            fixture_note("n2", "m2@example.org", NoteState::Done),
+            fixture_note("n1", "m1@example.org", NoteState::Open),
+        ],
+        selected: 2,
+        prompt: None,
+        presets: mp_core::config::default_note_presets(),
+    }));
+    app
+}
+
+#[test]
+pub fn golden_notes_overlay() {
+    let mut app = notes_overlay_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 

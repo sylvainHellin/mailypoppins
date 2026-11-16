@@ -13,6 +13,7 @@
       { "key": "!", "action": "Toggle activity log" },
       { "key": "R", "action": "Calendar reminders (snooze, dismiss, open)" },
       { "key": "x", "action": "Send current draft (approve + send)" },
+      { "key": "N", "action": "Notes for the agent (every account)" },
       { "key": "ff", "action": "Search all mail (sender, subject, body)" },
       { "key": "cn", "action": "New draft" },
       { "key": "cs", "action": "Manage signatures" },
@@ -45,6 +46,7 @@
       { "key": "*", "action": "Toggle flag/star" },
       { "key": "M", "action": "Move to mailbox (fuzzy picker)" },
       { "key": "y", "action": "Copy selector (mp://)" },
+      { "key": "n", "action": "Note for the agent (a preset, or Space for free text)" },
       { "key": "B", "action": "Block the sender (address or @domain), its mail to Junk" },
       { "key": "Esc", "action": "Clear selection / return to list" },
       { "key": "gj / gk", "action": "Next / previous message" },
@@ -87,7 +89,8 @@
       { "key": "cA", "action": "Approve draft (in Drafts or a conversation)" },
       { "key": "cD", "action": "Unapprove, back to draft (in Drafts or a conversation)" },
       { "key": "cX", "action": "Send all approved drafts (Drafts only)" },
-      { "key": "fF", "action": "Show flagged only (toggle)" }
+      { "key": "fF", "action": "Show flagged only (toggle)" },
+      { "key": "fN", "action": "Show noted only (toggle)" }
     ]
   },
   {
@@ -112,6 +115,20 @@
       { "key": "S", "action": "Order the results: newest, oldest, best match first" },
       { "key": "Tab", "action": "Switch focus" },
       { "key": "Esc", "action": "Close overlay" }
+    ]
+  },
+  {
+    "title": "NOTES",
+    "bindings": [
+      { "key": "j/k", "action": "Navigate notes" },
+      { "key": "Enter", "action": "Open the mail (a note for a new email: edit it)" },
+      { "key": "a", "action": "New note asking for a new email (this account)" },
+      { "key": "e", "action": "Edit the note" },
+      { "key": "d", "action": "Drop the note" },
+      { "key": "D", "action": "Clear every done note" },
+      { "key": "y", "action": "Copy the batch prompt of the open notes" },
+      { "key": "x", "action": "Hand the open notes to the agent ([agent] open_in)" },
+      { "key": "Esc / q", "action": "Close the list" }
     ]
   },
   {
