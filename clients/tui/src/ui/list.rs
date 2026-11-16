@@ -600,7 +600,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
         } else if app.noted_only {
             "  No noted emails (press fN to show all)".to_string()
         } else if app.flagged_only {
-            "  No flagged emails (press F to show all)".to_string()
+            "  No flagged emails (press fF to show all)".to_string()
         } else {
             format!(
                 "\n  No emails in {}\n\n  Press f to fetch new emails",
