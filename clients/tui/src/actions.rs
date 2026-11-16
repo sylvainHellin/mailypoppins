@@ -2402,7 +2402,8 @@ fn copy_notes_export(app: &mut App, terminal: &mut Terminal<CrosstermBackend<io:
 /// the notes it exported handed off, so a launch that failed leaves every
 /// note open and says why. In this terminal the agent is spawned with the TUI
 /// suspended, as for `$EDITOR`, and the notes are marked once the spawn went
-/// through, before the agent is waited for.
+/// through, before the agent is waited for. `open_in = "clipboard"` starts
+/// no agent: it copies the prompt and marks nothing, as the desktop does.
 fn hand_off_notes(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -2534,12 +2535,12 @@ pub(crate) fn hand_off_with(app: &mut App, launcher: &mut dyn Launcher) -> Resul
     };
     if place == Place::Clipboard {
         let outcome = launcher.copy(&export.text);
-        if matches!(outcome, super::clipboard::CopyOutcome::Failed { .. }) {
-            let (line, level) = outcome.status("the batch prompt");
-            app.set_status_level(line, level);
-            return Ok(());
-        }
-        mark_handed_off(app, &export.ids, place);
+        let summary = format!(
+            "the prompt for {} notes; open_in = clipboard starts no agent",
+            export.ids.len()
+        );
+        let (line, level) = outcome.status(&summary);
+        app.set_status_level(line, level);
         return Ok(());
     }
     let Some(command) = agent.default_command() else {
@@ -2582,17 +2583,11 @@ pub(crate) fn hand_off_with(app: &mut App, launcher: &mut dyn Launcher) -> Resul
 /// `note.handoff` on the notes a launch gave the agent, and the status line
 /// that says where it went.
 fn mark_handed_off(app: &mut App, ids: &[String], place: super::agent_launch::Place) {
-    let done = match place {
-        super::agent_launch::Place::Clipboard => format!(
-            "Copied the prompt for {} notes and marked them handed off",
-            ids.len()
-        ),
-        _ => format!(
-            "Handed {} notes to the agent in {}",
-            ids.len(),
-            place.word()
-        ),
-    };
+    let done = format!(
+        "Handed {} notes to the agent in {}",
+        ids.len(),
+        place.word()
+    );
     match note_export(app, mp_protocol::note::METHOD_NOTE_HANDOFF, Some(ids)) {
         Ok(_) => app.set_status_level(done, StatusLevel::Success),
         Err(e) => app.set_status_level(

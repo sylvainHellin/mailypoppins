@@ -479,7 +479,9 @@ fn handing_off(open_in: mp_core::config::AgentOpenIn) -> (App, Daemon, tempfile:
 
 /// `x`: `note.export`, then the launch, then `note.handoff` on exactly the
 /// exported ids, only once the agent started; a launch that fails marks
-/// nothing and says the notes stay open.
+/// nothing and says the notes stay open, and `open_in = "clipboard"`
+/// starts no agent, so it copies the prompt and marks nothing, as the
+/// desktop does.
 #[test]
 fn x_marks_the_exported_notes_handed_off_only_once_the_agent_started() {
     let _data = mp_core::config::test_env::TestDataDir::new();
@@ -512,6 +514,17 @@ fn x_marks_the_exported_notes_handed_off_only_once_the_agent_started() {
         Some("Handed 2 notes to the agent in a tmux pane")
     );
     assert!(starting.copied.is_empty(), "nothing goes to the clipboard");
+
+    daemon.calls.lock().unwrap().clear();
+    app.global_config.agent.open_in = mp_core::config::AgentOpenIn::Clipboard;
+    let mut copying = Launcher::new(&daemon, None);
+    crate::actions::hand_off_with(&mut app, &mut copying).expect("no terminal error");
+    assert_eq!(calls_and_launches(&daemon), ["note.export"]);
+    assert_eq!(copying.copied, [r#"I have notes ["n1", "n3"]"#]);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Copied the prompt for 2 notes; open_in = clipboard starts no agent")
+    );
 }
 
 /// `a` asks for a new email from the active account; `e` edits the cursor

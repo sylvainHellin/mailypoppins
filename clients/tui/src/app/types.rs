@@ -2330,7 +2330,8 @@ pub enum Action {
     /// batch file and starts the agent as `[agent] open_in` says, and only a
     /// launch that went through marks the notes handed off with
     /// `note.handoff` on the ids it exported. `open_in = "terminal"` hands
-    /// the terminal to the agent until it exits.
+    /// the terminal to the agent until it exits; `open_in = "clipboard"`
+    /// starts none, so it copies the prompt and marks nothing.
     HandOffNotes,
 }
 

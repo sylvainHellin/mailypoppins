@@ -156,7 +156,8 @@ pub enum AgentOpenIn {
     DesktopPanel,
     /// A detached `paseo run`.
     Paseo,
-    /// No agent: the batch prompt is copied to the clipboard.
+    /// No agent: the batch prompt is copied to the clipboard and no note is
+    /// marked handed off.
     Clipboard,
 }
 
