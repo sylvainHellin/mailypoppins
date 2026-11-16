@@ -427,7 +427,8 @@ fn params_of<T: DeserializeOwned>(
         .map_err(|e| invalid_params(format!("the parameters of {method}: {e}")).into())
 }
 
-/// The instruction of a set: a configured preset, a text, or both.
+/// The instruction of a set: a configured preset, a text, either left out;
+/// whether the note ends with one of them is the file's check ([`notes::set`]).
 fn content(
     preset: &Option<String>,
     text: &Option<String>,
@@ -443,13 +444,9 @@ fn content(
             .into());
         }
     }
-    let text = text.as_deref().unwrap_or_default().trim_end().to_string();
-    if preset.is_none() && text.trim().is_empty() {
-        return Err(invalid_params("a note needs a preset or a text").into());
-    }
     Ok(Content {
         preset: preset.clone(),
-        text,
+        text: text.as_deref().map(|text| text.trim_end().to_string()),
     })
 }
 
@@ -722,26 +719,17 @@ mod tests {
         }
     }
 
-    /// A set needs a configured preset or a text; trailing blank lines go.
+    /// A set's preset is a configured one; a text loses its trailing blank
+    /// lines, and a field left out stays out, for an edit by id to keep.
     #[test]
-    fn a_note_needs_a_configured_preset_or_a_text() {
+    fn a_preset_is_a_configured_one_and_a_text_is_trimmed() {
         let presets = crate::config::default_note_presets();
-        let refused = |preset: Option<&str>, text: Option<&str>| {
-            let error = content(
-                &preset.map(str::to_string),
-                &text.map(str::to_string),
-                &presets,
-            )
-            .unwrap_err();
-            format!("{error:?}")
-        };
-        assert!(refused(None, None).contains("a note needs a preset or a text"));
-        assert!(refused(None, Some("  \n")).contains("a note needs a preset or a text"));
-        assert!(refused(Some("q"), None)
+        let error = content(&Some("q".into()), &None, &presets).unwrap_err();
+        assert!(format!("{error:?}")
             .contains("preset q is not configured; the presets are r, d, s, e, p, t, f"));
         let ok = content(&Some("s".into()), &None, &presets).unwrap();
-        assert_eq!(ok.text, "");
+        assert_eq!(ok.text, None);
         let ok = content(&None, &Some("say yes\n\n".into()), &presets).unwrap();
-        assert_eq!(ok.text, "say yes");
+        assert_eq!((ok.preset, ok.text.as_deref()), (None, Some("say yes")));
     }
 }

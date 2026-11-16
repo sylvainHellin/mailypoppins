@@ -1764,7 +1764,7 @@ enum NotesAction {
         #[arg(long)]
         json: bool,
     },
-    /// Change the preset or the text of a note by its id, and open it again
+    /// Change the preset or the text of a note by its id, keeping the one left out, and open it again
     Edit {
         /// The note's id
         id: String,

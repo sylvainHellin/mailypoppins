@@ -1056,10 +1056,11 @@ An orphaned note stays until it is cleared, never deleted silently.
 A selector is read in the grammar `mp show` takes, its account from its own `mp://<account>/` segment or else from `account`, and one whose mailbox is `drafts` names a draft.
 `note.set` resolves it against the account's store, or the drafts directory for a draft, so a note is only set on mail the daemon holds, and keeps the mailbox it found the message in as the hint for the selector its answers print.
 At most one note is on a message or a draft, and setting another, through a selector of any of its copies, replaces its preset and text, takes the snapshot again and opens it, keeping its id and its place.
-`note.set` with `id` does the same to the note with that id, a new-email note included; with neither `selector` nor `id` it adds a new-email note from `account`, which it requires.
+`note.set` with `id` edits the note with that id, a new-email note included, and opens it again: a field the request leaves out keeps its stored value, so `{id, text}` changes the text and keeps the preset, while a set through a selector replaces both.
+With neither `selector` nor `id`, `note.set` adds a new-email note from `account`, which it requires.
 `note.set_many` sets the same note on each selector in one write, two selectors of one message counted once, and refuses them all when one does not resolve.
 `note.get`, `note.done` and `note.clear` read only the account and the key off a selector and read no store: the mailbox and a UID segment are ignored, so the selector of any copy names the note on its message, and an agent holding a stale `mp://<account>/inbox/<key>` closes the note on a message since archived.
-A note needs a preset, a text, or both; a preset is the `key` of one of `note.presets`, and `needs_text` is a hint for a client's prompt, never a refusal.
+A note needs a preset, a text, or both, after an edit by id as after any other set; a preset is the `key` of one of `note.presets`, and `needs_text` is a hint for a client's prompt, never a refusal.
 
 `note.list` answers newest first, by when a note was first set, and `state` keeps the notes in that state.
 `note.export` renders the batch prompt for every open note, or for the notes `ids` names in any state, in list order, and changes nothing; `note.handoff` renders the same text and marks the open notes among them `handed_off`.

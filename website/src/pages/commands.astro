@@ -120,7 +120,7 @@ const blockCommands = [
 const notesCommands = [
   { command: 'mp notes add <selector>... [--preset <key>] [--text <text>] [--json]', description: 'Set a note on one or more received emails or drafts; a mail that has one gets it replaced and opened again' },
   { command: 'mp notes new [--preset <key>] --text <text> [--json]', description: 'Set a note asking for a new email from the account (-A, else the first)' },
-  { command: 'mp notes edit <id> [--preset <key>] [--text <text>] [--json]', description: 'Change the preset or the text of a note by its id, and open it again' },
+  { command: 'mp notes edit <id> [--preset <key>] [--text <text>] [--json]', description: 'Change the preset or the text of a note by its id, keeping the one left out, and open it again' },
   { command: 'mp notes list [--state open|handed_off|done] [--json]', description: 'List the notes, newest first, with the subject of the mail, the instruction and the result; a note whose mail is gone is marked orphaned' },
   { command: 'mp notes export [--handoff] [--id <id>]... [--json]', description: 'Print the batch prompt for the open notes, or for the notes named; --handoff marks the open ones handed off' },
   { command: 'mp notes done <selector>|--id <id> --result <text> [--json]', description: 'Close a note with what was done, the line the clients show on the mail' },

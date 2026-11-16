@@ -213,10 +213,19 @@ impl Stored {
         }
     }
 
-    /// Set the note's instruction again and open it.
-    fn reset(&mut self, content: &Content, now: &str) {
-        self.preset = content.preset.clone();
-        self.text = content.text.clone();
+    /// Set the note's instruction again and open it: with `keep`, a field
+    /// `content` leaves out keeps its stored value, else it is cleared.
+    fn reset(&mut self, content: &Content, keep: bool, now: &str) {
+        match (&content.preset, keep) {
+            (Some(preset), _) => self.preset = Some(preset.clone()),
+            (None, true) => {}
+            (None, false) => self.preset = None,
+        }
+        match (&content.text, keep) {
+            (Some(text), _) => self.text = text.clone(),
+            (None, true) => {}
+            (None, false) => self.text.clear(),
+        }
         self.state = NoteState::Open;
         self.result = None;
         self.updated = now.to_string();
@@ -282,13 +291,15 @@ fn commit(path: &Path, file: &NotesFile, publish: Publish<'_>) -> anyhow::Result
     Ok(())
 }
 
-/// The instruction a note carries.
+/// The instruction a set gives a note: a field left out is none on a note
+/// set on mail or for a new email, and keeps the stored value on a note set
+/// again by its id.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Content {
     /// The key of a configured preset, checked by the caller.
     pub preset: Option<String>,
-    /// What the user typed, `""` for none.
-    pub text: String,
+    /// What the user typed.
+    pub text: Option<String>,
 }
 
 /// The selector the hint names for a message note: the full
@@ -356,7 +367,9 @@ impl Key {
 ///
 /// A target that already has a note replaces its preset and text and opens it
 /// again, keeping its id and its place; a [`Target::Mail`] also takes the
-/// snapshot again. An id no note has is refused and nothing is written.
+/// snapshot again, and a [`Target::Id`] keeps the preset or the text
+/// `content` leaves out. An id no note has, and a note left with neither a
+/// preset nor a text, are refused and nothing is written.
 pub fn set(
     path: &Path,
     targets: &[Target],
@@ -384,7 +397,7 @@ pub fn set(
         let index = match at {
             Some(index) => {
                 let note = &mut file.notes[index];
-                note.reset(content, now);
+                note.reset(content, matches!(target, Target::Id(_)), now);
                 if let Target::Mail {
                     mailbox,
                     from,
@@ -433,7 +446,7 @@ pub fn set(
                     mailbox,
                     account,
                     preset: content.preset.clone(),
-                    text: content.text.clone(),
+                    text: content.text.clone().unwrap_or_default(),
                     state: NoteState::Open,
                     result: None,
                     created: now.to_string(),
@@ -445,6 +458,12 @@ pub fn set(
                 file.notes.len() - 1
             }
         };
+        let note = &file.notes[index];
+        if note.preset.is_none() && note.text.trim().is_empty() {
+            return Err(NotesError::Refused(
+                "a note needs a preset or a text".to_string(),
+            ));
+        }
         set.push(index);
     }
     commit(path, &file, publish)?;
@@ -817,7 +836,7 @@ mod tests {
     fn content(preset: Option<&str>, text: &str) -> Content {
         Content {
             preset: preset.map(str::to_string),
-            text: text.to_string(),
+            text: Some(text.to_string()),
         }
     }
 
@@ -954,6 +973,77 @@ mod tests {
             &mut |_| {},
         ));
         assert_eq!(why, "no note has the id zzzzzzzz");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A note set again by its id keeps the field the call leaves out: a text
+    /// alone keeps the preset, a preset alone keeps the text, and a note left
+    /// with neither is refused. A note set again on its mail replaces both.
+    #[test]
+    fn an_edit_by_id_keeps_what_it_leaves_out() {
+        let (_dir, path) = file();
+        let note = set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A")],
+            &content(Some("r"), "yes"),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap()
+        .remove(0);
+        let edit = |preset: Option<&str>, text: Option<&str>| {
+            set(
+                &path,
+                &[Target::Id(note.id.clone())],
+                &Content {
+                    preset: preset.map(str::to_string),
+                    text: text.map(str::to_string),
+                },
+                LATER,
+                &mut |_| {},
+            )
+        };
+        let edited = edit(None, Some("yes, Thursday")).unwrap().remove(0);
+        assert_eq!(
+            (edited.preset.as_deref(), edited.text.as_str()),
+            (Some("r"), "yes, Thursday")
+        );
+        let edited = edit(Some("d"), None).unwrap().remove(0);
+        assert_eq!(
+            (edited.preset.as_deref(), edited.text.as_str()),
+            (Some("d"), "yes, Thursday")
+        );
+        let replaced = set(
+            &path,
+            &[mail("mp://tum/inbox/a", "A")],
+            &Content {
+                preset: None,
+                text: Some("only this".to_string()),
+            },
+            LATER,
+            &mut |_| {},
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(
+            (replaced.preset, replaced.text.as_str()),
+            (None, "only this")
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            refused(edit(None, Some(""))),
+            "a note needs a preset or a text"
+        );
+        assert_eq!(
+            refused(set(
+                &path,
+                &[mail("mp://tum/inbox/b", "B")],
+                &Content::default(),
+                LATER,
+                &mut |_| {},
+            )),
+            "a note needs a preset or a text"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 

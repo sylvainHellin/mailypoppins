@@ -1063,6 +1063,16 @@ fn mp_notes_round_trip() {
     let new_id = out.split_whitespace().nth(1).unwrap().to_string();
     let (out, _, code) = slice.mp(&["notes", "edit", &new_id, "--text", "Ask Ada and Bo."]);
     assert_eq!(code, Some(0), "{out}");
+    // An edit of the text alone keeps the preset.
+    let thesis_id = lines[0].split_whitespace().nth(1).unwrap().to_string();
+    let (out, _, code) = slice.mp(&[
+        "notes",
+        "edit",
+        &thesis_id,
+        "--text",
+        "Yes, Thursday at two.",
+    ]);
+    assert_eq!(code, Some(0), "{out}");
 
     let (out, _, _) = slice.mp(&["notes", "list"]);
     assert!(
@@ -1073,7 +1083,7 @@ fn mp_notes_round_trip() {
     );
     assert!(
         out.contains(&format!(
-            "{THESIS}\n    Master Thesis Presentation, from Stefan Fuchs <stefan.fuchs@tum.de>\n    [r] Yes, Thursday works.\n"
+            "{THESIS}\n    Master Thesis Presentation, from Stefan Fuchs <stefan.fuchs@tum.de>\n    [r] Yes, Thursday at two.\n"
         )),
         "{out}"
     );

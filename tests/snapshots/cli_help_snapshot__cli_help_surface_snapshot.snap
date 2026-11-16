@@ -434,7 +434,7 @@ Usage: mp notes [OPTIONS] <COMMAND>
 Commands:
   add      Set a note on one or more received emails or drafts
   new      Set a note asking for a new email from the account
-  edit     Change the preset or the text of a note by its id, and open it again
+  edit     Change the preset or the text of a note by its id, keeping the one left out, and open it again
   list     List the notes, newest first
   export   Print the batch prompt for the open notes, or for the notes named
   done     Close a note with what was done
@@ -494,7 +494,7 @@ Options:
   -h, --help               Print help
 
 $ mp notes edit --help
-Change the preset or the text of a note by its id, and open it again
+Change the preset or the text of a note by its id, keeping the one left out, and open it again
 
 Usage: mp notes edit [OPTIONS] <ID>
 
