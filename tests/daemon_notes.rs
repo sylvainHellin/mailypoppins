@@ -287,6 +287,80 @@ async fn a_note_on_a_message_marks_its_row_and_every_client_hears_it() {
     assert_eq!(none, json!({"note": null}));
 }
 
+/// The rows of the two streamed listings carry the note as `message.list`'s
+/// do: a flat row by itself, a conversation by its `latest` row.
+#[tokio::test]
+async fn the_streamed_rows_carry_the_note() {
+    use mp_protocol::listing::{ConversationRowsChunk, MessageRowsChunk};
+    use mp_protocol::{METHOD_MESSAGE_CONVERSATIONS, METHOD_MESSAGE_ROWS, METHOD_STATE_EVENT};
+
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    ok(
+        &mut conn,
+        "note.set",
+        json!({"selector": THESIS, "preset": "s"}),
+    )
+    .await;
+    ok(&mut conn, "state.bootstrap", json!({})).await;
+
+    // Every notification of one stream until its finish, by method.
+    async fn stream(conn: &mut Connection, method: &str) -> Vec<(String, Value)> {
+        let started = ok(
+            conn,
+            method,
+            json!({"account": ACCOUNT, "mailbox": "inbox"}),
+        )
+        .await;
+        let id = started["operation_id"].clone();
+        let mut seen = Vec::new();
+        loop {
+            let notification = tokio::time::timeout(DEADLINE, conn.next_notification())
+                .await
+                .expect("the stream goes on")
+                .expect("the daemon keeps the connection open");
+            if notification.method == METHOD_STATE_EVENT
+                && notification.params["kind"] == json!("operation.finished")
+                && notification.params["payload"]["operation_id"] == id
+            {
+                return seen;
+            }
+            seen.push((notification.method, notification.params));
+        }
+    }
+
+    let mut flat = Vec::new();
+    for (method, params) in stream(&mut conn, "message.list_stream").await {
+        if method == METHOD_MESSAGE_ROWS {
+            let chunk: MessageRowsChunk = serde_json::from_value(params).unwrap();
+            flat.extend(chunk.rows.into_iter().map(|row| (row.selector, row.note)));
+        }
+    }
+    flat.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        flat,
+        [
+            (BUDGET.to_string(), None),
+            (THESIS.to_string(), Some(NoteState::Open))
+        ]
+    );
+
+    let mut grouped = Vec::new();
+    for (method, params) in stream(&mut conn, "message.list_conversations").await {
+        if method == METHOD_MESSAGE_CONVERSATIONS {
+            let chunk: ConversationRowsChunk = serde_json::from_value(params).unwrap();
+            grouped.extend(
+                chunk
+                    .rows
+                    .into_iter()
+                    .map(|row| (row.latest.selector, row.latest.note)),
+            );
+        }
+    }
+    grouped.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(grouped, flat);
+}
+
 /// Setting a note again replaces it and opens it again; `note.done` closes it
 /// with its result, which the row shows as `done`; `note.clear` removes it and
 /// a second clear removes nothing, which publishes nothing.
