@@ -3417,6 +3417,7 @@ pub(crate) fn retire_draft_of_row(
     };
     // As the live send does, before the file is marked or retired.
     crate::voice_snapshot::record_sent(&row.account, &draft, &row.message_id);
+    crate::daemon::notes::draft_sent(&row.account, &draft, &row.message_id);
     if let Err(e) = crate::draft::mark_draft_sent(&draft, Some(&row.message_id)) {
         warn!(
             "[outbox] row {row_id} was sent but {} could not be marked sent: {e:#}",
@@ -3832,6 +3833,8 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         // Before the settle, which may retire the file: the voice snapshot
         // records the body this send went out with. Best effort, logged.
         crate::voice_snapshot::record_sent(&ctx.account.name, draft, &built.message_id);
+        // The draft's note follows the message into Sent (PERSO-315).
+        crate::daemon::notes::draft_sent(&ctx.account.name, draft, &built.message_id);
         if let Err(e) = crate::draft::settle_sent_draft(draft, &report, Some(&built.message_id)) {
             warn!("Sent but failed to retire {}: {e:#}", draft.path.display());
             settle_error = Some(e);

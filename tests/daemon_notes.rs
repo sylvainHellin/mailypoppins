@@ -784,6 +784,80 @@ async fn dropping_the_account_orphans_its_notes() {
     assert_eq!(orphaned, [true, true], "{listed:?}");
 }
 
+/// A draft's note follows the draft when it is sent: it moves onto the
+/// Message-ID the send went out with, keeping its id and state, and every
+/// client hears `note.changed` with it.
+#[tokio::test]
+async fn a_sent_drafts_note_follows_the_message_it_went_out_as() {
+    use support::send_fixture as fixture;
+
+    let tmp = TempDir::new().unwrap();
+    fixture::seed(tmp.path());
+    support::parity::pin_font_size(tmp.path());
+    let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
+    let daemon =
+        DaemonFixture::start_with(tmp.path(), None, &[(fixture::FAKE_TRANSPORT_ENV, &hook)]);
+    let mut conn = connect(tmp.path()).await;
+    let draft = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
+    let set = note(
+        ok(
+            &mut conn,
+            "note.set",
+            json!({"selector": draft, "preset": "p"}),
+        )
+        .await,
+    );
+    assert_eq!(set.draft_id.as_deref(), Some(fixture::APPROVED));
+    let mut watcher = connect(tmp.path()).await;
+    ok(&mut watcher, "state.bootstrap", json!({})).await;
+
+    let started = ok(
+        &mut conn,
+        "send.draft",
+        json!({"account": fixture::ACCOUNT, "selector": draft}),
+    )
+    .await;
+    let id = started["operation_id"].clone();
+    let settled = loop {
+        let status = ok(&mut conn, "operation.status", json!({"operation_id": id})).await;
+        if !matches!(status["state"].as_str(), Some("queued" | "running")) {
+            break status;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let sent = settled["result"]["message_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the send names its Message-ID: {settled}"))
+        .to_string();
+    let key = sent.trim_start_matches('<').trim_end_matches('>');
+
+    let heard = next_notes_event(&mut watcher).await;
+    assert_eq!(heard.notes.len(), 1, "{heard:?}");
+    let moved = &heard.notes[0];
+    assert_eq!(moved.id, set.id);
+    assert_eq!(moved.message_id.as_deref(), Some(key));
+    assert_eq!(moved.draft_id, None);
+    assert_eq!(moved.state, NoteState::Open);
+    assert_eq!(moved.subject, set.subject);
+    // The send files its copy in the store's Sent mailbox, which the note
+    // now names.
+    assert!(!moved.orphaned, "{moved:?}");
+    assert_eq!(
+        moved.selector,
+        Some(format!("mp://{}/sent/{key}", fixture::ACCOUNT))
+    );
+    let listed = listing(ok(&mut conn, "note.list", json!({})).await);
+    assert_eq!(listed.notes, heard.notes);
+    let got = ok(
+        &mut conn,
+        "note.get",
+        json!({"selector": format!("mp://{}/sent/{key}", fixture::ACCOUNT)}),
+    )
+    .await;
+    assert_eq!(got["note"]["id"], json!(set.id), "{got}");
+    drop(daemon);
+}
+
 /// The notes outlive the store: with the store deleted and the daemon started
 /// again, as a failed integrity check would have it, every note is still
 /// listed with the snapshot it took. A store that is not there yet orphans

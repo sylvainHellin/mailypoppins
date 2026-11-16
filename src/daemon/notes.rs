@@ -40,7 +40,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use log::warn;
@@ -469,6 +469,80 @@ pub fn done(path: &Path, key: &Key, result: &str, now: &str, publish: Publish<'_
     let closed = note.to_wire();
     commit(path, &file, publish)?;
     Ok(closed)
+}
+
+/// Move the note on the draft `draft_id` of `account` onto the message the
+/// draft went out as, `message_id` in either form, so the note and its result
+/// follow the mail into Sent rather than being orphaned with the retired
+/// draft. The note keeps its id, its state, its result and its snapshot, and
+/// takes the Sent mailbox as its hint. Answers whether a note moved; a draft
+/// with no note writes nothing.
+pub fn follow_sent_draft(
+    path: &Path,
+    account: &str,
+    draft_id: &str,
+    message_id: &str,
+    now: &str,
+    publish: Publish<'_>,
+) -> Result<bool> {
+    let _turn = locked();
+    let mut file = read(path)?;
+    let draft = NoteKey::draft(account, draft_id);
+    let Some(note) = file
+        .notes
+        .iter_mut()
+        .find(|note| note.on.as_ref() == Some(&draft))
+    else {
+        return Ok(false);
+    };
+    note.on = Some(NoteKey::message(account, message_id));
+    note.mailbox = Some(crate::catalogue::FolderRole::Sent.as_str().to_string());
+    note.updated = now.to_string();
+    commit(path, &file, publish)?;
+    Ok(true)
+}
+
+/// Who hears a change the notes file takes outside a `note.*` call: the
+/// `note.*` family installs it when it is registered ([`listen`]), so a send
+/// that moves a draft's note publishes `note.changed` as a `note.*` writer
+/// does, under the lock.
+type Listener = Arc<dyn Fn(Vec<Note>) + Send + Sync>;
+
+static LISTENER: Mutex<Option<Listener>> = Mutex::new(None);
+
+/// Install the process's [`Listener`], replacing any before it.
+pub fn listen(listener: Listener) {
+    *LISTENER.lock().unwrap_or_else(|p| p.into_inner()) = Some(listener);
+}
+
+/// What every send calls once `draft` went out as `message_id` from
+/// `account`, beside the voice snapshot's record: the draft's note, if it has
+/// one, moves onto the message ([`follow_sent_draft`]) and the listener hears
+/// the list. Best effort and logged, as the message is out either way; a
+/// draft with no frontmatter id has no note.
+pub fn draft_sent(account: &str, draft: &crate::types::EmailDraft, message_id: &str) {
+    let Some(id) = draft
+        .frontmatter
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let listener = LISTENER.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let moved = follow_sent_draft(&path(), account, id, message_id, &now(), &mut |notes| {
+        if let Some(listener) = &listener {
+            listener(notes);
+        }
+    });
+    if let Err(error) = moved {
+        let why = match error {
+            NotesError::Refused(why) => why,
+            NotesError::File(e) => format!("{e:#}"),
+        };
+        warn!("[notes] the draft {id} of {account} was sent but its note stayed on it: {why}");
+    }
 }
 
 /// Remove the note `key` names, answering how many went: `0` when none
@@ -964,6 +1038,60 @@ mod tests {
         let (again, changed) =
             hand_off(&path, Some(&[notes[2].id.clone()]), LATER, &mut |_| {}).unwrap();
         assert_eq!((again.len(), changed), (1, false));
+    }
+
+    /// A sent draft's note moves onto the message it went out as, keeping
+    /// its id, its state and its snapshot and naming the Sent copy; a draft
+    /// with no note, or another account's draft, moves nothing.
+    #[test]
+    fn a_sent_drafts_note_follows_its_message() {
+        let (_dir, path) = file();
+        let review = set(
+            &path,
+            &[Target::Mail {
+                on: NoteKey::draft("tum", "d1"),
+                mailbox: None,
+                from: "sylvain@tum.de".to_string(),
+                to: "ada@example.com".to_string(),
+                subject: "Re: Review".to_string(),
+            }],
+            &content(Some("p"), ""),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap()
+        .remove(0);
+        let mut heard = Vec::new();
+        let follow = |account: &str, id: &str, heard: &mut Vec<Vec<Note>>| {
+            follow_sent_draft(&path, account, id, "<sent-1@tum.de>", LATER, &mut |notes| {
+                heard.push(notes)
+            })
+            .unwrap()
+        };
+        assert!(!follow("tum", "d2", &mut heard));
+        assert!(!follow("perso", "d1", &mut heard));
+        assert!(heard.is_empty());
+        assert!(follow("tum", "d1", &mut heard));
+        let moved = &heard[0][0];
+        assert_eq!(moved.id, review.id);
+        assert_eq!(moved.message_id.as_deref(), Some("sent-1@tum.de"));
+        assert_eq!(moved.draft_id, None);
+        assert_eq!(
+            moved.selector.as_deref(),
+            Some("mp://tum/sent/sent-1@tum.de")
+        );
+        assert_eq!(
+            (moved.state, moved.subject.as_str()),
+            (NoteState::Open, "Re: Review")
+        );
+        assert_eq!(moved.updated, LATER);
+        let marks = NoteMarks::load(&path);
+        assert_eq!(marks.of_draft("tum", "d1"), None);
+        assert_eq!(
+            marks.of_message_id("tum", "sent-1@tum.de"),
+            Some(NoteState::Open)
+        );
+        assert!(!follow("tum", "d1", &mut heard));
     }
 
     /// Writers racing each other publish in the order they wrote: each list

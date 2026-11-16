@@ -12,7 +12,7 @@ Nothing in the store may be the only copy of anything the user typed.
 They are Markdown files with YAML frontmatter under `<account_dir>/drafts/`, written by `mp new` and by `$EDITOR`, and the `drafts` table is a derived index over them.
 Each draft is mirrored to the account's server Drafts folder (PERSO-139, `src/draft_mirror/`): the copy there is a rendering of the file, and a change made on the server reaches mp only by rewriting the file.
 - What the user typed outside a draft lives in the data directory beside the stores, never in them: the blocked senders in `<data_dir>/blocked-senders.json` (PERSO-261) and the notes on mail in `<data_dir>/notes.json` (PERSO-315), each replaced atomically, private to the user, and read and written by the daemon alone.
-A note is held by the account and `Message-ID` of the message it is on, or by the id of its draft, never by a mailbox, so it follows its message when it is archived and every copy carries it.
+A note is held by the account and `Message-ID` of the message it is on, or by the id of its draft, never by a mailbox, so it follows its message when it is archived and every copy carries it; a sent draft's note moves onto the `Message-ID` it went out with.
 A note keeps a snapshot of the headers of the mail it is on, so it survives a rebuilt store; a note whose mail is gone from every mailbox is marked orphaned and stays until it is cleared, never deleted silently.
 - Received mail is read-only locally.
 The client never edits a message body; it changes flags and mailbox membership, and the server is told immediately.

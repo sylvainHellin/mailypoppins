@@ -85,6 +85,13 @@ pub fn register(
     config: Arc<ConfigStore>,
     canonical: Arc<CanonicalState>,
 ) {
+    // A send moves a draft's note onto the message it went out as, outside
+    // any `note.*` call; the list it leaves is published as a writer's is.
+    let (accounts, published) = (Arc::clone(&config), Arc::clone(&canonical));
+    notes::listen(Arc::new(move |mut listed: Vec<Note>| {
+        resolve(&mut listed, &accounts.accounts());
+        published.publish(note_changed(listed));
+    }));
     for spec in NOTE_METHOD_SPECS {
         dispatcher.register(Arc::new(NoteMethod {
             spec,

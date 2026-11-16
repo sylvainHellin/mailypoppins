@@ -1043,6 +1043,7 @@ The agent never sends or approves anything, and no method here sends.
 A `Note` is `{id, selector?, account, message_id?, draft_id?, preset?, text, state, result?, created, updated, from, to, subject, orphaned}`.
 A note on a received message is held by its `account` and `message_id`, the `Message-ID` without its angle brackets, and not by a mailbox: it follows the message when it is archived or moved.
 A note on a draft is held by its `account` and `draft_id`, and a note asking for a new email carries neither.
+When a draft with a note is sent, by any send path, the note moves onto the `Message-ID` the draft went out with, keeping its id, its state, its result and its snapshot, and the daemon publishes `note.changed`, so the note follows the mail into Sent rather than being orphaned with the retired draft.
 A client matches a note against its rows by `account` with `message_id` (against `message_key` of the row's `message_id`) or `draft_id`, never by `selector`, which would miss a copy in another mailbox and a UID-qualified twin row.
 `selector` is decided at every answer: the full `mp://<account>/<mailbox>/<key>` of the copy in the mailbox the note was set in when that mailbox still holds one, else of the account's first copy, with a UID segment when that mailbox holds the message twice, and the draft selector for a draft; it is never the elided form.
 `id` is eight characters, a letter first; `state` is `open`, `handed_off` or `done`; `created` and `updated` are RFC 3339 in UTC, to the second.
