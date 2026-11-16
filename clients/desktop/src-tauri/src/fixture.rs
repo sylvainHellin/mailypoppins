@@ -7258,9 +7258,10 @@ fn one_line(error: &anyhow::Error) -> String {
 }
 
 /// The daemon's `index_dir` over one directory: the rows that parse, newest
-/// file first then by id, and the files that do not.
+/// created first ([`mp_core::draft::created_at`]) then by id, and the files
+/// that do not.
 fn scan_drafts(account: &str, dir: &Path) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
-    let mut rows: Vec<(SystemTime, DraftEntry)> = Vec::new();
+    let mut rows: Vec<(i64, DraftEntry)> = Vec::new();
     let mut skipped = Vec::new();
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
@@ -7271,14 +7272,17 @@ fn scan_drafts(account: &str, dir: &Path) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
         let mtime = entry
             .metadata()
             .and_then(|m| m.modified())
-            .unwrap_or(UNIX_EPOCH);
+            .ok()
+            .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs() as i64);
         match mp_core::draft::parse_email_draft(&path) {
             Ok(draft) => {
                 let fm = &draft.frontmatter;
                 let id = fm.id.clone().unwrap_or_else(|| stem_of(&shown));
                 let filled = |v: &Option<String>| v.clone().filter(|v| !v.trim().is_empty());
+                let file_name = entry.file_name().to_string_lossy().into_owned();
                 rows.push((
-                    mtime,
+                    mp_core::draft::created_at(fm.date.as_deref(), &file_name, mtime),
                     DraftEntry {
                         selector: Selector::for_draft(account, &id).to_string(),
                         id,

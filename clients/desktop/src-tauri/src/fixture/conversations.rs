@@ -313,7 +313,7 @@ mod tests {
     fn draft() -> Vec<DraftMember> {
         vec![DraftMember {
             id: "offsite-note".to_string(),
-            date: "2026-09-27T18:40:00".to_string(),
+            date: "2026-09-27T18:40:00Z".to_string(),
             thread_id: CANNED_THREAD.to_string(),
             path: "/fixture/drafts/offsite-note.md".to_string(),
         }]

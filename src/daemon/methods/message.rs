@@ -1431,11 +1431,12 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
 }
 
 /// Put the drafts that answer or forward one of `ids` among `members`, each
-/// after every member whose `date_sort` is not later than the draft file's
-/// `mtime` (#0142).
+/// after every member whose `date_sort` is not later than the draft's
+/// creation time ([`crate::draft::created_at`], #0142), so an edit never
+/// moves a draft past a message that arrived after it was written.
 ///
 /// `members` is oldest first by `date_sort`, `NULL` first, so the place is a
-/// partition point; drafts of one `mtime` keep the index's order. A draft
+/// partition point; drafts created in one second are ordered by id. A draft
 /// member is drawn from the index: its id, `mailbox: "drafts"`, no
 /// `Message-ID` of its own yet, the account's address as its sender (so it is
 /// `own`), and the frontmatter `date` as its date.
@@ -1446,15 +1447,26 @@ fn join_drafts(
     members: &mut Vec<(Option<i64>, ThreadMessage)>,
 ) -> Result<(), RpcError> {
     let name = &account.name;
-    let mut drafts: Vec<crate::store::drafts::LinkedDraft> =
-        crate::store::drafts::linked(store, name)
-            .map_err(|e| internal(format!("reading the drafts index of {name}: {e:#}")))?
-            .into_iter()
-            .filter(|draft| ids.contains(draft.source.as_str()))
-            .collect();
-    drafts.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.id.cmp(&b.id)));
-    for draft in drafts {
-        let at = members.partition_point(|(stamped, _)| *stamped <= Some(draft.mtime));
+    let drafts: Vec<crate::store::drafts::LinkedDraft> = crate::store::drafts::linked(store, name)
+        .map_err(|e| internal(format!("reading the drafts index of {name}: {e:#}")))?
+        .into_iter()
+        .filter(|draft| ids.contains(draft.source.as_str()))
+        .collect();
+    let created = |draft: &crate::store::drafts::LinkedDraft| {
+        let file_name = std::path::Path::new(&draft.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        crate::draft::created_at(draft.date.as_deref(), &file_name, draft.mtime)
+    };
+    let mut drafts: Vec<(i64, crate::store::drafts::LinkedDraft)> = drafts
+        .into_iter()
+        .map(|draft| (created(&draft), draft))
+        .collect();
+    drafts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    for (created, draft) in drafts {
+        let at = members.partition_point(|(stamped, _)| *stamped <= Some(created));
         let member = ThreadMessage {
             id: 0,
             mailbox: DRAFTS_MAILBOX.to_string(),
@@ -1468,7 +1480,7 @@ fn join_drafts(
             path: Some(draft.path),
             draft_id: Some(draft.id),
         };
-        members.insert(at, (Some(draft.mtime), member));
+        members.insert(at, (Some(created), member));
     }
     Ok(())
 }

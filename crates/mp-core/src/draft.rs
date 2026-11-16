@@ -2212,6 +2212,26 @@ pub fn parse_email_draft_content(path: &Path, content: &str) -> Result<EmailDraf
     })
 }
 
+/// When a draft was created, in unix seconds: what every draft listing orders
+/// by, newest first, so an edit or a status change never moves a draft.
+///
+/// The frontmatter `date:` first, which `mp new`, the compose wizards, a reply,
+/// a forward and the draft mirror's import all write (RFC 2822; RFC 3339 is
+/// read too, for a hand-written one). Else the `YYYY-MM-DD-HHMM` UTC prefix
+/// a reply or forward file name carries, which is all an older one has (or a
+/// bare `YYYY-MM-DD`, its midnight). Else the file's mtime, the one source an
+/// edit moves, for a draft written by hand with neither.
+///
+/// The date and the file name are read by [`crate::parse::resolve_date`], the
+/// rule every list row's `date_sort` comes from, so the TUI's date column and
+/// this order agree.
+pub fn created_at(date: Option<&str>, file_name: &str, mtime: i64) -> i64 {
+    let date = date.map(|date| date.trim().to_string());
+    let (_, sort) = crate::parse::resolve_date(&date, &date, Path::new(file_name));
+    chrono::NaiveDateTime::parse_from_str(&sort, "%Y-%m-%dT%H:%M:%S")
+        .map_or(mtime, |at| at.and_utc().timestamp())
+}
+
 pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
@@ -4798,5 +4818,59 @@ second\r\n\
                 .as_deref(),
             Some("d0")
         );
+    }
+
+    /// The creation time is the frontmatter `date:` (RFC 2822 as `mp new`
+    /// writes it, or RFC 3339), else the `YYYY-MM-DD-HHMM_` UTC prefix a
+    /// reply or forward file name carries, else the file's mtime.
+    #[test]
+    fn the_creation_time_falls_back_from_the_date_to_the_file_name_to_the_mtime() {
+        let mtime = 1_900_000_000;
+        // 2026-06-01 09:00:00 UTC.
+        let june = 1_780_304_400;
+        assert_eq!(
+            created_at(Some("Mon, 01 Jun 2026 11:00:00 +0200"), "x.md", mtime),
+            june
+        );
+        assert_eq!(
+            created_at(Some("2026-06-01T11:00:00+02:00"), "x.md", mtime),
+            june
+        );
+        // The date wins over the file name.
+        assert_eq!(
+            created_at(
+                Some("Mon, 01 Jun 2026 09:00:00 +0000"),
+                "2020-01-01-0000_alice_hello.md",
+                mtime
+            ),
+            june
+        );
+        // No date, or one that does not parse: the file name's prefix, UTC.
+        assert_eq!(
+            created_at(None, "2026-06-01-0900_alice_hello.md", mtime),
+            june
+        );
+        assert_eq!(
+            created_at(
+                Some("2026-07-01 09:00"),
+                "2026-06-01-0900_alice_email-2.md",
+                mtime
+            ),
+            june
+        );
+        assert_eq!(
+            created_at(Some("  "), "2026-06-01-0900_a_b.md", mtime),
+            june
+        );
+        // Neither: the mtime.
+        assert_eq!(created_at(None, "note.md", mtime), mtime);
+        assert_eq!(created_at(Some("soon"), "note.md", mtime), mtime);
+        assert_eq!(created_at(None, "2026-06-01-0900.md", mtime), june);
+        // A bare day prefix is that day's midnight, UTC.
+        assert_eq!(
+            created_at(None, "2026-06-01-notes.md", mtime),
+            june - 9 * 3600
+        );
+        assert_eq!(created_at(None, "2026-13-01-0900_a_b.md", mtime), mtime);
     }
 }
