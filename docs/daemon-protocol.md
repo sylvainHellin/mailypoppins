@@ -1017,6 +1017,7 @@ After every tick that ran a body, each ready account with a server judges the In
 `sender.unblock` only removes the entry and the moves still owed for it: nothing moves back.
 An owed-moves file that does not parse never fails an unblock: the daemon logs a warning and leaves the file as it is.
 Both writers publish `sender.blocklist_changed` `{entries}` when the list changed, and the mailbox counts of every account whose mail moved.
+The daemon publishes `sender.blocklist_changed` while it still holds the list's lock, so the events of two edits made at once leave in the order the edits did, and the last a client hears is the list as it is.
 As for a `message.move`, each moved message is announced as a `state.remove` of its Inbox row and the Junk listing as a `state.invalidate` with scope `{"query": "list"}` (PERSO-286), so every client, the one that blocked included, drops the rows from what it holds without reloading on the answer.
 
 ### The `note.*` family

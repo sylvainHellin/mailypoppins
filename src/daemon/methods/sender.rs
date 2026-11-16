@@ -24,8 +24,9 @@
 //! block of one of the user's own addresses or of its domain, which would
 //! move the user's own mail to Junk ([`mp_core::blocklist::checked`]): the
 //! own addresses are every configured account's `default_from`. Both writers publish
-//! `sender.blocklist_changed` with the whole list when it changed, and the
-//! counts of every account whose mail moved.
+//! `sender.blocklist_changed` with the whole list when it changed, while the
+//! list's lock is held so the last one a client hears is the list as it is,
+//! and the counts of every account whose mail moved.
 
 use std::sync::Arc;
 
@@ -147,10 +148,13 @@ impl SenderMethod {
             .filter(|account| !account.is_local_only())
             .cloned()
             .collect();
+        let canonical = Arc::clone(&self.canonical);
         let (edit, moved, skipped) = blocking(move || {
             let list = senders::list_path();
-            let edit = senders::block(&list, &entry)
-                .map_err(|e| DomainError::from(internal(format!("{e:#}"))))?;
+            let edit = senders::block(&list, &entry, &mut |entries| {
+                canonical.publish(blocklist_changed(entries));
+            })
+            .map_err(|e| DomainError::from(internal(format!("{e:#}"))))?;
             let mut moved = Vec::new();
             let mut skipped = Vec::new();
             for account in &accounts {
@@ -246,9 +250,6 @@ impl SenderMethod {
                     .await;
             }
         }
-        if edit.changed {
-            self.canonical.publish(blocklist_changed(&edit.entries));
-        }
         let moved: Vec<BlockMoved> = moved.into_iter().map(|(row, _)| row).collect();
         let mut affected = vec![ResourceId::new(BLOCKLIST_RESOURCE)];
         affected.extend(
@@ -270,14 +271,14 @@ impl SenderMethod {
         let method = self.spec.name;
         only_params(method, params, &["address"])?;
         let entry = entry_param(params)?;
+        let canonical = Arc::clone(&self.canonical);
         let edit = blocking(move || {
-            senders::unblock(&senders::list_path(), &entry)
-                .map_err(|e| DomainError::from(internal(format!("{e:#}"))))
+            senders::unblock(&senders::list_path(), &entry, &mut |entries| {
+                canonical.publish(blocklist_changed(entries));
+            })
+            .map_err(|e| DomainError::from(internal(format!("{e:#}"))))
         })
         .await?;
-        if edit.changed {
-            self.canonical.publish(blocklist_changed(&edit.entries));
-        }
         let result = SenderUnblocked {
             entry: edit.entry,
             removed: edit.changed,

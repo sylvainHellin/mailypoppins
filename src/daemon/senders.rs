@@ -194,8 +194,14 @@ pub struct Edit {
     pub entries: Vec<String>,
 }
 
-/// Add `entry`, already [`normalize`]d, to the list at `path`.
-pub fn block(path: &Path, entry: &str) -> Result<Edit> {
+/// What a list edit hands the list it saved to, while it still holds the
+/// lock, so the `sender.blocklist_changed` its caller publishes leaves in the
+/// order the edits did and the last one a client hears is the list as it is.
+pub type Publish<'a> = &'a mut dyn FnMut(&[String]);
+
+/// Add `entry`, already [`normalize`]d, to the list at `path`, handing
+/// `publish` the list when it changed.
+pub fn block(path: &Path, entry: &str, publish: Publish<'_>) -> Result<Edit> {
     let _turn = locked();
     let mut entries = load(path)?;
     let changed = !entries.iter().any(|known| known == entry);
@@ -203,6 +209,7 @@ pub fn block(path: &Path, entry: &str) -> Result<Edit> {
         entries.push(entry.to_string());
         entries.sort();
         save(path, &entries)?;
+        publish(&entries);
     }
     Ok(Edit {
         entry: entry.to_string(),
@@ -212,13 +219,14 @@ pub fn block(path: &Path, entry: &str) -> Result<Edit> {
 }
 
 /// Remove `entry`, already [`normalize`]d, from the list at `path`, and the
-/// moves owed for it from every account ([`owe`]). Nothing moves back.
+/// moves owed for it from every account ([`owe`]), handing `publish` the list
+/// when it changed. Nothing moves back.
 ///
 /// The unblock stands once the list is saved: an owed-moves file that does
 /// not parse or cannot be written is logged and left as it is, and an owed
 /// move it still keeps for `entry` settles unmoved once it parses again,
 /// since the list no longer holds the entry ([`move_owed`]).
-pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
+pub fn unblock(path: &Path, entry: &str, publish: Publish<'_>) -> Result<Edit> {
     let _turn = locked();
     let mut entries = load(path)?;
     let before = entries.len();
@@ -226,6 +234,7 @@ pub fn unblock(path: &Path, entry: &str) -> Result<Edit> {
     let changed = entries.len() != before;
     if changed {
         save(path, &entries)?;
+        publish(&entries);
     }
     if let Err(e) = forget_owed(&owed_path(path), entry) {
         warn!("unblocked {entry} but left its owed moves as they are: {e:#}");
@@ -1056,15 +1065,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(LIST_FILE);
         assert!(load(&path).unwrap().is_empty());
-        assert!(block(&path, "@x.com").unwrap().changed);
-        let again = block(&path, "@x.com").unwrap();
+        assert!(block(&path, "@x.com", &mut |_| {}).unwrap().changed);
+        let again = block(&path, "@x.com", &mut |_| {}).unwrap();
         assert!(!again.changed);
         assert_eq!(again.entries, ["@x.com"]);
-        assert!(block(&path, "a@b.com").unwrap().changed);
+        assert!(block(&path, "a@b.com", &mut |_| {}).unwrap().changed);
         assert_eq!(load(&path).unwrap(), ["@x.com", "a@b.com"]);
-        assert!(unblock(&path, "@x.com").unwrap().changed);
-        assert!(!unblock(&path, "@x.com").unwrap().changed);
+        assert!(unblock(&path, "@x.com", &mut |_| {}).unwrap().changed);
+        assert!(!unblock(&path, "@x.com", &mut |_| {}).unwrap().changed);
         assert_eq!(load(&path).unwrap(), ["a@b.com"]);
+    }
+
+    /// Edits racing each other publish in the order they saved: each list
+    /// handed to `publish` holds one entry more than the one before, and the
+    /// last is the file as it is, so the last `sender.blocklist_changed` a
+    /// client hears is never a stale list; an edit that changed nothing
+    /// publishes nothing.
+    #[test]
+    fn racing_edits_publish_in_the_order_they_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LIST_FILE);
+        let published = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        std::thread::scope(|scope| {
+            for n in 0..16 {
+                let (path, published) = (&path, &published);
+                scope.spawn(move || {
+                    block(path, &format!("@d{n}.example"), &mut |entries| {
+                        published.lock().unwrap().push(entries.to_vec())
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        let mut published = published.into_inner().unwrap();
+        let sizes: Vec<usize> = published.iter().map(Vec::len).collect();
+        assert_eq!(sizes, (1..=16).collect::<Vec<_>>());
+        assert_eq!(published.last().unwrap(), &load(&path).unwrap());
+        block(&path, "@d0.example", &mut |entries| {
+            published.push(entries.to_vec())
+        })
+        .unwrap();
+        assert_eq!(published.len(), 16);
     }
 
     #[test]
@@ -1144,7 +1185,7 @@ mod tests {
         let list = fx.dir.path().join(LIST_FILE);
         let spam = fx.ingest(1, "x@spam.example");
         for entry in ["x@spam.example", "@other.example"] {
-            block(&list, entry).unwrap();
+            block(&list, entry, &mut |_| {}).unwrap();
             owe(&list, ACCOUNT, entry).unwrap();
         }
         owe(&list, "beta", "x@spam.example").unwrap();
@@ -1154,7 +1195,7 @@ mod tests {
         );
 
         // An unblock settles the sender's debt in every account.
-        unblock(&list, "@other.example").unwrap();
+        unblock(&list, "@other.example", &mut |_| {}).unwrap();
         assert_eq!(owed(&list, ACCOUNT, BOTH).unwrap(), ["x@spam.example"]);
 
         // A move that fails keeps its debt.
