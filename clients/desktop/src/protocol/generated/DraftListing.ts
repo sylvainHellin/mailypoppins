@@ -12,8 +12,10 @@ export type DraftListing = {
  */
 account: string,
 /**
- * The rows, in the index's order (`mtime DESC, id ASC`), which the client
- * prints without re-sorting.
+ * The rows, in the index's order (newest created first, ties by id; the
+ * creation time is the `date:` field, else the file name's timestamp,
+ * else the mtime), which the client prints without re-sorting, so an
+ * edit or a status change never moves a draft.
  */
 drafts: Array<DraftEntry>,
 /**

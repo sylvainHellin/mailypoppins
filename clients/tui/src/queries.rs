@@ -216,7 +216,7 @@ fn entries_from_rows(account: &str, mailbox: &str, rows: Vec<MessageListRow>) ->
 
 /// A `draft.list` answer as list rows, in the order the Drafts mailbox shows
 /// them: the files that would not parse first (#0080), then the index's own
-/// order (`mtime DESC, id ASC`).
+/// order (newest created first, ties by id).
 fn decode_drafts(answer: &Value) -> Result<Vec<EmailEntry>> {
     let listing = wire::decode_draft_listing(answer)?;
     let skipped = listing.skipped.into_iter().map(entry_from_skip);

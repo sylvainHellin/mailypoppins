@@ -46,10 +46,12 @@
 //! identical on both sides.
 //!
 //! Restoring puts the *modification times* back too, and touches only the
-//! files that actually changed. `store::drafts::list` orders by
-//! `mtime DESC, id ASC`, so a restore that rewrote all five files would hand
-//! the second binary a different listing order than the first one saw, and the
-//! parity failure would be an artefact of the harness.
+//! files that actually changed. `store::drafts::list` orders by creation time,
+//! newest first, and these files' `date: 2026-07-01 09:00` is neither RFC 2822
+//! nor RFC 3339, so their creation time falls back to the mtime: a restore
+//! that rewrote all five files would hand the second binary a different
+//! listing order than the first one saw, and the parity failure would be an
+//! artefact of the harness.
 
 #![allow(dead_code)]
 

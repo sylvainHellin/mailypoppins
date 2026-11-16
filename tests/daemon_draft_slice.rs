@@ -142,8 +142,8 @@
 //!
 //! ## `draft.list`
 //!
-//! The rows are `DraftEntry`, in the index's order (`mtime DESC, id ASC`),
-//! which the client prints without re-sorting. `to` and `subject` stay
+//! The rows are `DraftEntry`, in the index's order (newest created first,
+//! ties by id), which the client prints without re-sorting. `to` and `subject` stay
 //! `Option`, which is where this row differs from the snapshot row
 //! `mp_protocol::events::DraftChanged`: the snapshot flattens a missing
 //! subject to `""`, and `mp list` prints the dimmed subject line only when the

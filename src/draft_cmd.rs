@@ -21,10 +21,10 @@ const RULE: usize = 72;
 
 /// `mp list`, from the account's listing.
 ///
-/// The rows arrive in the index's order (`mtime DESC, id ASC`) and are printed
-/// without re-sorting. An empty listing says so and says whether anything was
-/// skipped, because "no drafts" and "no *listable* drafts" are two different
-/// states of the directory.
+/// The rows arrive in the index's order (newest created first, ties by id)
+/// and are printed without re-sorting. An empty listing says so and says
+/// whether anything was skipped, because "no drafts" and "no *listable*
+/// drafts" are two different states of the directory.
 pub fn render_list(listing: &DraftListing) -> String {
     if listing.drafts.is_empty() {
         return match listing.skipped.is_empty() {

@@ -254,7 +254,7 @@ fn dedupe_by_id<T>(rows: Vec<(DraftRow, T)>) -> (Vec<(DraftRow, T)>, Vec<IdColli
 /// The index projection of one drafts directory, read without a store.
 ///
 /// [`refresh_reporting`] minus the SQL: the same scan, the same collision rule
-/// and the same `mtime DESC, id ASC` order, so the rows are the ones `list`
+/// and the same order (newest [`created_at`] first, ties by id), so the rows are the ones `list`
 /// would hand back after a refresh. It is what the daemon's `draft.*` family
 /// answers from (P4-U6): a directory read is fresh by construction, which is
 /// the freshness rule every draft command has always had, and it costs neither
@@ -294,14 +294,16 @@ pub fn refresh_account(account: &str) -> Result<Vec<DraftRow>> {
     refresh(&store, account, &dir)
 }
 
-/// Every indexed draft of one account, newest file first, optionally filtered
-/// by status.
+/// Every indexed draft of one account, newest created first (see
+/// [`created_at`]), ties by id, optionally filtered by status.
+///
+/// Sorted here rather than in SQL: the creation time is derived from three
+/// columns (`date`, `path`, `mtime`), and tens of rows sort in no time.
 pub fn list(store: &Store, account: &str, status: Option<&str>) -> Result<Vec<DraftRow>> {
     let sql = format!(
         "SELECT id, slug, path, mtime, size, status, to_, cc, subject, date, snippet,
                 in_reply_to, forwarded_from
-         FROM drafts WHERE account = ?1 {}
-         ORDER BY mtime DESC, id ASC",
+         FROM drafts WHERE account = ?1 {}",
         if status.is_some() {
             "AND status = ?2"
         } else {
@@ -334,7 +336,9 @@ pub fn list(store: &Store, account: &str, status: Option<&str>) -> Result<Vec<Dr
             .query_map(rusqlite::params![account], mapped)?
             .collect::<rusqlite::Result<Vec<_>>>(),
     };
-    rows.context("reading the drafts index")
+    let mut rows = rows.context("reading the drafts index")?;
+    sort_by_created(&mut rows, |row| row);
+    Ok(rows)
 }
 
 /// One indexed draft by id: the single lookup a draft selector resolves to.
@@ -429,7 +433,7 @@ fn scan(dir: &Path) -> (Vec<(DraftRow, EmailDraft)>, Vec<SkippedDraft>) {
             }),
         }
     }
-    rows.sort_by(|(a, _), (b, _)| b.mtime.cmp(&a.mtime).then_with(|| a.id.cmp(&b.id)));
+    sort_by_created(&mut rows, |(row, _)| row);
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
     (rows, skipped)
 }
@@ -525,6 +529,43 @@ pub fn linked(store: &Store, account: &str) -> Result<Vec<LinkedDraft>> {
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("reading the linked drafts")
+}
+
+/// When a draft was created, in unix seconds: what every draft listing orders
+/// by, newest first, so an edit or a status change never moves a draft.
+///
+/// The frontmatter `date:` first, which `mp new`, the compose wizards, a reply,
+/// a forward and the draft mirror's import all write (RFC 2822; RFC 3339 is
+/// read too, for a hand-written one). Else the `YYYY-MM-DD-HHMM` UTC prefix
+/// a reply or forward file name carries, which is all an older one has (or a
+/// bare `YYYY-MM-DD`, its midnight). Else the file's mtime, the one source an
+/// edit moves, for a draft written by hand with neither.
+///
+/// The date and the file name are read by [`crate::parse::resolve_date`], the
+/// rule every list row's `date_sort` comes from, so the TUI's date column and
+/// this order agree.
+pub fn created_at(date: Option<&str>, file_name: &str, mtime: i64) -> i64 {
+    let date = date.map(|date| date.trim().to_string());
+    let (_, sort) = crate::parse::resolve_date(&date, &date, Path::new(file_name));
+    chrono::NaiveDateTime::parse_from_str(&sort, "%Y-%m-%dT%H:%M:%S")
+        .map_or(mtime, |at| at.and_utc().timestamp())
+}
+
+impl DraftRow {
+    /// [`created_at`] of this row: its `date:`, file name and mtime.
+    pub fn created(&self) -> i64 {
+        let file_name = self.path.file_name().unwrap_or_default().to_string_lossy();
+        created_at(self.date.as_deref(), &file_name, self.mtime)
+    }
+}
+
+/// Order rows as every draft listing shows them: newest created first, ties
+/// by id, so the order never changes on an edit or a status change.
+fn sort_by_created<T>(rows: &mut [T], row: impl Fn(&T) -> &DraftRow) {
+    rows.sort_by_cached_key(|item| {
+        let row = row(item);
+        (std::cmp::Reverse(row.created()), row.id.clone())
+    });
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -1047,6 +1088,185 @@ mod tests {
         assert!(paths.contains(&dir.join("null.md")));
         assert!(paths.contains(&dir.join("attach.md")));
         assert!(skipped.iter().all(|s| !s.error.is_empty()));
+    }
+
+    /// Put a file's modification time at `secs`, which is what an editor's
+    /// save or a status rewrite does to it, without waiting a real second.
+    fn set_mtime(path: &Path, secs: i64) {
+        let at = UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(at))
+            .unwrap();
+    }
+
+    /// The ids of the scan and of the store's listing, which must agree.
+    fn both_orders(store: &Store, dir: &Path) -> (Vec<String>, Vec<String>) {
+        refresh(store, "work", dir).unwrap();
+        let scanned = index_dir(dir).0.into_iter().map(|row| row.id).collect();
+        let listed = list(store, "work", None)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        (scanned, listed)
+    }
+
+    /// Editing an older draft writes the file, which bumps its mtime; the
+    /// listing orders by creation, so the edited draft stays below the one
+    /// created after it.
+    #[test]
+    fn editing_an_older_draft_does_not_move_it_above_a_newer_one() {
+        let (tmp, store) = store();
+        let dir = tmp.path().join("drafts");
+        let older = write_draft(
+            &dir,
+            "older.md",
+            "id: aaa\ndate: Mon, 01 Jun 2026 09:00:00 +0000\n",
+        );
+        let newer = write_draft(
+            &dir,
+            "newer.md",
+            "id: bbb\ndate: Tue, 02 Jun 2026 09:00:00 +0000\n",
+        );
+        set_mtime(&older, 1_780_000_000);
+        set_mtime(&newer, 1_780_000_100);
+        let before = both_orders(&store, &dir);
+        assert_eq!(before.0, ["bbb", "aaa"]);
+
+        let edited = fs::read_to_string(&older)
+            .unwrap()
+            .replace("Body here", "Body here, edited");
+        fs::write(&older, edited).unwrap();
+        set_mtime(&older, 1_780_000_500);
+
+        let (scanned, listed) = both_orders(&store, &dir);
+        assert_eq!(scanned, ["bbb", "aaa"], "the scan keeps the creation order");
+        assert_eq!(listed, ["bbb", "aaa"], "the store keeps the creation order");
+    }
+
+    /// Approving rewrites the `status:` line, which bumps the mtime too; the
+    /// approved draft keeps its place.
+    #[test]
+    fn approving_a_draft_does_not_move_it() {
+        let (tmp, store) = store();
+        let dir = tmp.path().join("drafts");
+        let first = write_draft(
+            &dir,
+            "first.md",
+            "id: aaa\ndate: Mon, 01 Jun 2026 09:00:00 +0000\n",
+        );
+        let second = write_draft(
+            &dir,
+            "second.md",
+            "id: bbb\ndate: Mon, 01 Jun 2026 10:00:00 +0000\n",
+        );
+        let third = write_draft(
+            &dir,
+            "third.md",
+            "id: ccc\ndate: Mon, 01 Jun 2026 11:00:00 +0000\n",
+        );
+        set_mtime(&first, 1_780_000_000);
+        set_mtime(&second, 1_780_000_100);
+        set_mtime(&third, 1_780_000_200);
+        assert_eq!(both_orders(&store, &dir).0, ["ccc", "bbb", "aaa"]);
+
+        crate::draft::mark_as_approved(&first).unwrap();
+        set_mtime(&first, 1_780_000_900);
+
+        let (scanned, listed) = both_orders(&store, &dir);
+        assert_eq!(scanned, ["ccc", "bbb", "aaa"]);
+        assert_eq!(listed, ["ccc", "bbb", "aaa"]);
+        let approved = list(&store, "work", Some("approved")).unwrap();
+        assert_eq!(approved[0].id, "aaa");
+    }
+
+    /// The creation time is the frontmatter `date:` (RFC 2822 as `mp new`
+    /// writes it, or RFC 3339), else the `YYYY-MM-DD-HHMM_` UTC prefix a
+    /// reply or forward file name carries, else the file's mtime.
+    #[test]
+    fn the_creation_time_falls_back_from_the_date_to_the_file_name_to_the_mtime() {
+        let mtime = 1_900_000_000;
+        // 2026-06-01 09:00:00 UTC.
+        let june = 1_780_304_400;
+        assert_eq!(
+            created_at(Some("Mon, 01 Jun 2026 11:00:00 +0200"), "x.md", mtime),
+            june
+        );
+        assert_eq!(
+            created_at(Some("2026-06-01T11:00:00+02:00"), "x.md", mtime),
+            june
+        );
+        // The date wins over the file name.
+        assert_eq!(
+            created_at(
+                Some("Mon, 01 Jun 2026 09:00:00 +0000"),
+                "2020-01-01-0000_alice_hello.md",
+                mtime
+            ),
+            june
+        );
+        // No date, or one that does not parse: the file name's prefix, UTC.
+        assert_eq!(
+            created_at(None, "2026-06-01-0900_alice_hello.md", mtime),
+            june
+        );
+        assert_eq!(
+            created_at(
+                Some("2026-07-01 09:00"),
+                "2026-06-01-0900_alice_email-2.md",
+                mtime
+            ),
+            june
+        );
+        assert_eq!(
+            created_at(Some("  "), "2026-06-01-0900_a_b.md", mtime),
+            june
+        );
+        // Neither: the mtime.
+        assert_eq!(created_at(None, "note.md", mtime), mtime);
+        assert_eq!(created_at(Some("soon"), "note.md", mtime), mtime);
+        assert_eq!(created_at(None, "2026-06-01-0900.md", mtime), june);
+        // A bare day prefix is that day's midnight, UTC.
+        assert_eq!(
+            created_at(None, "2026-06-01-notes.md", mtime),
+            june - 9 * 3600
+        );
+        assert_eq!(created_at(None, "2026-13-01-0900_a_b.md", mtime), mtime);
+    }
+
+    /// The three sources order together in one listing, newest first, ties by
+    /// id.
+    #[test]
+    fn the_listing_orders_dated_named_and_bare_drafts_together() {
+        let (tmp, store) = store();
+        let dir = tmp.path().join("drafts");
+        // Created 2026-06-01 09:00 UTC by its date, written last.
+        let dated = write_draft(
+            &dir,
+            "dated.md",
+            "id: aaa\ndate: Mon, 01 Jun 2026 09:00:00 +0000\n",
+        );
+        // Created 2026-06-02 09:00 UTC by its file name, no date.
+        let named = write_draft(&dir, "2026-06-02-0900_alice_hello.md", "id: bbb\n");
+        // Created when it was last written: 2026-06-01 12:00 UTC.
+        let bare = write_draft(&dir, "bare.md", "id: ccc\n");
+        // Same creation second as `dated`: the id breaks the tie.
+        let twin = write_draft(
+            &dir,
+            "twin.md",
+            "id: ddd\ndate: 2026-06-01T11:00:00+02:00\n",
+        );
+        set_mtime(&dated, 1_790_000_000);
+        set_mtime(&named, 1_780_000_000);
+        set_mtime(&bare, 1_780_315_200);
+        set_mtime(&twin, 1_700_000_000);
+
+        let (scanned, listed) = both_orders(&store, &dir);
+        assert_eq!(scanned, ["bbb", "ccc", "aaa", "ddd"]);
+        assert_eq!(listed, ["bbb", "ccc", "aaa", "ddd"]);
     }
 
     #[test]

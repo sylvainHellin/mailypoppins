@@ -1250,8 +1250,8 @@ fn sweep(
     let account = config.name.as_str();
     let store = drafts_store(account)?;
     // The scan first, so a draft written a millisecond ago is swept, and
-    // through the index so the walk keeps the `mtime DESC, id ASC` order
-    // `mp delete --sent` has always walked in.
+    // through the index so the walk keeps the listing's order (newest
+    // created first, ties by id).
     reindex(&store, account);
     let rows = crate::store::drafts::list(&store, account, Some("sent"))
         .map_err(|e| internal(format!("listing the sent drafts of {account}: {e:#}")))?;

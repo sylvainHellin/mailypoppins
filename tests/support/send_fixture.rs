@@ -506,8 +506,9 @@ pub fn seed(root: &Path) {
 /// the one row that prints it verbatim - `mp send-approved`'s
 /// `freigabe.md -> ivana@example.com` - does not move. The rewrite happens
 /// here rather than in `draft_fixture` so no other slice sees it, and the
-/// modification time is put back afterwards because the drafts index orders by
-/// `mtime DESC, id ASC` and a rewritten file would otherwise sort first.
+/// modification time is put back afterwards because the fixture's drafts carry
+/// no parseable `date:`, so the index orders them by mtime and a rewritten file
+/// would otherwise sort first.
 fn widen_approved_draft(root: &Path) {
     let path = drafts_dir(root, ACCOUNT).join(APPROVED_FILE);
     let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -746,9 +747,10 @@ pub fn draft_status(root: &Path, account: &str, file: &str) -> String {
 ///
 /// So the whole `accounts/` tree is copied before a run and put back
 /// afterwards. Restoring puts modification times back too and touches only the
-/// files that changed, for the reason `draft_fixture::Stash` gives: the drafts
-/// index orders by `mtime DESC, id ASC`, and a restore that rewrote every file
-/// would hand the second binary a different order than the first one saw.
+/// files that changed, for the reason `draft_fixture::Stash` gives: the
+/// fixture's drafts have no parseable `date:`, so the index orders them by
+/// mtime, and a restore that rewrote every file would hand the second binary a
+/// different order than the first one saw.
 ///
 /// **The daemon must not be running while `take` or `restore` runs.** It
 /// holds the SQLite store open in WAL mode, and putting a different
