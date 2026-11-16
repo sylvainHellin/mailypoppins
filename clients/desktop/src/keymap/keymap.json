@@ -47,6 +47,10 @@
         "action": "Send current draft (approve + send)"
       },
       {
+        "key": "N",
+        "action": "Notes for the agent (every account)"
+      },
+      {
         "key": "ff",
         "action": "Search all mail (sender, subject, body)"
       },
@@ -158,6 +162,10 @@
       {
         "key": "y",
         "action": "Copy selector (mp://)"
+      },
+      {
+        "key": "n",
+        "action": "Note for the agent (a preset, or Space for free text)"
       },
       {
         "key": "B",
@@ -300,6 +308,10 @@
       {
         "key": "fF",
         "action": "Show flagged only (toggle)"
+      },
+      {
+        "key": "fN",
+        "action": "Show noted only (toggle)"
       }
     ]
   },
@@ -381,6 +393,47 @@
       {
         "key": "Esc",
         "action": "Close overlay"
+      }
+    ]
+  },
+  {
+    "title": "NOTES",
+    "bindings": [
+      {
+        "key": "j/k",
+        "action": "Navigate notes"
+      },
+      {
+        "key": "Enter",
+        "action": "Open the mail (a note for a new email: edit it)"
+      },
+      {
+        "key": "a",
+        "action": "New note asking for a new email (this account)"
+      },
+      {
+        "key": "e",
+        "action": "Edit the note"
+      },
+      {
+        "key": "d",
+        "action": "Drop the note"
+      },
+      {
+        "key": "D",
+        "action": "Clear every done note"
+      },
+      {
+        "key": "y",
+        "action": "Copy the batch prompt of the open notes"
+      },
+      {
+        "key": "x",
+        "action": "Hand the open notes to the agent ([agent] open_in)"
+      },
+      {
+        "key": "Esc / q",
+        "action": "Close the list"
       }
     ]
   },
