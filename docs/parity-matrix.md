@@ -636,6 +636,27 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: one list for every account, kept by the daemon in `<data_dir>/blocked-senders.json`; no rule is written on the server, so blocked mail moves only while the daemon runs (decision log, 2026-11-06).
   The TUI and the desktop always move the mail already in each Inbox; `mp block --keep-existing`, which leaves it, and blocking an address typed rather than read off a message are the CLI's alone.
 
+### MSG-11 Leave a note on a message or a draft, or for a new email, and see its state on the row
+
+- Classification: GUI parity
+- Source anchor: `mp notes add <selector>... [--preset] [--text]`, `mp notes new`, `mp notes edit <id>`, `mp notes done`, `mp notes clear [--done]`, `mp notes presets` (`src/main.rs`, PERSO-315); the file, its edits and the row marks in `src/daemon/notes.rs`, the family in `src/daemon/methods/note.rs`; the presets are `[notes] presets` (`mp_core::config::NotesConfig`)
+- Daemon surface: `note.set` `{account?, selector?, id?, preset?, text?}`, `note.set_many` `{account?, selectors, preset?, text?}`, `note.get` `{account?, selector}`, `note.done` `{account?, selector?, id?, result}`, `note.clear` `{account?, selector?, id?}`, `note.clear_done`, `note.presets`, and the lifecycle event `note.changed` `{notes}`; `message.list`, the streamed listings, `message.search` and `draft.list` rows carry `note`, the state of the note on the mail
+- GUI location: clients/desktop: not built yet, phase C of the mail-notes plan (`.agents/plans/2026-11-16-mail-notes.md`): `n` on the list, the reader and the Drafts list opens the note prompt with the daemon's presets as buttons, a glyph beside the star shows the state, a filter keeps the noted mail, and the reader shows a done note's result in a band above the body
+- Validation: `tests/daemon_notes.rs` (`a_note_on_a_message_marks_its_row_and_every_client_hears_it`, `the_streamed_rows_carry_the_note`, `a_note_is_replaced_closed_and_cleared`, `the_refusals_say_why`, `several_notes_a_draft_and_a_new_email`, `the_notes_survive_a_store_rebuild`, `the_presets_come_from_the_configuration`, `mp_notes_round_trip`), unit tests in `src/daemon/notes.rs` and `src/daemon/methods/note.rs`, `crates/mp-core/src/config.rs` (`note_presets_are_the_built_in_ones_unless_the_config_lists_its_own`, `a_preset_with_a_bad_or_shared_key_or_an_empty_field_is_refused`), the `note.*` fixtures in `crates/mp-protocol/fixtures/`
+- Status: CLI routed (PERSO-315); TUI not started, phase B of the mail-notes plan; desktop not started, phase C
+- Note: one file for every account, kept by the daemon in `<data_dir>/notes.json`, so a note survives a rebuilt store (decision log, 2026-11-16).
+  A note whose mail is gone, a draft sent or deleted or a message moved, stays, marked orphaned, until it is cleared.
+
+### MSG-12 Hand the open notes to a coding agent as one prompt
+
+- Classification: GUI parity
+- Source anchor: `mp notes list [--state]`, `mp notes export [--handoff] [--id]...` (`src/main.rs`, PERSO-315); the batch prompt in `src/daemon/notes.rs` (`render`); the agent and where it opens are `[agent]` (`mp_core::config::AgentConfig`), which the clients read
+- Daemon surface: `note.list` `{state?}`, `note.export` `{ids?}` and `note.handoff` `{ids?}`, both answering `{text, ids}`, and `note.changed`
+- GUI location: clients/desktop: not built yet, phase C of the mail-notes plan: `N` opens the notes list across accounts, `y` copies the export and `x` hands it off to the agent in a terminal panel beside the reading pane (`open_in = "desktop-panel"`)
+- Validation: `tests/daemon_notes.rs` (`the_export_changes_nothing_and_the_hand_off_marks_its_notes`, `mp_notes_round_trip`), `src/daemon/notes.rs` (`the_batch_prompt`, an insta snapshot, `the_export_fixture_is_the_rendered_prompt`, `a_hand_off_marks_the_open_notes_it_gives`), `crates/mp-core/src/config.rs` (`the_agent_defaults_to_pi_and_its_commands_add_to_the_built_in_ones`)
+- Status: CLI routed (PERSO-315); TUI not started, phase B of the mail-notes plan (`N`, and the launcher that writes the batch file and opens the agent by `[agent] open_in`); desktop not started, phase C
+- Note: the daemon alone renders the prompt, so every client hands an agent the same text; the CLI prints it and starts no agent, which a shell pipes where it wants (`mp notes export --handoff > notes.md`).
+
 ## Drafts, composition, reply, and forward
 
 ### DFT-01 Create a draft from the template and print its selector

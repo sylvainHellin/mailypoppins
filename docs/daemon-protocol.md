@@ -109,6 +109,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `signature.*` for list, read, create, rename, delete, and per-account default selection. This build serves six methods (`mp_protocol::signature`): `signature.list` `{account}` -> `{account, names, default}`, a query any configured account answers, store or not, the sorted names under `<config>/signatures/` and the account's default, `null` when it has none or its file is gone; `signature.read` `{name}` -> `{name, path, content}`, a query; and four commands, `signature.create` `{name}` -> `{name, path, content: ""}`, `signature.rename` `{account, old, new}`, `signature.delete` `{account, name}` and `signature.set_default` `{account, name|null}`, the last three answering `account`'s listing after the change. A refusal is `-32602` with `mp_core::signatures`' sentence; no method writes a signature's content, which is the editor's, on `path`.
 - `hook.*` for the mail hooks of `[[accounts.hooks]]` (#0135). This build serves `hook.list`, `hook.replay` and `hook.test`.
 - `sender.*` for the blocked senders (PERSO-261). This build serves `sender.block`, `sender.list` and `sender.unblock` ([The `sender.*` family](#the-sender-family)).
+- `note.*` for the notes on mail a coding agent works through (PERSO-315). This build serves `note.clear`, `note.clear_done`, `note.done`, `note.export`, `note.get`, `note.handoff`, `note.list`, `note.presets`, `note.set` and `note.set_many` ([The `note.*` family](#the-note-family)).
 - `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes. This build serves ten methods: `config.add_account`, `config.cutover`, `config.get`, `config.init`, `config.oauth2_login`, `config.probe`, `config.reload`, `config.reset_secrets`, `config.set_password` and `config.validate`.
 - `operation.*` for long-running operation status and cancellation.
 - `diagnostic.*` for logs, health, and support information. This build serves five methods: `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `diagnostic.store_gc` and `diagnostic.support_bundle`. The sweep is here rather than under a `store.*` family because there is no such family, which is the name `docs/parity-matrix.md` SYN-08 already carried.
@@ -121,8 +122,8 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.attachments`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.list`, `calendar.view`, `event.get`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `sender.list`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, `sender.block`, `sender.unblock`, the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft`, `calendar.set_visibility`, `calendar.dismiss_reminder`, `calendar.snooze_reminder` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.attachments`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.list`, `calendar.view`, `event.get`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `sender.list`, `note.export`, `note.get`, `note.list`, `note.presets`, `signature.list`, `signature.read`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold`, `sender.block`, `sender.unblock`, the six `note.*` writers (`note.clear`, `note.clear_done`, `note.done`, `note.handoff`, `note.set`, `note.set_many`), the four `signature.*` writers (`signature.create`, `signature.delete`, `signature.rename`, `signature.set_default`), `contact.vcard_draft`, `calendar.set_visibility`, `calendar.dismiss_reminder`, `calendar.snooze_reminder` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.freebusy`, `calendar.rebuild`, `calendar.rsvp`, `event.cancel`, `event.create`, `event.delete`, `event.respond`, `event.update`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -350,7 +351,8 @@ An unknown account is `account_unknown` and a configured account with no readabl
     "flags": {"seen": true, "answered": true, "forwarded": true, "flagged": false},
     "has_attachments": true,
     "is_invite": false,
-    "selector": "mp://work/inbox/Bericht@example.com"
+    "selector": "mp://work/inbox/Bericht@example.com",
+    "note": "open"
   }]
 }
 ```
@@ -371,6 +373,9 @@ A row whose mailbox holds another row under the same `Message-ID` carries the se
 It goes on the row rather than behind a `message.selector` query, because the daemon already had the string in hand when it built the row and a query per keypress would be a round trip to learn something the listing could have said.
 A client could compose it from `message_id`, the answer's `mailbox` and its own account name, since `mp_core::selector` is a shared module; it may not, because that is a second implementation of the percent-encoding and of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins only the CLI's spelling.
 The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fourteen keys, and this is the fifteenth, about forty bytes of ASCII, paid once per listing rather than once per copy.
+`note` is the state of the note on the message (`open`, `handed_off` or `done`, [The `note.*` family](#the-note-family)), absent when it has none, so a list draws the note glyph beside the star without a second call (PERSO-315).
+A note is held by the message's canonical selector, without a UID segment, so both copies of a `Message-ID` held twice in one mailbox carry it; the streamed rows, a conversation's `latest`, `message.search` hits and `draft.list` rows carry it too, a `draft.list` row by its draft selector.
+The daemon reads `<data_dir>/notes.json` once per listing for it, and a file that does not read marks no row and logs why rather than refusing the listing.
 
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
@@ -1013,6 +1018,55 @@ An owed-moves file that does not parse never fails an unblock: the daemon logs a
 Both writers publish `sender.blocklist_changed` `{entries}` when the list changed, and the mailbox counts of every account whose mail moved.
 As for a `message.move`, each moved message is announced as a `state.remove` of its Inbox row and the Junk listing as a `state.invalidate` with scope `{"query": "list"}` (PERSO-286), so every client, the one that blocked included, drops the rows from what it holds without reloading on the answer.
 
+### The `note.*` family
+
+A note is a short instruction the user attaches to a received message, to a draft, or to nothing, which asks for a new email (PERSO-315, `mp_protocol::note`).
+The daemon keeps every note of every account in `<data_dir>/notes.json`, replaced atomically and private to the user, because the user typed it and the store is disposable; `config.toml` is the user's file and is never written.
+A client lists the open notes and hands them to a coding agent as one prompt the daemon renders; the agent works through `mp`, writes drafts, and closes each note with `note.done` and a result the clients show on the mail.
+The agent never sends or approves anything, and no method here sends.
+
+| method | kind | params | result |
+|---|---|---|---|
+| `note.set` | command | `{account?, selector?, id?, preset?, text?}` | `Note` |
+| `note.set_many` | command | `{account?, selectors, preset?, text?}` | `{notes}` |
+| `note.list` | query | `{state?}` | `{notes}` |
+| `note.get` | query | `{account?, selector}` | `{note}`, `null` when the mail has none |
+| `note.done` | command | `{account?, selector?, id?, result}` | `Note` |
+| `note.clear` | command | `{account?, selector?, id?}` | `{removed}` |
+| `note.clear_done` | command | `{}` | `{removed}` |
+| `note.export` | query | `{ids?}` | `{text, ids}` |
+| `note.handoff` | command | `{ids?}` | `{text, ids}` |
+| `note.presets` | query | `{}` | `{presets: [{key, label, needs_text, instruction}]}` |
+
+A `Note` is `{id, selector?, account, preset?, text, state, result?, created, updated, from, to, subject, orphaned}`.
+`id` is eight characters, a letter first; `state` is `open`, `handed_off` or `done`; `created` and `updated` are RFC 3339 in UTC, to the second.
+`from`, `to` and `subject` are a snapshot the daemon took when the note was set, the account's `default_from` standing as a draft's `from`, so a list and the prompt render without a store read and survive a rebuilt store.
+`orphaned` is decided at every answer and never stored: a note on a draft that is no longer in the drafts directory, or on a message the account's store no longer holds under its selector, is orphaned, and so is a note of an account the configuration no longer names; an account whose store cannot be read now orphans nothing, since its next sync may bring the message back.
+An orphaned note stays until it is cleared: a draft sent or deleted and a message moved to another mailbox leave their notes behind, never deleted silently.
+
+A selector is read in the grammar `mp show` takes, its account from its own `mp://<account>/` segment or else from `account`, and one whose mailbox is `drafts` names a draft.
+`note.set` resolves it against the account's store, or the drafts directory for a draft, so a note is only set on mail the daemon holds, and is held by the canonical selector, without a UID segment; at most one note is on a selector, and setting another replaces its preset and text, takes the snapshot again and opens it, keeping its id and its place.
+`note.set` with `id` does the same to the note with that id, a new-email note included; with neither `selector` nor `id` it adds a new-email note from `account`, which it requires.
+`note.set_many` sets the same note on each selector in one write, a selector named twice counted once, and refuses them all when one does not resolve.
+`note.get`, `note.done` and `note.clear` read the canonical selector off one that names its mailbox, a listing row's UID-qualified selector included, and resolve one that does not against the store.
+A note needs a preset, a text, or both; a preset is the `key` of one of `note.presets`, and `needs_text` is a hint for a client's prompt, never a refusal.
+
+`note.list` answers newest first, by when a note was first set, and `state` keeps the notes in that state.
+`note.export` renders the batch prompt for every open note, or for the notes `ids` names in any state, in list order, and changes nothing; `note.handoff` renders the same text and marks the open notes among them `handed_off`.
+`ids` in the answer are the notes the prompt numbers, in its order, and `text` is `""` when there are none.
+`note.done` closes a note in any state with a `result` that is not blank; `note.clear` answers `{removed: 0}` for a note that is not there, and `note.clear_done` removes every done note.
+`note.presets` answers `[notes] presets` of the live configuration, in its order, the seven built-in presets when it names none; a client renders its preset prompt from this answer and keeps no list of its own, and reads it again on `config.changed`.
+
+The batch prompt opens with how to read, carry out and close a note (`mp show`, `mp path` for a draft, `mp notes done`, `mp -A <account> new` for a new email) and says never to send or approve, then numbers the notes: a selector, the line `From <sender>, subject "<subject>"` or `Draft to <to>, subject "<subject>"`, a line telling the agent the selector names nothing any more for an orphaned note, `<label>: <instruction>` for a preset, and the user's text.
+A new-email note reads `New email from account <account> (note <id>)` instead of the selector and the headline.
+The daemon alone renders it (`src/daemon/notes.rs`, pinned by a snapshot test), so every client hands an agent the same text.
+
+A refusal is `-32602` with a sentence: no preset and no text, a preset the configuration lacks (naming the ones it has), a selector that resolves to no message or draft (the resolver's own sentence), a new-email note with no `account`, an id no note has, a note addressed by both `selector` and `id` or by neither, a blank `result`, and a parameter the method does not take; an account the configuration does not name is `-32005`.
+A notes file that does not parse is `-32603`, and the file is left as it is.
+
+Every call that wrote the file publishes `note.changed` with the whole list, `{notes}` newest first with `orphaned` decided, so every client redraws its glyphs and its list from the payload; a `note.clear` that removed nothing and a `note.handoff` that marked nothing publish nothing.
+Every writer names the one resource `note:list` in its `affected`.
+
 ### The server search leg
 
 Two operations carry every client's server search: the merged search behind the TUI's `ff`, the desktop search bar's server leg and `mp search` without `--local` (`LST-08`, `LST-06`), and the `f` that ingests a server-only hit (`LST-09`).
@@ -1520,6 +1574,8 @@ It is a lifecycle event and reduces into no snapshot: signatures are global rath
 
 `sender.blocklist_changed` says that the blocked senders changed, with a payload of `{entries}`, the whole sorted list (`mp_protocol::sender::BlockedSenders`), published by a `sender.block` that added an entry and a `sender.unblock` that removed one. It is a lifecycle event, and a client showing the list replaces it with the payload.
 
+`note.changed` says that the notes on mail changed, with a payload of `{notes}`, every note newest first with `orphaned` decided (`mp_protocol::note::NoteListing`), published by every `note.*` call that wrote the notes file (PERSO-315). It is a lifecycle event: a client showing the notes list replaces it with the payload, and one showing rows sets each row's note glyph from the note on its selector.
+
 `calendar.reminder` says that a reminder fell due, with a `CalendarReminder` as its payload ([The calendar reminders](#the-calendar-reminders)); `calendar.reminders_changed` `{account}` (`CalendarRemindersChanged`) says that one was dismissed, snoozed or left the list, and a client showing reminders reads `calendar.reminders` again. Both are lifecycle events.
 
 `mail.arrived` says that a tick brought an account new mail worth a system notification, with a payload of `{account, arrivals, presenter, presenter_connection}` (`mp_protocol::events::MailArrived`), `arrivals` being `[{from, subject}]` and never empty (PERSO-186).
@@ -1990,3 +2046,8 @@ A client that predates PERSO-186 decoded the field as `default` and read the ans
 No method was added or renamed, and no command's output moved.
 
 The voice snapshots added `body` to `draft.reply` and `draft.forward`, optional and additively, with `draft.create`'s contract: the text a caller wrote before the draft existed, placed above the signature and the quote; no field was renamed or dropped, no method was added, and a call without it writes the draft it wrote before.
+
+PERSO-315 added the `note.*` family, ten methods, one lifecycle kind and one member of two rows, all additively; no field was renamed, none was dropped, and no command's output moved.
+`note.clear`, `note.clear_done`, `note.done`, `note.handoff`, `note.set` and `note.set_many` are commands and `note.export`, `note.get`, `note.list` and `note.presets` queries, with the shapes of [the family's section](#the-note-family) and the types of `mp_protocol::note`; `note.changed` `{notes}` is the lifecycle kind.
+A `message.list` row (`MessageListRow`, and with it the streamed rows, a conversation's `latest` and a `message.search` hit) and a `draft.list` row (`DraftEntry`) gained `note`, the state of the note on the mail, absent when it has none, so a row from an older daemon decodes as one with no note.
+The fixtures are `crates/mp-protocol/fixtures/note.{set,set_many,list,get,done,clear,clear_done,export,handoff,presets}.{request,response}.json` and `notification.note_changed.json`, and the capability list grew by the ten names.

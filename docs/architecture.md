@@ -11,6 +11,8 @@ Nothing in the store may be the only copy of anything the user typed.
 - Drafts are the only local truth.
 They are Markdown files with YAML frontmatter under `<account_dir>/drafts/`, written by `mp new` and by `$EDITOR`, and the `drafts` table is a derived index over them.
 Each draft is mirrored to the account's server Drafts folder (PERSO-139, `src/draft_mirror/`): the copy there is a rendering of the file, and a change made on the server reaches mp only by rewriting the file.
+- What the user typed outside a draft lives in the data directory beside the stores, never in them: the blocked senders in `<data_dir>/blocked-senders.json` (PERSO-261) and the notes on mail in `<data_dir>/notes.json` (PERSO-315), each replaced atomically, private to the user, and read and written by the daemon alone.
+A note keeps a snapshot of the headers of the mail it is on, so it survives a rebuilt store; a note whose mail is gone is marked orphaned and stays until it is cleared, never deleted silently.
 - Received mail is read-only locally.
 The client never edits a message body; it changes flags and mailbox membership, and the server is told immediately.
 - No migration paths until v1.0.
@@ -27,7 +29,8 @@ No native-Windows code paths (registry, Credential Manager).
 ## Crate shape
 
 A Cargo workspace: the root package is the library plus the binary, and `crates/mp-core`, `crates/mp-protocol`, `crates/mp-client` and `clients/tui` are the four crates beside it (see "Daemon and crate boundaries" below).
-The engine lives in the root package's `src/lib.rs` modules, the shared engine-free modules in `mp-core` (re-exported from the root crate under their old paths), the terminal client in `mp-tui` (re-exported as `mailypoppins::tui`), and the daemon in `src/daemon/` drives the engine; the CLI and the TUI are clients of it over a Unix socket and spawn no subprocess of their own.
+The engine lives in the root package's `src/lib.rs` modules, the shared engine-free modules in `mp-core` (re-exported from the root crate under their old paths), the terminal client in `mp-tui` (re-exported as `mailypoppins::tui`), and the daemon in `src/daemon/` drives the engine; the CLI and the TUI are clients of it over a Unix socket and spawn no `mp` subprocess for mail work, every mailbox operation being a daemon call (the CLI starts the daemon itself on demand).
+The programs they do start are the user's own tools: `$EDITOR`, `zoxide`, the system opener and notifier, and, for the notes hand-off (PERSO-315), the coding agent.
 
 | crate | what it owns | what it may link |
 |---|---|---|
@@ -692,6 +695,7 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | `src/calendar_sync.rs` | One account's calendar sync from its stored tokens, the daily re-baseline, the per-account lock, and the invitation mail to server event lookup (PERSO-200) |
 | `src/daemon/methods/freebusy.rs` | `calendar.freebusy`, the client-scoped free/busy query (PERSO-255) |
 | `src/daemon/reminders.rs` | The calendar reminders: the due minutes, the firing and the decisions over the cache, the reminder clock, and the task that sleeps until the next due minute (PERSO-255) |
+| `src/daemon/notes.rs` + `src/daemon/methods/note.rs` | The notes on mail (PERSO-315): `<data_dir>/notes.json` and its edits under one lock, the batch prompt the daemon alone renders, and `NoteMarks`, the note state a listing row carries; the `note.*` family resolves a selector to the canonical one and the snapshot a note keeps, decides `orphaned` at every answer, and publishes `note.changed` on every write |
 | `src/store/reminders.rs` | `calendar_reminders`, what fired, was dismissed or is snoozed per account and event, kept apart from the disposable cache (PERSO-255) |
 | `src/calendar_view.rs` | The merged view `calendar.view` and `event.get` serve: the cached server events and the invitation mails' events, deduplicated on `UID` plus `RECURRENCE-ID`, filtered by visibility (PERSO-200) |
 | `mp-core/notify.rs` | The new-mail and reminder notification text both clients show, and the TUI's notifier, shelling out to `osascript` / `notify-send` |
@@ -952,6 +956,9 @@ Layout under the data dir:
   accounts/<name>/attachments/<message-id>/   # materialised for forward drafts (#0006)
   accounts/<name>/contacts-cache.json
   voice-snapshots/<name>/<draft-id>.json # a draft as created and as sent, for the listed accounts
+  blocked-senders.json                   # the blocked senders of every account (PERSO-261)
+  blocked-senders-owed.json              # the Inbox moves a block still owes an account
+  notes.json                             # the notes on mail of every account (PERSO-315)
   tokens/<name>.enc                      # Graph encrypted refresh tokens
   state.json                             # app state (#0107): per-account default signature
   logs/mailypoppins-YYYY-MM-DD.log       # capped at 200 MB in total (crates/mp-core/src/logfile.rs)

@@ -117,6 +117,17 @@ const blockCommands = [
   { command: 'mp blocked [--json]', description: 'List the blocked senders' },
 ];
 
+const notesCommands = [
+  { command: 'mp notes add <selector>... [--preset <key>] [--text <text>] [--json]', description: 'Set a note on one or more received emails or drafts; a mail that has one gets it replaced and opened again' },
+  { command: 'mp notes new [--preset <key>] --text <text> [--json]', description: 'Set a note asking for a new email from the account (-A, else the first)' },
+  { command: 'mp notes edit <id> [--preset <key>] [--text <text>] [--json]', description: 'Change the preset or the text of a note by its id, and open it again' },
+  { command: 'mp notes list [--state open|handed_off|done] [--json]', description: 'List the notes, newest first, with the subject of the mail, the instruction and the result; a note whose mail is gone is marked orphaned' },
+  { command: 'mp notes export [--handoff] [--id <id>]... [--json]', description: 'Print the batch prompt for the open notes, or for the notes named; --handoff marks the open ones handed off' },
+  { command: 'mp notes done <selector>|--id <id> --result <text> [--json]', description: 'Close a note with what was done, the line the clients show on the mail' },
+  { command: 'mp notes clear <selector>|--id <id>|--done', description: 'Remove a note, or every done note' },
+  { command: 'mp notes presets [--json]', description: 'List the presets a note takes, in prompt order' },
+];
+
 const syncOptions = [
   { command: '-n, --limit <N>', description: 'Max messages per mailbox (default: 50)' },
   { command: '--mailbox <name>...', description: 'Mailboxes to sync (default: INBOX, Archive, Sent)' },
@@ -410,6 +421,22 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
         or its <code>@domain</code>, leaving out your own, and
         <code>s b</code> lists the blocked senders to unblock one; the Mac app has the same keys, a Block
         sender button in the reader and two rows in the command palette.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="notes">Notes for an Agent</h2>
+      <CommandTable commands={notesCommands} />
+      <p>
+        A note is a short instruction on a received email or a draft, or on nothing for a new
+        email: a preset letter (Reply, Decline, Summarize, Explain, Review, Task, Forward, or your own
+        under <code>[notes] presets</code>), a text, or both. The daemon keeps every note in one file
+        beside the stores, so a note survives a rebuilt store, and a note whose mail is gone stays,
+        marked orphaned, until you clear it. <code>mp notes export</code> prints the batch prompt the
+        daemon renders: it tells an agent to read each mail with <code>mp show</code>, carry the note
+        out, and close it with <code>mp notes done</code>, and never to send or approve anything.
+        Pipe it to the agent of your choice, for example
+        <code>mp notes export --handoff &gt; notes.md</code>.
       </p>
     </section>
 

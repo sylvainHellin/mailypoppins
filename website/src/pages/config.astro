@@ -441,6 +441,26 @@ mirror = false`} />
 accounts = ["tum", "work"]`} />
     </section>
 
+    <!-- Note presets -->
+    <section>
+      <h2 id="notes">Note Presets</h2>
+      <p>
+        A note for an agent (<a href="/commands/#notes">mp notes</a>) takes a preset by its letter.
+        Seven ship built in: <code>r</code> Reply, <code>d</code> Decline, <code>s</code> Summarize,
+        <code>e</code> Explain, <code>p</code> Review, <code>t</code> Task and <code>f</code> Forward.
+        <code>[notes] presets</code> replaces the whole list, in the order a prompt shows it. Each
+        preset has a one-character <code>key</code>, a <code>label</code>, the
+        <code>instruction</code> the agent's prompt carries, and <code>needs_text</code>, whether a
+        client's prompt waits for a line of text after the letter (default false). Two presets
+        sharing a key, or an empty label or instruction, are refused when the config loads.
+      </p>
+      <ConfigExample title="Two presets of your own" code={`[notes]
+presets = [
+  { key = "r", label = "Reply", needs_text = true, instruction = "Draft a reply in my voice from this gist." },
+  { key = "x", label = "Translate", instruction = "Translate this mail into German and post it as the result." },
+]`} />
+    </section>
+
     <!-- Multi-Account Setup -->
     <section>
       <h2>Multi-Account Setup</h2>
