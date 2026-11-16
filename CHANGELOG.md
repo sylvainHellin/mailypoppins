@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Notes on mail for a coding agent: `mp notes add|new|edit|list|export [--handoff]|done|clear|presets` set a preset (Reply, Decline, Summarize, Explain, Review, Task, Forward) or free-text instruction on a received email, a draft or a new email, kept by the daemon in `<data_dir>/notes.json` so a store rebuild keeps them; the daemon renders one batch prompt for the open notes, and `[notes] presets` replaces the built-in presets while `[agent]` names the agent and where it opens (PERSO-315).
+- A note follows its mail: it is on the message, not its mailbox, so it survives archiving and moves, every copy carries it, a sent draft's note moves onto the sent message, and list rows, conversation rows and thread members carry its state (PERSO-315).
 - Voice snapshots: `[voice_snapshots] accounts` (default `["tum"]`) keeps each draft mp creates for those accounts as created and as sent under `<data_dir>/voice-snapshots/<account>/`, with the subject, the first recipient's domain and the writer's own text and signature; a reply's or forward's attribution, header block and quoted mail are left out, and snapshots older than 90 days are pruned.
 - `mp new --to --cc --subject --body-file`, `mp reply --body-file` and `mp forward --body-file` put the text in the draft when it is created, above the signature and the quote.
 - `mp daemon status` now names any client that is falling behind on daemon events, with how much is waiting for it and whether its queue overflowed; a healthy daemon prints what it always did, and `--json` lists every connected client under `connections` (PERSO-221).
