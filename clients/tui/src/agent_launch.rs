@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use mp_core::config::AgentOpenIn;
 
@@ -354,51 +354,15 @@ pub fn batch_path(dir: &Path, stamp: &str) -> PathBuf {
     dir.join(format!("batch-{stamp}.md"))
 }
 
-/// How long a batch file is kept: an agent has long read it by then.
-pub const BATCH_KEPT_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
-/// Whether `name` is a batch file's, `batch-<stamp>.md` with a stamp of
-/// digits and dashes, as [`batch_path`] names them.
-pub fn is_batch_name(name: &str) -> bool {
-    name.strip_prefix("batch-")
-        .and_then(|rest| rest.strip_suffix(".md"))
-        .is_some_and(|stamp| {
-            !stamp.is_empty() && stamp.chars().all(|c| c.is_ascii_digit() || c == '-')
-        })
-}
-
-/// Delete the batch files in `dir` last written more than
-/// [`BATCH_KEPT_FOR`] before `now`; any other file stays, and a file that
-/// cannot be read or removed is left alone.
-pub fn prune_batches(dir: &Path, now: SystemTime) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !name.to_str().is_some_and(is_batch_name) {
-            continue;
-        }
-        let old = entry
-            .metadata()
-            .ok()
-            .filter(|meta| meta.is_file())
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|written| now.duration_since(written).ok())
-            .is_some_and(|age| age > BATCH_KEPT_FOR);
-        if old {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
 /// Write the batch prompt to [`batch_path`], creating `dir`, and prune the
-/// batch files older than [`BATCH_KEPT_FOR`] there.
+/// batch files there older than
+/// [`BATCH_KEPT_FOR`](mp_core::agent_batch::BATCH_KEPT_FOR), as the desktop
+/// app does.
 pub fn write_batch(dir: &Path, stamp: &str, text: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = batch_path(dir, stamp);
     std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
-    prune_batches(dir, SystemTime::now());
+    mp_core::agent_batch::prune_batches(dir, SystemTime::now());
     Ok(path)
 }
 
@@ -523,6 +487,7 @@ pub fn run_in_herdr(split: &[String], line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn words(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
@@ -876,9 +841,6 @@ mod tests {
         assert!(!old.exists(), "the eight-day-old batch is pruned");
         assert!(recent.exists() && written.exists());
         assert!(other.exists() && lookalike.exists(), "only batch files go");
-        assert!(is_batch_name("batch-20261116-101500.md"));
-        assert!(!is_batch_name("batch-.md"));
-        assert!(!is_batch_name("batch-20261116.md.bak"));
     }
 
     /// A command that fails says what it printed; one that runs answers its

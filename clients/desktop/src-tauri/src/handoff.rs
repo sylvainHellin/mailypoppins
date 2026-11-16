@@ -19,7 +19,9 @@
 //! # The start
 //!
 //! The prompt is written to `<data>/notes/batch-<date>-<millis>.md`, in a
-//! directory private to the user ([`agent::batch_path`]), `{batch}` and
+//! directory private to the user ([`agent::batch_path`]), where the batch
+//! files older than a week are pruned as the TUI prunes its own
+//! ([`agent::write_batch`], `mp_core::agent_batch`), `{batch}` and
 //! `{date}` are replaced in every word of the command, and its program is
 //! located as the embedded editor's is: on the login shell's `PATH`, then in
 //! the probe directories. The panel's session is a terminal session
@@ -63,20 +65,14 @@ fn load_settings(fixture: bool) -> Result<AgentSettings, GuiError> {
         .map_err(|why| setup(format!("{why}; fix [agent] in config.toml.")))
 }
 
-/// Write `text` to a fresh batch file under `data_dir`, answering its path.
+/// Write `text` to a fresh batch file under `data_dir`, answering its path,
+/// and prune the week-old ones ([`agent::write_batch`]).
 fn write_batch(data_dir: &Path, text: &str, date: &str) -> Result<String, GuiError> {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default();
-    let path = agent::batch_path(data_dir, date, millis);
-    if let Some(dir) = path.parent() {
-        mp_core::config::create_private_dir_all(dir).map_err(|e| {
-            GuiError::internal(format!("could not create {}: {e:#}", dir.display()))
-        })?;
-    }
-    std::fs::write(&path, text)
-        .map_err(|e| GuiError::internal(format!("could not write {}: {e}", path.display())))?;
+    let path = agent::write_batch(data_dir, date, millis, text).map_err(GuiError::internal)?;
     Ok(path.to_string_lossy().into_owned())
 }
 

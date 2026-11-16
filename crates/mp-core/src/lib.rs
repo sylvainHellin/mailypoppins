@@ -21,6 +21,7 @@
 //! out of `send` that `draft` reads and that want no transport.
 
 pub mod addresses;
+pub mod agent_batch;
 pub mod app_state;
 pub mod blocklist;
 pub mod body;

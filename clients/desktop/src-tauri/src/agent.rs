@@ -112,6 +112,24 @@ pub fn batch_path(data_dir: &Path, date: &str, millis: u128) -> PathBuf {
         .join(format!("batch-{date}-{millis}.md"))
 }
 
+/// Write `text` to [`batch_path`], its directory created private to the
+/// user, and prune the batch files there older than
+/// [`BATCH_KEPT_FOR`](mp_core::agent_batch::BATCH_KEPT_FOR), as the TUI does.
+pub fn write_batch(
+    data_dir: &Path,
+    date: &str,
+    millis: u128,
+    text: &str,
+) -> Result<PathBuf, String> {
+    let path = batch_path(data_dir, date, millis);
+    let dir = path.parent().unwrap_or(data_dir);
+    mp_core::config::create_private_dir_all(dir)
+        .map_err(|e| format!("could not create {}: {e:#}", dir.display()))?;
+    std::fs::write(&path, text).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    mp_core::agent_batch::prune_batches(dir, std::time::SystemTime::now());
+    Ok(path)
+}
+
 /// `paseo run`, detached, on the batch, the agent's name as its provider.
 pub fn paseo_argv(name: &str, cwd: &str, batch: &str, date: &str) -> Vec<String> {
     vec![
@@ -194,6 +212,35 @@ mod tests {
         ] {
             assert!(checked_date(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// Writing a batch deletes the batch files older than a week, as the
+    /// TUI's does, and keeps the recent ones and every file not named as a
+    /// batch.
+    #[test]
+    fn writing_a_batch_prunes_the_batches_older_than_a_week() {
+        let data = crate::test_support::scratch_dir("batch-prune");
+        let notes = data.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let aged = |name: &str, days: u32| {
+            let path = notes.join(name);
+            std::fs::write(&path, "x").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(std::time::SystemTime::now() - day * days)
+                .unwrap();
+            path
+        };
+        let old = aged("batch-2026-11-01-1761987600000.md", 8);
+        let recent = aged("batch-2026-11-12-1762938000000.md", 6);
+        let other = aged("notes.json", 30);
+        let lookalike = aged("batch-mine.md", 30);
+        let written = write_batch(&data, "2026-11-16", 42, "I have notes").expect("written");
+        assert_eq!(written, notes.join("batch-2026-11-16-42.md"));
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), "I have notes");
+        assert!(!old.exists(), "the eight-day-old batch is pruned");
+        assert!(recent.exists());
+        assert!(other.exists() && lookalike.exists(), "only batch files go");
     }
 
     #[test]
