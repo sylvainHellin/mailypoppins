@@ -21,6 +21,8 @@ import type {
   HoldStatus,
   MessageFlags,
   MessageListRow,
+  Note,
+  NotePreset,
   OutboxListing,
   Progress,
   SearchOrder,
@@ -216,7 +218,8 @@ export const LIST_WIDTH_STEP = 40;
  * `account_wizard` is the account wizard `accountWizard` describes;
  * `device_code` is the sign-in `signIn` describes; `compose_leave` is the
  * question `composeLeave` describes; `server_search` is the Server Search
- * form `serverSearchDialog` describes.
+ * form `serverSearchDialog` describes; `note_prompt` is the note prompt
+ * `notePrompt` describes; `notes` is the notes list, which reads `notes`.
  */
 export type Overlay =
   | "palette"
@@ -242,6 +245,8 @@ export type Overlay =
   | "folder_picker"
   | "event_remove"
   | "event_scope"
+  | "note_prompt"
+  | "notes"
   | null;
 
 /**
@@ -893,6 +898,52 @@ export type BlockDialog = {
 };
 
 /**
+ * The note prompt (PERSO-315), the TUI's `n`: what the note goes on, the
+ * daemon's presets, and the step it is at. `keys` waits for a preset's
+ * letter, Space for free text; `text` waits for the text line, after a
+ * letter whose preset needs one, after Space, or on a note being edited;
+ * `done` offers a done note's clear or a new instruction.
+ */
+export type NotePrompt = {
+  /** The selectors the note goes on: one, several from the marks, or none for a new email. */
+  selectors: string[];
+  /** The account a new email goes out from; the shown list's otherwise. */
+  account: string;
+  /** What the prompt names: the subject, how many emails, or a new email. */
+  title: string;
+  presets: NotePreset[];
+  /** The note on the one target, which an edit replaces; null for a new note. */
+  editing: Note | null;
+  step: "keys" | "text" | "done";
+  /** The preset picked, null for free text. */
+  preset: string | null;
+  /** The text the field starts with. */
+  text: string;
+  /** Where Escape and a save go back to: the notes list the prompt was opened from, or nothing. */
+  returnTo: "notes" | null;
+};
+
+/**
+ * The agent the notes were handed to, in the terminal panel beside the
+ * reader (PERSO-315): kept until it is closed, shown or hidden with the
+ * panel, whatever mail the reader shows. `spawn` moves with each hand-off
+ * and keys the session's pane.
+ */
+export type AgentPanel = {
+  spawn: number;
+  /** The batch prompt, the notes it numbers, and the day it was handed off. */
+  text: string;
+  ids: string[];
+  date: string;
+  shown: boolean;
+  status:
+    | { kind: "starting" }
+    | { kind: "running"; session: number; command: string }
+    | { kind: "exited"; code: number | null; signal: number | null }
+    | { kind: "failed"; error: string };
+};
+
+/**
  * The password dialog: which password of which account it stores, `null`
  * for one password stored as both the IMAP and the SMTP one (PERSO-297).
  * The value itself lives in the dialog's own state and never in the model.
@@ -1196,6 +1247,25 @@ export type AppState = {
    */
   blockedSenders: Loadable<string[]>;
   /**
+   * The notes on mail (`note_list`, PERSO-315), every account's, newest
+   * first: stale on every open of the notes list and every bootstrap, read
+   * while the list is open, and replaced whole by every `note.changed`.
+   */
+  notes: Loadable<Note[]>;
+  /** What the `note_prompt` overlay shows; null whenever another overlay or none is open. */
+  notePrompt: NotePrompt | null;
+  /**
+   * The note on the mail the reader shows (`note_get`), by its selector,
+   * the band above the body, each read at the generation `gen` names: every
+   * `note.changed` moves it, so the shown one is read again and an answer
+   * asked before it is dropped.
+   */
+  noteBands: { gen: number; of: Record<string, { note: Note | null; gen: number }> };
+  /** The list shows only the rows with a note on them (`fN`), beside the text filter. */
+  notedOnly: boolean;
+  /** The agent's terminal panel, null until a hand-off opens it. */
+  agent: AgentPanel | null;
+  /**
    * The daemon's configuration (`config_get`), read when the Settings view
    * opens and while it shows, stale again on every `config.changed` and
    * every bootstrap.
@@ -1336,6 +1406,11 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     signaturesDialog: null,
     blockDialog: null,
     blockedSenders: emptyLoadable<string[]>(),
+    notes: emptyLoadable<Note[]>(),
+    notePrompt: null,
+    noteBands: { gen: 1, of: {} },
+    notedOnly: false,
+    agent: null,
     config: emptyLoadable(),
     credentials: emptyLoadable(),
     configProblem: null,
@@ -1444,11 +1519,16 @@ export function bannerFor(s: AppState): Banner {
   return null;
 }
 
-/** The list pane's local filter, shared by the pane and the keyboard moves. */
-export function filteredRows(list: MessageList | null, filter: string): MessageListRow[] {
+/**
+ * The list pane's local filter, shared by the pane and the keyboard moves;
+ * `notedOnly` keeps the rows with a note on them (`fN`, PERSO-315), an
+ * independent narrowing the text filter intersects with.
+ */
+export function filteredRows(list: MessageList | null, filter: string, notedOnly = false): MessageListRow[] {
   if (!list || list.kind !== "messages") return [];
   const f = filter.trim().toLowerCase();
-  return f ? list.rows.filter((r) => `${r.subject} ${r.from}`.toLowerCase().includes(f)) : list.rows;
+  const rows = notedOnly ? list.rows.filter((r) => r.note !== undefined) : list.rows;
+  return f ? rows.filter((r) => `${r.subject} ${r.from}`.toLowerCase().includes(f)) : rows;
 }
 
 /** Whether `account` is in conversation mode: on unless `prefs.flatListAccounts` names it (ticket 0142). */
@@ -1465,12 +1545,17 @@ export function listsConversations(s: AppState, account: string | null, mailbox:
   return account !== null && mailbox !== null && mailbox !== "drafts" && conversationModeOn(s, account);
 }
 
-/** The conversation list's filter: the participants and the latest row's subject and sender. */
-export function filteredConversations(list: MessageList | null, filter: string): ConversationRow[] {
+/**
+ * The conversation list's filter: the participants and the latest row's
+ * subject and sender; `notedOnly` keeps the conversations a member of which
+ * has a note.
+ */
+export function filteredConversations(list: MessageList | null, filter: string, notedOnly = false): ConversationRow[] {
   if (!list || list.kind !== "conversations") return [];
   const f = filter.trim().toLowerCase();
-  if (!f) return list.rows;
-  return list.rows.filter((r) => `${r.latest.subject} ${r.latest.from} ${r.participants.join(" ")}`.toLowerCase().includes(f));
+  const rows = notedOnly ? list.rows.filter((r) => r.note !== undefined) : list.rows;
+  if (!f) return rows;
+  return rows.filter((r) => `${r.latest.subject} ${r.latest.from} ${r.participants.join(" ")}`.toLowerCase().includes(f));
 }
 
 /** Whether a conversation row expands: more than one member, a draft counted. */
@@ -1490,8 +1575,13 @@ export type ConversationEntry =
  * its expansion read them. A filter matches headers only; an expanded header
  * keeps its members.
  */
-export function conversationEntries(list: MessageList | null, expanded: Record<string, Expansion>, filter: string): ConversationEntry[] {
-  return filteredConversations(list, filter).flatMap((row): ConversationEntry[] => {
+export function conversationEntries(
+  list: MessageList | null,
+  expanded: Record<string, Expansion>,
+  filter: string,
+  notedOnly = false,
+): ConversationEntry[] {
+  return filteredConversations(list, filter, notedOnly).flatMap((row): ConversationEntry[] => {
     const e = expanded[row.thread_id];
     if (!e) return [{ kind: "header", row, expanded: false }];
     const members = e.data?.messages ?? [];
@@ -1582,8 +1672,8 @@ export function draftItems(list: MessageList | null): DraftItem[] {
   return [...listed, ...skipped];
 }
 
-export function filteredDrafts(list: MessageList | null, filter: string): DraftItem[] {
-  const all = draftItems(list);
+export function filteredDrafts(list: MessageList | null, filter: string, notedOnly = false): DraftItem[] {
+  const all = notedOnly ? draftItems(list).filter((d) => d.note !== undefined) : draftItems(list);
   const f = filter.trim().toLowerCase();
   return f ? all.filter((d) => `${d.subject ?? ""} ${d.to ?? ""}`.toLowerCase().includes(f)) : all;
 }

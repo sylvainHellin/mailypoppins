@@ -3,7 +3,8 @@ import { CalendarDays, ChevronRight, CornerUpLeft, Paperclip, Pencil } from "luc
 import type { ConversationRow as Conversation } from "@/protocol/types";
 import { shortDate } from "@/components/list/format";
 import { senderName } from "@/lib/mailbox";
-import { FlagToggle, MarkBox, PendingMark, UnreadToggle } from "@/components/list/RowControls";
+import { FlagToggle, MarkBox, NoteGlyph, PendingMark, UnreadToggle } from "@/components/list/RowControls";
+import { NOTE_LABEL } from "@/app/notes";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 
 export type ConversationRowProps = {
@@ -78,6 +79,7 @@ export const ConversationRow = memo(function ConversationRow({
     marked ? "marked" : null,
     pending ? "change pending" : null,
     row.flagged ? "flagged" : null,
+    row.note ? NOTE_LABEL[row.note].toLowerCase() : null,
     row.has_draft ? "has a draft" : null,
     latest.flags.answered ? "answered" : null,
     row.has_attachments ? "has attachments" : null,
@@ -153,6 +155,7 @@ export const ConversationRow = memo(function ConversationRow({
           {latest.is_invite ? <CalendarDays aria-hidden="true" className="size-3.5" /> : null}
           {latest.flags.answered ? <CornerUpLeft aria-hidden="true" className="size-3.5" /> : null}
           {row.has_attachments ? <Paperclip aria-hidden="true" className="size-3.5" /> : null}
+          <NoteGlyph state={row.note} />
           <FlagToggle flagged={row.flagged} onToggle={() => onToggleFlag(row)} />
         </span>
         <time className="shrink-0 text-xs text-muted-foreground tabular-nums" dateTime={row.date_sort}>

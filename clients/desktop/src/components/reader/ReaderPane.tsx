@@ -8,6 +8,7 @@ import { ReaderHeader } from "@/components/reader/ReaderHeader";
 import { InviteCard } from "@/components/reader/InviteCard";
 import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
+import { NoteBand } from "@/components/notes/NoteBand";
 import { READER_SCROLL_ID } from "@/app/actions";
 import * as compose from "@/app/compose";
 import { exportMessage, fetchHit, openHtml } from "@/app/attachments";
@@ -158,7 +159,10 @@ export function ReaderPane() {
           <ComposeSummary key={shown} account={summary.account} draftId={summary.draft} />
         ) : draft && account ? (
           draftRow ? (
-            <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} />
+            <>
+              <NoteBand />
+              <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} />
+            </>
           ) : conversationDraft(s) === draft ? (
             // A conversation's draft member (ticket 0142): no Drafts listing to read it from.
             <ComposeSummary key={`${account}/${draft}`} account={account} draftId={draft} member />
@@ -180,6 +184,7 @@ export function ReaderPane() {
             <ReaderToolbar meta={s.reader.meta} />
             <ReaderHeader meta={s.reader.meta} />
             {s.reader.meta.invite ? <InviteCard meta={s.reader.meta} /> : null}
+            <NoteBand />
             {s.readerMode === "text" ? (
               <ReaderText
                 instance={s.bootstrap?.instance_id ?? ""}

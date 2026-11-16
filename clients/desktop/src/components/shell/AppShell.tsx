@@ -25,6 +25,9 @@ import { ServerSearchDialog } from "@/components/search/ServerSearchDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
 import { BlockSenderDialog } from "@/components/senders/BlockSenderDialog";
 import { BlockedSendersDialog } from "@/components/senders/BlockedSendersDialog";
+import { NotePromptDialog } from "@/components/notes/NotePromptDialog";
+import { NotesListDialog } from "@/components/notes/NotesListDialog";
+import { AgentHost, AgentSlotProvider } from "@/components/notes/AgentPanel";
 import { ActivityLogDialog } from "@/components/activity/ActivityLogDialog";
 import { PasswordDialog } from "@/components/settings/PasswordDialog";
 import { AccountWizard } from "@/components/settings/AccountWizard";
@@ -108,53 +111,58 @@ export function AppShell() {
   const close = (open: boolean) => {
     if (!open) dispatch({ type: "overlay", overlay: null });
   };
-  // The embedded editors live beside the body, so a screen change never
-  // unmounts one (components/compose/TerminalHost.tsx).
+  // The embedded editors and the agent live beside the body, so a screen
+  // change never unmounts one (components/compose/TerminalHost.tsx).
   return (
     <TerminalSlotProvider>
-      {body}
-      <TerminalHost />
-      <PrefixPopup state={s} />
-      <CommandPalette
-        open={s.overlay === "palette"}
-        onOpenChange={close}
-        onRun={runFromPalette}
-        extra={updateRows}
-        hidden={hiddenRows}
-        recent={s.prefs.paletteRecent}
-      />
-      <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
-      <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
-      <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />
-      <ConfirmMutationDialog
-        dialog={s.overlay === "mutation" && s.dialog && s.dialog.kind !== "move" ? s.dialog : null}
-        onOpenChange={close}
-        onConfirm={() => s.dialog && runDialog(s.dialog, dispatch, undefined, s.compose)}
-      />
-      <MovePicker
-        state={s}
-        dialog={s.overlay === "mutation" && s.dialog?.kind === "move" ? s.dialog : null}
-        onOpenChange={close}
-        onPick={(slug) => s.dialog && runDialog(s.dialog, dispatch, slug)}
-      />
-      <ComposeWizard dialog={s.overlay === "compose" ? s.composeDialog : null} onOpenChange={close} />
-      <AttachmentsDialog dialog={s.overlay === "attachments" ? s.attachDialog : null} onOpenChange={close} />
-      <AccountPicker open={s.overlay === "account_picker"} onOpenChange={close} />
-      <FolderPicker open={s.overlay === "folder_picker"} onOpenChange={close} />
-      <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
-      <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
-      <NewEventDialog dialog={s.overlay === "event" ? s.eventDialog : null} onOpenChange={close} />
-      <EventRemoveDialog dialog={s.overlay === "event_remove" ? s.eventRemoveDialog : null} onOpenChange={close} />
-      <EventScopeDialog dialog={s.overlay === "event_scope" ? s.eventScopeDialog : null} onOpenChange={close} />
-      <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />
-      <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
-      <BlockSenderDialog dialog={s.overlay === "block_sender" ? s.blockDialog : null} onOpenChange={close} />
-      <BlockedSendersDialog open={s.overlay === "blocked_senders"} onOpenChange={close} />
-      <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />
-      <PasswordDialog dialog={s.overlay === "password" ? s.passwordDialog : null} onOpenChange={close} />
-      <AccountWizard dialog={s.overlay === "account_wizard" ? s.accountWizard : null} onOpenChange={close} />
-      <DeviceCodeDialog open={s.overlay === "device_code"} />
-      <ComposeLeaveDialog />
+      <AgentSlotProvider>
+        {body}
+        <TerminalHost />
+        <AgentHost />
+        <PrefixPopup state={s} />
+        <CommandPalette
+          open={s.overlay === "palette"}
+          onOpenChange={close}
+          onRun={runFromPalette}
+          extra={updateRows}
+          hidden={hiddenRows}
+          recent={s.prefs.paletteRecent}
+        />
+        <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
+        <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
+        <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />
+        <ConfirmMutationDialog
+          dialog={s.overlay === "mutation" && s.dialog && s.dialog.kind !== "move" ? s.dialog : null}
+          onOpenChange={close}
+          onConfirm={() => s.dialog && runDialog(s.dialog, dispatch, undefined, s.compose)}
+        />
+        <MovePicker
+          state={s}
+          dialog={s.overlay === "mutation" && s.dialog?.kind === "move" ? s.dialog : null}
+          onOpenChange={close}
+          onPick={(slug) => s.dialog && runDialog(s.dialog, dispatch, slug)}
+        />
+        <ComposeWizard dialog={s.overlay === "compose" ? s.composeDialog : null} onOpenChange={close} />
+        <AttachmentsDialog dialog={s.overlay === "attachments" ? s.attachDialog : null} onOpenChange={close} />
+        <AccountPicker open={s.overlay === "account_picker"} onOpenChange={close} />
+        <FolderPicker open={s.overlay === "folder_picker"} onOpenChange={close} />
+        <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
+        <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
+        <NewEventDialog dialog={s.overlay === "event" ? s.eventDialog : null} onOpenChange={close} />
+        <EventRemoveDialog dialog={s.overlay === "event_remove" ? s.eventRemoveDialog : null} onOpenChange={close} />
+        <EventScopeDialog dialog={s.overlay === "event_scope" ? s.eventScopeDialog : null} onOpenChange={close} />
+        <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />
+        <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
+        <BlockSenderDialog dialog={s.overlay === "block_sender" ? s.blockDialog : null} onOpenChange={close} />
+        <BlockedSendersDialog open={s.overlay === "blocked_senders"} onOpenChange={close} />
+        <NotePromptDialog prompt={s.overlay === "note_prompt" ? s.notePrompt : null} />
+        <NotesListDialog open={s.overlay === "notes"} onOpenChange={close} />
+        <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />
+        <PasswordDialog dialog={s.overlay === "password" ? s.passwordDialog : null} onOpenChange={close} />
+        <AccountWizard dialog={s.overlay === "account_wizard" ? s.accountWizard : null} onOpenChange={close} />
+        <DeviceCodeDialog open={s.overlay === "device_code"} />
+        <ComposeLeaveDialog />
+      </AgentSlotProvider>
     </TerminalSlotProvider>
   );
 }

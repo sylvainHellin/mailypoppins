@@ -13,6 +13,7 @@ import { EditingBanner } from "@/components/compose/EditingBanner";
 import { ConfigProblemBanner } from "@/components/settings/ConfigProblemBanner";
 import { ReminderBanner } from "@/components/reminders/ReminderBanner";
 import { ViewHost } from "@/components/views/ViewHost";
+import { AgentSlot, AgentTab } from "@/components/notes/AgentPanel";
 import { VIEW_TITLES } from "@/app/views";
 import { useAppState, useDispatch } from "@/app/store";
 import { listWidthFor, useWidth } from "@/app/layout";
@@ -110,6 +111,9 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
                 <ReaderPane />
               </div>
             ) : null}
+            {/* The agent the notes went to (PERSO-315), to the right of the reader. */}
+            {!view && showReader && !narrow && s.agent?.shown ? <AgentSlot /> : null}
+            {!view && showReader && !narrow ? <AgentTab /> : null}
           </div>
         </SidebarInset>
       )}

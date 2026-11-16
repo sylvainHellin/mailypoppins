@@ -3,7 +3,8 @@ import { CornerUpLeft, Pencil, Star } from "lucide-react";
 import type { ThreadMessage } from "@/protocol/types";
 import { shortDate } from "@/components/list/format";
 import { readableSender, senderAddress, senderName } from "@/lib/mailbox";
-import { MarkBox, PendingMark } from "@/components/list/RowControls";
+import { MarkBox, NoteGlyph, PendingMark } from "@/components/list/RowControls";
+import { NOTE_LABEL } from "@/app/notes";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 
 export type ConversationMemberRowProps = {
@@ -72,6 +73,7 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
     pending ? "change pending" : null,
     unread ? "unread" : null,
     member.flags.flagged ? "flagged" : null,
+    member.note ? NOTE_LABEL[member.note].toLowerCase() : null,
     member.flags.answered ? "answered" : null,
     member.current ? "the listed message" : null,
   ].filter(Boolean);
@@ -122,6 +124,7 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
           {pending ? <PendingMark /> : null}
           {draft !== null ? <Pencil aria-hidden="true" className="size-3.5" /> : null}
           {member.flags.answered ? <CornerUpLeft aria-hidden="true" className="size-3.5" /> : null}
+          <NoteGlyph state={member.note} />
           {member.flags.flagged ? <Star aria-hidden="true" className="size-3.5 fill-current text-warning" /> : null}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{date}</span>

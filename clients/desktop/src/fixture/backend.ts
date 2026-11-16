@@ -44,6 +44,8 @@ import type {
   EventFrontmatter,
   HoldStatus,
   MessageListRow,
+  Note,
+  NoteState,
   OutboxListing,
   OutboxRow,
   RecipientOutcome,
@@ -52,6 +54,7 @@ import type {
   ThreadMessage,
 } from "@/protocol/types";
 import { FakeBridge } from "@/fixture/terminal-bridge";
+import { keyOf, NoteBook, noteRefusal, type NoteTarget, type NoteWorld } from "@/fixture/notes";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
 import { countsAsFailed } from "@/app/outbox";
@@ -59,6 +62,7 @@ import { comparableAddress, entryRefusal, mailboxAddresses, ownAddresses, ownMai
 import type {
   AccountDraft,
   AccountInfo,
+  AgentSettings,
   ConfigSnapshot,
   ConnectionStatus,
   ContactRow,
@@ -198,6 +202,21 @@ export const UPDATE_DISABLED: UpdateCheck = { state: "disabled", current: "0.11.
 
 /** `update_status` in fixture mode, as updates.rs's gate says. */
 export const UPDATE_STATUS_FIXTURE: UpdateStatus = { current: "0.1.0", enabled: false, reason: "Updates are off in fixture mode." };
+
+/** The built-in `[agent]` as `agent_settings` answers it in fixture mode (src-tauri/src/agent.rs). */
+export const FIXTURE_AGENT: AgentSettings = {
+  route: "panel",
+  name: "pi",
+  command: ["pi", "--name", "mail notes {date}", "@{batch}", "Work through these notes."],
+  cwd: "/home/fixture/pi-remote",
+};
+
+/** An empty notebook whose every write emits `note.changed` with the whole list, as the daemon publishes it. */
+function freshNotes(): NoteBook {
+  const book = new NoteBook();
+  book.onChanged = (notes: Note[]) => emitEnvelope("note.changed", { notes });
+  return book;
+}
 
 export const mock = {
   connection: { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true } as ConnectionStatus,
@@ -364,6 +383,12 @@ export const mock = {
   signatures: clone(fixtures.signatures),
   /** The blocked senders, lowercase and sorted, what the `sender_*` commands read and change (PERSO-261). */
   blocked: [] as string[],
+  /** The notes on mail, what the `note_*` commands read and change (PERSO-315); every write emits `note.changed`. */
+  notes: freshNotes(),
+  /** Every `agent_paseo` start, oldest first: the batch prompt and the date. */
+  paseoRuns: [] as { text: string; date: string }[],
+  /** What `agent_settings` answers: the built-in `[agent]`, which opens in the panel. */
+  agent: { ...FIXTURE_AGENT },
   /** `config.get`'s `state`: `absent` makes `config_open` refuse with fixture.rs's `NO_CONFIG`. */
   configState: "ok" as "ok" | "absent" | "invalid",
   /** Whether the daemon's log file exists, which `log_open` checks. */
@@ -643,6 +668,9 @@ export function resetMock(): void {
   mock.vcards = [];
   mock.signatures = clone(fixtures.signatures);
   mock.blocked = [];
+  mock.notes = freshNotes();
+  mock.paseoRuns = [];
+  mock.agent = { ...FIXTURE_AGENT, command: [...FIXTURE_AGENT.command] };
   mock.configState = "ok";
   mock.logExists = true;
   mock.configRevision = 0;
@@ -1418,7 +1446,7 @@ function conversationDrafts(account: string): { id: string; date: string; thread
 /** Every row of the account, with its mailbox and its wire shape. */
 function accountRows(account: string): { mailbox: string; row: MessageListRow }[] {
   return Object.entries(mock.rows[account] ?? {}).flatMap(([mailbox, rows]) =>
-    mailbox === "drafts" ? [] : rows.map((r) => ({ mailbox, row: { ...strip(r), id: r.id + mock.rowShift } })),
+    mailbox === "drafts" ? [] : rows.map((r) => ({ mailbox, row: noted(account, { ...strip(r), id: r.id + mock.rowShift }) })),
   );
 }
 
@@ -1437,8 +1465,10 @@ export function conversationListing(account: string, mailbox: string): Extract<M
     if (here.length === 0) return [];
     const seen = new Set<string>();
     const participants = members.filter((m) => !seen.has(addressOf(m.row.from)) && !!seen.add(addressOf(m.row.from))).slice(0, 5).map((m) => m.row.from);
+    const note = pressing(members.map((m) => m.row.note));
     return [
       {
+        ...(note ? { note } : {}),
         count: new Set(members.map((m) => m.row.message_id)).size,
         date_display: members[0].row.date_display,
         date_sort: members[0].row.date_sort,
@@ -1485,6 +1515,7 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       flags: row.flags,
       current: row.message_id === addressed.row.message_id,
       selector: row.selector,
+      ...(row.note ? { note: row.note } : {}),
     },
   }));
   for (const d of conversationDrafts(account).filter((x) => x.thread_id === tid)) {
@@ -1501,6 +1532,8 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       selector: `mp://${account}/drafts/${d.id}`,
       path: d.path,
     };
+    const draftNote = mock.notes.stateOf(account, null, d.id);
+    if (draftNote) m.note = draftNote;
     const at = messages.findIndex((x) => x.date > d.date);
     messages.splice(at < 0 ? messages.length : at, 0, { date: d.date, m });
   }
@@ -1671,6 +1704,92 @@ function unblockSender(raw: string): SenderUnblocked {
     emitEnvelope("sender.blocklist_changed", { entries: mock.blocked });
   }
   return { entry, removed, entries: [...mock.blocked] };
+}
+
+// ---------------------------------------------------------------------------
+// The notes on mail (PERSO-315), as fixture.rs keeps them: a selector names
+// the row of its account whose Message-ID is its key, the copy in its mailbox
+// first, or the draft of its account with that id; a listing row carries the
+// state of the note on its message or draft.
+// ---------------------------------------------------------------------------
+
+const bareId = (id: string) => id.replace(/^</, "").replace(/>$/, "");
+
+/** The row of `account` whose Message-ID is `key`, the copy in `mailbox` first. */
+function rowByKey(account: string, mailbox: string | null, key: string): FixtureRow | null {
+  const boxes = mock.rows[account] ?? {};
+  const match = (r: FixtureRow) => bareId(r.message_id) === key;
+  return (mailbox ? boxes[mailbox]?.find(match) : undefined) ?? Object.values(boxes).flat().find(match) ?? null;
+}
+
+const noteWorld: NoteWorld = {
+  target(account, selector): NoteTarget {
+    const key = keyOf(selector, account);
+    if (key.draft_id !== undefined) {
+      const d = mock.drafts[key.account]?.drafts.find((x) => x.id === key.draft_id);
+      if (!d) throw noteRefusal(`no draft matches ${selector}`);
+      return { account: key.account, selector: d.selector, draft_id: d.id, from: `Me <${FIXTURE_ADDRESS}>`, to: d.to ?? "", subject: d.subject ?? "" };
+    }
+    const mailbox = selector.startsWith("mp://") ? (selector.slice(5).split("/")[1] ?? null) : (selector.split("/")[0] ?? null);
+    const row = rowByKey(key.account, mailbox, key.message_id ?? "");
+    if (!row) throw noteRefusal(`no message matches ${selector}`);
+    return { account: key.account, selector: row.selector, message_id: key.message_id, from: row.from ?? "", to: row.to ?? "", subject: row.subject ?? "" };
+  },
+  locate(note: Note): string | null {
+    if (note.draft_id !== undefined) return mock.drafts[note.account]?.drafts.find((d) => d.id === note.draft_id)?.selector ?? null;
+    const hinted = note.selector?.slice(5).split("/")[1] ?? null;
+    return rowByKey(note.account, hinted, note.message_id ?? "")?.selector ?? null;
+  },
+  knows: (account) => mock.bootstrap.snapshot.accounts.some((a) => a.name === account),
+};
+
+/** `row` with the state of the note on its message, as a listing carries it. */
+function noted<R extends { message_id: string; note?: NoteState }>(account: string, row: R): R {
+  const note = mock.notes.stateOf(account, row.message_id, null);
+  const { note: _old, ...rest } = row;
+  return (note ? { ...rest, note } : rest) as R;
+}
+
+/** The most pressing of `states`: open, then handed off, then done (`NoteState::urgency`). */
+function pressing(states: (NoteState | undefined)[]): NoteState | undefined {
+  for (const s of ["open", "handed_off", "done"] as const) if (states.includes(s)) return s;
+  return undefined;
+}
+
+/** The `note_*` and `agent_*` commands, over `mock.notes` and `mock.agent`; undefined for any other command. */
+function noteAnswer(cmd: string, args: Record<string, unknown>): unknown {
+  const n = mock.notes;
+  switch (cmd) {
+    case "note_presets":
+      return n.presets();
+    case "note_list":
+      return n.list(noteWorld);
+    case "note_get":
+      return n.get(noteWorld, String(args.selector));
+    case "note_set":
+      return n.set(noteWorld, (args.params ?? {}) as Parameters<NoteBook["set"]>[1]);
+    case "note_set_many":
+      return n.setMany(noteWorld, args.params as Parameters<NoteBook["setMany"]>[1]);
+    case "note_clear":
+      return n.clear(noteWorld, String(args.id));
+    case "note_clear_done":
+      return n.clearDone(noteWorld);
+    case "note_export":
+    case "note_handoff":
+      return n.export(noteWorld, (args.ids as string[] | null | undefined) ?? null, cmd === "note_handoff");
+    case "agent_settings":
+      return structuredClone(mock.agent);
+    case "agent_paseo":
+      mock.paseoRuns.push({ text: String(args.text), date: String(args.date) });
+      return "fixture";
+    default:
+      return undefined;
+  }
+}
+
+/** Close a note as the agent's `mp notes done` would, emitting `note.changed`. */
+export function closeNote(id: string, result: string): Note {
+  return mock.notes.done(noteWorld, { id, result });
 }
 
 /** One of the five message mutations over `row_ids`, in order, as fixture.rs answers it. */
@@ -1900,6 +2019,8 @@ function setDraftStatus(cmd: string, account: string, ids: string[]): unknown {
 
 async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const account = String(args.account ?? "");
+  const note = noteAnswer(cmd, args);
+  if (note !== undefined) return note;
   switch (cmd) {
     case "subscribe_events": {
       mock.channel = args.on_event as Channel<GuiEvent>;
@@ -1946,10 +2067,18 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "list_messages": {
       const mailbox = String(args.mailbox);
       if (mailbox === "drafts") {
-        return { kind: "drafts", account, listing: clone(mock.drafts[account]) } satisfies MessageList;
+        const listing = clone(mock.drafts[account]);
+        if (listing) {
+          listing.drafts = listing.drafts.map((d) => {
+            const { note: _old, ...rest } = d;
+            const note = mock.notes.stateOf(account, null, d.id);
+            return note ? { ...rest, note } : rest;
+          });
+        }
+        return { kind: "drafts", account, listing } satisfies MessageList;
       }
       if (args.conversations === true) return conversationListing(account, mailbox) satisfies MessageList;
-      const rows = (mock.rows[account]?.[mailbox] ?? []).map(strip).map((r) => ({ ...r, id: r.id + mock.rowShift }));
+      const rows = (mock.rows[account]?.[mailbox] ?? []).map(strip).map((r) => noted(account, { ...r, id: r.id + mock.rowShift }));
       return { kind: "messages", account, mailbox, total: rows.length, rows } satisfies MessageList;
     }
     case "message_thread": {
@@ -3035,6 +3164,19 @@ function terminalAnswer(cmd: string, args: Record<string, unknown>): Promise<unk
       }
       const req = { account: String(args.account), id: String(args.id), path: String(args.path), cols: Number(args.cols), rows: Number(args.rows), theme } as const;
       return t.spawn(req, channelSink(args.output as Channel<unknown>));
+    }
+    // handoff.rs: the agent's session, a date other than YYYY-MM-DD refused.
+    case "agent_spawn": {
+      const theme = args.theme;
+      if (theme !== "dark" && theme !== "light") {
+        return Promise.reject({ kind: "protocol", message: `the theme \`${String(theme)}\` is neither dark nor light`, code: null });
+      }
+      const date = String(args.date);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return Promise.reject({ kind: "protocol", message: `\`${date}\` is not a date of the form 2026-11-16`, code: null });
+      }
+      const req = { text: String(args.text), date, cols: Number(args.cols), rows: Number(args.rows), theme } as const;
+      return t.spawnAgent(req, channelSink(args.output as Channel<unknown>));
     }
     case "terminal_write":
       return t.write(Number(args.session), String(args.data));

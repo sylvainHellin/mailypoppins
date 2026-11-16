@@ -946,6 +946,65 @@ The dialog owns every key while it is open, and reads them in the capture phase,
 Every open of the dialog and every bootstrap make it stale, and it is read (`sender_list`) only while the dialog is open.
 Every `sender.blocklist_changed`, from this window or another client, and every block or unblock answer carry the whole list and replace it, so an open dialog follows another client's change with no read, and a read asked before the change is dropped when it lands.
 
+## Notes on mail
+
+A note is a short instruction for a coding agent on a message, a draft, or nothing (a new email), kept by the daemon (MSG-11, MSG-12, PERSO-315); the desktop has the TUI's keys and flows, `src/app/notes.ts` holds the model and `src/app/noteActions.ts` the commands ([rust-layer.md](rust-layer.md), "Notes on mail").
+The agent drafts and never sends; the daemon renders the batch prompt every client hands it.
+
+### Entry points
+
+- `n`, the TUI's MESSAGE key, from the list or the reader, and the palette's "Note for the agent (a preset, or Space for free text)" open the note prompt on the marked rows, else the cursor row (a conversation header's latest message, a draft, a draft member), else the message the reader shows; a server-only hit says to fetch it first.
+- `N` in Mail, and the palette's "Notes for the agent (every account)", open the notes list.
+- `fN`, beside the TUI's `fF`, and the list header's sticky-note button show only the rows with a note, a narrowing the text filter intersects with; the header counts "<n> of <total>".
+
+Until keymap.json, regenerated from the TUI, carries these rows, `GUI_ENTRIES` stands in for them under the TUI's descriptions and keys (`NOTES_ROWS` in `src/keymap/catalog.ts`); the palette alone runs "Hand off the open notes to the agent", "Copy the open notes' batch prompt" and "Agent panel: show / hide".
+
+### The prompt
+
+`NotePromptDialog.tsx` is the overlay `note_prompt`, and `state.notePrompt` its selectors, account, title, the daemon's presets (`note_presets`, read at each open), the note being edited and the step.
+
+| Step | Keys |
+|---|---|
+| letters | a preset's letter picks it: one that needs no text saves at once, one that needs a text goes to the text line; Space goes to free text |
+| text | the line takes the keys, Enter saves; on a noted mail the prompt opens here, its preset and text filled in |
+| done | a done note shows its instruction and result; Backspace clears it (`note_clear`), a letter or Space gives it a new instruction |
+
+Escape writes nothing and closes, back to the notes list when the prompt came from it.
+A save is `note_set_many` on several selectors, `note_set` on one (which replaces the preset and the text and opens the note again), by id on an edited note with no selector, and with `account` alone for a new email; the notice line says "Note saved on <title>", and a refusal stays in the prompt's alert line with the daemon's sentence.
+
+### The glyph and the band
+
+Every listing row carries the state of the note on it (`note` on a message row, a draft row, a conversation row, the most pressing of its members', and a thread member), and the row shows it beside the star (`NoteGlyph`): open, handed off, done; its accessible name says it too.
+The reader shows the note on the shown message or draft in a band above the body (`NoteBand.tsx`), its instruction and, once done, its result, read with `note_get` for the reader's selector.
+Every `note.changed`, from this window, another client or the agent's `mp notes done`, replaces `state.notes`, reads the shown listing again for its glyphs, and moves `state.noteBands.gen`, so the band reads again and an answer asked before is dropped.
+
+### The notes list
+
+`NotesListDialog.tsx` is the overlay `notes`: every account's notes, newest first, each with its glyph, its mail's subject (or the new email it asks for), its account, its instruction, its result once done and "mail gone" when orphaned; read with `note_list` at each open and kept live by `note.changed`.
+
+| Key | Action | Command |
+|---|---|---|
+| `j`/`k`, Down/Up | move | none |
+| Enter | open the note's mail in Mail; a note for a new email is edited | none |
+| `a` | a note for a new email from the shown account | `note_set` |
+| `e` | edit the cursor note | `note_set` |
+| `d` | drop the cursor note | `note_clear` |
+| `D` | clear every done note | `note_clear_done` |
+| `y` | copy the batch prompt of the open notes, changing nothing | `note_export` |
+| `x` | hand the open notes to the agent | `agent_settings`, `note_export`, then the start, then `note_handoff` |
+| Escape, `q` | close | none |
+
+`y` hands the clipboard a `ClipboardItem` of the pending prompt within the key press (`copyLater` in `src/lib/clipboard.ts`), which keeps WebKit's user activation across the daemon call.
+
+### The hand-off and the agent panel
+
+`x` reads `[agent]` (`agent_settings`) and the prompt (`note_export`); with no open note it says so.
+By `open_in`: `clipboard` copies the prompt and marks nothing; `paseo` starts a detached `paseo run` (`agent_paseo`) and then marks the exported notes handed off; anything else opens the agent in the panel beside the reader, whatever the TUI would use.
+The panel (`AgentPanel.tsx`) is a terminal session of its own (`agent_spawn`), the embedded editor's xterm.js on the Rust layer's PTY: `AgentHost` lives under AppShell and lays the terminal over the slot `AgentSlot` renders to the right of the reader, so the agent keeps running across mails, views and a hidden panel.
+Once the start answered, `note_handoff` marks the exported ids handed off, never other notes, and never for an agent that did not start; a refused start leaves the notes open and says why.
+The panel's header names the agent's state (starting, working, done, exited with its code, did not start); its Hide button and the palette's "Agent panel: show / hide" hide it, a thin tab at the reader's edge shows it again, and Close (Stop while the agent runs) kills the agent and frees the session.
+A hand-off while the panel's agent runs is refused with a notice; one after it exited replaces it.
+
 ## Activity log
 
 The activity log is the TUI's ACTIVITY LOG overlay and status log (OBS-01): every line this window reported, in one place, after its notice left.

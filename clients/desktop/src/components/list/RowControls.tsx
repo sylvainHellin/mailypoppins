@@ -3,7 +3,9 @@
 // tab stop) and has its key: `v`, `u`, `*`.
 
 import type { MouseEvent, ReactNode } from "react";
-import { Check, LoaderCircle, Star } from "lucide-react";
+import { Bot, Check, CircleCheck, LoaderCircle, Star, StickyNote } from "lucide-react";
+import { NOTE_LABEL } from "@/app/notes";
+import type { NoteState } from "@/protocol/types";
 
 /** A click inside a row that must not select or open the row. */
 function own(handler: (e: MouseEvent) => void) {
@@ -100,6 +102,17 @@ export function FlagToggle({ flagged, onToggle }: { flagged: boolean; onToggle: 
       <Star aria-hidden="true" className={`size-3.5 ${flagged ? "fill-current" : ""}`} />
     </RowButton>
   );
+}
+
+/**
+ * The note on the row beside its star (PERSO-315): open, handed off to the
+ * agent, or done; nothing when the row has none. `n` sets or edits it.
+ */
+export function NoteGlyph({ state }: { state: NoteState | undefined }) {
+  if (!state) return null;
+  const Icon = state === "open" ? StickyNote : state === "handed_off" ? Bot : CircleCheck;
+  const tone = state === "open" ? "text-link" : "text-muted-foreground";
+  return <Icon role="img" aria-label={NOTE_LABEL[state]} data-note={state} className={`size-3.5 shrink-0 ${tone}`} />;
 }
 
 /** A change the daemon has not confirmed yet. */

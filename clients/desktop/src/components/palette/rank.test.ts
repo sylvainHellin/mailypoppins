@@ -34,7 +34,27 @@ describe("the palette's ranking", () => {
   });
 
   it("matches a word's start, and three letters or more inside a word", () => {
-    expect(labels("not")).toEqual(["Show a test reminder notification", "Dismiss the newest notice", "Dismiss all notices"]);
+    expect(labels("not")).toEqual([
+      "Show a test reminder notification",
+      "Dismiss the newest notice",
+      "Dismiss all notices",
+      // The notes on mail (PERSO-315): the TUI's rows, then the desktop's own.
+      "Note for the agent (a preset, or Space for free text)",
+      "Notes for the agent (every account)",
+      "Show noted only (toggle)",
+      "Navigate notes",
+      "Open the mail (a note for a new email: edit it)",
+      "New note asking for a new email (this account)",
+      "Edit the note",
+      "Drop the note",
+      "Clear every done note",
+      "Copy the batch prompt of the open notes",
+      "Hand the open notes to the agent ([agent] open_in)",
+      "Hand off the open notes to the agent",
+      "Copy the open notes' batch prompt",
+      "Close the list",
+      "Agent panel: show / hide",
+    ]);
     expect(labels("box")).toContain("Open outbox");
     // Two letters inside a word are not enough.
     expect(paletteScore(entry("Open outbox"), "bo")).toBe(0);

@@ -25,6 +25,14 @@ import type {
   EventUpdateParams,
   HoldListing,
   MessageAttachment,
+  Note,
+  NoteCleared,
+  NoteExport,
+  NoteListing,
+  NoteLookup,
+  NotePresets,
+  NoteSetManyParams,
+  NoteSetParams,
   OutboxListing,
   SenderBlocked,
   SenderUnblocked,
@@ -33,6 +41,7 @@ import type {
 import type {
   AccountDraft,
   AccountInfo,
+  AgentSettings,
   CancelOutcome,
   ConfigInitialised,
   ConfigSnapshot,
@@ -289,6 +298,49 @@ export const senderUnblock = (address: string): Promise<SenderUnblocked> => invo
 
 /** The blocked senders, lowercase and sorted. */
 export const senderList = (): Promise<BlockedSenders> => invoke<BlockedSenders>("sender_list");
+
+// The notes on mail (docs/rust-layer.md, "Notes on mail", PERSO-315): one
+// `note.*` call each. Every write publishes `note.changed` with the whole list.
+
+/** The presets the note prompt offers, in its order. */
+export const notePresets = (): Promise<NotePresets> => invoke<NotePresets>("note_presets");
+
+/** Every note, newest first. */
+export const noteList = (): Promise<NoteListing> => invoke<NoteListing>("note_list");
+
+/** The note on the message or draft `selector` names; any copy's selector names a message's. */
+export const noteGet = (selector: string): Promise<NoteLookup> => invoke<NoteLookup>("note_get", { selector });
+
+/**
+ * Add a note on a selector, edit one by id (what the request leaves out is
+ * kept), or with neither add a note asking for a new email from `account`;
+ * a refusal is a `protocol` error with the daemon's sentence.
+ */
+export const noteSet = (params: NoteSetParams): Promise<Note> => invoke<Note>("note_set", { params });
+
+/** The same note on each of `params.selectors`; answers the notes it set. */
+export const noteSetMany = (params: NoteSetManyParams): Promise<NoteListing> => invoke<NoteListing>("note_set_many", { params });
+
+/** Remove one note by its id. */
+export const noteClear = (id: string): Promise<NoteCleared> => invoke<NoteCleared>("note_clear", { id });
+
+/** Remove every done note. */
+export const noteClearDone = (): Promise<NoteCleared> => invoke<NoteCleared>("note_clear_done");
+
+/** The batch prompt for `ids`, or for every open note; changes nothing. */
+export const noteExport = (ids?: string[]): Promise<NoteExport> => invoke<NoteExport>("note_export", { ids: ids ?? null });
+
+/** The batch prompt for `ids`, marking the open notes among them handed off. */
+export const noteHandoff = (ids?: string[]): Promise<NoteExport> => invoke<NoteExport>("note_handoff", { ids: ids ?? null });
+
+/** The agent `[agent]` of config.toml names, and where the desktop opens it; a bad `default` is `setup`. */
+export const agentSettings = (): Promise<AgentSettings> => invoke<AgentSettings>("agent_settings");
+
+/**
+ * Start the agent with a detached `paseo run` on the batch prompt `text`;
+ * `date` is today, `YYYY-MM-DD`. Answers what paseo printed.
+ */
+export const agentPaseo = (text: string, date: string): Promise<string> => invoke<string>("agent_paseo", { text, date });
 
 /** Opens the file in the resolved editor and never waits for it; a launch failure is `setup`. */
 export const editorOpen = (path: string): Promise<EditorLaunch> => invoke<EditorLaunch>("editor_open", { path });

@@ -13,18 +13,20 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import { tauriBridge, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
+import { tauriBridge, type DraftRun, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
 import { terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
 import { currentScheme } from "@/app/theme";
 
 /** How long a run of container resizes settles before the PTY hears of it. */
 export const RESIZE_DEBOUNCE_MS = 50;
 
-export type TerminalPaneProps = {
-  /** The draft the editor opens; read at mount. */
-  session: { account: string; id: string; path: string };
-  /** Read at mount; the real one over Tauri by default. */
-  bridge?: TerminalBridge;
+export type TerminalPaneProps<R extends object = DraftRun> = {
+  /** What the session runs on, the draft the editor opens by default; read at mount. */
+  session: R;
+  /** Read at mount; the real editor's over Tauri by default. */
+  bridge?: TerminalBridge<R>;
+  /** The terminal's accessible name. */
+  label?: string;
   /** Hidden keeps the terminal and its buffer; shown again, it refits and takes the focus. */
   visible: boolean;
   onStarted?: (started: TerminalStarted) => void;
@@ -69,7 +71,15 @@ function safeFit(fit: FitAddon): void {
 
 type Live = { sync: () => void; focus: () => void };
 
-export function TerminalPane({ session, bridge = tauriBridge, visible, onStarted, onExit, onError }: TerminalPaneProps) {
+export function TerminalPane<R extends object = DraftRun>({
+  session,
+  bridge = tauriBridge as unknown as TerminalBridge<R>,
+  label = "Editor terminal",
+  visible,
+  onStarted,
+  onExit,
+  onError,
+}: TerminalPaneProps<R>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const live = useRef<Live | null>(null);
   const latest = useRef({ session, bridge, visible, onStarted, onExit, onError });
@@ -187,7 +197,7 @@ export function TerminalPane({ session, bridge = tauriBridge, visible, onStarted
     <div
       data-slot="terminal"
       role="application"
-      aria-label="Editor terminal"
+      aria-label={label}
       hidden={!visible}
       className="flex h-full min-h-0 w-full flex-col bg-background p-2"
     >

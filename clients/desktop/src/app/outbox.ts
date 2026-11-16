@@ -240,6 +240,8 @@ export const SELECTION_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   "copy_link",
   "copy_subject",
   "block_sender",
+  "note",
+  "toggle_noted_only",
 ]);
 
 export const CLOSE_OUTBOX_FIRST = "Close the outbox first (Escape): this acts on the mailbox selection";

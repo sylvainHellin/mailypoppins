@@ -149,7 +149,19 @@ export type ActionId =
   /** A made-up reminder's system notification, to check that the system shows them. */
   | "reminder_notify_test"
   | "update_install"
-  | "update_restart";
+  | "update_restart"
+  /** `n`: the note prompt on the marked rows, the cursor row or the shown message (PERSO-315). */
+  | "note"
+  /** `N`: the notes list, every account's. */
+  | "notes_list"
+  /** `fN`: the noted mail only, beside the text filter. */
+  | "toggle_noted_only"
+  /** The notes list's `x`: every open note to the agent `[agent]` names. */
+  | "hand_off_notes"
+  /** The notes list's `y`: the batch prompt of the open notes, copied. */
+  | "copy_notes_prompt"
+  /** The agent's terminal panel beside the reader, shown or hidden; the agent keeps running. */
+  | "toggle_agent_panel";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -163,6 +175,54 @@ export type Badge = "M3" | "M4" | "soon" | "key" | "menu" | "later";
  * key, or to none where the desktop gives the TUI's key to another action.
  */
 type Binding = { id: ActionId; keys?: string[] } | { badge: Badge; keys?: string[] };
+
+/**
+ * The TUI's notes rows (PERSO-315), by their KEYMAP descriptions: `n` in
+ * MESSAGE, `N` in GLOBAL and `fN` in EMAIL LIST, then the NOTES list
+ * overlay's own keys, which act inside the open list only
+ * (NotesListDialog.tsx). A row keymap.json carries binds through BY_ACTION
+ * and SECTION_OVERRIDES; one it lacks, as before the TUI that adds it is
+ * the one `pnpm gen:keymap` reads, stands in GUI_ENTRIES under the same
+ * label and key.
+ */
+const NOTES_ROWS: { section: string; label: string; key: string; id: ActionId }[] = [
+  { section: "MESSAGE (list, headers, body)", label: "Note for the agent (a preset, or Space for free text)", key: "n", id: "note" },
+  { section: "GLOBAL", label: "Notes for the agent (every account)", key: "N", id: "notes_list" },
+  { section: "EMAIL LIST", label: "Show noted only (toggle)", key: "fN", id: "toggle_noted_only" },
+];
+
+const NOTES_LIST_ROWS: { label: string; key: string }[] = [
+  { label: "Navigate notes", key: "j/k" },
+  { label: "Open the mail (a note for a new email: edit it)", key: "Enter" },
+  { label: "New note asking for a new email (this account)", key: "a" },
+  { label: "Edit the note", key: "e" },
+  { label: "Drop the note", key: "d" },
+  { label: "Clear every done note", key: "D" },
+  { label: "Copy the batch prompt of the open notes", key: "y" },
+  { label: "Hand the open notes to the agent ([agent] open_in)", key: "x" },
+  { label: "Close the list", key: "Esc / q" },
+];
+
+function keymapHas(section: string, label: string): boolean {
+  return SECTIONS.some((s) => s.title === section && s.bindings.some((b) => b.action === label));
+}
+
+function notesBindings(): Record<string, Binding> {
+  return Object.fromEntries(NOTES_ROWS.filter((r) => keymapHas(r.section, r.label)).map((r) => [r.label, { id: r.id }]));
+}
+
+function notesListOverrides(): Record<string, Record<string, Binding>> {
+  if (!SECTIONS.some((s) => s.title === "NOTES")) return {};
+  return { NOTES: Object.fromEntries(NOTES_LIST_ROWS.map((r) => [r.label, { badge: "key" as const }])) };
+}
+
+/** The GUI_ENTRIES rows that stand in for the notes rows keymap.json lacks. */
+const NOTES_STAND_INS: PaletteEntry[] = [
+  ...NOTES_ROWS.filter((r) => !keymapHas(r.section, r.label)).map((r) => ({ section: r.section, label: r.label, keys: [r.key], id: r.id, badge: null })),
+  ...(SECTIONS.some((s) => s.title === "NOTES")
+    ? []
+    : NOTES_LIST_ROWS.map((r) => ({ section: "NOTES", label: r.label, keys: [r.key], id: null, badge: "key" as const }))),
+];
 
 /** By the KEYMAP description, whatever the section. */
 export const BY_ACTION: Record<string, Binding> = {
@@ -241,6 +301,7 @@ export const BY_ACTION: Record<string, Binding> = {
   "Unapprove, back to draft (in Drafts or a conversation)": { id: "demote" },
   "Send all approved drafts (Drafts only)": { id: "send_all" },
   "Show flagged only (toggle)": { badge: "soon" },
+  ...notesBindings(),
   "Scroll headers": { badge: "key" },
   "Scroll line by line": { badge: "key" },
 };
@@ -250,6 +311,7 @@ const BY_SECTION: Record<string, Badge> = {};
 
 /** A section's own reading of a shared description. */
 export const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
+  ...notesListOverrides(),
   BODY: { "Half-page down / up": { badge: "key" } },
   // The activity log dialog's own keys (ActivityLogDialog.tsx), which act
   // inside the open dialog only.
@@ -478,6 +540,13 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "CALENDAR", label: "Next day or week", keys: ["l", "]"], id: "calendar_next", badge: null },
   { section: "CALENDAR", label: "Day layout", keys: ["d"], id: "calendar_layout_day", badge: null },
   { section: "CALENDAR", label: "Week layout", keys: ["w"], id: "calendar_layout_week", badge: null },
+  // The notes on mail (PERSO-315): the TUI's rows while keymap.json lacks
+  // them (NOTES_STAND_INS), then the desktop's own.
+  ...NOTES_STAND_INS,
+  { section: "NOTES", label: "Hand off the open notes to the agent", keys: [], id: "hand_off_notes", badge: null },
+  { section: "NOTES", label: "Copy the open notes' batch prompt", keys: [], id: "copy_notes_prompt", badge: null },
+  // Desktop only: the agent opens in a panel beside the reader, which the TUI has not.
+  { section: "NOTES", label: "Agent panel: show / hide", keys: [], id: "toggle_agent_panel", badge: null },
   { section: "OUTBOX", label: "Open outbox", keys: ["go"], id: "open_outbox", badge: null },
   { section: "OUTBOX", label: "Retry outbox row", keys: ["R"], id: "outbox_retry", badge: null },
   { section: "OUTBOX", label: "Discard outbox row", keys: ["d"], id: "outbox_discard", badge: null },

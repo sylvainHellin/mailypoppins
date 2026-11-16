@@ -3,7 +3,8 @@ import { CalendarDays, CornerUpLeft, Paperclip } from "lucide-react";
 import type { MessageListRow } from "@/protocol/types";
 import { shortDate } from "@/components/list/format";
 import { senderName } from "@/lib/mailbox";
-import { FlagToggle, MarkBox, PendingMark, UnreadToggle } from "@/components/list/RowControls";
+import { FlagToggle, MarkBox, NoteGlyph, PendingMark, UnreadToggle } from "@/components/list/RowControls";
+import { NOTE_LABEL } from "@/app/notes";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 
 export type MessageRowProps = {
@@ -54,6 +55,7 @@ export const MessageRow = memo(function MessageRow({
     pending ? "change pending" : null,
     unread ? "unread" : null,
     row.flags.flagged ? "flagged" : null,
+    row.note ? NOTE_LABEL[row.note].toLowerCase() : null,
     row.flags.answered ? "answered" : null,
     row.has_attachments ? "has attachments" : null,
     row.is_invite ? "invitation" : null,
@@ -94,6 +96,7 @@ export const MessageRow = memo(function MessageRow({
           {row.is_invite ? <CalendarDays aria-hidden="true" className="size-3.5" /> : null}
           {row.flags.answered ? <CornerUpLeft aria-hidden="true" className="size-3.5" /> : null}
           {row.has_attachments ? <Paperclip aria-hidden="true" className="size-3.5" /> : null}
+          <NoteGlyph state={row.note} />
           <FlagToggle flagged={row.flags.flagged} onToggle={() => onToggleFlag(row)} />
         </span>
         <time className="shrink-0 text-xs text-muted-foreground tabular-nums" dateTime={row.date_sort}>

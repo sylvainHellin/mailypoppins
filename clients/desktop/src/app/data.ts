@@ -14,6 +14,7 @@ import { CONTACT_LIMIT } from "@/app/contacts";
 import { signaturesWanted } from "@/app/signatures";
 import { credentialsWanted } from "@/app/health";
 import { EMPTY_SEARCH_FORM } from "@/app/search";
+import { bandWanted } from "@/app/notes";
 
 /** Subscribe once, read the connection and version, and route menu items. */
 export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => void): void {
@@ -255,6 +256,38 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .catch((e: unknown) => dispatch({ type: "blocked_senders_failed", gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, blockedOpen, blocked, dispatch]);
+
+  // The notes, read while their list is open (PERSO-315); a `note.changed`
+  // replaces the list without a read.
+  const notesOpen = state.overlay === "notes";
+  const notes = state.notes;
+  useEffect(() => {
+    if (!hasBootstrap || !notesOpen || !isStale(notes)) return;
+    const gen = notes.gen;
+    run(`notes@${gen}`, () =>
+      cmd
+        .noteList()
+        .then((listed) => dispatch({ type: "notes_loaded", gen, notes: listed.notes }))
+        .catch((e: unknown) => dispatch({ type: "notes_failed", gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, notesOpen, notes, dispatch]);
+
+  // The note on the mail the reader shows, its band above the body: read
+  // for each selector the reader shows, and again after every `note.changed`.
+  const band = bandWanted(state);
+  const bandKey = band ? `${band.selector}@${band.gen}` : null;
+  useEffect(() => {
+    if (!hasBootstrap || !band) return;
+    const { selector, gen } = band;
+    run(`band:${selector}@${gen}`, () =>
+      cmd
+        .noteGet(selector)
+        .then((lookup) => dispatch({ type: "note_band_loaded", selector, gen, note: lookup.note }))
+        // A band that did not read shows nothing: the note is the list's too.
+        .catch(() => dispatch({ type: "note_band_loaded", selector, gen, note: null })),
+    );
+    // `band` is keyed by bandKey.
+  }, [hasBootstrap, bandKey, dispatch]);
 
   // The selected mailbox's list.
   // The answer carries the list generation it was asked at, so a reload that

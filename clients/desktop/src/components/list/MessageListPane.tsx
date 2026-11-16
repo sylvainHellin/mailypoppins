@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { Server, Search, SlidersHorizontal, X } from "lucide-react";
+import { Server, Search, SlidersHorizontal, StickyNote, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -39,11 +39,11 @@ export function MessageListPane() {
 
   const list = s.messages.data;
   const f = s.filter.trim();
-  const rows = filteredRows(list, s.filter);
-  const drafts = filteredDrafts(list, s.filter);
+  const rows = filteredRows(list, s.filter, s.notedOnly);
+  const drafts = filteredDrafts(list, s.filter, s.notedOnly);
   // A conversation list (ticket 0142) shows its headers and, under each expanded
   // one, its members: one sequence, every line of the same fixed height.
-  const entries = list?.kind === "conversations" ? conversationEntries(list, s.expanded, s.filter) : [];
+  const entries = list?.kind === "conversations" ? conversationEntries(list, s.expanded, s.filter, s.notedOnly) : [];
   const count = list?.kind === "drafts" ? drafts.length : list?.kind === "conversations" ? entries.length : rows.length;
   const win = useWindow(scrollRef, count);
 
@@ -206,7 +206,7 @@ export function MessageListPane() {
             </span>
           ) : total !== null ? (
             <span className="text-xs text-muted-foreground tabular-nums">
-              {f ? `${count} of ${total}` : `${total} ${noun}`}
+              {f || s.notedOnly ? `${count} of ${total}` : `${total} ${noun}`}
             </span>
           ) : null}
         </div>
@@ -241,6 +241,17 @@ export function MessageListPane() {
             onClick={() => runAction("search_server", s, dispatch)}
           >
             <Server aria-hidden="true" />
+          </Button>
+          {/* The noted-only narrowing (PERSO-315), beside the text filter it intersects with. */}
+          <Button
+            size="icon-sm"
+            variant="outline"
+            aria-label="Noted mail only"
+            aria-pressed={s.notedOnly}
+            title="Show only the mail with a note (f N)"
+            onClick={() => runAction("toggle_noted_only", s, dispatch)}
+          >
+            <StickyNote aria-hidden="true" />
           </Button>
           <Button
             size="icon-sm"
@@ -292,7 +303,7 @@ export function MessageListPane() {
             ))}
           </div>
         ) : count === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">{f ? "Nothing matches the filter." : "This mailbox is empty."}</p>
+          <p className="p-4 text-sm text-muted-foreground">{s.notedOnly ? "No mail here has a note; f N shows every row." : f ? "Nothing matches the filter." : "This mailbox is empty."}</p>
         ) : (
           <div
             role="listbox"

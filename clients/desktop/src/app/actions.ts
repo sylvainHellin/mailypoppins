@@ -15,6 +15,7 @@ import { newInvitation } from "@/app/invite";
 import { nextOrder } from "@/app/search";
 import { manageSignatures } from "@/app/signatures";
 import { openBlockSender } from "@/app/senders";
+import { copyNotesExport, handOffNotes, openNotePrompt } from "@/app/noteActions";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { copyFromMessage, openConfig, openLog, openMeta } from "@/app/interop";
@@ -330,6 +331,22 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void openBlockSender(s, dispatch);
     case "blocked_senders":
       return dispatch({ type: "open_blocked_senders" });
+    case "note":
+      return void openNotePrompt(s, dispatch);
+    case "notes_list":
+      return dispatch({ type: "open_notes_list" });
+    case "toggle_noted_only": {
+      dispatch({ type: "toggle_noted_only" });
+      dispatch({ type: "notice", text: s.notedOnly ? "Every row shown" : "Noted mail only; f N shows every row" });
+      return;
+    }
+    case "hand_off_notes":
+      return handOffNotes(s, dispatch);
+    case "copy_notes_prompt":
+      return copyNotesExport(dispatch);
+    case "toggle_agent_panel":
+      if (!s.agent) return dispatch({ type: "notice", text: "No agent yet: x in the notes list (N) hands the open notes to one" });
+      return dispatch({ type: "agent_toggle" });
     case "reply":
     case "reply_all":
       return compose.reply(compose.cursorSource(s), id === "reply_all", dispatch);

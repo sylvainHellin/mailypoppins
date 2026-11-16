@@ -112,6 +112,8 @@ import {
   type AccountWizard,
   type AppState,
   type BlockDialog,
+  type NotePrompt,
+  type AgentPanel,
   type ActivityKind,
   type ActivityLevel,
   type AttachmentDialog,
@@ -260,6 +262,8 @@ import {
   signInStarting,
 } from "@/app/signin";
 import { blockedSendersFailed, blockedSendersLoaded, blockedSendersReplaced, openBlockedSenders } from "@/app/senders";
+import { agentOpened, agentStatus, bandLoaded, notesFailed, notesLoaded, notesReplaced, openNotesList } from "@/app/notes";
+import type { Note } from "@/protocol/types";
 import {
   dropSignatures,
   openSignaturesDialog,
@@ -523,6 +527,24 @@ export type Action =
   | { type: "blocked_senders_failed"; gen: number; error: GuiError }
   /** The whole list, as a block or an unblock answered it. */
   | { type: "blocked_senders_set"; entries: string[] }
+  // The notes on mail (app/notes.ts, PERSO-315).
+  | { type: "open_note_prompt"; prompt: NotePrompt }
+  /** A preset's letter whose preset needs a text, or Space (`null`): the text step. */
+  | { type: "note_prompt_pick"; preset: string | null }
+  | { type: "open_notes_list" }
+  | { type: "notes_loaded"; gen: number; notes: Note[] }
+  | { type: "notes_failed"; gen: number; error: GuiError }
+  | { type: "note_band_loaded"; selector: string; gen: number; note: Note | null }
+  /** `fN`: the noted mail only, or every row again. */
+  | { type: "toggle_noted_only" }
+  /** The note's mail in Mail: its mailbox, then the message the list confirms by its selector. */
+  | { type: "open_note_mail"; account: string; mailbox: string; selector: string; message_id: string }
+  | { type: "open_note_draft"; account: string; id: string }
+  /** A hand-off opens the agent in the panel, which starts it. */
+  | { type: "agent_open"; text: string; ids: string[]; date: string }
+  | { type: "agent_status"; spawn: number; status: AgentPanel["status"] }
+  | { type: "agent_toggle" }
+  | { type: "agent_close" }
   // The Settings view (app/settings.ts).
   | { type: "config_loaded"; gen: number; snapshot: ConfigSnapshot }
   | { type: "config_failed"; gen: number; error: GuiError }
@@ -663,7 +685,7 @@ function selectMailbox(s: AppState, account: string, slug: string): AppState {
   return retarget(s, { account, mailbox: slug, message: null, draft: null, hit: null }, true);
 }
 
-type ListItem =
+export type ListItem =
   | { kind: "message"; ref: Omit<MessageRef, "verified"> }
   | { kind: "draft"; id: string }
   | { kind: "hit"; key: string }
@@ -686,10 +708,10 @@ export function visibleItems(s: AppState): ListItem[] {
   }
   const list = s.messages.data;
   if (list?.kind === "drafts") {
-    return filteredDrafts(list, s.filter).map((d) => ({ kind: "draft", id: d.id }));
+    return filteredDrafts(list, s.filter, s.notedOnly).map((d) => ({ kind: "draft", id: d.id }));
   }
   if (list?.kind === "conversations") {
-    return conversationEntries(list, s.expanded, s.filter).map((e): ListItem => {
+    return conversationEntries(list, s.expanded, s.filter, s.notedOnly).map((e): ListItem => {
       if (e.kind === "header") {
         const l = e.row.latest;
         return {
@@ -709,7 +731,7 @@ export function visibleItems(s: AppState): ListItem[] {
       };
     });
   }
-  return filteredRows(list, s.filter).map((r) => ({
+  return filteredRows(list, s.filter, s.notedOnly).map((r) => ({
     kind: "message",
     ref: { row_id: r.id, message_id: r.message_id, selector: r.selector },
   }));
@@ -774,14 +796,22 @@ function itemTargets(account: string, it: ListItem): Target[] {
  */
 export function actionTargets(s: AppState): Target[] {
   const account = shownAccount(s);
+  const seen = new Set<string>();
+  return actionItems(s)
+    .flatMap((it) => itemTargets(account, it))
+    .filter((t) => !seen.has(targetKey(t)) && !!seen.add(targetKey(t)));
+}
+
+/**
+ * The list items an action acts on: the marked ones in list order, or else
+ * the one under the cursor; a mark the list no longer shows is not acted on.
+ */
+export function actionItems(s: AppState): ListItem[] {
+  const account = shownAccount(s);
   const items = visibleItems(s);
-  const targets = (its: ListItem[]) => {
-    const seen = new Set<string>();
-    return its.flatMap((it) => itemTargets(account, it)).filter((t) => !seen.has(targetKey(t)) && !!seen.add(targetKey(t)));
-  };
-  if (s.marked.keys.size > 0) return targets(items.filter((it) => s.marked.keys.has(itemKey(account, it))));
+  if (s.marked.keys.size > 0) return items.filter((it) => s.marked.keys.has(itemKey(account, it)));
   const cur = currentIndex(s, items);
-  return cur >= 0 ? targets([items[cur]]) : [];
+  return cur >= 0 ? [items[cur]] : [];
 }
 
 /**
@@ -809,7 +839,7 @@ function pruneMarks(s: AppState, list: MessageList): AppState {
     list.kind === "drafts"
       ? draftItems(list).map((d) => targetKey({ account: list.account, draft: d.id }))
       : list.kind === "conversations"
-        ? visibleItems({ ...s, filter: "" }).map((it) => itemKey(list.account, it))
+        ? visibleItems({ ...s, filter: "", notedOnly: false }).map((it) => itemKey(list.account, it))
         : list.rows.map((r) => targetKey({ account: list.account, row_id: r.id })),
   );
   const keys = new Set([...s.marked.keys].filter((k) => present.has(k)));
@@ -1519,6 +1549,14 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const entries = (payload as { entries?: unknown }).entries;
       return Array.isArray(entries) ? blockedSendersReplaced(s, entries.filter((e): e is string => typeof e === "string")) : s;
     }
+    // A note was set, changed, closed or cleared, in this window, another
+    // client or by the agent (PERSO-315): the payload is the whole list, and
+    // the shown listing is read again so each row carries its note's state.
+    case "note.changed": {
+      const notes = (payload as { notes?: unknown }).notes;
+      if (!Array.isArray(notes)) return s;
+      return staleListIf(notesReplaced(s, notes as Note[]), () => true);
+    }
     // An account's contact index was written: by a rebuild, a sync's or a
     // send's bump, from any client. Its list is read again when the view
     // shows it.
@@ -1663,6 +1701,8 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         credentials: markStale(next.credentials),
         // Events may have been missed: the list is read again while it shows.
         blockedSenders: markStale(next.blockedSenders),
+        notes: markStale(next.notes),
+        noteBands: { ...next.noteBands, gen: next.noteBands.gen + 1 },
         configProblem: sameInstance ? next.configProblem : null,
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
@@ -2125,6 +2165,7 @@ function reduce(s: AppState, a: Action): AppState {
         serverSearchDialog: a.overlay === "server_search" ? s.serverSearchDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
         blockDialog: a.overlay === "block_sender" ? s.blockDialog : null,
+        notePrompt: a.overlay === "note_prompt" ? s.notePrompt : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
         accountWizard: a.overlay === "account_wizard" ? s.accountWizard : null,
         composeLeave: a.overlay === "compose_leave" ? s.composeLeave : null,
@@ -2474,6 +2515,43 @@ function reduce(s: AppState, a: Action): AppState {
       return blockedSendersFailed(s, a.gen, a.error);
     case "blocked_senders_set":
       return blockedSendersReplaced(s, a.entries);
+    case "open_note_prompt":
+      return { ...s, overlay: "note_prompt", notePrompt: a.prompt };
+    case "note_prompt_pick":
+      return s.notePrompt ? { ...s, notePrompt: { ...s.notePrompt, step: "text", preset: a.preset } } : s;
+    case "open_notes_list":
+      return openNotesList(s);
+    case "notes_loaded":
+      return notesLoaded(s, a.gen, a.notes);
+    case "notes_failed":
+      return notesFailed(s, a.gen, a.error);
+    case "note_band_loaded":
+      return bandLoaded(s, a.selector, a.gen, a.note);
+    case "toggle_noted_only": {
+      // The cursor stays where it is when its row stays; the list re-renders around it.
+      return { ...s, notedOnly: !s.notedOnly };
+    }
+    case "open_note_mail": {
+      // As the calendar's Open mail: Mail, the mailbox, then the message,
+      // which the list confirms by its selector once read.
+      const mail = reduce({ ...s, overlay: null, notePrompt: null }, { type: "switch_view", view: "mail" });
+      const message = { row_id: -1, message_id: a.message_id, selector: a.selector, verified: false };
+      const next = retarget(mail, { ...listSelection(mail), account: a.account, mailbox: a.mailbox, message, draft: null, hit: null, conversation: null });
+      return { ...next, messages: { ...next.messages, gen: next.messages.gen + 1 }, reader: emptyReader() };
+    }
+    case "open_note_draft": {
+      const mail = reduce({ ...s, overlay: null, notePrompt: null }, { type: "switch_view", view: "mail" });
+      const next = retarget(mail, { ...listSelection(mail), account: a.account, mailbox: "drafts", message: null, draft: a.id, hit: null, conversation: null });
+      return { ...next, messages: { ...next.messages, gen: next.messages.gen + 1 }, reader: emptyReader() };
+    }
+    case "agent_open":
+      return agentOpened(s, a);
+    case "agent_status":
+      return agentStatus(s, a.spawn, a.status);
+    case "agent_toggle":
+      return s.agent ? { ...s, agent: { ...s.agent, shown: !s.agent.shown } } : s;
+    case "agent_close":
+      return { ...s, agent: null };
     case "config_loaded":
       return configLoaded(s, a.gen, a.snapshot);
     case "config_failed":

@@ -33,6 +33,8 @@ const MESSAGE_KEYS: Record<string, ActionId> = {
   "*": "toggle_flag",
   M: "move",
   B: "block_sender",
+  // The note prompt (PERSO-315), from the list and the reader as the TUI's.
+  n: "note",
 };
 
 const BADGE_TEXT: Record<Badge, string> = {
@@ -123,6 +125,8 @@ const MAIL_COMBOS: Record<string, ActionId> = {
   fm: "focus_filter",
   // The TUI's "Search all mail": its Server Search form (PERSO-115).
   ff: "open_server_search",
+  // The noted mail only, beside the flagged filter's `fF` (PERSO-315).
+  fN: "toggle_noted_only",
   // The conversation view of the selected account (ticket 0142), from any pane.
   tc: "toggle_conversation_mode",
   cn: "new_draft",
@@ -397,6 +401,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         // The TUI's reminders overlay, from every view: here the reminder banner.
         case "R":
           return handled(), run("focus_reminders");
+        // The notes list, every account's (PERSO-315), from any pane.
+        case "N":
+          return handled(), run("notes_list");
         case "Escape":
           handled();
           // The view hides the marks, so it closes before they clear.

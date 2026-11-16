@@ -269,6 +269,9 @@ describe("what the outbox view hides", () => {
         "attach_file",
         // `B`, on the cursor message's sender (PERSO-261).
         "block_sender",
+        // `n` and `fN`, on the marked or cursor rows and the list (PERSO-315).
+        "note",
+        "toggle_noted_only",
         // `h` and `l`, the KEYMAP's conversation rows (ticket 0142).
         "collapse_conversation",
         "copy_link",

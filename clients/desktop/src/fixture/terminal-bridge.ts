@@ -5,11 +5,12 @@
 // Only types from `@/lib/terminal`, which imports `@/lib/tauri`: the fixture
 // backend that stands in for that module holds a FakeBridge, and a value
 // import here would be a cycle.
-import type { TerminalBridge, TerminalSpawn, TerminalStarted } from "@/lib/terminal";
+import type { AgentSpawn, TerminalBridge, TerminalSpawn, TerminalStarted } from "@/lib/terminal";
 import { frameRouter, type TerminalExit, type TerminalSink } from "@/lib/terminal-frames";
 
 export type BridgeCall =
   | { cmd: "spawn"; req: TerminalSpawn }
+  | { cmd: "agent"; req: AgentSpawn }
   | { cmd: "write"; session: number; data: string }
   | { cmd: "resize"; session: number; cols: number; rows: number }
   | { cmd: "kill"; session: number };
@@ -33,6 +34,16 @@ export class FakeBridge implements TerminalBridge {
 
   async spawn(req: TerminalSpawn, sink: TerminalSink): Promise<TerminalStarted> {
     this.calls.push({ cmd: "spawn", req });
+    return this.start(sink, `nvim '${req.path}'`, "probe");
+  }
+
+  /** `agent_spawn`: the agent's session, on the same session ids, gate and failure as an editor's. */
+  async spawnAgent(req: AgentSpawn, sink: TerminalSink): Promise<TerminalStarted> {
+    this.calls.push({ cmd: "agent", req });
+    return this.start(sink, `pi --name 'mail notes ${req.date}' @/fixture/notes/batch-${req.date}.md`, "agent");
+  }
+
+  private async start(sink: TerminalSink, editor: string, source: TerminalStarted["source"]): Promise<TerminalStarted> {
     const gate = this.gate;
     this.gate = null;
     if (gate) await gate;
@@ -43,7 +54,7 @@ export class FakeBridge implements TerminalBridge {
     }
     const session = this.nextSession++;
     this.routes.set(session, frameRouter(sink));
-    return { session, pid: 4000 + session, editor: `nvim '${req.path}'`, source: "probe", fixture: false };
+    return { session, pid: 4000 + session, editor, source, fixture: false };
   }
 
   async write(session: number, data: string): Promise<void> {

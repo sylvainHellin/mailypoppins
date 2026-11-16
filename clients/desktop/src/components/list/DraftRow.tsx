@@ -5,7 +5,8 @@ import { StatusPill } from "@/components/compose/DraftPreview";
 import type { DraftItem } from "@/app/state";
 import type { DraftSyncState } from "@/protocol/generated";
 import { shortDate } from "@/components/list/format";
-import { MarkBox, PendingMark } from "@/components/list/RowControls";
+import { MarkBox, NoteGlyph, PendingMark } from "@/components/list/RowControls";
+import { NOTE_LABEL } from "@/app/notes";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 
 export type DraftRowProps = {
@@ -61,7 +62,7 @@ export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked,
   const sync = draftSyncLabel(draft.server?.state);
   const state = invalid
     ? `invalid: ${draft.diagnostic ?? "does not parse"}`
-    : `${draft.status}, ${draft.ready ? "ready to send" : "not ready"}${sync ? `, server copy ${sync.word}` : ""}`;
+    : `${draft.status}, ${draft.ready ? "ready to send" : "not ready"}${sync ? `, server copy ${sync.word}` : ""}${draft.note ? `, ${NOTE_LABEL[draft.note].toLowerCase()}` : ""}`;
   const onClick = (e: MouseEvent) => {
     if (e.shiftKey) onMark(draft.id, true);
     else if (e.metaKey || e.ctrlKey) onMark(draft.id, false);
@@ -121,6 +122,7 @@ export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked,
             {sync.word}
           </Badge>
         ) : null}
+        <NoteGlyph state={draft.note} />
         <StatusPill status={invalid ? "invalid" : draft.status} hidden />
         <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{shortDate(draft.date ?? "")}</span>
       </div>
