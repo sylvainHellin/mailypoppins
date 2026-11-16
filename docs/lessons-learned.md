@@ -3620,3 +3620,19 @@ A selector keeps `@` unescaped (`mp_core::selector::encode` treats it as unreser
 
 Publishing after the blocking task returns let two writers publish out of order, so a stale list could be the last event every client applied; `note.changed` and `sender.blocklist_changed` now publish while the lock is held.
 Anything judged against the store while building such a list (a note's `orphaned`) treats "store not readable" as "cannot tell": a deleted store is not recreated until the next sync, and reading it as "gone" would flash every note orphaned during a resync.
+
+## A KEYMAP change reaches the desktop's keymap.json and the parity gate
+
+A key added to `clients/tui/src/app/keymap.rs::KEYMAP` changes `mp dump-keys --json`, and `tests/phase5_parity_gate.rs` compares that with `clients/desktop/src/keymap/keymap.json`, so the branch regenerates it (`cd clients/desktop && MP_BIN=../../target/debug/mp pnpm gen:keymap`) or `cargo test --workspace` fails.
+A key family under its own KeyCtx as `KeyAction::Manual` rows also needs its section in the gate's `surface_headings` and hand-dispatched count, in `docs/baselines/pre-daemon/manual-keys.md` and in `docs/baselines/phase5-manual-keys.md`; every golden frame needs its `_daemon` twin in `src/tui_tests/golden_frames_daemon.rs`.
+The desktop palette then searches the new descriptions too, so `rank.test.ts` expectations move with the catalog.
+
+## The Herdr app's terminals carry HC_TERMINAL_ID, not HERDR_ENV
+
+A terminal the Herdr app shows has `HC_TERMINAL_ID` and the labels `herdr.space`/`herdr.tab` (`hc get $HC_TERMINAL_ID --json`); a hidden `hc run` terminal has the variable without the labels, so read the space before `herdr-app do pane.split`, which splits the focused pane.
+On a machine without `herdr-app` (ENOENT, or "no Herdr window"), `hc run --bg --no-parent --keep --label herdr.space=<s> --label herdr.tab=tb<hex>` is what the app adopts as a new tab of that space; pi's `/branch` (`~/dotfiles/pi/.config/pi/extensions/branch.ts`) is the reference.
+
+## A clipboard write after an await loses the key press's permission in WKWebView
+
+Text that a daemon call returns later goes to `clipboard.write` as a `ClipboardItem` whose value is the pending `Promise<Blob>`, created inside the key handler (`clients/desktop/src/lib/clipboard.ts` `copyLater`).
+A modal dialog also makes the shell behind it inert, so a panel its action opens stays out of the accessibility tree (and the tests) until the dialog closes in the same reducer step.
