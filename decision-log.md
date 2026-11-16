@@ -520,3 +520,25 @@ Why: an edit or an approval moved a draft to the top under the edit-time order, 
 Rejected: oldest first (new drafts would land at the bottom of a long list); keeping edit time and pinning the cursor (the rows still jump under the eye).
 Source: chat, 2026-11-16.
 Status: accepted
+
+## 2026-11-16 - Notes on mail are kept by the daemon and handed to an agent as one batch prompt
+
+Why: Sylvain copies selectors into an agent session one by one; a one-key note per mail (presets Reply, Decline, Summarize, Explain, Review, Task, Forward, or free text, or no mail for a new one) and one hand-off keep him in the client (PERSO-315).
+The notes live in `<data_dir>/notes.json` like the blocked senders, since the store is disposable; the daemon renders the batch prompt so every client sends the same text; the agent closes a note with a result shown on the mail and in its chat, and never sends or approves.
+Rejected: notes in the message store (lost on a rebuild); a native chat panel on the Agent Client Protocol for now (a chat interface in two clients, and pi's adapter is young); an MCP server for mail (agents already use `mp`).
+Source: design page 2026-11-16_mail-notes-agent-handoff, comment export.
+Status: accepted
+
+## 2026-11-16 - The agent opens in a Herdr pane beside the TUI and in a terminal panel inside the desktop app
+
+Why: both keep Sylvain in one window; where it opens is a config key (`[agent] open_in`, with tmux, WezTerm, the same terminal, Paseo and clipboard as alternatives), and the agent is a command line per entry with pi the default, started in `~/pi-remote`.
+Rejected: opening outside the desktop app; libghostty in place of xterm.js for now (Herdr's app draws libghostty natively with GPUI, while a Tauri web view would need ghostty-web, whose xterm-compatible API keeps a later swap cheap).
+Source: design page 2026-11-16_mail-notes-agent-handoff, comment export.
+Status: accepted
+
+## 2026-11-16 - Nothing runs unprompted in the first notes build
+
+Why: the presets already make the common actions one key; review before approve (attachments, spelling, unanswered questions) comes first once the loop works, then auto Summarize notes from chosen senders.
+Rejected: shipping either automation with the first build.
+Source: design page 2026-11-16_mail-notes-agent-handoff, comment export.
+Status: accepted
