@@ -712,7 +712,7 @@ async fn the_export_changes_nothing_and_the_hand_off_marks_its_notes() {
     assert_eq!(export.ids, [new.id.clone(), thesis.id.clone()]);
     assert!(export.text.starts_with("I have notes on 2 emails.\n"));
     assert!(export.text.contains(&format!(
-        "1. New email from account alpha (note {})\n   Ask Ada about Friday.\n2. {THESIS}\n   From Stefan Fuchs <stefan.fuchs@tum.de>, subject \"Master Thesis Presentation\"\n   Summarize: ",
+        "1. New email from account alpha (note {})\n   Write it with `mp -A alpha new <name> --to <address> --subject \"...\" --body-file -`.\n   Ask Ada about Friday.\n2. {THESIS}\n   From Stefan Fuchs <stefan.fuchs@tum.de>, subject \"Master Thesis Presentation\"\n   Summarize: ",
         new.id
     )), "{}", export.text);
     let listed = listing(ok(&mut conn, "note.list", json!({})).await);

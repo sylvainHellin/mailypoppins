@@ -3,11 +3,13 @@ source: src/daemon/notes.rs
 expression: "render(&notes, &presets)"
 ---
 I have notes on 4 emails.
-Read each with `mp show <selector>` (a draft: `mp path <selector>`), carry out the instruction, and close it with `mp notes done <selector> --result "..."`.
-A note without a selector asks for a new email: write it with `mp -A <account> new`, then close it with `mp notes done --id <id> --result "..."`.
+Read each with `mp show <selector>` (a draft: `mp path <selector>` gives its file), carry out the instruction, and close it with `mp notes done <selector> --result "..."`.
+To answer an email, write the draft with `mp reply <selector> --body-file -` (`--all` to reply to all); to pass one on, with `mp forward <selector> --body-file -`, then add the recipients in the file `mp path` gives for the draft it prints.
+A note without a selector asks for a new email: write it as its item says, then close it with `mp notes done --id <id> --result "..."`.
 Never send or approve anything.
 
 1. New email from account tum (note e5a7712c)
+   Write it with `mp -A tum new <name> --to <address> --subject "..." --body-file -`.
    Ask Ada whether the review moves to Friday.
    Copy Bo.
 2. mp://tum/inbox/thesis-42@tum.de

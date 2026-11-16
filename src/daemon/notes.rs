@@ -682,10 +682,15 @@ pub fn render(notes: &[Note], presets: &[NotePreset]) -> String {
         n => format!("I have notes on {n} emails.\n"),
     });
     out.push_str(
-        "Read each with `mp show <selector>` (a draft: `mp path <selector>`), carry out the \
-         instruction, and close it with `mp notes done <selector> --result \"...\"`.\n\
-         A note without a selector asks for a new email: write it with `mp -A <account> new`, \
-         then close it with `mp notes done --id <id> --result \"...\"`.\n\
+        "Read each with `mp show <selector>` (a draft: `mp path <selector>` gives its file), \
+         carry out the instruction, and close it with \
+         `mp notes done <selector> --result \"...\"`.\n\
+         To answer an email, write the draft with `mp reply <selector> --body-file -` \
+         (`--all` to reply to all); to pass one on, with \
+         `mp forward <selector> --body-file -`, then add the recipients in the file \
+         `mp path` gives for the draft it prints.\n\
+         A note without a selector asks for a new email: write it as its item says, then \
+         close it with `mp notes done --id <id> --result \"...\"`.\n\
          Never send or approve anything.\n\n",
     );
     for (index, note) in notes.iter().enumerate() {
@@ -702,10 +707,17 @@ pub fn render(notes: &[Note], presets: &[NotePreset]) -> String {
                     );
                 }
             }
-            None => lines.push(format!(
-                "New email from account {} (note {})",
-                note.account, note.id
-            )),
+            None => {
+                lines.push(format!(
+                    "New email from account {} (note {})",
+                    note.account, note.id
+                ));
+                lines.push(format!(
+                    "Write it with `mp -A {} new <name> --to <address> --subject \"...\" \
+                     --body-file -`.",
+                    note.account
+                ));
+            }
         }
         if let Some(key) = &note.preset {
             lines.push(match presets.iter().find(|preset| preset.key == *key) {
