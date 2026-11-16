@@ -3289,6 +3289,7 @@ mod tests {
             valid: true,
             ready: false,
             server,
+            note: None,
         };
         assert_eq!(entry_from_draft(row(None)).draft_sync, None);
         let synced = row(Some(DraftServer {

@@ -1,0 +1,9 @@
+{
+  "id": 104,
+  "jsonrpc": "2.0",
+  "method": "note.get",
+  "params": {
+    "account": "tum",
+    "selector": "mp://tum/inbox/thesis-42%40tum.de"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "note.changed",
+    "payload": {
+      "notes": [
+        {
+          "account": "tum",
+          "created": "2026-11-16T09:35:00Z",
+          "from": "",
+          "id": "e5a7712c",
+          "orphaned": false,
+          "state": "open",
+          "subject": "",
+          "text": "Ask Ada whether the review moves to Friday.",
+          "to": "",
+          "updated": "2026-11-16T09:35:00Z"
+        },
+        {
+          "account": "tum",
+          "created": "2026-11-16T09:30:00Z",
+          "from": "Stefan Fuchs <stefan.fuchs@tum.de>",
+          "id": "c41f09ab",
+          "orphaned": false,
+          "preset": "s",
+          "selector": "mp://tum/inbox/thesis-42%40tum.de",
+          "state": "open",
+          "subject": "Master Thesis Presentation",
+          "text": "",
+          "to": "sylvain@tum.de",
+          "updated": "2026-11-16T09:30:00Z"
+        },
+        {
+          "account": "tum",
+          "created": "2026-11-16T09:20:00Z",
+          "from": "sylvain@tum.de",
+          "id": "d0e83b21",
+          "orphaned": true,
+          "preset": "p",
+          "selector": "mp://tum/drafts/a3f9c2e1b4d5f607",
+          "state": "handed_off",
+          "subject": "Re: Review",
+          "text": "",
+          "to": "Ada Lovelace <ada@example.com>",
+          "updated": "2026-11-16T09:40:00Z"
+        }
+      ]
+    },
+    "revision": 4243
+  }
+}

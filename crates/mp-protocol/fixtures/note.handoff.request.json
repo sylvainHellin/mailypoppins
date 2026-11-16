@@ -1,0 +1,11 @@
+{
+  "id": 109,
+  "jsonrpc": "2.0",
+  "method": "note.handoff",
+  "params": {
+    "ids": [
+      "e5a7712c",
+      "c41f09ab"
+    ]
+  }
+}

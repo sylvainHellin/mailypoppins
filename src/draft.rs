@@ -348,6 +348,7 @@ fn draft_to_wire(account: &str, row: &crate::store::drafts::DraftRow) -> DraftEn
             .as_ref()
             .is_ok_and(|draft| validate_draft(draft).is_ok()),
         server: None,
+        note: None,
     }
 }
 

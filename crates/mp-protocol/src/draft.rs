@@ -102,6 +102,11 @@ pub struct DraftEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub server: Option<crate::state::DraftServer>,
+    /// The state of the note on this draft (PERSO-315), absent when it has
+    /// none, as a message listing row carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub note: Option<crate::note::NoteState>,
 }
 
 /// A file the refresh could not parse, named by path because a file with no

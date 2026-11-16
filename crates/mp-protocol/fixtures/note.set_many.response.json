@@ -1,0 +1,36 @@
+{
+  "id": 102,
+  "jsonrpc": "2.0",
+  "result": {
+    "notes": [
+      {
+        "account": "tum",
+        "created": "2026-11-16T09:30:00Z",
+        "from": "Stefan Fuchs <stefan.fuchs@tum.de>",
+        "id": "c41f09ab",
+        "orphaned": false,
+        "preset": "r",
+        "selector": "mp://tum/inbox/thesis-42%40tum.de",
+        "state": "open",
+        "subject": "Master Thesis Presentation",
+        "text": "Yes, Thursday works.",
+        "to": "sylvain@tum.de",
+        "updated": "2026-11-16T09:30:00Z"
+      },
+      {
+        "account": "tum",
+        "created": "2026-11-16T09:30:00Z",
+        "from": "Jana Weber <jana.weber@tum.de>",
+        "id": "f2b6a0c9",
+        "orphaned": false,
+        "preset": "r",
+        "selector": "mp://tum/inbox/budget-7%40tum.de",
+        "state": "open",
+        "subject": "Budget meeting",
+        "text": "Yes, Thursday works.",
+        "to": "sylvain@tum.de",
+        "updated": "2026-11-16T09:30:00Z"
+      }
+    ]
+  }
+}

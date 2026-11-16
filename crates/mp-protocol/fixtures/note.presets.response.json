@@ -1,0 +1,50 @@
+{
+  "id": 110,
+  "jsonrpc": "2.0",
+  "result": {
+    "presets": [
+      {
+        "instruction": "Draft a reply in my voice from this gist.",
+        "key": "r",
+        "label": "Reply",
+        "needs_text": true
+      },
+      {
+        "instruction": "Draft a polite refusal; use my reason if I gave one.",
+        "key": "d",
+        "label": "Decline",
+        "needs_text": true
+      },
+      {
+        "instruction": "Summarize in three lines: who, what is asked, by when. Post it as the result.",
+        "key": "s",
+        "label": "Summarize",
+        "needs_text": false
+      },
+      {
+        "instruction": "Explain the context from the vault and past mail: who this is, what came before. Post it as the result.",
+        "key": "e",
+        "label": "Explain",
+        "needs_text": false
+      },
+      {
+        "instruction": "Review this draft before I approve it: spelling and grammar (fix them in the draft), an attachment the text mentions but the draft lacks, a question from the mail it answers that it leaves unanswered, wrong names or dates. Post what you found as the result; change nothing beyond spelling and grammar.",
+        "key": "p",
+        "label": "Review",
+        "needs_text": false
+      },
+      {
+        "instruction": "Turn this mail into a Plane task or a vault note, whichever fits; post the link as the result.",
+        "key": "t",
+        "label": "Task",
+        "needs_text": false
+      },
+      {
+        "instruction": "Draft a forward to the person named, with a short cover line.",
+        "key": "f",
+        "label": "Forward",
+        "needs_text": true
+      }
+    ]
+  }
+}

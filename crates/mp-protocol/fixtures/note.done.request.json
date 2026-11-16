@@ -1,0 +1,9 @@
+{
+  "id": 105,
+  "jsonrpc": "2.0",
+  "method": "note.done",
+  "params": {
+    "result": "Stefan asks to present on 3 December at 14:00; he needs the slides by 1 December.",
+    "selector": "mp://tum/inbox/thesis-42%40tum.de"
+  }
+}

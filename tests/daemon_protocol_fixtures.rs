@@ -188,6 +188,32 @@ const SENDER_FIXTURES: &[&str] = &[
     "notification.sender_blocklist_changed.json",
 ];
 
+/// The fixtures PERSO-315 adds for the notes on mail: a pair per method and
+/// one `note.changed`.
+const NOTE_FIXTURES: &[&str] = &[
+    "note.clear.request.json",
+    "note.clear.response.json",
+    "note.clear_done.request.json",
+    "note.clear_done.response.json",
+    "note.done.request.json",
+    "note.done.response.json",
+    "note.export.request.json",
+    "note.export.response.json",
+    "note.get.request.json",
+    "note.get.response.json",
+    "note.handoff.request.json",
+    "note.handoff.response.json",
+    "note.list.request.json",
+    "note.list.response.json",
+    "note.presets.request.json",
+    "note.presets.response.json",
+    "note.set.request.json",
+    "note.set.response.json",
+    "note.set_many.request.json",
+    "note.set_many.response.json",
+    "notification.note_changed.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -260,6 +286,7 @@ fn every_required_fixture_is_committed() {
         .chain(REMINDER_FIXTURES)
         .chain(FREEBUSY_FIXTURES)
         .chain(SENDER_FIXTURES)
+        .chain(NOTE_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();

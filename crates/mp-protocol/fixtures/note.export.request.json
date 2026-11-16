@@ -1,0 +1,6 @@
+{
+  "id": 108,
+  "jsonrpc": "2.0",
+  "method": "note.export",
+  "params": {}
+}

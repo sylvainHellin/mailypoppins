@@ -380,6 +380,7 @@ async fn the_wire_row_carries_every_field_a_list_entry_is_built_from() {
             has_attachments: row.has_attachments,
             is_invite: row.is_invite,
             selector: Selector::for_message(fixture::ACCOUNT, row).to_string(),
+            note: None,
         };
         assert_eq!(
             wire, &expected,

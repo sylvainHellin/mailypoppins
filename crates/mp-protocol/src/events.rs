@@ -236,6 +236,11 @@ pub const KIND_SIGNATURE_REMOVED: &str = "signature.removed";
 /// change.
 pub const KIND_SENDER_BLOCKLIST_CHANGED: &str = "sender.blocklist_changed";
 
+/// The `kind` a change of the notes on mail travels as (PERSO-315): every
+/// `note.*` call that wrote the notes file. The payload is
+/// [`crate::note::NoteListing`], every note after the change, newest first.
+pub const KIND_NOTE_CHANGED: &str = "note.changed";
+
 /// The `kind` an account's contact index travels as once it was written (the
 /// daemon leftovers, 2026-10-22).
 pub const KIND_CONTACT_CHANGED: &str = "contact.changed";

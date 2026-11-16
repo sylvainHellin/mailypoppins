@@ -1,0 +1,11 @@
+{
+  "id": 109,
+  "jsonrpc": "2.0",
+  "result": {
+    "ids": [
+      "e5a7712c",
+      "c41f09ab"
+    ],
+    "text": "I have notes on 2 emails.\nRead each with `mp show <selector>` (a draft: `mp path <selector>`), carry out the instruction, and close it with `mp notes done <selector> --result \"...\"`.\nA note without a selector asks for a new email: write it with `mp -A <account> new`, then close it with `mp notes done --id <id> --result \"...\"`.\nNever send or approve anything.\n\n1. New email from account tum (note e5a7712c)\n   Ask Ada whether the review moves to Friday.\n2. mp://tum/inbox/thesis-42%40tum.de\n   From Stefan Fuchs, \"Master Thesis Presentation\"\n   Summarize: Summarize in three lines: who, what is asked, by when. Post it as the result.\n"
+  }
+}

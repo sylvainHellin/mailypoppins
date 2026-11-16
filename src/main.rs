@@ -7684,6 +7684,7 @@ mod tests {
                 valid: true,
                 ready: true,
                 server: None,
+                note: None,
             }
         }
 

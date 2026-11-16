@@ -416,6 +416,7 @@ fn entry(account: &str, row: &DraftRow, draft: &EmailDraft) -> DraftEntry {
         valid: true,
         ready: crate::draft::validate_draft(draft).is_ok(),
         server: None,
+        note: None,
     }
 }
 

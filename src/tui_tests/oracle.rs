@@ -184,6 +184,7 @@ fn row_to_wire(account: &str, row: &crate::store::read::MessageRow) -> MessageLi
         has_attachments: row.has_attachments,
         is_invite: row.is_invite,
         selector: crate::selector::Selector::for_message(account, row).to_string(),
+        note: None,
     }
 }
 

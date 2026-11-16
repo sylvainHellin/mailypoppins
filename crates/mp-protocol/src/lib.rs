@@ -20,6 +20,7 @@ pub mod draft;
 pub mod events;
 pub mod frame;
 pub mod listing;
+pub mod note;
 pub mod operation;
 pub mod reminder;
 pub mod rendition;

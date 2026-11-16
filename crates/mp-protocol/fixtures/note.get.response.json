@@ -1,0 +1,20 @@
+{
+  "id": 104,
+  "jsonrpc": "2.0",
+  "result": {
+    "note": {
+      "account": "tum",
+      "created": "2026-11-16T09:30:00Z",
+      "from": "Stefan Fuchs <stefan.fuchs@tum.de>",
+      "id": "c41f09ab",
+      "orphaned": false,
+      "preset": "s",
+      "selector": "mp://tum/inbox/thesis-42%40tum.de",
+      "state": "open",
+      "subject": "Master Thesis Presentation",
+      "text": "",
+      "to": "sylvain@tum.de",
+      "updated": "2026-11-16T09:30:00Z"
+    }
+  }
+}

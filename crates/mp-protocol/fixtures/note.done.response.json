@@ -1,0 +1,19 @@
+{
+  "id": 105,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "tum",
+    "created": "2026-11-16T09:30:00Z",
+    "from": "Stefan Fuchs <stefan.fuchs@tum.de>",
+    "id": "c41f09ab",
+    "orphaned": false,
+    "preset": "s",
+    "result": "Stefan asks to present on 3 December at 14:00; he needs the slides by 1 December.",
+    "selector": "mp://tum/inbox/thesis-42%40tum.de",
+    "state": "done",
+    "subject": "Master Thesis Presentation",
+    "text": "",
+    "to": "sylvain@tum.de",
+    "updated": "2026-11-16T10:05:00Z"
+  }
+}

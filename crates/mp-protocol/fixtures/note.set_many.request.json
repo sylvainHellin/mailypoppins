@@ -1,0 +1,14 @@
+{
+  "id": 102,
+  "jsonrpc": "2.0",
+  "method": "note.set_many",
+  "params": {
+    "account": "tum",
+    "preset": "r",
+    "selectors": [
+      "mp://tum/inbox/thesis-42%40tum.de",
+      "mp://tum/inbox/budget-7%40tum.de"
+    ],
+    "text": "Yes, Thursday works."
+  }
+}

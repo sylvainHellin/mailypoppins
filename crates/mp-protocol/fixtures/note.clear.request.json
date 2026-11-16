@@ -1,0 +1,8 @@
+{
+  "id": 106,
+  "jsonrpc": "2.0",
+  "method": "note.clear",
+  "params": {
+    "id": "e5a7712c"
+  }
+}

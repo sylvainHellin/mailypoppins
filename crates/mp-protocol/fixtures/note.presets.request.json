@@ -1,0 +1,6 @@
+{
+  "id": 110,
+  "jsonrpc": "2.0",
+  "method": "note.presets",
+  "params": {}
+}

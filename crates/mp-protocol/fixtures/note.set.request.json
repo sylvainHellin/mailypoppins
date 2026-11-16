@@ -1,0 +1,10 @@
+{
+  "id": 101,
+  "jsonrpc": "2.0",
+  "method": "note.set",
+  "params": {
+    "account": "tum",
+    "preset": "s",
+    "selector": "mp://tum/inbox/thesis-42%40tum.de"
+  }
+}

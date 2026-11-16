@@ -17,8 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mp_protocol::{
-    account, attachment, calendar, contact, daemon, diagnostic, draft, events, listing, operation,
-    reminder, rendition, send, sender, signature, state,
+    account, attachment, calendar, contact, daemon, diagnostic, draft, events, listing, note,
+    operation, reminder, rendition, send, sender, signature, state,
 };
 use ts_rs::{Config, TS};
 
@@ -132,6 +132,21 @@ fn export_into(dir: &Path) -> usize {
         sender::BlockSkipped,
         sender::SenderBlocked,
         sender::SenderUnblocked,
+        note::NoteState,
+        note::Note,
+        note::NotePreset,
+        note::NoteSetParams,
+        note::NoteSetManyParams,
+        note::NoteListParams,
+        note::NoteGetParams,
+        note::NoteClearParams,
+        note::NoteDoneParams,
+        note::NoteExportParams,
+        note::NoteListing,
+        note::NoteLookup,
+        note::NoteCleared,
+        note::NoteExport,
+        note::NotePresets,
         contact::VcardDraft,
         contact::RefusedRebuild,
         events::ConfigInvalid,

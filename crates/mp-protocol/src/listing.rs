@@ -121,6 +121,13 @@ pub struct MessageListRow {
     /// because every row has a mailbox and a `Message-ID` key.
     #[serde(default)]
     pub selector: String,
+    /// The state of the note on this message (PERSO-315), absent when it has
+    /// none, so a list draws the note glyph beside the star with no second
+    /// call. A note is on a message's canonical selector, so both copies of a
+    /// Message-ID held twice in one mailbox carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub note: Option<crate::note::NoteState>,
 }
 
 /// The whole `message.list` answer in its default `projection: "list"` form.
@@ -1333,6 +1340,7 @@ mod tests {
                 has_attachments: true,
                 is_invite: false,
                 selector: "mp://work/inbox/a@example.com".to_string(),
+                note: None,
             }],
         };
         let encoded = serde_json::to_value(&listing).expect("it serialises");
