@@ -6,7 +6,9 @@
 // so the row is hidden. A label match counts twice what the same match in
 // the section or the keys counts; the whole query equal to one of the row's
 // keys (`ff`, `x`, `Ctrl+p`) is a key match. Equal scores go to the action
-// run from the palette most recently, then to catalog order.
+// run from the palette most recently, then to a row the palette runs over
+// one it lists disabled (a key that acts in its own view only, such as the
+// notes list's `e`), then to catalog order.
 
 import type { PaletteEntry } from "@/keymap/catalog";
 
@@ -54,16 +56,18 @@ export function paletteScore(e: PaletteEntry, query: string): number {
 
 /**
  * The rows `query` keeps, best first: by score, then by the place of their
- * action in `recent` (most recent first), then in the order given.
+ * action in `recent` (most recent first), then a row with an action before
+ * one without, then in the order given.
  */
 export function rankPalette<T extends PaletteEntry>(entries: readonly T[], query: string, recent: readonly string[]): T[] {
+  const inert = (e: T) => (e.id === null ? 1 : 0);
   const age = (e: T) => {
     const i = e.id === null ? -1 : recent.indexOf(e.id);
     return i < 0 ? recent.length : i;
   };
   return entries
-    .map((e, index) => ({ e, index, score: paletteScore(e, query), age: age(e) }))
+    .map((e, index) => ({ e, index, score: paletteScore(e, query), age: age(e), inert: inert(e) }))
     .filter((r) => r.score > 0)
-    .sort((a, b) => b.score - a.score || a.age - b.age || a.index - b.index)
+    .sort((a, b) => b.score - a.score || a.age - b.age || a.inert - b.inert || a.index - b.index)
     .map((r) => r.e);
 }

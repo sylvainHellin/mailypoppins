@@ -34,26 +34,27 @@ describe("the palette's ranking", () => {
   });
 
   it("matches a word's start, and three letters or more inside a word", () => {
+    // "not" starts "note" as it starts "notice": the notes on mail (PERSO-315)
+    // and the notices tie, the rows the palette runs first, in catalog order,
+    // then the notes list's keys, which act in the open list only, then the
+    // rows that match by their NOTES section alone.
     expect(labels("not")).toEqual([
+      "Notes for the agent (every account)",
+      "Note for the agent (a preset, or Space for free text)",
+      "Show noted only (toggle)",
+      "Copy the batch prompt of the open notes",
+      "Hand the open notes to the agent ([agent] open_in)",
       "Show a test reminder notification",
       "Dismiss the newest notice",
       "Dismiss all notices",
-      // The notes on mail (PERSO-315): the TUI's rows, then the desktop's own.
-      "Note for the agent (a preset, or Space for free text)",
-      "Notes for the agent (every account)",
-      "Show noted only (toggle)",
       "Navigate notes",
       "Open the mail (a note for a new email: edit it)",
       "New note asking for a new email (this account)",
       "Edit the note",
       "Drop the note",
       "Clear every done note",
-      "Copy the batch prompt of the open notes",
-      "Hand the open notes to the agent ([agent] open_in)",
-      "Hand off the open notes to the agent",
-      "Copy the open notes' batch prompt",
-      "Close the list",
       "Agent panel: show / hide",
+      "Close the list",
     ]);
     expect(labels("box")).toContain("Open outbox");
     // Two letters inside a word are not enough.
@@ -101,12 +102,17 @@ describe("the palette's ranking", () => {
     expect(rankPalette([byKey, byLabel], "x", [])).toEqual([byLabel, byKey]);
   });
 
-  it("breaks a tie by the action run most recently, then by catalog order", () => {
-    expect(labels("not", ["dismiss_all_notices"]).slice(0, 2)).toEqual(["Dismiss all notices", "Show a test reminder notification"]);
+  it("breaks a tie by the action run most recently, then a row that runs above a disabled one, then by catalog order", () => {
+    // Recency lifts the action to the top of its tie and leaves the rest in place.
+    const plain = labels("not");
+    expect(labels("not", ["dismiss_all_notices"])).toEqual(["Dismiss all notices", ...plain.filter((l) => l !== "Dismiss all notices")]);
     expect(labels("not", ["dismiss_notice", "dismiss_all_notices"]).slice(0, 2)).toEqual([
       "Dismiss the newest notice",
       "Dismiss all notices",
     ]);
+    const disabled = { ...entry("Edit the note", ["e"]), badge: "key" as const };
+    const runs = entry("Edit recipients", [], "edit_recipients");
+    expect(rankPalette([disabled, runs], "edit", [])).toEqual([runs, disabled]);
     // Recency never lifts a weaker match.
     expect(labels("cal", ["calendar_today"]).slice(0, 3)).toEqual([
       "Calendar reminders (snooze, dismiss, open)",

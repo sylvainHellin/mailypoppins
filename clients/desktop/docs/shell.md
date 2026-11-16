@@ -957,7 +957,7 @@ The agent drafts and never sends; the daemon renders the batch prompt every clie
 - `N` in Mail, and the palette's "Notes for the agent (every account)", open the notes list.
 - `fN`, beside the TUI's `fF`, and the list header's sticky-note button show only the rows with a note, a narrowing the text filter intersects with; the header counts "<n> of <total>".
 
-Until keymap.json, regenerated from the TUI, carries these rows, `GUI_ENTRIES` stands in for them under the TUI's descriptions and keys (`NOTES_ROWS` in `src/keymap/catalog.ts`); the palette alone runs "Hand off the open notes to the agent", "Copy the open notes' batch prompt" and "Agent panel: show / hide".
+These rows, and the notes list's under NOTES, are keymap.json's, bound in `src/keymap/catalog.ts` (`BY_ACTION`, and `SECTION_OVERRIDES` for NOTES); the palette also runs the list's `y` and `x` on the open notes from anywhere, and its own "Agent panel: show / hide".
 
 ### The prompt
 
@@ -1390,7 +1390,7 @@ The palette lists every action under its section; a search flattens the sections
 Each word of the query must match the start of a word of the row's label or section, or, at three letters or more, a run inside a word of its label; the whole query equal to one of the row's keys (`ff`, `x`, `Ctrl+p`) matches too, case-exact above another case (`X` the dismiss, `x` the send).
 A row whose letters only turn up scattered is hidden, so `test` lists "Show a test reminder notification" alone, never "Toggle flag/star".
 A match in the label counts twice the same match in the section or the keys, a whole word above a word's start above a run inside a word, and the scores of the query's words add up: `cal` lists "Switch to Calendar view" and "Show or hide calendars" before the rest of the CALENDAR rows, and `go` the Go rows before "Open outbox", matched by its key.
-Equal scores list the action last run from the palette first (`prefs.paletteRecent`, the last 30, stored with the other prefs), then in catalog order.
+Equal scores list the action last run from the palette first (`prefs.paletteRecent`, the last 30, stored with the other prefs), then the rows the palette runs above those it lists disabled, then in catalog order: `edit` lists "Edit the event" above the notes list's `Enter` row, whose description ends "edit it" but which acts in the open list only.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
 A KEYMAP key the desktop does not bind (such as `gt`, the TUI's jump to date) shows a notice saying so; the palette lists the same actions disabled, with the badge.
 No row carries an M3 or M4 badge any more.

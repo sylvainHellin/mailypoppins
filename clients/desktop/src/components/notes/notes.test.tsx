@@ -293,17 +293,21 @@ describe("the notes list and the hand-off", () => {
 });
 
 describe("the notes' keys", () => {
-  it("n, N and fN run from the palette under the TUI's descriptions and keys, and the list's own keys are in the help", () => {
-    // From keymap.json once it carries the TUI's rows, from GUI_ENTRIES until then.
-    const rows = [...paletteEntries(), ...GUI_ENTRIES];
+  it("n, N, fN, y and x run from the palette under the TUI's descriptions and keys, and the list's own keys are in the help", () => {
+    // keymap.json's rows, each once: the desktop adds only its agent panel.
+    const rows = paletteEntries();
     const row = (id: string) => rows.find((e) => e.id === id);
     expect(row("note")).toMatchObject({ section: "MESSAGE (list, headers, body)", label: "Note for the agent (a preset, or Space for free text)", keys: ["n"] });
     expect(row("notes_list")).toMatchObject({ section: "GLOBAL", label: "Notes for the agent (every account)", keys: ["N"] });
     expect(row("toggle_noted_only")).toMatchObject({ section: "EMAIL LIST", label: "Show noted only (toggle)", keys: ["fN"] });
-    expect(row("hand_off_notes")?.keys).toEqual([]);
-    expect(row("toggle_agent_panel")?.keys).toEqual([]);
+    expect(row("copy_notes_prompt")).toMatchObject({ section: "NOTES", label: "Copy the batch prompt of the open notes", keys: ["y"] });
+    expect(row("hand_off_notes")).toMatchObject({ section: "NOTES", label: "Hand the open notes to the agent ([agent] open_in)", keys: ["x"] });
+    const notesIds = ["note", "notes_list", "toggle_noted_only", "copy_notes_prompt", "hand_off_notes", "toggle_agent_panel"];
+    expect(GUI_ENTRIES.filter((e) => e.section === "NOTES" || (e.id !== null && notesIds.includes(e.id)))).toEqual([
+      { section: "NOTES", label: "Agent panel: show / hide", keys: [], id: "toggle_agent_panel", badge: null },
+    ]);
     const listKeys = rows.filter((e) => e.section === "NOTES" && e.badge === "key").map((e) => e.keys[0]);
-    expect(listKeys).toEqual(["j/k", "Enter", "a", "e", "d", "D", "y", "x", "Esc / q"]);
+    expect(listKeys).toEqual(["j/k", "Enter", "a", "e", "d", "D", "Esc / q"]);
   });
 
   it("the palette runs n and N, and from another view n says to go back to Mail first", async () => {

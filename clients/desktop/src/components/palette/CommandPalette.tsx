@@ -76,9 +76,10 @@ export function CommandPalette({
  * `rankPalette` (rank.ts) and drawn in that order, cmdk's own filter off: a
  * label match first, the section and the keys below the same match in the
  * label, rows whose letters only turn up scattered hidden, and equal matches
- * by the action last run from the palette, then catalog order. Out of their
- * groups, the rows name their section, so the same label in two sections
- * (Archive, Forward, Jump to top) reads as two actions.
+ * by the action last run from the palette, then the rows that run above the
+ * disabled ones, then catalog order. Out of their groups, the rows name their
+ * section, so the same label in two sections (Archive, Forward, Jump to top)
+ * reads as two actions.
  */
 function PaletteBody({
   all,
