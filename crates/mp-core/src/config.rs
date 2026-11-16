@@ -138,10 +138,15 @@ pub fn default_note_presets() -> Vec<mp_protocol::note::NotePreset> {
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentOpenIn {
-    /// The first that applies: a Herdr pane, a tmux pane, a WezTerm pane, the
-    /// terminal the TUI runs in.
+    /// The first that applies: the Herdr app, a Herdr TUI pane, a tmux pane,
+    /// a WezTerm pane, the terminal the TUI runs in.
     #[default]
     Auto,
+    /// The Herdr desktop app (herdr-core, `$HC_TERMINAL_ID`): a pane split
+    /// right of the TUI's, or a new tab of its space on a machine the app
+    /// shows over ssh.
+    HerdrApp,
+    /// The Herdr TUI (`HERDR_ENV=1`): a pane split right of the TUI's.
     Herdr,
     Tmux,
     Wezterm,
@@ -2600,6 +2605,8 @@ mirror = false
         let empty: GlobalConfig = toml::from_str("[agent.commands]\npi = []\n").unwrap();
         assert!(format!("{:#}", validate_notes(&empty).unwrap_err())
             .contains("agent.commands.pi names no program"));
+        let app: GlobalConfig = toml::from_str("[agent]\nopen_in = \"herdr-app\"\n").unwrap();
+        assert_eq!(app.agent.open_in, AgentOpenIn::HerdrApp);
         assert!(toml::from_str::<GlobalConfig>("[agent]\nopen_in = \"window\"\n").is_err());
     }
 

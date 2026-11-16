@@ -474,9 +474,12 @@ presets = [
       </p>
       <p>
         <code>open_in</code> says where: <code>auto</code> (the default) splits a pane to the right
-        in Herdr, tmux or WezTerm, whichever the TUI runs inside, else runs the agent in the TUI's
-        own terminal until it exits; <code>herdr</code>, <code>tmux</code>, <code>wezterm</code> and
-        <code>terminal</code> force one of those; <code>paseo</code> starts a background
+        in the Herdr app, the Herdr TUI, tmux or WezTerm, whichever the TUI runs inside, else runs
+        the agent in the TUI's own terminal until it exits. On a machine the Herdr app shows over
+        ssh, the agent opens in a new tab of the TUI's space instead of a pane; a terminal no app
+        space shows goes on to the next option. <code>herdr-app</code>, <code>herdr</code> (the
+        Herdr TUI), <code>tmux</code>, <code>wezterm</code> and <code>terminal</code> force one of
+        those; <code>paseo</code> starts a background
         <code>paseo run</code> with the prompt as its task; <code>clipboard</code> only copies the
         prompt. The notes are marked handed off once the agent started; a launch that failed leaves
         them open and says why.

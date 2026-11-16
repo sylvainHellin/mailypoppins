@@ -2420,7 +2420,12 @@ fn hand_off_notes(
         }
     };
     let agent = app.global_config.agent.clone();
-    let place = launch::place(agent.open_in, launch::Env::from_process());
+    let env = launch::Env::from_process();
+    let first = launch::place(agent.open_in, env);
+    let space = (first == Place::HerdrApp)
+        .then(launch::this_terminals_space)
+        .flatten();
+    let place = launch::settle(first, env, space.as_deref());
     let failed = |app: &mut App, e: String| {
         app.set_status_level(
             format!("Cannot start the agent: {e}; the notes stay open"),
@@ -2474,6 +2479,14 @@ fn hand_off_notes(
         Launch::Herdr { split, line } => match launch::run_in_herdr(&split, &line) {
             Ok(()) => mark_handed_off(app, &export.ids, place),
             Err(e) => failed(app, e),
+        },
+        // `settle` keeps the app's place only with a space to open in.
+        Launch::HerdrApp { argv, cwd } => match space.as_deref() {
+            Some(space) => match launch::run_in_herdr_app(&argv, &cwd, space) {
+                Ok(()) => mark_handed_off(app, &export.ids, place),
+                Err(e) => failed(app, e),
+            },
+            None => failed(app, "no Herdr app space shows this terminal".to_string()),
         },
         Launch::Foreground { argv, cwd } => {
             let Some((program, args)) = argv.split_first() else {
