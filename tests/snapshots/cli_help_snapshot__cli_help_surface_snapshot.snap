@@ -28,6 +28,7 @@ Commands:
   block           Block a sender: move its mail from every Inbox to Junk, now and as it arrives
   unblock         Remove a sender from the block list; nothing moves back from Junk
   blocked         List the blocked senders
+  notes           Leave notes on mail for a coding agent, and hand them over as one prompt
   delete          Delete received emails (server + local) or local drafts
   open            Open a received email's attachment in the default application
   save            Save a received email's attachment(s) to a directory
@@ -421,6 +422,156 @@ Usage: mp blocked [OPTIONS]
 
 Options:
       --json               Emit one JSON object {entries}
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes --help
+Leave notes on mail for a coding agent, and hand them over as one prompt
+
+Usage: mp notes [OPTIONS] <COMMAND>
+
+Commands:
+  add      Set a note on one or more received emails or drafts
+  new      Set a note asking for a new email from the account
+  edit     Change the preset or the text of a note by its id, and open it again
+  list     List the notes, newest first
+  export   Print the batch prompt for the open notes, or for the notes named
+  done     Close a note with what was done
+  clear    Remove a note, or with --done every done note
+  presets  List the presets a note takes, in prompt order
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+A note is a short instruction on a received email or a draft, or on nothing
+for a new email. The daemon keeps every note, and its batch prompt tells an
+agent to read each mail with mp, carry the note out, and close it with
+`mp notes done`; the agent never sends or approves anything. A preset is a
+letter from `mp notes presets` ([notes] presets in config.toml), and a note
+has a preset, a text, or both. Setting a note on a mail that has one replaces
+it and opens it again. A note whose mail is gone stays, marked orphaned, until
+it is cleared.
+
+Examples:
+  mp notes add mp://tum/inbox/abc@tum.de --preset r --text "Yes, Thursday works"
+  mp notes add inbox/abc@tum.de inbox/def@tum.de --preset s
+  mp -A tum notes new --text "Ask Ada whether the review moves to Friday"
+  mp notes export --handoff > /tmp/notes.md
+  mp notes done mp://tum/inbox/abc@tum.de --result "Drafted the reply"
+  mp notes clear --done
+
+$ mp notes add --help
+Set a note on one or more received emails or drafts
+
+Usage: mp notes add [OPTIONS] <SELECTOR>...
+
+Arguments:
+  <SELECTOR>...  The emails or drafts, as `mp show` and `mp path` take them
+
+Options:
+  -p, --preset <PRESET>    The letter of a preset (`mp notes presets`)
+  -t, --text <TEXT>        The instruction, or what the preset works from
+      --json               Print the daemon's answer as JSON
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes new --help
+Set a note asking for a new email from the account
+
+Usage: mp notes new [OPTIONS]
+
+Options:
+  -p, --preset <PRESET>    The letter of a preset (`mp notes presets`)
+  -t, --text <TEXT>        What the email is to say
+      --json               Print the daemon's answer as JSON
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes edit --help
+Change the preset or the text of a note by its id, and open it again
+
+Usage: mp notes edit [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The note's id
+
+Options:
+  -p, --preset <PRESET>    The letter of a preset (`mp notes presets`)
+  -t, --text <TEXT>        The new text
+      --json               Print the daemon's answer as JSON
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes list --help
+List the notes, newest first
+
+Usage: mp notes list [OPTIONS]
+
+Options:
+      --state <STATE>      Only the notes in this state: open, handed_off or done [possible values: open, handed_off, done]
+      --json               Print the daemon's answer as JSON {notes}
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes export --help
+Print the batch prompt for the open notes, or for the notes named
+
+Usage: mp notes export [OPTIONS]
+
+Options:
+      --handoff            Mark the open notes in the prompt handed off
+      --id <ID>            A note to put in the prompt, in any state; repeatable
+      --json               Print the daemon's answer as JSON {text, ids}
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes done --help
+Close a note with what was done
+
+Usage: mp notes done [OPTIONS] --result <RESULT> [SELECTOR]
+
+Arguments:
+  [SELECTOR]  The email or draft the note is on
+
+Options:
+      --id <ID>            The note's id, for a note without a selector
+  -r, --result <RESULT>    What was done, the line the clients show on the mail
+      --json               Print the daemon's answer as JSON
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes clear --help
+Remove a note, or with --done every done note
+
+Usage: mp notes clear [OPTIONS] [SELECTOR]
+
+Arguments:
+  [SELECTOR]  The email or draft the note is on
+
+Options:
+      --id <ID>            The note's id
+      --done               Remove every done note
+  -A, --account <ACCOUNT>  Account to use
+      --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
+  -h, --help               Print help
+
+$ mp notes presets --help
+List the presets a note takes, in prompt order
+
+Usage: mp notes presets [OPTIONS]
+
+Options:
+      --json               Print the daemon's answer as JSON {presets}
   -A, --account <ACCOUNT>  Account to use
       --profile <NAME>     Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help               Print help

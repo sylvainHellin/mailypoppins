@@ -417,6 +417,28 @@ Examples:
         #[arg(long)]
         json: bool,
     },
+    /// Leave notes on mail for a coding agent, and hand them over as one prompt
+    #[command(after_help = "\
+A note is a short instruction on a received email or a draft, or on nothing
+for a new email. The daemon keeps every note, and its batch prompt tells an
+agent to read each mail with mp, carry the note out, and close it with
+`mp notes done`; the agent never sends or approves anything. A preset is a
+letter from `mp notes presets` ([notes] presets in config.toml), and a note
+has a preset, a text, or both. Setting a note on a mail that has one replaces
+it and opens it again. A note whose mail is gone stays, marked orphaned, until
+it is cleared.
+
+Examples:
+  mp notes add mp://tum/inbox/abc@tum.de --preset r --text \"Yes, Thursday works\"
+  mp notes add inbox/abc@tum.de inbox/def@tum.de --preset s
+  mp -A tum notes new --text \"Ask Ada whether the review moves to Friday\"
+  mp notes export --handoff > /tmp/notes.md
+  mp notes done mp://tum/inbox/abc@tum.de --result \"Drafted the reply\"
+  mp notes clear --done")]
+    Notes {
+        #[command(subcommand)]
+        action: NotesAction,
+    },
     /// Delete received emails (server + local) or local drafts
     //
     // Kept to one doc line on purpose: a second paragraph flips clap into its
@@ -1710,6 +1732,106 @@ enum ContactsAction {
     Rebuild,
     /// Show index statistics
     Stats,
+}
+
+/// `mp notes <action>`, over the daemon's `note.*` methods (PERSO-315).
+#[derive(Subcommand)]
+enum NotesAction {
+    /// Set a note on one or more received emails or drafts
+    Add {
+        /// The emails or drafts, as `mp show` and `mp path` take them
+        #[arg(required = true, value_name = "SELECTOR")]
+        selectors: Vec<String>,
+        /// The letter of a preset (`mp notes presets`)
+        #[arg(long, short = 'p')]
+        preset: Option<String>,
+        /// The instruction, or what the preset works from
+        #[arg(long, short = 't')]
+        text: Option<String>,
+        /// Print the daemon's answer as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a note asking for a new email from the account
+    New {
+        /// The letter of a preset (`mp notes presets`)
+        #[arg(long, short = 'p')]
+        preset: Option<String>,
+        /// What the email is to say
+        #[arg(long, short = 't')]
+        text: Option<String>,
+        /// Print the daemon's answer as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change the preset or the text of a note by its id, and open it again
+    Edit {
+        /// The note's id
+        id: String,
+        /// The letter of a preset (`mp notes presets`)
+        #[arg(long, short = 'p')]
+        preset: Option<String>,
+        /// The new text
+        #[arg(long, short = 't')]
+        text: Option<String>,
+        /// Print the daemon's answer as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the notes, newest first
+    List {
+        /// Only the notes in this state: open, handed_off or done
+        #[arg(long, value_parser = ["open", "handed_off", "done"])]
+        state: Option<String>,
+        /// Print the daemon's answer as JSON {notes}
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the batch prompt for the open notes, or for the notes named
+    Export {
+        /// Mark the open notes in the prompt handed off
+        #[arg(long)]
+        handoff: bool,
+        /// A note to put in the prompt, in any state; repeatable
+        #[arg(long = "id", value_name = "ID")]
+        ids: Vec<String>,
+        /// Print the daemon's answer as JSON {text, ids}
+        #[arg(long)]
+        json: bool,
+    },
+    /// Close a note with what was done
+    Done {
+        /// The email or draft the note is on
+        #[arg(required_unless_present = "id", conflicts_with = "id")]
+        selector: Option<String>,
+        /// The note's id, for a note without a selector
+        #[arg(long)]
+        id: Option<String>,
+        /// What was done, the line the clients show on the mail
+        #[arg(long, short = 'r')]
+        result: String,
+        /// Print the daemon's answer as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a note, or with --done every done note
+    Clear {
+        /// The email or draft the note is on
+        #[arg(required_unless_present_any = ["id", "done"], conflicts_with_all = ["id", "done"])]
+        selector: Option<String>,
+        /// The note's id
+        #[arg(long, conflicts_with = "done")]
+        id: Option<String>,
+        /// Remove every done note
+        #[arg(long)]
+        done: bool,
+    },
+    /// List the presets a note takes, in prompt order
+    Presets {
+        /// Print the daemon's answer as JSON {presets}
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `mp signature <action>`, over the daemon's `signature.*` methods.
@@ -5848,6 +5970,236 @@ async fn routed_blocked(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `mp notes <action>`: one daemon call per verb, the `note.*` method the TUI
+/// and the desktop make too (PERSO-315); this process only prints.
+///
+/// `account` is the `-A` or first configured account, which names the account
+/// of a selector that does not name its own and of a new email.
+async fn routed_notes(account: &str, action: NotesAction) -> Result<()> {
+    use mp_protocol::note::{self as wire, Note, NoteCleared, NoteExport, NoteListing};
+
+    let account = (!account.is_empty()).then(|| account.to_string());
+    let with_account = |mut params: serde_json::Value| {
+        if let Some(account) = &account {
+            params["account"] = serde_json::json!(account);
+        }
+        params
+    };
+    let instruction = |preset: Option<String>, text: Option<String>| {
+        let mut params = serde_json::json!({});
+        if let Some(preset) = preset {
+            params["preset"] = serde_json::json!(preset);
+        }
+        if let Some(text) = text {
+            params["text"] = serde_json::json!(text);
+        }
+        params
+    };
+    let merge = |mut into: serde_json::Value, from: serde_json::Value| {
+        if let (Some(into), serde_json::Value::Object(from)) = (into.as_object_mut(), from) {
+            into.extend(from);
+        }
+        into
+    };
+    let (method, params, json) = match &action {
+        NotesAction::Add {
+            selectors,
+            preset,
+            text,
+            json,
+        } => (
+            wire::METHOD_NOTE_SET_MANY,
+            merge(
+                with_account(serde_json::json!({"selectors": selectors})),
+                instruction(preset.clone(), text.clone()),
+            ),
+            *json,
+        ),
+        NotesAction::New { preset, text, json } => (
+            wire::METHOD_NOTE_SET,
+            merge(
+                with_account(serde_json::json!({})),
+                instruction(preset.clone(), text.clone()),
+            ),
+            *json,
+        ),
+        NotesAction::Edit {
+            id,
+            preset,
+            text,
+            json,
+        } => (
+            wire::METHOD_NOTE_SET,
+            merge(
+                serde_json::json!({"id": id}),
+                instruction(preset.clone(), text.clone()),
+            ),
+            *json,
+        ),
+        NotesAction::List { state, json } => (
+            wire::METHOD_NOTE_LIST,
+            match state {
+                Some(state) => serde_json::json!({"state": state}),
+                None => serde_json::json!({}),
+            },
+            *json,
+        ),
+        NotesAction::Export { handoff, ids, json } => (
+            if *handoff {
+                wire::METHOD_NOTE_HANDOFF
+            } else {
+                wire::METHOD_NOTE_EXPORT
+            },
+            if ids.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({"ids": ids})
+            },
+            *json,
+        ),
+        NotesAction::Done {
+            selector,
+            id,
+            result,
+            json,
+        } => (
+            wire::METHOD_NOTE_DONE,
+            match (selector, id) {
+                (Some(selector), _) => {
+                    with_account(serde_json::json!({"selector": selector, "result": result}))
+                }
+                (None, id) => serde_json::json!({"id": id, "result": result}),
+            },
+            *json,
+        ),
+        NotesAction::Clear { selector, id, done } => (
+            if *done {
+                wire::METHOD_NOTE_CLEAR_DONE
+            } else {
+                wire::METHOD_NOTE_CLEAR
+            },
+            match (selector, id) {
+                _ if *done => serde_json::json!({}),
+                (Some(selector), _) => with_account(serde_json::json!({"selector": selector})),
+                (None, id) => serde_json::json!({"id": id}),
+            },
+            false,
+        ),
+        NotesAction::Presets { json } => (wire::METHOD_NOTE_PRESETS, serde_json::json!({}), *json),
+    };
+
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call(&mut connection, method, params)
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    let read = |what: &str| anyhow!("reading the daemon's {method} answer: {what}");
+    match action {
+        NotesAction::Add { .. } => {
+            let set: NoteListing =
+                serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            for note in &set.notes {
+                println!("{} {}", "\u{2713}".green(), note_line(note));
+            }
+        }
+        NotesAction::New { .. } | NotesAction::Edit { .. } => {
+            let note: Note = serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            println!("{} {}", "\u{2713}".green(), note_line(&note));
+        }
+        NotesAction::List { .. } => {
+            let listed: NoteListing =
+                serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            print!("{}", render_notes(&listed.notes));
+        }
+        NotesAction::Export { .. } => {
+            let export: NoteExport =
+                serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            if export.ids.is_empty() {
+                eprintln!("No open notes to export");
+            }
+            print!("{}", export.text);
+        }
+        NotesAction::Done { .. } => {
+            let note: Note = serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            println!("{} Done: {}", "\u{2713}".green(), note_line(&note));
+        }
+        NotesAction::Clear { .. } => {
+            let cleared: NoteCleared =
+                serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            match cleared.removed {
+                0 => println!("No note to clear"),
+                1 => println!("{} Cleared 1 note", "\u{2713}".green()),
+                n => println!("{} Cleared {n} notes", "\u{2713}".green()),
+            }
+        }
+        NotesAction::Presets { .. } => {
+            let presets: wire::NotePresets =
+                serde_json::from_value(answer).map_err(|e| read(&e.to_string()))?;
+            for preset in &presets.presets {
+                let text = if preset.needs_text { " (+ text)" } else { "" };
+                println!(
+                    "{}  {}{text}: {}",
+                    preset.key, preset.label, preset.instruction
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One note in a line: its id, its state, and what it is on.
+fn note_line(note: &mp_protocol::note::Note) -> String {
+    let target = match &note.selector {
+        Some(selector) => selector.clone(),
+        None => format!("new email from {}", note.account),
+    };
+    let orphaned = if note.orphaned { " (orphaned)" } else { "" };
+    format!(
+        "{}  {:<10}  {target}{orphaned}",
+        note.id,
+        note.state.as_str()
+    )
+}
+
+/// What `mp notes list` prints: a line per note, then indented, the mail's
+/// subject, the note's preset and text, and its result.
+fn render_notes(notes: &[mp_protocol::note::Note]) -> String {
+    if notes.is_empty() {
+        return "No notes\n".to_string();
+    }
+    let mut out = String::new();
+    for note in notes {
+        out.push_str(&note_line(note));
+        out.push('\n');
+        if note.selector.is_some() {
+            let who = if note.selector.as_deref().is_some_and(|selector| {
+                selector.contains(&format!("/{}/", mailypoppins::selector::DRAFTS_MAILBOX))
+            }) {
+                format!("to {}", note.to)
+            } else {
+                format!("from {}", mailypoppins::parse::readable_sender(&note.from))
+            };
+            out.push_str(&format!("    {}, {who}\n", note.subject));
+        }
+        let preset = note
+            .preset
+            .as_deref()
+            .map(|key| format!("[{key}] "))
+            .unwrap_or_default();
+        if !preset.is_empty() || !note.text.is_empty() {
+            let text = note.text.replace('\n', "\n    ");
+            out.push_str(&format!("    {preset}{text}\n"));
+        }
+        if let Some(result) = &note.result {
+            out.push_str(&format!("    = {}\n", result.replace('\n', "\n      ")));
+        }
+    }
+    out
+}
+
 /// `mp signature list`: the names, the account's default marked.
 fn render_signature_listing(listing: &mp_protocol::signature::SignatureListing) -> String {
     if listing.names.is_empty() {
@@ -7003,6 +7355,10 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
 
         Some(Commands::Blocked { json }) => {
             routed_blocked(json).await?;
+        }
+
+        Some(Commands::Notes { action }) => {
+            routed_notes(&account_config.name, action).await?;
         }
 
         Some(Commands::Delete {

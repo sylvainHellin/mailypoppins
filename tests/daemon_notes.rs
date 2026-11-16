@@ -1,10 +1,11 @@
-//! The notes on mail over a real socket (PERSO-315).
+//! The notes on mail over a real socket, and `mp notes` in front of them
+//! (PERSO-315).
 //!
 //! The file, its order and the batch prompt are unit-tested beside their code
 //! (`src/daemon/notes.rs`, whose snapshot pins the prompt); this file pins
 //! what a client sees: each `note.*` answer and refusal, the `note.changed`
 //! every write publishes, the `note` a message listing row and a draft row
-//! carry, and the notes outliving a rebuilt store.
+//! carry, the notes outliving a rebuilt store, and the CLI's verbs.
 //!
 //! One account with a server and no credentials, on the discard port with the
 //! scheduler off, so nothing ever connects; its store holds two Inbox
@@ -138,6 +139,16 @@ impl Slice {
 
     async fn connect(&self) -> Connection {
         connect(self.root()).await
+    }
+
+    /// `mp notes <args>` against the daemon, which must route.
+    fn mp(&self, args: &[&str]) -> (String, String, Option<i32>) {
+        let out = self.daemon.mp_routed(args);
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
     }
 }
 
@@ -656,4 +667,99 @@ async fn the_presets_come_from_the_configuration() {
             .contains("two presets share the key \"x\""),
         "{verdict}"
     );
+}
+
+/// `mp notes` routes every verb through the daemon: add on two selectors,
+/// new, edit, list, export with and without the hand-off, done, clear and
+/// presets, each printing the daemon's answer; a refusal is the daemon's
+/// sentence and exit 1.
+#[test]
+fn mp_notes_round_trip() {
+    let slice = Slice::start();
+    let (out, err, code) = slice.mp(&[
+        "notes",
+        "add",
+        "inbox/thesis@tum.de",
+        BUDGET,
+        "--preset",
+        "r",
+        "--text",
+        "Yes, Thursday works.",
+    ]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(
+        lines[0].ends_with(&format!("open        {THESIS}")),
+        "{out}"
+    );
+    assert!(
+        lines[1].ends_with(&format!("open        {BUDGET}")),
+        "{out}"
+    );
+
+    let (out, _, code) = slice.mp(&["notes", "new", "--text", "Ask Ada about Friday."]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("new email from alpha"), "{out}");
+    let new_id = out.split_whitespace().nth(1).unwrap().to_string();
+    let (out, _, code) = slice.mp(&["notes", "edit", &new_id, "--text", "Ask Ada and Bo."]);
+    assert_eq!(code, Some(0), "{out}");
+
+    let (out, _, _) = slice.mp(&["notes", "list"]);
+    assert!(
+        out.starts_with(&format!(
+            "{new_id}  open        new email from alpha\n    Ask Ada and Bo.\n"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "{THESIS}\n    Master Thesis Presentation, from Stefan Fuchs <stefan.fuchs@tum.de>\n    [r] Yes, Thursday works.\n"
+        )),
+        "{out}"
+    );
+
+    let (exported, _, code) = slice.mp(&["notes", "export"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        exported.starts_with("I have notes on 3 emails.\n"),
+        "{exported}"
+    );
+    let (json_out, _, _) = slice.mp(&["notes", "export", "--json"]);
+    let answer: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(answer["text"], json!(exported));
+    let (handed, _, _) = slice.mp(&["notes", "export", "--handoff"]);
+    assert_eq!(handed, exported);
+    let (out, err, _) = slice.mp(&["notes", "export"]);
+    assert_eq!(out, "");
+    assert!(err.ends_with("No open notes to export\n"), "{err}");
+
+    let (out, _, code) = slice.mp(&["notes", "done", THESIS, "--result", "Drafted the reply"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Done: ") && out.contains("done  "), "{out}");
+    let (out, _, code) = slice.mp(&["notes", "done", "--id", &new_id, "--result", "Wrote it"]);
+    assert_eq!(code, Some(0), "{out}");
+    let (out, _, _) = slice.mp(&["notes", "list", "--state", "done"]);
+    assert!(out.contains("    = Drafted the reply\n"), "{out}");
+    let (json_out, _, _) = slice.mp(&["notes", "list", "--json"]);
+    let listed: NoteListing = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(listed.notes.len(), 3);
+
+    let (out, _, _) = slice.mp(&["notes", "clear", BUDGET]);
+    assert_eq!(out, "\u{2713} Cleared 1 note\n");
+    let (out, _, _) = slice.mp(&["notes", "clear", "--done"]);
+    assert_eq!(out, "\u{2713} Cleared 2 notes\n");
+    let (out, _, _) = slice.mp(&["notes", "clear", "--id", &new_id]);
+    assert_eq!(out, "No note to clear\n");
+    let (out, _, _) = slice.mp(&["notes", "list"]);
+    assert_eq!(out, "No notes\n");
+
+    let (out, _, _) = slice.mp(&["notes", "presets"]);
+    assert!(
+        out.starts_with("r  Reply (+ text): Draft a reply in my voice from this gist.\n"),
+        "{out}"
+    );
+    let (_, err, code) = slice.mp(&["notes", "add", THESIS, "--preset", "q"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("preset q is not configured"), "{err}");
 }
