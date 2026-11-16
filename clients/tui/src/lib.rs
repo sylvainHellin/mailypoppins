@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod agent_launch;
 pub mod app;
 pub mod bg;
 #[cfg(test)]

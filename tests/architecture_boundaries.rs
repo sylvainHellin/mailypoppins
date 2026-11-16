@@ -825,12 +825,18 @@ const TUI_DIRECT_REACHES: [&str; 22] = [
 /// (`draft.attach`) and the compose wizard's header edit of an existing draft
 /// with its signature re-splice (`draft.set_headers`). A row that goes away
 /// is struck in the same commit.
-const TUI_DIRECT_RESIDUE: [(&str, &str, &str); 2] = [
+const TUI_DIRECT_RESIDUE: [(&str, &str, &str); 3] = [
     (
         "actions.rs",
         "fs::write(",
         "the HTML rendition and the invitation's .ics, written into this process's private \
          temp area for a browser or a calendar app to open; neither is a draft",
+    ),
+    (
+        "agent_launch.rs",
+        "fs::write(",
+        "the batch prompt `note.export` rendered, written under <data_dir>/notes/ for the coding \
+         agent the TUI starts to read (PERSO-315); the daemon renders it and owns no such file",
     ),
     (
         "prefs.rs",
