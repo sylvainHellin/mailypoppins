@@ -887,13 +887,20 @@ struct WireConversation<'a> {
     latest: WireRow<'a>,
     mailboxes: &'a [String],
     member_ids: &'a [i64],
+    /// The most pressing state among the notes on the members, absent when
+    /// none has one, so a conversation without notes is the row it was before
+    /// them, byte for byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<NoteState>,
     participants: &'a [String],
     thread_id: &'a str,
     unread: usize,
 }
 
 impl<'a> WireConversation<'a> {
-    /// The conversation, its `latest` row's `note` read from `marks`.
+    /// The conversation, its `latest` row's `note` and its own read from
+    /// `marks`: the latest message's note, and the most pressing over every
+    /// member in every mailbox.
     fn new(
         account: &str,
         conversation: &'a read::Conversation,
@@ -918,6 +925,8 @@ impl<'a> WireConversation<'a> {
             ),
             mailboxes: &conversation.mailboxes,
             member_ids: &conversation.member_ids,
+            note: marks
+                .of_conversation(account, conversation.message_ids.iter().map(String::as_str)),
             participants: &conversation.participants,
             thread_id: &conversation.thread_id,
             unread: conversation.unread,
@@ -1414,6 +1423,7 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     // the store (PERSO-244).
     let twins = read::twins_of(&store, &name, rows.iter().map(|(member, _)| member))
         .map_err(|e| internal(format!("the twins of {thread_id} in {name}: {e:#}")))?;
+    let marks = NoteMarks::load(&super::super::notes::path());
 
     let mut members: Vec<(Option<i64>, ThreadMessage)> = rows
         .iter()
@@ -1442,6 +1452,7 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                 draft_id: None,
                 selector: Selector::for_listed(&name, member, &twins).to_string(),
                 path: None,
+                note: marks.of_message(&name, member),
             };
             (*stamped, message)
         })
@@ -1451,7 +1462,7 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
             .iter()
             .map(|(member, _)| member.message_id.as_str())
             .collect();
-        join_drafts(&store, account, &ids, &mut members)?;
+        join_drafts(&store, account, &ids, &marks, &mut members)?;
     }
 
     let listing = ThreadListing {
@@ -1481,6 +1492,7 @@ fn join_drafts(
     store: &Store,
     account: &AccountConfig,
     ids: &std::collections::HashSet<&str>,
+    marks: &NoteMarks,
     members: &mut Vec<(Option<i64>, ThreadMessage)>,
 ) -> Result<(), RpcError> {
     let name = &account.name;
@@ -1515,6 +1527,7 @@ fn join_drafts(
             current: false,
             selector: Selector::for_draft(name, &draft.id).to_string(),
             path: Some(draft.path),
+            note: marks.of_draft(name, &draft.id),
             draft_id: Some(draft.id),
         };
         members.insert(at, (Some(created), member));
@@ -3381,6 +3394,7 @@ mod tests {
         let latest = sample_row(index);
         read::Conversation {
             thread_id: latest.message_id.clone(),
+            message_ids: vec![latest.message_id.clone()],
             member_ids: vec![latest.id, latest.id - 1],
             latest: (latest, Some(1_782_993_450 + index)),
             date_sort: Some(1_783_000_000 + index),

@@ -375,7 +375,7 @@ A client could compose it from `message_id`, the answer's `mailbox` and its own 
 The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fourteen keys, and this is the fifteenth, about forty bytes of ASCII, paid once per listing rather than once per copy.
 `note` is the state of the note on the message (`open`, `handed_off` or `done`, [The `note.*` family](#the-note-family)), absent when it has none, so a list draws the note glyph beside the star without a second call (PERSO-315).
 A note is held by the message's account and `Message-ID`, whatever mailbox holds it, so every copy carries it: the Inbox and the Sent copy, a copy under a label, and both copies of a `Message-ID` held twice in one mailbox.
-The streamed rows, a conversation's `latest`, `message.search` hits and `draft.list` rows carry it too, a `draft.list` row by its draft id.
+The streamed rows, a conversation's `latest`, `message.search` hits and `draft.list` rows carry it too, a `draft.list` row by its draft id; a conversation row carries the most pressing among its members' notes and a `message.thread` member its own.
 The daemon reads `<data_dir>/notes.json` once per listing for it, and a file that does not read marks no row and logs why rather than refusing the listing.
 
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
@@ -531,6 +531,7 @@ A client that wants the whole message asks `message.get` with the row's `id`, wh
 `own` says the member is the user's own message (PERSO-179): its `From:` address is the account's `default_from` address, compared case-insensitively on the address alone, or it sits in the `sent` mailbox.
 The address makes a note to self listed in the Inbox `own` as much as its Sent copy, and the mailbox makes a Sent copy `own` when it went out from an alias or a former `default_from`, which the configuration does not name; the daemon decides it because it is the side that holds the configuration.
 `subject` is the addressed message's `Subject:` verbatim, `""` when it carried none, and the client renders its own `(no subject)` placeholder.
+`note` is the state of the note on a member, a message by its `Message-ID` and a draft member by its id, absent when it has none (PERSO-315).
 
 **A message with no relatives answers with itself alone.** A one-row conversation is the truthful answer to "what else is in this thread", and the client is what turns it into a sentence: the TUI says "No related emails for this message in the store" and opens no overlay for it.
 An empty `messages` array would be a different claim, that the store holds not even the message that was addressed, which is `-32602` instead.
@@ -1245,6 +1246,7 @@ A row is `mp_protocol::listing::ConversationRow`:
 - `mailboxes` are the distinct mailboxes the members live in, sorted.
 - `has_attachments` is true when any member, in any mailbox, has one; `flagged` when a member in the listed mailbox is flagged.
 - `has_draft` is true when a draft of the drafts index, not yet sent, answers or forwards a member, matched by `Message-ID`.
+- `note` is the most pressing state among the notes on the members, in any mailbox (PERSO-315): `open` before `handed_off` before `done`, absent when no member has a note; `latest.note` stays the latest message's own.
 
 The stream is ordered by the conversation's `date_sort` descending, then by `latest.id` descending.
 A draft never makes a conversation appear: a conversation is listed in a mailbox one of its messages lives in, and Drafts is refused as `message.list` refuses it.
@@ -2061,4 +2063,5 @@ PERSO-315 added the `note.*` family, ten methods, one lifecycle kind and one mem
 `note.clear`, `note.clear_done`, `note.done`, `note.handoff`, `note.set` and `note.set_many` are commands and `note.export`, `note.get`, `note.list` and `note.presets` queries, with the shapes of [the family's section](#the-note-family) and the types of `mp_protocol::note`; `note.changed` `{notes}` is the lifecycle kind.
 A `message.list` row (`MessageListRow`, and with it the streamed rows, a conversation's `latest` and a `message.search` hit) and a `draft.list` row (`DraftEntry`) gained `note`, the state of the note on the mail, absent when it has none, so a row from an older daemon decodes as one with no note.
 A `Note` names its mail by `account` with `message_id` or `draft_id`, and its `selector` is decided at every answer.
+A conversation row (`ConversationRow`) gained `note`, the most pressing state among its members' notes, and a `message.thread` member (`ThreadMessage`) gained `note`, both absent when there is none.
 The fixtures are `crates/mp-protocol/fixtures/note.{set,set_many,list,get,done,clear,clear_done,export,handoff,presets}.{request,response}.json` and `notification.note_changed.json`, and the capability list grew by the ten names.

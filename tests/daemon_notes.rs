@@ -65,12 +65,20 @@ fn store_path(root: &Path) -> std::path::PathBuf {
 
 /// Ingest one Inbox message; its Message-ID is `<id>`.
 fn ingest(root: &Path, uid: i64, id: &str, from: &str, subject: &str) {
+    ingest_raw(
+        root,
+        uid,
+        &format!(
+            "From: {from}\r\nTo: alpha@example.com\r\nSubject: {subject}\r\nMessage-ID: <{id}>\r\nDate: Mon, 16 Nov 2026 09:00:00 +0100\r\n\r\nbody\r\n"
+        ),
+    );
+}
+
+/// Ingest one Inbox message from its raw bytes.
+fn ingest_raw(root: &Path, uid: i64, raw: &str) {
     let dir = root.join("accounts").join(ACCOUNT);
     let store = Store::open(store_path(root)).unwrap();
     let blobs = BlobStore::new(dir.join("blobs"));
-    let raw = format!(
-        "From: {from}\r\nTo: alpha@example.com\r\nSubject: {subject}\r\nMessage-ID: <{id}>\r\nDate: Mon, 16 Nov 2026 09:00:00 +0100\r\n\r\nbody\r\n"
-    );
     let email = mailypoppins::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
     ingest_message(
         &store,
@@ -302,12 +310,37 @@ async fn a_note_on_a_message_marks_its_row_and_every_client_hears_it() {
     assert_eq!(none, json!({"note": null}));
 }
 
+/// Every notification of one stream until its finish, by method.
+async fn stream(conn: &mut Connection, method: &str) -> Vec<(String, Value)> {
+    let started = ok(
+        conn,
+        method,
+        json!({"account": ACCOUNT, "mailbox": "inbox"}),
+    )
+    .await;
+    let id = started["operation_id"].clone();
+    let mut seen = Vec::new();
+    loop {
+        let notification = tokio::time::timeout(DEADLINE, conn.next_notification())
+            .await
+            .expect("the stream goes on")
+            .expect("the daemon keeps the connection open");
+        if notification.method == mp_protocol::METHOD_STATE_EVENT
+            && notification.params["kind"] == json!("operation.finished")
+            && notification.params["payload"]["operation_id"] == id
+        {
+            return seen;
+        }
+        seen.push((notification.method, notification.params));
+    }
+}
+
 /// The rows of the two streamed listings carry the note as `message.list`'s
 /// do: a flat row by itself, a conversation by its `latest` row.
 #[tokio::test]
 async fn the_streamed_rows_carry_the_note() {
     use mp_protocol::listing::{ConversationRowsChunk, MessageRowsChunk};
-    use mp_protocol::{METHOD_MESSAGE_CONVERSATIONS, METHOD_MESSAGE_ROWS, METHOD_STATE_EVENT};
+    use mp_protocol::{METHOD_MESSAGE_CONVERSATIONS, METHOD_MESSAGE_ROWS};
 
     let slice = Slice::start();
     let mut conn = slice.connect().await;
@@ -318,31 +351,6 @@ async fn the_streamed_rows_carry_the_note() {
     )
     .await;
     ok(&mut conn, "state.bootstrap", json!({})).await;
-
-    // Every notification of one stream until its finish, by method.
-    async fn stream(conn: &mut Connection, method: &str) -> Vec<(String, Value)> {
-        let started = ok(
-            conn,
-            method,
-            json!({"account": ACCOUNT, "mailbox": "inbox"}),
-        )
-        .await;
-        let id = started["operation_id"].clone();
-        let mut seen = Vec::new();
-        loop {
-            let notification = tokio::time::timeout(DEADLINE, conn.next_notification())
-                .await
-                .expect("the stream goes on")
-                .expect("the daemon keeps the connection open");
-            if notification.method == METHOD_STATE_EVENT
-                && notification.params["kind"] == json!("operation.finished")
-                && notification.params["payload"]["operation_id"] == id
-            {
-                return seen;
-            }
-            seen.push((notification.method, notification.params));
-        }
-    }
 
     let mut flat = Vec::new();
     for (method, params) in stream(&mut conn, "message.list_stream").await {
@@ -374,6 +382,71 @@ async fn the_streamed_rows_carry_the_note() {
     }
     grouped.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(grouped, flat);
+}
+
+/// A conversation carries the most pressing note among its members, here
+/// the thesis under a later reply that has none, while its `latest` row
+/// carries the reply's own; `message.thread` gives each member its note.
+#[tokio::test]
+async fn a_conversation_and_its_members_carry_their_notes() {
+    use mp_protocol::listing::{ConversationRowsChunk, ThreadListing};
+    use mp_protocol::METHOD_MESSAGE_CONVERSATIONS;
+
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    ok(
+        &mut conn,
+        "note.set",
+        json!({"selector": THESIS, "preset": "s"}),
+    )
+    .await;
+    drop(conn);
+    let slice = slice.restarted(|root| {
+        ingest_raw(
+            root,
+            3,
+            "From: Stefan Fuchs <stefan.fuchs@tum.de>\r\nTo: alpha@example.com\r\nSubject: Re: Master Thesis Presentation\r\nMessage-ID: <reply@tum.de>\r\nIn-Reply-To: <thesis@tum.de>\r\nReferences: <thesis@tum.de>\r\nDate: Mon, 16 Nov 2026 11:00:00 +0100\r\n\r\nbody\r\n",
+        );
+    });
+    let reply = "mp://alpha/inbox/reply@tum.de";
+    let mut conn = slice.connect().await;
+    ok(&mut conn, "state.bootstrap", json!({})).await;
+
+    let mut rows = Vec::new();
+    for (method, params) in stream(&mut conn, "message.list_conversations").await {
+        if method == METHOD_MESSAGE_CONVERSATIONS {
+            let chunk: ConversationRowsChunk = serde_json::from_value(params).unwrap();
+            rows.extend(chunk.rows);
+        }
+    }
+    let thread = rows
+        .iter()
+        .find(|row| row.latest.selector == reply)
+        .unwrap_or_else(|| panic!("no conversation under {reply}: {rows:?}"));
+    assert_eq!(thread.count, 2, "{thread:?}");
+    assert_eq!(thread.note, Some(NoteState::Open));
+    assert_eq!(thread.latest.note, None);
+    let budget = rows
+        .iter()
+        .find(|row| row.latest.selector == BUDGET)
+        .unwrap();
+    assert_eq!(budget.note, None);
+
+    let listed: ThreadListing = serde_json::from_value(
+        ok(
+            &mut conn,
+            "message.thread",
+            json!({"account": ACCOUNT, "selector": reply}),
+        )
+        .await,
+    )
+    .unwrap();
+    let notes: Vec<(&str, Option<NoteState>)> = listed
+        .messages
+        .iter()
+        .map(|member| (member.selector.as_str(), member.note))
+        .collect();
+    assert_eq!(notes, [(THESIS, Some(NoteState::Open)), (reply, None)]);
 }
 
 /// Setting a note again replaces it and opens it again; `note.done` closes it

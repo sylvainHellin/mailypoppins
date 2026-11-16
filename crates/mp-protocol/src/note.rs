@@ -68,6 +68,17 @@ impl NoteState {
             NoteState::Done => "done",
         }
     }
+
+    /// How pressing the state is, lowest first: open, then handed off, then
+    /// done. A conversation carries the most pressing state among its
+    /// members' notes.
+    pub fn urgency(self) -> u8 {
+        match self {
+            NoteState::Open => 0,
+            NoteState::HandedOff => 1,
+            NoteState::Done => 2,
+        }
+    }
 }
 
 /// One note, as every `note.*` answer and `note.changed` carry it.

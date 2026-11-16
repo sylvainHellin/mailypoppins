@@ -145,6 +145,10 @@ pub fn list(
                 has_draft: drafted.contains(thread_id.as_str()),
                 member_ids: here.iter().map(|r| r.id).collect(),
                 mailboxes: mailboxes.into_iter().collect(),
+                note: members
+                    .iter()
+                    .filter_map(|(_, r)| r.note)
+                    .min_by_key(|state| state.urgency()),
                 participants,
                 unread: unread.len() as u64,
                 latest,
@@ -218,6 +222,7 @@ pub fn thread(
                 draft_id: None,
                 selector: row.selector,
                 path: None,
+                note: row.note,
             };
             (row.date_sort, member)
         })
@@ -235,6 +240,7 @@ pub fn thread(
             draft_id: Some(draft.id.clone()),
             selector: format!("mp://{account}/{DRAFTS}/{}", draft.id),
             path: Some(draft.path.clone()),
+            note: None,
         };
         let at = messages
             .iter()

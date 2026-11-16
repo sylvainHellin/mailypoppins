@@ -283,6 +283,12 @@ pub struct ConversationRow {
     /// an action on the row has to reach.
     #[serde(default)]
     pub member_ids: Vec<i64>,
+    /// The most pressing state among the notes on the members, in any
+    /// mailbox (PERSO-315): `open` before `handed_off` before `done`, absent
+    /// when no member has a note. `latest.note` is the latest message's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub note: Option<crate::note::NoteState>,
     /// The members' `From:` headers verbatim, one per address compared
     /// case-insensitively, newest first, at most five.
     #[serde(default)]
@@ -435,6 +441,12 @@ pub struct ThreadMessage {
     /// desktop (#0142); absent for a message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The state of the note on this member, a message by its `Message-ID`
+    /// in any mailbox or a draft by its id (PERSO-315); absent when it has
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub note: Option<crate::note::NoteState>,
 }
 
 /// The whole `message.thread` answer: one conversation, oldest first.
@@ -1453,6 +1465,7 @@ mod tests {
                 draft_id: None,
                 selector: "mp://work/Team%2FReports/root@example.com".to_string(),
                 path: None,
+                note: None,
             }],
         };
         let encoded = serde_json::to_value(&thread).expect("it serialises");

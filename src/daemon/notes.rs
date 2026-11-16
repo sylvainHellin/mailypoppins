@@ -778,6 +778,21 @@ impl NoteMarks {
     pub fn of_draft(&self, account: &str, id: &str) -> Option<NoteState> {
         self.drafts.get(account)?.get(id).copied()
     }
+
+    /// The most pressing state among the notes on the messages
+    /// `message_ids` of `account`, a conversation's members: open before
+    /// handed off before done, absent when none has a note.
+    pub fn of_conversation<'a>(
+        &self,
+        account: &str,
+        message_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Option<NoteState> {
+        let notes = self.messages.get(account)?;
+        message_ids
+            .into_iter()
+            .filter_map(|id| notes.get(crate::selector::message_key(id)).copied())
+            .min_by_key(|state| state.urgency())
+    }
 }
 
 #[cfg(test)]
@@ -1225,6 +1240,41 @@ mod tests {
         assert_eq!(marks.of_draft("tum", "d1"), Some(NoteState::Open));
         assert_eq!(marks.of_draft("tum", "a@x"), None);
         assert_eq!(marks.of_message_id("tum", "d1"), None);
+    }
+
+    /// A conversation carries the most pressing note among its members:
+    /// open before handed off before done.
+    #[test]
+    fn a_conversation_carries_its_most_pressing_note() {
+        let (_dir, path) = file();
+        let notes = set(
+            &path,
+            &[
+                mail("mp://tum/inbox/a", "A"),
+                mail("mp://tum/sent/b", "B"),
+                mail("mp://tum/inbox/c", "C"),
+            ],
+            &content(Some("s"), ""),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
+        done(
+            &path,
+            &Key::Id(notes[0].id.clone()),
+            "done",
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
+        hand_off(&path, Some(&[notes[1].id.clone()]), NOW, &mut |_| {}).unwrap();
+        let marks = NoteMarks::load(&path);
+        let of = |ids: &[&str]| marks.of_conversation("tum", ids.iter().copied());
+        assert_eq!(of(&["<a>", "<b>", "<c>"]), Some(NoteState::Open));
+        assert_eq!(of(&["<a>", "<b>", "<z>"]), Some(NoteState::HandedOff));
+        assert_eq!(of(&["<a>", "<z>"]), Some(NoteState::Done));
+        assert_eq!(of(&["<z>"]), None);
+        assert_eq!(marks.of_conversation("perso", ["<a>"]), None);
     }
 
     /// The batch prompt every client hands an agent, over a received

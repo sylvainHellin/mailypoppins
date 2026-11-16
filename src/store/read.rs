@@ -382,6 +382,10 @@ pub struct Conversation {
     pub date_display: Option<String>,
     /// One per `Message-ID`, across every mailbox.
     pub count: usize,
+    /// Those `Message-ID`s, sorted, as the store holds them: what a
+    /// conversation's note is read from (PERSO-315), since a note is on a
+    /// message wherever its copies are.
+    pub message_ids: Vec<String>,
     /// The `Message-ID`s with an unseen copy in the listed mailbox.
     pub unread: usize,
     /// The member rows in the listed mailbox, newest first, copies included.
@@ -551,6 +555,8 @@ fn fold_members(members: &mut Vec<DatedRow>, mailbox: &str) -> Option<Conversati
     }
     mailboxes.sort();
     let count = distinct(&mut ids);
+    let mut message_ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    message_ids.dedup();
     let unread = distinct(&mut unread_ids);
     drop((ids, unread_ids, addresses));
 
@@ -566,6 +572,7 @@ fn fold_members(members: &mut Vec<DatedRow>, mailbox: &str) -> Option<Conversati
         date_sort,
         date_display,
         count,
+        message_ids,
         unread,
         member_ids,
         participants,
@@ -597,6 +604,7 @@ fn fold_one((row, date_sort): DatedRow, mailbox: &str) -> Option<Conversation> {
         date_sort,
         date_display: row.date_display.clone(),
         count: 1,
+        message_ids: vec![row.message_id.clone()],
         unread: usize::from(!flags.seen),
         member_ids: vec![row.id],
         participants,

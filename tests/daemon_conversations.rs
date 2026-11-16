@@ -546,6 +546,10 @@ async fn folded(conn: &mut Connection, mailbox: &str) -> Vec<ConversationRow> {
                 latest: rows[0].clone(),
                 mailboxes,
                 member_ids: rows.iter().map(|row| row.id).collect(),
+                note: messages
+                    .iter()
+                    .filter_map(|member| member.note)
+                    .min_by_key(|state| state.urgency()),
                 participants,
                 thread_id: key,
                 unread: unread.len() as u64,
