@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `note.set`: add a note, or replace the one on its selector or id.
+/// `note.set`: add a note, or replace the one on its message, draft or id.
 pub const METHOD_NOTE_SET: &str = "note.set";
 
 /// `note.set_many`: the same note on each of several selectors.
