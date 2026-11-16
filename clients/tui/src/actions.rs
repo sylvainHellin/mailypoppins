@@ -2407,7 +2407,107 @@ fn hand_off_notes(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    use super::agent_launch::{self as launch, Launch, Place};
+    hand_off_with(app, &mut TerminalLauncher { terminal })
+}
+
+/// What a hand-off needs beyond the daemon: the environment, the Herdr app's
+/// answer, the clipboard and the programs that open the agent.
+/// [`TerminalLauncher`] is the TUI's; the tests stand in for it.
+pub(crate) trait Launcher {
+    /// The multiplexers the TUI runs inside.
+    fn env(&self) -> super::agent_launch::Env;
+    /// The Herdr app space that shows this terminal, if any.
+    fn space(&mut self) -> Option<String>;
+    /// `text` to the clipboard.
+    fn copy(&mut self, text: &str) -> super::clipboard::CopyOutcome;
+    /// Open the agent as `launch` says, `space` the app's space for
+    /// [`Launch::HerdrApp`](super::agent_launch::Launch::HerdrApp), and call
+    /// `started` once it runs, before anything waits for it. The inner `Err`
+    /// says why it did not start; the outer one is the terminal's own failure.
+    fn start(
+        &mut self,
+        app: &mut App,
+        launch: super::agent_launch::Launch,
+        space: Option<&str>,
+        started: &mut dyn FnMut(&mut App),
+    ) -> Result<std::result::Result<(), String>>;
+}
+
+/// The launcher of the running TUI, on its terminal.
+struct TerminalLauncher<'t> {
+    terminal: &'t mut Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl Launcher for TerminalLauncher<'_> {
+    fn env(&self) -> super::agent_launch::Env {
+        super::agent_launch::Env::from_process()
+    }
+
+    fn space(&mut self) -> Option<String> {
+        super::agent_launch::this_terminals_space()
+    }
+
+    fn copy(&mut self, text: &str) -> super::clipboard::CopyOutcome {
+        super::clipboard::copy_text(self.terminal, text)
+    }
+
+    fn start(
+        &mut self,
+        app: &mut App,
+        launch: super::agent_launch::Launch,
+        space: Option<&str>,
+        started: &mut dyn FnMut(&mut App),
+    ) -> Result<std::result::Result<(), String>> {
+        use super::agent_launch::{self as agent, Launch};
+        let ran = match launch {
+            Launch::Run(argv) => agent::run_to_end(&argv).map(|_| ()),
+            Launch::Herdr { split, line } => agent::run_in_herdr(&split, &line),
+            // `settle` keeps the app's place only with a space to open in.
+            Launch::HerdrApp { argv, cwd } => match space {
+                Some(space) => agent::run_in_herdr_app(&argv, &cwd, space),
+                None => Err("no Herdr app space shows this terminal".to_string()),
+            },
+            Launch::Foreground { argv, cwd } => {
+                let Some((program, args)) = argv.split_first() else {
+                    return Ok(Err("an empty agent command".to_string()));
+                };
+                suspend_terminal(self.terminal)?;
+                let spawned = std::process::Command::new(program)
+                    .args(args)
+                    .current_dir(&cwd)
+                    .spawn();
+                return match spawned {
+                    Ok(mut child) => {
+                        started(app);
+                        let waited = child.wait();
+                        resume_terminal(self.terminal)?;
+                        if let Err(e) = waited {
+                            app.set_status_level(
+                                format!("Lost the agent: {e}"),
+                                StatusLevel::Warning,
+                            );
+                        }
+                        Ok(Ok(()))
+                    }
+                    Err(e) => {
+                        resume_terminal(self.terminal)?;
+                        Ok(Err(format!("{program}: {e}")))
+                    }
+                };
+            }
+            Launch::Clipboard => return Ok(Ok(())),
+        };
+        if ran.is_ok() {
+            started(app);
+        }
+        Ok(ran)
+    }
+}
+
+/// [`hand_off_notes`] through `launcher`: `note.export`, the launch, then
+/// `note.handoff` on the exported ids once the agent started.
+pub(crate) fn hand_off_with(app: &mut App, launcher: &mut dyn Launcher) -> Result<()> {
+    use super::agent_launch::{self as launch, Place};
     let export = match note_export(app, mp_protocol::note::METHOD_NOTE_EXPORT, None) {
         Ok(export) if export.ids.is_empty() => {
             app.set_status("No open notes to hand off".to_string());
@@ -2420,10 +2520,10 @@ fn hand_off_notes(
         }
     };
     let agent = app.global_config.agent.clone();
-    let env = launch::Env::from_process();
+    let env = launcher.env();
     let first = launch::place(agent.open_in, env);
     let space = (first == Place::HerdrApp)
-        .then(launch::this_terminals_space)
+        .then(|| launcher.space())
         .flatten();
     let place = launch::settle(first, env, space.as_deref());
     let failed = |app: &mut App, e: String| {
@@ -2433,7 +2533,7 @@ fn hand_off_notes(
         )
     };
     if place == Place::Clipboard {
-        let outcome = super::clipboard::copy_text(terminal, &export.text);
+        let outcome = launcher.copy(&export.text);
         if matches!(outcome, super::clipboard::CopyOutcome::Failed { .. }) {
             let (line, level) = outcome.status("the batch prompt");
             app.set_status_level(line, level);
@@ -2471,49 +2571,10 @@ fn hand_off_notes(
         }
     };
     let argv = launch::agent_argv(&command, &batch, &date);
-    match launch::plan(place, argv, &cwd, &agent.default, &export.text, &date) {
-        Launch::Run(argv) => match launch::run_to_end(&argv) {
-            Ok(_) => mark_handed_off(app, &export.ids, place),
-            Err(e) => failed(app, e),
-        },
-        Launch::Herdr { split, line } => match launch::run_in_herdr(&split, &line) {
-            Ok(()) => mark_handed_off(app, &export.ids, place),
-            Err(e) => failed(app, e),
-        },
-        // `settle` keeps the app's place only with a space to open in.
-        Launch::HerdrApp { argv, cwd } => match space.as_deref() {
-            Some(space) => match launch::run_in_herdr_app(&argv, &cwd, space) {
-                Ok(()) => mark_handed_off(app, &export.ids, place),
-                Err(e) => failed(app, e),
-            },
-            None => failed(app, "no Herdr app space shows this terminal".to_string()),
-        },
-        Launch::Foreground { argv, cwd } => {
-            let Some((program, args)) = argv.split_first() else {
-                failed(app, "an empty agent command".to_string());
-                return Ok(());
-            };
-            suspend_terminal(terminal)?;
-            let spawned = std::process::Command::new(program)
-                .args(args)
-                .current_dir(&cwd)
-                .spawn();
-            match spawned {
-                Ok(mut child) => {
-                    mark_handed_off(app, &export.ids, place);
-                    let waited = child.wait();
-                    resume_terminal(terminal)?;
-                    if let Err(e) = waited {
-                        app.set_status_level(format!("Lost the agent: {e}"), StatusLevel::Warning);
-                    }
-                }
-                Err(e) => {
-                    resume_terminal(terminal)?;
-                    failed(app, format!("{program}: {e}"));
-                }
-            }
-        }
-        Launch::Clipboard => {}
+    let plan = launch::plan(place, argv, &cwd, &agent.default, &export.text, &date);
+    let mut started = |app: &mut App| mark_handed_off(app, &export.ids, place);
+    if let Err(e) = launcher.start(app, plan, space.as_deref(), &mut started)? {
+        failed(app, e);
     }
     Ok(())
 }

@@ -61,6 +61,18 @@ impl crate::queries::Queries for Daemon {
                 notes.retain(|n| n.state != NoteState::Done);
                 Ok(json!({ "removed": before - notes.len() }))
             }
+            "note.export" => {
+                let ids: Vec<&str> = notes
+                    .iter()
+                    .filter(|n| n.state == NoteState::Open)
+                    .map(|n| n.id.as_str())
+                    .collect();
+                Ok(json!({ "text": format!("I have notes {ids:?}"), "ids": ids }))
+            }
+            "note.handoff" => {
+                let ids = params["ids"].clone();
+                Ok(json!({ "text": "I have notes", "ids": ids }))
+            }
             other => Err(anyhow::anyhow!("unexpected {other}")),
         }
     }
@@ -376,6 +388,130 @@ fn the_notes_list_drops_copies_and_hands_off() {
     }
     key(&mut app, KeyCode::Esc);
     assert!(matches!(app.overlay, Overlay::None));
+}
+
+/// What the hand-off runs, standing in for the terminal: every start is
+/// recorded in the daemon's call log as `launch`, so the log orders it among
+/// the `note.*` calls; with `fails` set the agent does not start.
+struct Launcher {
+    calls: Calls,
+    fails: Option<String>,
+    copied: Vec<String>,
+}
+
+impl Launcher {
+    fn new(daemon: &Daemon, fails: Option<&str>) -> Self {
+        Launcher {
+            calls: Arc::clone(&daemon.calls),
+            fails: fails.map(str::to_string),
+            copied: Vec::new(),
+        }
+    }
+}
+
+impl crate::actions::Launcher for Launcher {
+    fn env(&self) -> crate::agent_launch::Env {
+        crate::agent_launch::Env::default()
+    }
+
+    fn space(&mut self) -> Option<String> {
+        None
+    }
+
+    fn copy(&mut self, text: &str) -> crate::clipboard::CopyOutcome {
+        self.copied.push(text.to_string());
+        crate::clipboard::CopyOutcome::System
+    }
+
+    fn start(
+        &mut self,
+        app: &mut App,
+        launch: crate::agent_launch::Launch,
+        _space: Option<&str>,
+        started: &mut dyn FnMut(&mut App),
+    ) -> anyhow::Result<Result<(), String>> {
+        let argv = match launch {
+            crate::agent_launch::Launch::Run(argv) => argv,
+            other => panic!("tmux runs one program, not {other:?}"),
+        };
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("launch".to_string(), json!(argv)));
+        match &self.fails {
+            Some(why) => Ok(Err(why.clone())),
+            None => {
+                started(app);
+                Ok(Ok(()))
+            }
+        }
+    }
+}
+
+/// The `note.*` calls and the launches, in order, from the first one on.
+fn calls_and_launches(daemon: &Daemon) -> Vec<String> {
+    daemon
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m.starts_with("note.") || m == "launch")
+        .map(|(m, _)| m.clone())
+        .collect()
+}
+
+/// Two open notes and a done one, the agent opened in a tmux pane from a
+/// directory that exists, the batch files under a scratch data dir.
+fn handing_off(open_in: mp_core::config::AgentOpenIn) -> (App, Daemon, tempfile::TempDir) {
+    let (mut app, daemon) = app(
+        vec![received(1, "a@x")],
+        vec![
+            note("n1", "a@x", NoteState::Open),
+            note("n2", "b@x", NoteState::Done),
+            note("n3", "c@x", NoteState::Open),
+        ],
+    );
+    let cwd = tempfile::tempdir().expect("a scratch dir");
+    app.global_config.agent.open_in = open_in;
+    app.global_config.agent.cwd = cwd.path().display().to_string();
+    (app, daemon, cwd)
+}
+
+/// `x`: `note.export`, then the launch, then `note.handoff` on exactly the
+/// exported ids, only once the agent started; a launch that fails marks
+/// nothing and says the notes stay open.
+#[test]
+fn x_marks_the_exported_notes_handed_off_only_once_the_agent_started() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let (mut app, daemon, _cwd) = handing_off(mp_core::config::AgentOpenIn::Tmux);
+
+    let mut failing = Launcher::new(&daemon, Some("tmux: no server running"));
+    crate::actions::hand_off_with(&mut app, &mut failing).expect("no terminal error");
+    assert_eq!(calls_and_launches(&daemon), ["note.export", "launch"]);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Cannot start the agent: tmux: no server running; the notes stay open")
+    );
+
+    daemon.calls.lock().unwrap().clear();
+    let mut starting = Launcher::new(&daemon, None);
+    crate::actions::hand_off_with(&mut app, &mut starting).expect("no terminal error");
+    assert_eq!(
+        calls_and_launches(&daemon),
+        ["note.export", "launch", "note.handoff"]
+    );
+    let log = daemon.calls.lock().unwrap().clone();
+    let launched = &log.iter().find(|(m, _)| m == "launch").expect("a launch").1;
+    assert_eq!(launched[0], "tmux", "{launched}");
+    assert_eq!(
+        log.last().cloned(),
+        Some(("note.handoff".to_string(), json!({"ids": ["n1", "n3"]})))
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Handed 2 notes to the agent in a tmux pane")
+    );
+    assert!(starting.copied.is_empty(), "nothing goes to the clipboard");
 }
 
 /// `a` asks for a new email from the active account; `e` edits the cursor
