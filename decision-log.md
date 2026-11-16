@@ -513,3 +513,10 @@ Why: the base, golden and work VMs held about 30 GB of the Mac's disk for checks
 Rejected: keeping the golden VM only (the three share most of their blocks, so it frees little); compressing the golden VM onto the home server drive (a restore that saves little over a fresh pull and setup).
 Source: chat, Mac disk cleanup, 2026-11-11.
 Status: accepted
+
+## 2026-11-16 - The Drafts list is ordered by creation time, newest first
+
+Why: an edit or an approval moved a draft to the top under the edit-time order, which made stepping between drafts unpredictable.
+Rejected: oldest first (new drafts would land at the bottom of a long list); keeping edit time and pinning the cursor (the rows still jump under the eye).
+Source: chat, 2026-11-16.
+Status: accepted
