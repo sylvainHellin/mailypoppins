@@ -1,10 +1,10 @@
 //! The EWS calendar writes (PERSO-256, `.agents/plans/calendar.md`, phase 3,
 //! units 6 and 7).
 //!
-//! The spike ran no write against the server
-//! (`.agents/research/2026-11-13-ews-spike.md`, "Still unknown"): every
-//! envelope here is built from Microsoft's EWS schema documentation and is
-//! unverified live, each marked so where it is built.
+//! Every envelope here is built from Microsoft's EWS schema documentation,
+//! and each kind was sent to TUM's server once on 2026-11-18
+//! (`.agents/workflow/2026-11-12-calendar-and-open-tickets/live-checks.md`);
+//! what that run did not reach is marked where it is built.
 //!
 //! - An answer to an invitation is a response object (`AcceptItem`,
 //!   `TentativelyAcceptItem`, `DeclineItem`) made through `CreateItem` on the
@@ -17,7 +17,8 @@
 //!   `Message`, it is deleted for good (`HardDelete`); an item of any other
 //!   kind, the calendar item above all, is never deleted, nor is one whose
 //!   id is the answered event's, and an answer that names none is logged.
-//!   Whether the server names it is unverified live.
+//!   Live, a `SaveOnly` tentative and decline named the calendar item and
+//!   left Drafts as it was, so nothing was deleted.
 //!
 //! - A create is a `CalendarItem` through `CreateItem` into the calendar's
 //!   folder, every field in the schema's order, which invites the attendees
@@ -107,8 +108,9 @@ fn body_element(text: &str) -> String {
 
 /// The `CreateItem` that answers the invitation `event`.
 ///
-/// Built from the schema documentation, unverified live: the response
-/// object's children go in the schema's order (`Body`, `ReferenceItemId`,
+/// Checked live (accept, a tentative saved only, a decline with a
+/// proposal, which reached the organizer as an iCalendar COUNTER): the
+/// response object's children go in the schema's order (`Body`, `ReferenceItemId`,
 /// then `ProposedStart` and `ProposedEnd`), and a proposal rides on a
 /// tentative or a decline only, as the schema puts it on
 /// `MeetingRegistrationResponseObjectType` and Graph takes it.
@@ -299,9 +301,10 @@ fn relative_day(days: &[Weekday]) -> BackendResult<&'static str> {
 }
 
 /// The `Recurrence` of `rule`, counted from `first` when the rule names no
-/// start. Built from the schema documentation, unverified live: each
-/// pattern names only the children its type has, in the schema's order,
-/// and a yearly pattern has no interval.
+/// start. Each pattern names only the children its type has, in the
+/// schema's order, and a yearly pattern has no interval; the weekly pattern
+/// with a count was checked live, the others are built from the schema
+/// documentation alone.
 fn recurrence_element(rule: &Recurrence, first: NaiveDate) -> BackendResult<String> {
     let interval = format!("<t:Interval>{}</t:Interval>", rule.interval.max(1));
     let month = || -> BackendResult<String> {
@@ -475,8 +478,9 @@ fn no_online_meeting(account: &str) -> CalendarBackendError {
 /// The `CreateItem` of `input` into `calendar`, stamped with
 /// `transaction_id` when there is one.
 ///
-/// Built from the schema documentation, unverified live: the item's fields
-/// go in the order of `ItemType` then `CalendarItemType` (the order GetItem
+/// Checked live with a subject, a body, the transaction property, times and
+/// a weekly rule: the item's fields go in the order of `ItemType` then
+/// `CalendarItemType` (the order GetItem
 /// answers them in), which the schema requires.
 pub(super) fn create_body(
     calendar: &str,
@@ -582,8 +586,10 @@ fn delete_field(uri: &str) -> String {
 /// The `Updates` of `patch`, one per field it names, in the order of the
 /// item's fields; empty for an empty patch.
 ///
-/// Built from the schema documentation, unverified live. A location or an
-/// attendee list emptied is deleted; a description emptied is set to an
+/// Checked live for the subject, the times with a new zone, the reminder,
+/// the free/busy status and the attendee list; a field emptied
+/// (`DeleteItemField`) was not sent. A location or an attendee list emptied
+/// is deleted; a description emptied is set to an
 /// empty body, which every item has.
 pub(super) fn patch_updates(patch: &EventPatch) -> BackendResult<String> {
     let span = patch
@@ -703,7 +709,7 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     }
 
     /// Delete for good the unsent response `draft` an answer saved only left
-    /// in Drafts. Built from the schema documentation, unverified live. A
+    /// in Drafts. Never reached live: TUM's server named the calendar item. A
     /// draft that cannot be deleted is logged, never the answer's failure:
     /// the calendar holds the answer already, and the draft is clutter the
     /// user can delete.
@@ -750,9 +756,9 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     }
 
     /// The item of `calendar` a create with `transaction_id` made already,
-    /// found by its transaction property. Built from the schema
-    /// documentation, unverified live: a FindItem without a view lists single
-    /// events and series masters, the items a create makes.
+    /// found by its transaction property, which a FindItem restricted to it
+    /// found live: a FindItem without a view lists single events and series
+    /// masters, the items a create makes.
     async fn earlier_try(
         &self,
         calendar: &str,
@@ -821,8 +827,8 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         self.written(&calendar.id, &id).await
     }
 
-    /// Change the fields `patch` names on `event` of `calendar`. Built from
-    /// the schema documentation, unverified live.
+    /// Change the fields `patch` names on `event` of `calendar`, an
+    /// occurrence's own id making it an exception (checked live).
     pub(super) async fn update_item(
         &self,
         calendar: &str,
@@ -963,8 +969,8 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         }
     }
 
-    /// Delete `event` into Deleted Items, telling nobody. Built from the
-    /// schema documentation, unverified live.
+    /// Delete `event` into Deleted Items, telling nobody; the item named by
+    /// its id alone, which the server takes (checked live).
     pub(super) async fn delete_item(&self, event: &str) -> BackendResult<()> {
         let request = format!(
             "<m:DeleteItem DeleteType=\"MoveToDeletedItems\" SendMeetingCancellations=\"SendToNone\">\

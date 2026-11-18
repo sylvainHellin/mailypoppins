@@ -573,7 +573,7 @@ Times come in UTC with the Windows zone in `StartTimeZoneId`, mapped through `wi
 EWS has no transaction id: a create stamps its own as the extended property `MailypoppinsTransactionId` (`PublicStrings`), every GetItem reads it into `Event::transaction_id` so the store finds the event as it finds a Graph one, and a create first looks for an item carrying it (FindItem on the property), updating that one with its fields instead of making a second.
 Times go out as UTC instants with the zone's Windows id from `windows_zones.rs`; a zone with no Windows id, a yearly rule with an interval and an online meeting are refused with a sentence before any request.
 `ews/freebusy.rs` reads `GetUserAvailability`, asked in UTC, into one schedule per address, and `event_for_message` finds a meeting mail by its Message-ID and answers its `AssociatedCalendarItemId`.
-Its `FEATURES` are `write`, `propose-time`, `free-busy` and `server-reminders`; every write and the free/busy request are built from Microsoft's schema documentation, since the read-only spike sent none.
+Its `FEATURES` are `write`, `propose-time`, `free-busy` and `server-reminders`; every write and the free/busy request are built from Microsoft's schema documentation, since the read-only spike sent none, and each kind ran once against TUM's server on 2026-11-18, whose differing answers are the fixtures the change-key, UTC-zone, per-folder FindItem and working-elsewhere tests read.
 
 ### Store tables
 
