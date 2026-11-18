@@ -145,6 +145,27 @@ pub struct ConfigAccount {
     pub imap: ConfigServer,
     /// The app registration of a `graph` account.
     pub oauth2: Option<ConfigOAuth2>,
+    /// `graph`, `ews`, `caldav` or `none` as the file writes it; null when the
+    /// auth method decides it.
+    pub calendar_backend: Option<String>,
+    /// The Exchange Web Services login of an `ews` calendar.
+    pub ews: Option<ConfigEws>,
+}
+
+/// `[accounts.ews]`: where and as whom the calendar logs in, and which
+/// stored password it uses, named by its kind and never read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(default)]
+pub struct ConfigEws {
+    pub endpoint: String,
+    pub username: String,
+    /// `imap` or `smtp`.
+    pub password_from: Option<String>,
+    /// The room and other mailboxes whose calendar the account reads as a
+    /// delegate.
+    pub delegate_calendars: Vec<String>,
 }
 
 /// An SMTP or IMAP server; its password is never read, only redacted.
@@ -1446,6 +1467,38 @@ mod tests {
         assert_eq!(snapshot.config.accounts[1].oauth2, None);
         let empty: ConfigSnapshot = serde_json::from_value(json!({})).expect("empty");
         assert_eq!(empty, ConfigSnapshot::default());
+    }
+
+    /// An EWS account decodes its calendar backend and `[accounts.ews]` as
+    /// the daemon's `config.get` serves them, and an older daemon's account
+    /// without them as none (PERSO-256).
+    #[test]
+    fn an_ews_account_decodes_its_calendar_backend_and_login() {
+        let accounts: Vec<ConfigAccount> = serde_json::from_value(json!([
+            {"name": "tum", "calendar_backend": "ews", "ews": {
+                "endpoint": "https://mail.example.com/ews/exchange.asmx",
+                "username": "ab12cde", "password_from": "imap",
+                "delegate_calendars": ["room-1@example.com"]}},
+            {"name": "old"},
+        ]))
+        .expect("lenient");
+        assert_eq!(accounts[0].calendar_backend.as_deref(), Some("ews"));
+        assert_eq!(
+            accounts[0].ews,
+            Some(ConfigEws {
+                endpoint: "https://mail.example.com/ews/exchange.asmx".into(),
+                username: "ab12cde".into(),
+                password_from: Some("imap".into()),
+                delegate_calendars: vec!["room-1@example.com".into()],
+            })
+        );
+        assert_eq!(
+            (
+                accounts[1].calendar_backend.clone(),
+                accounts[1].ews.clone()
+            ),
+            (None, None)
+        );
     }
 
     #[test]

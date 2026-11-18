@@ -2446,6 +2446,9 @@ fn effective_account(account: &Value) -> Value {
         } else {
             Value::Null
         },
+        // A wizard block names no calendar backend: the auth method decides.
+        "calendar_backend": Value::Null,
+        "ews": Value::Null,
         "smtp": {
             "host": text(&smtp["host"]),
             "port": smtp["port"].as_u64().unwrap_or(465),

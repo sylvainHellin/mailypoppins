@@ -12,6 +12,7 @@ export type { BootstrapCause } from "./BootstrapCause";
 export type { CancelOutcome } from "./CancelOutcome";
 export type { ConfigAccount } from "./ConfigAccount";
 export type { ConfigEmail } from "./ConfigEmail";
+export type { ConfigEws } from "./ConfigEws";
 export type { ConfigInitialised } from "./ConfigInitialised";
 export type { ConfigOAuth2 } from "./ConfigOAuth2";
 export type { ConfigServer } from "./ConfigServer";

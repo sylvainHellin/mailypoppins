@@ -681,9 +681,10 @@ server = "sentitems"          # Not "Sent Items"`} />
         table: <code>endpoint</code>, the EWS URL; <code>username</code>, the login
         name; and <code>password_from</code>, which stored password it logs in with,
         <code>"imap"</code> or <code>"smtp"</code> (the one
-        <code>mp config set-password</code> stored). A table that lacks a field is
-        refused with a line naming it, which <code>mp config show</code> prints
-        under the account. An optional <code>delegate_calendars</code> lists the
+        <code>mp config set-password</code> stored). <code>mp config show</code>
+        prints the table under the account, or, when it lacks a field, a line
+        naming that field; the desktop's Settings shows the login on the
+        account's card. An optional <code>delegate_calendars</code> lists the
         addresses of other mailboxes whose calendar you hold as a delegate, such
         as TUM's rooms: each is shown beside your own calendars under its
         address, read-only unless Exchange lets you create items in it.

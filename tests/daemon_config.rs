@@ -360,9 +360,11 @@ const CONFIG_KEYS: [&str; 6] = [
 ];
 
 /// The keys of one account inside that.
-const ACCOUNT_KEYS: [&str; 10] = [
+const ACCOUNT_KEYS: [&str; 12] = [
     "auth_method",
+    "calendar_backend",
     "default_from",
+    "ews",
     "hooks",
     "imap",
     "mailboxes",
@@ -1440,6 +1442,64 @@ async fn config_get_reports_the_effective_configuration_with_every_secret_redact
         json!([]),
         "and an absent extra list is empty rather than null"
     );
+}
+
+/// An account's calendar backend travels as the file writes it, `null` when
+/// it is left to the auth method, and an EWS account's `[accounts.ews]`
+/// beside it, the stored password named by its kind and never read; `mp
+/// config show`, which renders `config.get`, prints both (PERSO-256).
+#[tokio::test]
+async fn config_get_carries_the_calendar_backend_and_the_ews_settings() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    sandbox.write_config(&format!(
+        "{}[[accounts]]\nname = \"tum\"\ndefault_from = \"tum@example.com\"\n\
+         calendar_backend = \"ews\"\n\n[accounts.ews]\n\
+         endpoint = \"https://mail.example.com/ews/exchange.asmx\"\nusername = \"ab12cde\"\n\
+         password_from = \"imap\"\ndelegate_calendars = [\"room-1@example.com\"]\n",
+        account_toml("alpha", DEFAULT_BODY_FETCH_DEADLINE_SECS)
+    ));
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let get = call_ok(&mut conn, "config.get", json!({})).await;
+    let alpha = account_of(&get, "alpha");
+    assert_keys(alpha, &ACCOUNT_KEYS, "a password account");
+    assert_eq!(alpha["calendar_backend"], Value::Null);
+    assert_eq!(alpha["ews"], Value::Null);
+    let tum = account_of(&get, "tum");
+    assert_keys(tum, &ACCOUNT_KEYS, "an EWS account");
+    assert_eq!(tum["calendar_backend"], json!("ews"));
+    assert_eq!(
+        tum["ews"],
+        json!({
+            "endpoint": "https://mail.example.com/ews/exchange.asmx",
+            "username": "ab12cde",
+            "password_from": "imap",
+            "delegate_calendars": ["room-1@example.com"],
+        })
+    );
+
+    let show = sandbox
+        .cmd()
+        .args(["config", "show"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run mp config show");
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(show.status.success(), "{stdout}");
+    for line in [
+        "  calendar_backend = ews",
+        "  [ews]",
+        "    endpoint      = https://mail.example.com/ews/exchange.asmx",
+        "    username      = ab12cde",
+        "    password_from = imap",
+        "    delegate_calendars = room-1@example.com",
+    ] {
+        assert!(
+            stdout.lines().any(|shown| shown.trim_end() == line),
+            "{line:?} in {stdout}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

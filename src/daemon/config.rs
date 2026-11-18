@@ -365,6 +365,17 @@ pub fn effective_account(config: &GlobalConfig, account: &AccountConfig) -> Valu
             "client_id": settings.client_id,
             "tenant_id": settings.tenant_id,
         })),
+        // As the file writes it, `null` when the auth method decides it
+        // (PERSO-256), so `mp config show` can mark the default.
+        "calendar_backend": account.calendar_backend.map(|kind| kind.as_str()),
+        // `[accounts.ews]` names which stored password the login uses, by
+        // its kind; no secret is read for it.
+        "ews": account.ews.as_ref().map(|ews| json!({
+            "endpoint": ews.endpoint,
+            "username": ews.username,
+            "password_from": ews.password_from.map(|source| source.as_str()),
+            "delegate_calendars": ews.delegate_calendars,
+        })),
         "smtp": {
             "host": account.smtp.host,
             "port": account.smtp.port,

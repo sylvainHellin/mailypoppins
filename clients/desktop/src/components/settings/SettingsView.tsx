@@ -25,7 +25,7 @@ import { useAppState, useDispatch } from "@/app/store";
 import { conversationModeOn } from "@/app/state";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import * as cmd from "@/lib/commands";
-import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
+import type { ConfigAccount, ConfigEws, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
 import type { AccountCredential, TokenState } from "@/protocol/types";
 
 const AUTH_LABELS: Record<string, string> = {
@@ -66,6 +66,13 @@ export function imapPasswordLine(c: AccountCredential | undefined): string {
   if (!c || c.imap_password === null) return "not reported";
   if (c.imap_password) return "stored";
   return c.smtp_password ? "uses the SMTP password" : "not set";
+}
+
+/** The Exchange login of an EWS calendar, as `mp config show`'s `[ews]` block names it. */
+export function exchangeLine(ews: ConfigEws): string {
+  const password = ews.password_from === "smtp" ? "SMTP" : ews.password_from === "imap" ? "IMAP" : null;
+  const login = `${ews.endpoint || "no endpoint"} as ${ews.username || "no username"}`;
+  return password ? `${login}, with the ${password} password` : `${login}, with no stored password named`;
 }
 
 function server(s: ConfigServer): string {
@@ -153,6 +160,14 @@ function AccountCard({
         )}
         {account.oauth2 ? (
           <Field label="App registration">{`client ${account.oauth2.client_id}, tenant ${account.oauth2.tenant_id}`}</Field>
+        ) : null}
+        {account.calendar_backend === "ews" && account.ews ? (
+          <>
+            <Field label="Exchange calendar">{exchangeLine(account.ews)}</Field>
+            {account.ews.delegate_calendars.length ? (
+              <Field label="Room calendars">{account.ews.delegate_calendars.join(", ")}</Field>
+            ) : null}
+          </>
         ) : null}
         {credential?.token ? <Field label="Token">{TOKEN_LABELS[credential.token]}</Field> : null}
         {calendarScopeLine(credential) ? <Field label="Calendar">{calendarScopeLine(credential)}</Field> : null}

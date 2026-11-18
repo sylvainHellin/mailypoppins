@@ -564,6 +564,9 @@ function configureAccount(account: AccountDraft): string {
     smtp: server(account.smtp, 465),
     imap: server(account.imap, 993),
     oauth2: account.oauth2 ?? null,
+    // The wizard names no calendar backend: the auth method decides it.
+    calendar_backend: null,
+    ews: null,
   } as ConfigSnapshot["config"]["accounts"][number]);
   mock.configState = "ok";
   mock.configRevision += 1;

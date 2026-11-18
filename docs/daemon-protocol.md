@@ -750,6 +750,7 @@ Retention is reported resolved, per-account overrides layered over the global ta
 Present, because their absence would say "no password is stored", which is a fact about the secrets backend and one a redacted read must not go and look up; the literal, because a length, a prefix or a fixed number of asterisks all leak something.
 Whether a password is stored is `account.credentials`'s answer ([Read-only methods](#read-only-methods)), asked for by the screen that shows it.
 `oauth2.client_id` is not redacted: it is a public identifier, `mp config show` prints it in the clear, and redacting it would break the one screen that exists to diagnose an OAuth2 setup.
+An account's `calendar_backend` is reported as the file writes it, `null` when the auth method decides it, and `ews` is its `[accounts.ews]` table (`endpoint`, `username`, `password_from`, `delegate_calendars`), `null` when there is none; `password_from` names which stored password the login uses by its kind, `imap` or `smtp`, and nothing is read from the secrets for it.
 
 **`config.validate` is a pure function of the string it is given.**
 It reads no file, writes no file, swaps nothing and moves no revision: it is the "would this load?" a GUI asks while the user is still typing, running the same three checks the loader runs (legacy keys, the TOML parse, retention) against the parameter.
@@ -2077,3 +2078,7 @@ The fixtures are `crates/mp-protocol/fixtures/note.{set,set_many,list,get,done,c
 
 PERSO-256 added one value, additively: `mp_protocol::account::RejectedLogin` gained `ews`, the last of its four, for the Exchange Web Services login of an EWS calendar, which `account.credentials`' `rejected_logins` lists after the three mail logins; a client that names the first refused login names `ews` only when no mail login is refused, and the `calendar:<name>` health check carries its sentence.
 The TypeScript binding `clients/desktop/src/protocol/generated/RejectedLogin.ts` moved with it.
+
+PERSO-256 also added two members to a `config.get` account, additively: `calendar_backend`, as the file writes it or `null`, and `ews`, the `[accounts.ews]` table or `null`; no field was renamed or dropped, and `tests/daemon_config.rs` pins the account at twelve keys.
+`mp config show`, which renders `config.get`, had printed every EWS account as `calendar_backend = none (default)` without its `[ews]` lines, and prints both now; the desktop's `ConfigAccount` gained the two members (binding `gui/ConfigAccount.ts`, new `gui/ConfigEws.ts`) and its Settings card shows the Exchange login and the room calendars, as it shows a Graph account's app registration.
+An edit to either now counts as an update of the account at a reload.

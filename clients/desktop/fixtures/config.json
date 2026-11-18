@@ -20,6 +20,8 @@
       "default_from": "Me <me@example.com>",
       "auth_method": "password",
       "oauth2": null,
+      "calendar_backend": null,
+      "ews": null,
       "smtp": {
         "host": "smtp.work.example",
         "port": 465,
@@ -52,6 +54,8 @@
       "default_from": "Me <me@example.com>",
       "auth_method": "graph",
       "oauth2": {"client_id": "00000000-0000-0000-0000-00000000f1x7", "tenant_id": "common"},
+      "calendar_backend": null,
+      "ews": null,
       "smtp": {
         "host": "",
         "port": 465,

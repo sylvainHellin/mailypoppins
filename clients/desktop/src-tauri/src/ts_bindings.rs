@@ -108,6 +108,7 @@ fn export_into(dir: &Path) -> usize {
         configuration::ConfigAccount,
         configuration::ConfigServer,
         configuration::ConfigOAuth2,
+        configuration::ConfigEws,
         configuration::ConfigSwap,
         configuration::SecretKind,
         configuration::SecretStored,

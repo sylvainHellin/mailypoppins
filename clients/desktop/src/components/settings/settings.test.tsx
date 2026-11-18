@@ -115,6 +115,26 @@ describe("the Settings view", () => {
     expect(within(office).queryByRole("button", { name: /password/ })).toBeNull();
   });
 
+  it("an EWS calendar account shows its Exchange login and room calendars, as a Graph card shows its app registration", async () => {
+    resetMock();
+    mock.config.accounts.push({
+      ...mock.config.accounts[0],
+      name: "tum",
+      calendar_backend: "ews",
+      ews: {
+        endpoint: "https://mail.example.com/ews/exchange.asmx",
+        username: "ab12cde",
+        password_from: "imap",
+        delegate_calendars: ["room-1@example.com", "room-2@example.com"],
+      },
+    });
+    const { view } = await openSettingsKeeping();
+    const tum = card(view, "tum");
+    expect(within(tum).getByText("https://mail.example.com/ews/exchange.asmx as ab12cde, with the IMAP password")).toBeInTheDocument();
+    expect(within(tum).getByText("room-1@example.com, room-2@example.com")).toBeInTheDocument();
+    expect(within(card(view, "work")).queryByText(/ews\/exchange/)).toBeNull();
+  });
+
   it("offers Sign in on the Graph card and Add account below them, both live", async () => {
     const { user, view } = await openSettings();
     const home = card(view, "home");
