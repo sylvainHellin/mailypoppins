@@ -12,9 +12,10 @@
 //! daylight transitions fall on the same day ("The specified time zone isn't
 //! valid", TUM's server on 2026-11-18), so UTC goes out as the rule
 //! Microsoft's own client sends for a zone without daylight saving: two
-//! transitions on distinct days that change the offset by nothing. The
-//! `CalendarEventArray` of a busy day, which the spike's free day did not
-//! carry, is built from the schema documentation and unverified live.
+//! transitions on distinct days that change the offset by nothing. A busy
+//! day carries a `CalendarEventArray` of its blocks with their times as UTC
+//! wall times, and the merged view counts a working-elsewhere block as free
+//! (both seen live on 2026-11-18), so the view is raised to the blocks.
 //!
 //! The answer is in default namespaces without prefixes, one
 //! `FreeBusyResponse` per address in the order asked. An address the server
@@ -28,7 +29,7 @@ use super::parse::{fault_of, malformed, AnswerError};
 use super::xml::{self, Element};
 use super::{answer_error, EwsCalendarBackend};
 use crate::calendar_backend::BackendResult;
-use crate::calendar_freebusy::{slot_digit, FreeBusyQuery, Schedule, ScheduleItem};
+use crate::calendar_freebusy::{raised_by, slot_digit, FreeBusyQuery, Schedule, ScheduleItem};
 use crate::calendar_model::ShowAs;
 
 /// The wall-time form of the window: whole seconds, no offset.
@@ -147,8 +148,10 @@ fn items_of(view: &Element) -> Vec<ScheduleItem> {
     items
 }
 
-/// One `FreeBusyResponse` as the schedule of `address`.
-fn schedule_of(address: &str, response: &Element) -> Schedule {
+/// One `FreeBusyResponse` as the schedule of `address` over `query`. The
+/// merged view counts a working-elsewhere block as free (TUM's server,
+/// 2026-11-18), so each slot is raised to the heaviest block over it.
+fn schedule_of(address: &str, response: &Element, query: &FreeBusyQuery) -> Schedule {
     let message = response.child("ResponseMessage");
     if message.and_then(|message| message.attr("ResponseClass")) != Some("Success") {
         let text = message
@@ -164,10 +167,12 @@ fn schedule_of(address: &str, response: &Element) -> Schedule {
     let Some(view) = response.child("FreeBusyView") else {
         return Schedule::unavailable(address, "the server answered no free/busy view");
     };
+    let items = items_of(view);
+    let merged = view_of(view.text_of("MergedFreeBusy").unwrap_or_default());
     Schedule {
         address: address.to_string(),
-        view: view_of(view.text_of("MergedFreeBusy").unwrap_or_default()),
-        items: items_of(view),
+        view: raised_by(&merged, &items, query),
+        items,
         error: None,
     }
 }
@@ -193,7 +198,7 @@ pub(super) fn parse_schedules(
         .addresses
         .iter()
         .map(|address| match responses.next() {
-            Some(response) => schedule_of(address, response),
+            Some(response) => schedule_of(address, response, query),
             None => Schedule::unavailable(address, "the server answered nothing for it"),
         })
         .collect())

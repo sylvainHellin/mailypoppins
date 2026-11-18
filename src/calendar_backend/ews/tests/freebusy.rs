@@ -133,6 +133,38 @@ async fn a_free_busy_query_names_each_address_and_the_window_in_utc() {
     );
 }
 
+/// TUM's answer of 2026-11-18 for the user's 11 December in UTC at half-hour
+/// slots: one working-elsewhere block from 02:00 to 02:30, which the merged
+/// view leaves free.
+const WORKING_ELSEWHERE: &str =
+    include_str!("../../../../tests/fixtures/ews/getuseravailability_working_elsewhere.xml");
+
+/// The merged view Exchange answers counts a working-elsewhere block as
+/// free (the live answer), where Graph's view and the fake's show it, so
+/// each slot shows the heavier of the merged digit and the blocks over it.
+#[tokio::test]
+async fn a_working_elsewhere_block_shows_in_the_view_the_server_left_free() {
+    let backend =
+        backend(ScriptedFetch::default().answer("GetUserAvailabilityRequest", WORKING_ELSEWHERE));
+    let query = FreeBusyQuery {
+        addresses: vec!["user@tum.de".into()],
+        window: CalendarWindow {
+            start: Utc.with_ymd_and_hms(2026, 12, 11, 0, 0, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 12, 12, 0, 0, 0).unwrap(),
+        },
+        interval: 30,
+    };
+    let schedules = backend.free_busy(&query).await.unwrap();
+    let own = &schedules[0];
+    assert_eq!(own.items.len(), 1);
+    assert_eq!(own.items[0].status, ShowAs::WorkingElsewhere);
+    assert_eq!(
+        own.items[0].start,
+        Utc.with_ymd_and_hms(2026, 12, 11, 2, 0, 0).unwrap()
+    );
+    assert_eq!(own.view, format!("{}4{}", "0".repeat(4), "0".repeat(43)));
+}
+
 /// The text of every `name` element of `xml`.
 fn elements<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
     let (open, close) = (format!("<t:{name}>"), format!("</t:{name}>"));

@@ -203,6 +203,20 @@ pub fn view_of(items: &[ScheduleItem], query: &FreeBusyQuery) -> String {
         .collect()
 }
 
+/// `view` with each slot raised to the heaviest status of the `items`
+/// overlapping it, for a server whose view leaves out a status its blocks
+/// carry (Exchange's merged view counts working elsewhere as free).
+pub fn raised_by(view: &str, items: &[ScheduleItem], query: &FreeBusyQuery) -> String {
+    let blocks: Vec<char> = view_of(items, query).chars().collect();
+    view.chars()
+        .enumerate()
+        .map(|(slot, digit)| match blocks.get(slot) {
+            Some(&block) if weight(slot_status(block)) > weight(slot_status(digit)) => block,
+            _ => digit,
+        })
+        .collect()
+}
+
 /// The [`FreeBusyQuery`] `params` names, `own` (the account's address)
 /// first, or the sentence that says what is wrong with it. Dates and times
 /// without an offset are read in `params.zone`, else in `host`.
