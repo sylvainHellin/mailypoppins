@@ -742,18 +742,27 @@ pub fn calendar_event(account: &str, calendar: &str, item: &Element) -> Result<E
     })
 }
 
-/// The ItemIds a FindItem without a view answers, items of any kind.
+/// The ItemIds a FindItem without a view answers, items of any kind, in the
+/// order of the folders it searched: the server answers one response
+/// message per parent folder (TUM's server on 2026-11-18,
+/// `finditem_message_id_two_folders.xml`), and a folder it refuses fails
+/// the whole answer.
 pub fn found_ids(body: &str) -> Result<Vec<String>, AnswerError> {
-    let message = only_message(body, "FindItem")?;
-    let items = message
-        .at(&["RootFolder", "Items"])
-        .ok_or_else(|| malformed("no RootFolder with Items"))?;
-    Ok(items
-        .children
-        .iter()
-        .filter_map(item_id)
-        .map(str::to_string)
-        .collect())
+    let mut ids = Vec::new();
+    for message in messages(body, "FindItem")? {
+        let message = message.map_err(AnswerError::Refused)?;
+        let items = message
+            .at(&["RootFolder", "Items"])
+            .ok_or_else(|| malformed("no RootFolder with Items"))?;
+        ids.extend(
+            items
+                .children
+                .iter()
+                .filter_map(item_id)
+                .map(str::to_string),
+        );
+    }
+    Ok(ids)
 }
 
 /// The calendar item a meeting mail (`MeetingRequest`,

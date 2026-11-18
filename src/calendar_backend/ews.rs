@@ -743,8 +743,9 @@ impl<F: EwsFetch> CalendarBackend for EwsCalendarBackend<F> {
     /// brackets optional) rather than by an EWS ItemId: FindItem finds it in
     /// the Inbox or in Deleted Items, where Outlook moves an answered
     /// invitation, and GetItem reads its `AssociatedCalendarItemId`. The
-    /// restriction on `message:InternetMessageId` is built from the schema
-    /// documentation and unverified live; the GetItem is the spike's.
+    /// restriction on `message:InternetMessageId` found the invitation live
+    /// (2026-11-18), answering one response message per folder; the GetItem
+    /// is the spike's.
     /// `calendar_sync::invite_event` asks under the row's Message-ID on an
     /// EWS account.
     async fn event_for_message(&self, message_id: &str) -> BackendResult<Option<EventId>> {

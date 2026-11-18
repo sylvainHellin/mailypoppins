@@ -13,6 +13,11 @@ const REQUEST: &str = include_str!("../../../../tests/fixtures/ews/getitem_meeti
 const CANCELLATION: &str =
     include_str!("../../../../tests/fixtures/ews/getitem_meeting_cancellation.xml");
 const RESPONSE: &str = include_str!("../../../../tests/fixtures/ews/getitem_meeting_response.xml");
+/// TUM's answer of 2026-11-18 to the Message-ID restriction over the Inbox
+/// and Deleted Items: one response message per folder, the invitation in the
+/// first (ids sanitised).
+const TWO_FOLDERS: &str =
+    include_str!("../../../../tests/fixtures/ews/finditem_message_id_two_folders.xml");
 
 fn backend(fetch: ScriptedFetch) -> EwsCalendarBackend<ScriptedFetch> {
     EwsCalendarBackend::with_fetch("tum", EwsPasswordSource::Imap, fetch)
@@ -79,6 +84,42 @@ async fn an_invitation_mail_names_its_event_through_its_associated_item() {
             )),
         ]
     );
+}
+
+/// The server answers a FindItem over two folders with one response message
+/// per folder, as it did live, and the mail is found in whichever holds it.
+#[tokio::test]
+async fn a_mail_is_found_in_either_folder_of_the_two_messages() {
+    let found = backend(
+        ScriptedFetch::default()
+            .answer("FindItem", TWO_FOLDERS)
+            .answer("GetItem", REQUEST),
+    );
+    let event = found.event_for_message("<a@b>").await.unwrap();
+    assert_eq!(
+        event.as_deref(),
+        Some(id_after(REQUEST, "<t:AssociatedCalendarItemId"))
+    );
+    let mail = id_after(TWO_FOLDERS, "<t:MeetingRequest>");
+    assert!(found.fetch().sent()[1].contains(&format!("<t:ItemId Id=\"{mail}\"/>")));
+    // The same answer with the folders the other way round.
+    let first = TWO_FOLDERS.find("<m:FindItemResponseMessage").unwrap();
+    let second = TWO_FOLDERS.rfind("<m:FindItemResponseMessage").unwrap();
+    let end = TWO_FOLDERS.find("</m:ResponseMessages>").unwrap();
+    let swapped = format!(
+        "{}{}{}{}",
+        &TWO_FOLDERS[..first],
+        &TWO_FOLDERS[second..end],
+        &TWO_FOLDERS[first..second],
+        &TWO_FOLDERS[end..]
+    );
+    let found = backend(
+        ScriptedFetch::default()
+            .answer("FindItem", &swapped)
+            .answer("GetItem", REQUEST),
+    );
+    assert!(found.event_for_message("<a@b>").await.unwrap().is_some());
+    assert!(found.fetch().sent()[1].contains(&format!("<t:ItemId Id=\"{mail}\"/>")));
 }
 
 /// A cancellation and a response name their event the same way.
