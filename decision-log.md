@@ -542,3 +542,17 @@ Why: the presets already make the common actions one key; review before approve 
 Rejected: shipping either automation with the first build.
 Source: design page 2026-11-16_mail-notes-agent-handoff, comment export.
 Status: accepted
+
+## 2026-11-18 - The EWS calendar backend takes three crates: quick-xml, md4 and md-5
+
+Why: quick-xml 0.42 reads and writes Exchange's SOAP answers, and md4 0.10 and md-5 0.10 are the two hashes the NTLMv2 login needs (PERSO-256); all three are small, maintained and without a network or runtime of their own.
+Rejected: a hand-written XML reader and hand-written MD4 and MD5 in mp (parser and crypto code to own for no gain); a full EWS or NTLM client crate (none maintained that fits the daemon's own connection and login hold).
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-18.
+Status: accepted
+
+## 2026-11-18 - Calendar writes are checked live with the agent's own mailbox as the only counterpart
+
+Why: a write built from schema documentation can mail the wrong people at the wrong notice level; 17 single calls on the TUM calendar, on throwaway events titled "mp test" with assistant@mailypoppins.com as their only attendee, found five differences before the merge (results in `.agents/workflow/2026-11-12-calendar-and-open-tickets/live-checks.md`).
+Rejected: merging on recorded answers alone; Sylvain running the calls by hand; a second address of his as counterpart (an agent never sends from his accounts).
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-18.
+Status: accepted
