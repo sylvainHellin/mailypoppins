@@ -16,6 +16,10 @@ const SELF: &str = include_str!("../../../../tests/fixtures/ews/getuseravailabil
 const ROOM: &str = include_str!("../../../../tests/fixtures/ews/getuseravailability_room.xml");
 const VERSION_REFUSED: &str =
     include_str!("../../../../tests/fixtures/ews/version_refused_exchange2019.xml");
+/// TUM's answer of 2026-11-18 to a UTC zone whose standard and daylight
+/// transitions were the same day (1 January).
+const UTC_REFUSED: &str =
+    include_str!("../../../../tests/fixtures/ews/getuseravailability_utc_refused.xml");
 
 fn backend(fetch: ScriptedFetch) -> EwsCalendarBackend<ScriptedFetch> {
     EwsCalendarBackend::with_fetch("tum", EwsPasswordSource::Imap, fetch)
@@ -86,8 +90,8 @@ const OUTSIDE: &str = "<FreeBusyResponse><ResponseMessage ResponseClass=\"Error\
     xmlns=\"http://schemas.microsoft.com/exchange/services/2006/types\">None</FreeBusyViewType>\
     </FreeBusyView></FreeBusyResponse>";
 
-/// The query goes out as one GetUserAvailability in UTC: a zone without
-/// offset or daylight saving, one mailbox per address in order, the window
+/// The query goes out as one GetUserAvailability in UTC: a zone whose two
+/// transitions change nothing, one mailbox per address in order, the window
 /// as UTC wall times and the slot length, merged and detailed.
 #[tokio::test]
 async fn a_free_busy_query_names_each_address_and_the_window_in_utc() {
@@ -96,8 +100,12 @@ async fn a_free_busy_query_names_each_address_and_the_window_in_utc() {
         &answer_with(&[response_of(SELF), response_of(ROOM), OUTSIDE]),
     ));
     backend.free_busy(&query()).await.unwrap();
-    let rule = "<t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder>\
-                <t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek>";
+    let rule = |month: u32| {
+        format!(
+            "<t:Bias>0</t:Bias><t:Time>02:00:00</t:Time><t:DayOrder>1</t:DayOrder>\
+             <t:Month>{month}</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek>"
+        )
+    };
     let mailbox = |address: &str| {
         format!(
             "<t:MailboxData><t:Email><t:Address>{address}</t:Address></t:Email>\
@@ -109,18 +117,66 @@ async fn a_free_busy_query_names_each_address_and_the_window_in_utc() {
         backend.fetch().sent(),
         [envelope(&format!(
             "<m:GetUserAvailabilityRequest><t:TimeZone><t:Bias>0</t:Bias>\
-             <t:StandardTime>{rule}</t:StandardTime><t:DaylightTime>{rule}</t:DaylightTime>\
+             <t:StandardTime>{}</t:StandardTime><t:DaylightTime>{}</t:DaylightTime>\
              </t:TimeZone><m:MailboxDataArray>{}{}{}</m:MailboxDataArray>\
              <t:FreeBusyViewOptions><t:TimeWindow><t:StartTime>2026-11-19T23:00:00</t:StartTime>\
              <t:EndTime>2026-11-20T23:00:00</t:EndTime></t:TimeWindow>\
              <t:MergedFreeBusyIntervalInMinutes>60</t:MergedFreeBusyIntervalInMinutes>\
              <t:RequestedView>DetailedMerged</t:RequestedView></t:FreeBusyViewOptions>\
              </m:GetUserAvailabilityRequest>",
+            rule(3),
+            rule(10),
             mailbox("user@tum.de"),
             mailbox("room-1@tum.de"),
             mailbox("someone@gmail.com"),
         ))]
     );
+}
+
+/// The text of every `name` element of `xml`.
+fn elements<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
+    let (open, close) = (format!("<t:{name}>"), format!("</t:{name}>"));
+    xml.match_indices(&open)
+        .map(|(at, _)| {
+            let start = at + open.len();
+            &xml[start..start + xml[start..].find(&close).unwrap()]
+        })
+        .collect()
+}
+
+/// Exchange refuses a time zone whose standard and daylight transitions
+/// fall on the same day as invalid (the live answer, read as the server's
+/// sentence), so the UTC of the request changes twice a year by nothing,
+/// the rule Microsoft's own client sends for a zone without daylight
+/// saving: daylight from the first Sunday of October, standard from the
+/// first Sunday of March, both at 02:00 with no bias.
+#[tokio::test]
+async fn the_utc_zone_has_two_distinct_transitions_since_exchange_refuses_one_day() {
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("GetUserAvailabilityRequest", UTC_REFUSED)
+            .answer(
+                "GetUserAvailabilityRequest",
+                &answer_with(&[response_of(SELF), response_of(ROOM), OUTSIDE]),
+            ),
+    );
+    let err = backend.free_busy(&query()).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "the Exchange server refused GetUserAvailability: -2146233088: The specified time zone \
+         isn't valid."
+    );
+    backend.free_busy(&query()).await.unwrap();
+    let sent = &backend.fetch().sent()[1];
+    let rule = |month: u32| {
+        format!(
+            "<t:Bias>0</t:Bias><t:Time>02:00:00</t:Time><t:DayOrder>1</t:DayOrder>\
+             <t:Month>{month}</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek>"
+        )
+    };
+    assert_eq!(elements(sent, "StandardTime"), [rule(3)]);
+    assert_eq!(elements(sent, "DaylightTime"), [rule(10)]);
+    assert!(sent.contains("<t:TimeZone><t:Bias>0</t:Bias><t:StandardTime>"));
 }
 
 /// Each address has its schedule in the order asked: the merged view with

@@ -8,10 +8,13 @@
 //! its calendar with their times in the request's zone. The request names
 //! UTC, a zone with neither offset nor daylight saving, so the window goes
 //! out and the blocks come back as UTC wall times and no zone rule is
-//! rebuilt on either side. The spike asked in Central European time; a UTC
-//! request is built from the schema documentation and unverified live, as is
-//! the `CalendarEventArray` of a busy day, which the spike's free day did
-//! not carry.
+//! rebuilt on either side. Exchange refuses a zone whose standard and
+//! daylight transitions fall on the same day ("The specified time zone isn't
+//! valid", TUM's server on 2026-11-18), so UTC goes out as the rule
+//! Microsoft's own client sends for a zone without daylight saving: two
+//! transitions on distinct days that change the offset by nothing. The
+//! `CalendarEventArray` of a busy day, which the spike's free day did not
+//! carry, is built from the schema documentation and unverified live.
 //!
 //! The answer is in default namespaces without prefixes, one
 //! `FreeBusyResponse` per address in the order asked. An address the server
@@ -34,10 +37,16 @@ const WALL_TIME: &str = "%Y-%m-%dT%H:%M:%S";
 /// The operation's element, which its answer is named after.
 const OPERATION: &str = "GetUserAvailability";
 
-/// The `GetUserAvailabilityRequest` for `query`, in UTC.
+/// The `GetUserAvailabilityRequest` for `query`, in UTC: daylight from the
+/// first Sunday of October and standard from the first Sunday of March, both
+/// at 02:00 with no bias, a year of one offset that Exchange takes.
 pub(super) fn availability_body(query: &FreeBusyQuery) -> String {
-    let rule = "<t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder>\
-                <t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek>";
+    let rule = |month: u32| {
+        format!(
+            "<t:Bias>0</t:Bias><t:Time>02:00:00</t:Time><t:DayOrder>1</t:DayOrder>\
+             <t:Month>{month}</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek>"
+        )
+    };
     let mailboxes: String = query
         .addresses
         .iter()
@@ -53,13 +62,15 @@ pub(super) fn availability_body(query: &FreeBusyQuery) -> String {
     let wall = |at: DateTime<Utc>| at.naive_utc().format(WALL_TIME).to_string();
     format!(
         "<m:{OPERATION}Request><t:TimeZone><t:Bias>0</t:Bias>\
-         <t:StandardTime>{rule}</t:StandardTime><t:DaylightTime>{rule}</t:DaylightTime>\
+         <t:StandardTime>{}</t:StandardTime><t:DaylightTime>{}</t:DaylightTime>\
          </t:TimeZone><m:MailboxDataArray>{mailboxes}</m:MailboxDataArray>\
          <t:FreeBusyViewOptions><t:TimeWindow><t:StartTime>{}</t:StartTime>\
          <t:EndTime>{}</t:EndTime></t:TimeWindow>\
          <t:MergedFreeBusyIntervalInMinutes>{}</t:MergedFreeBusyIntervalInMinutes>\
          <t:RequestedView>DetailedMerged</t:RequestedView></t:FreeBusyViewOptions>\
          </m:{OPERATION}Request>",
+        rule(3),
+        rule(10),
         wall(query.window.start),
         wall(query.window.end),
         query.interval.max(1)
