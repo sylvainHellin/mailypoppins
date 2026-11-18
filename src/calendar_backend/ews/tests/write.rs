@@ -891,7 +891,9 @@ async fn a_cancel_tells_every_attendee_and_a_gone_meeting_counts_as_cancelled() 
     );
     let backend = backend(
         ScriptedFetch::default()
+            .answer("GetItem", &key_of(SINGLE_ID))
             .answer("CreateItem", &response_made())
+            .answer("GetItem", &key_of(SINGLE_ID))
             .answer("CreateItem", &gone),
     );
     backend
@@ -901,15 +903,94 @@ async fn a_cancel_tells_every_attendee_and_a_gone_meeting_counts_as_cancelled() 
     backend.cancel_event(SINGLE_ID, None).await.unwrap();
     let sent = backend.fetch().sent();
     assert_eq!(
-        sent[0],
+        sent[1],
         envelope(&format!(
             "<m:CreateItem MessageDisposition=\"SendAndSaveCopy\"><m:Items>\
              <t:CancelCalendarItem><t:Body BodyType=\"Text\">Sick &lt;again&gt;</t:Body>\
-             <t:ReferenceItemId Id=\"{SINGLE_ID}\"/></t:CancelCalendarItem></m:Items>\
-             </m:CreateItem>"
+             <t:ReferenceItemId Id=\"{SINGLE_ID}\" ChangeKey=\"{KEY}\"/>\
+             </t:CancelCalendarItem></m:Items></m:CreateItem>"
         ))
     );
-    assert!(!sent[1].contains("<t:Body"));
+    assert!(!sent[3].contains("<t:Body"));
+}
+
+/// TUM's answer of 2026-11-18 to a cancel naming the meeting by its id
+/// alone.
+const CHANGE_KEY_REQUIRED: &str =
+    include_str!("../../../../tests/fixtures/ews/createitem_cancel_changekey_required.xml");
+
+/// The change key the GetItem of [`key_of`] answers.
+const KEY: &str = "DwAAABYAAACq0vYKGMzPSIYwTbWKSBzoAAJJD7B2";
+
+/// What a GetItem of `id` with no properties answers: the item's id and its
+/// current change key.
+fn key_of(id: &str) -> String {
+    built_answer(
+        "GetItem",
+        &success_message(
+            "GetItem",
+            &format!(
+                "<m:Items><t:CalendarItem><t:ItemId Id=\"{id}\" ChangeKey=\"{KEY}\"/>\
+                 </t:CalendarItem></m:Items>"
+            ),
+        ),
+    )
+}
+
+/// The GetItem of `id` with no properties, which reads its change key.
+fn key_request(id: &str) -> String {
+    envelope(&format!(
+        "<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape>\
+         <m:ItemIds><t:ItemId Id=\"{id}\"/></m:ItemIds></m:GetItem>"
+    ))
+}
+
+/// Exchange refuses a cancel that names the meeting without its change key
+/// (the live answer, read as the server's sentence), so the cancel reads
+/// the current key first and names the meeting with it; a meeting the read
+/// no longer finds counts as cancelled with no cancel sent.
+#[tokio::test]
+async fn a_cancel_names_the_meeting_with_its_current_change_key() {
+    let gone = built_answer(
+        "GetItem",
+        &error_message(
+            "GetItem",
+            "ErrorItemNotFound",
+            "The specified object was not found in the store.",
+        ),
+    );
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("GetItem", &key_of(SINGLE_ID))
+            .answer("CreateItem", CHANGE_KEY_REQUIRED)
+            .answer("GetItem", &key_of(SINGLE_ID))
+            .answer("CreateItem", &response_made())
+            .answer("GetItem", &gone),
+    );
+    let err = backend.cancel_event(SINGLE_ID, None).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "the Exchange server refused CreateItem: ErrorChangeKeyRequiredForWriteOperations: \
+         ChangeKey is required for this operation."
+    );
+    backend.cancel_event(SINGLE_ID, None).await.unwrap();
+    backend.cancel_event(SINGLE_ID, None).await.unwrap();
+    let sent = backend.fetch().sent();
+    assert_eq!(sent[2], key_request(SINGLE_ID));
+    assert_eq!(
+        sent[3],
+        envelope(&format!(
+            "<m:CreateItem MessageDisposition=\"SendAndSaveCopy\"><m:Items>\
+             <t:CancelCalendarItem><t:ReferenceItemId Id=\"{SINGLE_ID}\" ChangeKey=\"{KEY}\"/>\
+             </t:CancelCalendarItem></m:Items></m:CreateItem>"
+        ))
+    );
+    assert_eq!(
+        sent.len(),
+        5,
+        "no cancel goes out for a meeting gone already"
+    );
+    assert!(backend.fetch().exhausted());
 }
 
 /// A delete moves the item to Deleted Items and tells nobody; one already

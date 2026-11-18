@@ -809,6 +809,23 @@ pub fn saved_response_id(body: &str) -> Result<Option<String>, AnswerError> {
         .map(str::to_string))
 }
 
+/// The current change key of the one item a GetItem answers, `None` when
+/// the item is gone.
+pub fn change_key(body: &str) -> Result<Option<String>, AnswerError> {
+    let message = match only_message(body, "GetItem") {
+        Err(AnswerError::Refused(error)) if error.code == super::ITEM_NOT_FOUND => return Ok(None),
+        other => other?,
+    };
+    message
+        .child("Items")
+        .and_then(|items| items.children.first())
+        .and_then(|item| item.child("ItemId"))
+        .and_then(|id| id.attr("ChangeKey"))
+        .filter(|key| !key.is_empty())
+        .map(|key| Some(key.to_string()))
+        .ok_or_else(|| malformed("a GetItem message without an item's change key"))
+}
+
 /// The ItemId of the calendar item a CreateItem or an UpdateItem saved.
 pub fn saved_id(body: &str, operation: &str) -> Result<String, AnswerError> {
     only_message(body, operation)?

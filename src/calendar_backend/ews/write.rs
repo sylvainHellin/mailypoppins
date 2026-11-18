@@ -36,9 +36,12 @@
 //!   the reminder action dismisses the one reminder, as Outlook does. An
 //!   event already gone has no reminder left, which counts as done.
 //! - A cancel is a `CancelCalendarItem` response object on a meeting the
-//!   user organizes, with the comment as its body; a delete is a
-//!   `DeleteItem` into Deleted Items that tells nobody. An event already
-//!   gone (`ErrorItemNotFound`) counts as cancelled or deleted.
+//!   user organizes, with the comment as its body, naming the meeting with
+//!   its current change key, which TUM's server requires for it
+//!   (`ErrorChangeKeyRequiredForWriteOperations`, 2026-11-18) where it
+//!   takes an answer without one; the key is read with a GetItem first. A
+//!   delete is a `DeleteItem` into Deleted Items that tells nobody. An event
+//!   already gone (`ErrorItemNotFound`) counts as cancelled or deleted.
 //!
 //! A create or an update reads the item back with GetItem and answers it
 //! converted: a series master as its series, an occurrence hung from its
@@ -861,21 +864,41 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
         }
     }
 
+    /// The current change key of the item `id`, `None` when it is gone.
+    async fn change_key(&self, id: &str) -> BackendResult<Option<String>> {
+        let request = format!(
+            "<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape>\
+             <m:ItemIds><t:ItemId Id=\"{}\"/></m:ItemIds></m:GetItem>",
+            xml::escape(id)
+        );
+        let answer = self.call("GetItem", &request).await?;
+        parse::change_key(&answer).map_err(|error| answer_error(&error, "GetItem"))
+    }
+
     /// Cancel the meeting `event` the user organizes, telling every
-    /// attendee. Built from the schema documentation, unverified live.
+    /// attendee, named with its current change key.
     pub(super) async fn cancel_item(
         &self,
         event: &str,
         comment: Option<&str>,
     ) -> BackendResult<()> {
+        let Some(key) = self.change_key(event).await? else {
+            debug!(
+                "[calendar] {}: item {event} is gone already; the cancel counts as done",
+                self.account
+            );
+            return Ok(());
+        };
         let body = comment
             .filter(|comment| !comment.trim().is_empty())
             .map(body_element)
             .unwrap_or_default();
         let request = format!(
             "<m:CreateItem MessageDisposition=\"SendAndSaveCopy\"><m:Items><t:CancelCalendarItem>\
-             {body}<t:ReferenceItemId Id=\"{}\"/></t:CancelCalendarItem></m:Items></m:CreateItem>",
-            xml::escape(event)
+             {body}<t:ReferenceItemId Id=\"{}\" ChangeKey=\"{}\"/></t:CancelCalendarItem>\
+             </m:Items></m:CreateItem>",
+            xml::escape(event),
+            xml::escape(&key)
         );
         let answer = self.call("CreateItem", &request).await?;
         self.done_or_gone("CreateItem", event, &answer)
