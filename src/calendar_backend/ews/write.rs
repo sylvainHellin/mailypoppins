@@ -29,8 +29,9 @@
 //!   occurrence's own ItemId, which makes it an exception; a change to the
 //!   series goes to the master's.
 //! - A reminder dismissed or snoozed is a `PerformReminderAction`
-//!   (`Exchange2013` and later) on the event's ItemId, an occurrence's own
-//!   included, the snooze with its new reminder time. Turning
+//!   (`Exchange2013` and later) on the event's ItemId with its current
+//!   change key, an occurrence's own included, the snooze with its new
+//!   reminder time; an answer that updated no item is not done. Turning
 //!   `ReminderIsSet` off through UpdateItem would dismiss every later
 //!   occurrence of a series and make an exception of an occurrence, where
 //!   the reminder action dismisses the one reminder, as Outlook does. An
@@ -905,31 +906,52 @@ impl<F: EwsFetch> EwsCalendarBackend<F> {
     }
 
     /// Dismiss the reminder of `event` (`Dismiss`), or snooze it until
-    /// `until` (`Snooze`). Built from the schema documentation, unverified
-    /// live; the item is named by its id alone, without the change key
-    /// mp does not keep.
+    /// `until` (`Snooze`), the item named with its current change key: TUM's
+    /// server answered an action naming it by its id alone with success and
+    /// changed nothing (2026-11-18). An answer that names no updated item
+    /// is no dismissal or snooze, and says so.
     pub(super) async fn reminder_action(
         &self,
         event: &str,
         until: Option<DateTime<Utc>>,
     ) -> BackendResult<()> {
         const OPERATION: &str = "PerformReminderAction";
-        let (action, time) = match until {
+        let Some(key) = self.change_key(event).await? else {
+            debug!(
+                "[calendar] {}: item {event} is gone already; its reminder is no more",
+                self.account
+            );
+            return Ok(());
+        };
+        let (action, time, done) = match until {
             Some(until) => (
                 "Snooze",
                 format!("<t:NewReminderTime>{}</t:NewReminderTime>", utc_text(until)),
+                "snoozed",
             ),
-            None => ("Dismiss", String::new()),
+            None => ("Dismiss", String::new(), "dismissed"),
         };
         let request = format!(
             "<m:{OPERATION}><m:ReminderItemActions><t:ReminderItemAction>\
-             <t:ActionType>{action}</t:ActionType><t:ItemId Id=\"{}\"/>{time}\
+             <t:ActionType>{action}</t:ActionType><t:ItemId Id=\"{}\" ChangeKey=\"{}\"/>{time}\
              </t:ReminderItemAction></m:ReminderItemActions></m:{OPERATION}>",
-            xml::escape(event)
+            xml::escape(event),
+            xml::escape(&key)
         );
         let answer = self.call(OPERATION, &request).await?;
         match parse::bare_response(&answer, OPERATION) {
-            Ok(_) => Ok(()),
+            Ok(response) => {
+                let updated = response
+                    .child("UpdatedItemIds")
+                    .is_some_and(|ids| !ids.children.is_empty());
+                if updated {
+                    Ok(())
+                } else {
+                    Err(refusal(format!(
+                        "the Exchange server changed no reminder of {event}: it {done} nothing"
+                    )))
+                }
+            }
             Err(parse::AnswerError::Refused(error)) if error.code == ITEM_NOT_FOUND => {
                 debug!(
                     "[calendar] {}: item {event} is gone already; its reminder is no more",

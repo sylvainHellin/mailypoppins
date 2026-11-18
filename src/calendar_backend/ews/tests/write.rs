@@ -1052,6 +1052,49 @@ fn reminder_answer(class: &str, code: &str, payload: &str) -> String {
     )
 }
 
+/// TUM's answer of 2026-11-18 to a dismissal naming the item by its id
+/// alone, a due reminder's included: success, and no item changed.
+const NOTHING_UPDATED: &str =
+    include_str!("../../../../tests/fixtures/ews/performreminderaction_nothing_updated.xml");
+
+/// Exchange answers a reminder action that names the item without its
+/// change key with success and changes nothing (the live answer), so the
+/// action reads the current key first and names the item with it, and an
+/// answer that changed no item is no dismissal or snooze, said so.
+#[tokio::test]
+async fn a_reminder_action_names_the_item_with_its_change_key_and_needs_an_update() {
+    let updated = format!(
+        "<UpdatedItemIds><ItemId xmlns=\"http://schemas.microsoft.com/exchange/services/2006/types\" \
+         Id=\"{SINGLE_ID}\" ChangeKey=\"k\"/></UpdatedItemIds>"
+    );
+    let backend = backend(
+        ScriptedFetch::default()
+            .answer("GetItem", &key_of(SINGLE_ID))
+            .answer("PerformReminderAction", NOTHING_UPDATED)
+            .answer("GetItem", &key_of(SINGLE_ID))
+            .answer(
+                "PerformReminderAction",
+                &reminder_answer("Success", "NoError", &updated),
+            ),
+    );
+    let err = backend.dismiss_reminder(SINGLE_ID).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("the Exchange server changed no reminder of {SINGLE_ID}: it dismissed nothing")
+    );
+    backend.dismiss_reminder(SINGLE_ID).await.unwrap();
+    let sent = backend.fetch().sent();
+    assert_eq!(sent[2], key_request(SINGLE_ID));
+    assert_eq!(
+        sent[3],
+        envelope(&format!(
+            "<m:PerformReminderAction><m:ReminderItemActions><t:ReminderItemAction>\
+             <t:ActionType>Dismiss</t:ActionType><t:ItemId Id=\"{SINGLE_ID}\" ChangeKey=\"{KEY}\"/>\
+             </t:ReminderItemAction></m:ReminderItemActions></m:PerformReminderAction>"
+        ))
+    );
+}
+
 /// A dismissal and a snooze are reminder actions on the event's ItemId, an
 /// occurrence's own included, the snooze carrying the new reminder time;
 /// an event already gone has none to dismiss.
@@ -1063,14 +1106,17 @@ async fn a_dismissal_and_a_snooze_are_reminder_actions_on_the_item() {
     );
     let backend = backend(
         ScriptedFetch::default()
+            .answer("GetItem", &key_of(OCCURRENCE_ID))
             .answer(
                 "PerformReminderAction",
                 &reminder_answer("Success", "NoError", &updated),
             )
+            .answer("GetItem", &key_of(OCCURRENCE_ID))
             .answer(
                 "PerformReminderAction",
                 &reminder_answer("Success", "NoError", &updated),
             )
+            .answer("GetItem", &key_of(SINGLE_ID))
             .answer(
                 "PerformReminderAction",
                 &reminder_answer(
@@ -1079,6 +1125,7 @@ async fn a_dismissal_and_a_snooze_are_reminder_actions_on_the_item() {
                     "<MessageText>The specified object was not found in the store.</MessageText>",
                 ),
             )
+            .answer("GetItem", &key_of(SINGLE_ID))
             .answer(
                 "PerformReminderAction",
                 &reminder_answer(
@@ -1099,19 +1146,22 @@ async fn a_dismissal_and_a_snooze_are_reminder_actions_on_the_item() {
          invalid."
     );
     let sent = backend.fetch().sent();
-    assert_eq!(
-        sent[0],
-        envelope(&format!(
-            "<m:PerformReminderAction><m:ReminderItemActions><t:ReminderItemAction>\
-             <t:ActionType>Dismiss</t:ActionType><t:ItemId Id=\"{OCCURRENCE_ID}\"/>\
-             </t:ReminderItemAction></m:ReminderItemActions></m:PerformReminderAction>"
-        ))
-    );
+    assert_eq!(sent[0], key_request(OCCURRENCE_ID));
     assert_eq!(
         sent[1],
         envelope(&format!(
             "<m:PerformReminderAction><m:ReminderItemActions><t:ReminderItemAction>\
-             <t:ActionType>Snooze</t:ActionType><t:ItemId Id=\"{OCCURRENCE_ID}\"/>\
+             <t:ActionType>Dismiss</t:ActionType>\
+             <t:ItemId Id=\"{OCCURRENCE_ID}\" ChangeKey=\"{KEY}\"/>\
+             </t:ReminderItemAction></m:ReminderItemActions></m:PerformReminderAction>"
+        ))
+    );
+    assert_eq!(
+        sent[3],
+        envelope(&format!(
+            "<m:PerformReminderAction><m:ReminderItemActions><t:ReminderItemAction>\
+             <t:ActionType>Snooze</t:ActionType>\
+             <t:ItemId Id=\"{OCCURRENCE_ID}\" ChangeKey=\"{KEY}\"/>\
              <t:NewReminderTime>2026-11-20T08:55:00Z</t:NewReminderTime>\
              </t:ReminderItemAction></m:ReminderItemActions></m:PerformReminderAction>"
         ))
