@@ -1095,6 +1095,24 @@ async fn a_reminder_action_names_the_item_with_its_change_key_and_needs_an_updat
     );
 }
 
+/// An event gone by the time its change key is read has no reminder left:
+/// the dismissal counts as done and no PerformReminderAction goes out.
+#[tokio::test]
+async fn a_reminder_of_an_event_gone_before_its_key_is_read_counts_as_done() {
+    let gone = built_answer(
+        "GetItem",
+        &error_message(
+            "GetItem",
+            "ErrorItemNotFound",
+            "The specified object was not found in the store.",
+        ),
+    );
+    let backend = backend(ScriptedFetch::default().answer("GetItem", &gone));
+    backend.dismiss_reminder(SINGLE_ID).await.unwrap();
+    assert_eq!(backend.fetch().sent(), [key_request(SINGLE_ID)]);
+    assert!(backend.fetch().exhausted());
+}
+
 /// A dismissal and a snooze are reminder actions on the event's ItemId, an
 /// occurrence's own included, the snooze carrying the new reminder time;
 /// an event already gone has none to dismiss.
