@@ -571,11 +571,11 @@ Rejected: deploying after every merge.
 Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
 Status: accepted
 
-## 2026-11-19 - Base UI's unnamed focus guards are reported upstream and not patched in the app (PERSO-278)
+## 2026-11-19 - Base UI's unnamed focus guards are left as the library renders them (PERSO-278)
 
-Why: the two unnamed buttons are the library's focus guards on Apple WebKit, which a pointer never reaches; every button of the app itself has a name.
-Rejected: an app-level observer that names them (guesses at the library's markup); a patched dependency (carried on every update).
-Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Why: the two unnamed buttons are the library's focus guards on Apple WebKit, which a pointer never reaches; the report exists upstream as mui/base-ui#5237, where the maintainer calls the role intended (VoiceOver needs it to move focus into a popup); every button of the app itself has a name.
+Rejected: a second upstream issue; an app-level observer that names them (guesses at the library's markup); a patched dependency (carried on every update).
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19; `.agents/research/2026-11-19-packaging-caldav-baseui.md`.
 Status: accepted
 
 ## 2026-11-19 - A contact's count is the mail ever seen, and a delete does not lower it (PERSO-237)
