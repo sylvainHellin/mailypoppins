@@ -2161,4 +2161,38 @@ mod wire {
             "both copies, each under its own UID"
         );
     }
+
+    /// The UID the store holds for the deleted row now holds another
+    /// message, and the message itself sits under a new UID, as after a
+    /// mailbox another client renumbered: the refused delete restores the
+    /// copy the delete op resolved, under its own UID, and never ingests the
+    /// other message under the old one.
+    #[test]
+    fn a_refused_delete_whose_uid_now_holds_another_message_restores_the_right_one() {
+        let wire = synced();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (1, mail("first", "ada@example.org", "First", "one")),
+                (2, mail("other", "eve@example.org", "Other", "not this")),
+                (3, mail("second", "bob@example.org", "Second", "two")),
+            ],
+        );
+        wire.imap
+            .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
+
+        let out = wire.mp(&["delete", SECOND]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (3, "<second@example.org>".to_string())
+            ],
+            "the deleted message is back under the UID the server holds it at, \
+             and the message at its old UID is not taken for it"
+        );
+    }
 }

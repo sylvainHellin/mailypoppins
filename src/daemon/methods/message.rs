@@ -2269,6 +2269,15 @@ async fn mutate_with<E: OpExecutor>(
         let older = pending_ops::OlderOps::wait_for(patience, &ask_for_drain)
             .paused_while(&turn_held)
             .unless_login_refused(&login_refused);
+        // The copy the delete op is aimed at, read before the settle discards
+        // the op, so a refusal restores that copy and no other (PERSO-210).
+        let delete_copy = match pending_ops::row_by_id(&store, first.op_id) {
+            Ok(Some(pending_ops::PendingOp {
+                op: crate::ops::ServerOp::Delete { copy, .. },
+                ..
+            })) => copy,
+            _ => None,
+        };
         let settled =
             pending_ops::run_and_settle(&store, &blobs, &scope, first.op_id, &mut backend, older)
                 .await;
@@ -2283,11 +2292,11 @@ async fn mutate_with<E: OpExecutor>(
         }
         if settled.is_err() && kind == Kind::Delete {
             // A delete has no rollback: its row is gone though the server,
-            // which refused it, still holds the message. That copy is fetched
-            // back by its mailbox and UID before the refusal is answered,
-            // whatever its age (a quick sync reaches only the newest UIDs of
-            // the mailbox) and whatever other copies of the message the store
-            // holds (PERSO-210). Only a settle
+            // which refused it, still holds the message. The copy the delete
+            // was aimed at is fetched back before the refusal is answered,
+            // resolved as the executor resolved it, whatever its age (a quick
+            // sync reaches only the newest UIDs of the mailbox) and whatever
+            // other copies of the message the store holds (PERSO-210). Only a settle
             // the server refused: a refusal before the commit left the row
             // where it was.
             super::message_server::restore_deleted_row(
@@ -2296,6 +2305,7 @@ async fn mutate_with<E: OpExecutor>(
                 &row.mailbox,
                 row.uid,
                 &row.message_id,
+                delete_copy.as_ref(),
                 canonical,
             )
             .await;

@@ -25,7 +25,7 @@ use crate::types::MessageFlags;
 /// A keyword arrives as [`async_imap::types::Flag::Custom`], so it goes
 /// through [`MessageFlags::parse`] rather than a match arm, which is also what
 /// keeps the two spellings of the forwarded keyword in one place.
-fn flags_of(msg: &super::checked::FetchResponse) -> MessageFlags {
+pub(super) fn flags_of(msg: &super::checked::FetchResponse) -> MessageFlags {
     let mut out = MessageFlags::default();
     for flag in msg.flags() {
         match flag {
@@ -290,36 +290,6 @@ pub async fn fetch_raw_by_message_id(
         )),
         None => Ok(None),
     }
-}
-
-/// One message's raw bytes and parse by its UID in `mailbox`, `None` when the
-/// mailbox no longer holds that UID: what restores one row the store dropped
-/// for a copy the server still has (a delete it refused, PERSO-210), where a
-/// lookup by Message-ID could land on another copy of the same message.
-pub async fn fetch_raw_by_uid(
-    session: &mut ImapSession,
-    mailbox: &str,
-    uid: u32,
-) -> Result<Option<(Vec<u8>, FetchedEmail)>> {
-    session.select(mailbox).await.map_err(|e| {
-        anyhow!(
-            "Failed to select mailbox '{}': {}",
-            mailbox,
-            super::words::server_words(&e)
-        )
-    })?;
-    let fetched = session
-        .uid_fetch_checked(&uid.to_string(), "(UID BODY.PEEK[] FLAGS)")
-        .await
-        .map_err(|e| anyhow!("Failed to fetch email: {}", super::words::server_words(&e)))?;
-    for msg in fetched.iter().filter(|msg| msg.uid == Some(uid)) {
-        let raw = msg.body().unwrap_or_default();
-        if let Some(mut email) = parse_rfc822_to_fetched_email(raw) {
-            email.flags = flags_of(msg);
-            return Ok(Some((raw.to_vec(), email)));
-        }
-    }
-    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

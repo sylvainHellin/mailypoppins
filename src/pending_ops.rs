@@ -1941,7 +1941,7 @@ impl LaterOpsUndone {
 }
 
 /// One decoded row by its `pending_ops.id`.
-fn row_by_id(store: &Store, id: i64) -> Result<Option<PendingOp>> {
+pub fn row_by_id(store: &Store, id: i64) -> Result<Option<PendingOp>> {
     row_in(store.conn(), id)
 }
 

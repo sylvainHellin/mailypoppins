@@ -406,6 +406,84 @@ pub(super) async fn copy_to_delete<S: UidSearch>(
     }
 }
 
+/// What [`fetch_resolved_copy`] found of the copy an op named.
+#[derive(Debug)]
+pub enum ResolvedCopy {
+    /// The copy, under the UID the server holds it at now, its bytes and
+    /// their parse, whose `Message-ID` is the op's.
+    Found {
+        uid: u32,
+        raw: Vec<u8>,
+        email: Box<crate::parse::FetchedEmail>,
+    },
+    /// The folder holds no copy under the `Message-ID`.
+    Gone,
+    /// The folder holds copies that cannot be told apart from the op's
+    /// ([`Resolved::Missed`]): none is taken for it.
+    Unsettled,
+}
+
+/// The copy of `message_id` in `mailbox` that an op naming `copy` acts on,
+/// resolved as the op's executor resolves it ([`resolve_copy`]: its UID
+/// under the folder's UIDVALIDITY, else the one copy no other row stands
+/// for, else the newest), and fetched whole: what restores the row of a
+/// delete the server refused at the copy the delete was aimed at (PERSO-210).
+///
+/// Never a message of another `Message-ID`: the resolution searches by it,
+/// and the fetched bytes are checked against it before they are handed back.
+pub async fn fetch_resolved_copy(
+    imap_config: &ImapConfig,
+    mailbox: &str,
+    message_id: &str,
+    copy: Option<&ServerCopy>,
+) -> Result<ResolvedCopy> {
+    let mut session = super::open_imap_session(imap_config).await?;
+    let found = fetch_resolved_on_session(&mut session, mailbox, message_id, copy).await;
+    session.logout().await.ok();
+    found
+}
+
+async fn fetch_resolved_on_session(
+    session: &mut ImapSession,
+    mailbox: &str,
+    message_id: &str,
+    copy: Option<&ServerCopy>,
+) -> Result<ResolvedCopy> {
+    let uidvalidity = select(session, mailbox).await?;
+    let uid = match resolve_copy(session, message_id, copy, uidvalidity).await? {
+        Resolved::Copy(uid) => uid,
+        Resolved::Gone => return Ok(ResolvedCopy::Gone),
+        Resolved::Missed { .. } => return Ok(ResolvedCopy::Unsettled),
+    };
+    let fetched = session
+        .uid_fetch_checked(&uid.to_string(), "(UID BODY.PEEK[] FLAGS)")
+        .await
+        .map_err(|e| anyhow!("Failed to fetch email: {}", super::words::server_words(&e)))?;
+    let wanted = super::search::normalize_message_id(message_id).to_string();
+    for msg in fetched.iter().filter(|msg| msg.uid == Some(uid)) {
+        let raw = msg.body().unwrap_or_default();
+        let Some(mut email) = crate::parse::parse_rfc822_to_fetched_email(raw) else {
+            continue;
+        };
+        let same = email
+            .message_id
+            .as_deref()
+            .is_some_and(|m| super::search::normalize_message_id(m).eq_ignore_ascii_case(&wanted));
+        if !same {
+            // `HEADER Message-ID` is a substring match: a longer id that
+            // contains this one is another message.
+            return Ok(ResolvedCopy::Gone);
+        }
+        email.flags = super::fetch::flags_of(msg);
+        return Ok(ResolvedCopy::Found {
+            uid,
+            raw: raw.to_vec(),
+            email: Box::new(email),
+        });
+    }
+    Ok(ResolvedCopy::Gone)
+}
+
 /// Move an email to a different mailbox on the IMAP server (#0018).
 ///
 /// SELECTs `source_mailbox`, resolves the copy ([`copy_to_move`]), then
