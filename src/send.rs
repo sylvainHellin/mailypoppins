@@ -20,6 +20,13 @@ use crate::types::{EmailDraft, EmailStatus};
 
 pub mod graph_submit;
 
+/// The SMTP server the daemon suites use too (PERSO-199, PERSO-210).
+#[cfg(test)]
+#[path = "../tests/support/fake_smtp.rs"]
+pub(crate) mod fake_smtp;
+#[cfg(test)]
+mod wire_tests;
+
 // The RFC 5322 address-string half of this module, which needs no transport and
 // which `draft` reads without wanting one, lives in `mp-core` since #0126
 // (P5-U10b). Re-exported so `crate::send::split_addresses` and the two

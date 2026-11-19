@@ -1,19 +1,34 @@
-//! An SMTP server that records the credentials it is given (PERSO-199).
+//! An SMTP server that takes a whole conversation over STARTTLS and records
+//! what it was given (PERSO-199, PERSO-210).
 //!
 //! `send::build_smtp_transport` is TLS-only: port 465 is implicit TLS and every
-//! other port is STARTTLS. This server speaks STARTTLS on a free localhost
-//! port with the throwaway identity [`super::fake_imap`] presents
+//! other port is STARTTLS. This server speaks STARTTLS (RFC 3207) on a free
+//! localhost port with the throwaway identity [`super::fake_imap`] presents
 //! (`fake_imap.p12`, CN `localhost`, SAN `127.0.0.1`), which an account reaches
-//! with `accept_invalid_certs = true`, allowed for a loopback host only.
+//! with `accept_invalid_certs = true`, allowed for a loopback host only. The
+//! implicit-TLS branch is chosen by port 465 alone, which a test cannot bind,
+//! so it is out of reach.
 //!
-//! It accepts every `AUTH PLAIN` and `AUTH LOGIN` and records the username and
-//! password each one carried, which is what a test reads to prove the password
-//! a client logged in with is the one stored. Past the login it answers `NOOP`,
-//! `RSET`, `MAIL`, `RCPT` and `DATA` with success and keeps nothing of a
-//! message: it is a login witness, not a mail sink.
+//! It answers as Postfix does by default: no AUTH and no mail before
+//! STARTTLS, no mail before AUTH, MAIL before RCPT before DATA (RFC 5321
+//! 4.1.4), each reply with its enhanced status code (RFC 3463). It records
+//! every AUTH PLAIN and AUTH LOGIN with the username and password it carried
+//! ([`RecordingSmtpServer::logins`]), and every message a DATA brought in,
+//! its envelope and its bytes with the dot-stuffing undone (RFC 5321 4.5.2,
+//! [`RecordingSmtpServer::deliveries`]).
+//!
+//! A test changes the answer to any step of the conversation
+//! ([`RecordingSmtpServer::answer`]), or to a step of the transaction of one
+//! recipient ([`RecordingSmtpServer::answer_for`]): a reply of its own (a
+//! `535 5.7.8` to AUTH, a `550 5.1.1` to RCPT), no answer at all while the
+//! connection stays open ([`SmtpAnswer::Stall`]), or the connection closed
+//! ([`SmtpAnswer::HangUp`]). [`RecordingSmtpServer::reached`] counts the
+//! times the server came to each step, so a test waits on a stall without
+//! sleeping.
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_std::net::{TcpListener, TcpStream};
@@ -25,17 +40,114 @@ use futures::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 const IDENTITY: &[u8] = include_bytes!("fake_imap.p12");
 const IDENTITY_PASSWORD: &str = "mailypoppins";
 
-/// One login the server accepted.
+/// One login the server was given, whatever it answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmtpLogin {
     pub username: String,
     pub password: String,
 }
 
+/// One message a DATA brought in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmtpDelivery {
+    /// The reverse-path of `MAIL FROM`, without its brackets.
+    pub from: String,
+    /// The forward-path of every `RCPT TO` the server took, in order.
+    pub recipients: Vec<String>,
+    /// The message as the client meant it: CRLF line ends, the terminating
+    /// `.` line gone and a leading dot of each line unstuffed.
+    pub data: Vec<u8>,
+    /// Whether the server answered the end of the data with a `2xx`: a
+    /// message it stalled or hung up on was received all the same, and is
+    /// what a client that got no verdict cannot tell from one delivered.
+    pub acknowledged: bool,
+}
+
+/// The steps of a conversation a test can change the answer to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SmtpStep {
+    /// The `220` a connection opens with.
+    Greeting,
+    /// `EHLO`, before STARTTLS and after it.
+    Ehlo,
+    /// `AUTH`, answered once the credentials are in.
+    Auth,
+    /// `MAIL FROM`.
+    Mail,
+    /// `RCPT TO`.
+    Rcpt,
+    /// `DATA`, before the message.
+    Data,
+    /// The end of the message, its `.` line.
+    Message,
+}
+
+/// What the server does at a step in place of its success.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SmtpAnswer {
+    /// This reply line, without its CRLF (`550 5.1.1 <x>: Recipient address
+    /// rejected`).
+    Reply(String),
+    /// No answer: the server reads and discards whatever comes next until
+    /// the client hangs up.
+    Stall,
+    /// The connection closed, no answer given.
+    HangUp,
+}
+
+impl SmtpAnswer {
+    /// [`SmtpAnswer::Reply`] of `line`.
+    pub fn reply(line: &str) -> SmtpAnswer {
+        SmtpAnswer::Reply(line.to_string())
+    }
+}
+
+/// What every connection shares with the test.
+#[derive(Default)]
+struct Shared {
+    logins: Mutex<Vec<SmtpLogin>>,
+    deliveries: Mutex<Vec<SmtpDelivery>>,
+    /// The answer of each step for every recipient.
+    answers: Mutex<HashMap<SmtpStep, SmtpAnswer>>,
+    /// The answer of a step of one recipient's transaction, keyed by the
+    /// lowercase address.
+    recipient_answers: Mutex<HashMap<(String, SmtpStep), SmtpAnswer>>,
+    /// How many times the server came to each step.
+    reached: Mutex<HashMap<SmtpStep, usize>>,
+}
+
+impl Shared {
+    /// The answer at `step` for a transaction to `recipient`, if a test
+    /// changed it, after counting the step reached.
+    fn answer_at(&self, step: SmtpStep, recipient: Option<&str>) -> Option<SmtpAnswer> {
+        *self
+            .reached
+            .lock()
+            .expect("the step counts")
+            .entry(step)
+            .or_default() += 1;
+        recipient
+            .and_then(|address| {
+                self.recipient_answers
+                    .lock()
+                    .expect("the recipient answers")
+                    .get(&(address.to_ascii_lowercase(), step))
+                    .cloned()
+            })
+            .or_else(|| {
+                self.answers
+                    .lock()
+                    .expect("the answers")
+                    .get(&step)
+                    .cloned()
+            })
+    }
+}
+
 /// A running server, which lives as long as the test process.
 pub struct RecordingSmtpServer {
     port: u16,
-    logins: Arc<Mutex<Vec<SmtpLogin>>>,
+    shared: Arc<Shared>,
 }
 
 impl RecordingSmtpServer {
@@ -44,8 +156,8 @@ impl RecordingSmtpServer {
     pub fn start() -> RecordingSmtpServer {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a localhost port");
         let port = listener.local_addr().expect("its address").port();
-        let logins = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&logins);
+        let shared = Arc::new(Shared::default());
+        let served = Arc::clone(&shared);
         std::thread::spawn(move || {
             async_std::task::block_on(async move {
                 let acceptor = async_native_tls::TlsAcceptor::new(IDENTITY, IDENTITY_PASSWORD)
@@ -56,14 +168,14 @@ impl RecordingSmtpServer {
                     let Ok((stream, _)) = listener.accept().await else {
                         continue;
                     };
-                    let (acceptor, recorded) = (acceptor.clone(), Arc::clone(&recorded));
+                    let (acceptor, served) = (acceptor.clone(), Arc::clone(&served));
                     async_std::task::spawn(async move {
-                        let _ = serve(stream, acceptor, recorded).await;
+                        let _ = serve(stream, acceptor, served).await;
                     });
                 }
             });
         });
-        RecordingSmtpServer { port, logins }
+        RecordingSmtpServer { port, shared }
     }
 
     /// The port an account's `[accounts.smtp]` names, with host `127.0.0.1`.
@@ -71,50 +183,146 @@ impl RecordingSmtpServer {
         self.port
     }
 
-    /// Every login accepted so far, in order.
+    /// Every login the server was given so far, in order, whatever it
+    /// answered.
     pub fn logins(&self) -> Vec<SmtpLogin> {
-        self.logins.lock().expect("the login list").clone()
+        self.shared.logins.lock().expect("the login list").clone()
+    }
+
+    /// Every message a DATA brought in so far, in order.
+    pub fn deliveries(&self) -> Vec<SmtpDelivery> {
+        self.shared
+            .deliveries
+            .lock()
+            .expect("the delivery list")
+            .clone()
+    }
+
+    /// Answer every later `step` with `answer`, or as a server that takes
+    /// it with `None`.
+    pub fn answer(&self, step: SmtpStep, answer: Option<SmtpAnswer>) {
+        let mut answers = self.shared.answers.lock().expect("the answers");
+        match answer {
+            Some(answer) => answers.insert(step, answer),
+            None => answers.remove(&step),
+        };
+    }
+
+    /// Answer `step` of every later transaction to `recipient` with
+    /// `answer`, ahead of [`RecordingSmtpServer::answer`]. Only the steps
+    /// that come once the recipient is named apply: [`SmtpStep::Rcpt`],
+    /// [`SmtpStep::Data`] and [`SmtpStep::Message`].
+    pub fn answer_for(&self, recipient: &str, step: SmtpStep, answer: Option<SmtpAnswer>) {
+        let key = (recipient.to_ascii_lowercase(), step);
+        let mut answers = self
+            .shared
+            .recipient_answers
+            .lock()
+            .expect("the recipient answers");
+        match answer {
+            Some(answer) => answers.insert(key, answer),
+            None => answers.remove(&key),
+        };
+    }
+
+    /// How many times the server came to `step` so far, whatever it
+    /// answered.
+    pub fn reached(&self, step: SmtpStep) -> usize {
+        self.shared
+            .reached
+            .lock()
+            .expect("the step counts")
+            .get(&step)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
-/// One connection: the plaintext greeting, EHLO and STARTTLS, the TLS upgrade,
-/// then EHLO again, AUTH and whatever follows, until the client quits.
+/// What a step of a connection comes to.
+enum Next {
+    /// Write this and read on.
+    Write(String),
+    /// Stall or hang up: the connection is over.
+    Stop(SmtpAnswer),
+}
+
+/// The step's success, or what the test made of the step.
+fn at(shared: &Shared, step: SmtpStep, recipient: Option<&str>, success: String) -> Next {
+    match shared.answer_at(step, recipient) {
+        None => Next::Write(success),
+        Some(SmtpAnswer::Reply(line)) => Next::Write(format!("{line}\r\n")),
+        Some(stop) => Next::Stop(stop),
+    }
+}
+
+/// Whether a reply is a refusal, a `4xx` or a `5xx`.
+fn refused(reply: &str) -> bool {
+    matches!(reply.as_bytes().first(), Some(b'4' | b'5'))
+}
+
+/// The address of a `MAIL FROM:<a>` or `RCPT TO:<a>` line, without its
+/// brackets or its parameters.
+fn path_of(line: &str) -> String {
+    let rest = line.split_once(':').map_or("", |(_, rest)| rest).trim();
+    let path = rest.split_whitespace().next().unwrap_or_default();
+    path.trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string()
+}
+
+/// One connection: the greeting, EHLO and STARTTLS in plaintext, the TLS
+/// upgrade, then EHLO again, AUTH and the mail transactions, until the
+/// client quits or a step stops it.
 async fn serve(
     mut plain: TcpStream,
     acceptor: async_native_tls::TlsAcceptor,
-    logins: Arc<Mutex<Vec<SmtpLogin>>>,
+    shared: Arc<Shared>,
 ) -> std::io::Result<()> {
-    plain.write_all(b"220 localhost fake ESMTP\r\n").await?;
+    match at(
+        &shared,
+        SmtpStep::Greeting,
+        None,
+        "220 localhost ESMTP fake\r\n".to_string(),
+    ) {
+        Next::Write(greeting) => {
+            plain.write_all(greeting.as_bytes()).await?;
+            if refused(&greeting) {
+                // RFC 5321 3.1: a server that will not serve says so with a
+                // 554 greeting and waits for QUIT.
+                return refuse_all(&mut plain).await;
+            }
+        }
+        Next::Stop(stop) => return stop_plain(&mut plain, &stop).await,
+    }
     // Byte by byte until STARTTLS, so nothing of the TLS handshake that follows
     // is read into a buffer the acceptor never sees.
     loop {
         let Some(line) = read_plain_line(&mut plain).await? else {
             return Ok(());
         };
-        let verb = line
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-        match verb.as_str() {
-            "EHLO" => {
-                plain
-                    .write_all(b"250-localhost\r\n250 STARTTLS\r\n")
-                    .await?
-            }
+        let verb = verb_of(&line);
+        let answer = match verb.as_str() {
+            // RFC 3207 4: STARTTLS is offered, AUTH is not, before TLS.
+            "EHLO" => at(
+                &shared,
+                SmtpStep::Ehlo,
+                None,
+                "250-localhost\r\n250-ENHANCEDSTATUSCODES\r\n250 STARTTLS\r\n".to_string(),
+            ),
             "STARTTLS" => {
-                plain.write_all(b"220 Ready to start TLS\r\n").await?;
+                plain.write_all(b"220 2.0.0 Ready to start TLS\r\n").await?;
                 break;
             }
             "QUIT" => {
-                plain.write_all(b"221 Bye\r\n").await?;
+                plain.write_all(b"221 2.0.0 Bye\r\n").await?;
                 return Ok(());
             }
-            _ => {
-                plain
-                    .write_all(b"530 Must issue STARTTLS first\r\n")
-                    .await?
-            }
+            "NOOP" | "RSET" => Next::Write("250 2.0.0 Ok\r\n".to_string()),
+            _ => Next::Write("530 5.7.0 Must issue a STARTTLS command first\r\n".to_string()),
+        };
+        match answer {
+            Next::Write(reply) => plain.write_all(reply.as_bytes()).await?,
+            Next::Stop(stop) => return stop_plain(&mut plain, &stop).await,
         }
     }
     let tls = acceptor
@@ -122,27 +330,32 @@ async fn serve(
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut tls = BufReader::new(tls);
-    let mut in_data = false;
+    let mut authenticated = false;
+    // The open transaction: its reverse-path and the recipients taken.
+    let mut from: Option<String> = None;
+    let mut recipients: Vec<String> = Vec::new();
+    let mut queued = 0usize;
     loop {
-        let mut line = String::new();
-        if tls.read_line(&mut line).await? == 0 {
+        let Some(line) = read_tls_line(&mut tls).await? else {
             return Ok(());
-        }
-        if in_data {
-            if line.trim_end_matches(['\r', '\n']) == "." {
-                in_data = false;
-                reply(&mut tls, "250 OK queued\r\n").await?;
-            }
-            continue;
-        }
+        };
         let words: Vec<&str> = line.split_whitespace().collect();
-        let verb = words
-            .first()
-            .copied()
-            .unwrap_or_default()
-            .to_ascii_uppercase();
+        let verb = verb_of(&line);
+        // The recipient a transaction-scoped answer is keyed by: the one
+        // being named, or the first one taken.
+        let named = (verb == "RCPT").then(|| path_of(&line));
+        let recipient = named.as_deref().or(recipients.first().map(String::as_str));
         let answer = match verb.as_str() {
-            "EHLO" => "250-localhost\r\n250 AUTH PLAIN LOGIN\r\n".to_string(),
+            // RFC 3207 4.2: the session starts over, STARTTLS is not offered
+            // again, and AUTH now is.
+            "EHLO" => at(
+                &shared,
+                SmtpStep::Ehlo,
+                None,
+                "250-localhost\r\n250-SIZE 10240000\r\n250-8BITMIME\r\n250-SMTPUTF8\r\n\
+                 250-ENHANCEDSTATUSCODES\r\n250 AUTH PLAIN LOGIN\r\n"
+                    .to_string(),
+            ),
             "AUTH" => {
                 let mechanism = words
                     .get(1)
@@ -155,40 +368,186 @@ async fn serve(
                             Some(initial) => initial.to_string(),
                             None => {
                                 reply(&mut tls, "334 \r\n").await?;
-                                read_tls_line(&mut tls).await?
+                                read_tls_line(&mut tls).await?.unwrap_or_default()
                             }
                         };
                         plain_login(&initial)
                     }
                     "LOGIN" => {
                         reply(&mut tls, "334 VXNlcm5hbWU6\r\n").await?;
-                        let username = decode(&read_tls_line(&mut tls).await?);
+                        let username = decode(&read_tls_line(&mut tls).await?.unwrap_or_default());
                         reply(&mut tls, "334 UGFzc3dvcmQ6\r\n").await?;
-                        let password = decode(&read_tls_line(&mut tls).await?);
+                        let password = decode(&read_tls_line(&mut tls).await?.unwrap_or_default());
                         Some(SmtpLogin { username, password })
                     }
                     _ => None,
                 };
                 match login {
                     Some(login) => {
-                        logins.lock().expect("the login list").push(login);
-                        "235 Authentication succeeded\r\n".to_string()
+                        shared.logins.lock().expect("the login list").push(login);
+                        let answer = at(
+                            &shared,
+                            SmtpStep::Auth,
+                            None,
+                            "235 2.7.0 Authentication successful\r\n".to_string(),
+                        );
+                        authenticated = matches!(&answer, Next::Write(reply) if !refused(reply));
+                        answer
                     }
-                    None => "504 Unrecognized authentication type\r\n".to_string(),
+                    None => {
+                        Next::Write("504 5.5.4 Unrecognized authentication type\r\n".to_string())
+                    }
                 }
             }
-            "DATA" => {
-                in_data = true;
-                "354 End data with <CR><LF>.<CR><LF>\r\n".to_string()
+            "MAIL" if !authenticated => {
+                Next::Write("530 5.7.0 Authentication required\r\n".to_string())
             }
+            "MAIL" if from.is_some() => {
+                Next::Write("503 5.5.1 Error: nested MAIL command\r\n".to_string())
+            }
+            "MAIL" => {
+                let answer = at(
+                    &shared,
+                    SmtpStep::Mail,
+                    None,
+                    "250 2.1.0 Ok\r\n".to_string(),
+                );
+                if matches!(&answer, Next::Write(reply) if !refused(reply)) {
+                    from = Some(path_of(&line));
+                }
+                answer
+            }
+            "RCPT" if from.is_none() => {
+                Next::Write("503 5.5.1 Error: need MAIL command\r\n".to_string())
+            }
+            "RCPT" => {
+                let answer = at(
+                    &shared,
+                    SmtpStep::Rcpt,
+                    recipient,
+                    "250 2.1.5 Ok\r\n".to_string(),
+                );
+                if matches!(&answer, Next::Write(reply) if !refused(reply)) {
+                    recipients.extend(named.clone());
+                }
+                answer
+            }
+            "DATA" if recipients.is_empty() => {
+                Next::Write("554 5.5.1 Error: no valid recipients\r\n".to_string())
+            }
+            "DATA" => {
+                let answer = at(
+                    &shared,
+                    SmtpStep::Data,
+                    recipient,
+                    "354 End data with <CR><LF>.<CR><LF>\r\n".to_string(),
+                );
+                match answer {
+                    Next::Write(go) if !refused(&go) => {
+                        reply(&mut tls, &go).await?;
+                        let Some(data) = read_data(&mut tls).await? else {
+                            return Ok(());
+                        };
+                        queued += 1;
+                        let answer = at(
+                            &shared,
+                            SmtpStep::Message,
+                            recipient,
+                            format!("250 2.0.0 Ok: queued as FAKE{queued}\r\n"),
+                        );
+                        shared
+                            .deliveries
+                            .lock()
+                            .expect("the delivery list")
+                            .push(SmtpDelivery {
+                                from: from.take().unwrap_or_default(),
+                                recipients: std::mem::take(&mut recipients),
+                                data,
+                                acknowledged: matches!(
+                                    &answer,
+                                    Next::Write(reply) if !refused(reply)
+                                ),
+                            });
+                        answer
+                    }
+                    other => other,
+                }
+            }
+            "RSET" => {
+                from = None;
+                recipients.clear();
+                Next::Write("250 2.0.0 Ok\r\n".to_string())
+            }
+            "NOOP" => Next::Write("250 2.0.0 Ok\r\n".to_string()),
             "QUIT" => {
-                reply(&mut tls, "221 Bye\r\n").await?;
+                reply(&mut tls, "221 2.0.0 Bye\r\n").await?;
                 return Ok(());
             }
-            _ => "250 OK\r\n".to_string(),
+            _ => Next::Write("502 5.5.2 Error: command not recognized\r\n".to_string()),
         };
-        reply(&mut tls, &answer).await?;
+        match answer {
+            Next::Write(answer) => reply(&mut tls, &answer).await?,
+            Next::Stop(SmtpAnswer::Stall) => return drain(&mut tls).await,
+            Next::Stop(_) => return Ok(()),
+        }
     }
+}
+
+/// After a refusing greeting: every command but QUIT is refused, until the
+/// client quits or hangs up.
+async fn refuse_all(plain: &mut TcpStream) -> std::io::Result<()> {
+    while let Some(line) = read_plain_line(plain).await? {
+        if verb_of(&line) == "QUIT" {
+            return plain.write_all(b"221 2.0.0 Bye\r\n").await;
+        }
+        plain.write_all(b"503 5.5.1 Error: no service\r\n").await?;
+    }
+    Ok(())
+}
+
+/// A stall or a hang-up before TLS.
+async fn stop_plain(plain: &mut TcpStream, stop: &SmtpAnswer) -> std::io::Result<()> {
+    if *stop == SmtpAnswer::Stall {
+        while read_plain_line(plain).await?.is_some() {}
+    }
+    Ok(())
+}
+
+/// A stall after TLS: read and discard until the client hangs up.
+async fn drain(tls: &mut BufReader<async_native_tls::TlsStream<TcpStream>>) -> std::io::Result<()> {
+    let mut sink = Vec::new();
+    while tls.read_until(b'\n', &mut sink).await? > 0 {
+        sink.clear();
+    }
+    Ok(())
+}
+
+/// The message after a `354`, up to its `.` line, unstuffed; `None` once
+/// the client hung up before the end.
+async fn read_data(
+    tls: &mut BufReader<async_native_tls::TlsStream<TcpStream>>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut data = Vec::new();
+    loop {
+        let mut line = Vec::new();
+        if tls.read_until(b'\n', &mut line).await? == 0 {
+            return Ok(None);
+        }
+        if line == b".\r\n" {
+            return Ok(Some(data));
+        }
+        // RFC 5321 4.5.2: the client doubled every leading dot.
+        let unstuffed = line.strip_prefix(b".").unwrap_or(&line);
+        data.extend_from_slice(unstuffed);
+    }
+}
+
+/// The command verb of a line, upper case.
+fn verb_of(line: &str) -> String {
+    line.split([' ', '\r', '\n'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase()
 }
 
 /// One CRLF-terminated line off the plaintext stream, `None` once the client
@@ -205,12 +564,17 @@ async fn read_plain_line(plain: &mut TcpStream) -> std::io::Result<Option<String
     Ok(Some(String::from_utf8_lossy(&line).into_owned()))
 }
 
+/// One line off the TLS stream without its line end, `None` once the client
+/// hung up.
 async fn read_tls_line(
     tls: &mut BufReader<async_native_tls::TlsStream<TcpStream>>,
-) -> std::io::Result<String> {
-    let mut line = String::new();
-    tls.read_line(&mut line).await?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    if tls.read_until(b'\n', &mut line).await? == 0 {
+        return Ok(None);
+    }
+    let line = String::from_utf8_lossy(&line);
+    Ok(Some(line.trim_end_matches(['\r', '\n']).to_string()))
 }
 
 async fn reply(
