@@ -27,6 +27,7 @@
 
 pub mod carrier;
 pub mod folder;
+pub mod graph_folder;
 pub mod holds;
 pub mod push;
 pub mod reconcile;
