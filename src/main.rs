@@ -265,7 +265,7 @@ enum Commands {
         #[arg(value_name = "SELECTOR")]
         selector: String,
     },
-    /// Open a draft in $EDITOR
+    /// Open a draft in $VISUAL, else $EDITOR
     Edit {
         /// Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
         #[arg(value_name = "SELECTOR")]
@@ -1856,7 +1856,7 @@ enum SignatureAction {
         /// The signature's name
         name: String,
     },
-    /// Open a signature in $EDITOR
+    /// Open a signature in $VISUAL, else $EDITOR
     Edit {
         /// The signature's name
         name: String,
@@ -6281,7 +6281,7 @@ async fn routed_signature(account: &str, action: SignatureAction) -> Result<()> 
                 )
                 .await?,
             )?;
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "hx".to_string());
+            let editor = mp_core::editor::command();
             let status = std::process::Command::new(&editor)
                 .arg(&read.path)
                 .status()
@@ -7162,7 +7162,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
                 serde_json::json!({"account": account_config.name, "selector": selector}),
             )
             .await?;
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "hx".to_string());
+            let editor = mp_core::editor::command();
             let status = std::process::Command::new(&editor)
                 .arg(&location.path)
                 .status()

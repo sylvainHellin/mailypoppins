@@ -16,7 +16,7 @@ Commands:
   mark-draft      Demote an approved draft back to `draft` status (reverse of `mark-approved`)
   new             Create a new email draft from template and print its selector
   path            Print the filesystem path of a draft (the only selector-to-path edge)
-  edit            Open a draft in $EDITOR
+  edit            Open a draft in $VISUAL, else $EDITOR
   reply           Create a reply draft from a received email
   forward         Forward an email to new recipients
   invite          Answer a received calendar invitation: through the server when the account's server calendar holds its event, else by iMIP reply
@@ -184,7 +184,7 @@ Options:
   -h, --help               Print help
 
 $ mp edit --help
-Open a draft in $EDITOR
+Open a draft in $VISUAL, else $EDITOR
 
 Usage: mp edit [OPTIONS] <SELECTOR>
 
@@ -928,7 +928,7 @@ Commands:
   list     List the signatures, marking the account's default
   show     Print a signature's content
   new      Create an empty signature and print the path of its file
-  edit     Open a signature in $EDITOR
+  edit     Open a signature in $VISUAL, else $EDITOR
   rename   Rename a signature
   delete   Delete a signature
   default  Print the account's default signature, or set it, or clear it with --none
@@ -988,7 +988,7 @@ Options:
   -h, --help               Print help
 
 $ mp signature edit --help
-Open a signature in $EDITOR
+Open a signature in $VISUAL, else $EDITOR
 
 Usage: mp signature edit [OPTIONS] <NAME>
 

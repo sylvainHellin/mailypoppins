@@ -180,12 +180,14 @@ pub fn sandbox_env<'a>(cmd: &'a mut Command, root: &Path) -> &'a mut Command {
     // A profile exported in the developer's shell would be refused beside the
     // two directory variables (PERSO-176), so it is cleared with them.
     // `CLICOLOR_FORCE` would colour the check marks a test reads back from
-    // captured output.
+    // captured output. `VISUAL` names the editor before the `EDITOR` a test
+    // sets (PERSO-320), so the developer's own would run instead of the stub.
     cmd.env("HOME", root)
         .env("MAILYPOPPINS_DATA_DIR", root)
         .env("MAILYPOPPINS_CONFIG_DIR", root)
         .env_remove("MAILYPOPPINS_PROFILE")
-        .env_remove("CLICOLOR_FORCE");
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("VISUAL");
     for hook in DAEMON_ENV_HOOKS {
         cmd.env_remove(hook);
     }

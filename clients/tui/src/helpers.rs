@@ -67,12 +67,8 @@ pub(super) fn install_panic_hook() {
 // Editor
 // ---------------------------------------------------------------------------
 
-fn editor() -> String {
-    std::env::var("EDITOR").unwrap_or_else(|_| "hx".to_string())
-}
-
 pub(super) fn edit_file(path: &Path) -> Result<()> {
-    let editor = editor();
+    let editor = mp_core::editor::command();
     let status = std::process::Command::new(&editor)
         .arg(path)
         .status()

@@ -2111,6 +2111,37 @@ fn mp_edit_hands_the_editor_the_path_mp_path_prints() {
     }
 }
 
+/// `$VISUAL` names the editor before `$EDITOR`, the one resolver `mp config
+/// open` and the TUI take too (PERSO-320): with a failing `$EDITOR` beside it,
+/// `mp edit` runs `$VISUAL` and succeeds.
+#[test]
+fn mp_edit_runs_visual_before_editor() {
+    let slice = Slice::start();
+    let expected = slice.agreed_stdout(&["path", fixture::VALID]);
+    let visual = stub_editor(slice.root(), 0);
+    let editor = stub_editor(slice.root(), 3);
+    let log = slice.root().join("visual-editor.log");
+
+    let out = mp_command(slice.root())
+        .env("VISUAL", &visual)
+        .env("EDITOR", &editor)
+        .env("MP_EDITOR_LOG", &log)
+        .args(["edit", fixture::VALID])
+        .output()
+        .expect("run mp edit");
+    assert!(
+        out.status.success(),
+        "`mp edit` ran $VISUAL, not the failing $EDITOR: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&log)
+            .expect("$VISUAL recorded its argument")
+            .trim(),
+        expected.trim()
+    );
+}
+
 /// An editor that fails is an error, and the same error on both routes: the
 /// client owns the editor, so it owns the exit code too.
 #[test]

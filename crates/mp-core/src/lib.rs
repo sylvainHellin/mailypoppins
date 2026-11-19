@@ -32,6 +32,7 @@ pub mod calendar_write;
 pub mod config;
 pub mod contacts;
 pub mod draft;
+pub mod editor;
 pub mod imap_query;
 pub mod invite;
 pub mod logfile;

@@ -232,8 +232,9 @@ Email body here.`;
     <section>
       <h2 id="editing-drafts">Editing Drafts</h2>
       <p>
-        A draft is edited as the file it is. The TUI suspends itself and opens the file in
-        <code>$EDITOR</code>, and returns when the editor exits.
+        A draft is edited as the file it is. The TUI and <code>mp edit</code> open the file in
+        <code>$VISUAL</code>, else <code>$EDITOR</code>, else <code>hx</code>, the TUI suspending
+        itself until the editor exits.
       </p>
       <p>
         The desktop app runs a terminal editor such as Neovim inside its reader pane, with your
