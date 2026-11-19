@@ -160,6 +160,9 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- A server that refuses a flag change, a delete, a move's last step, a search, a folder listing or a download now fails the command in the server's own words ("the server answered NO: [OVERQUOTA] Quota exceeded") instead of reporting success or async-imap's debug text; a refused delete restores its message from the server before it answers, and a download the server answers for only some messages keeps those (PERSO-210).
+- `mp outbox retry`, and the desktop's retry notice, say a Sent copy was already on the server when the retry found it there, instead of counting it as filed; the desktop no longer calls every finished retry "partly delivered" (PERSO-210).
+- `mp archive` and `mp move` print the moved message's selector the way every other command does, without percent-encoded angle brackets (PERSO-210).
 - After a store rebuild, sending a mirrored draft whose server copy was changed in Outlook or on the other machine is refused once and the change is pulled for review, instead of the change being deleted and the older text sent (PERSO-327).
 - On IMAP accounts, an Outlook save of a draft that mp replaced at the same moment no longer overwrites your local edit: both texts are kept, yours as a conflict copy (PERSO-328).
 - After a send whose claim of the draft's server copy failed or lost its answer, the retry no longer deletes an edit saved in Outlook or pushed from the other machine in the meantime (PERSO-182).

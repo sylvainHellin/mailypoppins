@@ -3798,3 +3798,25 @@ Claim only copies whose mp mark carries the local file's hash, and refuse any ot
 
 On IMAP a newer copy without mp's mark beside the row's copy is read as an Outlook edit of an older copy, which is only right if Outlook removes the message it edits.
 Built so that a client keeping the message it edits costs one redundant conflict copy and never lost text, with a live check to confirm the behaviour.
+
+## async-imap drops the tagged status of most commands, so a server's NO read as success (2026-11-20, PERSO-210)
+
+async-imap 0.11 drops the tagged status of FETCH, STORE, EXPUNGE, SEARCH, LIST, CAPABILITY and NOOP (parse_fetches, parse_expunge, parse_ids, parse_names, parse_capabilities, parse_noop stop at the tagged line), so a server's NO reads as an empty success; src/imap_client/checked.rs sends them over run_command and reads the status, and clippy.toml disallows the old methods.
+A server may answer a FETCH with some messages and then a tagged NO (RFC 2180 4.1.2; Gmail's "Some messages could not be FETCHed"): Checked::uid_fetch_partial keeps those messages, since turning that NO into an error stops a sync at one unreadable message for good.
+async-imap keeps a NO or BAD as "code: {code:?}, info: {info:?}" and displays it after "no response: "; src/imap_client/words.rs renders it as the server wrote it, code first, and the LOGIN refusal alone keeps the raw form that is_rejection and the login gate parse.
+The checked commands read their own untagged answers and hand none to the session's unsolicited channel; only async-imap's own commands (SELECT, COPY, IDLE) still fill it, so a test of what is queued there must queue it through one of those.
+
+## A refused delete has no rollback, so the daemon restores the copy its op resolved (2026-11-20, PERSO-210)
+
+pending_ops::apply_delete removes the row and its blobs with Rollback::None.
+The daemon restores that row before it answers, judged present by its mailbox and UID, and fetches the copy the delete op resolved (imap_client::fetch_resolved_copy over the op's ServerCopy, with resolve_copy's UIDVALIDITY and Message-ID rules and a Message-ID check on the bytes).
+Never judge by Message-ID across the account, where a copy in Sent or a twin passes for the deleted row, and never fetch a stale UID, which may hold another message; a quick tick would reach only the newest QUICK_TICK_LIMIT UIDs.
+
+## Wire tests over the fake IMAP and SMTP servers (2026-11-20, PERSO-210)
+
+lettre's AsyncSmtpTransport::send_raw always writes CRLF.CRLF after the message, so bytes that already end in CRLF reach the server with one extra blank line.
+The fake IMAP server's deliver() wakes the daemon's own INBOX watcher into a sync; a test that syncs the new mail itself uses deliver_unannounced, and one that needs mail the store lacks files it in a folder nobody idles on.
+A send whose account has a drain already running returns before its Sent copy is filed ("another engine is draining"); a test counts Sent copies only once the outbox owes no APPEND (WireRoot::sent_once_settled).
+The daemon starts no account runtime for an account without a store, so a test account needs store.sqlite3 created before the daemon starts.
+send.outbox_retry's completed and deduped count every row the drain finished, not the retried one; a client speaks for the row only through state and partial.
+mp-protocol result types are also built as struct literals in clients/desktop/src-tauri/src/fixture.rs, which builds only on the Mac: a new field needs those literals edited by hand, a check in a scratch crate under /var/tmp, and the binding regenerated with `cargo test -p mp-protocol --features ts --test ts_bindings -- --ignored export_bindings`.
