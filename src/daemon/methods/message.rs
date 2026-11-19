@@ -1930,27 +1930,7 @@ impl Method for MessageMutationMethod {
             })
             .await;
             let (result, resource) = match done {
-                Ok(Ok(result)) => result,
-                Ok(Err(refused)) => {
-                    // A delete has no rollback: its row is gone though the
-                    // server, which refused, still holds the message. A quick
-                    // sync of the account brings it back now rather than at
-                    // the user's next one (PERSO-210).
-                    if kind == Kind::Delete {
-                        if let Some(runtime) = account.and_then(|name| self.runtimes.get(&name)) {
-                            let canonical = Arc::clone(&self.canonical);
-                            tokio::spawn(async move {
-                                crate::daemon::runtime::publish::tick_and_publish(
-                                    &runtime,
-                                    &canonical,
-                                    crate::daemon::runtime::account::TickKind::Quick,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                    return Err(DomainError::from(refused));
-                }
+                Ok(result) => result.map_err(DomainError::from)?,
                 Err(e) => {
                     return Err(DomainError::internal(format!(
                         "the mutation worker did not finish: {e}"
@@ -2052,7 +2032,7 @@ async fn mutate(
     snapshot: &super::super::config::Snapshot,
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
-    canonical: &super::super::state::CanonicalState,
+    canonical: &Arc<super::super::state::CanonicalState>,
 ) -> Result<(Value, String), RpcError> {
     mutate_with(
         params,
@@ -2094,7 +2074,7 @@ async fn mutate_with<E: OpExecutor>(
     snapshot: &super::super::config::Snapshot,
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
-    canonical: &super::super::state::CanonicalState,
+    canonical: &Arc<super::super::state::CanonicalState>,
     patience: std::time::Duration,
     resolve: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
 ) -> Result<(Value, String), RpcError> {
@@ -2300,6 +2280,24 @@ async fn mutate_with<E: OpExecutor>(
         let waiting = pending_ops::counts(&store, &name).map_or(true, |(queued, _)| queued > 0);
         if waiting {
             ask_for_drain();
+        }
+        if settled.is_err() && kind == Kind::Delete {
+            // A delete has no rollback: its row is gone though the server,
+            // which refused it, still holds the message. A quick sync of the
+            // account brings the row back now rather than at the user's
+            // next one (PERSO-210). Only a settle the server refused: a
+            // refusal before the commit left the row where it was.
+            if let Some(runtime) = runtimes.get(&name) {
+                let canonical = Arc::clone(canonical);
+                tokio::spawn(async move {
+                    super::super::runtime::publish::tick_and_publish(
+                        &runtime,
+                        &canonical,
+                        super::super::runtime::account::TickKind::Quick,
+                    )
+                    .await;
+                });
+            }
         }
         settled.map_err(|e| refused(canonical, &name, &e))?;
     }
@@ -3925,7 +3923,7 @@ mod tests {
             runtime: Arc<AccountRuntime>,
             runtimes: RuntimeTable,
             /// Where a settle announces what it rolled back.
-            canonical: crate::daemon::state::CanonicalState,
+            canonical: Arc<crate::daemon::state::CanonicalState>,
             _data: TestDataDir,
         }
 
@@ -3969,13 +3967,13 @@ mod tests {
                 Arc::new(AccountRuntime::start_at_with_hooks(&dir, account, 1, hooks).unwrap());
             let runtimes = RuntimeTable::default();
             runtimes.insert(Arc::clone(&runtime));
-            let canonical = crate::daemon::state::CanonicalState::new(
+            let canonical = Arc::new(crate::daemon::state::CanonicalState::new(
                 crate::daemon::state::InstanceId::new("test"),
                 vec![crate::daemon::state::AccountSeed {
                     name: "alice".to_string(),
                     mailboxes: Vec::new(),
                 }],
-            );
+            ));
             Seeded {
                 fx,
                 id,
