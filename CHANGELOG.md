@@ -262,6 +262,7 @@ All notable changes to this project are documented in this file.
 - The daemon tests that failed now and then under load pass reliably: they no longer mistake the daemon's own startup events for theirs, and they wait for the log, the connection count and the event stream to settle instead of reading them once.
 - `mp show` and `mp export` on a drafts selector name the commands that read a draft (`mp <selector>`, `mp path <selector>`, `mp list`), also on an account that has never synced, where they used to advise `mp sync` (PERSO-316).
 - A drafts selector whose draft already went out answers "already sent on <date>" with the sent copy's selector, or its Message-ID when the store holds no copy, instead of "no match"; `mp path`, the preview, edit, send and discard say it, as do the TUI and the desktop app (PERSO-317).
+- A draft sent or discarded from another machine or mail client, whose copy left the server's Drafts folder, no longer answers "no match" either: the same commands say so and print the `mp search -A <account> --mailbox sent --subject=<subject>` command that shows whether it went out (PERSO-317).
 
 ### Removed
 - The daemon no longer sends the unused `new_inbox_mail` list on `sync.completed` or in a sync's answer; new-mail notifications come from `mail.arrived` only, so a TUI of 0.12.0 or older shows none against a newer daemon (PERSO-306).

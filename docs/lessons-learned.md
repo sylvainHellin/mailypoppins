@@ -3637,6 +3637,8 @@ A modal dialog also makes the shell behind it inert, so a panel its action opens
 A fully sent draft is marked `status: sent` with `sent_at` and `message_id` and moved to `drafts/.retired/`, and the daemon's draft lookup scans only the top level of `drafts/`, so its id used to answer "no match".
 The draft miss (`not_found` in `src/daemon/methods/draft.rs`) now reads the retired record to answer "already sent"; after the 30-day prune of `.retired/` the same id answers "no match" again.
 A discarded draft is retired too, without `status: sent`, and keeps "no match".
+A draft sent from the other machine is retired here by the draft mirror with its frontmatter untouched (`status: draft` or `approved`), so only its file name (`<stem>.copy-gone[-n].md`, read by `draft_mirror::reconcile::is_copy_gone`) tells it apart from one discarded here; the miss then says the copy left the server's Drafts folder, since the mirror cannot tell sent from discarded and no key links the record to a Sent row.
+A command printed for the reader carries a value that may start with a dash in one word with its flag (`--subject=<subject>`): as two words clap reads `- Rechnung` as a flag, whatever the shell quoting.
 
 ## A method that reads received mail refuses a drafts selector before it asks for the store (2026-11-19, PERSO-316)
 
