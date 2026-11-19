@@ -963,7 +963,8 @@ fn remove_event(app: &mut App, commands: &dyn Queries, removal: &super::app::Eve
 /// A settled change as the status line: `done`, for a cancel who was told,
 /// and for an invitation mail's change each attendee it did not reach yet
 /// under what became of them (PERSO-204): waiting in the outbox for a later
-/// sync, parked there with no verdict, or refused for good.
+/// sync, parked there with no verdict, parked there never having reached the
+/// server (PERSO-330), or refused for good.
 fn changed_line(done: &str, settled: &Value) -> String {
     let addresses = |key: &str| -> Vec<String> {
         settled[key]
@@ -990,11 +991,35 @@ fn changed_line(done: &str, settled: &Value) -> String {
             queued.join(", ")
         ));
     }
-    let parked = addresses("parked");
-    if !parked.is_empty() {
+    // A parked attendee the transport never reached was sent nothing
+    // (PERSO-330); an older daemon sends no flag, worded as before.
+    let parked = |nothing_sent: bool| -> Vec<String> {
+        settled["parked"]
+            .as_array()
+            .map(|people| {
+                people
+                    .iter()
+                    .filter(|person| {
+                        person["nothing_sent"].as_bool().unwrap_or(false) == nothing_sent
+                    })
+                    .filter_map(|person| person["address"].as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let unverdicted = parked(false);
+    if !unverdicted.is_empty() {
         line.push_str(&format!(
             "; parked with no verdict for {}, check, then mp outbox retry or discard",
-            parked.join(", ")
+            unverdicted.join(", ")
+        ));
+    }
+    let unsent = parked(true);
+    if !unsent.is_empty() {
+        line.push_str(&format!(
+            "; never reached the server for {}, nothing was sent, mp outbox retry or discard",
+            unsent.join(", ")
         ));
     }
     let refused = addresses("refused");
@@ -2462,6 +2487,27 @@ mod tests {
             "Updated Budget review; waits in the outbox for bob@example.com, goes out with a \
              later sync; parked with no verdict for eve@example.com, check, then mp outbox \
              retry or discard; refused for good: cy@example.com"
+        );
+    }
+
+    /// PERSO-330: a parked attendee the transport never reached is named as
+    /// one nothing was sent to, apart from one with no verdict.
+    #[test]
+    fn a_changed_line_names_who_was_never_reached() {
+        let outcome = |address: &str, nothing_sent: bool| {
+            json!({"address": address, "role": "To", "delivered": false,
+                   "error": "x", "nothing_sent": nothing_sent})
+        };
+        assert_eq!(
+            changed_line(
+                "Updated Budget review",
+                &json!({"event": {},
+                        "parked": [outcome("bob@example.com", true),
+                                   outcome("eve@example.com", false)]})
+            ),
+            "Updated Budget review; parked with no verdict for eve@example.com, check, then mp \
+             outbox retry or discard; never reached the server for bob@example.com, nothing was \
+             sent, mp outbox retry or discard"
         );
     }
 }

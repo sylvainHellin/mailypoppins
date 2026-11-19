@@ -373,8 +373,8 @@ function named(recipients: RecipientOutcome[]): string {
 /**
  * What a settled change says: what was done, for a cancel who was told,
  * and for an invitation mail's change each attendee it did not reach yet:
- * waiting in the outbox for a later sync, parked there with no verdict, or
- * refused for good.
+ * waiting in the outbox for a later sync, parked there with no verdict,
+ * parked there never having reached the server, or refused for good.
  */
 export function changedText(run: EventChangeRun, result: unknown): string {
   let text = `${VERB[run.kind][1]} ${run.summary}`;
@@ -383,7 +383,11 @@ export function changedText(run: EventChangeRun, result: unknown): string {
   else if (told.length > 1) text = `${text}; told ${told.length} people`;
   const { queued, parked, refused } = unreachedOf(result);
   if (queued.length > 0) text = `${text}; waits in the outbox for ${named(queued)}, goes out with a later sync`;
-  if (parked.length > 0) text = `${text}; parked with no verdict for ${named(parked)}, check, then retry or discard it in the outbox`;
+  // A parked attendee the transport never reached was sent nothing (PERSO-330); an older daemon sends no flag, worded as before.
+  const unverdicted = parked.filter((r) => !r.nothing_sent);
+  const unsent = parked.filter((r) => r.nothing_sent);
+  if (unverdicted.length > 0) text = `${text}; parked with no verdict for ${named(unverdicted)}, check, then retry or discard it in the outbox`;
+  if (unsent.length > 0) text = `${text}; never reached the server for ${named(unsent)}, nothing was sent, retry or discard it in the outbox`;
   if (refused.length > 0) text = `${text}; refused for good: ${named(refused)}`;
   return text;
 }

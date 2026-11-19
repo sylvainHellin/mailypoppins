@@ -2586,6 +2586,16 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
              shows it",
             held("did not take it for", detail)
         ),
+        Reach::Unsent(detail) => format!(
+            "No attendee has the message{}; it never reached the server, so nothing was sent, \
+             and mp does not send it again on its own{lost}{dropped}; mp outbox retry -A {name} \
+             sends it, and mp outbox list -A {name} shows it",
+            match (waiting.is_empty(), detail) {
+                (false, _) => format!(": not sent to {}", listed(&waiting)),
+                (true, Some(detail)) => format!(": {detail}"),
+                (true, None) => String::new(),
+            }
+        ),
         Reach::Unconfirmed(detail) => format!(
             "No attendee is known to have the message{}; the server gave no verdict for some, \
              who may have it, and mp does not send it again on its own{lost}{dropped}; mp \
@@ -2618,8 +2628,14 @@ enum Reach {
     Queued(Option<String>),
     /// The server gave no verdict for a recipient, who may hold it: the
     /// outbox keeps the row for a human and never submits it again on its
-    /// own, with the error the transport gave.
+    /// own, with the error the transport gave. A recipient the transport
+    /// never reached beside it does not change that.
     Unconfirmed(Option<String>),
+    /// The transport never reached the server for any recipient left (the
+    /// lookup, the connect or the TLS handshake failed), so nothing was
+    /// sent: the outbox parks the row for a human as for
+    /// [`Reach::Unconfirmed`], and nobody holds it (PERSO-330).
+    Unsent(Option<String>),
 }
 
 impl Reach {
@@ -2628,8 +2644,13 @@ impl Reach {
         let results = &report.send_result.results;
         if results.iter().any(|result| result.success) {
             Reach::Delivered
-        } else if results.iter().any(crate::send::RecipientResult::parked) {
+        } else if results
+            .iter()
+            .any(|result| result.verdict == crate::send::RecipientVerdict::Unknown)
+        {
             Reach::Unconfirmed(None)
+        } else if results.iter().any(crate::send::RecipientResult::parked) {
+            Reach::Unsent(None)
         } else if report.state == Some(crate::outbox::OutboxState::PendingSend) {
             Reach::Queued(None)
         } else {
@@ -2681,8 +2702,10 @@ struct Reached {
     /// goes out to them on a later pass.
     queued: Vec<RecipientOutcome>,
     /// The recipients its outbox row is parked for, with why: a recipient
-    /// got no verdict and may hold it, so the row waits for a human
-    /// (`mp outbox retry` or `discard`) and is never sent again on its own.
+    /// got no verdict and may hold it, or the transport never reached the
+    /// server for it and nothing was sent (`nothing_sent`, PERSO-330), so
+    /// the row waits for a human (`mp outbox retry` or `discard`) and is
+    /// never sent again on its own.
     parked: Vec<RecipientOutcome>,
 }
 
@@ -2732,6 +2755,7 @@ impl Reached {
                 role: "To".to_string(),
                 delivered: false,
                 error: Some(format!("{error:#}")),
+                nothing_sent: false,
             })
             .collect();
         match still_pending(account, built) {
@@ -2867,6 +2891,7 @@ fn unreached_outcome(result: &crate::send::RecipientResult) -> RecipientOutcome 
         role: result.role.to_string(),
         delivered: false,
         error: result.error.clone(),
+        nothing_sent: result.verdict == crate::send::RecipientVerdict::Unreached,
     }
 }
 
@@ -2977,6 +3002,86 @@ mod tests {
     use super::super::super::dispatch::CancelScope;
     use super::super::super::operations::OperationState;
     use super::*;
+
+    /// A failed change whose recipients ended with `verdicts`, as
+    /// [`unreached`] words it.
+    fn failed_change(verdicts: &[(&str, crate::send::RecipientVerdict, &str)]) -> String {
+        let report = crate::send::SendReport {
+            send_result: crate::send::SendResult {
+                results: verdicts
+                    .iter()
+                    .map(|(address, verdict, error)| crate::send::RecipientResult {
+                        address: address.to_string(),
+                        role: crate::send::RecipientRole::To,
+                        success: false,
+                        error: Some(error.to_string()),
+                        verdict: *verdict,
+                    })
+                    .collect(),
+            },
+            state: Some(crate::outbox::OutboxState::Failed),
+            row_id: Some(4),
+        };
+        let sent = ItipSent {
+            change: Reached::of(&report),
+            reach: Reach::of(&report),
+            dropped: Reached::default(),
+            contacts: None,
+        };
+        unreached("work", &sent)
+    }
+
+    const REFUSED: &str =
+        "could not connect to smtp.example.com:587: connection refused; nothing was sent";
+
+    /// PERSO-330: a change that never reached the server says so and that
+    /// nothing was sent, not that the server gave no verdict, and its
+    /// recipients are told the same on the wire.
+    #[test]
+    fn a_change_that_never_reached_the_server_says_nothing_was_sent() {
+        use crate::send::RecipientVerdict::Unreached;
+        let text = failed_change(&[("bob@x", Unreached, REFUSED), ("eve@x", Unreached, REFUSED)]);
+        assert!(
+            text.contains("never reached the server") && text.contains("nothing was sent"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("no verdict") && !text.contains("may have it"),
+            "{text}"
+        );
+
+        let report = crate::send::SendReport {
+            send_result: crate::send::SendResult {
+                results: vec![crate::send::RecipientResult {
+                    address: "bob@x".into(),
+                    role: crate::send::RecipientRole::To,
+                    success: false,
+                    error: Some(REFUSED.into()),
+                    verdict: Unreached,
+                }],
+            },
+            state: Some(crate::outbox::OutboxState::Failed),
+            row_id: Some(4),
+        };
+        let parked = Reached::of(&report).parked;
+        assert_eq!(parked.len(), 1);
+        assert!(parked[0].nothing_sent);
+    }
+
+    /// One recipient without a verdict keeps the no-verdict wording, though
+    /// another never reached the server.
+    #[test]
+    fn a_change_with_one_recipient_without_a_verdict_keeps_the_no_verdict_wording() {
+        use crate::send::RecipientVerdict::{Unknown, Unreached};
+        let text = failed_change(&[
+            ("bob@x", Unknown, "connection reset after DATA"),
+            ("eve@x", Unreached, REFUSED),
+        ]);
+        assert!(
+            text.contains("the server gave no verdict for some"),
+            "{text}"
+        );
+    }
 
     /// The array is the family, in method-name order, and both of it are
     /// durable: a reply abandoned mid-submission is the state the outbox parks.

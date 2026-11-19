@@ -1136,6 +1136,7 @@ fn outcome_of(
                 role: result.role.to_string(),
                 delivered: result.success,
                 error: result.error.clone(),
+                nothing_sent: result.verdict == crate::send::RecipientVerdict::Unreached,
             })
             .collect(),
         sent_copy: match (files_copy, report.state) {

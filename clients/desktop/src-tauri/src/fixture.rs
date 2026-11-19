@@ -337,6 +337,7 @@ fn imip_reached(recipients: &[String]) -> ImipReached {
         role: "To".into(),
         delivered: false,
         error: Some(error.into()),
+        nothing_sent: false,
     };
     for address in recipients {
         let domain = address
@@ -3375,6 +3376,7 @@ fn recipients_of(field: Option<&str>, role: &str) -> Vec<RecipientOutcome> {
             role: role.to_string(),
             delivered: true,
             error: None,
+            nothing_sent: false,
         })
         .collect()
 }
@@ -3663,6 +3665,7 @@ impl State {
                         role: "Cc".into(),
                         delivered: true,
                         error: None,
+                        nothing_sent: false,
                     });
                 }
                 if let Some(last) = recipients.last_mut() {

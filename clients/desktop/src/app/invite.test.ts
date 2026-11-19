@@ -36,7 +36,7 @@ function outcome(delivered: boolean[]): SendOutcome {
     selector: null,
     message_id: "<i@x>",
     status_line: "sent + saved",
-    recipients: delivered.map((d, i) => ({ address: `r${i}@example.com`, role: "To", delivered: d, error: d ? null : "550 no such mailbox" })),
+    recipients: delivered.map((d, i) => ({ address: `r${i}@example.com`, role: "To", delivered: d, error: d ? null : "550 no such mailbox", nothing_sent: false })),
     sent_copy: "filed",
     settle_error: null,
   };

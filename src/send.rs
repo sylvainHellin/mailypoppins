@@ -93,8 +93,10 @@ pub struct RecipientResult {
 
 impl RecipientResult {
     /// True when the outbox parks the recipient's row for a human and never
-    /// sends it again on its own: no verdict came back, or the connection
-    /// was never set up.
+    /// sends it again on its own: no verdict came back, so the recipient may
+    /// hold the message, or the connection was never set up, so nothing was
+    /// sent ([`RecipientVerdict::Unreached`]); a caller that words the two
+    /// apart reads the verdict.
     pub fn parked(&self) -> bool {
         matches!(
             self.verdict,

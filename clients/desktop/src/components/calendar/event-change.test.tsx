@@ -546,6 +546,18 @@ describe("a settled change of an invitation mail", () => {
     );
   });
 
+  // PERSO-330: a parked attendee the transport never reached is told nothing was sent, apart from one with no verdict.
+  it("names a parked attendee the change never reached apart from one with no verdict", () => {
+    const parked = [
+      { address: "bob@example.com", role: "To", delivered: false, error: "connection refused", nothing_sent: true },
+      { address: "eve@example.com", role: "To", delivered: false, error: "connection reset", nothing_sent: false },
+    ];
+    expect(changedText(run("update"), { account: "home", event: event(), parked })).toBe(
+      "Updated Budget; parked with no verdict for eve@example.com (connection reset), check, then retry or discard it in the outbox; " +
+        "never reached the server for bob@example.com (connection refused), nothing was sent, retry or discard it in the outbox",
+    );
+  });
+
   it("a cancel the server deferred for one attendee and refused for another says so on the notice", async () => {
     const r = await calendarOn("imip:1008", () => {
       const mail = mock.events.find((e) => e.id === "imip:1008");

@@ -35,6 +35,14 @@ pub struct RecipientOutcome {
     pub delivered: bool,
     /// The reason it did not, absent when it did.
     pub error: Option<String>,
+    /// Whether the transport never reached the server for it (the lookup,
+    /// the connect or the TLS handshake failed), so nothing was sent and it
+    /// cannot hold the message (PERSO-330). A client words a parked
+    /// recipient by it rather than as one with no verdict. Absent from an
+    /// older daemon, which reads as `false`: worded as before. Sent only when
+    /// `true`, so every other recipient's shape is the one it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nothing_sent: bool,
 }
 
 /// Where the local copy of a sent message ended up.

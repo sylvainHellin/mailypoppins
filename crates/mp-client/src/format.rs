@@ -444,8 +444,9 @@ pub fn recipient_line(recipient: &mp_protocol::send::RecipientOutcome) -> String
 /// The lines `mp event update` and `mp event cancel` print for each
 /// attendee an invitation mail's change did not reach yet, under what became
 /// of them (PERSO-204): `queued` waits in the outbox and goes out with a later
-/// sync, `parked` waits for a human because the server gave no verdict, and
-/// `refused` was refused for good. `account` names the outbox to look in.
+/// sync, `parked` waits for a human because the server gave no verdict or,
+/// marked `nothing_sent`, because the transport never reached the server
+/// (PERSO-330), and `refused` was refused for good. `account` names the outbox to look in.
 pub fn change_recipient_lines(
     account: &str,
     refused: &[mp_protocol::send::RecipientOutcome],
@@ -464,6 +465,10 @@ pub fn change_recipient_lines(
         "parked in the outbox with no verdict, so they may have it: check, then mp outbox \
          retry or mp outbox discard (mp outbox list -A {account})"
     );
+    let unsent_what = format!(
+        "parked in the outbox, it never reached the server, so nothing was sent: mp outbox \
+         retry sends it, or mp outbox discard drops it (mp outbox list -A {account})"
+    );
     queued
         .iter()
         .map(|r| {
@@ -473,7 +478,13 @@ pub fn change_recipient_lines(
                 "waits in the outbox and goes out with a later sync",
             )
         })
-        .chain(parked.iter().map(|r| line("?", r, &parked_what)))
+        .chain(parked.iter().map(|r| {
+            if r.nothing_sent {
+                line("\u{2717}", r, &unsent_what)
+            } else {
+                line("?", r, &parked_what)
+            }
+        }))
         .chain(
             refused
                 .iter()
@@ -1053,6 +1064,7 @@ mod tests {
             role: "To".into(),
             delivered: false,
             error: Some(error.into()),
+            nothing_sent: false,
         };
         assert_eq!(
             change_recipient_lines(
@@ -1071,6 +1083,44 @@ mod tests {
             ]
         );
         assert!(change_recipient_lines("perso", &[], &[], &[]).is_empty());
+    }
+
+    /// PERSO-330: a parked attendee the transport never reached is told
+    /// nothing was sent, not that they may have it; one beside it with no
+    /// verdict keeps its words.
+    #[test]
+    fn a_parked_attendee_never_reached_is_told_nothing_was_sent() {
+        let outcome =
+            |address: &str, error: &str, nothing_sent: bool| mp_protocol::send::RecipientOutcome {
+                address: address.into(),
+                role: "To".into(),
+                delivered: false,
+                error: Some(error.into()),
+                nothing_sent,
+            };
+        assert_eq!(
+            change_recipient_lines(
+                "perso",
+                &[],
+                &[],
+                &[
+                    outcome(
+                        "bob@x",
+                        "could not connect to smtp.x:587: connection refused",
+                        true
+                    ),
+                    outcome("eve@x", "connection reset", false),
+                ],
+            ),
+            [
+                "  \u{2717} bob@x (To): could not connect to smtp.x:587: connection refused; \
+                 parked in the outbox, it never reached the server, so nothing was sent: mp \
+                 outbox retry sends it, or mp outbox discard drops it (mp outbox list -A perso)",
+                "  ? eve@x (To): connection reset; parked in the outbox with no verdict, so they \
+                 may have it: check, then mp outbox retry or mp outbox discard (mp outbox list -A \
+                 perso)",
+            ]
+        );
     }
 
     #[test]

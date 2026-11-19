@@ -888,7 +888,7 @@ type ImipReached = { told: string[]; queued?: RecipientOutcome[]; parked?: Recip
  */
 function imipReached(recipients: string[]): ImipReached {
   const out: Required<ImipReached> = { told: [], queued: [], parked: [], refused: [] };
-  const outcome = (address: string, error: string): RecipientOutcome => ({ address, role: "To", delivered: false, error });
+  const outcome = (address: string, error: string): RecipientOutcome => ({ address, role: "To", delivered: false, error, nothing_sent: false });
   for (const address of recipients) {
     const domain = address.slice(address.lastIndexOf("@") + 1).toLowerCase();
     if (domain === "queued.example") out.queued.push(outcome(address, IMIP_DEFERRED_REASON));
