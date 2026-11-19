@@ -2283,21 +2283,20 @@ async fn mutate_with<E: OpExecutor>(
         }
         if settled.is_err() && kind == Kind::Delete {
             // A delete has no rollback: its row is gone though the server,
-            // which refused it, still holds the message. A quick sync of the
-            // account brings the row back now rather than at the user's
-            // next one (PERSO-210). Only a settle the server refused: a
-            // refusal before the commit left the row where it was.
-            if let Some(runtime) = runtimes.get(&name) {
-                let canonical = Arc::clone(canonical);
-                tokio::spawn(async move {
-                    super::super::runtime::publish::tick_and_publish(
-                        &runtime,
-                        &canonical,
-                        super::super::runtime::account::TickKind::Quick,
-                    )
-                    .await;
-                });
-            }
+            // which refused it, still holds the message. The message is
+            // fetched back by its Message-ID, as `message.fetch` does, before
+            // the refusal is answered, whatever its age: a quick sync reaches
+            // only the newest UIDs of the mailbox (PERSO-210). Only a settle
+            // the server refused: a refusal before the commit left the row
+            // where it was.
+            super::message_server::refetch_into_store(
+                snapshot,
+                &name,
+                &row.mailbox,
+                &row.message_id,
+                canonical,
+            )
+            .await;
         }
         settled.map_err(|e| refused(canonical, &name, &e))?;
     }

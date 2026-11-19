@@ -1848,7 +1848,7 @@ fn twin_a_selector_naming_an_unconfigured_account_fails_with_that_account_named(
 
 mod wire {
     use super::support::wire_fixture::{
-        assert_ok, mail, stderr, stdout, wait_for, WireRoot, ARCHIVE, INBOX, TRASH,
+        assert_ok, mail, stderr, stdout, WireRoot, ARCHIVE, INBOX, TRASH,
     };
 
     /// Every op the store still owes the server: `(kind, state)`.
@@ -2028,11 +2028,10 @@ mod wire {
     ///
     /// A delete commits with nothing to roll back (`pending_ops::apply_delete`
     /// releases the row and its blobs in the same transaction), so the
-    /// refusal starts a quick sync of the account, which brings the row back
-    /// from the server that still holds it within seconds, with no `mp sync`
-    /// of the user's: the store is a cache of the server.
+    /// refusal fetches the message back from the server that still holds it,
+    /// with no `mp sync` of the user's: the store is a cache of the server.
     #[test]
-    fn a_refused_server_delete_fails_and_a_sync_it_starts_brings_the_row_back() {
+    fn a_refused_server_delete_fails_and_a_fetch_it_starts_brings_the_row_back() {
         let wire = synced();
         wire.imap
             .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
@@ -2052,15 +2051,51 @@ mod wire {
             owed(&wire)
         );
 
-        // No `mp sync` here: the sync the refusal started brings it back.
-        wait_for("the row to come back", || wire.local("inbox").len() == 2);
+        // No `mp sync` here: the refusal fetched it back before it answered.
         assert_eq!(
             wire.local("inbox"),
             vec![
                 (1, "<first@example.org>".to_string()),
                 (2, "<second@example.org>".to_string())
             ],
-            "the sync the refusal started restores the row from the server"
+            "the fetch the refusal started restores the row from the server"
         );
+    }
+
+    /// A refused delete of a message older than the quick sync's window, the
+    /// newest 100 UIDs, still comes back: the refusal fetches that message
+    /// into the store by its Message-ID rather than leaving it to a quick
+    /// sync, which never reaches it.
+    #[test]
+    fn a_refused_delete_of_an_old_message_brings_that_message_back() {
+        let mut wire = WireRoot::new();
+        let message = |uid: u32| {
+            let id = format!("m{uid}");
+            mail(&id, "ada@example.org", &format!("Message {uid}"), "body")
+        };
+        // Twenty first, then a hundred more: two quick syncs leave all of
+        // them in the store, the first twenty below the newest hundred.
+        wire.imap
+            .set_mail(INBOX, 11, (1..=20).map(|uid| (uid, message(uid))).collect());
+        wire.start(&[]);
+        wire.sync();
+        for uid in 21..=120 {
+            wire.imap.deliver_unannounced(INBOX, message(uid));
+        }
+        wire.sync();
+        assert_eq!(wire.local("inbox").len(), 120);
+
+        wire.imap
+            .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
+        let out = wire.mp(&["delete", "mp://wire/inbox/<m1@example.org>"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+        assert_eq!(server(&wire, INBOX).len(), 120, "the server still holds it");
+
+        // Fetched before the refusal was answered.
+        assert_eq!(
+            wire.local("inbox").first(),
+            Some(&(1, "<m1@example.org>".to_string()))
+        );
+        assert_eq!(wire.local("inbox").len(), 120);
     }
 }

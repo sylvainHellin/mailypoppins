@@ -306,17 +306,53 @@ pub(super) fn fetch_storage(
 /// error for the state it wanted.
 async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Arc<CanonicalState>) {
     handle.set_running();
+    match fetch_into_store(request, &canonical).await {
+        Ok(settled) => handle.succeed(settled),
+        Err(e) => handle.fail(DomainError::from(e)),
+    }
+}
+
+/// Bring the message `message_id` of `mailbox` (a mailbox key) of
+/// `account` into the store from the server, as `message.fetch` does, for a
+/// caller that is no operation: a delete the server refused, whose row the
+/// commit already dropped (PERSO-210). Logs what it came to.
+pub(crate) async fn refetch_into_store(
+    snapshot: &super::super::config::Snapshot,
+    account: &str,
+    mailbox: &str,
+    message_id: &str,
+    canonical: &Arc<CanonicalState>,
+) {
+    let params = json!({"account": account, "mailbox": mailbox, "message_id": message_id});
+    let fetched = match fetch_request(&params, snapshot) {
+        Ok(request) => fetch_into_store(request, canonical).await,
+        Err(e) => Err(e),
+    };
+    match fetched {
+        Ok(settled) => log::info!(
+            "[mutation] {message_id} is back in {account}/{mailbox} from the server: {}",
+            settled["selector"]
+        ),
+        Err(e) => log::warn!(
+            "[mutation] could not fetch {message_id} of {account}/{mailbox} back from the \
+             server; the next sync that reaches it brings it back: {}",
+            e.message
+        ),
+    }
+}
+
+/// [`run_fetch`]'s work: the settled answer, or the refusal.
+async fn fetch_into_store(
+    request: FetchRequest,
+    canonical: &Arc<CanonicalState>,
+) -> Result<Value, RpcError> {
     let name = request.account.name.clone();
 
-    match held_row(&name, &request.message_id) {
-        Err(e) => return handle.fail(DomainError::from(e)),
-        Ok(Some(settled)) => return handle.succeed(settled),
-        Ok(None) => {}
+    if let Some(settled) = held_row(&name, &request.message_id)? {
+        return Ok(settled);
     }
 
-    if let Err(e) = super::open_secrets(&name, request.secrets) {
-        return handle.fail(DomainError::from(e));
-    }
+    super::open_secrets(&name, request.secrets)?;
 
     let fetched = if request.account.auth_method == AuthMethod::Graph {
         graph_fetch(&request).await
@@ -330,7 +366,7 @@ async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Ar
         threading,
     } = match fetched {
         Ok(fetched) => fetched,
-        Err(e) => return handle.fail(DomainError::from(super::server_error(&name, &e))),
+        Err(e) => return Err(super::server_error(&name, &e)),
     };
 
     // Graph already carries the whole payload and ingests under the synthetic
@@ -345,21 +381,18 @@ async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Ar
         raw.as_deref(),
         threading.as_ref(),
     );
-    let (row_id, selector, published) = match ingested {
-        Ok(landed) => landed,
-        Err(e) => return handle.fail(DomainError::from(internal(format!("{e:#}")))),
-    };
+    let (row_id, selector, published) = ingested.map_err(|e| internal(format!("{e:#}")))?;
     if let Some(change) = published {
         canonical.apply(change);
     }
-    handle.succeed(json!({
+    Ok(json!({
         "account": name,
         "mailbox": request.mailbox,
         "uid": uid,
         "row_id": row_id,
         "selector": selector,
         "already_present": false,
-    }));
+    }))
 }
 
 /// The settled answer for a message the store already holds, or `None`.
