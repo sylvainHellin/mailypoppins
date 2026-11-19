@@ -380,7 +380,9 @@ export function retryResult(outcome: OutboxRetryOutcome): { kind: "applied" | "s
     case "sent_pending_append":
       return { kind: "applied", text: `Outbox row ${id} sent; its Sent copy is still owed` };
     case "done":
-      return outcome.partial
+      // Only an explicit `false` reads as plainly sent: an older daemon sends
+      // no `partial`, and its done row may be a partly delivered one.
+      return outcome.partial !== false
         ? { kind: "send_partial", text: `Outbox row ${id} partly delivered; the outbox names who never got it` }
         : { kind: "applied", text: `Outbox row ${id} sent${copies}` };
     case "pending_send":

@@ -238,6 +238,9 @@ describe("the confirmations and the words", () => {
     // A row the retry delivered to everyone is done and not partial; only a done row that kept a note is partly delivered.
     expect(retryResult({ row_id: 5, state: "done", completed: 1, deduped: 0, partial: false })).toEqual({ kind: "applied", text: "Outbox row 5 sent; 1 Sent copy filed" });
     expect(retryResult({ row_id: 5, state: "done", completed: 0, deduped: 0, partial: true }).kind).toBe("send_partial");
+    // An older daemon sends no partial: its done row may be partly delivered, so it keeps that reading.
+    const older = { row_id: 5, state: "done", completed: 1 } as unknown as Parameters<typeof retryResult>[0];
+    expect(retryResult(older)).toEqual({ kind: "send_partial", text: "Outbox row 5 partly delivered; the outbox names who never got it" });
   });
 
   it("counts the queue depth from the outbox, the sends and the pending changes", () => {
