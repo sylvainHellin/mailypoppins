@@ -1202,6 +1202,7 @@ pub(super) async fn get(
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?;
+    refuse_a_draft(params, &name)?;
     let wants_body = flag_param(params, "body", true)?;
     let wait = flag_param(params, "wait_for_body", false)?;
 
@@ -1243,6 +1244,42 @@ pub(super) async fn get(
         }
     }
     Ok(result)
+}
+
+/// The refusal of a drafts selector handed to `message.get`, which reads
+/// received mail, naming the commands that read a draft (PERSO-316).
+///
+/// The sentence is [`crate::selector::parse_in`]'s, which every received
+/// method raises; the way forward is added here alone, because `message.get`
+/// is the read, and reading the draft is the right advice for a read and not
+/// for a move, a flag or a reply. `Ok` for anything that is not a drafts
+/// selector, which [`address`] then resolves or refuses in its own words.
+fn refuse_a_draft(params: &Value, account: &str) -> Result<(), RpcError> {
+    let Some(selector) = params.get("selector").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let mailbox = params.get("mailbox").and_then(Value::as_str);
+    let Ok(parts) = crate::selector::parse(selector) else {
+        return Ok(());
+    };
+    // The selector's own mailbox segment wins over `--mailbox`, as in
+    // `parse_in`.
+    if parts.mailbox.as_deref().or(mailbox) != Some(DRAFTS_MAILBOX) {
+        return Ok(());
+    }
+    let Err(refused) = crate::selector::parse_in(selector, Namespace::Received, account, mailbox)
+    else {
+        return Ok(());
+    };
+    let draft = Selector::new(
+        parts.account.as_deref().unwrap_or(account),
+        DRAFTS_MAILBOX,
+        parts.key,
+    );
+    Err(invalid_params(format!(
+        "{refused:#}. To read the draft, run `mp {draft}`, or `mp path {draft}` for its file; \
+         `mp list` lists the drafts"
+    )))
 }
 
 /// The `result` of `message.attachments` for a stored row: its parts in

@@ -492,6 +492,44 @@ fn a_received_selector_given_to_the_draft_preview_names_mp_show() {
     );
 }
 
+/// PERSO-316, the mirror of the row above: `mp show` on a drafts selector is
+/// refused, and the refusal names the way forward as well as the mistake.
+/// `mp path <selector>` reads the draft and `mp list` lists the drafts; a
+/// refusal that stops at "this command addresses received mail" left an agent
+/// guessing which command reads a draft.
+#[test]
+fn a_drafts_selector_given_to_mp_show_names_mp_path_and_mp_list() {
+    let fx = Fixture::new();
+    // A store to address received mail in: without one `mp show` stops at
+    // "no local store yet" before it reads the selector.
+    fx.ingest("inbox", 1, "known@example.com", "Known");
+    let printed = fx.ok(&["new", "shown-by-mistake"]);
+    let selector = captured(&printed).to_string();
+    assert!(
+        selector.starts_with(&format!("{}{ACCOUNT}/drafts/", selector::SCHEME)),
+        "mp new piped prints the draft's selector alone: {printed:?}"
+    );
+
+    let stderr = fx.err(&["show", &selector]);
+    // The explanation it has always given stays.
+    assert!(
+        stderr.contains(&format!(
+            "{selector} names the reserved mailbox `drafts`, which holds local drafts; \
+             this command addresses received mail"
+        )),
+        "{stderr}"
+    );
+    // And it names the commands that do read drafts.
+    assert!(
+        stderr.contains("mp path"),
+        "the refusal names `mp path <selector>`, which reads a draft: {stderr}"
+    );
+    assert!(
+        stderr.contains("mp list"),
+        "the refusal names `mp list`, which lists the drafts: {stderr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PERSO-155: a selector the store has no row for is fetched
 // ---------------------------------------------------------------------------
