@@ -160,6 +160,8 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- After a store rebuild, sending a mirrored draft whose server copy was changed in Outlook or on the other machine is refused once and the change is pulled for review, instead of the change being deleted and the older text sent (PERSO-327).
+- On IMAP accounts, an Outlook save of a draft that mp replaced at the same moment no longer overwrites your local edit: both texts are kept, yours as a conflict copy (PERSO-328).
 - After a send whose claim of the draft's server copy failed or lost its answer, the retry no longer deletes an edit saved in Outlook or pushed from the other machine in the meantime (PERSO-182).
 - When the other machine took a draft's server copy while this machine was claiming it to send, the retry is refused as sent elsewhere instead of sending the draft a second time (PERSO-182).
 - Contacts: deleting mail no longer lowers a correspondent's count after a store rebuild; the rebuild counts deleted mail as the live index does (PERSO-237).

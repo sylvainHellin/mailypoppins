@@ -3781,3 +3781,20 @@ To find such a test, run the lib test binary with `XDG_DATA_HOME` pointed at a s
 On the home server clippy-driver died with SIGBUS on two integration tests, and it did so at a commit it had passed an hour earlier.
 At the same time `journalctl -k` showed "critical medium error" read failures on nvme0n1.
 `cargo clean -p mailypoppins` rebuilt the damaged artifacts, and check the kernel log before debugging the compiler.
+
+## Find a test that writes into the real data directory by probing with XDG_DATA_HOME (2026-11-20, PERSO-329)
+
+A test that resolves a store by account name without a TestDataDir on its thread opens <data dir>/accounts/<name>/store.sqlite3 in the user's real data directory; with an empty name that is accounts/store.sqlite3.
+Opening a store whose schema is current writes nothing, so the leak shows only when a new table or column lands.
+Run the lib test binary with XDG_DATA_HOME on a scratch dir seeded with a copy of the store one table behind, and bisect with --exact; the same probe also caught a test running zoxide against the user's real database.
+`open_store` now refuses an empty account name under cfg(test).
+
+## With no sync row, only a copy of this very text is this machine's to claim (2026-11-20, PERSO-327)
+
+A draft with no draft_sync row (a rebuilt store, a push that never wrote its row) gives the send guard nothing to say which copy this machine last saw.
+Claim only copies whose mp mark carries the local file's hash, and refuse any other copy with nothing removed; the reconcile recovers the row and the next send passes through it.
+
+## When a rule rests on an unconfirmed client behaviour, make the wrong case cost a conflict copy (2026-11-20, PERSO-328)
+
+On IMAP a newer copy without mp's mark beside the row's copy is read as an Outlook edit of an older copy, which is only right if Outlook removes the message it edits.
+Built so that a client keeping the message it edits costs one redundant conflict copy and never lost text, with a live check to confirm the behaviour.
