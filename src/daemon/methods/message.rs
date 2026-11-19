@@ -1255,9 +1255,11 @@ pub(super) async fn get(
 ///
 /// The sentence is [`crate::selector::parse_in`]'s, which every received
 /// method raises; the way forward is added here alone, because `message.get`
-/// is the read, and reading the draft is the right advice for a read and not
-/// for a move, a flag or a reply. `Ok` for anything that is not a drafts
-/// selector, which [`address`] then resolves or refuses in its own words.
+/// is the read of one message, which `mp show` and `mp export` both go
+/// through, and reading the draft is the right advice for a command that
+/// reads a message and not for a move, a flag or a reply. `Ok` for anything
+/// that is not a drafts selector, which [`address`] then resolves or refuses
+/// in its own words.
 fn refuse_a_draft(params: &Value, account: &str) -> Result<(), RpcError> {
     let Some(selector) = params.get("selector").and_then(Value::as_str) else {
         return Ok(());

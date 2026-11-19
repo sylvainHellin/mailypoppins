@@ -453,6 +453,8 @@ The daemon keeps the last few server copies it downloaded for two minutes, by ac
 `selector` is the grammar `mp show` takes from a user (`<message-id>`, `<mailbox>/<message-id>`, `mp://<account>/<mailbox>/<message-id>`, and either form that names its mailbox followed by `/<uid>` for one of two copies sharing a `Message-ID` there, PERSO-239), resolved daemon-side the way `resolve_received_arg` resolves it, with the optional `mailbox` narrowing it exactly as `mp show --mailbox` does: the resolution needs the store the client no longer has.
 Which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
 An unknown uid, a malformed id, a mailbox the account does not have and a selector that resolves to nothing are all `-32602`, in the resolution's own words, so a routed `mp show` reports what the pre-daemon one reported.
+A selector whose mailbox is the drafts, by its own mailbox segment or, when it has none, by `mailbox: "drafts"`, is `-32602` with the refusal every received method gives a draft, followed by the commands that read a draft: `mp <selector>` previews it, `mp path <selector>` prints its file and `mp list` lists the drafts (PERSO-316).
+That refusal comes after the account check and before the store check, so an unknown account is still `-32005`, while an account with no store, or one whose store the daemon is still opening, gets the refusal rather than `-32006`: no sync makes a draft readable through `message.get`.
 
 `body` defaults to `true` and its absence is not its nullity: with `body: false` the key is gone from the result, and with the default it is present and `null` when the row has no text body.
 A row whose body blob the retention sweep evicted gets it back first (PERSO-205): from the raw message or the HTML the row keeps, at once, else from the server's copy of that one message through the same recent copies, stored again when it hashes to the row's `body_blob`.
@@ -925,6 +927,10 @@ Every `path`, `kept` and `shadowed` field is absolute and under `<data_dir>/acco
 An unknown account is `-32005` with `{account}`; an account with no store is `-32006` for the two methods that read one (`draft.reply`, `draft.forward`) and never for the eight that read the directory, because a drafts directory is local truth and an account that has never synced still has one.
 A `kind` outside the three words, and a `message` that is absent or is not an object, are `-32602`.
 An id nothing resolves to is `-32602` with `{account, id}`; a name `draft.create` would overwrite is `-32602` with `{account, name, path}`; a draft already `sent` is `-32602` with `{account, id, status}` for both mutators; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload.
+A sent draft is retired into `drafts/.retired/`, out of the scan, so its id resolves to nothing; when that directory holds a `status: sent` record with the id, every method that resolves a draft id, `send.draft` included, answers "already sent" instead, as `-32602` with `{account, id, status: "sent", sent_at, message_id, sent_copy}` (PERSO-317).
+`sent_at` and `message_id` are the record's, `null` when it lacks the field.
+`sent_copy` is the selector of the sent copy the account's store holds, `null` when the store is not ready or holds no copy, and the message then names the `Message-ID` instead.
+A retired draft that was discarded rather than sent keeps the plain `{account, id}` miss.
 An invalid draft is not a refusal: `draft.validate` reports it and the exit code stays the client's.
 
 ### The `sync.*` family
