@@ -2214,11 +2214,12 @@ fn two_machines_sending_one_approved_draft_send_it_once() {
 }
 
 /// A copy another session expunged while this one claimed it may be the other
-/// machine sending or another client expunging the copy this one flagged: the
-/// send is refused with its outcome unknown, and the draft is neither retired
-/// nor refused again as sent elsewhere.
+/// machine sending it: the send is refused, the row is put back as synced
+/// rather than left claiming, and a retry is refused as sent elsewhere
+/// instead of sending the draft a second time; the reconcile then retires
+/// the file.
 #[test]
-fn a_copy_claimed_by_another_session_refuses_the_send_with_its_outcome_unknown() {
+fn a_copy_claimed_by_another_session_refuses_the_send_and_its_retry() {
     let fx = Fixture::new();
     let path = fx.write("angebot", "d1", "", "eins");
     let mut folder = FakeFolder::default();
@@ -2227,18 +2228,56 @@ fn a_copy_claimed_by_another_session_refuses_the_send_with_its_outcome_unknown()
 
     let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
     assert!(refused.contains("another session removed"), "{refused}");
-    assert!(refused.contains("outcome unknown"), "{refused}");
     assert!(refused.contains("check Sent and Drafts"), "{refused}");
-    assert!(
-        fx.row("d1").unwrap().claiming.is_some(),
-        "kept, claiming, until the claim settles"
+    assert!(!refused.contains("send again"), "{refused}");
+    assert_eq!(
+        fx.row("d1").unwrap().claiming,
+        None,
+        "put back: the copy went elsewhere"
     );
-    for _ in 0..2 {
-        let report = reconciled(&fx, &mut folder);
-        assert_eq!(report.retired, 0, "{report:?}");
-    }
-    assert!(path.exists(), "never retired as copy-gone");
-    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the user's retry goes ahead");
+    folder.claimed_elsewhere = false;
+
+    let retry = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        retry.contains("sent or discarded on another machine"),
+        "{retry}"
+    );
+    let retired: usize = (0..2).map(|_| reconciled(&fx, &mut folder).retired).sum();
+    assert_eq!(retired, 1);
+    assert!(!path.exists(), "retired as sent elsewhere");
+}
+
+/// The same on Graph: a removal that answers 404 because another session
+/// removed the copy first puts the row back, and the retry is refused rather
+/// than sending the draft again.
+#[test]
+fn a_graph_copy_removed_by_another_session_refuses_the_send_and_its_retry() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    graph.removed_elsewhere = true;
+
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(refused.contains("another session removed"), "{refused}");
+    assert_eq!(fx.row("d1").unwrap().claiming, None);
+    graph.removed_elsewhere = false;
+
+    let retry = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        retry.contains("sent or discarded on another machine"),
+        "{retry}"
+    );
+    let retired: usize = (0..2)
+        .map(|_| graph_reconciled(&fx, &mut graph).retired)
+        .sum();
+    assert_eq!(retired, 1);
+    assert!(!path.exists());
 }
 
 /// A connection that drops once the claim has removed the copy leaves a draft
@@ -3066,8 +3105,7 @@ fn two_machines_sending_one_graph_draft_send_it_once() {
 }
 
 /// A copy another session removed first is not this send's claim: the send
-/// is refused with its outcome unknown. A mailbox out of reach refuses it
-/// too, and nothing is sent.
+/// is refused. A mailbox out of reach refuses it too, and nothing is sent.
 #[test]
 fn a_graph_claim_another_session_took_or_could_not_make_refuses_the_send() {
     let fx = graph_fixture();
@@ -3087,7 +3125,7 @@ fn a_graph_claim_another_session_took_or_could_not_make_refuses_the_send() {
 
     graph.removed_elsewhere = true;
     let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
-    assert!(refused.contains("outcome unknown"), "{refused}");
+    assert!(refused.contains("another session removed"), "{refused}");
 }
 
 /// The drain over a Graph mailbox, as the daemon's executor runs it.

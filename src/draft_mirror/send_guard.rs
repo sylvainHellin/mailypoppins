@@ -6,17 +6,25 @@
 //! out of the Drafts folder, and goes ahead only when this session is the one
 //! that removed it.
 //!
-//! - A copy: the draft's `draft_sync` row is forgotten, then the copy is
-//!   removed with `UID STORE \Deleted` and `UID EXPUNGE`, and the send goes
-//!   ahead only when this session saw the untagged `EXPUNGE` of every copy
-//!   ([`DraftsFolder::claim`]).
-//! - A claim that fails, or that sees another session remove a copy, has an
-//!   unknown outcome: the copy may be gone by this session's hand (a
-//!   connection dropped after the `UID EXPUNGE`, another client's plain
-//!   `EXPUNGE` taking the copy this one had flagged, or a folder that kept
-//!   renumbering while the claim read the copy's sequence number) or by
-//!   another machine's send. The send is refused with "outcome unknown: check Sent and Drafts,
-//!   then send again or discard".
+//! - A copy: the draft's `draft_sync` row is marked claiming, then the copy
+//!   is removed with `UID STORE \Deleted` and `UID EXPUNGE` (on Graph, a
+//!   `permanentDelete` of its version), and the send goes ahead only when
+//!   this session saw the untagged `EXPUNGE` of every copy
+//!   ([`DraftsFolder::claim`]); the row is then forgotten.
+//! - A claim that fails has an unknown outcome: the copy may be gone by this
+//!   session's hand (a connection dropped after the `UID EXPUNGE`, a Graph
+//!   answer lost, or a folder that kept renumbering while the claim read the
+//!   copy's sequence number) or not at all. The send is refused with
+//!   "outcome unknown: check Sent and Drafts, then send again or discard",
+//!   and the row stays claiming for the retry.
+//! - A claim that answers that another session removed a copy first: the
+//!   claim settled, most likely by mp on the other machine sending the
+//!   draft. The row is put back as synced and the send refused, so a retry
+//!   meets the "sent or discarded elsewhere" refusal below rather than
+//!   sending the draft a second time. On IMAP the same answer comes from
+//!   another client's plain `EXPUNGE` taking the copy this one had flagged,
+//!   one round trip's window: that unsent draft is retired as copy-gone, and
+//!   moving it back from `drafts/.retired/` pushes it again.
 //! - A copy the row does not name, beside or instead of the one it names,
 //!   that this machine did not write ([`own_copies`]): the copy changed since
 //!   this machine last synced it (an Outlook save, in place on Graph; another
@@ -197,6 +205,36 @@ fn outcome_unknown(mailbox: &str, why: &str) -> anyhow::Error {
     )
 }
 
+/// The refusal when another session removed the draft's server copy while
+/// this send was claiming it: most likely mp on the other machine sending it.
+/// A retry is refused as sent elsewhere, so this one does not say to send
+/// again.
+fn taken_elsewhere(mailbox: &str) -> anyhow::Error {
+    anyhow!(
+        "another session removed this draft's server copy while this send was claiming it, \
+         another machine sending it or another client tidying the folder; nothing was sent here \
+         and the draft is treated as sent or discarded elsewhere: check Sent and Drafts in \
+         {mailbox}; the drafts reconcile retires the file, and a draft moved back from \
+         drafts/.retired/ is pushed again as a new copy"
+    )
+}
+
+/// Put `row` back as it was before the claim marked it claiming, once a
+/// claim has settled without this machine taking the copy: an edit stopped
+/// it, or another session removed the copy first.
+fn put_back(store: &Store, row: Option<&draft_sync::DraftSyncRow>) -> Result<()> {
+    if let Some(row) = row {
+        draft_sync::upsert(
+            store,
+            &draft_sync::DraftSyncRow {
+                claiming: None,
+                ..row.clone()
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Log a refused send at WARN, naming the account, the draft and the
 /// `Message-ID` of its server copy: the error goes back to the client that
 /// asked, and without this line the daemon log kept no trace of it.
@@ -350,26 +388,21 @@ async fn claim<F: DraftsFolder>(
             // back so a retry before the pull is refused the same way rather
             // than read as this machine's own earlier claim, and so the
             // reconcile pulls the edit as a change of the copy the row names.
-            if let Some(row) = &row {
-                draft_sync::upsert(
-                    store,
-                    &draft_sync::DraftSyncRow {
-                        claiming: None,
-                        ..row.clone()
-                    },
-                )?;
-            }
+            put_back(store, row.as_ref())?;
             return Err(ChangedElsewhere {
                 mailbox: mailbox.clone(),
             }
             .into());
         }
         if claim.removed.len() != batch.len() {
-            return Err(outcome_unknown(
-                &mailbox,
-                "another session removed this draft's server copy while this send was claiming \
-                 it, another machine sending it or another client tidying the folder",
-            ));
+            // The claim answered that another session removed a copy first:
+            // the claim settled, and not by this machine's hand. The row comes
+            // back as synced, so a retry finds no copy and a row that names
+            // one and is refused as sent elsewhere, rather than read as this
+            // machine's own earlier claim and sent a second time; the
+            // reconcile then retires the file.
+            put_back(store, row.as_ref())?;
+            return Err(taken_elsewhere(&mailbox));
         }
     }
     // Settled: the row is forgotten, so a send that fails from here leaves a
