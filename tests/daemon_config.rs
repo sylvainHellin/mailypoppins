@@ -1949,6 +1949,183 @@ async fn a_reload_that_changes_nothing_still_announces_itself() {
 }
 
 // ---------------------------------------------------------------------------
+// Layer (b) - mp config open (PERSO-320)
+// ---------------------------------------------------------------------------
+
+/// A stand-in editor: a `sh` script that appends `$MP_TEST_APPEND` to the file
+/// it is handed, and records that it ran in `<root>/editor.ran`.
+fn stand_in_editor(sandbox: &Sandbox) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = sandbox.root.path().join("stand-in-editor.sh");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\nprintf '%s' \"$MP_TEST_APPEND\" >> \"$1\"\n",
+            sandbox.editor_ran().display()
+        ),
+    )
+    .expect("write the stand-in editor");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod the editor");
+    path
+}
+
+impl Sandbox {
+    fn editor_ran(&self) -> PathBuf {
+        self.root.path().join("editor.ran")
+    }
+
+    /// `mp config open` with the stand-in as `$VISUAL` and a failing
+    /// `$EDITOR` beside it, appending `append` to the file.
+    fn config_open(&self, append: &str) -> std::process::Output {
+        self.cmd()
+            .args(["config", "open"])
+            .env("VISUAL", stand_in_editor(self))
+            .env("EDITOR", "/bin/false")
+            .env("MP_TEST_APPEND", append)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run mp config open")
+    }
+}
+
+impl Sandbox {
+    /// The warning lines about `config.toml` in a run's stderr, leaving out
+    /// the SMTP line every command prints for an account with no password.
+    fn config_warnings(&self, out: &std::process::Output) -> Vec<String> {
+        let prefix = format!("⚠ {}: ", self.config_path().display());
+        text(&out.stderr)
+            .lines()
+            .filter(|line| line.starts_with(&prefix))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// No file: the command says where it looked and names `mp config init`,
+/// and opens no editor.
+#[test]
+fn config_open_with_no_file_points_at_config_init_and_opens_nothing() {
+    let sandbox = Sandbox::empty();
+    let out = sandbox.config_open("");
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.lines().any(|line| line
+            == format!(
+                "✗ Config file not found at {}. Run `mp config init` to create it.",
+                sandbox.config_path().display()
+            )),
+        "{stderr}"
+    );
+    assert!(!sandbox.editor_ran().exists(), "no editor ran");
+    assert!(!sandbox.socket().exists(), "no daemon was started");
+}
+
+/// An editor that changed nothing: one line saying so, and no daemon call,
+/// so none is started either.
+#[test]
+fn config_open_on_an_unchanged_file_says_so_and_calls_no_daemon() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let before = sandbox.read_config();
+    let out = sandbox.config_open("");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        fs::read_to_string(sandbox.editor_ran()).expect("$VISUAL ran"),
+        format!("{}\n", sandbox.config_path().display()),
+        "$VISUAL, not the failing $EDITOR, was handed the file `mp config path` prints"
+    );
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "No change to {}; nothing reloaded\n",
+            sandbox.config_path().display()
+        )
+    );
+    assert_eq!(sandbox.read_config(), before);
+    assert!(
+        !sandbox.socket().exists(),
+        "no daemon was contacted or started"
+    );
+}
+
+/// A changed file that loads is reloaded by the running daemon, which says
+/// what the swap did.
+#[tokio::test]
+async fn config_open_reloads_a_changed_file_in_the_running_daemon() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let out = sandbox.config_open(&account_toml("beta", DEFAULT_BODY_FETCH_DEADLINE_SECS));
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "✓ Configuration reloaded: added beta\n");
+    assert_eq!(
+        sandbox.config_warnings(&out),
+        Vec::<String>::new(),
+        "a file that loads cleanly has no warning"
+    );
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+    let get = call_ok(&mut conn, "config.get", json!({})).await;
+    assert_eq!(account_names(&get), vec!["alpha", "beta"]);
+}
+
+/// A changed file that does not load: the daemon's refusal with the path and
+/// the line, and the configuration it had stays live.
+#[tokio::test]
+async fn config_open_reports_a_broken_file_with_its_line_and_keeps_the_old_configuration() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let out = sandbox.config_open(&format!("{BROKEN_LINE}\n"));
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    let line = line_of(&sandbox.read_config(), BROKEN_LINE);
+    let stderr = text(&out.stderr);
+    let refused = format!(
+        "✗ The configuration was refused ({}, line {line}): ",
+        sandbox.config_path().display()
+    );
+    assert!(
+        stderr.lines().any(|shown| shown.starts_with(&refused)),
+        "{refused:?} in {stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|shown| shown == "  The daemon keeps the configuration it had."),
+        "{stderr}"
+    );
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+    let get = call_ok(&mut conn, "config.get", json!({})).await;
+    assert_eq!(get["revision"], json!(0), "nothing was swapped");
+    assert_eq!(account_names(&get), vec!["alpha"]);
+}
+
+/// A changed file that loads with a key the load ignores: reloaded, and the
+/// warning printed now rather than on the next command. The key is the one
+/// of the ticket, `calendar_backend` pasted under `[accounts.mailboxes.sent]`.
+#[tokio::test]
+async fn config_open_prints_each_load_warning_of_the_reloaded_file() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let out = sandbox
+        .config_open("[accounts.mailboxes.sent]\nserver = \"Sent\"\ncalendar_backend = \"ews\"\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "✓ Configuration reloaded: updated alpha\n"
+    );
+    assert_eq!(
+        sandbox.config_warnings(&out),
+        vec![format!(
+            "⚠ {}: account \"alpha\": unknown key `accounts.mailboxes.sent.calendar_backend` is ignored",
+            sandbox.config_path().display()
+        )]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Layer (b) - the first run
 // ---------------------------------------------------------------------------
 

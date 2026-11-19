@@ -533,6 +533,125 @@ pub fn oauth2_stored_line(account: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The config edit (PERSO-320)
+// ---------------------------------------------------------------------------
+
+use mp_protocol::events::ConfigInvalid;
+use mp_protocol::{ErrorCode, RpcError};
+
+/// What `mp config open` and the TUI's `sc` say when the editor left
+/// `config.toml` as it was, and nothing was asked of the daemon.
+pub fn config_unchanged_line(path: &str) -> String {
+    format!("No change to {path}; nothing reloaded")
+}
+
+/// A reload the daemon accepted, from `config.reload`'s three lists, in the
+/// words the desktop's `config.changed` line uses.
+pub fn config_reloaded_line(added: &[String], updated: &[String], removed: &[String]) -> String {
+    let parts: Vec<String> = [("added", added), ("updated", updated), ("removed", removed)]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(verb, names)| format!("{verb} {}", names.join(", ")))
+        .collect();
+    if parts.is_empty() {
+        "Configuration reloaded: no account changed".to_string()
+    } else {
+        format!("Configuration reloaded: {}", parts.join("; "))
+    }
+}
+
+/// A reload the daemon refused: the file, the line when there is one, and
+/// why, as the desktop's `config.invalid` line says it.
+pub fn config_refused_line(refusal: &ConfigInvalid) -> String {
+    let at = match refusal.line {
+        Some(line) => format!("{}, line {line}", refusal.path),
+        None => refusal.path.clone(),
+    };
+    format!("The configuration was refused ({at}): {}", refusal.message)
+}
+
+/// The line under [`config_refused_line`]: a refused file swaps nothing.
+pub const CONFIG_KEPT_LINE: &str = "The daemon keeps the configuration it had.";
+
+/// One finding the load ignores but takes (PERSO-118), as every `mp`
+/// command prints it on its way in.
+pub fn config_warning_line(path: &str, warning: &str) -> String {
+    format!("{path}: {warning}")
+}
+
+/// The `{path, line, message}` of a `config.reload` refused as `-32007`, or
+/// `None` for any other refusal.
+pub fn config_refusal(error: &RpcError) -> Option<ConfigInvalid> {
+    if error.code != ErrorCode::ConfigInvalid.code() {
+        return None;
+    }
+    serde_json::from_value(error.data.clone()?).ok()
+}
+
+#[cfg(test)]
+mod config_edit_tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_reload_names_each_list_that_moved_and_says_so_when_none_did() {
+        assert_eq!(
+            config_reloaded_line(&[], &[], &[]),
+            "Configuration reloaded: no account changed"
+        );
+        assert_eq!(
+            config_reloaded_line(&names(&["beta"]), &[], &names(&["alpha", "gamma"])),
+            "Configuration reloaded: added beta; removed alpha, gamma"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_line_only_when_it_has_one() {
+        let mut refusal = ConfigInvalid {
+            path: "/c/config.toml".into(),
+            line: Some(7),
+            message: "expected `=`".into(),
+        };
+        assert_eq!(
+            config_refused_line(&refusal),
+            "The configuration was refused (/c/config.toml, line 7): expected `=`"
+        );
+        refusal.line = None;
+        assert_eq!(
+            config_refused_line(&refusal),
+            "The configuration was refused (/c/config.toml): expected `=`"
+        );
+    }
+
+    #[test]
+    fn only_a_config_invalid_refusal_decodes_as_one() {
+        let data = serde_json::json!({"path": "/c/config.toml", "line": 3, "message": "m"});
+        let refused = RpcError {
+            code: ErrorCode::ConfigInvalid.code(),
+            message: "m".into(),
+            data: Some(data.clone()),
+        };
+        assert_eq!(
+            config_refusal(&refused),
+            Some(ConfigInvalid {
+                path: "/c/config.toml".into(),
+                line: Some(3),
+                message: "m".into(),
+            })
+        );
+        let other = RpcError {
+            code: ErrorCode::AccountUnknown.code(),
+            message: "m".into(),
+            data: Some(data),
+        };
+        assert_eq!(config_refusal(&other), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The server calendar (PERSO-200)
 // ---------------------------------------------------------------------------
 

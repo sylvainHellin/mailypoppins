@@ -147,6 +147,7 @@ The table is what routes and through what:
 | `mp config set-password [smtp\|imap] [--account] [--stdin]` | `config.set_password`, with the `dialoguer` prompt in the client; without a kind one call with no `kind` stores the password as both (PERSO-297) | P4-U14 |
 | `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
+| `mp config open` | `$VISUAL` (else `$EDITOR`) in the client on `config.toml`, then `config.reload` when the file changed and nothing when it did not, the load warnings read in the client from the file it reloaded | PERSO-320 |
 | `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |
 | `mp hooks list [--json]` | one `hook.list` per account, in configuration order | #0135 |
 | `mp hooks test <hook> <selector> [--mailbox] [--json]` | `hook.test` | #0135 |
@@ -315,6 +316,7 @@ What it holds is a `ConfigStore` (`src/daemon/config.rs`): the loaded `GlobalCon
 Every read method resolves its account against that store rather than against a list captured at startup, so a reload is visible to the next `account.list` without a restart, and `mp daemon status` lists the accounts the live configuration names.
 
 Nothing watches the file yet: a swap happens when a client asks for one, through `config.reload`, `config.init` or `config.add_account`.
+`mp config open` and the TUI's `sc` ask for one when the editor they ran changed the file (PERSO-320).
 The file watcher is a later unit; the mechanism it will drive is this one.
 
 A swap is atomic in the sense that matters: the candidate is parsed and validated in full before anything is stopped, written or installed.
@@ -562,7 +564,7 @@ subject = "^\\[pi\\]"            # a regular expression on the decoded subject
 headers = { "X-Task" = "^yes$" }  # header name to a regular expression
 ```
 
-Nothing watches `config.toml` yet, so a hook added or edited by hand takes effect at the next `mp daemon restart` (or `config.reload`).
+Nothing watches `config.toml` yet, so a hook added or edited by hand takes effect at the next `mp daemon restart` or `config.reload`, which `mp config open` sends when its editor changed the file.
 
 **The sender check is the one to get right**, because a hook may run anything with the user's rights and `From:` alone proves nothing.
 `authenticated_from` passes only when `From:` carries exactly one address, that address is on the list, and the *topmost* `Authentication-Results` header carries `authserv_id` and records a DKIM pass whose signing domain is exactly the `From:` domain.

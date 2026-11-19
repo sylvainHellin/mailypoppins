@@ -1929,6 +1929,17 @@ enum ConfigAction {
         #[command(flatten)]
         no_account: NoAccount,
     },
+    /// Open config.toml in $VISUAL, else $EDITOR, and reload it if it changed
+    ///
+    /// Once the editor exits with the file changed, the daemon reloads it and
+    /// this prints the accounts the reload changed, or the line it refused
+    /// while the configuration in use stays, and each key the load ignored.
+    /// An unchanged file is not reloaded. A daemon is started for the reload
+    /// if none runs, as for the other `mp config` commands.
+    Open {
+        #[command(flatten)]
+        no_account: NoAccount,
+    },
 }
 
 fn prompt_confirmation(message: &str) -> bool {
@@ -6677,6 +6688,100 @@ async fn settle(
     }
 }
 
+/// `mp config open` (PERSO-320): `config.toml` in the editor, then a
+/// `config.reload` when the editor changed it, and the outcome in words.
+///
+/// The daemon reads the file once and nothing watches it, so without the
+/// reload an edit waited for the next restart, and a key the load ignores
+/// showed only as a warning on the next command. An unchanged file asks the
+/// daemon nothing; a changed one reaches it the way every other `mp config`
+/// command that touches the configuration does, starting one if none runs.
+async fn cmd_config_open() -> Result<()> {
+    let path = config_path();
+    let shown = path.display().to_string();
+    if !path.exists() {
+        eprintln!(
+            "{} Config file not found at {shown}. Run `mp config init` to create it.",
+            "\u{2717}".red()
+        );
+        std::process::exit(1);
+    }
+    let before = std::fs::read(&path).with_context(|| format!("reading {shown}"))?;
+    let editor = mp_core::editor::command();
+    let status = std::process::Command::new(&editor)
+        .arg(&path)
+        .status()
+        .with_context(|| format!("running {editor}"))?;
+    if !status.success() {
+        return Err(anyhow!("{editor} exited with {status}"));
+    }
+    // A file the editor removed is not reloaded: the daemon would read its
+    // absence as "no configuration" and stop every account.
+    let after = std::fs::read_to_string(&path).with_context(|| format!("reading {shown}"))?;
+    if after.as_bytes() == before {
+        println!("{}", mp_client::format::config_unchanged_line(&shown));
+        return Ok(());
+    }
+    let warnings = mailypoppins::config::config_warnings(&after);
+
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call_within(
+        &mut connection,
+        "config.reload",
+        serde_json::json!({}),
+        DAEMON_MUTATION_TIMEOUT,
+    )
+    .await;
+    let refused = match answer {
+        Ok(result) => {
+            let list = |key: &str| -> Vec<String> {
+                result[key]
+                    .as_array()
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(|name| name.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            println!(
+                "{} {}",
+                "\u{2713}".green(),
+                mp_client::format::config_reloaded_line(
+                    &list("added"),
+                    &list("updated"),
+                    &list("removed")
+                )
+            );
+            false
+        }
+        Err(error) => {
+            let Some(refusal) = mp_client::format::config_refusal(&error) else {
+                return Err(anyhow!("{}", error.message));
+            };
+            eprintln!(
+                "{} {}",
+                "\u{2717}".red(),
+                mp_client::format::config_refused_line(&refusal)
+            );
+            eprintln!("  {}", mp_client::format::CONFIG_KEPT_LINE);
+            true
+        }
+    };
+    for warning in &warnings {
+        eprintln!(
+            "{} {}",
+            "\u{26a0}".yellow(),
+            mp_client::format::config_warning_line(&shown, warning)
+        );
+    }
+    if refused {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Whether a refusal is the daemon saying this account has no store at all,
 /// which several commands of this slice report as a note and walk past.
 fn is_storeless(error: &mp_protocol::RpcError) -> bool {
@@ -6734,8 +6839,9 @@ fn conflict(message: impl std::fmt::Display) -> clap::Error {
 /// `-A` on a command that names no account, wherever `-A` was written.
 ///
 /// The daemon's lifecycle, the shell completions, the key dump, the account
-/// listing and the five `mp config` commands that are about the whole file
-/// (`init`, `show`, `add-account`, `reset-secrets`, `path`) act on no account,
+/// listing and the six `mp config` commands that are about the whole file
+/// (`init`, `show`, `add-account`, `reset-secrets`, `path`, `open`) act on no
+/// account,
 /// so an `-A` there is a mistake to report rather than a value to ignore:
 /// `mp daemon status -A alpha` used to be accepted and mean nothing. Each of
 /// them shadows the global flag with a hidden [`NoAccount`], which keeps it
@@ -6755,7 +6861,8 @@ fn refuse_account_where_meaningless(
             | ConfigAction::Show { no_account }
             | ConfigAction::ResetSecrets { no_account }
             | ConfigAction::AddAccount { no_account }
-            | ConfigAction::Path { no_account } => no_account,
+            | ConfigAction::Path { no_account }
+            | ConfigAction::Open { no_account } => no_account,
             ConfigAction::SetPassword { .. } | ConfigAction::Oauth2Login => return Ok(()),
         },
         _ => return Ok(()),
@@ -7959,6 +8066,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
 
                 ConfigAction::ResetSecrets { .. } => routed_reset_secrets().await?,
                 ConfigAction::Path { .. } => cmd_config_path(),
+                ConfigAction::Open { .. } => cmd_config_open().await?,
             }
         }
 
@@ -8381,6 +8489,7 @@ mod tests {
                 &["mp", "config", "reset-secrets", "-A", "x"][..],
                 "config reset-secrets",
             ),
+            (&["mp", "config", "open", "-A", "x"][..], "config open"),
         ] {
             let cli = super::Cli::try_parse_from(args)
                 .unwrap_or_else(|e| panic!("{args:?} must parse before the refusal: {e}"));
