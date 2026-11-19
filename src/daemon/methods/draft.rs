@@ -40,7 +40,9 @@
 //! [`crate::selector::draft_not_found`] for an id nothing resolves to, and the
 //! `mark_as_approved` / `mark_as_draft` sentences for a draft that has already
 //! been sent, carrying `{account, id, status}` so a client can tell the case
-//! apart without reading English.
+//! apart without reading English. An id whose draft went out and was retired
+//! into `drafts/.retired/` is answered "already sent" with the same
+//! `status: sent` (PERSO-317), rather than "no match".
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,7 +64,7 @@ use crate::selector::{Namespace, Selector};
 use crate::store::drafts::DraftRow;
 use crate::store::read::MessageRow;
 use crate::store::{BlobStore, Store};
-use crate::types::EmailDraft;
+use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus};
 
 use crate::daemon::config::ConfigStore;
 use crate::daemon::watch::{diagnostics_of, DraftWatch};
@@ -1570,12 +1572,99 @@ fn row_by_id(account: &str, id: &str) -> Option<DraftRow> {
 
 /// `-32602` for an id nothing resolves to, worded as the command has always
 /// worded it and carrying the two fields a client matches on.
+///
+/// A draft that went out is not a wrong id (PERSO-317): a fully sent draft is
+/// retired into `drafts/.retired/`, out of the scan every resolver reads, so
+/// the miss looks there before it answers "no match", and a sent record with
+/// the id gets [`already_sent`] instead. Every draft method that resolves an id
+/// misses through here, so `mp path`, the preview, an edit, a send and a
+/// discard all say the same.
 fn not_found(account: &str, id: &str) -> RpcError {
+    if let Some(sent) = retired_sent(account, id) {
+        return already_sent(account, id, &sent);
+    }
     RpcError {
         code: super::INVALID_PARAMS,
         message: format!("{:#}", crate::selector::draft_not_found(account, id)),
         data: Some(json!({"account": account, "id": id})),
     }
+}
+
+/// The frontmatter of the retired draft `id` of `account` that was sent, the
+/// latest one should the directory hold two.
+///
+/// A retired draft that was discarded rather than sent is no answer: its id
+/// keeps the plain "no match".
+fn retired_sent(account: &str, id: &str) -> Option<EmailFrontmatter> {
+    let dir = crate::config::drafts_dir(account).join(crate::draft::RETIRED_DIR);
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md"))
+        .filter_map(|path| crate::draft::parse_email_draft(&path).ok())
+        .map(|draft| draft.frontmatter)
+        .filter(|sent| {
+            sent.status == EmailStatus::Sent && sent.id.as_deref().map(str::trim) == Some(id)
+        })
+        .max_by(|a, b| a.sent_at.cmp(&b.sent_at))
+}
+
+/// `-32602` for a draft that was already sent: when it went, and where its
+/// sent copy is, as a selector when the store holds the copy and as the
+/// `Message-ID` it went out with otherwise. `status: sent` in the data, as
+/// the approval's refusal of a sent draft carries it.
+fn already_sent(account: &str, id: &str, sent: &EmailFrontmatter) -> RpcError {
+    let when = sent
+        .sent_at
+        .as_deref()
+        .map(|at| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .map(|at| at.format(" on %Y-%m-%d at %H:%M UTC").to_string())
+                .unwrap_or_else(|_| format!(" on {at}"))
+        })
+        .unwrap_or_default();
+    let message_id = sent.message_id.as_deref();
+    let copy = message_id.and_then(|message_id| sent_copy(account, message_id));
+    let found = match (&copy, message_id) {
+        (Some(copy), _) => format!("; its sent copy is {copy}, which `mp show` reads"),
+        (None, Some(message_id)) => format!("; it went out as Message-ID {message_id}"),
+        (None, None) => String::new(),
+    };
+    RpcError {
+        code: super::INVALID_PARAMS,
+        message: format!("{id} in {account}/drafts was already sent{when}{found}"),
+        data: Some(json!({
+            "account": account,
+            "id": id,
+            "status": "sent",
+            "sent_at": sent.sent_at,
+            "message_id": message_id,
+            "sent_copy": copy.map(|copy| copy.to_string()),
+        })),
+    }
+}
+
+/// The selector of the account's sent copy of `message_id`, when its store
+/// holds one: the row the send ingested into `sent`, named as a listing names
+/// it. `None` with no store to ask, or none holding the copy yet.
+fn sent_copy(account: &str, message_id: &str) -> Option<Selector> {
+    // Not while the daemon is still opening the store (PERSO-109), nor one
+    // that is missing or does not open.
+    if super::account::state_of(account) != super::account::STATE_READY {
+        return None;
+    }
+    let store = Store::open(crate::config::store_path(account)).ok()?;
+    // Bracketed first, then bare, as `resolve_received` asks.
+    let key = crate::selector::message_key(message_id);
+    let mut rows =
+        crate::store::read::find_by_message_id(&store, account, &format!("<{key}>")).ok()?;
+    if rows.is_empty() {
+        rows = crate::store::read::find_by_message_id(&store, account, key).ok()?;
+    }
+    rows.iter()
+        .find(|row| crate::reconcile::is_sent_copy(&row.mailbox))
+        .map(|row| Selector::for_message(account, row))
 }
 
 /// `-32010`, carrying the diagnostics the watcher would have published: the

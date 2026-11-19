@@ -2538,17 +2538,18 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
 ///
 /// Routed side only (fake transport). What it proves is the shape of a
 /// successful send end to end: the transport saw the recipients, the outbox
-/// row reached `done`, the draft file is gone, and the line the user reads
-/// came out of the daemon's own outcome.
+/// row reached `done`, the draft file is gone from `drafts/`, and the line the
+/// user reads came out of the daemon's own outcome.
 ///
-/// "Retired" is the file being *removed*, not its `status:` line being
-/// rewritten. `draft::settle_sent_draft` marks the file sent and then deletes
-/// it whenever every recipient took the message and an outbox row is behind
-/// it, because from that moment the copy that matters is the server's: the
-/// durable row APPENDs it to Sent and ingest reads it back, so a file left in
-/// `drafts/` would be a second, staler copy showing up in `mp list` and the
-/// TUI with nothing left to do to it. So the assertion is the pair the
-/// deletion rests on - no file, and a row in the outbox.
+/// "Retired" is the file leaving `drafts/`, not its `status:` line being
+/// rewritten. `draft::settle_sent_draft` marks the file sent and then moves it
+/// into `drafts/.retired/` (#0143) whenever every recipient took the message
+/// and an outbox row is behind it, because from that moment the copy that
+/// matters is the server's: the durable row APPENDs it to Sent and ingest
+/// reads it back, so a file left in `drafts/` would be a second, staler copy
+/// showing up in `mp list` and the TUI with nothing left to do to it. So the
+/// assertion is the pair the retirement rests on - no file in `drafts/`, and a
+/// row in the outbox.
 #[test]
 fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
     let slice = Slice::with_fake_transport();
@@ -2615,6 +2616,92 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
         !text.contains(".sqlite3") && !text.contains("/blobs/"),
         "the outcome named a file the user cannot open:\n{text}"
     );
+}
+
+/// PERSO-317: `mp path` on the selector of a draft that has gone out says it
+/// was already sent, instead of the "no match" that reads as a wrong selector.
+///
+/// Routed side only (fake transport). The send is the real one, `mp send -y`
+/// through the daemon, so the draft ends where a sent draft really ends: marked
+/// `status: sent` with its `sent_at:` and `message_id:`, and retired into
+/// `drafts/.retired/`, out of the directory the drafts index scans. Those
+/// retired-file facts are checked first, as preconditions: they are what a
+/// "sent on <date> as <selector>" answer can be built from, and the drafts
+/// index itself keeps no row for a retired draft.
+#[test]
+fn mp_path_on_a_sent_draft_says_it_was_already_sent() {
+    let slice = Slice::with_fake_transport();
+    let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
+
+    let sent = slice.routed(&["send", &selector, "-y"]);
+    assert_eq!(
+        sent.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(&sent),
+        stderr(&sent)
+    );
+
+    let drafts = fixture::drafts_dir(slice.root(), fixture::ACCOUNT);
+    assert!(
+        !drafts.join(fixture::APPROVED_FILE).exists(),
+        "a fully delivered draft leaves the drafts directory"
+    );
+    let retired = drafts
+        .join(mailypoppins::draft::RETIRED_DIR)
+        .join(fixture::APPROVED_FILE);
+    let record = std::fs::read_to_string(&retired)
+        .unwrap_or_else(|e| panic!("the sent draft is retired to {}: {e}", retired.display()));
+    for field in [
+        "status: sent\n",
+        "sent_at: ",
+        "message_id: ",
+        &format!("id: {}", fixture::APPROVED),
+    ] {
+        assert!(
+            record.contains(field),
+            "the retired draft records {field:?}:\n{record}"
+        );
+    }
+
+    let out = slice.routed(&["path", &selector]);
+    let err = stderr(&out);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a sent draft has no path: {out:?}"
+    );
+    assert_eq!(stdout(&out), "", "a refusal prints no path");
+    assert!(
+        err.contains("already sent"),
+        "the refusal says the draft was already sent:\n{err}"
+    );
+    assert!(
+        !err.contains("no match for"),
+        "a sent draft does not read as a wrong selector:\n{err}"
+    );
+}
+
+/// The guard beside it: a drafts selector that never named a draft keeps the
+/// plain "no match", so the already-sent answer is only given to a draft that
+/// really went out.
+#[test]
+fn mp_path_on_a_draft_that_never_existed_still_answers_no_match() {
+    let slice = Slice::with_fake_transport();
+    let selector = fixture::selector(fixture::ACCOUNT, fixture::UNKNOWN_DRAFT);
+
+    let out = slice.routed(&["path", &selector]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "a miss exits 1: {out:?}");
+    assert!(
+        err.contains(&format!(
+            "no match for {} in the drafts index of {}/drafts",
+            fixture::UNKNOWN_DRAFT,
+            fixture::ACCOUNT
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("already sent"), "{err}");
 }
 
 /// The CLI send path does not wait out the undo-send hold.
