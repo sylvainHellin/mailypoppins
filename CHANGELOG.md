@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Microsoft 365 accounts signed in through Graph now mirror drafts to their Outlook Drafts folder, as IMAP accounts do: a draft written in mp appears in Outlook, a draft started or edited in Outlook reaches mp, and `[accounts.drafts] mirror = false` keeps an account's drafts local (PERSO-182).
 - `mp config open` opens `config.toml` in your editor and has the daemon reload it when the editor closes, printing the reload, the line the daemon refused, or each key it ignored; `sc` in the TUI does the same (PERSO-320).
 - Notes on mail for a coding agent: `mp notes add|new|edit|list|export [--handoff]|done|clear|presets` set a preset (Reply, Decline, Summarize, Explain, Review, Task, Forward) or free-text instruction on a received email, a draft or a new email, kept by the daemon in `<data_dir>/notes.json` so a store rebuild keeps them; the daemon renders one batch prompt for the open notes, and `[notes] presets` replaces the built-in presets while `[agent]` names the agent and where it opens (PERSO-315).
 - A note follows its mail: it is on the message, not its mailbox, so it survives archiving and moves, every copy carries it, a sent draft's note moves onto the sent message, and list rows, conversation rows and thread members carry its state (PERSO-315).
@@ -99,6 +100,8 @@ All notable changes to this project are documented in this file.
 - New-mail notifications in the desktop app (PERSO-186): the daemon announces each sync's new inbox mail once the blocked senders and mail hooks ran, leaving out a first sync's backlog, mail moved to Junk, mail already read and the account's own messages, and one client shows it, the desktop app when open, else the TUI with `notifications = true`.
 
 ### Changed
+- Sending a mirrored draft whose server copy changed since the last sync (an Outlook save, mp on the other machine pushing over it) is refused with nothing removed, the message says so, and the change is pulled at once for you to review and send again; this applies to IMAP accounts too (PERSO-182).
+- On a Graph account, a draft too large for one Graph request (about 2.6 MB as a message) stays local and can still be sent; its push shows as failed once with the reason, and an edit of the draft or a smaller attachment pushes it again (PERSO-182).
 - The editor `mp edit`, `mp signature edit`, `mp config open`, the TUI and the desktop app start is now chosen by one rule: the first of `$VISUAL` and `$EDITOR` that names a terminal editor, else the first one set, else `hx`; a value with arguments (`code --wait`, `emacs -nw`) works in all of them (PERSO-320).
 - A config reload now restarts an account whose drafts, trash or junk folder, mailbox overrides or drafts mirror setting changed, instead of keeping the old value until the next daemon restart (PERSO-320).
 - Drafts are listed newest created first in `mp list`, the TUI and the desktop app, so editing or approving a draft no longer moves it to the top; the creation time is the draft's `date:` field, else its file name's `YYYY-MM-DD-HHMM` prefix, else the file's modification time, and `mp reply` and `mp forward` now write `date:` too. `mp send-approved` sends in the same order.
@@ -157,6 +160,8 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- After a send whose claim of the draft's server copy failed or lost its answer, the retry no longer deletes an edit saved in Outlook or pushed from the other machine in the meantime (PERSO-182).
+- When the other machine took a draft's server copy while this machine was claiming it to send, the retry is refused as sent elsewhere instead of sending the draft a second time (PERSO-182).
 - Contacts: deleting mail no longer lowers a correspondent's count after a store rebuild; the rebuild counts deleted mail as the live index does (PERSO-237).
 - Drafts on Proton: a draft mp pushed from one machine is imported on the other under its own id instead of showing up as a second, foreign draft (PERSO-183).
 - A search with umlauts or other non-ASCII text on a server that cannot search UTF-8 (TUM's Exchange answers BADCHARSET) is answered from the local store, and `mp`, the TUI and the desktop app say that un-synced mail is not covered; before, it printed "No results found". A server search that fails in every mailbox now exits 1 and names the failures (PERSO-214).

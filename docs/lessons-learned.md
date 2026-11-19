@@ -3741,3 +3741,43 @@ The invitation lookup by Message-ID over the Inbox and Deleted Items got two res
 The contact index counted every message ever indexed, while a rebuild recounted from the messages still in the store, so the two disagreed after any delete.
 `deleted_addresses` is filled by a delete trigger on the messages table, which catches every delete path, and is carried across a rebuild; deletes made before the table existed stay lost.
 
+## A Graph removal by item id destroys an edit saved in place (2026-11-19, PERSO-182)
+
+Outlook edits a Graph draft in place: the immutable id stays and only the `changeKey` changes.
+So `permanentDelete` by id removes whatever version the item holds by then, including a save made after you last read it.
+Read the item's `changeKey` first and skip the removal when it differs, then send `If-Match: W/"<changeKey>"` and treat 412, like 404, as "not removed" ([src/graph/drafts.rs](../src/graph/drafts.rs), `remove_draft_version`).
+
+## UID-based code runs on Graph once each (id, changeKey) gets an increasing key (2026-11-19, PERSO-182)
+
+The drafts mirror's push, reconcile and send guard speak IMAP UIDs, which name one immutable copy each.
+Keying every `(immutable id, changeKey)` from an AUTOINCREMENT table makes an in-place edit look like a new, higher UID, and the code runs unchanged ([src/store/graph_draft_versions.rs](../src/store/graph_draft_versions.rs)).
+Keep the key of each draft's first version beside it (`item_key`): a version newer than mp's push but belonging to a draft older than it is an Outlook save of the copy the push replaced, which needs a conflict copy, not a pull.
+
+## Graph sets a message's internet headers only when it creates it (2026-11-19, PERSO-182)
+
+Data a copy carries in custom headers (here the draft file in `X-Mailypoppins-Draft-Source`) cannot be updated by a `PATCH`, so a patched copy keeps the previous file and reads as edited elsewhere.
+Replace the copy instead: create the new one from MIME, then remove the old version exactly.
+
+## A guard that drops its bookkeeping before a remote removal must mark it instead (2026-11-19, PERSO-182)
+
+The send guard deleted the draft's `draft_sync` row before claiming the server copy, so a claim that failed, lost its answer or was cut off by a crash left a retry with no row, and that retry claimed any copy it found, an Outlook save included.
+Mark the row `claiming` and delete it only once the claim settles; a retry checks copies against the claiming row, and no copy at all means this machine's own earlier claim took it.
+An answer proving another session removed the copy settles the claim too: put the row back as synced, or the retry repeats the other machine's send.
+Claim the extra copies first and the copy the row names last, as a separate claim, so a stop on the way leaves the row naming a copy that still exists.
+
+## A permanent refusal needs a retry key that covers what caused it (2026-11-19, PERSO-182)
+
+An op the server can never take as it stands (a Graph copy above one request) is parked failed on its first refusal and is not retried for the same key.
+The key must cover whatever decides the refusal: a copy's size depends on its attachments as much as on the draft file, so the key is the file hash plus each attachment's size (`draft_mirror::sized_push_key`).
+
+## A thread-local test data dir does not cover code that opens a store by account name (2026-11-19, PERSO-182)
+
+`send::tests::sending_a_reply_flags_every_local_copy_of_its_source` and `the_server_mailbox_list_is_deduplicated` open `<real data dir>/accounts/store.sqlite3` through `Catalogue::load(&AccountConfig::default())`, because their fixture sets no `TestDataDir`.
+Opening a store whose schema is current writes nothing, so the file's mtime moves only when a new additive table or column lands.
+To find such a test, run the lib test binary with `XDG_DATA_HOME` pointed at a scratch dir holding a copy of the store one table behind, and bisect by test path.
+
+## SIGBUS from rustc or clippy-driver can be the disk, not the code (2026-11-19, PERSO-182)
+
+On the home server clippy-driver died with SIGBUS on two integration tests, and it did so at a commit it had passed an hour earlier.
+At the same time `journalctl -k` showed "critical medium error" read failures on nvme0n1.
+`cargo clean -p mailypoppins` rebuilt the damaged artifacts, and check the kernel log before debugging the compiler.
