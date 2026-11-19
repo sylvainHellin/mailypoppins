@@ -2678,7 +2678,7 @@ A focus move has to zoom the target pane whenever the current width hides it.
 Twenty agents each building in their own `CARGO_TARGET_DIR` filled the Mac's 460 GB disk with trees of 5 to 17 GB each.
 Agents working in the same checkout share one target dir, which cargo's build lock makes safe, and the batch deletes it when it is done.
 Two worktrees cannot share one: cargo hashes workspace crates relative to the workspace root, so both write the same artifact names, one build overwrites the other mid-run (it surfaces as "function not found" for code that is in the tree), tests run the other tree's binaries and insta writes `.snap.new` into the other tree.
-A worktree gets its own dir, cloned from the shared one with `cp -cR` (APFS copy-on-write, seconds) followed by `cargo clean -p <workspace crates>`, so dependencies stay warm and only the tree's own crates rebuild.
+A worktree builds into its own in-tree `target/`; on the Mac the Worktrunk setup hook clones the main checkout's by APFS reflink (copy-on-write, seconds), so dependencies stay warm and only the tree's own crates rebuild.
 
 ## A file the desktop opens in an editor has to read the draft's route, not the external editor's resolver
 
@@ -3316,9 +3316,9 @@ The retired value is kept as `AuthMethod::RetiredOAuth2`, which every path that 
 
 ## A git worktree has none of the checkout's local .gitignore files (2026-10-23)
 
-The repo's `.gitignore` files are local-only, so a worktree made with `git worktree add` starts with no ignore rules at all.
-A `pnpm build` of the website in such a worktree leaves `website/dist/` and `website/.astro/` untracked, and a broad `git add` commits them.
-An agent in a worktree adds paths by name, or copies the checkout's `.gitignore` files into the worktree first.
+The repo's `.gitignore` files are local-only, so a worktree made with `git worktree add` (or pi-subagents' `isolation: "worktree"`) starts with no ignore rules at all.
+A `pnpm build` of the website in such a worktree leaves `website/dist/` and `website/.astro/` untracked, and a broad `git add -A` commits them.
+`wt switch --create` avoids it, since its setup hook copies the `.gitignore` files in; in a bare worktree, stage paths by name or copy the checkout's `.gitignore` files in first.
 
 ## A draft file is not the only record of its server copy's Message-ID (2026-10-25, PERSO-192)
 
@@ -3432,11 +3432,6 @@ A test that a chord stays the field's while a text field has focus therefore che
 
 The desktop app's `X` dismisses the newest notice in every view, and a full-pane view's own binding wins over the keys every view shares (`VIEW_SHARED_KEYS`), so a view that takes one of those keys silently loses the shared action there.
 Check that list before giving a view a key; the calendar's cancel or delete took `D` instead of the planned `X` for this reason, in the TUI too, so both clients keep one key.
-
-## A worktree has none of the local-only .gitignore files (2026-11-04, PERSO-255)
-
-The `.gitignore` files are kept out of git, so a fresh worktree ignores nothing, and `git add -A` after a website build stages `website/dist` and `website/.astro`.
-Stage paths explicitly in a worktree.
 
 ## An event patch's time is read against the cached event (2026-11-04, PERSO-255)
 
