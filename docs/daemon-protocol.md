@@ -539,7 +539,8 @@ The address makes a note to self listed in the Inbox `own` as much as its Sent c
 An empty `messages` array would be a different claim, that the store holds not even the message that was addressed, which is `-32602` instead.
 
 The address, the `mailbox` narrowing and their refusals are `message.get`'s but for a drafts selector: naming none or more than one of the three is `-32602`, a `row_id` no message has is `-32602`, an unknown account is `-32005` and an account with no store is `-32006`.
-A drafts selector is `-32602` in the selector's own words, without the hint `message.get` adds, and only on an account with a store: `message.thread` asks for the store before it reads the address, so an account with no store answers it with the `-32006` above.
+A drafts selector is `-32602` in the selector's own words, without the hint `message.get` adds, since reading the draft is not its conversation.
+As in `message.get`, it is refused after the account check and before the store check, so an account with no store answers it with the same `-32602` rather than the `-32006` above.
 
 Two optional parameters make the answer the expansion of a conversation row ([The conversation listing](#the-conversation-listing)); without them the answer is the one above, byte for byte.
 

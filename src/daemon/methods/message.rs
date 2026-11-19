@@ -1253,39 +1253,47 @@ pub(super) async fn get(
 /// The refusal of a drafts selector handed to `message.get`, which reads
 /// received mail, naming the commands that read a draft (PERSO-316).
 ///
-/// The sentence is [`crate::selector::parse_in`]'s, which every received
-/// method raises; the way forward is added here alone, because `message.get`
-/// is the read of one message, which `mp show` and `mp export` both go
-/// through, and reading the draft is the right advice for a command that
-/// reads a message and not for a move, a flag or a reply. `Ok` for anything
-/// that is not a drafts selector, which [`address`] then resolves or refuses
-/// in its own words.
+/// The sentence is [`drafts_selector`]'s; the way forward is added here alone,
+/// because `message.get` is the read of one message, which `mp show` and
+/// `mp export` both go through, and reading the draft is the right advice for
+/// a command that reads a message and not for a move, a flag or a reply.
+/// `Ok` for anything that is not a drafts selector, which [`address`] then
+/// resolves or refuses in its own words.
 fn refuse_a_draft(params: &Value, account: &str) -> Result<(), RpcError> {
-    let Some(selector) = params.get("selector").and_then(Value::as_str) else {
-        return Ok(());
-    };
+    match drafts_selector(params, account) {
+        None => Ok(()),
+        Some((refused, draft)) => Err(invalid_params(format!(
+            "{refused}. To read the draft, run `mp {draft}`, or `mp path {draft}` for its file; \
+             `mp list` lists the drafts"
+        ))),
+    }
+}
+
+/// The selector `params` names when it is a drafts selector, with its refusal
+/// in [`crate::selector::parse_in`]'s words, which every received method
+/// raises, and the draft it names; `None` for anything else, which
+/// [`address`] then resolves or refuses in its own words (PERSO-316).
+///
+/// A method that reads received mail asks this after the account check and
+/// before the store check, so an account with no store yet answers the same
+/// refusal rather than "run `mp sync`", which no sync would make true.
+fn drafts_selector(params: &Value, account: &str) -> Option<(String, Selector)> {
+    let selector = params.get("selector").and_then(Value::as_str)?;
     let mailbox = params.get("mailbox").and_then(Value::as_str);
-    let Ok(parts) = crate::selector::parse(selector) else {
-        return Ok(());
-    };
+    let parts = crate::selector::parse(selector).ok()?;
     // The selector's own mailbox segment wins over `--mailbox`, as in
     // `parse_in`.
     if parts.mailbox.as_deref().or(mailbox) != Some(DRAFTS_MAILBOX) {
-        return Ok(());
+        return None;
     }
-    let Err(refused) = crate::selector::parse_in(selector, Namespace::Received, account, mailbox)
-    else {
-        return Ok(());
-    };
+    let refused =
+        crate::selector::parse_in(selector, Namespace::Received, account, mailbox).err()?;
     let draft = Selector::new(
         parts.account.as_deref().unwrap_or(account),
         DRAFTS_MAILBOX,
         parts.key,
     );
-    Err(invalid_params(format!(
-        "{refused:#}. To read the draft, run `mp {draft}`, or `mp path {draft}` for its file; \
-         `mp list` lists the drafts"
-    )))
+    Some((format!("{refused:#}"), draft))
 }
 
 /// The `result` of `message.attachments` for a stored row: its parts in
@@ -1431,8 +1439,18 @@ pub(super) fn address(
 /// `prefer_mailbox` and `include_drafts` make the answer the expansion of a
 /// conversation row (#0142): the fold keeps the copy in the preferred mailbox,
 /// and the drafts that answer or forward a member join it ([`join_drafts`]).
+///
+/// A drafts selector is refused as `message.get` refuses it, after the account
+/// check and before the store check ([`drafts_selector`], PERSO-316),
+/// but without `message.get`'s hint: reading the draft is not its
+/// conversation, which is what a caller of this method asked for, and no
+/// command offers a draft's conversation to point to instead.
 pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
+    super::account::configured_account(accounts, &name)?;
+    if let Some((refused, _)) = drafts_selector(params, &name) {
+        return Err(invalid_params(refused));
+    }
     let account = super::account::ready_account(accounts, &name)?;
     // The two parameters of the conversation list's expansion (#0142). Absent,
     // the answer is the one before them, byte for byte: the fold keeps the

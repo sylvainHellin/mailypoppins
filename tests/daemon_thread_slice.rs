@@ -798,3 +798,48 @@ async fn the_account_refusals_are_the_read_family_s() {
         "got {storeless:?}"
     );
 }
+
+/// A drafts selector is refused as a draft whether or not the account has a
+/// store: the conversation of a received message is what the method reads, and
+/// no sync gives a draft a received copy, so "run `mp sync`" would be advice
+/// that no sync makes true (PERSO-316).
+///
+/// **Fails before PERSO-316's fix**: the storeless account answers `-32006`.
+#[tokio::test]
+async fn a_drafts_selector_is_refused_as_a_draft_before_the_store_is_asked_about() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    let mut refusals = Vec::new();
+    for account in [fixture::STORELESS_ACCOUNT, fixture::ACCOUNT] {
+        let selector = format!(
+            "{}{account}/drafts/ffb930b9eb194908",
+            mailypoppins::selector::SCHEME
+        );
+        let error = call_err(
+            &mut conn,
+            METHOD,
+            json!({"account": account, "selector": selector}),
+        )
+        .await;
+        assert_eq!(error.code, -32602, "{account}: got {error:?}");
+        assert!(
+            error.message.contains(&format!(
+                "{selector} names the reserved mailbox `drafts`, which holds local drafts; \
+                 this command addresses received mail"
+            )),
+            "{account}: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("mp sync"),
+            "{account}: no sync gives a draft a received copy: {}",
+            error.message
+        );
+        refusals.push(error.message.replace(account, "<account>"));
+    }
+    assert_eq!(
+        refusals[0], refusals[1],
+        "the store decides nothing about a drafts selector"
+    );
+}
