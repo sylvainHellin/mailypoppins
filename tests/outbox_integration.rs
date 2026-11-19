@@ -1683,14 +1683,64 @@ fn each_pass_replaces_the_unsent_list() {
     assert!(row.may_be_delivered());
 }
 
+/// An older build's retry clears the state and the marker and leaves the
+/// envelope, so its `unsent` lines outlive their pass; if that resend then
+/// dies mid-DATA, the row is parked again with the old lines beside a new
+/// marker, and they no longer say anything about it: the row warns.
+#[test]
+fn unsent_lines_of_an_earlier_pass_do_not_hide_a_resend_that_died() {
+    let (account, id) = submitted(RecipientVerdicts {
+        unsent: vec![
+            pair("bob@example.com", REFUSED),
+            pair("blind@example.com", REFUSED),
+        ],
+        ..Default::default()
+    });
+    let first_marker = row_of(&account, id).submission_started_at.unwrap();
+    let (store, _) = account.open();
+    // What an older build's `retry` writes: no envelope change.
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET state = 'pending_send', last_error = NULL,
+             submission_started_at = NULL WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    // Its resend marks the row and dies inside DATA, which a later sweep
+    // parks; the marker is another second than the first one's.
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET submission_started_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, first_marker + 7],
+        )
+        .unwrap();
+    assert_eq!(
+        outbox::sweep_pending_sends(&store, ACCOUNT)
+            .unwrap()
+            .stranded,
+        vec![id]
+    );
+    let row = row_of(&account, id);
+    assert_eq!(row.state, OutboxState::Failed);
+    assert!(
+        !row.envelope.as_ref().unwrap().unsent.is_empty(),
+        "the older build left the lines"
+    );
+    assert!(row.may_be_delivered());
+}
+
 /// The `unsent` line round-trips, and a decoder skips a line kind it does not
 /// know, which is the rule an older build's decoder applies to `unsent:`.
 #[test]
 fn the_unsent_line_round_trips_and_an_unknown_line_is_skipped() {
     let mut envelope = self::envelope();
     envelope.unsent = vec!["blind@example.com".to_string()];
+    envelope.unsent_at = Some(1_790_000_000);
     let encoded = envelope.encode();
     assert!(encoded.contains("\nunsent:blind@example.com"), "{encoded}");
+    assert!(encoded.contains("\nunsent-at:1790000000"), "{encoded}");
     assert_eq!(Envelope::decode(&encoded), envelope);
 
     let later = format!("{}\nkind-of-a-later-build:x", self::envelope().encode());

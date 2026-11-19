@@ -1367,6 +1367,8 @@ mod tests {
                 from: "me@x".into(),
                 recipients: vec![("bob@x".into(), crate::send::RecipientRole::To)],
                 unsent,
+                // Written under the row's own marker.
+                unsent_at: Some(1),
                 ..Default::default()
             }),
         };

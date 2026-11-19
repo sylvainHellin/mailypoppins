@@ -272,6 +272,14 @@ impl OutboxRow {
         let Some(envelope) = &self.envelope else {
             return true;
         };
+        // The lines speak only for the pass that wrote them. This build's
+        // `retry` clears them with the marker in one write, so a stale line
+        // needs an older build's retry, which keeps the envelope, and a
+        // resend marked in the very second the first pass was: the marker is
+        // in whole seconds, and that collision is accepted.
+        if envelope.unsent_at != self.submission_started_at {
+            return !envelope.outstanding().is_empty();
+        }
         envelope
             .outstanding()
             .iter()
@@ -337,6 +345,12 @@ pub struct Envelope {
     /// an older build skips the line, and a row without it reads as one
     /// that may have reached them ([`OutboxRow::may_be_delivered`]).
     pub unsent: Vec<String>,
+    /// The submission marker ([`OutboxRow::submission_started_at`]) of the
+    /// pass that wrote [`Envelope::unsent`]: the lines speak for that pass
+    /// alone. An older build's retry clears the marker and leaves the
+    /// envelope, so a later pass parked under another marker finds lines
+    /// that are not its own, and they are not honoured.
+    pub unsent_at: Option<i64>,
     /// The draft this submission was built from, when it came from one. The
     /// durable half of the admission gate: a second send of the same draft
     /// finds this row instead of enqueuing a second copy (#0063).
@@ -408,6 +422,9 @@ impl Envelope {
             out.push_str("\nunsent:");
             out.push_str(&one_line(addr));
         }
+        if let Some(at) = self.unsent_at {
+            out.push_str(&format!("\nunsent-at:{at}"));
+        }
         for (addr, reason) in &self.rejected {
             out.push_str("\nrejected:");
             out.push_str(&one_line(addr));
@@ -454,6 +471,7 @@ impl Envelope {
                 "bcc" => env.recipients.push((addr.to_string(), RecipientRole::Bcc)),
                 "delivered" => env.delivered.push(addr.to_string()),
                 "unsent" => env.unsent.push(addr.to_string()),
+                "unsent-at" => env.unsent_at = addr.parse().ok(),
                 "rejected" => {
                     let (addr, reason) = addr.split_once('\t').unwrap_or((addr, ""));
                     env.rejected.push((addr.to_string(), reason.to_string()));
@@ -1227,6 +1245,9 @@ fn record_per_recipient(
         .iter()
         .map(|(addr, _)| addr.clone())
         .collect();
+    envelope.unsent_at = (!envelope.unsent.is_empty())
+        .then_some(row.submission_started_at)
+        .flatten();
     store
         .conn()
         .execute(
@@ -2154,6 +2175,7 @@ pub fn retry(store: &Store, id: i64) -> Result<()> {
     let envelope = row.envelope.as_ref().map(|envelope| {
         Envelope {
             unsent: Vec::new(),
+            unsent_at: None,
             ..envelope.clone()
         }
         .encode()
