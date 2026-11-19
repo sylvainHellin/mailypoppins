@@ -1201,8 +1201,12 @@ pub(super) async fn get(
     leg: super::message_body::BodyLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
-    let account = super::account::ready_account(accounts, &name)?;
+    // A drafts selector is refused before the store is asked about, so an
+    // account with no store yet answers the same refusal rather than "run
+    // `mp sync`", which no sync would make true (PERSO-316).
+    super::account::configured_account(accounts, &name)?;
     refuse_a_draft(params, &name)?;
+    let account = super::account::ready_account(accounts, &name)?;
     let wants_body = flag_param(params, "body", true)?;
     let wait = flag_param(params, "wait_for_body", false)?;
 

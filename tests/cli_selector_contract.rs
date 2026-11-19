@@ -530,6 +530,30 @@ fn a_drafts_selector_given_to_mp_show_names_mp_path_and_mp_list() {
     );
 }
 
+/// PERSO-316, the same refusal on an account with no store yet: a drafts
+/// selector is refused for what it is before the store is asked about, so the
+/// answer is not "run `mp sync` first", which no sync would make true.
+#[test]
+fn a_drafts_selector_given_to_mp_show_before_any_sync_is_refused_as_a_draft() {
+    let fx = Fixture::new();
+    let selector = format!("{}{ACCOUNT}/drafts/ffb930b9eb194908", selector::SCHEME);
+
+    let stderr = fx.err(&["show", &selector]);
+    assert!(
+        stderr.contains(&format!(
+            "{selector} names the reserved mailbox `drafts`, which holds local drafts; \
+             this command addresses received mail"
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("mp path"), "{stderr}");
+    assert!(stderr.contains("mp list"), "{stderr}");
+    assert!(
+        !stderr.contains("mp sync"),
+        "no sync gives a draft a received copy: {stderr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PERSO-155: a selector the store has no row for is fetched
 // ---------------------------------------------------------------------------
