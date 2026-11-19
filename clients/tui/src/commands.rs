@@ -1011,14 +1011,16 @@ fn changed_line(done: &str, settled: &Value) -> String {
     let unverdicted = parked(false);
     if !unverdicted.is_empty() {
         line.push_str(&format!(
-            "; parked with no verdict for {}, check, then mp outbox retry or discard",
+            "; parked with no verdict for {}, check, then mp outbox list, then mp outbox retry \
+             <id> or discard <id>",
             unverdicted.join(", ")
         ));
     }
     let unsent = parked(true);
     if !unsent.is_empty() {
         line.push_str(&format!(
-            "; never reached the server for {}, nothing was sent, mp outbox retry or discard",
+            "; never reached the server for {}, nothing was sent, mp outbox list, then mp outbox \
+             retry <id> or discard <id>",
             unsent.join(", ")
         ));
     }
@@ -2486,7 +2488,7 @@ mod tests {
             ),
             "Updated Budget review; waits in the outbox for bob@example.com, goes out with a \
              later sync; parked with no verdict for eve@example.com, check, then mp outbox \
-             retry or discard; refused for good: cy@example.com"
+             list, then mp outbox retry <id> or discard <id>; refused for good: cy@example.com"
         );
     }
 
@@ -2506,8 +2508,9 @@ mod tests {
                                    outcome("eve@example.com", false)]})
             ),
             "Updated Budget review; parked with no verdict for eve@example.com, check, then mp \
-             outbox retry or discard; never reached the server for bob@example.com, nothing was \
-             sent, mp outbox retry or discard"
+             outbox list, then mp outbox retry <id> or discard <id>; never reached the server for \
+             bob@example.com, nothing was sent, mp outbox list, then mp outbox retry <id> or \
+             discard <id>"
         );
     }
 }

@@ -462,12 +462,14 @@ pub fn change_recipient_lines(
         )
     };
     let parked_what = format!(
-        "parked in the outbox with no verdict, so they may have it: check, then mp outbox \
-         retry or mp outbox discard (mp outbox list -A {account})"
+        "parked in the outbox with no verdict, so they may have it: check, then find its row \
+         with mp outbox list -A {account}, then mp outbox retry -A {account} <id> or mp outbox \
+         discard -A {account} <id>"
     );
     let unsent_what = format!(
-        "parked in the outbox, it never reached the server, so nothing was sent: mp outbox \
-         retry sends it, or mp outbox discard drops it (mp outbox list -A {account})"
+        "parked in the outbox, it never reached the server, so nothing was sent: find its row \
+         with mp outbox list -A {account}, then mp outbox retry -A {account} <id> sends it, or \
+         mp outbox discard -A {account} <id> drops it"
     );
     queued
         .iter()
@@ -1077,8 +1079,8 @@ mod tests {
                 "  \u{29d7} bob@x (To): 451 later; waits in the outbox and goes out with a later \
                  sync",
                 "  ? eve@x (To): connection reset; parked in the outbox with no verdict, so they \
-                 may have it: check, then mp outbox retry or mp outbox discard (mp outbox list -A \
-                 perso)",
+                 may have it: check, then find its row with mp outbox list -A perso, then mp \
+                 outbox retry -A perso <id> or mp outbox discard -A perso <id>",
                 "  \u{2717} cy@x (To): 550 no such user; refused for good, so they will not get it",
             ]
         );
@@ -1114,11 +1116,12 @@ mod tests {
             ),
             [
                 "  \u{2717} bob@x (To): could not connect to smtp.x:587: connection refused; \
-                 parked in the outbox, it never reached the server, so nothing was sent: mp \
-                 outbox retry sends it, or mp outbox discard drops it (mp outbox list -A perso)",
+                 parked in the outbox, it never reached the server, so nothing was sent: find \
+                 its row with mp outbox list -A perso, then mp outbox retry -A perso <id> sends \
+                 it, or mp outbox discard -A perso <id> drops it",
                 "  ? eve@x (To): connection reset; parked in the outbox with no verdict, so they \
-                 may have it: check, then mp outbox retry or mp outbox discard (mp outbox list -A \
-                 perso)",
+                 may have it: check, then find its row with mp outbox list -A perso, then mp \
+                 outbox retry -A perso <id> or mp outbox discard -A perso <id>",
             ]
         );
     }

@@ -1404,7 +1404,8 @@ fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
     assert!(
         out.contains(&format!(
             "? bob@example.com (To): {}; parked in the outbox with no verdict, so they may \
-             have it: check, then mp outbox retry or mp outbox discard (mp outbox list -A {IMIP})",
+             have it: check, then find its row with mp outbox list -A {IMIP}, then mp outbox retry \
+             -A {IMIP} <id> or mp outbox discard -A {IMIP} <id>",
             send_fixture::AMBIGUOUS
         )),
         "{out}"

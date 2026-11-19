@@ -2586,14 +2586,22 @@ fn unreached(name: &str, sent: &ItipSent) -> String {
              shows it",
             held("did not take it for", detail)
         ),
-        Reach::Unsent(detail) => format!(
+        Reach::Unsent { detail, row } => format!(
             "No attendee has the message{}; it never reached the server, so nothing was sent, \
-             and mp does not send it again on its own{lost}{dropped}; mp outbox retry -A {name} \
-             sends it, and mp outbox list -A {name} shows it",
+             and mp does not send it again on its own{lost}{dropped}; {}",
             match (waiting.is_empty(), detail) {
                 (false, _) => format!(": not sent to {}", listed(&waiting)),
                 (true, Some(detail)) => format!(": {detail}"),
                 (true, None) => String::new(),
+            },
+            match row {
+                Some(id) => format!(
+                    "mp outbox retry -A {name} {id} sends it, and mp outbox list -A {name} shows it"
+                ),
+                None => format!(
+                    "find its row with mp outbox list -A {name}, then mp outbox retry -A {name} \
+                     <id> sends it"
+                ),
             }
         ),
         Reach::Unconfirmed(detail) => format!(
@@ -2635,7 +2643,12 @@ enum Reach {
     /// lookup, the connect or the TLS handshake failed), so nothing was
     /// sent: the outbox parks the row for a human as for
     /// [`Reach::Unconfirmed`], and nobody holds it (PERSO-330).
-    Unsent(Option<String>),
+    Unsent {
+        /// The error the transport gave.
+        detail: Option<String>,
+        /// The outbox row, which `mp outbox retry` names.
+        row: Option<i64>,
+    },
 }
 
 impl Reach {
@@ -2650,7 +2663,10 @@ impl Reach {
         {
             Reach::Unconfirmed(None)
         } else if results.iter().any(crate::send::RecipientResult::parked) {
-            Reach::Unsent(None)
+            Reach::Unsent {
+                detail: None,
+                row: report.row_id,
+            }
         } else if report.state == Some(crate::outbox::OutboxState::PendingSend) {
             Reach::Queued(None)
         } else {
@@ -3006,6 +3022,13 @@ mod tests {
     /// A failed change whose recipients ended with `verdicts`, as
     /// [`unreached`] words it.
     fn failed_change(verdicts: &[(&str, crate::send::RecipientVerdict, &str)]) -> String {
+        failed_change_of(verdicts, Some(4))
+    }
+
+    fn failed_change_of(
+        verdicts: &[(&str, crate::send::RecipientVerdict, &str)],
+        row_id: Option<i64>,
+    ) -> String {
         let report = crate::send::SendReport {
             send_result: crate::send::SendResult {
                 results: verdicts
@@ -3020,7 +3043,7 @@ mod tests {
                     .collect(),
             },
             state: Some(crate::outbox::OutboxState::Failed),
-            row_id: Some(4),
+            row_id,
         };
         let sent = ItipSent {
             change: Reached::of(&report),
@@ -3047,6 +3070,16 @@ mod tests {
         );
         assert!(
             !text.contains("no verdict") && !text.contains("may have it"),
+            "{text}"
+        );
+        assert!(
+            text.contains("mp outbox retry -A work 4 sends it"),
+            "{text}"
+        );
+        // With no row id, the way to it: the listing names the id.
+        let text = failed_change_of(&[("bob@x", Unreached, REFUSED)], None);
+        assert!(
+            text.contains("mp outbox list -A work, then mp outbox retry -A work <id>"),
             "{text}"
         );
 
