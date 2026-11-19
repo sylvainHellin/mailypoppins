@@ -1972,6 +1972,13 @@ mod wire {
 
     /// `mp sync` ingests what the server holds, a second run finds nothing
     /// new, and mail that arrives later is the third run's.
+    ///
+    /// The later mail arrives unannounced: an announced one wakes the
+    /// daemon's watcher, idling on INBOX, into a sync that could ingest it
+    /// before the test's own and leave that one `0 new`. Unwoken, the
+    /// watcher's round ends only at its 300 s timeout
+    /// (`daemon::runtime::watcher::IDLE_ROUND_SECS`), far past this test, and
+    /// the account's scheduled sync is off (`sync_interval_secs = 0`).
     #[test]
     fn a_sync_ingests_what_the_server_holds_and_then_only_what_is_new() {
         let wire = served();
@@ -1986,9 +1993,11 @@ mod wire {
         );
         assert_eq!(stdout(&wire.sync()), "✓ Synced: 0 new, 2 already present\n");
 
+        // Unannounced: an announced arrival wakes the daemon's watcher, idling
+        // on INBOX, whose sync could take it before this test's own.
         let uid = wire
             .imap
-            .deliver(INBOX, mail("third", "cy@example.org", "Third", "three"));
+            .deliver_unannounced(INBOX, mail("third", "cy@example.org", "Third", "three"));
         assert_eq!(uid, 3, "the folder's next UID");
         assert_eq!(stdout(&wire.sync()), "✓ Synced: 1 new, 2 already present\n");
         assert_eq!(wire.local("inbox").len(), 3);
@@ -2072,9 +2081,11 @@ mod wire {
     fn a_message_the_server_refuses_to_send_does_not_hold_back_the_others() {
         let wire = served();
         wire.imap
-            .deliver(INBOX, mail("third", "cy@example.org", "Third", "three"));
-        wire.imap
             .refuse_fetch_of(2, Some("NO Some messages could not be FETCHed (Failure)"));
+        // Unannounced, so the daemon's watcher syncs nothing before the
+        // test's own sync does.
+        wire.imap
+            .deliver_unannounced(INBOX, mail("third", "cy@example.org", "Third", "three"));
 
         wire.sync();
         assert_eq!(

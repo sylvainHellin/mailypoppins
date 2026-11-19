@@ -574,6 +574,19 @@ impl RejectingImapServer {
         };
     }
 
+    /// A message `raw` arrives in `folder` under its next UID, unseen, and no
+    /// session idling there is told: mail a test syncs itself, which the
+    /// daemon's own watcher, idling on INBOX, must not sync first. Answers
+    /// the new UID.
+    pub fn deliver_unannounced(&self, folder: &str, raw: Vec<u8>) -> u32 {
+        let message_id = message_id_of(&raw).unwrap_or_default();
+        self.shared
+            .change(folder, |mailbox| {
+                mailbox.take(message_id, Vec::new(), Some(raw))
+            })
+            .expect("the folder is served")
+    }
+
     /// How many IDLE commands the server has entered so far: what a test
     /// waits on before it delivers, so the arrival is one IDLE reports.
     pub fn idles(&self) -> usize {
