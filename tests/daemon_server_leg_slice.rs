@@ -91,17 +91,20 @@
 //! The client keeps its sentence by branching on `already_present`, which is
 //! one boolean against a refusal it would have had to match on.
 //!
-//! # What is NOT TESTABLE offline, and the manual check
+//! # The happy paths, and the manual check
 //!
-//! There is no fake IMAP server in this tree, and neither method's happy path
-//! can run without one: `message.fetch` has to `UID SEARCH HEADER Message-ID`
-//! and fetch the bytes, and `message.search_server` has to run a `SEARCH` per
-//! mailbox. Every other slice with a server leg has the same hole, which is why
-//! `tests/support/sync_fixture.rs`'s `gamma` account exists: it configures a
-//! server on the discard port and has no credentials, so credential resolution
-//! refuses *before* anything opens a socket. That is the seam these rows use.
+//! Neither method's happy path runs without a server: `message.fetch` has to
+//! `UID SEARCH HEADER Message-ID` and fetch the bytes, and
+//! `message.search_server` has to run a `SEARCH` per mailbox. The contract
+//! rows use `tests/support/sync_fixture.rs`'s `gamma` account, which configures
+//! a server on the discard port and has no credentials, so credential
+//! resolution refuses *before* anything opens a socket. The `wire` module at the
+//! end of this file runs both happy paths against the fake IMAP server of
+//! `tests/support/fake_imap.rs` (PERSO-210): a server-only hit found and
+//! fetched into the store once, which are steps 1, 3 and 4 of the check below
+//! short of the TUI's own rendering.
 //!
-//! So what is pinned here is the shape: the methods are registered and declared
+//! So what the contract rows pin is the shape: the methods are registered and declared
 //! the way the operation family declares one, the parameters are validated, the
 //! two account refusals are the read family's, the idempotent fetch settles
 //! without a server, and an account that cannot be reached settles as a failed
@@ -1001,4 +1004,152 @@ fn a_search_every_mailbox_refused_fails_naming_why() {
     server.refuse_searches(None);
     let out = daemon.mp(&["search", "-A", "alpha", "--mailbox", "Inbox", "from:ivana"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+// ---------------------------------------------------------------------------
+// Over the wire (PERSO-210)
+// ---------------------------------------------------------------------------
+
+/// The happy paths the module header lists as not testable offline, on an
+/// account the fake IMAP server of `tests/support/fake_imap.rs` serves: a
+/// search whose hit is on the server and not in the store, and the fetch
+/// that brings it in, which is what the overlay's `f` does (the owner's
+/// manual check, steps 1, 3 and 4).
+mod wire {
+    use super::support::wire_fixture::{mail, stdout, WireRoot, ACCOUNT, ARCHIVE, INBOX};
+    use super::{call, operation_id, settle, succeeded, within};
+    use mp_client::{ClientInfo, ClientKind, Connection, Identity};
+    use serde_json::json;
+
+    async fn connect(wire: &WireRoot) -> Connection {
+        let mut conn = within(
+            "Connection::connect",
+            Connection::connect(&super::socket_path(wire.root())),
+        )
+        .await
+        .expect("connect");
+        within(
+            "Connection::initialize",
+            conn.initialize(
+                ClientInfo {
+                    kind: ClientKind::Cli,
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                Identity {
+                    data_dir: wire.root().to_path_buf(),
+                    config_dir: wire.root().to_path_buf(),
+                },
+                &[],
+                &[],
+            ),
+        )
+        .await
+        .expect("handshake");
+        conn
+    }
+
+    /// A root whose store holds `known`, synced from INBOX, and whose
+    /// server's Archive holds `lonely`, filed there after the sync with no
+    /// IDLE told of it (the daemon's watcher idles on INBOX, and a wake
+    /// would sync it in).
+    fn root() -> WireRoot {
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![(
+                1,
+                mail("known", "ada@example.org", "Known ledger", "in both"),
+            )],
+        );
+        wire.start(&[]);
+        wire.sync();
+        wire.imap.set_mail(
+            ARCHIVE,
+            14,
+            vec![(
+                7,
+                mail(
+                    "lonely",
+                    "bob@example.org",
+                    "Lonely ledger",
+                    "only on the server",
+                ),
+            )],
+        );
+        wire
+    }
+
+    /// The server search finds the hit the store lacks, and drops the one
+    /// the client already shows, counting it; `mp search --local` does not
+    /// see it, and `mp search` does.
+    #[tokio::test]
+    async fn a_server_search_finds_a_message_the_store_does_not_hold() {
+        let wire = root();
+        let local = stdout(&wire.mp(&["search", "--local", "subject:ledger"]));
+        assert!(
+            local.contains("known@example.org") && !local.contains("lonely@example.org"),
+            "{local}"
+        );
+        let both = stdout(&wire.mp(&["search", "subject:ledger"]));
+        assert!(
+            both.contains("Selector: mp://wire/archive/lonely@example.org")
+                && both.contains("only on the server"),
+            "{both}"
+        );
+
+        let mut conn = connect(&wire).await;
+        let started = call(
+            &mut conn,
+            "message.search_server",
+            json!({
+                "account": ACCOUNT,
+                "query": "subject:ledger",
+                "exclude_message_ids": ["<known@example.org>"],
+            }),
+        )
+        .await;
+        let id = operation_id(&started);
+        let status = settle(&mut conn, &id).await;
+        let result = succeeded(&status);
+        assert_eq!(result["hits"], 1, "{result}");
+        assert_eq!(result["deduplicated"], 1, "{result}");
+        assert_eq!(result["coverage"], "server");
+        assert_eq!(result["unreachable"], json!([]));
+    }
+
+    /// `message.fetch`, the overlay's `f`: the server-only hit comes into the
+    /// store under the server's UID and becomes a row with a selector, and a
+    /// second fetch answers with that row, already present, and opens no
+    /// session.
+    #[tokio::test]
+    async fn fetching_a_server_only_hit_brings_it_into_the_store_once() {
+        let wire = root();
+        let mut conn = connect(&wire).await;
+        let fetch =
+            json!({"account": ACCOUNT, "mailbox": "archive", "message_id": "<lonely@example.org>"});
+
+        let started = call(&mut conn, "message.fetch", fetch.clone()).await;
+        let status = settle(&mut conn, &operation_id(&started)).await;
+        let first = succeeded(&status).clone();
+        assert_eq!(first["already_present"], false, "{first}");
+        assert_eq!(first["uid"], 7, "the server's UID");
+        assert_eq!(first["selector"], "mp://wire/archive/lonely@example.org");
+        assert_eq!(
+            wire.local("archive"),
+            vec![(7, "<lonely@example.org>".to_string())]
+        );
+
+        let logins = wire.imap.logins();
+        let started = call(&mut conn, "message.fetch", fetch).await;
+        let status = settle(&mut conn, &operation_id(&started)).await;
+        let again = succeeded(&status);
+        assert_eq!(again["already_present"], true, "{again}");
+        assert_eq!(again["row_id"], first["row_id"]);
+        assert_eq!(
+            wire.imap.logins(),
+            logins,
+            "no session for a row the store holds"
+        );
+    }
 }
