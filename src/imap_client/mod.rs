@@ -1,4 +1,5 @@
 mod batch;
+pub(crate) mod checked;
 /// The IMAP server the daemon suites use too (PERSO-296, PERSO-210).
 #[cfg(test)]
 #[path = "../../tests/support/fake_imap.rs"]

@@ -5,10 +5,11 @@
 use std::fmt;
 use std::future::Future;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use async_imap::types::UnsolicitedResponse;
 use futures::io::{AsyncRead, AsyncWrite};
-use futures::TryStreamExt;
+
+use crate::imap_client::checked::Checked;
 
 use crate::config::ImapConfig;
 use crate::imap_client::PooledSession;
@@ -239,7 +240,7 @@ impl DraftsFolder for ImapDraftsFolder {
                 .pooled()
                 .await?
                 .session()
-                .uid_search(&query)
+                .uid_search_checked(&query)
                 .await
                 .map_err(|e| anyhow!("UID SEARCH in the drafts folder failed: {e}"))?;
             let mut uids: Vec<u32> = found.into_iter().collect();
@@ -263,20 +264,14 @@ impl DraftsFolder for ImapDraftsFolder {
         let result = async {
             let session = self.pooled().await?.session();
             session
-                .uid_store(&set, "+FLAGS (\\Deleted)")
+                .uid_store_checked(&set, "+FLAGS (\\Deleted)")
                 .await
-                .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?
-                .try_collect::<Vec<_>>()
-                .await
-                .map_err(|e| anyhow!("Failed to collect the store response: {e}"))?;
+                .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?;
             if uidplus {
                 session
-                    .uid_expunge(&set)
+                    .uid_expunge_checked(&set)
                     .await
-                    .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(|e| anyhow!("Failed to collect the expunge response: {e}"))?;
+                    .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?;
             }
             Ok(())
         }
@@ -309,7 +304,7 @@ impl DraftsFolder for ImapDraftsFolder {
         let result = async {
             let session = self.pooled().await?.session();
             let undeleted = session
-                .uid_search("UNDELETED")
+                .uid_search_checked("UNDELETED")
                 .await
                 .map_err(|e| anyhow!("UID SEARCH in the drafts folder failed: {e}"))?;
             if undeleted.is_empty() {
@@ -322,13 +317,10 @@ impl DraftsFolder for ImapDraftsFolder {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            let fetched: Vec<_> = session
-                .uid_fetch(&set, heads_query())
+            let fetched = session
+                .uid_fetch_checked(&set, &heads_query())
                 .await
-                .map_err(|e| anyhow!("Failed to fetch the drafts' headers: {e}"))?
-                .try_collect()
-                .await
-                .map_err(|e| anyhow!("Failed to collect the drafts' headers: {e}"))?;
+                .map_err(|e| anyhow!("Failed to fetch the drafts' headers: {e}"))?;
             let mut heads: Vec<ServerHead> = fetched
                 .iter()
                 .filter_map(|msg| {
@@ -347,16 +339,13 @@ impl DraftsFolder for ImapDraftsFolder {
 
     async fn fetch(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
         let result = async {
-            let fetched: Vec<_> = self
+            let fetched = self
                 .pooled()
                 .await?
                 .session()
-                .uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")
+                .uid_fetch_checked(&uid.to_string(), "(UID BODY.PEEK[])")
                 .await
-                .map_err(|e| anyhow!("Failed to fetch draft {uid}: {e}"))?
-                .try_collect()
-                .await
-                .context("collecting a draft's bytes")?;
+                .map_err(|e| anyhow!("Failed to fetch draft {uid}: {e}"))?;
             Ok(fetched
                 .iter()
                 .find(|msg| msg.uid == Some(uid))
@@ -396,10 +385,9 @@ where
 /// [`claimed_by_expunges`] matches against those numbers.
 ///
 /// The numbers must be the ones the server holds when the `UID EXPUNGE`
-/// starts. An `EXPUNGE` another client caused during the `UID FETCH` reaches
-/// the unsolicited channel rather than the fetch's answer, with nothing to
-/// say whether it came before or after the copies' `FETCH` lines; a fetch
-/// that saw one is read again, until one completes without any, so a
+/// starts. An `EXPUNGE` another client caused during the `UID FETCH` is in the
+/// fetch's answer, with nothing to say whether it came before or after the
+/// copies' `FETCH` lines; a fetch that saw one is read again, until one completes without any, so a
 /// renumbering below a copy is never missed and its own `EXPUNGE` taken for
 /// someone else's. The channel is emptied before the `STORE` so what earlier
 /// commands left queued neither counts nor fills it.
@@ -414,29 +402,26 @@ where
         .join(",");
     drain_unsolicited(session);
     session
-        .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+        .uid_store_checked(&set, "+FLAGS.SILENT (\\Deleted)")
         .await
-        .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow!("Failed to collect the store response: {e}"))?;
+        .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?;
     let mut pending: Option<Vec<(u32, u32)>> = None;
     for _ in 0..CLAIM_FETCH_ATTEMPTS {
         // An expunge reported during the STORE is in the numbers this fetch
         // reads, so it does not count.
         drain_unsolicited(session);
-        let fetched: Vec<_> = session
-            .uid_fetch(&set, "(UID)")
-            .await
-            .map_err(|e| anyhow!("Failed to fetch {set}: {e}"))?
-            .try_collect()
-            .await
-            .map_err(|e| anyhow!("Failed to collect the fetch response: {e}"))?;
-        if drain_unsolicited(session) {
+        let answer =
+            crate::imap_client::checked::answer_of(session, &format!("UID FETCH {set} (UID)"))
+                .await
+                .map_err(|e| anyhow!("Failed to fetch {set}: {e}"))?;
+        // The fetch's own answer carries an EXPUNGE another client caused
+        // during it; an earlier command's may still be in the channel.
+        let expunged_during = !crate::imap_client::checked::expunges(&answer).is_empty();
+        if drain_unsolicited(session) || expunged_during {
             continue;
         }
         pending = Some(
-            fetched
+            crate::imap_client::checked::fetches(answer)
                 .iter()
                 .filter_map(|msg| Some((msg.message, msg.uid?)))
                 .filter(|(_, uid)| uids.contains(uid))
@@ -450,13 +435,10 @@ where
              of {set}'s sequence numbers, which were flagged deleted but not expunged"
         ));
     };
-    let expunged: Vec<u32> = session
-        .uid_expunge(&set)
+    let expunged = session
+        .uid_expunge_checked(&set)
         .await
-        .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect the expunge response: {e}"))?;
+        .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?;
     Ok(claimed_by_expunges(&mut pending, &expunged))
 }
 
@@ -617,7 +599,7 @@ mod tests {
             "* 4 FETCH (UID 120)\r\n{tag} OK FETCH completed\r\n",
             "* 4 EXPUNGE\r\n{tag} OK EXPUNGE completed\r\n",
         ]);
-        futures::executor::block_on(session.noop()).unwrap();
+        futures::executor::block_on(session.noop_checked()).unwrap();
         let claimed = futures::executor::block_on(claim_on(&mut session, &[120])).unwrap();
         assert_eq!(claimed, vec![120]);
 
@@ -628,7 +610,7 @@ mod tests {
             "* 5 FETCH (UID 120)\r\n{tag} OK FETCH completed\r\n",
             "* 5 EXPUNGE\r\n{tag} OK EXPUNGE completed\r\n",
         ]);
-        futures::executor::block_on(session.noop()).unwrap();
+        futures::executor::block_on(session.noop_checked()).unwrap();
         let claimed = futures::executor::block_on(claim_on(&mut session, &[120])).unwrap();
         assert_eq!(claimed, vec![120]);
     }

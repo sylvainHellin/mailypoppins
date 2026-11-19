@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use super::checked::Checked;
 use anyhow::{anyhow, Result};
-use futures::TryStreamExt;
 use log::{info, warn};
 
 use super::{
@@ -25,7 +25,7 @@ use crate::types::MessageFlags;
 /// A keyword arrives as [`async_imap::types::Flag::Custom`], so it goes
 /// through [`MessageFlags::parse`] rather than a match arm, which is also what
 /// keeps the two spellings of the forwarded keyword in one place.
-fn flags_of(msg: &async_imap::types::Fetch) -> MessageFlags {
+fn flags_of(msg: &super::checked::FetchResponse) -> MessageFlags {
     let mut out = MessageFlags::default();
     for flag in msg.flags() {
         match flag {
@@ -104,16 +104,13 @@ where
         });
     }
 
-    let fetched: Vec<_> = session
-        .uid_fetch(
+    let fetched = session
+        .uid_fetch_checked(
             &compress_uid_set(&selected_uids),
             "(UID BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)])",
         )
         .await
-        .map_err(|e| anyhow!("Failed to fetch headers: {}", e))?
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect headers: {}", e))?;
+        .map_err(|e| anyhow!("Failed to fetch headers: {}", e))?;
 
     let wanted = message_id.map(|mid| super::search::normalize_message_id(mid).to_string());
     let mut stubs = Vec::new();
@@ -168,13 +165,10 @@ pub async fn fetch_uids_on_session(
         .select(mailbox)
         .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
-    let fetched: Vec<_> = session
-        .uid_fetch(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
+    let fetched = session
+        .uid_fetch_checked(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
         .await
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
     let mut answer = Fetched::default();
     let mut answered = std::collections::HashSet::new();
     for msg in fetched.iter() {
@@ -220,7 +214,7 @@ pub async fn fetch_raw_by_message_id(
     };
     let query = build_imap_search_query(&criteria);
     let uids = session
-        .uid_search(&query)
+        .uid_search_checked(&query)
         .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
@@ -228,13 +222,10 @@ pub async fn fetch_raw_by_message_id(
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort_unstable();
     for uid in uid_list {
-        let fetched: Vec<_> = session
-            .uid_fetch(&uid.to_string(), "(BODY.PEEK[] FLAGS)")
+        let fetched = session
+            .uid_fetch_checked(&uid.to_string(), "(BODY.PEEK[] FLAGS)")
             .await
-            .map_err(|e| anyhow!("Failed to fetch email: {}", e))?
-            .try_collect()
-            .await
-            .map_err(|e| anyhow!("Failed to collect email: {}", e))?;
+            .map_err(|e| anyhow!("Failed to fetch email: {}", e))?;
         for msg in fetched.iter() {
             let body_raw = msg.body().unwrap_or_default();
             let Some(mut email) = parse_rfc822_to_fetched_email(body_raw) else {
@@ -805,7 +796,7 @@ where
         );
     }
     let uids = session
-        .uid_search("ALL")
+        .uid_search_checked("ALL")
         .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
     span.mark("uid_search");
@@ -873,26 +864,20 @@ where
         if !flags.full.is_empty() {
             flagged.extend(
                 session
-                    .uid_fetch(compress_uid_set(&flags.full), flag_query(FlagPass::Full))
+                    .uid_fetch_checked(&compress_uid_set(&flags.full), &flag_query(FlagPass::Full))
                     .await
-                    .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(|e| anyhow!("Failed to collect flags: {}", e))?,
+                    .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?,
             );
         }
         if let Some(delta) = flags.delta {
             flagged.extend(
                 session
-                    .uid_fetch(
-                        delta.uid_set(),
-                        flag_query(FlagPass::ChangedSince(delta.since)),
+                    .uid_fetch_checked(
+                        &delta.uid_set(),
+                        &flag_query(FlagPass::ChangedSince(delta.since)),
                     )
                     .await
-                    .map_err(|e| anyhow!("Failed to fetch changed flags: {}", e))?
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(|e| anyhow!("Failed to collect changed flags: {}", e))?,
+                    .map_err(|e| anyhow!("Failed to fetch changed flags: {}", e))?,
             );
         }
         span.mark("pass1_flags");
@@ -1008,22 +993,19 @@ pub(crate) async fn fetch_body_chunk_on_session(
     uids: &[u32],
 ) -> Result<Vec<FetchedMessage>> {
     let mut out: Vec<FetchedMessage> = session
-        .uid_fetch(compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
+        .uid_fetch_checked(&compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
-        .try_filter_map(|msg| async move {
-            Ok(match (msg.uid, msg.body()) {
-                (Some(uid), Some(body)) => Some(FetchedMessage::raw(
-                    i64::from(uid),
-                    body.to_vec(),
-                    flags_of(&msg),
-                )),
-                _ => None,
-            })
+        .into_iter()
+        .filter_map(|mut msg| {
+            let flags = flags_of(&msg);
+            Some(FetchedMessage::raw(
+                i64::from(msg.uid?),
+                msg.body.take()?,
+                flags,
+            ))
         })
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+        .collect();
     out.sort_by_key(|m| m.uid);
     Ok(out)
 }

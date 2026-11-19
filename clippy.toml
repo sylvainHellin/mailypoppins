@@ -1,0 +1,17 @@
+# async-imap 0.11 ends the readers of these commands at the tagged response
+# without reading its status, so a server's NO or BAD reads as an empty
+# success. src/imap_client/checked.rs sends them and reads the status instead.
+disallowed-methods = [
+    { path = "async_imap::Session::fetch", reason = "drops the tagged status: use imap_client::checked::Checked" },
+    { path = "async_imap::Session::uid_fetch", reason = "drops the tagged status: use Checked::uid_fetch_checked" },
+    { path = "async_imap::Session::store", reason = "drops the tagged status: use imap_client::checked::Checked" },
+    { path = "async_imap::Session::uid_store", reason = "drops the tagged status: use Checked::uid_store_checked" },
+    { path = "async_imap::Session::expunge", reason = "drops the tagged status: use Checked::expunge_checked" },
+    { path = "async_imap::Session::uid_expunge", reason = "drops the tagged status: use Checked::uid_expunge_checked" },
+    { path = "async_imap::Session::search", reason = "drops the tagged status: use imap_client::checked::Checked" },
+    { path = "async_imap::Session::uid_search", reason = "drops the tagged status: use Checked::uid_search_checked" },
+    { path = "async_imap::Session::list", reason = "drops the tagged status: use Checked::list_checked" },
+    { path = "async_imap::Session::lsub", reason = "drops the tagged status: use imap_client::checked::Checked" },
+    { path = "async_imap::Session::capabilities", reason = "drops the tagged status: use Checked::capabilities_checked" },
+    { path = "async_imap::Session::noop", reason = "drops the tagged status: use Checked::noop_checked" },
+]

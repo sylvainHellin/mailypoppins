@@ -201,17 +201,12 @@ async fn a_refused_sent_append_is_the_servers_refusal() {
 /// messages 2 and 3 of three are both reported as 2.
 #[tokio::test]
 async fn an_expunge_numbers_each_message_after_the_ones_before_it() {
-    use futures::TryStreamExt;
     let server = server(&["one", "two", "three"]);
     server.set_flags("INBOX", 2, &["\\Deleted"]);
     server.set_flags("INBOX", 3, &["\\Deleted"]);
     let mut session = super::open_imap_session(&config(&server)).await.unwrap();
     session.select("INBOX").await.unwrap();
-    let expunged: Vec<u32> = session
-        .expunge()
-        .await
-        .unwrap()
-        .try_collect()
+    let expunged = super::checked::Checked::expunge_checked(&mut session)
         .await
         .unwrap();
     assert_eq!(expunged, vec![2, 2]);

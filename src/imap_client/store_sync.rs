@@ -401,20 +401,17 @@ pub async fn list_mailboxes_detailed(imap_config: &ImapConfig) -> Result<Vec<Ser
 
 /// [`list_mailboxes_detailed`] on a session already open.
 async fn list_detailed_on(session: &mut super::ImapSession) -> Result<Vec<ServerMailbox>> {
-    use futures::TryStreamExt;
+    use super::checked::Checked;
 
     Ok(session
-        .list(None, Some("*"))
+        .list_checked("", "*")
         .await
         .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow!("Failed to collect mailboxes: {}", e))?
-        .iter()
+        .into_iter()
         .map(|m| ServerMailbox {
-            name: m.name().to_string(),
-            delimiter: m.delimiter().map(str::to_string),
-            attributes: m.attributes().iter().map(attribute_token).collect(),
+            attributes: m.attributes.iter().map(attribute_token).collect(),
+            name: m.name,
+            delimiter: m.delimiter,
         })
         .collect())
 }
@@ -523,7 +520,7 @@ async fn identities_on(
     names: &[String],
     samples: &[(u32, Vec<u32>)],
 ) -> Result<Vec<FolderIdentity>> {
-    use futures::TryStreamExt;
+    use super::checked::Checked;
 
     let mut seen = Vec::with_capacity(names.len());
     for name in names {
@@ -561,13 +558,10 @@ async fn identities_on(
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            let fetched: Vec<_> = session
-                .uid_fetch(&set, MESSAGE_ID_QUERY)
+            let fetched = session
+                .uid_fetch_checked(&set, MESSAGE_ID_QUERY)
                 .await
-                .map_err(|e| anyhow!("Failed to fetch the Message-IDs of {name}: {e}"))?
-                .try_collect()
-                .await
-                .map_err(|e| anyhow!("Failed to collect the Message-IDs of {name}: {e}"))?;
+                .map_err(|e| anyhow!("Failed to fetch the Message-IDs of {name}: {e}"))?;
             identity.message_ids = fetched
                 .iter()
                 .filter_map(|msg| {

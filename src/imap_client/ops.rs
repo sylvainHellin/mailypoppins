@@ -9,9 +9,9 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use super::checked::Checked;
 use anyhow::{anyhow, Result};
 use futures::io::{AsyncRead, AsyncWrite};
-use futures::TryStreamExt;
 use log::{info, warn};
 
 use super::search::message_id_search_term;
@@ -165,7 +165,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
     async fn search_uids(&mut self, query: &str) -> Result<HashSet<u32>> {
-        self.uid_search(query)
+        self.uid_search_checked(query)
             .await
             .map_err(|e| anyhow!("IMAP search failed: {}", e))
     }
@@ -479,29 +479,20 @@ where
 {
     let uid = uid.to_string();
     session
-        .uid_store(&uid, "+FLAGS (\\Deleted)")
+        .uid_store_checked(&uid, "+FLAGS (\\Deleted)")
         .await
-        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
 
     if uidplus {
         session
-            .uid_expunge(&uid)
+            .uid_expunge_checked(&uid)
             .await
-            .map_err(|e| anyhow!("Failed to expunge {uid}: {e}"))?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| anyhow!("Failed to collect expunge response: {e}"))?;
+            .map_err(|e| anyhow!("Failed to expunge {uid}: {e}"))?;
     } else {
         session
-            .expunge()
+            .expunge_checked()
             .await
-            .map_err(|e| anyhow!("Failed to expunge: {e}"))?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| anyhow!("Failed to collect expunge response: {e}"))?;
+            .map_err(|e| anyhow!("Failed to expunge: {e}"))?;
     }
 
     Ok(())
@@ -527,12 +518,9 @@ async fn store_flags_on_session(
         return Ok(());
     };
     session
-        .uid_store(&uid.to_string(), change)
+        .uid_store_checked(&uid.to_string(), change)
         .await
-        .map_err(|e| anyhow!("Failed to store {}: {}", change, e))?
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
+        .map_err(|e| anyhow!("Failed to store {}: {}", change, e))?;
 
     Ok(())
 }

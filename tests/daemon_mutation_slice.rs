@@ -2015,13 +2015,16 @@ mod wire {
 
     /// A server that refuses the `\Deleted` STORE fails the delete in its
     /// own words, as a refused COPY fails an archive: nothing reports
-    /// success, the row is back in `inbox` where the server still holds the
-    /// message, and no op is left owed. The STORE's reader used to end at
+    /// success and no op is left owed. The STORE's reader used to end at
     /// the tagged answer without reading it, so the refusal was an empty
-    /// success: `✓ deleted`, the row gone, the message still on the server
-    /// for the next sync to bring back.
+    /// success: `✓ deleted`, and the op retired as done.
+    ///
+    /// A delete commits with nothing to roll back (`pending_ops::apply_delete`
+    /// releases the row and its blobs in the same transaction), so the row is
+    /// gone locally until the next sync, which brings it back from the server
+    /// that still holds it: the store is a cache of the server.
     #[test]
-    fn a_refused_server_delete_keeps_the_row() {
+    fn a_refused_server_delete_fails_and_the_next_sync_brings_the_row_back() {
         let wire = synced();
         wire.imap
             .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
@@ -2034,15 +2037,26 @@ mod wire {
             "Error: Failed to mark email as deleted: no response: code: None, \
              info: Some(\"[CANNOT] Mailbox is locked\")\n"
         );
+        assert_eq!(server(&wire, INBOX).len(), 2, "the server still holds it");
+        assert!(
+            owed(&wire).is_empty(),
+            "nothing is left owed: {:?}",
+            owed(&wire)
+        );
+        assert_eq!(
+            wire.local("inbox"),
+            vec![(1, "<first@example.org>".to_string())],
+            "the delete's local half has no rollback"
+        );
+
+        assert_eq!(stdout(&wire.sync()), "✓ Synced: 1 new, 1 already present\n");
         assert_eq!(
             wire.local("inbox"),
             vec![
                 (1, "<first@example.org>".to_string()),
                 (2, "<second@example.org>".to_string())
             ],
-            "the row is back where the server still holds it"
+            "the next sync restores the row from the server"
         );
-        assert_eq!(server(&wire, INBOX).len(), 2);
-        assert!(owed(&wire).is_empty(), "{:?}", owed(&wire));
     }
 }

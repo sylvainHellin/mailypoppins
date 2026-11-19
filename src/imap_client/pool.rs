@@ -131,15 +131,6 @@ impl ServerCaps {
         out
     }
 
-    /// The same, off a live `CAPABILITY` response. `AUTH=` mechanisms are not
-    /// extension names and are skipped.
-    fn from_response(caps: &async_imap::types::Capabilities) -> Self {
-        Self::from_names(caps.iter().filter_map(|cap| match cap {
-            async_imap::types::Capability::Atom(name) => Some(name.as_str()),
-            _ => None,
-        }))
-    }
-
     /// The advertised names, for the log line and the ticket's "probe Proton
     /// Bridge and document it" acceptance criterion.
     pub fn summary(&self) -> String {
@@ -288,7 +279,7 @@ pub async fn checkout(config: &ImapConfig) -> Result<PooledSession> {
         if idle.since.elapsed() <= PROBE_AFTER {
             return Ok(borrowed(key, idle));
         }
-        match idle.session.noop().await {
+        match super::checked::Checked::noop_checked(&mut idle.session).await {
             Ok(()) => return Ok(borrowed(key, idle)),
             Err(e) => {
                 debug!("IMAP pool: {key} session failed its NOOP probe ({e}), reconnecting");
@@ -334,8 +325,8 @@ async fn connect_with_backoff(config: &ImapConfig) -> Result<(ImapSession, Serve
             Ok(mut session) => {
                 // Post-LOGIN CAPABILITY: several servers, Gmail among them,
                 // advertise less before authentication.
-                let caps = match session.capabilities().await {
-                    Ok(caps) => ServerCaps::from_response(&caps),
+                let caps = match super::checked::Checked::capabilities_checked(&mut session).await {
+                    Ok(names) => ServerCaps::from_names(names.iter().map(String::as_str)),
                     Err(e) => {
                         // Not fatal, and not a reason to poison the session
                         // either: an unknown capability set is the same as an

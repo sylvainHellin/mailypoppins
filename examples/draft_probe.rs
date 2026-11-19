@@ -25,6 +25,12 @@
 //! appeared since the APPEND, prints the findings and appends them to
 //! `/var/tmp/mp-draft-probe-<account>-<id>.txt`, one block per run.
 
+// The probe prints what a server answers and is no product path, so it keeps
+// async-imap's readers, which drop a refusal's tagged status
+// (`clippy.toml`, `src/imap_client/checked.rs`): an empty answer here may be
+// a refusal.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;

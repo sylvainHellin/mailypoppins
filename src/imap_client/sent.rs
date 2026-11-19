@@ -25,6 +25,7 @@
 use anyhow::{anyhow, Result};
 use log::{info, warn};
 
+use super::checked::Checked;
 use super::{open_imap_session, ImapSession};
 use crate::config::ImapConfig;
 use crate::outbox::{SentMailbox, SentRefused};
@@ -78,7 +79,7 @@ impl SentMailbox for ImapSentMailbox {
                 .map_err(|e| answered(e, format!("Failed to select {mailbox}")))?;
             let query = format!("HEADER Message-ID \"{}\"", message_id);
             let uids = session
-                .uid_search(&query)
+                .uid_search_checked(&query)
                 .await
                 .map_err(|e| answered(e, format!("UID SEARCH in {mailbox} failed")))?;
             let mut uids: Vec<u32> = uids.into_iter().collect();

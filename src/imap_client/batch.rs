@@ -9,8 +9,8 @@
 //! rows the caller already wrote (`crate::store::write`), so a result here is
 //! what tells the queue whether the op is done or owed again.
 
+use super::checked::Checked;
 use anyhow::{anyhow, Result};
-use futures::TryStreamExt;
 use log::info;
 
 use super::{pool, ImapSession};
@@ -75,7 +75,7 @@ async fn add_flag_on_session(
         .map_err(|e| anyhow!("Failed to select {}: {}", mailbox, e))?;
 
     let uids = session
-        .uid_search(&crate::imap_client::search::message_id_search_term(
+        .uid_search_checked(&crate::imap_client::search::message_id_search_term(
             message_id,
         ))
         .await
@@ -86,12 +86,9 @@ async fn add_flag_on_session(
     }
 
     session
-        .uid_store(&uid_set(&uids), &format!("+FLAGS ({flag})"))
+        .uid_store_checked(&uid_set(&uids), &format!("+FLAGS ({flag})"))
         .await
-        .map_err(|e| anyhow!("Failed to set the {} flag: {}", flag, e))?
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
+        .map_err(|e| anyhow!("Failed to set the {} flag: {}", flag, e))?;
     Ok(())
 }
 
