@@ -29,6 +29,11 @@
 //! #0063) are carried the same way, for the same reason: each names drafts on
 //! the server that nothing else does ([`salvage_cleanups`]).
 //!
+//! The address headers of the deleted rows (`deleted_addresses`, PERSO-237)
+//! are carried too ([`salvage_deleted_addresses`]): the contacts rebuild
+//! counts them as mail ever seen, and the server no longer holds those
+//! messages, so no sync can restate them.
+//!
 //! The calendar visibility choices (`calendar_prefs`, PERSO-200) are carried
 //! too ([`salvage_calendar_prefs`]): the calendar cache beside them refills
 //! from the server, but a calendar the user hid is a local choice no sync can
@@ -174,6 +179,19 @@ pub(super) struct SalvagedReminder {
     snoozed_until: Option<i64>,
 }
 
+/// One deleted row's address headers read out of the old file
+/// ([`super::schema::DELETED_ADDRESSES_TABLE`]), its columns as stored.
+#[derive(Debug, Clone)]
+pub(super) struct SalvagedDeletedAddresses {
+    account: String,
+    mailbox: String,
+    from: Option<String>,
+    to: Option<String>,
+    cc: Option<String>,
+    bcc: Option<String>,
+    date_display: Option<String>,
+}
+
 /// What the pre-drop read got out of the old file.
 #[derive(Debug, Default)]
 pub(super) struct Salvage {
@@ -185,6 +203,8 @@ pub(super) struct Salvage {
     pub calendar_prefs: Vec<SalvagedCalendarPref>,
     /// The calendar reminder records ([`salvage_calendar_reminders`]).
     pub calendar_reminders: Vec<SalvagedReminder>,
+    /// The deleted rows' address headers ([`salvage_deleted_addresses`]).
+    pub deleted_addresses: Vec<SalvagedDeletedAddresses>,
     /// What the read itself could not get, in the shape
     /// [`RebuildReport::lost`] carries: a damaged page that ended the scan, a
     /// row that would not come back, a table too big to read in full. These
@@ -203,6 +223,8 @@ pub(super) struct RebuildReport {
     pub carried_calendar_prefs: usize,
     /// Calendar reminder records carried into the fresh store.
     pub carried_calendar_reminders: usize,
+    /// Deleted rows' address headers carried into the fresh store.
+    pub carried_deleted_addresses: usize,
     /// Outbox rows that could not be carried, each with its reason.
     pub lost: Vec<(String, String)>,
     pub swept_files: u64,
@@ -472,6 +494,61 @@ pub(super) fn salvage_calendar_reminders(path: &Path) -> Vec<SalvagedReminder> {
             Err(e) => {
                 warn!(
                     "[store] a calendar reminder in {} could not be read: {e}",
+                    path.display()
+                );
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Read the deleted rows' address headers out of a store that failed
+/// validation (PERSO-237).
+///
+/// Best effort, like [`salvage_calendar_prefs`], and with no row bound: the
+/// table grows by one small row per message ever deleted, and each row left
+/// behind lowers a contact's count. A row that cannot be read ends the read
+/// with a warning.
+pub(super) fn salvage_deleted_addresses(path: &Path) -> Vec<SalvagedDeletedAddresses> {
+    let Ok(conn) = Connection::open(path) else {
+        return Vec::new();
+    };
+    let table = super::schema::DELETED_ADDRESSES_TABLE;
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT account, mailbox, from_, to_, cc, bcc, date_display FROM {table}"
+    )) {
+        Ok(stmt) => stmt,
+        // A file from before the table, or not one of ours.
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map([], |r| {
+        Ok(SalvagedDeletedAddresses {
+            account: r.get(0)?,
+            mailbox: r.get(1)?,
+            from: r.get(2)?,
+            to: r.get(3)?,
+            cc: r.get(4)?,
+            bcc: r.get(5)?,
+            date_display: r.get(6)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                "[store] no deleted addresses salvaged from {}: {e}",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok(deleted) => out.push(deleted),
+            Err(e) => {
+                warn!(
+                    "[store] a deleted row's addresses in {} could not be read: {e}",
                     path.display()
                 );
                 break;
@@ -929,6 +1006,13 @@ pub(super) fn finish(conn: &Connection, path: &Path, salvaged: Salvage) -> Rebui
             ),
         }
     }
+    // A deleted row's addresses hold no bytes either, and one the fresh store
+    // refuses costs a contact one count, so it is logged too. One
+    // transaction, since the table holds a row per message ever deleted.
+    match carry_deleted_addresses(conn, &salvaged.deleted_addresses) {
+        Ok(carried) => report.carried_deleted_addresses = carried,
+        Err(e) => warn!("[store] the deleted rows' addresses did not survive the rebuild: {e:#}"),
+    }
     let Some(root) = blobs_root(path) else {
         // Unreachable for any real store path, and still not a place where a
         // submission may vanish without being named.
@@ -961,6 +1045,35 @@ pub(super) fn finish(conn: &Connection, path: &Path, salvaged: Salvage) -> Rebui
     }
 
     report
+}
+
+/// Write the salvaged deleted rows' addresses into the fresh store, all or
+/// none, answering how many.
+fn carry_deleted_addresses(
+    conn: &Connection,
+    deleted: &[SalvagedDeletedAddresses],
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut insert = tx.prepare(&format!(
+            "INSERT INTO {} (account, mailbox, from_, to_, cc, bcc, date_display)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            super::schema::DELETED_ADDRESSES_TABLE
+        ))?;
+        for row in deleted {
+            insert.execute(rusqlite::params![
+                row.account,
+                row.mailbox,
+                row.from,
+                row.to,
+                row.cc,
+                row.bcc,
+                row.date_display
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(deleted.len())
 }
 
 /// Write one salvaged row into the fresh `outbox`, with its blob reference.
@@ -1524,6 +1637,50 @@ mod tests {
             Some(schema::SCHEMA_VERSION)
         );
         assert_eq!(reminders::load(&store, "alice").unwrap(), written);
+    }
+
+    /// The address headers of the deleted rows survive a schema-version
+    /// rebuild: the server no longer holds those messages, so a contacts
+    /// rebuild after the store refills would otherwise drop their
+    /// correspondents, whom the live count keeps (PERSO-237).
+    #[test]
+    fn a_rebuild_carries_the_deleted_addresses() {
+        use crate::store::read::{list_sightings, Sighting};
+
+        let (_dir, path, _blobs) = account_dir();
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO messages (account, mailbox, uid, message_id, from_, to_, cc,
+                                           bcc, date_display)
+                     VALUES ('alice', 'sent', 7, '<m@x>', 'me@example.com',
+                             'Carol <carol@example.com>', 'dave@example.com',
+                             'erin@example.com', 'Wed, 07 Jan 2026 12:00:00 +0000')",
+                    [],
+                )
+                .unwrap();
+            store.conn().execute("DELETE FROM messages", []).unwrap();
+        }
+        stamp_a_wrong_version(&path);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
+        assert_eq!(
+            list_sightings(&store, "alice").unwrap(),
+            vec![Sighting {
+                mailbox: "sent".into(),
+                from: Some("me@example.com".into()),
+                to: Some("Carol <carol@example.com>".into()),
+                cc: Some("dave@example.com".into()),
+                bcc: Some("erin@example.com".into()),
+                date_display: Some("Wed, 07 Jan 2026 12:00:00 +0000".into()),
+            }]
+        );
     }
 
     #[test]

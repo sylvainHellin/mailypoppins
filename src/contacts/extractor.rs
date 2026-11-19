@@ -1,9 +1,11 @@
 //! Reads the account's message rows and builds a `ContactIndex`.
 //!
-//! The full rebuild reads `messages` through `store::read`, the same listing
-//! shape the TUI and `mp dump-mailbox` use: every row already carries `from`,
-//! `to`, `cc`, `mailbox` and the `Date:` header, which is exactly what the
-//! ranker needs. Before #0053
+//! The full rebuild reads the address headers, mailbox and `Date:` of every
+//! row through `store::read::list_sightings`, which is exactly what the
+//! ranker needs, and of every row deleted since, which the store keeps for
+//! it: a contact's count is the mail ever seen, a delete does not lower the
+//! live count, and a rebuild that dropped deleted mail would disagree with it
+//! (PERSO-237). Before #0053
 //! this walked a `.md` tree that the store cutover deleted, so a rebuild found
 //! nothing and the caller cached the nothing over months of accumulated
 //! frecency.
@@ -20,7 +22,7 @@ use crate::config::AccountConfig;
 use crate::contacts::hooks::fold_observation;
 use crate::contacts::types::ContactIndex;
 use crate::contacts::window::{self, RebuildWindow};
-use crate::store::read::{self, MessageRow};
+use crate::store::read::{self, Sighting};
 use crate::store::{open_store_in, Store};
 use crate::types::MailboxRole;
 use anyhow::Result;
@@ -85,7 +87,7 @@ fn build_index_from_store_until(
     let mut index = empty_index(account);
     let self_addr = account.own_address();
 
-    for (n, row) in read::list_account(store, &account.name)?
+    for (n, row) in read::list_sightings(store, &account.name)?
         .into_iter()
         .enumerate()
     {
@@ -105,7 +107,7 @@ fn build_index_from_store_until(
 }
 
 /// The address headers of one row.
-fn row_addresses(row: &MessageRow) -> MessageAddresses<'_> {
+fn row_addresses(row: &Sighting) -> MessageAddresses<'_> {
     MessageAddresses {
         from: row.from.as_deref(),
         to: row.to.as_deref(),
@@ -692,6 +694,80 @@ mod tests {
         rebuild_and_commit(root, walked);
 
         assert_eq!(received(root, "xavier@example.com"), 1, "kept, once");
+    }
+
+    /// The cache as its contacts, keyed by address, for comparing two of
+    /// them whole.
+    fn cached_contacts(root: &Path) -> serde_json::Value {
+        serde_json::to_value(&load_cache(root).unwrap().expect("cached").contacts).unwrap()
+    }
+
+    /// PERSO-237: a contact's count is the mail ever seen, so a delete does
+    /// not lower it, and a rebuild after the delete agrees with the count the
+    /// syncs kept live rather than dropping the deleted correspondent.
+    #[test]
+    fn a_rebuild_after_a_delete_agrees_with_the_live_count() {
+        let fx = fixture();
+        let root = fx._dir.path();
+        rebuild_and_commit(root, walk(&fx));
+        let alice = sync_in(&fx, 1, "Alice <alice@example.com>");
+        let bob = sync_in(&fx, 2, "Bob <bob@example.com>");
+        crate::contacts::hooks::bump_after_sync_at(root, &account(), &[alice, bob]);
+        let live = cached_contacts(root);
+        assert_eq!(received(root, "bob@example.com"), 1);
+
+        delete_newest(&fx);
+        rebuild_and_commit(root, walk(&fx));
+
+        assert_eq!(received(root, "bob@example.com"), 1, "bob stays counted");
+        assert_eq!(cached_contacts(root), live, "the rebuild is the live count");
+    }
+
+    /// Every way a row leaves the store keeps its correspondents: a delete
+    /// some writer issues on its own, like the queued delete's or the folder
+    /// rename's, counts as the shared delete does.
+    #[test]
+    fn a_row_deleted_by_any_statement_stays_counted() {
+        let fx = fixture();
+        let root = fx._dir.path();
+        ingest(
+            &fx,
+            "sent",
+            1,
+            &email(
+                "me@example.com",
+                "Carol <carol@example.com>",
+                Some("Dave <dave@example.com>"),
+                "Wed, 07 Jan 2026 12:00:00 +0000",
+            ),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email(
+                "Erin <erin@example.com>",
+                "me@example.com",
+                None,
+                "Thu, 08 Jan 2026 12:00:00 +0000",
+            ),
+        );
+        rebuild_and_commit(root, walk(&fx));
+        let before = cached_contacts(root);
+
+        fx.store
+            .conn()
+            .execute("DELETE FROM messages WHERE account = 'alice'", [])
+            .unwrap();
+        rebuild_and_commit(root, walk(&fx));
+
+        assert_eq!(cached_contacts(root), before);
+        assert_eq!(index_contacts(&fx), before, "and a bare walk counts them");
+    }
+
+    fn index_contacts(fx: &Fixture) -> serde_json::Value {
+        let index = build_index_from_store(&fx.store, &account()).unwrap();
+        serde_json::to_value(&index.contacts).unwrap()
     }
 
     fn xavier_row(fx: &Fixture) -> i64 {

@@ -664,6 +664,50 @@ pub fn list_account(store: &Store, account: &str) -> Result<Vec<MessageRow>> {
     Ok(out)
 }
 
+/// The address headers of one message the account holds or once held, as the
+/// contacts rebuild reads them ([`list_sightings`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sighting {
+    pub mailbox: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub bcc: Option<String>,
+    pub date_display: Option<String>,
+}
+
+/// Every message the account holds and every one it deleted, by its address
+/// headers: what the contacts rebuild counts, the mail ever seen (PERSO-237).
+///
+/// One statement over `messages` and
+/// [`super::schema::DELETED_ADDRESSES_TABLE`], so it reads one snapshot: a
+/// row deleted while it runs is either still a row or already in the table,
+/// never both and never neither.
+pub fn list_sightings(store: &Store, account: &str) -> Result<Vec<Sighting>> {
+    let deleted = super::schema::DELETED_ADDRESSES_TABLE;
+    let sql = format!(
+        "SELECT mailbox, from_, to_, cc, bcc, date_display FROM messages WHERE account = ?1
+         UNION ALL
+         SELECT mailbox, from_, to_, cc, bcc, date_display FROM {deleted} WHERE account = ?1"
+    );
+    let mut stmt = store.conn().prepare(&sql)?;
+    let rows = stmt.query_map([account], |row| {
+        Ok(Sighting {
+            mailbox: row.get(0)?,
+            from: row.get(1)?,
+            to: row.get(2)?,
+            cc: row.get(3)?,
+            bcc: row.get(4)?,
+            date_display: row.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.context("reading a message's address headers")?);
+    }
+    Ok(out)
+}
+
 /// Message count per mailbox for one account, as one grouped query.
 ///
 /// Replaces the second directory walk the pre-store build ran at startup

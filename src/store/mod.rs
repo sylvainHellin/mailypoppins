@@ -33,8 +33,9 @@
 //!   read at all. A row whose exactly-once marker was written but cannot be
 //!   read is carried as `failed`: a message that may already have reached a
 //!   mail server is parked for a human, never re-submitted.
-//! - `graph_cleanups`, `calendar_prefs` and `calendar_reminders` are carried
-//!   too, each a local record no sync can restate ([`rebuild`] says why).
+//! - `graph_cleanups`, `calendar_prefs`, `calendar_reminders` and
+//!   `deleted_addresses` are carried too, each a local record no sync can
+//!   restate ([`rebuild`] says why).
 //! - Blob *files* whose refcount row did not survive are deleted by the same
 //!   pass, so a rebuild cannot leave the blob directory full of orphans that
 //!   nothing reclaims. The blobs the carried outbox rows point at are what the
@@ -124,6 +125,7 @@ impl Store {
                     salvaged.cleanups = rebuild::salvage_cleanups(&path);
                     salvaged.calendar_prefs = rebuild::salvage_calendar_prefs(&path);
                     salvaged.calendar_reminders = rebuild::salvage_calendar_reminders(&path);
+                    salvaged.deleted_addresses = rebuild::salvage_deleted_addresses(&path);
                     // The file about to be created is a different file, so the
                     // "already checked this incarnation" note must go with the
                     // one being deleted.
@@ -147,13 +149,14 @@ impl Store {
             let notice = rebuild::write_notice(&path, &reason, &report);
             warn!(
                 "[store] rebuilt {}: {} outbox row(s), {} Graph cleanup(s), {} calendar \
-                 visibility choice(s) and {} calendar reminder(s) carried, {} discarded, {} \
-                 orphaned blob file(s) swept ({} bytes){}",
+                 visibility choice(s), {} calendar reminder(s) and {} deleted row(s)' \
+                 addresses carried, {} discarded, {} orphaned blob file(s) swept ({} bytes){}",
                 path.display(),
                 report.carried.len(),
                 report.carried_cleanups,
                 report.carried_calendar_prefs,
                 report.carried_calendar_reminders,
+                report.carried_deleted_addresses,
                 report.lost.len(),
                 report.swept_files,
                 report.swept_bytes,

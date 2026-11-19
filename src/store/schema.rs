@@ -5,7 +5,8 @@
 //! rebuilding it (see [`super::Store::open`]). That is why every statement
 //! below is a plain `CREATE`, and why the only stateful thing in the file is
 //! the `schema_version` row in `meta`. The tables that are not a cache,
-//! `outbox` and the Graph cleanups its discard leaves ([`GRAPH_CLEANUPS_TABLE`]),
+//! `outbox`, the Graph cleanups its discard leaves ([`GRAPH_CLEANUPS_TABLE`])
+//! and the deleted rows' addresses ([`DELETED_ADDRESSES_TABLE`]) among them,
 //! are carried across that rebuild rather than recreated from a server that
 //! never had them; [`super::rebuild`] owns that half.
 
@@ -618,6 +619,26 @@ pub const ATTACHMENT_REPAIRS_TABLE: &str = "attachment_repairs";
 /// losing a row costs an orphan draft on the server that nothing names.
 pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 
+/// Name of the table that keeps the address headers of every message row
+/// deleted from the store (PERSO-237).
+///
+/// A contact's count is the mail ever seen: a delete does not make a sender
+/// less of a correspondent, and the live count the send and sync hooks keep
+/// never goes down. The contacts rebuild reads the rows still here and this
+/// table together ([`super::read::list_sightings`]), so it counts a deleted
+/// message as it counted it before the delete and agrees with the live count.
+/// Filled by [`DELETED_ADDRESSES_TRIGGER`], so every way a row leaves the
+/// table (a user's delete, a sync's prune, a queued delete, a folder rename's
+/// duplicate) records it, and no writer has to remember to. Not a cache: like
+/// the `outbox`, it is carried across a rebuild ([`super::rebuild`]), since
+/// the server no longer holds what it records.
+pub const DELETED_ADDRESSES_TABLE: &str = "deleted_addresses";
+
+/// Name of the trigger that fills [`DELETED_ADDRESSES_TABLE`]: after each
+/// delete from `messages`, it copies the row's account, mailbox, address
+/// headers and `Date:`, the columns the contacts rebuild reads.
+pub const DELETED_ADDRESSES_TRIGGER: &str = "messages_keep_deleted_addresses";
+
 /// Every table created after [`SCHEMA_VERSION`] was last bumped, as
 /// `(name, CREATE statement)`.
 ///
@@ -647,6 +668,10 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 /// empty in a store an older build wrote, and the daemon's backfill
 /// ([`super::fts::backfill_trigram`]) fills it from the rows and their body
 /// blobs; the search keeps to the word index until it is complete.
+///
+/// [`DELETED_ADDRESSES_TABLE`] and its trigger come last, the table before
+/// the trigger that writes into it. A store an older build wrote starts
+/// recording its deletes from here; what it deleted before is gone.
 fn additive_tables() -> Vec<(&'static str, String)> {
     let mut tables = vec![
         (
@@ -685,17 +710,47 @@ fn additive_tables() -> Vec<(&'static str, String)> {
     tables.extend(super::calendar::create_sql());
     tables.push((super::reminders::TABLE, super::reminders::create_sql()));
     tables.push((super::fts::TRIGRAM_TABLE, super::fts::trigram_create_sql()));
+    tables.push((
+        DELETED_ADDRESSES_TABLE,
+        format!(
+            "CREATE TABLE IF NOT EXISTS {DELETED_ADDRESSES_TABLE} (
+                id           INTEGER PRIMARY KEY,
+                account      TEXT NOT NULL,
+                mailbox      TEXT NOT NULL,
+                from_        TEXT,
+                to_          TEXT,
+                cc           TEXT,
+                bcc          TEXT,
+                date_display TEXT
+            )"
+        ),
+    ));
+    tables.push((
+        DELETED_ADDRESSES_TRIGGER,
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS {DELETED_ADDRESSES_TRIGGER} AFTER DELETE ON messages
+             BEGIN
+                INSERT INTO {DELETED_ADDRESSES_TABLE}
+                    (account, mailbox, from_, to_, cc, bcc, date_display)
+                VALUES
+                    (OLD.account, OLD.mailbox, OLD.from_, OLD.to_, OLD.cc, OLD.bcc,
+                     OLD.date_display);
+             END"
+        ),
+    ));
     tables
 }
 
-/// Create the tables added after [`SCHEMA_VERSION`] was last bumped, on the
-/// terms of [`ensure_additive_indexes`]: additive, idempotent, and looked up
-/// before it is written, so an open of a store that has them writes nothing.
+/// Create the tables (and the one trigger) added after [`SCHEMA_VERSION`] was
+/// last bumped, on the terms of [`ensure_additive_indexes`]: additive,
+/// idempotent, and looked up before it is written, so an open of a store that
+/// has them writes nothing.
 pub fn ensure_additive_tables(conn: &Connection) -> Result<()> {
     for (name, sql) in additive_tables() {
         let present: bool = conn
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master
+                                WHERE type IN ('table', 'trigger') AND name = ?1)",
                 [name],
                 |row| row.get(0),
             )
