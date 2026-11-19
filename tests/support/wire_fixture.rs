@@ -184,6 +184,18 @@ impl WireRoot {
         rows
     }
 
+    /// What the server's Sent folder holds once the account's outbox owes
+    /// no APPEND (no row open, none filing), so no copy can be filed after
+    /// this reads it: what a test counts copies with. A row whose APPEND is
+    /// still to come is waited for, up to the deadline.
+    pub fn sent_once_settled(&self) -> Vec<super::fake_imap::HeldMessage> {
+        wait_for("the outbox to owe no APPEND", || {
+            let counts = mailypoppins::outbox::counts(&self.store(), ACCOUNT).expect("the counts");
+            counts.open == 0 && counts.filing == 0
+        });
+        self.imap.contents(SENT)
+    }
+
     /// `mp sync`, asserted to succeed.
     pub fn sync(&self) -> Output {
         let out = self.mp(&["sync"]);

@@ -3691,9 +3691,9 @@ mod wire {
         assert!(wire.imap.passwords().iter().all(|p| p == IMAP_PASSWORD));
 
         // The drain that files the copy may be one already running when the
-        // send committed its row, which then leaves the APPEND to it.
-        wait_for("the Sent copy", || !wire.imap.contents(SENT).is_empty());
-        let sent = wire.imap.contents(SENT);
+        // send committed its row, which then leaves the APPEND to it; once
+        // the outbox owes no APPEND, no copy can come after this count.
+        let sent = wire.sent_once_settled();
         assert_eq!(sent.len(), 1, "one Sent copy: {sent:?}");
         let message_id = header(&deliveries[0].data, "Message-ID");
         assert_eq!(sent[0].message_id, message_id);
@@ -3768,7 +3768,11 @@ mod wire {
             .flat_map(|d| d.recipients)
             .collect();
         assert_eq!(delivered, vec!["ada@example.org".to_string()]);
-        wait_for("the Sent copy", || wire.imap.contents(SENT).len() == 1);
+        assert_eq!(
+            wire.sent_once_settled().len(),
+            1,
+            "one Sent copy, and no later one"
+        );
     }
 
     /// The connection closes after the message went in and before the
@@ -3820,7 +3824,11 @@ mod wire {
             .map(|d| d.acknowledged)
             .collect();
         assert_eq!(acknowledged, vec![false, true]);
-        wait_for("the Sent copy", || wire.imap.contents(SENT).len() == 1);
+        assert_eq!(
+            wire.sent_once_settled().len(),
+            1,
+            "one Sent copy, and no later one"
+        );
     }
 
     /// The server files the Sent copy and closes the connection before its
@@ -3854,7 +3862,7 @@ mod wire {
             "  ↻ row 1 is queued again; sending it now\n  ✓ row 1 is now done\n  \
              ✓ 1 sent copy/copies already on the server, none filed again\n"
         );
-        assert_eq!(wire.imap.contents(SENT).len(), 1, "and no second one");
+        assert_eq!(wire.sent_once_settled().len(), 1, "and no second one");
         assert_eq!(wire.smtp.deliveries().len(), 1, "the message went out once");
     }
 }
