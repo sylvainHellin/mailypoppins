@@ -1950,13 +1950,21 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
 // ---------------------------------------------------------------------------
 
 mod wire {
-    use super::support::wire_fixture::{assert_ok, mail, stderr, stdout, WireRoot, ACCOUNT, INBOX};
+    use super::support::wire_fixture::{
+        assert_ok, mail, stderr, stdout, wait_for, WireRoot, ACCOUNT, INBOX,
+    };
 
     use super::support::parity::{mp_command, DEADLINE, REQUIRE_ENV, TICK};
 
     /// A root whose INBOX holds `first` and `second`.
     fn served() -> WireRoot {
+        served_with("")
+    }
+
+    /// [`served`], with `extra` appended under the account's IMAP table.
+    fn served_with(extra: &str) -> WireRoot {
         let mut wire = WireRoot::new();
+        wire.write_config(extra);
         wire.imap.set_mail(
             INBOX,
             11,
@@ -2110,12 +2118,25 @@ mod wire {
         mailypoppins::ingest::ingest_failure_attempts(&wire.store(), ACCOUNT, "inbox", uid)
     }
 
+    /// The arrival mark the INBOX's cursor holds.
+    fn mark(wire: &WireRoot) -> Option<i64> {
+        mailypoppins::ingest::load_mailbox_cursor(&wire.store(), ACCOUNT, "inbox")
+            .expect("the cursor reads")
+            .and_then(|cursor| cursor.arrival_mark)
+    }
+
     /// A root synced once, whose server then lost `first` (a row the prune
     /// owes) and gained `third` at UID 3, which it refuses to send, and
     /// `fourth`: the refused message is an arrival above the mark.
     fn refusing_an_arrival() -> WireRoot {
         let wire = served();
         wire.sync();
+        refuse_an_arrival(&wire);
+        wire
+    }
+
+    /// What [`refusing_an_arrival`] does to the server after the first sync.
+    fn refuse_an_arrival(wire: &WireRoot) {
         wire.imap.set_mail(
             INBOX,
             11,
@@ -2126,7 +2147,6 @@ mod wire {
             ],
         );
         wire.imap.refuse_fetch_of(3, Some(NOT_FETCHED));
-        wire
     }
 
     /// PERSO-333: a message the server refuses to send on every pass holds
@@ -2146,6 +2166,7 @@ mod wire {
             "pass 1 owes UID 3, so it prunes nothing"
         );
         assert_eq!(attempts(&wire, 3), 1);
+        assert_eq!(mark(&wire), Some(2), "the mark waits below UID 3");
 
         let fifth = wire
             .imap
@@ -2162,6 +2183,7 @@ mod wire {
             wire.local("inbox")
         );
         assert_eq!(attempts(&wire, 3), 2);
+        assert_eq!(mark(&wire), Some(2));
 
         wire.sync();
         assert_eq!(attempts(&wire, 3), 3);
@@ -2174,6 +2196,7 @@ mod wire {
             ],
             "the third refusal is given up on, and the prune it held runs"
         );
+        assert_eq!(mark(&wire), None, "nor does it hold the mark");
 
         let fetches = wire.imap.body_fetches();
         wire.sync();
@@ -2183,6 +2206,7 @@ mod wire {
             "a pass after the give-up does not ask for the refused body again"
         );
         assert_eq!(attempts(&wire, 3), 3);
+        assert_eq!(mark(&wire), None);
     }
 
     /// A message given up on is asked for again once a day has passed since
@@ -2195,6 +2219,7 @@ mod wire {
             wire.sync();
         }
         assert_eq!(attempts(&wire, 3), 3);
+        assert_eq!(mark(&wire), None);
         wire.imap.refuse_fetch_of(3, None);
         wire.sync();
         assert_eq!(
@@ -2220,6 +2245,7 @@ mod wire {
             wire.local("inbox")
         );
         assert_eq!(attempts(&wire, 3), 0, "the delivery clears the count");
+        assert_eq!(mark(&wire), None);
     }
 
     /// A message refused on two passes and sent on the third is ingested
@@ -2230,6 +2256,7 @@ mod wire {
         wire.sync();
         wire.sync();
         assert_eq!(attempts(&wire, 3), 2);
+        assert_eq!(mark(&wire), Some(2), "still owed, so the mark waits");
 
         wire.imap.refuse_fetch_of(3, None);
         wire.sync();
@@ -2243,6 +2270,7 @@ mod wire {
             "UID 3 is in, and the prune of UID 1 it held runs"
         );
         assert_eq!(attempts(&wire, 3), 0);
+        assert_eq!(mark(&wire), None);
     }
 
     /// A refusal of a whole body chunk with no data, which names no message,
@@ -2266,6 +2294,7 @@ mod wire {
         );
         assert_eq!(attempts(&wire, 3), 1);
         assert_eq!(attempts(&wire, 4), 0);
+        assert_eq!(mark(&wire), Some(2));
 
         // A second arrival puts two messages in the chunk again, both of
         // which the server sends alone.
@@ -2285,5 +2314,86 @@ mod wire {
         );
         assert_eq!(attempts(&wire, 3), 0);
         assert_eq!(attempts(&wire, 5), 0);
+        assert_eq!(mark(&wire), None);
+    }
+
+    /// An account hook that fires for every message and leaves the JSON it
+    /// was handed in a file of its own under `runs`.
+    fn hook_on_everything(runs: &std::path::Path) -> String {
+        format!(
+            "\n[[accounts.hooks]]\nname = \"everything\"\nmatch = {{ subject = \".\" }}\n\
+             exec = [\"/bin/sh\", \"-c\", \"f=$(mktemp -p '{}' .run.XXXXXX); cat > $f; mv $f $f.json\"]\n",
+            runs.display()
+        )
+    }
+
+    /// The Message-IDs the hook fired for, one per run, sorted.
+    fn fired(runs: &std::path::Path) -> Vec<String> {
+        let mut ids: Vec<String> = std::fs::read_dir(runs)
+            .expect("the runs directory")
+            .map(|entry| entry.expect("a run").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .map(|path| {
+                let json: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).expect("the run's input"))
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                json["message_id"].as_str().unwrap_or_default().to_string()
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Whether the hook has armed on the INBOX, which its first scan after
+    /// the first sync does.
+    fn hook_armed(wire: &WireRoot) -> bool {
+        std::fs::read_to_string(wire.account_dir().join("hooks-state.json"))
+            .is_ok_and(|state| state.contains("\"everything\""))
+    }
+
+    /// PERSO-333 review: a message given up on and written late, below the
+    /// UIDs that arrived after it, still gets its hook, once; and every
+    /// message that arrived meanwhile fired its own, once.
+    #[test]
+    fn a_message_given_up_on_and_delivered_late_fires_its_hook_once() {
+        let runs = tempfile::TempDir::new().expect("a runs directory");
+        let wire = served_with(&hook_on_everything(runs.path()));
+        wire.sync();
+        wait_for("the hook to arm", || hook_armed(&wire));
+        refuse_an_arrival(&wire);
+
+        wire.sync();
+        wait_for("the hook of UID 4", || fired(runs.path()).len() == 1);
+        wire.imap
+            .deliver_unannounced(INBOX, mail("fifth", "ed@example.org", "Fifth", "five"));
+        wire.sync();
+        wait_for("the hook of UID 5", || fired(runs.path()).len() == 2);
+        wire.sync();
+        assert_eq!(attempts(&wire, 3), 3, "UID 3 is given up on");
+        wire.sync();
+
+        wire.imap.refuse_fetch_of(3, None);
+        wire.store()
+            .conn()
+            .execute(
+                "UPDATE ingest_failures SET updated = updated - ?1",
+                [86_400 + 60],
+            )
+            .expect("age the refusal");
+        wire.sync();
+        assert!(wire
+            .local("inbox")
+            .contains(&(3, "<third@example.org>".to_string())));
+        wait_for("the hook of UID 3", || fired(runs.path()).len() == 3);
+        wire.sync();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(
+            fired(runs.path()),
+            vec![
+                "<fifth@example.org>".to_string(),
+                "<fourth@example.org>".to_string(),
+                "<third@example.org>".to_string(),
+            ]
+        );
     }
 }
