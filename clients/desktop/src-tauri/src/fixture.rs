@@ -3409,6 +3409,7 @@ impl State {
                     last_error: None,
                     rejected: Vec::new(),
                     outstanding: vec!["friend@example.com".into()],
+                    may_be_delivered: false,
                 });
             }
         }
@@ -3641,6 +3642,7 @@ impl State {
             last_error: None,
             rejected: Vec::new(),
             outstanding: Vec::new(),
+            may_be_delivered: false,
         };
         let mut sent_copy = SentCopy::Filed;
         match simulation {
@@ -6273,6 +6275,7 @@ impl Fixture {
                 last_error: Some(SEND_FAIL_REASON.into()),
                 rejected: Vec::new(),
                 outstanding: vec![organizer],
+                may_be_delivered: true,
             };
             let outbox = s.outbox.entry(account.clone()).or_default();
             outbox.ever_used = true;
@@ -6411,6 +6414,7 @@ impl Fixture {
                 last_error: Some(SEND_FAIL_REASON.into()),
                 rejected: Vec::new(),
                 outstanding: recipients.iter().map(|r| r.address.clone()).collect(),
+                may_be_delivered: true,
             };
             let outbox = s.outbox.entry(account.clone()).or_default();
             outbox.ever_used = true;

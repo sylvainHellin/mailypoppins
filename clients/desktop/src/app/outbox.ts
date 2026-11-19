@@ -31,19 +31,11 @@ export function countsAsFailed(row: OutboxRow): boolean {
 }
 
 /**
- * How the reason of a recipient the transport never reached ends: `mp_protocol::send::NOTHING_SENT`, which ts-rs does not
- * export (it exports types, not constants), so it is spelled here and pinned to the Rust value by `outbox.test.ts`.
- */
-export const NOTHING_SENT = "nothing was sent";
-
-/**
- * Whether a retry of the failed `row` may deliver it a second time, the CLI's rule (`mp_client::format::outbox_retry_warning`,
- * PERSO-330): no search runs before the SMTP re-send, so a row the server may have taken may arrive twice. A row whose
- * recipients never reached the server, its reason ending in {@link NOTHING_SENT} with no "no verdict" beside it, sent nothing.
+ * Whether a retry of the failed `row` may deliver it a second time, as the daemon decides it from the row's recorded verdicts
+ * (`may_be_delivered`, PERSO-330) and `mp outbox retry` reads it. An older daemon sends no field, and its row warns as before.
  */
 function mayDeliverTwice(row: OutboxRow): boolean {
-  const error = row.last_error ?? "";
-  return !(error.includes(NOTHING_SENT) && !error.includes("no verdict"));
+  return (row as Partial<OutboxRow>).may_be_delivered !== false;
 }
 
 /** Whether the daemon admits a retry of a row in this state (`send.outbox_retry`). */

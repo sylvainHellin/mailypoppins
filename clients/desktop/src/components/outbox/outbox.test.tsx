@@ -17,6 +17,7 @@ function row(id: number, patch: Partial<OutboxRow> = {}): OutboxRow {
     last_error: "421 4.7.0 the server closed the connection",
     rejected: [],
     outstanding: ["robin@example.com"],
+    may_be_delivered: true,
     ...patch,
   };
 }

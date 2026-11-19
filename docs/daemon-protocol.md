@@ -2115,3 +2115,8 @@ It added `partial` beside it, additively and defaulting to `false`: whether the 
 
 PERSO-210 also changed the spelling of one value: `moved_to.selector` in the `message.archive` and `message.move` results is the canonical selector, its Message-ID without angle brackets (`mp://work/archive/x@example.org`), as `message.delete`'s `selector`, a listed row's and every command's output spell it; it was the stored Message-ID with its brackets percent-encoded (`mp://work/archive/%3Cx@example.org%3E`).
 `mp archive` and `mp move` print the new one.
+
+PERSO-330 added `may_be_delivered` to a `send.outbox_list` row (`mp_protocol::send::OutboxRow`), one member, additively: whether `send.outbox_retry` of the `failed` row may deliver the message a second time, because a recipient a retry re-sends to got no verdict (a submission deadline, a connection lost mid-conversation, a send the daemon died inside) and no search runs before the SMTP re-send.
+It is `false` for a row every recipient refused, for one whose outstanding recipients the transport never reached (the lookup, the connect or the TLS handshake failed, recorded in the stored envelope as `unsent:` lines an older build skips), and for every row not `failed`; a row parked by an older build reads `true`.
+A row from an older daemon, which carries no member, decodes as `true`, so a client warns as it did; `mp outbox retry` prints its one-line warning and the desktop's retry confirmation its warning only when it is `true`, where both read the row's reason before.
+The binding `clients/desktop/src/protocol/generated/OutboxRow.ts` moved with it; no field was renamed or dropped, and no method was added.

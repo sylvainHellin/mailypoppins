@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
-use mp_protocol::send::NOTHING_SENT;
 
 #[cfg(test)]
 mod deadline_tests;
@@ -5304,9 +5303,14 @@ fn is_connection_setup_failure(err: &lettre::transport::smtp::Error) -> bool {
     err.to_string().starts_with("Connection error")
 }
 
+/// How the reason of a recipient the transport never reached ends.
+const NOTHING_SENT: &str = "nothing was sent";
+
 /// Why a connection to `server` (its host and port) was never set up, in
 /// plain words ending in [`NOTHING_SENT`], or `None` when `err` is not a
-/// [connection-setup failure](is_connection_setup_failure).
+/// [connection-setup failure](is_connection_setup_failure). The words are
+/// only how the recipient reads: its [`RecipientVerdict::Unreached`] is
+/// what the outbox records and what a client is told.
 ///
 /// lettre's own text (`Connection error: Connection refused (os error
 /// 111)`) names no server and reads like a connection lost mid-send, which

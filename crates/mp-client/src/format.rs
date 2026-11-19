@@ -356,29 +356,18 @@ pub fn outbox_discard_line(row_id: i64, message_id: &str) -> String {
     format!("  \u{2713} discarded row {row_id} ({message_id}); its bytes are released")
 }
 
-/// The line `mp outbox retry` prints before it sends the failed `row` again,
-/// `None` when there is nothing to warn about (PERSO-330).
-///
-/// A failed row is one the server may have taken: no verdict came back, or
-/// the daemon stopped mid-send. Nothing searches before the SMTP re-send
-/// (the Message-ID search guards only the Sent copy), so whether it arrived
-/// is the user's to find out. A row whose recipients never reached the
-/// server, its reason ending in [`NOTHING_SENT`] with no "no verdict" beside
-/// it, sent nothing, and a retry cannot deliver it twice.
+/// The line `mp outbox retry` prints before it sends `row` again, `None`
+/// when a retry cannot deliver it twice (PERSO-330). The daemon decides
+/// ([`OutboxRow::may_be_delivered`]), so the server's own words in the
+/// row's reason never do.
 pub fn outbox_retry_warning(row: &OutboxRow) -> Option<String> {
-    use mp_protocol::send::NOTHING_SENT;
-    if row.state != "failed" {
-        return None;
-    }
-    let error = row.last_error.as_deref().unwrap_or_default();
-    if error.contains(NOTHING_SENT) && !error.contains("no verdict") {
-        return None;
-    }
-    Some(format!(
-        "  \u{26a0} row {} may already have been delivered: mp cannot know whether the server \
-         took it, so its recipients may get it twice",
-        row.id
-    ))
+    (row.state == "failed" && row.may_be_delivered).then(|| {
+        format!(
+            "  \u{26a0} row {} may already have been delivered: mp cannot know whether the server \
+             took it, so its recipients may get it twice",
+            row.id
+        )
+    })
 }
 
 /// The two lines a retry prints, then one for the copies it filed and one
@@ -1160,7 +1149,7 @@ mod tests {
         assert_eq!(refused_rebuild_line("written", 30, 0), None);
     }
 
-    fn failed_row(last_error: &str) -> mp_protocol::send::OutboxRow {
+    fn failed_row(may_be_delivered: bool) -> mp_protocol::send::OutboxRow {
         mp_protocol::send::OutboxRow {
             id: 7,
             state: "failed".to_string(),
@@ -1169,44 +1158,41 @@ mod tests {
             message_id: "<m@example.com>".to_string(),
             target_mailbox: Some("Sent".to_string()),
             updated: 0,
-            last_error: Some(last_error.to_string()),
+            // The server's own words, which decide nothing.
+            last_error: Some("550 5.1.1 nothing was sent; no verdict".to_string()),
             rejected: Vec::new(),
             outstanding: vec!["bob@example.com".to_string()],
+            may_be_delivered,
         }
     }
 
-    /// PERSO-330: no search runs before an SMTP re-send, so `mp outbox
-    /// retry` of a row parked with no verdict says, before it sends, that the
-    /// message may already have been delivered. A row that never reached the
-    /// server sent nothing and needs no warning, nor does a row whose Sent
-    /// copy alone is owed.
+    /// PERSO-330: `mp outbox retry` warns in one line, before it sends, when
+    /// the daemon says the row may already have been delivered, and only
+    /// then; a row whose Sent copy alone is owed never warns.
     #[test]
-    fn a_retry_of_a_row_with_no_verdict_warns_that_it_may_have_been_delivered() {
+    fn a_retry_warns_when_the_daemon_says_the_row_may_have_been_delivered() {
         use super::outbox_retry_warning;
-        let silent = failed_row(
-            "no verdict for bob@example.com: no answer from the SMTP server within 150s; \
-             it may have taken the message",
-        );
-        let warning = outbox_retry_warning(&silent).expect("a warning");
+        let warning = outbox_retry_warning(&failed_row(true)).expect("a warning");
         assert!(!warning.contains('\n'), "one line: {warning}");
         assert!(
             warning.contains("row 7") && warning.contains("may already have been delivered"),
             "{warning}"
         );
-
-        let crashed = failed_row("the send never returned a verdict");
-        assert!(outbox_retry_warning(&crashed).is_some());
-
-        let unreached = failed_row(
-            "not sent to bob@example.com: could not connect to smtp.example.com:587: \
-             connection refused; nothing was sent",
-        );
-        assert_eq!(outbox_retry_warning(&unreached), None);
-
+        assert_eq!(outbox_retry_warning(&failed_row(false)), None);
         let filing = mp_protocol::send::OutboxRow {
             state: "sent_pending_append".to_string(),
-            ..failed_row("APPEND failed")
+            ..failed_row(true)
         };
         assert_eq!(outbox_retry_warning(&filing), None);
+    }
+
+    /// A row from a daemon that predates the field reads as one that may
+    /// have been delivered, so the CLI warns as it did.
+    #[test]
+    fn a_row_without_may_be_delivered_reads_as_one_that_may_be() {
+        let mut value = serde_json::to_value(failed_row(false)).unwrap();
+        value.as_object_mut().unwrap().remove("may_be_delivered");
+        let row: mp_protocol::send::OutboxRow = serde_json::from_value(value).unwrap();
+        assert!(row.may_be_delivered);
     }
 }

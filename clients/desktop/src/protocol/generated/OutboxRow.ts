@@ -46,4 +46,14 @@ rejected: Array<[string, string]>,
 /**
  * The recipients that have neither taken the message nor been refused it.
  */
-outstanding: Array<string>, };
+outstanding: Array<string>,
+/**
+ * Whether `send.outbox_retry` of this `failed` row may deliver the
+ * message a second time: a recipient a retry re-sends to got no verdict
+ * (a deadline, a connection lost mid-conversation, a crashed send), so
+ * the server may hold it, and no search runs before the re-send
+ * (PERSO-330). `false` for a row whose outstanding recipients the
+ * transport never reached, and for every row not `failed`. Absent from
+ * an older daemon, which reads as `true`: a client warns as it did.
+ */
+may_be_delivered: boolean, };

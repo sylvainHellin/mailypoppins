@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { cursorRow, hiddenByOutbox, NOTHING_SENT, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog, stateLabel } from "@/app/outbox";
+import { cursorRow, hiddenByOutbox, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog, stateLabel } from "@/app/outbox";
 import { initialState, isStale, type AppState } from "@/app/state";
 import { fixtures, outboxListing, mock, resetMock } from "@/test/tauri-mock";
 import { GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
@@ -26,6 +24,7 @@ function row(id: number, patch: Partial<OutboxRow> = {}): OutboxRow {
     last_error: "421 4.7.0 the server closed the connection",
     rejected: [],
     outstanding: ["robin@example.com"],
+    may_be_delivered: true,
     ...patch,
   };
 }
@@ -219,27 +218,15 @@ describe("the confirmations and the words", () => {
     expect(retryDialog("work", row(8, { state: "done", partial: true }))).toMatch(/row 8 is partly delivered/);
   });
 
-  // PERSO-330: the CLI's rule (`mp_client::format::outbox_retry_warning`). A row whose recipients never reached the server
-  // sent nothing, and a retry cannot deliver it twice; a row with a recipient of no verdict beside it still may.
-  it("does not warn about a second delivery for a row that never reached the server", () => {
-    const unreached = row(9, {
-      last_error: "not sent to robin@example.com: could not connect to smtp.example.com:587: connection refused; nothing was sent",
-    });
-    expect(retryDialog("work", unreached)).toMatchObject({ title: "Send row 9 again?", warning: null });
-    const mixed = row(10, {
-      last_error:
-        "no verdict for robin@example.com: no answer from the SMTP server within 150s; it may have taken the message | " +
-        "not sent to kim@example.com: could not connect to smtp.example.com:587: connection refused; nothing was sent",
-    });
-    expect((retryDialog("work", mixed) as { warning: string }).warning).toMatch(/may already have been delivered/);
-    expect((retryDialog("work", row(11, { last_error: null })) as { warning: string }).warning).toMatch(/may already have been delivered/);
-  });
-
-  it("reads the phrase the daemon ends a never-reached reason with, as mp-protocol spells it", () => {
-    const rust = readFileSync(resolve(process.cwd(), "../../crates/mp-protocol/src/send.rs"), "utf8");
-    const spelled = /pub const NOTHING_SENT: &str = "([^"]*)";/.exec(rust)?.[1];
-    expect(spelled).toBeDefined();
-    expect(NOTHING_SENT).toBe(spelled);
+  // PERSO-330: the daemon says whether a retry may deliver the row twice (`may_be_delivered`), as `mp outbox retry` reads it.
+  it("warns about a second delivery only when the daemon says the row may have been delivered", () => {
+    const warningOf = (r: OutboxRow) => (retryDialog("work", r) as { warning: string | null }).warning;
+    expect(warningOf(row(9, { may_be_delivered: true }))).toMatch(/may already have been delivered/);
+    expect(retryDialog("work", row(10, { may_be_delivered: false }))).toMatchObject({ title: "Send row 10 again?", warning: null });
+    // An older daemon sends no field: the dialog warns as it always did.
+    const older: Partial<OutboxRow> = row(11);
+    delete older.may_be_delivered;
+    expect(warningOf(older as OutboxRow)).toMatch(/may already have been delivered/);
   });
 
   it("names what a discard gives up, for each state", () => {

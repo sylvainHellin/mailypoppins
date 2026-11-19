@@ -1486,6 +1486,218 @@ fn the_envelope_encoding_carries_the_verdicts_and_stays_backwards_readable() {
 }
 
 // ---------------------------------------------------------------------------
+// Whether a retry may deliver twice (PERSO-330)
+// ---------------------------------------------------------------------------
+
+/// A row of [`envelope`] submitted once with `verdicts`, as the pass left it.
+fn submitted(verdicts: RecipientVerdicts) -> (Account, i64) {
+    let account = Account::new();
+    let id = enqueue(&account, "<retry-twice@example.com>", Some(SENT));
+    let (store, blobs) = account.open();
+    outbox::mark_submission_started(&store, id).unwrap();
+    outbox::record_submission(&store, &blobs, id, &SubmitOutcome::PerRecipient(verdicts)).unwrap();
+    (account, id)
+}
+
+fn row_of(account: &Account, id: i64) -> outbox::OutboxRow {
+    let (store, _) = account.open();
+    outbox::load(&store, id).unwrap().unwrap()
+}
+
+fn pair(address: &str, reason: &str) -> (String, String) {
+    (address.to_string(), reason.to_string())
+}
+
+const REFUSED: &str =
+    "could not connect to smtp.example.com:587: connection refused; nothing was sent";
+
+/// Every recipient refused with a 5xx: a retry re-sends to nobody.
+#[test]
+fn a_row_every_recipient_refused_cannot_be_delivered_twice() {
+    let (account, id) = submitted(RecipientVerdicts {
+        rejected: vec![
+            pair("bob@example.com", "550 unknown"),
+            pair("blind@example.com", "550 unknown"),
+        ],
+        ..Default::default()
+    });
+    let row = row_of(&account, id);
+    assert_eq!(row.state, OutboxState::Failed);
+    assert!(!row.may_be_delivered());
+}
+
+/// The deadline fired with no verdict for one recipient, and the one after it
+/// was never tried: a retry re-sends to the first, who may hold it.
+#[test]
+fn a_row_a_deadline_parked_may_be_delivered_twice() {
+    let (account, id) = submitted(RecipientVerdicts {
+        ambiguous: vec![pair(
+            "bob@example.com",
+            "no answer from the SMTP server within 150s; it may have taken the message",
+        )],
+        retryable: vec![pair(
+            "blind@example.com",
+            "not sent: the SMTP server stopped answering",
+        )],
+        ..Default::default()
+    });
+    let row = row_of(&account, id);
+    assert_eq!(row.state, OutboxState::Failed);
+    assert!(row.may_be_delivered());
+}
+
+/// No recipient was reached: the row is parked as before, and a retry cannot
+/// deliver twice.
+#[test]
+fn a_row_that_never_reached_the_server_cannot_be_delivered_twice() {
+    let (account, id) = submitted(RecipientVerdicts {
+        unsent: vec![
+            pair("bob@example.com", REFUSED),
+            pair("blind@example.com", REFUSED),
+        ],
+        ..Default::default()
+    });
+    let row = row_of(&account, id);
+    assert_eq!(row.state, OutboxState::Failed);
+    assert!(row.submission_started_at.is_some(), "parked as before");
+    assert!(!row.may_be_delivered());
+    assert_eq!(
+        row.envelope.unwrap().unsent,
+        vec![
+            "bob@example.com".to_string(),
+            "blind@example.com".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_row_with_no_verdict_beside_an_unreached_recipient_may_be_delivered_twice() {
+    let (account, id) = submitted(RecipientVerdicts {
+        ambiguous: vec![pair("bob@example.com", "connection reset after DATA")],
+        unsent: vec![pair("blind@example.com", REFUSED)],
+        ..Default::default()
+    });
+    assert!(row_of(&account, id).may_be_delivered());
+}
+
+/// One recipient took it and the other was never reached: a retry re-sends
+/// only to the one who has nothing.
+#[test]
+fn a_row_delivered_to_one_and_unreached_for_the_other_cannot_be_delivered_twice() {
+    let (account, id) = submitted(RecipientVerdicts {
+        delivered: vec!["bob@example.com".to_string()],
+        unsent: vec![pair("blind@example.com", REFUSED)],
+        ..Default::default()
+    });
+    let row = row_of(&account, id);
+    assert_eq!(row.state, OutboxState::Failed);
+    assert!(!row.may_be_delivered());
+}
+
+/// The accepted imprecision: a 4xx beside an unreached recipient warns,
+/// though nothing was sent, since the envelope does not record the 4xx.
+#[test]
+fn a_row_with_a_4xx_beside_an_unreached_recipient_still_warns() {
+    let (account, id) = submitted(RecipientVerdicts {
+        retryable: vec![pair("bob@example.com", "451 try again later")],
+        unsent: vec![pair("blind@example.com", REFUSED)],
+        ..Default::default()
+    });
+    assert!(row_of(&account, id).may_be_delivered());
+}
+
+/// A send the daemon died inside: nobody knows what the server took.
+#[test]
+fn a_row_a_crashed_send_parked_may_be_delivered_twice() {
+    let account = Account::new();
+    let id = enqueue(&account, "<crashed@example.com>", Some(SENT));
+    let (store, _) = account.open();
+    outbox::mark_submission_started(&store, id).unwrap();
+    assert_eq!(
+        outbox::sweep_pending_sends(&store, ACCOUNT)
+            .unwrap()
+            .stranded,
+        vec![id]
+    );
+    assert!(row_of(&account, id).may_be_delivered());
+}
+
+/// A row whose envelope has no `unsent` line, one an older build parked or
+/// wrote back, warns as it always did, whatever its reason says.
+#[test]
+fn a_row_without_the_unsent_line_may_be_delivered_twice() {
+    let (account, id) = submitted(RecipientVerdicts {
+        unsent: vec![
+            pair("bob@example.com", REFUSED),
+            pair("blind@example.com", REFUSED),
+        ],
+        ..Default::default()
+    });
+    let (store, _) = account.open();
+    let old_text: String = envelope_of(&account, id)
+        .encode()
+        .lines()
+        .filter(|line| !line.starts_with("unsent:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET envelope = ?2 WHERE id = ?1",
+            rusqlite::params![id, old_text],
+        )
+        .unwrap();
+    assert!(row_of(&account, id).may_be_delivered());
+}
+
+/// Each pass replaces the unsent list: a recipient unreached on the first
+/// pass and without a verdict on the retry is no longer counted unsent.
+#[test]
+fn each_pass_replaces_the_unsent_list() {
+    let (account, id) = submitted(RecipientVerdicts {
+        unsent: vec![
+            pair("bob@example.com", REFUSED),
+            pair("blind@example.com", REFUSED),
+        ],
+        ..Default::default()
+    });
+    let (store, blobs) = account.open();
+    outbox::retry(&store, id).unwrap();
+    outbox::mark_submission_started(&store, id).unwrap();
+    outbox::record_submission(
+        &store,
+        &blobs,
+        id,
+        &SubmitOutcome::PerRecipient(RecipientVerdicts {
+            ambiguous: vec![pair("bob@example.com", "connection reset after DATA")],
+            unsent: vec![pair("blind@example.com", REFUSED)],
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let row = row_of(&account, id);
+    assert_eq!(
+        row.envelope.as_ref().unwrap().unsent,
+        vec!["blind@example.com".to_string()]
+    );
+    assert!(row.may_be_delivered());
+}
+
+/// The `unsent` line round-trips, and a decoder skips a line kind it does not
+/// know, which is the rule an older build's decoder applies to `unsent:`.
+#[test]
+fn the_unsent_line_round_trips_and_an_unknown_line_is_skipped() {
+    let mut envelope = self::envelope();
+    envelope.unsent = vec!["blind@example.com".to_string()];
+    let encoded = envelope.encode();
+    assert!(encoded.contains("\nunsent:blind@example.com"), "{encoded}");
+    assert_eq!(Envelope::decode(&encoded), envelope);
+
+    let later = format!("{}\nkind-of-a-later-build:x", self::envelope().encode());
+    assert_eq!(Envelope::decode(&later), self::envelope());
+}
+
+// ---------------------------------------------------------------------------
 // The admission gate (#0063)
 // ---------------------------------------------------------------------------
 

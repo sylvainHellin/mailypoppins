@@ -15,12 +15,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How the reason of a recipient the transport never reached ends (the
-/// lookup, the connect or the TLS handshake failed): the outbox parks its
-/// row with that reason, and a client reads it to know a retry of the row
-/// cannot deliver the message twice (PERSO-330).
-pub const NOTHING_SENT: &str = "nothing was sent";
-
 // ---------------------------------------------------------------------------
 // A send
 // ---------------------------------------------------------------------------
@@ -131,6 +125,20 @@ pub struct OutboxRow {
     pub rejected: Vec<(String, String)>,
     /// The recipients that have neither taken the message nor been refused it.
     pub outstanding: Vec<String>,
+    /// Whether `send.outbox_retry` of this `failed` row may deliver the
+    /// message a second time: a recipient a retry re-sends to got no verdict
+    /// (a deadline, a connection lost mid-conversation, a crashed send), so
+    /// the server may hold it, and no search runs before the re-send
+    /// (PERSO-330). `false` for a row whose outstanding recipients the
+    /// transport never reached, and for every row not `failed`. Absent from
+    /// an older daemon, which reads as `true`: a client warns as it did.
+    #[serde(default = "absent_may_be_delivered")]
+    pub may_be_delivered: bool,
+}
+
+/// What an older daemon's row, which carries no `may_be_delivered`, reads as.
+fn absent_may_be_delivered() -> bool {
+    true
 }
 
 /// The three counts under the listing.

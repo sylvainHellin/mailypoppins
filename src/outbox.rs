@@ -253,6 +253,31 @@ pub struct OutboxRow {
 }
 
 impl OutboxRow {
+    /// Whether [`retry`] of this row may deliver the message a second time
+    /// (PERSO-330): it is `failed` with its submission marker set, and some
+    /// recipient a retry re-sends to is not one the last pass never reached
+    /// ([`Envelope::unsent`]). No search runs before the SMTP re-send, so
+    /// the user has to find out whether it arrived.
+    ///
+    /// A row every recipient refused has its marker cleared and nothing
+    /// outstanding; a row with no readable envelope, or one an older build
+    /// parked, which records no unsent recipients, may have been delivered.
+    /// The envelope does not record a 4xx, so a 4xx beside an unreached
+    /// recipient reads as possibly delivered though nothing was sent: an
+    /// imprecision accepted, on the side of warning.
+    pub fn may_be_delivered(&self) -> bool {
+        if self.state != OutboxState::Failed || self.submission_started_at.is_none() {
+            return false;
+        }
+        let Some(envelope) = &self.envelope else {
+            return true;
+        };
+        envelope
+            .outstanding()
+            .iter()
+            .any(|(addr, _)| !envelope.is_unsent(addr))
+    }
+
     /// Whether the user discarded the row ([`Envelope::discarded`]).
     pub fn is_discarded(&self) -> bool {
         self.envelope
@@ -305,6 +330,13 @@ pub struct Envelope {
     /// The recipients the server refused for good, with the reason it gave.
     /// Never submitted again either: a 5xx does not become a 250 by waiting.
     pub rejected: Vec<(String, String)>,
+    /// The recipients the last submission pass never reached: the lookup,
+    /// the connect or the TLS handshake failed, so nothing was sent to them
+    /// (PERSO-330). Replaced by every pass that records verdicts and
+    /// cleared by [`retry`], so it describes the pass that parked the row;
+    /// an older build skips the line, and a row without it reads as one
+    /// that may have reached them ([`OutboxRow::may_be_delivered`]).
+    pub unsent: Vec<String>,
     /// The draft this submission was built from, when it came from one. The
     /// durable half of the admission gate: a second send of the same draft
     /// finds this row instead of enqueuing a second copy (#0063).
@@ -372,6 +404,10 @@ impl Envelope {
             out.push_str("\ndelivered:");
             out.push_str(&one_line(addr));
         }
+        for addr in &self.unsent {
+            out.push_str("\nunsent:");
+            out.push_str(&one_line(addr));
+        }
         for (addr, reason) in &self.rejected {
             out.push_str("\nrejected:");
             out.push_str(&one_line(addr));
@@ -417,6 +453,7 @@ impl Envelope {
                 "cc" => env.recipients.push((addr.to_string(), RecipientRole::Cc)),
                 "bcc" => env.recipients.push((addr.to_string(), RecipientRole::Bcc)),
                 "delivered" => env.delivered.push(addr.to_string()),
+                "unsent" => env.unsent.push(addr.to_string()),
                 "rejected" => {
                     let (addr, reason) = addr.split_once('\t').unwrap_or((addr, ""));
                     env.rejected.push((addr.to_string(), reason.to_string()));
@@ -447,6 +484,11 @@ impl Envelope {
 
     pub fn is_rejected(&self, addr: &str) -> bool {
         self.rejected.iter().any(|(a, _)| same_recipient(a, addr))
+    }
+
+    /// Whether the last pass never reached `addr` ([`Envelope::unsent`]).
+    pub fn is_unsent(&self, addr: &str) -> bool {
+        self.unsent.iter().any(|a| same_recipient(a, addr))
     }
 
     /// The recipients that have neither taken the message nor been refused it.
@@ -1180,6 +1222,11 @@ fn record_per_recipient(
     for (addr, reason) in &verdicts.rejected {
         envelope.record_rejected(addr, reason);
     }
+    envelope.unsent = verdicts
+        .unsent
+        .iter()
+        .map(|(addr, _)| addr.clone())
+        .collect();
     store
         .conn()
         .execute(
@@ -2102,12 +2149,22 @@ pub fn retry(store: &Store, id: i64) -> Result<()> {
             row.state
         ));
     }
+    // The unreached recipients describe the pass that parked the row, and
+    // the next pass records its own.
+    let envelope = row.envelope.as_ref().map(|envelope| {
+        Envelope {
+            unsent: Vec::new(),
+            ..envelope.clone()
+        }
+        .encode()
+    });
     store
         .conn()
         .execute(
             "UPDATE outbox SET state = 'pending_send', last_error = NULL,
-             submission_started_at = NULL, updated = ?2 WHERE id = ?1",
-            rusqlite::params![id, unix_now()],
+             submission_started_at = NULL, updated = ?2,
+             envelope = COALESCE(?3, envelope) WHERE id = ?1",
+            rusqlite::params![id, unix_now(), envelope],
         )
         .context("re-arming a failed outbox row")?;
     info!(

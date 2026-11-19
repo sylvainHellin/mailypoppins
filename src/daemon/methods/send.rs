@@ -705,6 +705,7 @@ fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
                     .collect()
             })
             .unwrap_or_default(),
+        may_be_delivered: row.may_be_delivered(),
     }
 }
 
@@ -1342,6 +1343,34 @@ mod tests {
         let given_up = listed_row(&row(Some(1)));
         assert!(!given_up.partial);
         assert_eq!(given_up.last_error.as_deref(), Some("the note"));
+    }
+
+    /// PERSO-330: the listing carries the outbox's own answer to whether a
+    /// retry may deliver the row twice, read from its recorded verdicts.
+    #[test]
+    fn a_listed_row_says_whether_a_retry_may_deliver_it_twice() {
+        let row = |unsent: Vec<String>| crate::outbox::OutboxRow {
+            id: 8,
+            account: "work".into(),
+            target_mailbox: Some("Sent".into()),
+            message_id: "<m@x>".into(),
+            raw_blob: crate::store::blobs::BlobHash::parse(&"a".repeat(64)).unwrap(),
+            state: OutboxState::Failed,
+            attempts: 0,
+            last_error: Some("no verdict for bob@x: connection reset".into()),
+            appended_uid: None,
+            created: 0,
+            updated: 0,
+            submission_started_at: Some(1),
+            envelope: Some(crate::outbox::Envelope {
+                from: "me@x".into(),
+                recipients: vec![("bob@x".into(), crate::send::RecipientRole::To)],
+                unsent,
+                ..Default::default()
+            }),
+        };
+        assert!(listed_row(&row(Vec::new())).may_be_delivered);
+        assert!(!listed_row(&row(vec!["bob@x".into()])).may_be_delivered);
     }
 
     /// The array is the family, in method-name order, and every one of it is
