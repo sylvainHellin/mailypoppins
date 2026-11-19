@@ -69,17 +69,25 @@ async fn add_flag_on_session(
     mailbox: &str,
     flag: &str,
 ) -> Result<()> {
-    session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select {}: {}", mailbox, e))?;
+    session.select(mailbox).await.map_err(|e| {
+        anyhow!(
+            "Failed to select {}: {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
 
     let uids = session
         .uid_search_checked(&crate::imap_client::search::message_id_search_term(
             message_id,
         ))
         .await
-        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+        .map_err(|e| {
+            anyhow!(
+                "IMAP search failed: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     if uids.is_empty() {
         info!("Message-ID {message_id} not found in {mailbox}, skipping the {flag} write");
         return Ok(());
@@ -88,7 +96,13 @@ async fn add_flag_on_session(
     session
         .uid_store_checked(&uid_set(&uids), &format!("+FLAGS ({flag})"))
         .await
-        .map_err(|e| anyhow!("Failed to set the {} flag: {}", flag, e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to set the {} flag: {}",
+                flag,
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     Ok(())
 }
 

@@ -95,11 +95,8 @@ where
                 information,
             } if *done == tag => {
                 if *status != Status::Ok {
-                    let words = information.as_deref().unwrap_or("no reason given");
-                    let answer = match code {
-                        Some(code) => format!("[{code:?}] {words}"),
-                        None => words.to_string(),
-                    };
+                    // The server's words, its code first as on the wire.
+                    let answer = super::words::refusal_text(code.as_ref(), information.as_deref());
                     return Err(anyhow::Error::new(AppendRefused {
                         mailbox: mailbox.to_string(),
                         answer,

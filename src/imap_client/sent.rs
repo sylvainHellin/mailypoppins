@@ -149,9 +149,11 @@ const NOT_ABOUT_THE_COPY: [&str; 9] = [
 
 /// Whether the server's answer `answer` carries a response code of
 /// [`NOT_ABOUT_THE_COPY`]: the first bracketed atom of the text, which is
-/// where RFC 5530's codes stay, imap-proto not parsing them (async-imap
-/// renders a `NO` as `code: None, info: Some("[UNAVAILABLE] ...")`, and
-/// [`super::uidplus::AppendRefused::answer`] keeps the server's words).
+/// where RFC 5530's codes stay, imap-proto not parsing them: a refusal
+/// `async-imap` kept itself reads `code: None, info: Some("[UNAVAILABLE]
+/// ...")`, a checked command's and [`super::uidplus::AppendRefused::answer`]
+/// read `[UNAVAILABLE] ...` ([`super::words::refusal_text`]), and the bracket
+/// leads the text in both.
 /// Ignores case, as IMAP atoms do.
 fn not_about_the_copy(answer: &str) -> bool {
     let Some((_, rest)) = answer.split_once('[') else {
@@ -168,13 +170,14 @@ fn not_about_the_copy(answer: &str) -> bool {
 /// says it is not about the copy ([`not_about_the_copy`]); anything else a
 /// plain error, a server not reached.
 fn answered(error: async_imap::error::Error, what: String) -> anyhow::Error {
+    let words = super::words::server_words(&error);
     match error {
         async_imap::error::Error::No(why) | async_imap::error::Error::Bad(why)
             if !not_about_the_copy(&why) =>
         {
-            anyhow::Error::new(SentRefused(format!("{what}: {why}")))
+            anyhow::Error::new(SentRefused(format!("{what}: {words}")))
         }
-        other => anyhow!("{what}: {other}"),
+        _ => anyhow!("{what}: {words}"),
     }
 }
 

@@ -1971,8 +1971,8 @@ mod wire {
         assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
         assert_eq!(
             stderr(&out),
-            "Error: Failed to copy email to Archive: no response: code: None, \
-             info: Some(\"[OVERQUOTA] Quota exceeded\")\n"
+            "Error: Failed to copy email to Archive: the server answered NO: \
+             [OVERQUOTA] Quota exceeded\n"
         );
         assert_eq!(
             wire.local("inbox"),
@@ -2042,8 +2042,8 @@ mod wire {
         assert_eq!(stdout(&out), "");
         assert_eq!(
             stderr(&out),
-            "Error: Failed to mark email as deleted: no response: code: None, \
-             info: Some(\"[CANNOT] Mailbox is locked\")\n"
+            "Error: Failed to mark email as deleted: the server answered NO: \
+             [CANNOT] Mailbox is locked\n"
         );
         assert_eq!(server(&wire, INBOX).len(), 2, "the server still holds it");
         assert!(

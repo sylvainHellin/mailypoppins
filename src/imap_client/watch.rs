@@ -48,10 +48,13 @@ pub async fn watch_mailbox_since(
 ) -> Result<(i32, MailboxState)> {
     let mut session = open_imap_session(imap_config).await?;
 
-    let selected = session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    let selected = session.select(mailbox).await.map_err(|e| {
+        anyhow!(
+            "Failed to select mailbox '{}': {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
     let at_select = state_of(&selected);
 
     if changed_since(since, &at_select) {

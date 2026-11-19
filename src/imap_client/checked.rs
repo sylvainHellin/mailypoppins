@@ -188,17 +188,22 @@ where
                 code,
                 information,
             } if *done == tag => {
-                // async-imap's own wording for a refused SELECT or COPY, so a
-                // refusal reads the same whichever command met it.
                 return match status {
                     Status::Ok => Ok((answer, None)),
+                    // The server's own words, its code first
+                    // ([`super::words::refusal_text`]), which
+                    // [`super::words::server_words`] puts before a user.
                     Status::No => Ok((
                         answer,
-                        Some(Error::No(format!("code: {code:?}, info: {information:?}"))),
+                        Some(Error::No(super::words::refusal_text(
+                            code.as_ref(),
+                            information.as_deref(),
+                        ))),
                     )),
-                    Status::Bad => {
-                        Err(Error::Bad(format!("code: {code:?}, info: {information:?}")))
-                    }
+                    Status::Bad => Err(Error::Bad(super::words::refusal_text(
+                        code.as_ref(),
+                        information.as_deref(),
+                    ))),
                     other => Err(Error::Io(std::io::Error::other(format!(
                         "status: {other:?}, code: {code:?}, information: {information:?}"
                     )))),

@@ -145,9 +145,9 @@ async fn a_move_into_a_missing_folder_is_refused_with_trycreate() {
             .expect_err("no such folder");
     assert_eq!(
         format!("{refused:#}"),
-        "Failed to copy email to Nowhere: no response: code: Some(TryCreate), \
-         info: Some(\"Mailbox doesn't exist: Nowhere\")",
-        "async-imap's rendering of the server's answer, which is what the op's error shows"
+        "Failed to copy email to Nowhere: the server answered NO: [TRYCREATE] \
+         Mailbox doesn't exist: Nowhere",
+        "the server's own answer, its code first, which is what the op's error shows"
     );
     assert_eq!(held(&server, "INBOX").len(), 1);
 }
@@ -218,9 +218,9 @@ async fn an_expunge_numbers_each_message_after_the_ones_before_it() {
 /// The refusal the tests below make the server give.
 const LOCKED: &str = "NO [CANNOT] Mailbox is locked";
 
-/// How async-imap renders [`LOCKED`], which is what every refused command's
+/// How a user reads [`LOCKED`], which is what every refused command's
 /// error carries after the caller's own words.
-const LOCKED_WORDS: &str = "no response: code: None, info: Some(\"[CANNOT] Mailbox is locked\")";
+const LOCKED_WORDS: &str = "the server answered NO: [CANNOT] Mailbox is locked";
 
 /// A server's NO to the `UID STORE` of the read toggle and the flag changes
 /// is the op's error in its words, never an empty success: the op is then
@@ -306,9 +306,9 @@ async fn a_move_whose_store_or_expunge_is_refused_fails() {
 /// read, after the ones it could (RFC 2180 4.1.2).
 const NOT_FETCHED: &str = "NO Some messages could not be FETCHed (Failure)";
 
-/// How async-imap renders [`NOT_FETCHED`].
+/// How a user reads [`NOT_FETCHED`].
 const NOT_FETCHED_WORDS: &str =
-    "no response: code: None, info: Some(\"Some messages could not be FETCHed (Failure)\")";
+    "the server answered NO: Some messages could not be FETCHed (Failure)";
 
 /// A body chunk the server answers `NO` after sending some of its messages
 /// keeps the ones it sent: one message the server cannot read must not hold
@@ -339,13 +339,7 @@ async fn a_search_fetch_refused_for_one_message_keeps_the_others_and_says_why() 
         .expect("the messages the server sent");
     let uids: Vec<u32> = fetched.emails.iter().map(|(uid, _)| *uid).collect();
     assert_eq!(uids, vec![1, 3]);
-    assert_eq!(
-        fetched.missing,
-        vec![(
-            2,
-            format!("the server refused to fetch it: {NOT_FETCHED_WORDS}")
-        )]
-    );
+    assert_eq!(fetched.missing, vec![(2, NOT_FETCHED_WORDS.to_string())]);
     session.logout().await.ok();
 }
 
@@ -360,7 +354,7 @@ async fn a_refused_body_fetch_names_the_refusal_not_an_empty_mailbox() {
         .await
         .expect("an answer");
     assert!(fetched.emails.is_empty());
-    let why = format!("the server refused to fetch it: {LOCKED_WORDS}");
+    let why = LOCKED_WORDS.to_string();
     assert_eq!(fetched.missing, vec![(1, why.clone()), (2, why)]);
     session.logout().await.ok();
 }
@@ -403,8 +397,7 @@ async fn a_refused_sent_search_is_an_error_not_an_absent_copy() {
     assert!(!crate::outbox::is_sent_refusal(&refused), "{refused:#}");
     assert_eq!(
         format!("{refused:#}"),
-        "UID SEARCH in Sent failed: no response: code: None, \
-         info: Some(\"[UNAVAILABLE] Search is down\")"
+        "UID SEARCH in Sent failed: the server answered NO: [UNAVAILABLE] Search is down"
     );
 }
 

@@ -195,11 +195,12 @@ impl DraftsFolder for ImapDraftsFolder {
         let result = async {
             let pooled = self.pooled().await?;
             let uidplus = pooled.caps().uidplus;
-            let selected = pooled
-                .session()
-                .select(mailbox)
-                .await
-                .map_err(|e| anyhow!("Failed to select {mailbox}: {e}"))?;
+            let selected = pooled.session().select(mailbox).await.map_err(|e| {
+                anyhow!(
+                    "Failed to select {mailbox}: {}",
+                    crate::imap_client::words::server_words(&e)
+                )
+            })?;
             Ok(FolderInfo {
                 uidvalidity: selected.uid_validity.unwrap_or_default(),
                 uidplus,
@@ -241,7 +242,12 @@ impl DraftsFolder for ImapDraftsFolder {
                 .session()
                 .uid_search_checked(&query)
                 .await
-                .map_err(|e| anyhow!("UID SEARCH in the drafts folder failed: {e}"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "UID SEARCH in the drafts folder failed: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
             let mut uids: Vec<u32> = found.into_iter().collect();
             uids.sort_unstable();
             Ok(uids)
@@ -265,12 +271,19 @@ impl DraftsFolder for ImapDraftsFolder {
             session
                 .uid_store_checked(&set, "+FLAGS (\\Deleted)")
                 .await
-                .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to flag {set} deleted: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
             if uidplus {
-                session
-                    .uid_expunge_checked(&set)
-                    .await
-                    .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?;
+                session.uid_expunge_checked(&set).await.map_err(|e| {
+                    anyhow!(
+                        "Failed to expunge {set}: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
             }
             Ok(())
         }
@@ -302,10 +315,12 @@ impl DraftsFolder for ImapDraftsFolder {
     async fn heads(&mut self) -> Result<Vec<ServerHead>> {
         let result = async {
             let session = self.pooled().await?.session();
-            let undeleted = session
-                .uid_search_checked("UNDELETED")
-                .await
-                .map_err(|e| anyhow!("UID SEARCH in the drafts folder failed: {e}"))?;
+            let undeleted = session.uid_search_checked("UNDELETED").await.map_err(|e| {
+                anyhow!(
+                    "UID SEARCH in the drafts folder failed: {}",
+                    crate::imap_client::words::server_words(&e)
+                )
+            })?;
             if undeleted.is_empty() {
                 return Ok(Vec::new());
             }
@@ -319,7 +334,12 @@ impl DraftsFolder for ImapDraftsFolder {
             let fetched = session
                 .uid_fetch_checked(&set, &heads_query())
                 .await
-                .map_err(|e| anyhow!("Failed to fetch the drafts' headers: {e}"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to fetch the drafts' headers: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
             let mut heads: Vec<ServerHead> = fetched
                 .iter()
                 .filter_map(|msg| {
@@ -344,7 +364,12 @@ impl DraftsFolder for ImapDraftsFolder {
                 .session()
                 .uid_fetch_checked(&uid.to_string(), "(UID BODY.PEEK[])")
                 .await
-                .map_err(|e| anyhow!("Failed to fetch draft {uid}: {e}"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to fetch draft {uid}: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
             Ok(fetched
                 .iter()
                 .find(|msg| msg.uid == Some(uid))
@@ -388,7 +413,12 @@ where
     session
         .uid_store_checked(&set, "+FLAGS.SILENT (\\Deleted)")
         .await
-        .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to flag {set} deleted: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     let mut pending: Option<Vec<(u32, u32)>> = None;
     for _ in 0..CLAIM_FETCH_ATTEMPTS {
         // An expunge reported during the STORE is in the numbers this fetch
@@ -396,7 +426,12 @@ where
         let answer =
             crate::imap_client::checked::answer_of(session, &format!("UID FETCH {set} (UID)"))
                 .await
-                .map_err(|e| anyhow!("Failed to fetch {set}: {e}"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to fetch {set}: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
         // The fetch's own answer carries an EXPUNGE another client caused
         // during it.
         if !crate::imap_client::checked::expunges(&answer).is_empty() {
@@ -417,10 +452,12 @@ where
              of {set}'s sequence numbers, which were flagged deleted but not expunged"
         ));
     };
-    let expunged = session
-        .uid_expunge_checked(&set)
-        .await
-        .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?;
+    let expunged = session.uid_expunge_checked(&set).await.map_err(|e| {
+        anyhow!(
+            "Failed to expunge {set}: {}",
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
     Ok(claimed_by_expunges(&mut pending, &expunged))
 }
 

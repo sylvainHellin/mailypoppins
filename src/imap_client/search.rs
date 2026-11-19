@@ -137,7 +137,7 @@ fn search_refusal(
     };
     anyhow!(
         "the server answered {status}: {}",
-        information.unwrap_or("no reason given")
+        super::words::refusal_text(code, information)
     )
 }
 

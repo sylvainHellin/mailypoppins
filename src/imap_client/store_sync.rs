@@ -256,7 +256,13 @@ async fn fetch_next_chunk(
             .session()
             .select(&pass.plan.mailbox)
             .await
-            .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", pass.plan.mailbox, e));
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to select mailbox '{}': {}",
+                    pass.plan.mailbox,
+                    crate::imap_client::words::server_words(&e)
+                )
+            });
         let selected = pooled.check(selected)?;
         if selected.uid_validity != pass.plan.uid_validity {
             return Err(anyhow!(
@@ -406,7 +412,12 @@ async fn list_detailed_on(session: &mut super::ImapSession) -> Result<Vec<Server
     Ok(session
         .list_checked("", "*")
         .await
-        .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?
+        .map_err(|e| {
+            anyhow!(
+                "Failed to list mailboxes: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?
         .into_iter()
         .map(|m| ServerMailbox {
             attributes: m.attributes.iter().map(attribute_token).collect(),
@@ -468,7 +479,12 @@ pub async fn status_counts(
                 Err(async_imap::error::Error::No(why)) => {
                     log::warn!("[catalogue] STATUS {name} was refused: {why}");
                 }
-                Err(e) => return Err(anyhow!("STATUS {name} failed: {e}")),
+                Err(e) => {
+                    return Err(anyhow!(
+                        "STATUS {name} failed: {}",
+                        super::words::server_words(&e)
+                    ))
+                }
             }
         }
         Ok(counts)
@@ -530,7 +546,12 @@ async fn identities_on(
                 log::warn!("[catalogue] STATUS {name} was refused: {why}");
                 continue;
             }
-            Err(e) => return Err(anyhow!("STATUS {name} failed: {e}")),
+            Err(e) => {
+                return Err(anyhow!(
+                    "STATUS {name} failed: {}",
+                    super::words::server_words(&e)
+                ))
+            }
         };
         let mut identity = FolderIdentity {
             name: name.clone(),
@@ -551,7 +572,12 @@ async fn identities_on(
                     seen.push(identity);
                     continue;
                 }
-                Err(e) => return Err(anyhow!("EXAMINE {name} failed: {e}")),
+                Err(e) => {
+                    return Err(anyhow!(
+                        "EXAMINE {name} failed: {}",
+                        super::words::server_words(&e)
+                    ))
+                }
             }
             let set = uids
                 .iter()
@@ -561,7 +587,12 @@ async fn identities_on(
             let fetched = session
                 .uid_fetch_checked(&set, MESSAGE_ID_QUERY)
                 .await
-                .map_err(|e| anyhow!("Failed to fetch the Message-IDs of {name}: {e}"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to fetch the Message-IDs of {name}: {}",
+                        crate::imap_client::words::server_words(&e)
+                    )
+                })?;
             identity.message_ids = fetched
                 .iter()
                 .filter_map(|msg| {

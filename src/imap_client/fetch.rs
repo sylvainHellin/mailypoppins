@@ -68,10 +68,13 @@ pub async fn search_stubs_on_session<T>(
 where
     T: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
 {
-    session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    session.select(mailbox).await.map_err(|e| {
+        anyhow!(
+            "Failed to select mailbox '{}': {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
 
     // A `BADCHARSET` keeps its type, which the caller answers from the store
     // (PERSO-214); its sentence already says it is the search that failed.
@@ -110,7 +113,12 @@ where
             "(UID BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)])",
         )
         .await
-        .map_err(|e| anyhow!("Failed to fetch headers: {}", e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to fetch headers: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
 
     let wanted = message_id.map(|mid| super::search::normalize_message_id(mid).to_string());
     let mut stubs = Vec::new();
@@ -161,18 +169,26 @@ pub async fn fetch_uids_on_session(
     if uids.is_empty() {
         return Ok(Fetched::default());
     }
-    session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    session.select(mailbox).await.map_err(|e| {
+        anyhow!(
+            "Failed to select mailbox '{}': {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
     // A `NO` after some of the messages keeps those (RFC 2180 4.1.2), and
     // names the refusal as the reason the others are missing.
     let partial = session
         .uid_fetch_partial(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
         .await
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to fetch emails: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     let absent = match &partial.refused {
-        Some(refusal) => format!("the server refused to fetch it: {refusal}"),
+        Some(refusal) => super::words::server_words(refusal),
         None => "no longer in the mailbox".to_string(),
     };
     let fetched = partial.messages;
@@ -210,20 +226,25 @@ pub async fn fetch_raw_by_message_id(
     mailbox: &str,
     message_id: &str,
 ) -> Result<Option<(u32, Vec<u8>, FetchedEmail)>> {
-    session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    session.select(mailbox).await.map_err(|e| {
+        anyhow!(
+            "Failed to select mailbox '{}': {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
 
     let criteria = FetchCriteria {
         message_id: Some(message_id.to_string()),
         ..Default::default()
     };
     let query = build_imap_search_query(&criteria);
-    let uids = session
-        .uid_search_checked(&query)
-        .await
-        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+    let uids = session.uid_search_checked(&query).await.map_err(|e| {
+        anyhow!(
+            "IMAP search failed: {}",
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
 
     let wanted = super::search::normalize_message_id(message_id).to_string();
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
@@ -235,7 +256,12 @@ pub async fn fetch_raw_by_message_id(
         let partial = session
             .uid_fetch_partial(&uid.to_string(), "(BODY.PEEK[] FLAGS)")
             .await
-            .map_err(|e| anyhow!("Failed to fetch email: {}", e))?;
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to fetch email: {}",
+                    crate::imap_client::words::server_words(&e)
+                )
+            })?;
         if let Some(refusal) = partial.refused {
             refused.get_or_insert(refusal);
         }
@@ -258,7 +284,10 @@ pub async fn fetch_raw_by_message_id(
     // A copy the server would not send may be the one: that is its answer,
     // not "no such message".
     match refused {
-        Some(refusal) => Err(anyhow!("Failed to fetch email: {refusal}")),
+        Some(refusal) => Err(anyhow!(
+            "Failed to fetch email: {}",
+            super::words::server_words(&refusal)
+        )),
         None => Ok(None),
     }
 }
@@ -779,7 +808,13 @@ where
     } else {
         session.select(mailbox).await
     }
-    .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    .map_err(|e| {
+        anyhow!(
+            "Failed to select mailbox '{}': {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
     let server_modseq = imap_mailbox.highest_modseq;
     span.mark("select");
     let state = MailboxState {
@@ -814,10 +849,12 @@ where
             mailbox, stored_uidvalidity, state.uid_validity
         );
     }
-    let uids = session
-        .uid_search_checked("ALL")
-        .await
-        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+    let uids = session.uid_search_checked("ALL").await.map_err(|e| {
+        anyhow!(
+            "IMAP search failed: {}",
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
     span.mark("uid_search");
 
     let mut listed: Vec<u32> = uids.into_iter().collect();
@@ -885,7 +922,12 @@ where
                 session
                     .uid_fetch_checked(&compress_uid_set(&flags.full), &flag_query(FlagPass::Full))
                     .await
-                    .map_err(|e| anyhow!("Failed to fetch flags: {}", e))?,
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to fetch flags: {}",
+                            crate::imap_client::words::server_words(&e)
+                        )
+                    })?,
             );
         }
         if let Some(delta) = flags.delta {
@@ -896,7 +938,12 @@ where
                         &flag_query(FlagPass::ChangedSince(delta.since)),
                     )
                     .await
-                    .map_err(|e| anyhow!("Failed to fetch changed flags: {}", e))?,
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to fetch changed flags: {}",
+                            crate::imap_client::words::server_words(&e)
+                        )
+                    })?,
             );
         }
         span.mark("pass1_flags");
@@ -1018,13 +1065,19 @@ pub(crate) async fn fetch_body_chunk_on_session(
     let partial = session
         .uid_fetch_partial(&compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
         .await
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to fetch emails: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     if let Some(refusal) = &partial.refused {
         warn!(
             "[sync] the server sent {} of {} message(s) of a body chunk and refused the rest: \
-             {refusal}",
+             {}",
             partial.messages.len(),
-            uids.len()
+            uids.len(),
+            super::words::server_words(refusal)
         );
     }
     let mut out: Vec<FetchedMessage> = partial

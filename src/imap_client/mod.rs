@@ -16,6 +16,7 @@ mod uidplus;
 mod watch;
 #[cfg(test)]
 mod wire_tests;
+pub(crate) mod words;
 
 pub use batch::add_flag_in_mailboxes;
 /// The arrival arithmetic, so the engine's fake backend answers a pass that

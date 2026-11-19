@@ -165,15 +165,22 @@ where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
     async fn search_uids(&mut self, query: &str) -> Result<HashSet<u32>> {
-        self.uid_search_checked(query)
-            .await
-            .map_err(|e| anyhow!("IMAP search failed: {}", e))
+        self.uid_search_checked(query).await.map_err(|e| {
+            anyhow!(
+                "IMAP search failed: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })
     }
 
     async fn holds(&mut self, mailbox: &str, message_id: &str) -> Result<bool> {
-        self.examine(mailbox)
-            .await
-            .map_err(|e| anyhow!("Failed to examine {}: {}", mailbox, e))?;
+        self.examine(mailbox).await.map_err(|e| {
+            anyhow!(
+                "Failed to examine {}: {}",
+                mailbox,
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
         Ok(!self
             .search_uids(&message_id_search_term(message_id))
             .await?
@@ -301,10 +308,13 @@ async fn select<T>(session: &mut async_imap::Session<T>, mailbox: &str) -> Resul
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
-    let selected = session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select {}: {}", mailbox, e))?;
+    let selected = session.select(mailbox).await.map_err(|e| {
+        anyhow!(
+            "Failed to select {}: {}",
+            mailbox,
+            crate::imap_client::words::server_words(&e)
+        )
+    })?;
     Ok(selected.uid_validity)
 }
 
@@ -431,7 +441,13 @@ where
     session
         .uid_copy(uid.to_string(), dest_mailbox)
         .await
-        .map_err(|e| anyhow!("Failed to copy email to {}: {}", dest_mailbox, e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to copy email to {}: {}",
+                dest_mailbox,
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
 
     mark_deleted_and_expunge(session, uid, uidplus).await
 }
@@ -481,18 +497,27 @@ where
     session
         .uid_store_checked(&uid, "+FLAGS (\\Deleted)")
         .await
-        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to mark email as deleted: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
 
     if uidplus {
-        session
-            .uid_expunge_checked(&uid)
-            .await
-            .map_err(|e| anyhow!("Failed to expunge {uid}: {e}"))?;
+        session.uid_expunge_checked(&uid).await.map_err(|e| {
+            anyhow!(
+                "Failed to expunge {uid}: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     } else {
-        session
-            .expunge_checked()
-            .await
-            .map_err(|e| anyhow!("Failed to expunge: {e}"))?;
+        session.expunge_checked().await.map_err(|e| {
+            anyhow!(
+                "Failed to expunge: {}",
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
     }
 
     Ok(())
@@ -520,7 +545,13 @@ async fn store_flags_on_session(
     session
         .uid_store_checked(&uid.to_string(), change)
         .await
-        .map_err(|e| anyhow!("Failed to store {}: {}", change, e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to store {}: {}",
+                change,
+                crate::imap_client::words::server_words(&e)
+            )
+        })?;
 
     Ok(())
 }
