@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use crate::config::{EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
 
+#[cfg(test)]
+mod deadline_tests;
 pub mod graph_submit;
 
 /// The SMTP server the daemon suites use too (PERSO-199, PERSO-210).
@@ -5034,6 +5036,43 @@ async fn submit_over_within(
     smtp_config: &SmtpConfig,
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
     deadline: std::time::Duration,
+) -> Result<SendResult> {
+    submit_over_bounded(
+        built,
+        smtp_config,
+        mailer,
+        deadline,
+        SubmissionBudget::STANDARD,
+    )
+    .await
+}
+
+/// How long one recipient's submission may run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SubmissionBudget {
+    conversation: std::time::Duration,
+    per_mib: std::time::Duration,
+}
+
+impl SubmissionBudget {
+    const STANDARD: SubmissionBudget = SubmissionBudget {
+        conversation: std::time::Duration::from_secs(150),
+        per_mib: std::time::Duration::from_secs(32),
+    };
+
+    fn for_message(&self, _bytes: usize) -> std::time::Duration {
+        self.conversation
+    }
+}
+
+/// [`submit_over_within`] with the budget of each recipient's submission
+/// handed in, so a test need not wait it out.
+async fn submit_over_bounded(
+    built: &BuiltMessage,
+    smtp_config: &SmtpConfig,
+    mailer: &AsyncSmtpTransport<Tokio1Executor>,
+    deadline: std::time::Duration,
+    _budget: SubmissionBudget,
 ) -> Result<SendResult> {
     // Parse from address for envelope
     let from_addr: lettre::Address = built
