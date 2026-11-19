@@ -14,7 +14,7 @@
 //! # The rule
 //!
 //! Of `$VISUAL` and `$EDITOR`, a blank one counting as unset, the first that
-//! names a terminal editor ([`TERMINAL_EDITORS`]) wins; when neither does,
+//! names a terminal editor ([`needs_terminal`]) wins; when neither does,
 //! the first set one, a GUI editor, is taken as written; when neither is set,
 //! [`FALLBACK`]. So `VISUAL="code -w"` beside `EDITOR=nvim` runs `nvim` in the
 //! terminal, which the desktop's embedded terminal has always done, and
@@ -34,10 +34,21 @@ use std::path::Path;
 /// What runs when neither variable names an editor.
 pub const FALLBACK: &str = "hx";
 
-/// Editors that need a terminal, known by their program's file name.
+/// Editors that need a terminal, known by their program's file name. Emacs
+/// and emacsclient are not on it: they need one only with a terminal flag
+/// ([`EMACS_TERMINAL_FLAGS`]).
 pub const TERMINAL_EDITORS: &[&str] = &[
     "vi", "vim", "nvim", "hx", "helix", "nano", "pico", "micro", "kak", "joe", "ne", "mg", "ed",
+    "lvim", "nvi", "elvis", "vile", "vis", "jed", "zile", "mcedit", "amp", "dte", "ee", "jmacs",
+    "jpico", "jstar", "tilde", "ox",
 ];
+
+/// The programs that open a window unless one of [`EMACS_TERMINAL_FLAGS`]
+/// keeps them in the terminal.
+pub const EMACS_PROGRAMS: &[&str] = &["emacs", "emacsclient"];
+
+/// The flags that run [`EMACS_PROGRAMS`] in the terminal.
+pub const EMACS_TERMINAL_FLAGS: &[&str] = &["-nw", "--no-window-system", "-t", "--tty"];
 
 /// Which variable named the editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,18 +117,24 @@ pub fn command(template: &str, path: &Path) -> Result<std::process::Command, Str
     Ok(command)
 }
 
-/// Whether a template's program is a terminal-only editor.
+/// Whether a template runs a terminal editor: its program is one of
+/// [`TERMINAL_EDITORS`], or one of [`EMACS_PROGRAMS`] with a terminal flag.
 pub fn needs_terminal(template: &str) -> bool {
-    split(template)
-        .ok()
-        .and_then(|w| w.into_iter().next())
-        .is_some_and(|program| {
-            let name = Path::new(&program)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or(program);
-            TERMINAL_EDITORS.contains(&name.as_str())
-        })
+    let Ok(words) = split(template) else {
+        return false;
+    };
+    let Some((program, rest)) = words.split_first() else {
+        return false;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.clone());
+    TERMINAL_EDITORS.contains(&name.as_str())
+        || (EMACS_PROGRAMS.contains(&name.as_str())
+            && rest
+                .iter()
+                .any(|word| EMACS_TERMINAL_FLAGS.contains(&word.as_str())))
 }
 
 /// Split a command template the way a POSIX shell splits words, without any
@@ -285,6 +302,45 @@ mod tests {
         assert_eq!(template_from(None, None), FALLBACK);
         assert_eq!(template_from(Some(""), Some(" ")), FALLBACK);
         assert_eq!(pick(None, Some(" ")), Ok(None));
+    }
+
+    /// A one-word terminal editor the first list did not know ran the
+    /// `$EDITOR` beside it instead (PERSO-320 review).
+    #[test]
+    fn the_common_terminal_editors_are_known() {
+        for editor in [
+            "lvim", "nvi", "elvis", "vile", "vis", "jed", "zile", "mcedit", "amp", "dte", "ee",
+            "jmacs", "jpico", "jstar", "tilde", "ox",
+        ] {
+            assert!(needs_terminal(editor), "{editor}");
+        }
+        assert_eq!(template_from(Some("lvim"), Some("vi")), "lvim");
+        assert_eq!(template_from(Some("vis"), Some("vi")), "vis");
+        assert_eq!(template_from(Some("mcedit"), Some("vi")), "mcedit");
+    }
+
+    /// Emacs and emacsclient run in the terminal with `-nw`, `-t`, `--tty`
+    /// or `--no-window-system`, and open a window without them.
+    #[test]
+    fn emacs_needs_a_terminal_only_with_its_terminal_flag() {
+        for editor in [
+            "emacs -nw",
+            "emacs --no-window-system",
+            "/usr/bin/emacs -q -nw",
+            "emacsclient -t",
+            "emacsclient -nw",
+            "emacsclient --tty -a ''",
+        ] {
+            assert!(needs_terminal(editor), "{editor}");
+        }
+        for editor in ["emacs", "emacsclient -c", "emacs -q", "code -nw"] {
+            assert!(!needs_terminal(editor), "{editor}");
+        }
+        assert_eq!(
+            template_from(Some("emacsclient -t"), Some("vi")),
+            "emacsclient -t"
+        );
+        assert_eq!(template_from(Some("emacs"), Some("vi")), "vi");
     }
 
     #[test]

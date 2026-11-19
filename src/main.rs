@@ -265,7 +265,7 @@ enum Commands {
         #[arg(value_name = "SELECTOR")]
         selector: String,
     },
-    /// Open a draft in $VISUAL, else $EDITOR
+    /// Open a draft in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set
     Edit {
         /// Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
         #[arg(value_name = "SELECTOR")]
@@ -1856,7 +1856,7 @@ enum SignatureAction {
         /// The signature's name
         name: String,
     },
-    /// Open a signature in $VISUAL, else $EDITOR
+    /// Open a signature in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set
     Edit {
         /// The signature's name
         name: String,
@@ -1929,7 +1929,7 @@ enum ConfigAction {
         #[command(flatten)]
         no_account: NoAccount,
     },
-    /// Open config.toml in $VISUAL, else $EDITOR, and reload it if it changed
+    /// Open config.toml in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set, and reload it if it changed
     ///
     /// Once the editor exits with the file changed, the daemon reloads it and
     /// this prints the accounts the reload changed, or the line it refused

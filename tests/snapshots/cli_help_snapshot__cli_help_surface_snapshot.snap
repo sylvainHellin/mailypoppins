@@ -16,7 +16,7 @@ Commands:
   mark-draft      Demote an approved draft back to `draft` status (reverse of `mark-approved`)
   new             Create a new email draft from template and print its selector
   path            Print the filesystem path of a draft (the only selector-to-path edge)
-  edit            Open a draft in $VISUAL, else $EDITOR
+  edit            Open a draft in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set
   reply           Create a reply draft from a received email
   forward         Forward an email to new recipients
   invite          Answer a received calendar invitation: through the server when the account's server calendar holds its event, else by iMIP reply
@@ -184,7 +184,7 @@ Options:
   -h, --help               Print help
 
 $ mp edit --help
-Open a draft in $VISUAL, else $EDITOR
+Open a draft in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set
 
 Usage: mp edit [OPTIONS] <SELECTOR>
 
@@ -783,7 +783,7 @@ Commands:
   add-account    Add a new account to the existing config
   oauth2-login   Sign a Microsoft 365 (Graph) account in with the OAuth2 device code flow and cache its token (for the first Graph account unless `-A` names one)
   path           Print config file path
-  open           Open config.toml in $VISUAL, else $EDITOR, and reload it if it changed
+  open           Open config.toml in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set, and reload it if it changed
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -861,7 +861,7 @@ Options:
   -h, --help            Print help
 
 $ mp config open --help
-Open config.toml in $VISUAL, else $EDITOR, and reload it if it changed
+Open config.toml in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set, and reload it if it changed
 
 Once the editor exits with the file changed, the daemon reloads it and this prints the accounts the reload changed, or the line it refused while the configuration in use stays, and each key the load ignored. An unchanged file is not reloaded. A daemon is started for the reload if none runs, as for the other `mp config` commands.
 
@@ -943,7 +943,7 @@ Commands:
   list     List the signatures, marking the account's default
   show     Print a signature's content
   new      Create an empty signature and print the path of its file
-  edit     Open a signature in $VISUAL, else $EDITOR
+  edit     Open a signature in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set
   rename   Rename a signature
   delete   Delete a signature
   default  Print the account's default signature, or set it, or clear it with --none
@@ -1003,7 +1003,7 @@ Options:
   -h, --help               Print help
 
 $ mp signature edit --help
-Open a signature in $VISUAL, else $EDITOR
+Open a signature in the first of $VISUAL and $EDITOR naming a terminal editor, else the first one set
 
 Usage: mp signature edit [OPTIONS] <NAME>
 

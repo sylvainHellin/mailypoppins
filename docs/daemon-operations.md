@@ -147,7 +147,7 @@ The table is what routes and through what:
 | `mp config set-password [smtp\|imap] [--account] [--stdin]` | `config.set_password`, with the `dialoguer` prompt in the client; without a kind one call with no `kind` stores the password as both (PERSO-297) | P4-U14 |
 | `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
-| `mp config open` | `$VISUAL` (else `$EDITOR`) in the client on `config.toml`, then `config.reload` when the file changed and nothing when it did not, the load warnings read in the client from the file it reloaded | PERSO-320 |
+| `mp config open` | the first of `$VISUAL` and `$EDITOR` naming a terminal editor, else the first one set (`mp_core::editor`), in the client on `config.toml`, then `config.reload` when the file changed and nothing when it did not, the load warnings read in the client from the file it reloaded | PERSO-320 |
 | `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |
 | `mp hooks list [--json]` | one `hook.list` per account, in configuration order | #0135 |
 | `mp hooks test <hook> <selector> [--mailbox] [--json]` | `hook.test` | #0135 |

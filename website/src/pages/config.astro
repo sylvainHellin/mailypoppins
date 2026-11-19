@@ -27,8 +27,8 @@ import { codeTheme } from '../styles/code-theme';
         Print the file path with <code>mp config path</code>.
       </p>
       <p>
-        <code>mp config open</code> opens the file in <code>$VISUAL</code>, else
-        <code>$EDITOR</code>. When the editor exits with the file changed, the daemon reloads it
+        <code>mp config open</code> opens the file in the first of <code>$VISUAL</code> and
+        <code>$EDITOR</code> that names a terminal editor, else the first one set. When the editor exits with the file changed, the daemon reloads it
         and <code>mp</code> prints the outcome: the accounts the reload changed, or the line it
         refused while the configuration in use stays, and each key the load ignored. An
         unchanged file is not reloaded. <code>sc</code> in the TUI does the same, with the outcome

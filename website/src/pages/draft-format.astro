@@ -237,7 +237,8 @@ Email body here.`;
         else the first that is set (a GUI editor such as <code>code -w</code>, which needs its
         wait flag), else <code>hx</code>, the TUI suspending itself until the editor exits. A
         value carrying arguments, such as <code>nvim -u 'my init.lua'</code>, is split as a
-        shell would split it.
+        shell would split it, and <code>emacs</code> or <code>emacsclient</code> counts as a
+        terminal editor with <code>-nw</code>, <code>-t</code> or <code>--tty</code>.
       </p>
       <p>
         The desktop app runs a terminal editor such as Neovim inside its reader pane, with your
