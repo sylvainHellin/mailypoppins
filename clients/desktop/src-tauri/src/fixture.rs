@@ -1738,14 +1738,11 @@ impl State {
         match (method, destination, new_state) {
             (_, Some(destination), _) => {
                 let mut row = rows.remove(index);
-                // The row's own selector is `Selector::for_message`'s, the
-                // bare Message-ID; `moved_to` carries the stored Message-ID,
-                // brackets and all, which is what the daemon answers.
-                row["selector"] =
-                    json!(
-                        Selector::new(&account, &destination, message_key(&message_id)).to_string()
-                    );
-                let selector = Selector::new(&account, &destination, &message_id).to_string();
+                // The row's own selector and `moved_to`'s are one, the bare
+                // Message-ID, as the daemon answers (PERSO-210).
+                let selector =
+                    Selector::new(&account, &destination, message_key(&message_id)).to_string();
+                row["selector"] = json!(selector);
                 let target = boxes.entry(destination.clone()).or_default();
                 let at = target
                     .iter()
@@ -8664,8 +8661,8 @@ mod tests {
         assert_eq!(answer["moved_to"]["mailbox"], "archive");
         assert_eq!(
             answer["moved_to"]["selector"],
-            "mp://work/archive/%3Cquarterly-ledger-review-1001@fixture.example%3E",
-            "the stored Message-ID, brackets percent-encoded, as the daemon answers"
+            "mp://work/archive/quarterly-ledger-review-1001@fixture.example",
+            "the canonical selector, the bare Message-ID, as the daemon answers (PERSO-210)"
         );
         assert!(
             rx.try_recv().is_err(),

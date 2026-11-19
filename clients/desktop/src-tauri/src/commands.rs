@@ -2548,15 +2548,15 @@ mod tests {
         let moved = batch.done[0].moved_to.clone().expect("moved_to");
         assert_eq!(moved.mailbox, "newsletters");
         assert_eq!(
-            moved.selector, "mp://home/newsletters/%3Cdinner-on-saturday-1015@fixture.example%3E",
-            "the stored Message-ID, brackets percent-encoded, as the daemon answers"
+            moved.selector, "mp://home/newsletters/dinner-on-saturday-1015@fixture.example",
+            "the canonical selector, the bare Message-ID, as the daemon answers (PERSO-210)"
         );
         assert!(ids_of(&d, "home", "newsletters").contains(&1015));
         let meta = message_html_meta_on(&d, "home", 1015).expect("meta");
         assert_eq!(meta.mailbox, "newsletters");
         assert_eq!(
             meta.selector, "mp://home/newsletters/dinner-on-saturday-1015@fixture.example",
-            "the row's own selector is the bare Message-ID, unlike moved_to's"
+            "the row's own selector, the same as moved_to's"
         );
         assert_queued(&f, "message.move", 1);
         let calls = f.calls();

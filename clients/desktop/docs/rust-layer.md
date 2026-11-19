@@ -297,7 +297,7 @@ A `MessageMeta` header is `null` when the message did not carry it, where a `Mes
 The five message commands send one daemon call per row id, in the order given, each with `settle: false`, the TUI's contract.
 The daemon commits the row change and the server op it owes in one transaction and answers at once; it drains the queue once the account's mutations have been quiet for 1.5 s.
 `MutationAck` is the daemon's inline answer plus the `row_id` the call named; `id` and `selector` name the message before the mutation, and `moved_to` where an archive or a move put it.
-`moved_to.selector` carries the stored Message-ID with its angle brackets percent-encoded (`mp://work/archive/%3C…%3E`), as the daemon answers, and so differs from the moved row's own `selector`, which carries the bare Message-ID.
+`moved_to.selector` is the moved row's own `selector`, the bare Message-ID (`mp://work/archive/x@example.org`), as the daemon answers since PERSO-210; an older daemon percent-encoded the stored angle brackets (`mp://work/archive/%3C…%3E`), which names the same row.
 A row id is an id in the named account's store, and the daemon acts on whichever row of that account holds it.
 Keeping each row id paired with the account it was listed from is the frontend's job; the fixture refuses an id it does not hold in that account, and nothing in the GUI relies on that.
 A row the daemon refused with `-32602` (no such row in that account, or a destination it cannot move to) lands in `failed` with its `GuiError`, and the next row goes ahead.
