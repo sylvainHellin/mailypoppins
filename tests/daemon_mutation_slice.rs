@@ -1848,7 +1848,7 @@ fn twin_a_selector_naming_an_unconfigured_account_fails_with_that_account_named(
 
 mod wire {
     use super::support::wire_fixture::{
-        assert_ok, mail, stderr, stdout, WireRoot, ARCHIVE, INBOX, TRASH,
+        assert_ok, mail, stderr, stdout, wait_for, WireRoot, ARCHIVE, INBOX, TRASH,
     };
 
     /// Every op the store still owes the server: `(kind, state)`.
@@ -2027,11 +2027,12 @@ mod wire {
     /// success: `✓ deleted`, and the op retired as done.
     ///
     /// A delete commits with nothing to roll back (`pending_ops::apply_delete`
-    /// releases the row and its blobs in the same transaction), so the row is
-    /// gone locally until the next sync, which brings it back from the server
-    /// that still holds it: the store is a cache of the server.
+    /// releases the row and its blobs in the same transaction), so the
+    /// refusal starts a quick sync of the account, which brings the row back
+    /// from the server that still holds it within seconds, with no `mp sync`
+    /// of the user's: the store is a cache of the server.
     #[test]
-    fn a_refused_server_delete_fails_and_the_next_sync_brings_the_row_back() {
+    fn a_refused_server_delete_fails_and_a_sync_it_starts_brings_the_row_back() {
         let wire = synced();
         wire.imap
             .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
@@ -2050,20 +2051,16 @@ mod wire {
             "nothing is left owed: {:?}",
             owed(&wire)
         );
-        assert_eq!(
-            wire.local("inbox"),
-            vec![(1, "<first@example.org>".to_string())],
-            "the delete's local half has no rollback"
-        );
 
-        assert_eq!(stdout(&wire.sync()), "✓ Synced: 1 new, 1 already present\n");
+        // No `mp sync` here: the sync the refusal started brings it back.
+        wait_for("the row to come back", || wire.local("inbox").len() == 2);
         assert_eq!(
             wire.local("inbox"),
             vec![
                 (1, "<first@example.org>".to_string()),
                 (2, "<second@example.org>".to_string())
             ],
-            "the next sync restores the row from the server"
+            "the sync the refusal started restores the row from the server"
         );
     }
 }

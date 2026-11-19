@@ -1930,7 +1930,27 @@ impl Method for MessageMutationMethod {
             })
             .await;
             let (result, resource) = match done {
-                Ok(result) => result.map_err(DomainError::from)?,
+                Ok(Ok(result)) => result,
+                Ok(Err(refused)) => {
+                    // A delete has no rollback: its row is gone though the
+                    // server, which refused, still holds the message. A quick
+                    // sync of the account brings it back now rather than at
+                    // the user's next one (PERSO-210).
+                    if kind == Kind::Delete {
+                        if let Some(runtime) = account.and_then(|name| self.runtimes.get(&name)) {
+                            let canonical = Arc::clone(&self.canonical);
+                            tokio::spawn(async move {
+                                crate::daemon::runtime::publish::tick_and_publish(
+                                    &runtime,
+                                    &canonical,
+                                    crate::daemon::runtime::account::TickKind::Quick,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    return Err(DomainError::from(refused));
+                }
                 Err(e) => {
                     return Err(DomainError::internal(format!(
                         "the mutation worker did not finish: {e}"
