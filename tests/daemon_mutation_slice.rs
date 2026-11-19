@@ -159,13 +159,13 @@
 //!
 //! # What this fixture cannot reach
 //!
-//! No account here has credentials and nothing listens on a port, so the
-//! *successful* archive and delete of a received message - the local commit,
-//! the synchronous drain, the rollback when the server refuses - are not
-//! exercised. What is exercised is the ordering that protects them: the
-//! refusal arrives before the store is touched. The drain itself stays covered
-//! by the `pending_ops` unit tests, and a fake IMAP backend that would unlock
-//! the rest is recorded as a follow-up rather than invented here.
+//! No account of this fixture has credentials and nothing listens on a port,
+//! so what it exercises is the ordering that protects a mutation: the refusal
+//! arrives before the store is touched. The *successful* archive and delete of
+//! a received message - the local commit, the synchronous drain, the rollback
+//! when the server refuses - run in the `wire` module at the end of this file,
+//! on an account the fake IMAP server of `tests/support/fake_imap.rs` serves
+//! (PERSO-210). Routed side only: the oracle has no account on that server.
 //!
 //! # The legacy suites, twinned
 //!
@@ -1840,4 +1840,176 @@ fn twin_a_selector_naming_an_unconfigured_account_fails_with_that_account_named(
             "{which}: {text}"
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// Over the wire (PERSO-210)
+// ---------------------------------------------------------------------------
+
+mod wire {
+    use super::support::wire_fixture::{
+        assert_ok, mail, stderr, stdout, WireRoot, ARCHIVE, INBOX, TRASH,
+    };
+
+    /// Every op the store still owes the server: `(kind, state)`.
+    fn owed(wire: &WireRoot) -> Vec<(String, String)> {
+        let store = wire.store();
+        let mut statement = store
+            .conn()
+            .prepare("SELECT kind, COALESCE(state, '') FROM pending_ops ORDER BY id")
+            .expect("prepare the op listing");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("list the ops")
+            .map(|row| row.expect("an op"))
+            .collect()
+    }
+
+    /// `(uid, flags)` of each message of the server folder `folder`.
+    fn server(wire: &WireRoot, folder: &str) -> Vec<(u32, String, Vec<String>)> {
+        wire.imap
+            .contents(folder)
+            .into_iter()
+            .map(|m| (m.uid, m.message_id, m.flags))
+            .collect()
+    }
+
+    /// A root whose INBOX holds `first` (UID 1, read) and `second` (UID 2),
+    /// synced into the store.
+    fn synced() -> WireRoot {
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (1, mail("first", "ada@example.org", "First", "one")),
+                (2, mail("second", "bob@example.org", "Second", "two")),
+            ],
+        );
+        wire.imap.set_flags(INBOX, 1, &["\\Seen"]);
+        wire.start(&[]);
+        let out = wire.sync();
+        assert_eq!(stdout(&out), "✓ Synced: 2 email(s) ingested\n");
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (2, "<second@example.org>".to_string())
+            ]
+        );
+        wire
+    }
+
+    const FIRST: &str = "mp://wire/inbox/<first@example.org>";
+    const SECOND: &str = "mp://wire/inbox/<second@example.org>";
+
+    /// `mp archive` commits the move locally, drains the owed op at once and
+    /// answers once the server has it: the server copy is in Archive with its
+    /// flags, the INBOX one gone, the local row in `archive` under a
+    /// placeholder UID until the next sync reads the server's, and nothing
+    /// is left owed.
+    #[test]
+    fn an_archive_commits_locally_then_moves_the_message_on_the_server() {
+        let wire = synced();
+
+        let out = wire.mp(&["archive", FIRST]);
+        assert_ok(&out, "mp archive");
+        assert_eq!(stdout(&out), "mp://wire/archive/%3Cfirst@example.org%3E\n");
+
+        assert_eq!(
+            server(&wire, ARCHIVE),
+            vec![(
+                1,
+                "<first@example.org>".to_string(),
+                vec!["\\Seen".to_string()]
+            )],
+            "COPY keeps the flags (RFC 3501 6.4.7)"
+        );
+        let inbox: Vec<u32> = server(&wire, INBOX).into_iter().map(|m| m.0).collect();
+        assert_eq!(inbox, vec![2]);
+        assert_eq!(
+            wire.local("inbox"),
+            vec![(2, "<second@example.org>".to_string())]
+        );
+        assert_eq!(
+            wire.local("archive"),
+            vec![(-1, "<first@example.org>".to_string())],
+            "the local commit, before the server named a UID"
+        );
+        assert!(
+            owed(&wire).is_empty(),
+            "the synchronous drain settled the op: {:?}",
+            owed(&wire)
+        );
+
+        wire.sync();
+        assert_eq!(
+            wire.local("archive"),
+            vec![(1, "<first@example.org>".to_string())],
+            "the next sync reads the server's UID"
+        );
+    }
+
+    /// A server that refuses the COPY fails the command in its own words,
+    /// and the local commit is rolled back: the row is in `inbox` again,
+    /// the server unchanged, and no op is left owed for a later drain to
+    /// replay.
+    #[test]
+    fn a_refused_server_move_rolls_the_local_archive_back() {
+        let wire = synced();
+        wire.imap
+            .refuse("COPY", Some("NO [OVERQUOTA] Quota exceeded"));
+
+        let out = wire.mp(&["archive", SECOND]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+        assert_eq!(
+            stderr(&out),
+            "Error: Failed to copy email to Archive: no response: code: None, \
+             info: Some(\"[OVERQUOTA] Quota exceeded\")\n"
+        );
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (2, "<second@example.org>".to_string())
+            ],
+            "the row is back where the server still holds it"
+        );
+        assert!(wire.local("archive").is_empty());
+        assert!(server(&wire, ARCHIVE).is_empty());
+        assert_eq!(server(&wire, INBOX).len(), 2);
+        assert!(owed(&wire).is_empty(), "{:?}", owed(&wire));
+    }
+
+    /// `mp delete` flags the server copy `\Deleted` and expunges it, and
+    /// only it: a message another client flagged `\Deleted` stays, which
+    /// is what `UID EXPUNGE` under UIDPLUS is for (RFC 4315 2.1).
+    #[test]
+    fn a_delete_expunges_only_its_own_server_copy() {
+        let wire = synced();
+        wire.imap.set_flags(INBOX, 1, &["\\Seen", "\\Deleted"]);
+
+        let out = wire.mp(&["delete", SECOND]);
+        assert_ok(&out, "mp delete");
+        assert_eq!(
+            stdout(&out),
+            "✓ deleted mp://wire/inbox/second@example.org\n"
+        );
+
+        let inbox: Vec<u32> = server(&wire, INBOX).into_iter().map(|m| m.0).collect();
+        assert_eq!(
+            inbox,
+            vec![1],
+            "the other client's \\Deleted message is not expunged"
+        );
+        assert!(
+            server(&wire, TRASH).is_empty(),
+            "a delete is no move to Trash"
+        );
+        assert_eq!(
+            wire.local("inbox"),
+            vec![(1, "<first@example.org>".to_string())]
+        );
+        assert!(owed(&wire).is_empty(), "{:?}", owed(&wire));
+    }
 }

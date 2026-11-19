@@ -170,6 +170,28 @@ impl WireRoot {
     }
 }
 
+impl WireRoot {
+    /// `(uid, Message-ID)` of each message the local store lists in the
+    /// local mailbox `mailbox` (`inbox`, `archive`, ...), by ascending UID.
+    pub fn local(&self, mailbox: &str) -> Vec<(i64, String)> {
+        let mut rows: Vec<(i64, String)> =
+            mailypoppins::store::read::list_mailbox(&self.store(), ACCOUNT, mailbox)
+                .unwrap_or_else(|e| panic!("list {mailbox}: {e:#}"))
+                .into_iter()
+                .map(|row| (row.uid, row.message_id))
+                .collect();
+        rows.sort();
+        rows
+    }
+
+    /// `mp sync`, asserted to succeed.
+    pub fn sync(&self) -> Output {
+        let out = self.mp(&["sync"]);
+        assert_ok(&out, "mp sync");
+        out
+    }
+}
+
 impl Default for WireRoot {
     fn default() -> Self {
         WireRoot::new()
