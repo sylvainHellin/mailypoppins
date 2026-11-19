@@ -1547,11 +1547,21 @@ mod tests {
         assert_eq!(message["ccRecipients"][0]["emailAddress"]["name"], "Carol");
     }
 
+    /// The fixture's account, by name: one with no name would have its
+    /// catalogue read from `<data dir>/accounts/store.sqlite3` (PERSO-329).
+    fn alice() -> crate::config::AccountConfig {
+        crate::config::AccountConfig {
+            name: "alice".to_string(),
+            ..Default::default()
+        }
+    }
+
     /// The local half of the post-send hook flags *every* copy of the source,
     /// because one message is one row per mailbox and the archived copy is as
     /// likely to be the one on screen (#TKT-0051).
     #[test]
     fn sending_a_reply_flags_every_local_copy_of_its_source() {
+        let _data = crate::config::test_env::TestDataDir::new();
         let fx = crate::reconcile::tests::fixture();
         let inbox = fx.ingest_plain("inbox", 7, "Question");
         // The same Message-ID filed in a second mailbox: `ingest_plain` keys
@@ -1571,7 +1581,7 @@ mod tests {
             .unwrap()
             .message_id;
         let rows = crate::store::read::find_by_message_id(&fx.store, "alice", &message_id).unwrap();
-        let mailboxes = server_mailboxes_of(&crate::config::AccountConfig::default(), &rows);
+        let mailboxes = server_mailboxes_of(&alice(), &rows);
         let outcome = crate::pending_ops::apply_post_send_flag(
             &fx.store,
             "alice",
@@ -1605,6 +1615,7 @@ mod tests {
     /// same server folder are one `SELECT`, not two.
     #[test]
     fn the_server_mailbox_list_is_deduplicated() {
+        let _data = crate::config::test_env::TestDataDir::new();
         let fx = crate::reconcile::tests::fixture();
         let a = fx.ingest_plain("inbox", 1, "One");
         let b = fx.ingest_plain("inbox", 2, "Two");
@@ -1616,7 +1627,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let mailboxes = server_mailboxes_of(&crate::config::AccountConfig::default(), &rows);
+        let mailboxes = server_mailboxes_of(&alice(), &rows);
         assert_eq!(mailboxes.len(), 1, "one server folder, one SELECT");
     }
 

@@ -270,6 +270,16 @@ impl Store {
 /// `rusqlite::Connection` is not `Sync` and the TUI clones account state
 /// across threads. This follows `crate::outbox::counts_for_account`.
 pub fn open_store(account: &str) -> Option<Store> {
+    // An account with no name has no directory of its own: its store would be
+    // `accounts/store.sqlite3`, which in a test without a `TestDataDir` on
+    // its thread is in the user's real data directory (PERSO-329). The config
+    // never holds such an account, so only a test reaches this.
+    #[cfg(test)]
+    assert!(
+        !account.trim().is_empty(),
+        "open_store with an empty account name opens <data dir>/accounts/store.sqlite3; give \
+         the test a named account and a TestDataDir (PERSO-329)"
+    );
     open_store_in(&crate::config::account_dir(account))
 }
 
@@ -568,6 +578,18 @@ fn remove_store_files(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test that opens the store of an account with no name has no account
+    /// directory of its own: `accounts/store.sqlite3` sits directly under the
+    /// data directory, which is the user's real one unless the test armed a
+    /// `TestDataDir` on this very thread (PERSO-329). The open fails loudly so
+    /// the test gets a named account instead.
+    #[test]
+    #[should_panic(expected = "empty account name")]
+    fn opening_the_store_of_an_unnamed_account_fails_loudly_in_a_test() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        open_store("");
+    }
     use std::io::Write;
     use tempfile::tempdir;
 
