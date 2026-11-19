@@ -287,7 +287,7 @@ impl GraphClient {
             .send()
             .await
             .context(REMOVE_WHAT)?;
-        removed(resp).await
+        Ok(removed(resp).await? == DraftRemoval::Removed)
     }
 
     /// The `changeKey` the draft `id` holds now, `None` when no item has the
@@ -319,10 +319,10 @@ impl GraphClient {
     }
 
     /// Remove the version `change_key` of the draft `id` for good, and no
-    /// other: `permanentDelete` with `If-Match: W/"<changeKey>"`. `true` when
-    /// this request removed it; `false` when the item is gone (404) or holds
-    /// another version (412), an edit saved since, which stays.
-    pub async fn remove_draft_version(&self, id: &str, change_key: &str) -> Result<bool> {
+    /// other: `permanentDelete` with `If-Match: W/"<changeKey>"`. A 404 is a
+    /// draft gone, a 412 one that holds another version, an edit saved
+    /// since, which stays.
+    pub async fn remove_draft_version(&self, id: &str, change_key: &str) -> Result<DraftRemoval> {
         let resp = self
             .remove_version_request(id, change_key)
             .send()
@@ -345,19 +345,26 @@ fn if_match(change_key: &str) -> String {
     format!("W/\"{change_key}\"")
 }
 
-/// What a removal's answer says: removed, or not there to remove (404, gone;
-/// 412, another version).
-async fn removed(resp: reqwest::Response) -> Result<bool> {
-    let status = resp.status();
-    if status == reqwest::StatusCode::NOT_FOUND
-        || status == reqwest::StatusCode::PRECONDITION_FAILED
-    {
-        return Ok(false);
+/// What a removal of one draft version did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftRemoval {
+    /// This request removed it.
+    Removed,
+    /// No item has the id any more (404): another session removed it.
+    Gone,
+    /// The item holds another version than the one named (412, or a
+    /// `changeKey` read that differs): an edit saved since, which stays.
+    OtherVersion,
+}
+
+/// What a removal's answer says.
+async fn removed(resp: reqwest::Response) -> Result<DraftRemoval> {
+    match resp.status() {
+        reqwest::StatusCode::NOT_FOUND => Ok(DraftRemoval::Gone),
+        reqwest::StatusCode::PRECONDITION_FAILED => Ok(DraftRemoval::OtherVersion),
+        status if status.is_success() => Ok(DraftRemoval::Removed),
+        _ => Err(status_error(resp, REMOVE_WHAT).await),
     }
-    if !status.is_success() {
-        return Err(status_error(resp, REMOVE_WHAT).await);
-    }
-    Ok(true)
 }
 
 #[derive(Debug, Deserialize)]

@@ -3300,36 +3300,63 @@ fn an_outlook_save_during_a_graph_push_survives_it() {
     assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
 }
 
-/// An Outlook save that lands between the guard's lookup and its removal is
-/// not claimed: the send is refused with its outcome unknown, the edit stays
-/// in Drafts, and the reconcile keeps both texts.
+/// An Outlook save that lands between the guard's lookup and its removal,
+/// before the change-key read or between that read and the `If-Match`
+/// removal, is not claimed: the send is refused as a draft changed
+/// elsewhere, and so is a retry before any reconcile, the edit still in
+/// Drafts. The reconcile then pulls the edit into the draft, which had not
+/// moved since its last sync, and the send after it claims the pulled copy.
 #[test]
 fn an_outlook_save_during_a_graph_claim_survives_it() {
-    let fx = graph_fixture();
-    let path = fx.write("angebot", "d1", "", "Hallo Robin");
-    let mut graph = FakeGraph::default();
-    block_on(push::push(
-        &fx.mirror(1),
-        &mut on_graph(&fx.store, &mut graph),
-        "d1",
-    ))
-    .unwrap();
-    let mid = mid_of(&path);
-    graph.edit_before_remove = Some(outlook_copy(
-        &mid,
-        "robin@example.com",
-        "Angebot",
-        "<p>Hallo aus Outlook</p>",
-    ));
-    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
-    assert!(refused.contains("outcome unknown"), "{refused}");
-    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
-    assert!(String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo aus Outlook"));
+    for before_read in [false, true] {
+        let fx = graph_fixture();
+        let path = fx.write("angebot", "d1", "", "Hallo Robin");
+        let mut graph = FakeGraph::default();
+        block_on(push::push(
+            &fx.mirror(1),
+            &mut on_graph(&fx.store, &mut graph),
+            "d1",
+        ))
+        .unwrap();
+        let mid = mid_of(&path);
+        let save = outlook_copy(
+            &mid,
+            "robin@example.com",
+            "Angebot",
+            "<p>Hallo aus Outlook</p>",
+        );
+        if before_read {
+            graph.edit_before_read = Some(save);
+        } else {
+            graph.edit_before_remove = Some(save);
+        }
+        let in_drafts = |graph: &FakeGraph| {
+            graph.drafts().len() == 1
+                && String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo aus Outlook")
+        };
+        let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+        assert!(
+            refused.contains("changed in Outlook or on another machine"),
+            "{before_read}: {refused}"
+        );
+        assert!(in_drafts(&graph), "{before_read}: {:?}", graph.log);
 
-    graph_reconciled(&fx, &mut graph);
-    let text = all_draft_text();
-    assert!(text.contains("Hallo Robin"), "{text}");
-    assert!(text.contains("Hallo aus Outlook"), "{text}");
+        // The user sends again before any reconcile ran.
+        let again = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+        assert!(
+            again.contains("changed in Outlook or on another machine"),
+            "{before_read}: {again}"
+        );
+        assert!(in_drafts(&graph), "{before_read}: {:?}", graph.log);
+
+        let report = graph_reconciled(&fx, &mut graph);
+        assert_eq!(report.pulled, 1, "{before_read}: {report:?}");
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("Hallo aus Outlook"));
+        graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("the pulled text is sent");
+        assert!(graph.drafts().is_empty());
+    }
 }
 
 /// An Outlook save that landed before the push's removal reads its version:

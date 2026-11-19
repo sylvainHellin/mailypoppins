@@ -36,8 +36,12 @@
 //!   the reconcile too holds such a draft for one never pushed.
 //! - A server that cannot be reached, or that offers no `UIDPLUS`: the send
 //!   is refused, since nothing then says the other machine has not sent it.
+//! - A copy edited in place while the claim ran (Graph: its `changeKey`
+//!   moved between the lookup and the removal) is left where it is, the row
+//!   is put back, and the send is refused as [`ChangedElsewhere`].
 //!
-//! Forgetting the row before the claim is the whole of the bookkeeping: a
+//! Forgetting the row before the claim is the whole of the bookkeeping, save
+//! for a copy edited during the claim, whose row comes back: a
 //! draft without a row is one the reconcile never retires as copy-gone and
 //! the owed-push scan pushes again, so whatever happens after the `STORE`,
 //! a crash included, leaves a draft this machine sends on a retry and that
@@ -275,13 +279,27 @@ async fn claim<F: DraftsFolder>(
     if let Some(id) = id {
         draft_sync::delete(store, name, id)?;
     }
-    let claimed = folder.claim(&uids).await.map_err(|e| {
+    let claim = folder.claim(&uids).await.map_err(|e| {
         outcome_unknown(
             &mailbox,
             &format!("the claim of this draft's server copy did not complete ({e:#})"),
         )
     })?;
-    if claimed.len() != uids.len() {
+    if !claim.edited.is_empty() {
+        // An edit saved in place while this send claimed the copy (Graph):
+        // it stays, so the draft is not sent, and its row comes back so a
+        // retry before the pull is refused the same way rather than read as
+        // this machine's own earlier claim, and so the reconcile pulls the
+        // edit as a change of the copy the row names.
+        if let Some(row) = &row {
+            draft_sync::upsert(store, row)?;
+        }
+        return Err(ChangedElsewhere {
+            mailbox: mailbox.clone(),
+        }
+        .into());
+    }
+    if claim.removed.len() != uids.len() {
         return Err(outcome_unknown(
             &mailbox,
             "another session removed this draft's server copy while this send was claiming it, \
@@ -300,11 +318,12 @@ async fn claim<F: DraftsFolder>(
 /// found ([`super::graph_folder`]), which this request either removed or
 /// did not, so two sends never both claim one copy. An Outlook save in place
 /// since the last reconcile is a version the row does not name, and refuses
-/// the send ([`ChangedElsewhere`]); one that lands between the lookup and the
+/// the send ([`ChangedElsewhere`]). One that lands between the lookup and the
 /// removal changes the draft's `changeKey`, which the removal reads first and
-/// names in `If-Match`, so the copy is not claimed and the send is refused
-/// with its outcome unknown, the edit kept. A token the login gate holds as
-/// refused is a folder out of reach.
+/// names in `If-Match`: the copy is left, the row the claim forgot is put
+/// back, and the send is refused as [`ChangedElsewhere`] too, so the daemon
+/// pulls the edit and a retry before that pull is refused the same way. A
+/// token the login gate holds as refused is a folder out of reach.
 pub async fn guard_send(account: &AccountConfig, draft: &EmailDraft) -> Result<()> {
     if !guards(account, draft) {
         return Ok(());

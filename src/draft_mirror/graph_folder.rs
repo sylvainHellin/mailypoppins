@@ -40,9 +40,9 @@ use std::future::Future;
 use anyhow::{anyhow, Context, Result};
 use log::{info, warn};
 
-use super::folder::{bare_message_id, header_value, DraftsFolder, FolderInfo, ServerHead};
+use super::folder::{bare_message_id, header_value, Claim, DraftsFolder, FolderInfo, ServerHead};
 use crate::config::GraphConfig;
-use crate::graph::drafts::GraphDraftHead;
+use crate::graph::drafts::{DraftRemoval, GraphDraftHead};
 use crate::graph::GraphClient;
 use crate::store::{graph_draft_versions, Store};
 
@@ -73,9 +73,8 @@ pub trait GraphDraftsApi {
     fn change_key(&mut self, id: &str) -> impl Future<Output = Result<Option<String>>>;
 
     /// Remove the version `change_key` of the draft `id` for good, and no
-    /// other: `true` when this call removed it, `false` when the draft is
-    /// gone or holds another version, which stays.
-    fn remove(&mut self, id: &str, change_key: &str) -> impl Future<Output = Result<bool>>;
+    /// other; a draft that holds another version stays.
+    fn remove(&mut self, id: &str, change_key: &str) -> impl Future<Output = Result<DraftRemoval>>;
 }
 
 /// The requests over the account's Graph client, signed in on first use
@@ -124,7 +123,7 @@ impl GraphDraftsApi for LiveGraphDrafts {
         self.client().await?.draft_change_key(id).await
     }
 
-    async fn remove(&mut self, id: &str, change_key: &str) -> Result<bool> {
+    async fn remove(&mut self, id: &str, change_key: &str) -> Result<DraftRemoval> {
         self.client()
             .await?
             .remove_draft_version(id, change_key)
@@ -195,38 +194,36 @@ impl<'s, A: GraphDraftsApi> GraphDraftsFolder<'s, A> {
     }
 
     /// Remove exactly the version `key` names, as an IMAP `UID EXPUNGE`
-    /// removes exactly one UID: `true` when this call removed it. A version
-    /// an edit superseded, an Outlook save in place that landed since the
-    /// folder last listed it (the draft's `changeKey` now differs) or one
-    /// that lands between that read and the removal (`If-Match` answers
-    /// 412) is not removed, and the edit stays for the reconcile.
-    async fn remove_exact(&mut self, key: u32) -> Result<bool> {
-        let Some(version) = self.current(key)? else {
-            return Ok(false);
+    /// removes exactly one UID, and say what became of it. A version an edit
+    /// superseded, an Outlook save in place that landed since the folder
+    /// last listed it (the draft's `changeKey` now differs) or one that lands
+    /// between that read and the removal (`If-Match` answers 412) is
+    /// [`DraftRemoval::OtherVersion`] and stays for the reconcile; a draft no
+    /// longer there is [`DraftRemoval::Gone`].
+    async fn remove_exact(&mut self, key: u32) -> Result<DraftRemoval> {
+        let Some(version) = graph_draft_versions::version(self.store, &self.account, key)? else {
+            return Ok(DraftRemoval::Gone);
         };
-        let now = self.api.change_key(&version.graph_id).await?;
-        if now.as_deref() != Some(version.change_key.as_str()) {
-            if now.is_some() {
-                info!(
-                    "[drafts] {}: the Graph draft {} was edited since it was listed; not \
-                     removed, the reconcile reads the edit",
-                    self.account, version.graph_id
-                );
-            }
-            return Ok(false);
+        if self.current(key)?.is_none() {
+            return Ok(DraftRemoval::OtherVersion);
         }
-        let removed = self
-            .api
-            .remove(&version.graph_id, &version.change_key)
-            .await?;
-        if !removed {
+        let removal = match self.api.change_key(&version.graph_id).await? {
+            None => DraftRemoval::Gone,
+            Some(now) if now != version.change_key => DraftRemoval::OtherVersion,
+            Some(_) => {
+                self.api
+                    .remove(&version.graph_id, &version.change_key)
+                    .await?
+            }
+        };
+        if removal == DraftRemoval::OtherVersion {
             info!(
-                "[drafts] {}: the Graph draft {} changed or went just before its removal; \
-                 not removed",
+                "[drafts] {}: the Graph draft {} was edited since it was listed; not removed, \
+                 the reconcile reads the edit",
                 self.account, version.graph_id
             );
         }
-        Ok(removed)
+        Ok(removal)
     }
 
     /// Whether `message_id` is a message a Graph send of this account has
@@ -360,18 +357,22 @@ impl<A: GraphDraftsApi> DraftsFolder for GraphDraftsFolder<'_, A> {
     }
 
     /// Remove exactly the versions `keys` names, answering those this call
-    /// removed. A copy another session removed first, or one edited since it
-    /// was found, is not claimed, which the send guard refuses as an unknown
-    /// outcome.
-    async fn claim(&mut self, keys: &[u32]) -> Result<Vec<u32>> {
-        let mut claimed = Vec::new();
+    /// removed and those left because they were edited since they were
+    /// found, which the send guard refuses as a draft changed elsewhere. A
+    /// copy another session removed first is in neither list, which the
+    /// guard refuses as an unknown outcome.
+    async fn claim(&mut self, keys: &[u32]) -> Result<Claim> {
+        let mut claim = Claim::default();
         for &key in keys {
-            if self.remove_exact(key).await? {
-                claimed.push(key);
+            match self.remove_exact(key).await? {
+                DraftRemoval::Removed => claim.removed.push(key),
+                DraftRemoval::OtherVersion => claim.edited.push(key),
+                DraftRemoval::Gone => {}
             }
         }
-        claimed.sort_unstable();
-        Ok(claimed)
+        claim.removed.sort_unstable();
+        claim.edited.sort_unstable();
+        Ok(claim)
     }
 
     /// Every draft of the folder, keyed, by the headers a listing carries;
@@ -579,7 +580,7 @@ pub mod fake {
             (**self).change_key(id).await
         }
 
-        async fn remove(&mut self, id: &str, change_key: &str) -> Result<bool> {
+        async fn remove(&mut self, id: &str, change_key: &str) -> Result<DraftRemoval> {
             (**self).remove(id, change_key).await
         }
     }
@@ -651,22 +652,26 @@ pub mod fake {
 
         /// `permanentDelete` with `If-Match`: a draft that holds another
         /// version answers 412 and stays.
-        async fn remove(&mut self, id: &str, change_key: &str) -> Result<bool> {
+        async fn remove(&mut self, id: &str, change_key: &str) -> Result<DraftRemoval> {
             self.check()?;
             if let Some(raw) = self.edit_before_remove.take() {
                 self.edit(id, &raw);
             }
             let Some(item) = self.items.iter().find(|item| item.id == id) else {
                 self.log.push(format!("remove {id}"));
-                return Ok(false);
+                return Ok(DraftRemoval::Gone);
             };
             if format!("ck{}", item.version) != change_key {
                 self.log.push(format!("remove {id} refused"));
-                return Ok(false);
+                return Ok(DraftRemoval::OtherVersion);
             }
             self.log.push(format!("remove {id}"));
             self.drop_item(id);
-            Ok(!self.removed_elsewhere)
+            Ok(if self.removed_elsewhere {
+                DraftRemoval::Gone
+            } else {
+                DraftRemoval::Removed
+            })
         }
     }
 }
@@ -774,9 +779,10 @@ mod tests {
         assert_eq!(folder.api().drafts().len(), 1, "the stray copy went");
     }
 
-    /// A claim answers the copies this session removed; one another session
-    /// removed first, or one an edit superseded, is not claimed. A delete of
-    /// a superseded version leaves the edit alone.
+    /// A claim answers the copies this session removed. One an edit
+    /// superseded is not claimed and is named as edited; one another session
+    /// removed first is neither. A delete of a superseded version leaves the
+    /// edit alone.
     #[test]
     fn a_claim_is_a_removal_this_session_made() {
         let (_dir, store) = store();
@@ -790,15 +796,21 @@ mod tests {
 
         folder.api().edit(&id, &message("<a@x>", "A", "edited"));
         assert_eq!(block_on(folder.uids_of("<a@x>")).unwrap().len(), 1);
-        assert!(block_on(folder.claim(&a)).unwrap().is_empty());
+        assert_eq!(
+            block_on(folder.claim(&a)).unwrap(),
+            Claim {
+                removed: Vec::new(),
+                edited: a.clone(),
+            }
+        );
         block_on(folder.delete(&a)).unwrap();
         assert_eq!(folder.api().drafts().len(), 2, "the edit stays");
 
         folder.api().removed_elsewhere = true;
-        assert!(block_on(folder.claim(&b)).unwrap().is_empty());
+        assert_eq!(block_on(folder.claim(&b)).unwrap(), Claim::default());
         folder.api().removed_elsewhere = false;
         let a2 = block_on(folder.uids_of("<a@x>")).unwrap();
-        assert_eq!(block_on(folder.claim(&a2)).unwrap(), a2);
+        assert_eq!(block_on(folder.claim(&a2)).unwrap().removed, a2);
         assert!(folder.api().drafts().is_empty());
     }
 

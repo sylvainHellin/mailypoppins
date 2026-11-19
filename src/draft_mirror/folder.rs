@@ -13,6 +13,18 @@ use futures::TryStreamExt;
 use crate::config::ImapConfig;
 use crate::imap_client::PooledSession;
 
+/// What a [`DraftsFolder::claim`] did with the copies it was given.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Claim {
+    /// The copies this session removed.
+    pub removed: Vec<u32>,
+    /// The copies left in place because they hold another version than the
+    /// one the claim named: an edit saved in place since they were found
+    /// (Graph, PERSO-182). Always empty on IMAP, where a message never
+    /// changes.
+    pub edited: Vec<u32>,
+}
+
 /// What a `SELECT` of the folder says about it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FolderInfo {
@@ -79,7 +91,8 @@ pub trait DraftsFolder {
     /// Remove the copies `uids` names as a claim, and answer which of them
     /// this session removed: the UIDs whose untagged `EXPUNGE` it saw in
     /// answer to its own `UID EXPUNGE`. A copy another session removed first
-    /// is not in the answer. Needs `UIDPLUS`, and refuses without it, since a
+    /// is in neither list of the answer; one edited in place since it was
+    /// found is left and named in [`Claim::edited`]. Needs `UIDPLUS`, and refuses without it, since a
     /// plain `EXPUNGE` would also take what another client flagged.
     ///
     /// An error may come after the copies were flagged or removed, so it says
@@ -88,7 +101,7 @@ pub trait DraftsFolder {
     /// What a send of a mirrored draft takes the draft's server copy with
     /// before it submits ([`super::send_guard`]), so mp on two machines
     /// sending one draft cannot both go ahead.
-    fn claim(&mut self, uids: &[u32]) -> impl Future<Output = Result<Vec<u32>>>;
+    fn claim(&mut self, uids: &[u32]) -> impl Future<Output = Result<Claim>>;
 
     /// Every message of the folder, by its [`HEAD_FIELDS`].
     fn heads(&mut self) -> impl Future<Output = Result<Vec<ServerHead>>>;
@@ -271,9 +284,9 @@ impl DraftsFolder for ImapDraftsFolder {
         self.settle(result)
     }
 
-    async fn claim(&mut self, uids: &[u32]) -> Result<Vec<u32>> {
+    async fn claim(&mut self, uids: &[u32]) -> Result<Claim> {
         if uids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Claim::default());
         }
         if !self.uidplus {
             return Err(anyhow!(
@@ -286,7 +299,10 @@ impl DraftsFolder for ImapDraftsFolder {
             claim_on(session, uids).await
         }
         .await;
-        self.settle(result)
+        Ok(Claim {
+            removed: self.settle(result)?,
+            edited: Vec::new(),
+        })
     }
 
     async fn heads(&mut self) -> Result<Vec<ServerHead>> {
@@ -793,7 +809,7 @@ pub mod fake {
             Ok(())
         }
 
-        async fn claim(&mut self, uids: &[u32]) -> Result<Vec<u32>> {
+        async fn claim(&mut self, uids: &[u32]) -> Result<Claim> {
             if !self.uidplus {
                 return Err(anyhow!("the fake server offers no UIDPLUS"));
             }
@@ -809,9 +825,12 @@ pub mod fake {
                 return Err(anyhow!("the fake server dropped the connection"));
             }
             if self.claimed_elsewhere {
-                return Ok(Vec::new());
+                return Ok(Claim::default());
             }
-            Ok(present)
+            Ok(Claim {
+                removed: present,
+                edited: Vec::new(),
+            })
         }
 
         /// The [`HEAD_FIELDS`] of every listed copy, as a server answers
