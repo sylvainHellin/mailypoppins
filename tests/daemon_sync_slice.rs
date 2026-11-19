@@ -2209,6 +2209,32 @@ mod wire {
         assert_eq!(mark(&wire), None);
     }
 
+    /// PERSO-333 review: passes in a burst (the watcher runs one per
+    /// arrival) count a refusal once, so a passing refusal cannot be given
+    /// up on within a minute; the message stays owed, holding the mark and
+    /// the prune, until it has been refused for an hour.
+    #[test]
+    fn a_refusal_on_passes_in_quick_succession_counts_once() {
+        let wire = refusing_an_arrival();
+        for _ in 0..4 {
+            wire.sync();
+        }
+        assert_eq!(attempts(&wire, 3), 1);
+        assert_eq!(mark(&wire), Some(2), "still owed");
+        assert!(
+            wire.local("inbox")
+                .contains(&(1, "<first@example.org>".to_string())),
+            "so the prune still waits"
+        );
+
+        wire.imap.refuse_fetch_of(3, None);
+        wire.sync();
+        assert!(wire
+            .local("inbox")
+            .contains(&(3, "<third@example.org>".to_string())));
+        assert_eq!(attempts(&wire, 3), 0);
+    }
+
     /// A message given up on is asked for again once a day has passed since
     /// it was last refused (a refusal can be transient), and ingested
     /// normally when the server then sends it, its count cleared.

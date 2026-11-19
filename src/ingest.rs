@@ -1774,6 +1774,22 @@ pub fn pass_may_prune(coverage: &[(bool, bool)]) -> bool {
 /// the parser rejects, and one that passes clears on the next pass.
 pub const MAX_INGEST_ATTEMPTS: i64 = 3;
 
+/// How long after the last failure that counted the next one counts again
+/// towards [`MAX_INGEST_ATTEMPTS`] (PERSO-333 review).
+///
+/// [`MAX_INGEST_ATTEMPTS`] counts passes, and passes come in bursts: the IDLE
+/// watcher runs one per arrival, so three can fall within a minute. Without a
+/// spacing, one passing refusal (Gmail's transient `NO`) or a store locked for
+/// a few seconds would use the whole budget up in that minute and leave the
+/// message to its daily retry, and an outage that refuses even single fetches
+/// would do it to every message that arrived in its window. With a spacing of
+/// half an hour, the third counted failure is at least an hour after the
+/// first. An hour is past any per-request hiccup and the usual length of a
+/// provider's partial-failure incident, and costs only that hour of deferred
+/// prunes, which run on the pass after the give-up; nothing is lost while the
+/// message is still retried.
+pub const FAILURE_SPACING_SECS: i64 = 1_800;
+
 /// How long an IMAP pass leaves a message it has given up on alone before it
 /// asks for it again (PERSO-333).
 ///
@@ -3070,6 +3086,47 @@ mod tests {
     /// `(` hides the mailbox, is stored again from its raw message, newest
     /// first and once; a row whose raw was evicted keeps what it holds, and a
     /// header with no encoded-word is never written again.
+    /// PERSO-333 review: a failure counts towards the give-up only once
+    /// [`FAILURE_SPACING_SECS`] has passed since the last one that counted,
+    /// so a burst of passes (an IDLE tick per arrival) cannot use the budget
+    /// up within a minute: a message is given up on only when it has failed
+    /// for at least two spacings, an hour.
+    #[test]
+    fn failures_closer_than_the_spacing_count_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let age = |secs: i64| {
+            store
+                .conn()
+                .execute("UPDATE ingest_failures SET updated = updated - ?1", [secs])
+                .unwrap();
+        };
+        for _ in 0..5 {
+            assert!(record_ingest_failure(&store, "acct", "inbox", 7, "refused"));
+        }
+        assert_eq!(ingest_failure_attempts(&store, "acct", "inbox", 7), 1);
+        age(FAILURE_SPACING_SECS - 60);
+        assert!(record_ingest_failure(&store, "acct", "inbox", 7, "refused"));
+        assert_eq!(
+            ingest_failure_attempts(&store, "acct", "inbox", 7),
+            1,
+            "still within the spacing of the first"
+        );
+        age(60);
+        assert!(record_ingest_failure(&store, "acct", "inbox", 7, "refused"));
+        assert_eq!(ingest_failure_attempts(&store, "acct", "inbox", 7), 2);
+        age(FAILURE_SPACING_SECS);
+        assert!(
+            !record_ingest_failure(&store, "acct", "inbox", 7, "refused"),
+            "the third, an hour after the first, gives up"
+        );
+        assert_eq!(ingest_failure_attempts(&store, "acct", "inbox", 7), 3);
+        assert!(
+            !record_ingest_failure(&store, "acct", "inbox", 7, "refused"),
+            "and a given-up message stays given up on"
+        );
+    }
+
     #[test]
     fn the_address_backfill_stores_an_old_rows_addresses_again_once() {
         use crate::store::schema::{clear_meta, get_meta, META_ADDRESSES_REWRITTEN_BELOW};
