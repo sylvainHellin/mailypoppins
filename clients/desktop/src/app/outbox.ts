@@ -30,6 +30,22 @@ export function countsAsFailed(row: OutboxRow): boolean {
   return row.state === "failed" || (row.state === "done" && !row.partial);
 }
 
+/**
+ * How the reason of a recipient the transport never reached ends: `mp_protocol::send::NOTHING_SENT`, which ts-rs does not
+ * export (it exports types, not constants), so it is spelled here and pinned to the Rust value by `outbox.test.ts`.
+ */
+export const NOTHING_SENT = "nothing was sent";
+
+/**
+ * Whether a retry of the failed `row` may deliver it a second time, the CLI's rule (`mp_client::format::outbox_retry_warning`,
+ * PERSO-330): no search runs before the SMTP re-send, so a row the server may have taken may arrive twice. A row whose
+ * recipients never reached the server, its reason ending in {@link NOTHING_SENT} with no "no verdict" beside it, sent nothing.
+ */
+function mayDeliverTwice(row: OutboxRow): boolean {
+  const error = row.last_error ?? "";
+  return !(error.includes(NOTHING_SENT) && !error.includes("no verdict"));
+}
+
 /** Whether the daemon admits a retry of a row in this state (`send.outbox_retry`). */
 export function retryable(row: OutboxRow): boolean {
   return row.state === "failed" || row.state === "sent_pending_append";
@@ -316,7 +332,9 @@ export function retryDialog(account: string, row: OutboxRow): MutationDialog | s
     row_id: row.id,
     title: `Send row ${row.id} again?`,
     detail: row.message_id,
-    warning: "A failed submission may already have been delivered: check that it did not arrive, or its recipients get it twice.",
+    warning: mayDeliverTwice(row)
+      ? "A failed submission may already have been delivered: check that it did not arrive, or its recipients get it twice."
+      : null,
   };
 }
 

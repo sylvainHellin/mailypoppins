@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
-import { cursorRow, hiddenByOutbox, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog, stateLabel } from "@/app/outbox";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { cursorRow, hiddenByOutbox, NOTHING_SENT, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog, stateLabel } from "@/app/outbox";
 import { initialState, isStale, type AppState } from "@/app/state";
 import { fixtures, outboxListing, mock, resetMock } from "@/test/tauri-mock";
 import { GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
@@ -215,6 +217,29 @@ describe("the confirmations and the words", () => {
     expect(retryDialog("work", row(6, { state: "sent_pending_append" }))).toMatchObject({ title: "File the Sent copy of row 6?", warning: null });
     expect(retryDialog("work", row(7, { state: "pending_send" }))).toMatch(/row 7 is queued/);
     expect(retryDialog("work", row(8, { state: "done", partial: true }))).toMatch(/row 8 is partly delivered/);
+  });
+
+  // PERSO-330: the CLI's rule (`mp_client::format::outbox_retry_warning`). A row whose recipients never reached the server
+  // sent nothing, and a retry cannot deliver it twice; a row with a recipient of no verdict beside it still may.
+  it("does not warn about a second delivery for a row that never reached the server", () => {
+    const unreached = row(9, {
+      last_error: "not sent to robin@example.com: could not connect to smtp.example.com:587: connection refused; nothing was sent",
+    });
+    expect(retryDialog("work", unreached)).toMatchObject({ title: "Send row 9 again?", warning: null });
+    const mixed = row(10, {
+      last_error:
+        "no verdict for robin@example.com: no answer from the SMTP server within 150s; it may have taken the message | " +
+        "not sent to kim@example.com: could not connect to smtp.example.com:587: connection refused; nothing was sent",
+    });
+    expect((retryDialog("work", mixed) as { warning: string }).warning).toMatch(/may already have been delivered/);
+    expect((retryDialog("work", row(11, { last_error: null })) as { warning: string }).warning).toMatch(/may already have been delivered/);
+  });
+
+  it("reads the phrase the daemon ends a never-reached reason with, as mp-protocol spells it", () => {
+    const rust = readFileSync(resolve(process.cwd(), "../../crates/mp-protocol/src/send.rs"), "utf8");
+    const spelled = /pub const NOTHING_SENT: &str = "([^"]*)";/.exec(rust)?.[1];
+    expect(spelled).toBeDefined();
+    expect(NOTHING_SENT).toBe(spelled);
   });
 
   it("names what a discard gives up, for each state", () => {
