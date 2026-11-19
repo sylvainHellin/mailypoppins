@@ -162,7 +162,7 @@ pub fn copy_too_large(mime: &[u8]) -> Option<anyhow::Error> {
         crate::pending_ops::Unretryable(format!(
             "this draft is too large for its copy in Outlook's Drafts: {:.1} MB as a message, \
              above the {:.1} MB one Graph request takes; it stays local and can still be sent, \
-             and an edit that makes it smaller pushes it again",
+             and an edit of the draft or a smaller attachment pushes it again",
             mb(mime.len()),
             mb(super::MIME_SEND_MAX_BASE64_BYTES / 4 * 3),
         ))

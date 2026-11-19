@@ -82,6 +82,32 @@ pub fn file_hash(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The key a push refused for good records ([`crate::pending_ops::Unretryable`],
+/// PERSO-182): the file's hash and the size of every attachment file its copy
+/// would carry, resolved as the copy resolves them. What makes a copy too
+/// large for Graph is its attachments as much as its text, so a smaller file
+/// under the same attachment name is a new key and pushes again, while a
+/// draft left as it is keeps its key across scans and restarts.
+pub fn sized_push_key(local: &LocalDraft) -> String {
+    use sha2::{Digest, Sha256};
+    let anchor = crate::send::attachment_anchor(&local.draft);
+    let mut sizes = Sha256::new();
+    for entry in local.draft.frontmatter.attachments.iter().flatten() {
+        let files = crate::send::resolve_attachment_paths(std::slice::from_ref(entry), anchor)
+            .unwrap_or_default();
+        for file in files {
+            let size = std::fs::metadata(&file).map(|meta| meta.len()).ok();
+            sizes.update(format!("{}\0{size:?}\n", file.display()).as_bytes());
+        }
+    }
+    let sizes: String = sizes
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{} sizes:{sizes}", local.hash)
+}
+
 /// The server folder `account` mirrors its drafts into: the `drafts` role of
 /// its mailbox catalogue (#0141), which is the folder the server marks
 /// `\Drafts`, the one config names, or the one called `Drafts`; `Drafts`

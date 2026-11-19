@@ -160,7 +160,21 @@ pub async fn push<F: DraftsFolder>(
     )?;
     // The server names the new copy with UIDPLUS (PERSO-202); without it the
     // copy is the newest one a search finds that was not there before.
-    let new_uid = match folder.append(&raw).await? {
+    let appended = folder.append(&raw).await;
+    if let Err(e) = &appended {
+        if crate::pending_ops::Unretryable::is_in(e) {
+            // Parked for good: the row names what decided the refusal, so a
+            // smaller attachment, not only an edit of the file, queues it
+            // again (PERSO-182).
+            crate::pending_ops::note_push_hash(
+                mirror.store,
+                account,
+                draft_id,
+                &super::sized_push_key(&local),
+            )?;
+        }
+    }
+    let new_uid = match appended? {
         Some(uid) => uid,
         None => {
             let after = folder.uids_of(&message_id).await?;
@@ -274,6 +288,7 @@ pub fn enqueue_owed(store: &Store, account: &AccountConfig) -> Result<usize> {
                 &account.name,
                 &local.id,
                 &local.hash,
+                || super::sized_push_key(&local),
                 now,
             )?
         {

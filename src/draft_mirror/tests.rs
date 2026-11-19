@@ -3569,3 +3569,63 @@ fn a_graph_copy_this_machine_created_before_its_row_does_not_refuse_the_send() {
     graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("both copies are this machine's");
     assert!(graph.drafts().is_empty(), "{:?}", graph.log);
 }
+
+/// What decides an oversized copy's size is its attachments as much as its
+/// file: replacing an attachment with a smaller file of the same name, the
+/// draft file untouched, queues the push again and it lands. Unchanged, the
+/// draft is not retried, however many scans or restarts pass.
+#[test]
+fn a_smaller_attachment_pushes_an_oversized_graph_copy_again() {
+    let fx = graph_fixture();
+    let big = crate::config::drafts_dir("tum").join("plan.bin");
+    let bytes: Vec<u8> = (0..3_000_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(&big, bytes).unwrap();
+    let path = fx.write(
+        "gross",
+        "d1",
+        &format!("attachments:\n  - {}\n", big.display()),
+        "Anbei der Plan",
+    );
+    link_new_draft(&fx.account, &path).unwrap();
+    push::enqueue_owed(&fx.store, &fx.account).unwrap();
+    let blobs = BlobStore::for_account("tum");
+    let mut graph = FakeGraph::default();
+    let now = crate::outbox::unix_now();
+    let mut exec = GraphExecutor {
+        graph: &mut graph,
+        account: fx.account.clone(),
+    };
+    let result = block_on(pending_ops::drain(&fx.store, &blobs, "tum", &mut exec, now)).unwrap();
+    assert_eq!(result.failed, 1);
+    fx.store
+        .conn()
+        .execute(
+            "UPDATE pending_ops SET updated = updated - ?1 WHERE state = 'failed'",
+            [pending_ops::PUSH_RETRY_COOL_DOWN_SECS + 1],
+        )
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
+    }
+
+    std::fs::write(&big, vec![7u8; 1000]).unwrap();
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        1,
+        "the smaller attachment queues the push again"
+    );
+    let mut exec = GraphExecutor {
+        graph: &mut graph,
+        account: fx.account.clone(),
+    };
+    // A time read after the push was queued, so the row is due.
+    let later = crate::outbox::unix_now();
+    let result = block_on(pending_ops::drain(
+        &fx.store, &blobs, "tum", &mut exec, later,
+    ))
+    .unwrap();
+    assert_eq!(result.completed, 1);
+    assert_eq!(graph.drafts().len(), 1);
+}

@@ -3544,7 +3544,7 @@ fn parse_graph_recipients(field: Option<&str>) -> Vec<(String, String)> {
 /// since every draft the daemon reads comes off a full path. That degenerate
 /// case falls back to `.`, which leaves the entry relative exactly as the
 /// pre-daemon binary left it.
-fn attachment_anchor(draft: &EmailDraft) -> &Path {
+pub(crate) fn attachment_anchor(draft: &EmailDraft) -> &Path {
     match draft.path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),

@@ -746,24 +746,50 @@ pub const PUSH_RETRY_COOL_DOWN_SECS: i64 = crate::outbox::BACKOFF_MAX_SECS;
 
 /// Whether a push of the draft `draft_id` for the bytes hashing to `hash` was
 /// parked `failed` less than [`PUSH_RETRY_COOL_DOWN_SECS`] before `now`
-/// (#0143), or parked as [`Unretryable`] at any time: the owed-push scan does
-/// not queue it again until then, so a server out of reach is not hammered
-/// at every drain. Past the cool-down the scan queues one fresh push, never
-/// for a push the server can never take, and the next edit, a new hash,
-/// queues one at once.
+/// (#0143), or parked as [`Unretryable`] for the draft as `sized` describes
+/// it at any time: the owed-push scan does not queue it again until then, so
+/// a server out of reach is not hammered at every drain. Past the cool-down
+/// the scan queues one fresh push, never for a push the server can never
+/// take, and the next edit, a new hash, queues one at once.
+///
+/// An [`Unretryable`] push records the key of what decided its refusal rather
+/// than the file's hash ([`crate::draft_mirror::sized_push_key`], PERSO-182):
+/// a copy too large for Graph is as large as its attachments, so a smaller
+/// file under the same attachment name pushes it again while the draft file
+/// stays as it was. `sized` computes that key, and only for a draft that has
+/// such a row.
 pub fn push_failed_for(
     store: &Store,
     account: &str,
     draft_id: &str,
     hash: &str,
+    sized: impl FnOnce() -> String,
     now: i64,
 ) -> Result<bool> {
-    Ok(failed_ops(store, account)?.iter().any(|row| {
-        (row.updated + PUSH_RETRY_COOL_DOWN_SECS > now
-            || Unretryable::marks(row.last_error.as_deref()))
-            && matches!(&row.op, ServerOp::PushDraft { draft_id: id, hash: Some(h) }
-                if id == draft_id && h == hash)
-    }))
+    let mut sized = Some(sized);
+    let mut sized_key: Option<String> = None;
+    for row in failed_ops(store, account)? {
+        let ServerOp::PushDraft {
+            draft_id: id,
+            hash: Some(h),
+        } = &row.op
+        else {
+            continue;
+        };
+        if id != draft_id {
+            continue;
+        }
+        if Unretryable::marks(row.last_error.as_deref()) {
+            let key =
+                sized_key.get_or_insert_with(|| sized.take().map(|f| f()).unwrap_or_default());
+            if h == key {
+                return Ok(true);
+            }
+        } else if row.updated + PUSH_RETRY_COOL_DOWN_SECS > now && h == hash {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Settle the other failed pushes of the draft whose push `parked` was just
