@@ -38,6 +38,11 @@
 //!   it back meanwhile, the approval a send key makes before the send
 //!   included ([`super::push::push`]), so the claim never finds a fresh copy
 //!   of a draft sent elsewhere.
+//! - Copies and no row at all (a rebuilt store, a push that never wrote its
+//!   row, a row the reconcile let go): only a copy whose mark carries the
+//!   file's own hash is this machine's ([`written_from_file`], PERSO-327);
+//!   any other refuses the send as [`ChangedElsewhere`], with nothing
+//!   removed, and the reconcile recovers the row before the next send.
 //! - No copy and a claiming row: an earlier claim of this machine's took the
 //!   copy and its answer was lost. The send goes ahead.
 //! - No copy and no row: this machine's own claim took the copy and the
@@ -305,16 +310,16 @@ async fn claim<F: DraftsFolder>(
         Some(id) => draft_sync::get(store, name, id)?,
         None => None,
     };
-    if let Some(row) = &row {
-        if !own_copies(folder, row, &uids, &mailbox, info.uidvalidity, draft)
-            .await
-            .map_err(|e| unreachable(name, e))?
-        {
-            return Err(ChangedElsewhere {
-                mailbox: mailbox.clone(),
-            }
-            .into());
+    let ours = match &row {
+        Some(row) => own_copies(folder, row, &uids, &mailbox, info.uidvalidity, draft).await,
+        None => written_from_file(folder, &uids, draft).await,
+    }
+    .map_err(|e| unreachable(name, e))?;
+    if !ours {
+        return Err(ChangedElsewhere {
+            mailbox: mailbox.clone(),
         }
+        .into());
     }
     let claiming = row.as_ref().is_some_and(|row| row.claiming.is_some());
     if uids.is_empty() {
@@ -448,6 +453,42 @@ async fn own_copies<F: DraftsFolder>(
             Some(&copy.file_hash) == file_hash.as_ref() || (current && uid < row.uid)
         });
         if !ours {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether every copy `uids` names was written by mp from the draft's file as
+/// it is now (its mark carries the file's hash): the test a draft with no
+/// `draft_sync` row passes before its copies are claimed (PERSO-327).
+///
+/// With no row (a rebuilt store, a push that never wrote one, a row the
+/// reconcile let go) nothing says which copy this machine last saw, so only a
+/// copy that is this very text is this machine's to take. Any other, an
+/// Outlook save or another machine's push, refuses the send as
+/// [`ChangedElsewhere`]: the daemon then runs the reconcile, which recovers
+/// the row from the copy, keeping the local text as a conflict copy when
+/// the two differ, and the next send passes through the row.
+async fn written_from_file<F: DraftsFolder>(
+    folder: &mut F,
+    uids: &[u32],
+    draft: &EmailDraft,
+) -> Result<bool> {
+    if uids.is_empty() {
+        return Ok(true);
+    }
+    let Some(file_hash) = super::LocalDraft::read(draft.path.clone()).map(|local| local.hash)
+    else {
+        return Ok(false);
+    };
+    for &uid in uids {
+        let Some(raw) = folder.fetch(uid).await? else {
+            // Gone since the lookup: the claim's count tells.
+            continue;
+        };
+        let written = super::carrier::read(&raw).is_some_and(|copy| copy.file_hash == file_hash);
+        if !written {
             return Ok(false);
         }
     }

@@ -3916,3 +3916,143 @@ fn the_reconcile_never_retires_a_draft_whose_claim_did_not_settle() {
     assert!(fx.row("d1").is_none(), "let go after two misses");
     assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// A draft with no row (PERSO-327)
+// ---------------------------------------------------------------------------
+
+/// A store rebuilt with the draft unchanged drops its row and nothing else:
+/// the copy carries the file's own hash, so the send claims it as before.
+#[test]
+fn a_draft_with_no_row_whose_copy_is_its_file_is_sent() {
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    draft_sync::delete(&fx.store, "tum", "d1").unwrap();
+
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("its own copy");
+    assert!(folder.live().is_empty(), "{:?}", folder.log);
+
+    let fx = graph_fixture();
+    fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    rebuild_graph_store(&fx);
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("its own copy");
+    assert!(graph.drafts().is_empty(), "{:?}", graph.log);
+}
+
+/// What a store rebuild drops on a Graph account: the rows and the version
+/// keys they name.
+fn rebuild_graph_store(fx: &Fixture) {
+    fx.store
+        .conn()
+        .execute_batch("DELETE FROM draft_sync; DELETE FROM graph_draft_versions;")
+        .unwrap();
+}
+
+/// An Outlook save on IMAP, then a store rebuilt before the send: with no row
+/// the send refuses the copy, which mp did not write from this file, and
+/// leaves it in Drafts; the reconcile then keeps both texts and writes the
+/// row, and the send after it claims the pulled copy.
+#[test]
+fn a_store_rebuilt_after_an_outlook_save_refuses_the_send_until_the_reconcile() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo Robin");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mine = fx.row("d1").unwrap().uid;
+    folder.remove(mine);
+    folder.put(&outlook_copy(
+        &mid_of(&path),
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo aus Outlook</p>",
+    ));
+    draft_sync::delete(&fx.store, "tum", "d1").unwrap();
+
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert_eq!(folder.live().len(), 1, "{:?}", folder.log);
+    assert!(fx.row("d1").is_none(), "no row is written for the refusal");
+
+    reconciled(&fx, &mut folder);
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the pulled copy is claimed");
+    assert!(folder.live().is_empty());
+}
+
+/// The same on Graph, where Outlook saves in place and the rebuild drops the
+/// version keys too.
+#[test]
+fn a_graph_store_rebuilt_after_an_outlook_save_refuses_the_send_until_the_reconcile() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo Robin");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let id = graph.drafts()[0].id.clone();
+    graph.edit(
+        &id,
+        &outlook_copy(
+            &mid_of(&path),
+            "robin@example.com",
+            "Angebot",
+            "<p>Hallo aus Outlook</p>",
+        ),
+    );
+    rebuild_graph_store(&fx);
+
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+    assert!(String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo aus Outlook"));
+
+    graph_reconciled(&fx, &mut graph);
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("the pulled copy is claimed");
+    assert!(graph.drafts().is_empty());
+}
+
+/// With no row, a copy mp wrote from other text (the other machine's push)
+/// is refused as well: only a copy carrying this file's hash is this
+/// machine's to claim.
+#[test]
+fn a_draft_with_no_row_refuses_a_copy_pushed_from_other_text() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let other = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Servus");
+    folder.put(&server_copy_of(&other, &mid_of(&path)));
+    draft_sync::delete(&fx.store, "tum", "d1").unwrap();
+
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert_eq!(folder.live().len(), 2, "nothing removed: {:?}", folder.log);
+}
