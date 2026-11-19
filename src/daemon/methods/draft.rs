@@ -1620,7 +1620,11 @@ fn already_sent(account: &str, id: &str, sent: &EmailFrontmatter) -> RpcError {
         .as_deref()
         .map(|at| {
             chrono::DateTime::parse_from_rfc3339(at)
-                .map(|at| at.format(" on %Y-%m-%d at %H:%M UTC").to_string())
+                .map(|at| {
+                    at.with_timezone(&chrono::Utc)
+                        .format(" on %Y-%m-%d at %H:%M UTC")
+                        .to_string()
+                })
                 .unwrap_or_else(|_| format!(" on {at}"))
         })
         .unwrap_or_default();
@@ -1735,6 +1739,22 @@ fn to_value<T: serde::Serialize>(what: &str, value: &T) -> Result<Value, RpcErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The already-sent answer labels its time UTC, so a `sent_at` written
+    /// with another offset, as a hand-edited file may carry it, is converted
+    /// rather than printed as its local wall time (PERSO-317).
+    #[test]
+    fn the_already_sent_answer_converts_an_offset_sent_at_to_utc() {
+        let sent: EmailFrontmatter = serde_yaml::from_str(
+            "id: abc123\nsubject: Hello\nstatus: sent\nsent_at: 2026-11-19T09:55:00+02:00\n",
+        )
+        .expect("a sent frontmatter");
+        let refusal = already_sent("work", "abc123", &sent);
+        assert_eq!(
+            refusal.message,
+            "abc123 in work/drafts was already sent on 2026-11-19 at 07:55 UTC"
+        );
+    }
 
     /// `w` on a search hit the store does not hold is `draft.forward` with
     /// the hit as its source, inline: the draft carries the message's
