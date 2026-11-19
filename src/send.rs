@@ -154,6 +154,12 @@ impl SendResult {
 /// - anything else is a timeout or a connection that died somewhere in the
 ///   conversation, where the 250 may simply have been lost on the way back:
 ///   unknown, and never attempted again automatically.
+///
+/// A `554` reads as a refusal for good wherever it comes, the greeting
+/// included: lettre does not say which step a reply answered, a `554` after
+/// the message is the server refusing it, and a `554` greeting refuses the
+/// session for good from where the client stands. The reason carries the
+/// server's own words, which name the cause.
 fn smtp_failure_verdict(err: &lettre::transport::smtp::Error) -> RecipientVerdict {
     if err.is_timeout() {
         return RecipientVerdict::Unknown;
@@ -694,7 +700,9 @@ mod tests {
             .build();
         let from: lettre::Address = built.from.parse().unwrap();
         let watch = LoginWatch::new(None, crate::login_gate::LOGIN_DEADLINE);
-        let result = submit_through(built, &from, &mailer, watch).await.result;
+        let result = submit_through(built, &from, &mailer, watch, SubmissionBudget::STANDARD)
+            .await
+            .result;
         drop(mailer);
         let log = std::mem::take(&mut *log.lock().unwrap());
         (result, log)
@@ -5047,21 +5055,56 @@ async fn submit_over_within(
     .await
 }
 
-/// How long one recipient's submission may run.
+/// How long one recipient's submission may run before it ends with no
+/// verdict (PERSO-330): the allowance of the conversation plus the upload of
+/// the message at a slow but real rate.
+///
+/// lettre bounds only the TCP connect ([`SMTP_CONNECT_TIMEOUT`]); nothing in
+/// it bounds the greeting, STARTTLS, EHLO, AUTH, MAIL, RCPT or DATA, so a
+/// server that accepts the connection and then says nothing held the send,
+/// and the outbox row in "sending", until the daemon restarted. The
+/// transport's `send_raw` is one future from the connect to the reply after
+/// the final dot, with no hook between its steps, so the deadline is one
+/// overall deadline around each recipient's `send_raw` and not one per step:
+/// bounding each step means driving lettre's `AsyncSmtpConnection` by hand
+/// in place of the transport, its TLS modes and login included.
+///
+/// The budget is generous on purpose. A send cut while the server was still
+/// working ends with no verdict, parked until the user retries it through
+/// the Sent search, which costs a manual step; a deadline exists to end the
+/// send that would otherwise never end, not to hurry a slow one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SubmissionBudget {
+    /// The whole conversation but the upload: the connect
+    /// ([`SMTP_CONNECT_TIMEOUT`], 30 s), then the greeting, EHLO, STARTTLS,
+    /// EHLO again, AUTH, MAIL, RCPT, DATA and the reply to the final dot,
+    /// nine replies that each take well under a second on a working server.
+    /// The 2 minutes beyond the connect hold one reply delayed by a loaded
+    /// server, or a final reply delayed by the server scanning a large
+    /// message, with the rest on time. RFC 5321 (4.5.3.2) gives a relay 2 to
+    /// 10 minutes per reply, a relay having no one waiting on it; this is
+    /// RFC 5321's 2 minutes for the reply to DATA, for the whole
+    /// conversation.
     conversation: std::time::Duration,
+    /// The upload, per MiB of the message: 32 s, an uplink of 256 kbit/s, a
+    /// congested mobile or hotel link that still moves data. A 25 MiB
+    /// message, the size most providers cap a message at, gets 13 minutes
+    /// and 20 s on top of the conversation.
     per_mib: std::time::Duration,
 }
 
 impl SubmissionBudget {
     const STANDARD: SubmissionBudget = SubmissionBudget {
-        conversation: std::time::Duration::from_secs(150),
+        conversation: std::time::Duration::from_secs(SMTP_CONNECT_TIMEOUT.as_secs() + 120),
         per_mib: std::time::Duration::from_secs(32),
     };
 
-    fn for_message(&self, _bytes: usize) -> std::time::Duration {
+    /// The deadline of one submission of `bytes` bytes.
+    fn for_message(&self, bytes: usize) -> std::time::Duration {
+        const MIB: u128 = 1024 * 1024;
+        let upload = self.per_mib.as_nanos() * bytes as u128 / MIB;
         self.conversation
+            + std::time::Duration::from_nanos(u64::try_from(upload).unwrap_or(u64::MAX))
     }
 }
 
@@ -5072,7 +5115,7 @@ async fn submit_over_bounded(
     smtp_config: &SmtpConfig,
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
     deadline: std::time::Duration,
-    _budget: SubmissionBudget,
+    budget: SubmissionBudget,
 ) -> Result<SendResult> {
     // Parse from address for envelope
     let from_addr: lettre::Address = built
@@ -5090,6 +5133,7 @@ async fn submit_over_bounded(
         &from_addr,
         mailer,
         LoginWatch::new(Some(&mut dial), deadline),
+        budget,
     )
     .await;
     let Some(answer) = login_refused else {
@@ -5145,9 +5189,10 @@ impl<'a> LoginWatch<'a> {
     /// possibly sent: on a slow link the row then holds before AUTH is
     /// written, and the IMAP login of a shared password waits rather than
     /// being refused beside it in the same step. The login cannot be told
-    /// apart from the first recipient's upload, which a deadline must not
-    /// cut, so the send keeps running, and its refusal or success, when it
-    /// comes, is reported as usual.
+    /// apart from the first recipient's upload, which this deadline must not
+    /// cut, so the send keeps running, to the submission's own deadline sized
+    /// to the message ([`SubmissionBudget`]), and its refusal or success,
+    /// when it comes, is reported as usual.
     async fn answer_of<T>(&mut self, send: impl std::future::Future<Output = T>) -> T {
         self.sending = true;
         let sent = match self.dial.as_deref_mut().filter(|dial| dial.marked()) {
@@ -5288,22 +5333,32 @@ fn is_login_refusal(err: &lettre::transport::smtp::Error) -> bool {
 /// before `MAIL FROM`, so nothing of the message reached the server and the
 /// retry is that recipient's first submission, not a second one; every later
 /// recipient takes the 7bit bytes straight away.
+///
+/// Each recipient's submission ends at its `budget`
+/// ([`SubmissionBudget`], PERSO-330) with no verdict, the server possibly
+/// holding the message, and ends the loop too: every later recipient would
+/// wait out a deadline of its own against a server that has stopped
+/// answering, so each is left retryable, never tried.
 async fn submit_through(
     built: &BuiltMessage,
     from_addr: &lettre::Address,
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
     mut watch: LoginWatch<'_>,
+    budget: SubmissionBudget,
 ) -> Submitted {
     let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
     let mut login_refused = None;
     let mut login_unanswered = false;
+    let mut out_of_time = false;
 
     for (addr, role) in &built.recipients {
         let stopped = if login_refused.is_some() {
             Some("not sent: the server refused the SMTP login")
         } else if login_unanswered {
             Some("not sent: the SMTP login got no answer")
+        } else if out_of_time {
+            Some("not sent: the SMTP server stopped answering")
         } else {
             None
         };
@@ -5352,19 +5407,44 @@ async fn submit_through(
         };
 
         let wire = seven_bit.as_deref().unwrap_or(&built.raw);
-        let mut sent = watch.answer_of(mailer.send_raw(&envelope, wire)).await;
-        if seven_bit.is_none() && sent.as_ref().is_err_and(is_8bitmime_refusal) {
+        let mut sent = send_within(mailer, &envelope, wire, budget, &mut watch).await;
+        if seven_bit.is_none()
+            && sent
+                .as_ref()
+                .is_ok_and(|sent| sent.as_ref().is_err_and(is_8bitmime_refusal))
+        {
             if let Some(fallback) = seven_bit_fallback(&built.raw) {
                 warn!(
                     "[send] {} holds an 8bit message/rfc822 part and the SMTP server offers no \
                      8BITMIME; sending it as base64 application/octet-stream instead",
                     built.message_id
                 );
-                sent = watch
-                    .answer_of(mailer.send_raw(&envelope, seven_bit.insert(fallback)))
-                    .await;
+                let wire = seven_bit.insert(fallback);
+                sent = send_within(mailer, &envelope, wire, budget, &mut watch).await;
             }
         }
+        let sent = match sent {
+            Ok(sent) => sent,
+            Err(deadline) => {
+                // AUTH may have gone out with no answer, as when the
+                // connection is lost; the loop ends either way.
+                watch.unanswered();
+                out_of_time = true;
+                let err_msg = format!(
+                    "no answer from the SMTP server within {}s; it may have taken the message",
+                    deadline.as_secs()
+                );
+                error!("Failed to send to {} ({}): {}", addr, role, err_msg);
+                results.push(RecipientResult {
+                    address: addr.clone(),
+                    role: *role,
+                    success: false,
+                    error: Some(err_msg),
+                    verdict: RecipientVerdict::Unknown,
+                });
+                continue;
+            }
+        };
         match &sent {
             Ok(_) => watch.logged_in(),
             Err(e) if answered_past_login(e) => watch.logged_in(),
@@ -5420,6 +5500,41 @@ async fn submit_through(
         result: SendResult { results },
         login_refused,
     }
+}
+
+/// One recipient's `send_raw` of `wire`, through `watch`, ended at the
+/// deadline `budget` gives a message of its size: `Err` with that deadline
+/// when the server gave no verdict by then.
+///
+/// Dropping lettre's `send_raw` past the connect hands its connection back
+/// to the transport's pool unmarked as broken, mid-conversation; a later
+/// `send_raw` on the same transport would write its `NOOP` into it.
+/// [`submit_through`] sends nothing more after a deadline and [`submit`]
+/// builds a transport per message, so nothing reuses it; when the transport
+/// goes, lettre ends the connection with a `QUIT` whose answer it awaits in
+/// a task of its own with no deadline, which a server silent for good holds
+/// until it closes the connection.
+async fn send_within(
+    mailer: &AsyncSmtpTransport<Tokio1Executor>,
+    envelope: &Envelope,
+    wire: &[u8],
+    budget: SubmissionBudget,
+    watch: &mut LoginWatch<'_>,
+) -> std::result::Result<
+    std::result::Result<
+        lettre::transport::smtp::response::Response,
+        lettre::transport::smtp::Error,
+    >,
+    std::time::Duration,
+> {
+    let deadline = budget.for_message(wire.len());
+    watch
+        .answer_of(tokio::time::timeout(
+            deadline,
+            mailer.send_raw(envelope, wire),
+        ))
+        .await
+        .map_err(|_| deadline)
 }
 
 /// lettre's refusal of a message with 8-bit octets to a server whose EHLO
