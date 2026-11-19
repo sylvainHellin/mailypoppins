@@ -4062,12 +4062,18 @@ impl Scorer {
 // Directory picker helpers
 // ---------------------------------------------------------------------------
 
+// A test build never runs `zoxide` (PERSO-332): its query reads the user's
+// own database and may rewrite it, pruning the directories gone from disk.
+// In its place the picker has the directories a test sets on its thread,
+// and with none set it has no zoxide and opens on the browser.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_FREQUENT_DIRS: std::cell::RefCell<Option<Vec<PathBuf>>> =
         const { std::cell::RefCell::new(None) };
 }
 
+/// Stand the directories `dirs` in for zoxide's on this thread, `None` for
+/// no zoxide.
 #[cfg(test)]
 fn set_frequent_dirs_for_test(dirs: Option<Vec<PathBuf>>) {
     TEST_FREQUENT_DIRS.with(|frequent| *frequent.borrow_mut() = dirs);
@@ -4075,12 +4081,19 @@ fn set_frequent_dirs_for_test(dirs: Option<Vec<PathBuf>>) {
 
 /// Check whether `zoxide` is available on PATH.
 fn which_zoxide() -> bool {
-    std::process::Command::new("zoxide")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        TEST_FREQUENT_DIRS.with(|frequent| frequent.borrow().is_some())
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        std::process::Command::new("zoxide")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
 }
 
 /// Run `zoxide query --list <terms>` and populate `picker.zoxide_results`.
@@ -4089,30 +4102,48 @@ fn refresh_zoxide_results(picker: &mut DirPicker) {
         picker.zoxide_results.clear();
         return;
     }
+    // Split query on whitespace so "no do" becomes two positional args
+    let terms: Vec<&str> = picker.query.split_whitespace().collect();
+    picker.zoxide_results = zoxide_query(&terms).into_iter().take(20).collect();
+}
 
-    let mut cmd = std::process::Command::new("zoxide");
-    cmd.arg("query").arg("--list");
-    if !picker.query.is_empty() {
-        // Split query on whitespace so "no do" becomes two positional args
-        for term in picker.query.split_whitespace() {
-            cmd.arg(term);
-        }
-    }
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::null());
-
-    picker.zoxide_results = match cmd.output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout
-                .lines()
-                .filter(|l| !l.is_empty())
-                .take(20)
-                .map(|l| PathBuf::from(l.trim()))
-                .collect()
-        }
+/// The directories `zoxide query --list <terms>` lists, best first, none
+/// when it fails.
+#[cfg(not(any(test, feature = "test-support")))]
+fn zoxide_query(terms: &[&str]) -> Vec<PathBuf> {
+    let output = std::process::Command::new("zoxide")
+        .arg("query")
+        .arg("--list")
+        .args(terms)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| PathBuf::from(l.trim()))
+            .collect(),
         _ => Vec::new(),
-    };
+    }
+}
+
+/// The test's directories holding every term, case-insensitively, as
+/// zoxide's own match does.
+#[cfg(any(test, feature = "test-support"))]
+fn zoxide_query(terms: &[&str]) -> Vec<PathBuf> {
+    TEST_FREQUENT_DIRS.with(|frequent| {
+        let frequent = frequent.borrow();
+        frequent
+            .iter()
+            .flatten()
+            .filter(|dir| {
+                let dir = dir.to_string_lossy().to_lowercase();
+                terms.iter().all(|term| dir.contains(&term.to_lowercase()))
+            })
+            .cloned()
+            .collect()
+    })
 }
 
 /// Scan `picker.current_dir` for sub-directories and populate `picker.dir_entries`.
