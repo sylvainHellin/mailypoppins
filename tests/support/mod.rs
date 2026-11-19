@@ -33,6 +33,9 @@
 //! [`fake_smtp`] is a STARTTLS SMTP server that records every login and
 //! every message it is given, and whose answer to each step a test switches
 //! (PERSO-199, PERSO-210); the library's unit tests include it by path.
+//! [`wire_fixture`] is one account served over the wire by those two
+//! servers, with its passwords stored, for the success paths no hook stands
+//! in for (PERSO-210).
 //! [`readiness`] waits for a spawned daemon to answer `daemon.status`, and
 //! [`events`] reads `state.event` notifications past the daemon's own startup
 //! events; daemon suites that do not declare `mod support;` include either
@@ -56,3 +59,4 @@ pub mod read_fixture;
 pub mod readiness;
 pub mod send_fixture;
 pub mod sync_fixture;
+pub mod wire_fixture;

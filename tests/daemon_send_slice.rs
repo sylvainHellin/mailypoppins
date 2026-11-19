@@ -3605,3 +3605,154 @@ fn a_routed_send_approved_prints_each_draft_once_and_the_counts_after() {
         "the summary closes the batch with the counts:\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 12. Over the wire (PERSO-210)
+// ---------------------------------------------------------------------------
+//
+// The same send with no hook at all: an account on the fake SMTP and IMAP
+// servers of `tests/support/`, so the daemon submits over STARTTLS and files
+// the Sent copy with an IMAP APPEND, as it does for a user. Routed side only:
+// the oracle has no account on these servers.
+
+mod wire {
+    use super::support::fake_smtp::{SmtpAnswer, SmtpStep};
+    use super::support::wire_fixture::{
+        assert_ok, stdout, wait_for, WireRoot, ADDRESS, DRAFTS, IMAP_PASSWORD, SENT, SMTP_PASSWORD,
+    };
+    use mailypoppins::outbox::OutboxState;
+
+    /// The header `name` of `raw`, unfolded.
+    fn header(raw: &[u8], name: &str) -> String {
+        let (headers, _) = mailparse::parse_headers(raw).expect("headers");
+        headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case(name))
+            .map(|h| h.get_value())
+            .unwrap_or_default()
+    }
+
+    /// `mp send -y` submits one transaction per recipient over STARTTLS,
+    /// logged in with the stored SMTP password, files the very bytes it
+    /// sent in the server's Sent folder `\Seen`, under the IMAP password,
+    /// retires the draft and leaves the outbox row done.
+    #[test]
+    fn a_send_goes_out_over_smtp_and_its_copy_is_filed_over_imap() {
+        let mut wire = WireRoot::new();
+        let selector = wire.draft(
+            "a0000000000000w1",
+            "ada@example.org, bob@example.org",
+            "Over the wire",
+            "Sent for real.\n",
+        );
+        wire.start(&[]);
+
+        let out = wire.mp(&["send", &selector, "-y"]);
+        assert_ok(&out, "mp send -y");
+        assert!(
+            stdout(&out).contains("✓ Email sent successfully to all"),
+            "{}",
+            stdout(&out)
+        );
+
+        let deliveries = wire.smtp.deliveries();
+        let recipients: Vec<Vec<String>> =
+            deliveries.iter().map(|d| d.recipients.clone()).collect();
+        assert_eq!(
+            recipients,
+            vec![
+                vec!["ada@example.org".to_string()],
+                vec!["bob@example.org".to_string()]
+            ]
+        );
+        assert!(deliveries
+            .iter()
+            .all(|d| d.from == ADDRESS && d.acknowledged));
+        assert!(wire
+            .smtp
+            .logins()
+            .iter()
+            .all(|l| l.username == ADDRESS && l.password == SMTP_PASSWORD));
+        assert!(wire.imap.passwords().iter().all(|p| p == IMAP_PASSWORD));
+
+        // The drain that files the copy may be one already running when the
+        // send committed its row, which then leaves the APPEND to it.
+        wait_for("the Sent copy", || !wire.imap.contents(SENT).is_empty());
+        let sent = wire.imap.contents(SENT);
+        assert_eq!(sent.len(), 1, "one Sent copy: {sent:?}");
+        let message_id = header(&deliveries[0].data, "Message-ID");
+        assert_eq!(sent[0].message_id, message_id);
+        assert_eq!(sent[0].flags, vec!["\\Seen".to_string()]);
+        let filed = sent[0].raw.clone().expect("the copy's bytes");
+        assert_eq!(
+            [filed.as_slice(), b"\r\n"].concat(),
+            deliveries[0].data,
+            "the copy is the message the server was given"
+        );
+        assert_eq!(header(&filed, "Subject"), "Over the wire");
+
+        assert!(
+            !wire.drafts_dir().join("a0000000000000w1.md").exists(),
+            "the delivered draft is retired"
+        );
+        assert!(
+            wire.imap
+                .contents(DRAFTS)
+                .iter()
+                .all(|m| m.flags.iter().any(|f| f == "\\Deleted")),
+            "no live copy of the draft is left in the server's Drafts: {:?}",
+            wire.imap.contents(DRAFTS)
+        );
+        let account = super::support::wire_fixture::ACCOUNT;
+        let rows = super::fixture::all_rows(wire.root(), account);
+        assert_eq!(rows.len(), 1, "one outbox row: {rows:?}");
+        wait_for("the row to finish", || {
+            super::fixture::row_state(wire.root(), account, rows[0]) == Some(OutboxState::Done)
+        });
+    }
+
+    /// A recipient the server refuses at RCPT is reported in the server's
+    /// words, the others are delivered, and the Sent copy is filed: the
+    /// message went out.
+    #[test]
+    fn a_recipient_refused_over_the_wire_is_partly_delivered_in_the_servers_words() {
+        let mut wire = WireRoot::new();
+        let refusal = "550 5.1.1 <bob@example.org>: Recipient address rejected: User unknown";
+        wire.smtp.answer_for(
+            "bob@example.org",
+            SmtpStep::Rcpt,
+            Some(SmtpAnswer::reply(refusal)),
+        );
+        let selector = wire.draft(
+            "a0000000000000w2",
+            "ada@example.org, bob@example.org",
+            "Partly",
+            "Half of it.\n",
+        );
+        wire.start(&[]);
+
+        let out = wire.mp(&["send", &selector, "-y"]);
+        assert_ok(
+            &out,
+            "a message that reached somebody is not a failed command",
+        );
+        assert!(stdout(&out).contains("⚠ Partial send:"), "{}", stdout(&out));
+
+        let listing = wire.mp(&["outbox", "list"]);
+        let text = stdout(&listing);
+        assert!(
+            text.contains("never delivered to: bob@example.org")
+                && text
+                    .contains("5.1.1 <bob@example.org>: Recipient address rejected: User unknown"),
+            "the operator is told who never got it, and why:\n{text}"
+        );
+        let delivered: Vec<String> = wire
+            .smtp
+            .deliveries()
+            .into_iter()
+            .flat_map(|d| d.recipients)
+            .collect();
+        assert_eq!(delivered, vec!["ada@example.org".to_string()]);
+        wait_for("the Sent copy", || wire.imap.contents(SENT).len() == 1);
+    }
+}
