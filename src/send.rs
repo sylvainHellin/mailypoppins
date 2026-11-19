@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
+use mp_protocol::send::NOTHING_SENT;
 
 #[cfg(test)]
 mod deadline_tests;
@@ -5088,9 +5089,12 @@ async fn submit_over_within(
 /// in place of the transport, its TLS modes and login included.
 ///
 /// The budget is generous on purpose. A send cut while the server was still
-/// working ends with no verdict, parked until the user retries it through
-/// the Sent search, which costs a manual step; a deadline exists to end the
-/// send that would otherwise never end, not to hurry a slow one.
+/// working ends with no verdict, parked for the user, who has to find out
+/// from the recipient or the server's Sent folder whether it arrived before
+/// running `mp outbox retry`: no search runs before the SMTP re-send (the
+/// Message-ID search guards only the Sent copy), so a retry of a message
+/// the server took delivers it twice. A deadline exists to end the send that
+/// would otherwise never end, not to hurry a slow one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SubmissionBudget {
     /// The whole conversation but the upload: the connect
@@ -5301,7 +5305,7 @@ fn is_connection_setup_failure(err: &lettre::transport::smtp::Error) -> bool {
 }
 
 /// Why a connection to `server` (its host and port) was never set up, in
-/// plain words ending in "nothing was sent", or `None` when `err` is not a
+/// plain words ending in [`NOTHING_SENT`], or `None` when `err` is not a
 /// [connection-setup failure](is_connection_setup_failure).
 ///
 /// lettre's own text (`Connection error: Connection refused (os error
@@ -5319,7 +5323,7 @@ fn unreached_reason(err: &lettre::transport::smtp::Error, server: (&str, u16)) -
             let text = io.to_string();
             if let Some(why) = text.strip_prefix("failed to lookup address information: ") {
                 return Some(format!(
-                    "could not look up the SMTP server {host}: {}; nothing was sent",
+                    "could not look up the SMTP server {host}: {}; {NOTHING_SENT}",
                     first_lowercase(why)
                 ));
             }
@@ -5329,7 +5333,7 @@ fn unreached_reason(err: &lettre::transport::smtp::Error, server: (&str, u16)) -
                 _ => first_lowercase(text.split(" (os error").next().unwrap_or(&text)),
             };
             return Some(format!(
-                "could not connect to {host}:{port}: {why}; nothing was sent"
+                "could not connect to {host}:{port}: {why}; {NOTHING_SENT}"
             ));
         }
         cause = inner.source();
@@ -5342,7 +5346,7 @@ fn unreached_reason(err: &lettre::transport::smtp::Error, server: (&str, u16)) -
     if text.starts_with("could not resolve to any") {
         return Some(format!(
             "could not look up the SMTP server {host}: it has no address to connect to; \
-             nothing was sent"
+             {NOTHING_SENT}"
         ));
     }
     if text.to_ascii_lowercase().contains("certificate") {
@@ -5354,11 +5358,11 @@ fn unreached_reason(err: &lettre::transport::smtp::Error, server: (&str, u16)) -
             .map(|at| &text[at..])
             .unwrap_or_default();
         return Some(format!(
-            "the SMTP server's certificate was not trusted{detail}; nothing was sent"
+            "the SMTP server's certificate was not trusted{detail}; {NOTHING_SENT}"
         ));
     }
     Some(format!(
-        "could not set up a secure connection to {host}:{port}: {text}; nothing was sent"
+        "could not set up a secure connection to {host}:{port}: {text}; {NOTHING_SENT}"
     ))
 }
 

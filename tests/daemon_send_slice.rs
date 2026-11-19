@@ -3835,10 +3835,16 @@ mod wire {
             "{listing}"
         );
 
+        // The retry says first that the server may hold it already
+        // (PERSO-330), which it does.
         let out = wire.mp(&["outbox", "retry", "1"]);
         assert_ok(&out, "mp outbox retry");
         assert!(
-            stdout(&out).starts_with("  ↻ row 1 is queued again; sending it now\n"),
+            stdout(&out).starts_with(
+                "  ⚠ row 1 may already have been delivered: mp cannot know whether the server \
+                 took it, so its recipients may get it twice\n  ↻ row 1 is queued again; sending \
+                 it now\n"
+            ),
             "{}",
             stdout(&out)
         );

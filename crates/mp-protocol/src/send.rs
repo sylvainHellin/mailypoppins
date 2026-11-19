@@ -15,6 +15,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How the reason of a recipient the transport never reached ends (the
+/// lookup, the connect or the TLS handshake failed): the outbox parks its
+/// row with that reason, and a client reads it to know a retry of the row
+/// cannot deliver the message twice (PERSO-330).
+pub const NOTHING_SENT: &str = "nothing was sent";
+
 // ---------------------------------------------------------------------------
 // A send
 // ---------------------------------------------------------------------------

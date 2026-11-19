@@ -356,6 +356,31 @@ pub fn outbox_discard_line(row_id: i64, message_id: &str) -> String {
     format!("  \u{2713} discarded row {row_id} ({message_id}); its bytes are released")
 }
 
+/// The line `mp outbox retry` prints before it sends the failed `row` again,
+/// `None` when there is nothing to warn about (PERSO-330).
+///
+/// A failed row is one the server may have taken: no verdict came back, or
+/// the daemon stopped mid-send. Nothing searches before the SMTP re-send
+/// (the Message-ID search guards only the Sent copy), so whether it arrived
+/// is the user's to find out. A row whose recipients never reached the
+/// server, its reason ending in [`NOTHING_SENT`] with no "no verdict" beside
+/// it, sent nothing, and a retry cannot deliver it twice.
+pub fn outbox_retry_warning(row: &OutboxRow) -> Option<String> {
+    use mp_protocol::send::NOTHING_SENT;
+    if row.state != "failed" {
+        return None;
+    }
+    let error = row.last_error.as_deref().unwrap_or_default();
+    if error.contains(NOTHING_SENT) && !error.contains("no verdict") {
+        return None;
+    }
+    Some(format!(
+        "  \u{26a0} row {} may already have been delivered: mp cannot know whether the server \
+         took it, so its recipients may get it twice",
+        row.id
+    ))
+}
+
 /// The two lines a retry prints, then one for the copies it filed and one
 /// for those it found already on the server, each only when there are any.
 pub fn outbox_retry_lines(outcome: &OutboxRetryOutcome) -> Vec<String> {
@@ -1133,5 +1158,55 @@ mod tests {
             Some("Contacts rebuild found only 3, kept 25 cached")
         );
         assert_eq!(refused_rebuild_line("written", 30, 0), None);
+    }
+
+    fn failed_row(last_error: &str) -> mp_protocol::send::OutboxRow {
+        mp_protocol::send::OutboxRow {
+            id: 7,
+            state: "failed".to_string(),
+            partial: false,
+            never_submitted: false,
+            message_id: "<m@example.com>".to_string(),
+            target_mailbox: Some("Sent".to_string()),
+            updated: 0,
+            last_error: Some(last_error.to_string()),
+            rejected: Vec::new(),
+            outstanding: vec!["bob@example.com".to_string()],
+        }
+    }
+
+    /// PERSO-330: no search runs before an SMTP re-send, so `mp outbox
+    /// retry` of a row parked with no verdict says, before it sends, that the
+    /// message may already have been delivered. A row that never reached the
+    /// server sent nothing and needs no warning, nor does a row whose Sent
+    /// copy alone is owed.
+    #[test]
+    fn a_retry_of_a_row_with_no_verdict_warns_that_it_may_have_been_delivered() {
+        use super::outbox_retry_warning;
+        let silent = failed_row(
+            "no verdict for bob@example.com: no answer from the SMTP server within 150s; \
+             it may have taken the message",
+        );
+        let warning = outbox_retry_warning(&silent).expect("a warning");
+        assert!(!warning.contains('\n'), "one line: {warning}");
+        assert!(
+            warning.contains("row 7") && warning.contains("may already have been delivered"),
+            "{warning}"
+        );
+
+        let crashed = failed_row("the send never returned a verdict");
+        assert!(outbox_retry_warning(&crashed).is_some());
+
+        let unreached = failed_row(
+            "not sent to bob@example.com: could not connect to smtp.example.com:587: \
+             connection refused; nothing was sent",
+        );
+        assert_eq!(outbox_retry_warning(&unreached), None);
+
+        let filing = mp_protocol::send::OutboxRow {
+            state: "sent_pending_append".to_string(),
+            ..failed_row("APPEND failed")
+        };
+        assert_eq!(outbox_retry_warning(&filing), None);
     }
 }

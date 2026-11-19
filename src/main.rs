@@ -2024,6 +2024,14 @@ async fn cmd_outbox(
             )]);
         }
         OutboxAction::Retry { id } => {
+            if let Some(warning) = listing
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .and_then(mp_client::format::outbox_retry_warning)
+            {
+                print_lines(&[warning]);
+            }
             // A client that follows its own operation has to be a subscriber
             // first: the finished event reaches bootstrapped connections only.
             daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;

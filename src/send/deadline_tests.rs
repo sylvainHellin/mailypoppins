@@ -230,8 +230,8 @@ async fn the_recipients_after_a_deadline_are_left_for_a_later_send() {
 }
 
 /// A drain resubmitting a queued row against a server gone silent parks the
-/// row as failed with no verdict, which only `mp outbox retry` sends again
-/// through the Sent search, instead of leaving it in "sending".
+/// row as failed with no verdict, which only `mp outbox retry` sends again,
+/// instead of leaving it in "sending".
 #[tokio::test]
 async fn a_drain_against_a_silent_server_parks_the_row() {
     let server = RecordingSmtpServer::start_silent(SilentAfter::Data);
