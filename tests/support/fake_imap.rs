@@ -260,6 +260,9 @@ struct Shared {
     /// The messages, by UID, a FETCH leaves out, and the tagged answer it
     /// ends with when it named one of them.
     fetch_refusals: Mutex<HashMap<u32, String>>,
+    /// The verbs whose command closes the connection, after an untagged
+    /// line and before the tagged answer.
+    hangups: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Shared {
@@ -330,6 +333,7 @@ impl RejectingImapServer {
             idlers: Mutex::new(Vec::new()),
             idles: AtomicUsize::new(0),
             fetch_refusals: Mutex::new(HashMap::new()),
+            hangups: Mutex::new(std::collections::HashSet::new()),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -499,6 +503,19 @@ impl RejectingImapServer {
             Some(answer) => refusals.insert(verb, answer.to_string()),
             None => refusals.remove(&verb),
         };
+    }
+
+    /// Close the connection at every later command `verb` once logged in,
+    /// after an untagged `* OK` and before its tagged answer, as a server
+    /// that goes away mid-answer does; or answer it again with `false`.
+    pub fn hang_up_on(&self, verb: &str, on: bool) {
+        let mut hangups = self.shared.hangups.lock().expect("the hang-ups");
+        let verb = verb.to_ascii_uppercase();
+        if on {
+            hangups.insert(verb);
+        } else {
+            hangups.remove(&verb);
+        }
     }
 
     /// Offer UIDPLUS (RFC 4315) or not, from the next CAPABILITY on: the
@@ -918,6 +935,16 @@ async fn serve(
         } else {
             None
         };
+        if logged_in
+            && shared
+                .hangups
+                .lock()
+                .expect("the hang-ups")
+                .contains(&command)
+        {
+            reply(&mut tls, b"* OK going away\r\n").await?;
+            return tls.get_ref().get_ref().shutdown(std::net::Shutdown::Both);
+        }
         if let Some(answer) = early {
             reply(&mut tls, format!("{tag} {answer}\r\n").as_bytes()).await?;
             continue;

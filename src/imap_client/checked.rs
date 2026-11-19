@@ -354,3 +354,46 @@ pub(crate) fn expunges(answer: &[Untagged]) -> Vec<u32> {
 fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::imap_client::scripted::session as scripted;
+
+    /// A connection that ends after part of an answer and before its tagged
+    /// line is `ConnectionLost`, never the part taken for the whole.
+    #[test]
+    fn an_answer_cut_before_its_tagged_line_is_a_lost_connection() {
+        futures::executor::block_on(async {
+            let (mut session, _) = scripted(&[
+                "A0001 OK LOGIN completed\r\n",
+                "* 1 FETCH (UID 7 FLAGS (\\Seen))\r\n",
+            ])
+            .await;
+            let lost = session
+                .uid_fetch_partial("7", "(UID FLAGS)")
+                .await
+                .expect_err("the stream ended before the tagged line");
+            assert!(matches!(lost, Error::ConnectionLost), "{lost:?}");
+
+            let (mut session, _) = scripted(&["A0001 OK LOGIN completed\r\n"]).await;
+            let lost = session.noop_checked().await.expect_err("no answer at all");
+            assert!(matches!(lost, Error::ConnectionLost), "{lost:?}");
+        });
+    }
+
+    /// A tagged line of another command, or an untagged `BYE`, does not end
+    /// the answer; only this command's tag does.
+    #[test]
+    fn only_the_commands_own_tag_ends_its_answer() {
+        futures::executor::block_on(async {
+            let (mut session, _) = scripted(&[
+                "A0001 OK LOGIN completed\r\n",
+                "* SEARCH 3 4\r\nA0001 OK stray\r\n* SEARCH 5\r\nA0002 OK SEARCH completed\r\n",
+            ])
+            .await;
+            let found = session.uid_search_checked("ALL").await.expect("the answer");
+            assert_eq!(found, HashSet::from([3, 4, 5]));
+        });
+    }
+}

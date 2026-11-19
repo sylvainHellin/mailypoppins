@@ -297,6 +297,19 @@ pub async fn checkout(config: &ImapConfig) -> Result<PooledSession> {
     })
 }
 
+/// Make every session the pool keeps for `config` look idle `by` longer, so
+/// a test reaches the `NOOP` probe of [`PROBE_AFTER`] without waiting it out.
+#[cfg(test)]
+pub(crate) fn age_idle_for_test(config: &ImapConfig, by: Duration) {
+    let mut pool = pool().lock().expect("the pool");
+    for idle in pool.get_mut(&key_of(config)).into_iter().flatten() {
+        idle.since = idle
+            .since
+            .checked_sub(by)
+            .expect("an instant that far back");
+    }
+}
+
 fn take_idle(key: &str) -> Option<Idle> {
     let mut pool = pool().lock().ok()?;
     pool.get_mut(key)?.pop()

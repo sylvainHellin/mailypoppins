@@ -444,3 +444,42 @@ async fn a_refused_list_is_an_error_not_an_empty_server() {
         format!("Failed to list mailboxes: {LOCKED_WORDS}")
     );
 }
+
+/// A pooled session whose `NOOP` probe the server refuses, or whose
+/// connection ends before the probe's answer, is dropped and the checkout
+/// logs in afresh, instead of handing out a session the server has given up
+/// on.
+#[tokio::test]
+async fn a_pooled_session_whose_probe_fails_is_replaced_by_a_fresh_one() {
+    use super::checked::Checked;
+    for cut in [false, true] {
+        let server = server(&["one"]);
+        let config = config(&server);
+        drop(
+            super::pool::checkout(&config)
+                .await
+                .expect("a first session"),
+        );
+        let logins = server.logins();
+        super::pool::age_idle_for_test(&config, std::time::Duration::from_secs(30));
+        if cut {
+            server.hang_up_on("NOOP", true);
+        } else {
+            server.refuse("NOOP", Some(LOCKED));
+        }
+
+        let mut fresh = super::pool::checkout(&config).await.expect("a session");
+        assert_eq!(
+            server.logins(),
+            logins + 1,
+            "cut: {cut}: the checkout logged in again"
+        );
+        server.hang_up_on("NOOP", false);
+        server.refuse("NOOP", None);
+        fresh
+            .session()
+            .noop_checked()
+            .await
+            .expect("the fresh session answers");
+    }
+}
