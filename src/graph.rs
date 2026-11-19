@@ -20,6 +20,7 @@ use crate::server_search::{Fetched, MailboxStubs, SearchOrder, SearchStub};
 use crate::sync::SyncTarget;
 
 mod backend;
+pub mod drafts;
 
 pub use backend::{sync_mailboxes, GraphBackend, GraphKnown};
 
@@ -3161,20 +3162,7 @@ impl GraphClient {
     /// (`permanentDelete`, so it does not land in Deleted Items). A draft that
     /// is already gone counts as removed.
     pub async fn discard_draft(&self, draft_id: &str) -> Result<()> {
-        let resp = self
-            .discard_draft_request(draft_id)
-            .send()
-            .await
-            .context("Failed to discard the Graph draft")?;
-        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(())
-        } else {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Err(anyhow!(
-                "Discarding the Graph draft failed (HTTP {status}): {body}"
-            ))
-        }
+        self.remove_draft(draft_id).await.map(|_| ())
     }
 
     /// What the mailbox holds under one `Message-ID`: whether a sent copy
