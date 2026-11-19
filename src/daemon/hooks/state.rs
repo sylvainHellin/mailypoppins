@@ -49,6 +49,12 @@ pub struct HookCursor {
     /// still owed (the store's arrival mark).
     #[serde(default)]
     pub considered: Vec<i64>,
+    /// UIDs at or below `last_uid` with no row when the cursor passed them,
+    /// because the sync had given up on them (#0074, PERSO-333): each is
+    /// considered once its row is written, and forgotten then or once the
+    /// sync no longer gives up on it without having written it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owed: Vec<i64>,
     /// The Message-IDs this hook fired for, newest last.
     #[serde(default)]
     pub fired: Vec<String>,

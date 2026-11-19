@@ -22,6 +22,9 @@
 //!   later arms it afresh rather than firing for everything since.
 //! - The cursor never moves past the store's arrival mark, so a message that
 //!   arrives out of UID order is still considered.
+//! - A message the sync has given up on (#0074, PERSO-333) no longer holds
+//!   the arrival mark, and the cursor passes it while it has no row; it is
+//!   remembered as owed and considered once a later retry writes it.
 //! - The Message-IDs a hook fired for are remembered too, so a message moved
 //!   out and back in (a new UID) does not fire twice.
 //! - The claim is saved before the command starts: a crash in between loses a
@@ -136,7 +139,13 @@ pub fn scan(
             *entry = armed(&key, cursor.uidvalidity, top, Some(previous));
             continue;
         }
-        for (row_id, uid, message_id) in rows_above(store, name, &key, entry.last_uid)? {
+        // The rows written late below the cursor, then the ones above it.
+        let given_up = crate::ingest::given_up_unwritten(store, name, &key);
+        let mut rows = rows_at(store, name, &key, &entry.owed)?;
+        entry.owed.retain(|uid| given_up.contains(uid));
+        rows.extend(rows_above(store, name, &key, entry.last_uid)?);
+        let passed_from = entry.last_uid;
+        for (row_id, uid, message_id) in rows {
             if entry.considered.contains(&uid) {
                 continue;
             }
@@ -184,6 +193,14 @@ pub fn scan(
             });
         }
         entry.advance(cursor.arrival_mark);
+        let passed_to = entry.last_uid;
+        entry.owed.extend(
+            given_up
+                .iter()
+                .filter(|&&uid| passed_from < uid && uid <= passed_to),
+        );
+        entry.owed.sort_unstable();
+        entry.owed.dedup();
     }
 
     if state != before {
@@ -205,6 +222,7 @@ fn armed(
         uidvalidity,
         last_uid: top,
         considered: Vec::new(),
+        owed: Vec::new(),
         fired: previous.fired,
         armed_at: chrono::Local::now().to_rfc3339(),
         last_run: previous.last_run,
@@ -243,6 +261,34 @@ fn rows_above(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("listing the rows above the hook cursor")?;
+    Ok(rows)
+}
+
+/// `(row id, uid, Message-ID)` of the rows `mailbox` holds at `uids`, in UID
+/// order.
+fn rows_at(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    uids: &[i64],
+) -> Result<Vec<(i64, i64, String)>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT id, uid, message_id FROM messages
+         WHERE account = ?1 AND mailbox = ?2 AND uid = ?3",
+    )?;
+    let mut rows = Vec::new();
+    for &uid in uids {
+        if let Some(row) = stmt
+            .query_row(rusqlite::params![account, mailbox, uid], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .context("reading a row the hook cursor owes")?
+        {
+            rows.push(row);
+        }
+    }
+    rows.sort_by_key(|&(_, uid, _)| uid);
     Ok(rows)
 }
 
@@ -668,6 +714,52 @@ mod tests {
         fx.cursor(7, 2, None);
         assert!(fx.scan().is_empty());
         assert_eq!(state::load(&fx.state).unwrap().hooks["pi"].last_uid, 2);
+    }
+
+    /// Give up on `uid` as the sync does, after its last allowed attempt.
+    fn give_up(fx: &Fixture, uid: i64) {
+        for _ in 0..ingest::MAX_INGEST_ATTEMPTS {
+            ingest::record_ingest_failure(&fx.store, ACCOUNT, "inbox", uid, "refused");
+        }
+    }
+
+    /// PERSO-333: a message given up on stops holding the arrival mark, so
+    /// the cursor passes it with no row. It is owed: written late, it fires
+    /// once. One never written leaves a single owed UID behind and holds
+    /// back nothing above it; one given up on before the hook armed is old
+    /// mail and never fires.
+    #[test]
+    fn a_message_given_up_on_fires_once_when_written_late_and_never_stalls_the_cursor() {
+        let fx = fixture(vec![hook("pi", vec!["true".into()])]);
+        give_up(&fx, 1);
+        fx.cursor(7, 1, None);
+        assert!(fx.scan().is_empty(), "arms above uid 1");
+
+        give_up(&fx, 2);
+        give_up(&fx, 3);
+        fx.arrive(4, &raw("sylvain@hellin.me", "four", true));
+        fx.cursor(7, 4, None);
+        assert_eq!(fx.scan(), vec![4]);
+        let cursor = &state::load(&fx.state).unwrap().hooks["pi"];
+        assert_eq!(cursor.last_uid, 4, "the cursor passes the given-up uids");
+        assert_eq!(cursor.owed, vec![2, 3]);
+
+        fx.arrive(1, &raw("sylvain@hellin.me", "one", true));
+        fx.arrive(2, &raw("sylvain@hellin.me", "two", true));
+        fx.arrive(5, &raw("sylvain@hellin.me", "five", true));
+        fx.cursor(7, 5, None);
+        assert_eq!(fx.scan(), vec![2, 5], "uid 1 predates the hook");
+        assert!(fx.scan().is_empty(), "once per message");
+        let cursor = &state::load(&fx.state).unwrap().hooks["pi"];
+        assert_eq!(cursor.last_uid, 5);
+        assert_eq!(cursor.owed, vec![3], "uid 3 is still owed, and only it");
+        assert!(cursor.considered.is_empty());
+
+        // The sync stops giving up on it without writing it (a rebind
+        // cleared its count): nothing is owed any more.
+        ingest::clear_ingest_failure(&fx.store, ACCOUNT, "inbox", 3);
+        fx.scan();
+        assert!(state::load(&fx.state).unwrap().hooks["pi"].owed.is_empty());
     }
 
     #[test]

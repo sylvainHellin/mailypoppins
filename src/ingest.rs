@@ -1923,6 +1923,36 @@ pub fn given_up_uids(
     })
 }
 
+/// The UIDs of `mailbox` the sync has given up on and holds no row for,
+/// whenever their retry is due: the arrivals the arrival mark no longer waits
+/// for, which a consumer that walks the mailbox by UID behind that mark (the
+/// mail hooks) has to pick up once they are written late (PERSO-333). A store
+/// that cannot answer names none.
+pub fn given_up_unwritten(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+) -> std::collections::HashSet<i64> {
+    let read = || -> rusqlite::Result<std::collections::HashSet<i64>> {
+        let mut stmt = store.conn().prepare(
+            "SELECT f.uid FROM ingest_failures f
+             WHERE f.account = ?1 AND f.mailbox = ?2 AND f.attempts >= ?3
+               AND NOT EXISTS (SELECT 1 FROM messages m
+                               WHERE m.account = f.account AND m.mailbox = f.mailbox
+                                 AND m.uid = f.uid)",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![account, mailbox, MAX_INGEST_ATTEMPTS],
+            |row| row.get::<_, i64>(0),
+        )?;
+        rows.collect()
+    };
+    read().unwrap_or_else(|e| {
+        warn!("Failed to read the unwritten messages given up on in '{mailbox}': {e}");
+        std::collections::HashSet::new()
+    })
+}
+
 /// How many passes have failed to write `uid`. `0` when nothing is recorded.
 pub fn ingest_failure_attempts(store: &Store, account: &str, mailbox: &str, uid: i64) -> i64 {
     store
