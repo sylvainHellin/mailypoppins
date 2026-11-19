@@ -260,6 +260,9 @@ struct Shared {
     /// The messages, by UID, a FETCH leaves out, and the tagged answer it
     /// ends with when it named one of them.
     fetch_refusals: Mutex<HashMap<u32, String>>,
+    /// The tagged answer, with no data, to a FETCH of bodies naming more
+    /// than one message, when set.
+    chunk_refusal: Mutex<Option<String>>,
     /// The verbs whose command closes the connection, after an untagged
     /// line and before the tagged answer.
     hangups: Mutex<std::collections::HashSet<String>>,
@@ -333,6 +336,7 @@ impl RejectingImapServer {
             idlers: Mutex::new(Vec::new()),
             idles: AtomicUsize::new(0),
             fetch_refusals: Mutex::new(HashMap::new()),
+            chunk_refusal: Mutex::new(None),
             hangups: Mutex::new(std::collections::HashSet::new()),
         });
         let served = Arc::clone(&shared);
@@ -572,6 +576,14 @@ impl RejectingImapServer {
             Some(answer) => refusals.insert(uid, answer.to_string()),
             None => refusals.remove(&uid),
         };
+    }
+
+    /// Answer every later FETCH of bodies that names more than one message
+    /// with `answer` and no data at all, a FETCH of one message's body as
+    /// before; or every FETCH as before with `None`. An outage-like refusal
+    /// that names no message, which only a FETCH of one can pin on it.
+    pub fn refuse_body_chunks(&self, answer: Option<&str>) {
+        *self.shared.chunk_refusal.lock().expect("the refusal") = answer.map(str::to_string);
     }
 
     /// A message `raw` arrives in `folder` under its next UID, unseen, and no
@@ -1260,6 +1272,20 @@ fn on_selected(shared: &Shared, cmd: &Command<'_>, name: &str, read_only: bool) 
         "FETCH" => {
             let mut out = Vec::new();
             let refusals = shared.fetch_refusals.lock().expect("the refusals").clone();
+            let upper = line.to_ascii_uppercase();
+            let bodies = upper.contains("BODY.PEEK[]") || upper.contains("BODY[]");
+            let chunk_refusal = shared.chunk_refusal.lock().expect("the refusal").clone();
+            if let Some(answer) = chunk_refusal.filter(|_| bodies) {
+                let named_count = mailbox
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, message)| named(&set, index + 1, message))
+                    .count();
+                if named_count > 1 {
+                    return format!("{tag} {answer}\r\n").into_bytes();
+                }
+            }
             let mut refused = None;
             for (index, message) in mailbox.messages.iter().enumerate() {
                 let header_only = line.to_ascii_uppercase().contains("HEADER.FIELDS");

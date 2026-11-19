@@ -1950,7 +1950,7 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
 // ---------------------------------------------------------------------------
 
 mod wire {
-    use super::support::wire_fixture::{assert_ok, mail, stderr, stdout, WireRoot, INBOX};
+    use super::support::wire_fixture::{assert_ok, mail, stderr, stdout, WireRoot, ACCOUNT, INBOX};
 
     use super::support::parity::{mp_command, DEADLINE, REQUIRE_ENV, TICK};
 
@@ -2099,5 +2099,191 @@ mod wire {
         wire.imap.refuse_fetch_of(2, None);
         wire.sync();
         assert_eq!(wire.local("inbox").len(), 3, "{:?}", wire.local("inbox"));
+    }
+
+    /// Gmail's tagged answer to a FETCH some of whose messages it could not
+    /// read.
+    const NOT_FETCHED: &str = "NO Some messages could not be FETCHed (Failure)";
+
+    /// How many passes have counted against `uid` of the INBOX.
+    fn attempts(wire: &WireRoot, uid: i64) -> i64 {
+        mailypoppins::ingest::ingest_failure_attempts(&wire.store(), ACCOUNT, "inbox", uid)
+    }
+
+    /// A root synced once, whose server then lost `first` (a row the prune
+    /// owes) and gained `third` at UID 3, which it refuses to send, and
+    /// `fourth`: the refused message is an arrival above the mark.
+    fn refusing_an_arrival() -> WireRoot {
+        let wire = served();
+        wire.sync();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (2, mail("second", "bob@example.org", "Second", "two")),
+                (3, mail("third", "cy@example.org", "Third", "three")),
+                (4, mail("fourth", "di@example.org", "Fourth", "four")),
+            ],
+        );
+        wire.imap.refuse_fetch_of(3, Some(NOT_FETCHED));
+        wire
+    }
+
+    /// PERSO-333: a message the server refuses to send on every pass holds
+    /// the prune of the account and the arrival mark for as many passes as
+    /// an unwritable message does (#0074), and no longer: the other messages
+    /// keep arriving meanwhile, the row the server lost is pruned once the
+    /// refusal is given up on, and the pass after that does not ask for the
+    /// refused body again.
+    #[test]
+    fn a_message_the_server_refuses_for_good_stops_holding_the_prune_after_three_passes() {
+        let wire = refusing_an_arrival();
+        let first = (1, "<first@example.org>".to_string());
+
+        wire.sync();
+        assert!(
+            wire.local("inbox").contains(&first),
+            "pass 1 owes UID 3, so it prunes nothing"
+        );
+        assert_eq!(attempts(&wire, 3), 1);
+
+        let fifth = wire
+            .imap
+            .deliver_unannounced(INBOX, mail("fifth", "ed@example.org", "Fifth", "five"));
+        wire.sync();
+        assert!(
+            wire.local("inbox").contains(&first),
+            "pass 2 still owes UID 3"
+        );
+        assert!(
+            wire.local("inbox")
+                .contains(&(i64::from(fifth), "<fifth@example.org>".to_string())),
+            "the others keep arriving: {:?}",
+            wire.local("inbox")
+        );
+        assert_eq!(attempts(&wire, 3), 2);
+
+        wire.sync();
+        assert_eq!(attempts(&wire, 3), 3);
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (2, "<second@example.org>".to_string()),
+                (4, "<fourth@example.org>".to_string()),
+                (5, "<fifth@example.org>".to_string()),
+            ],
+            "the third refusal is given up on, and the prune it held runs"
+        );
+
+        let fetches = wire.imap.body_fetches();
+        wire.sync();
+        assert_eq!(
+            wire.imap.body_fetches(),
+            fetches,
+            "a pass after the give-up does not ask for the refused body again"
+        );
+        assert_eq!(attempts(&wire, 3), 3);
+    }
+
+    /// A message given up on is asked for again once a day has passed since
+    /// it was last refused (a refusal can be transient), and ingested
+    /// normally when the server then sends it, its count cleared.
+    #[test]
+    fn a_message_given_up_on_is_asked_for_again_a_day_later() {
+        let wire = refusing_an_arrival();
+        for _ in 0..3 {
+            wire.sync();
+        }
+        assert_eq!(attempts(&wire, 3), 3);
+        wire.imap.refuse_fetch_of(3, None);
+        wire.sync();
+        assert_eq!(
+            wire.local("inbox").len(),
+            2,
+            "still within the day: {:?}",
+            wire.local("inbox")
+        );
+
+        let day_and_a_minute = 86_400 + 60;
+        wire.store()
+            .conn()
+            .execute(
+                "UPDATE ingest_failures SET updated = updated - ?1",
+                [day_and_a_minute],
+            )
+            .expect("age the refusal");
+        wire.sync();
+        assert!(
+            wire.local("inbox")
+                .contains(&(3, "<third@example.org>".to_string())),
+            "{:?}",
+            wire.local("inbox")
+        );
+        assert_eq!(attempts(&wire, 3), 0, "the delivery clears the count");
+    }
+
+    /// A message refused on two passes and sent on the third is ingested
+    /// like any other, and its count is cleared.
+    #[test]
+    fn a_message_refused_twice_then_sent_is_ingested_and_its_count_cleared() {
+        let wire = refusing_an_arrival();
+        wire.sync();
+        wire.sync();
+        assert_eq!(attempts(&wire, 3), 2);
+
+        wire.imap.refuse_fetch_of(3, None);
+        wire.sync();
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (2, "<second@example.org>".to_string()),
+                (3, "<third@example.org>".to_string()),
+                (4, "<fourth@example.org>".to_string()),
+            ],
+            "UID 3 is in, and the prune of UID 1 it held runs"
+        );
+        assert_eq!(attempts(&wire, 3), 0);
+    }
+
+    /// A refusal of a whole body chunk with no data, which names no message,
+    /// counts against none of them: each is asked for alone, the ones the
+    /// server then sends are ingested, and only the one it refuses alone
+    /// too is counted.
+    #[test]
+    fn a_refusal_of_a_whole_chunk_counts_only_against_the_message_refused_alone() {
+        let wire = refusing_an_arrival();
+        wire.imap
+            .refuse_body_chunks(Some("NO [UNAVAILABLE] Try again later"));
+        wire.sync();
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (2, "<second@example.org>".to_string()),
+                (4, "<fourth@example.org>".to_string()),
+            ],
+            "UID 4 came alone; UID 3 is still owed, so UID 1 stays"
+        );
+        assert_eq!(attempts(&wire, 3), 1);
+        assert_eq!(attempts(&wire, 4), 0);
+
+        // A second arrival puts two messages in the chunk again, both of
+        // which the server sends alone.
+        wire.imap.refuse_fetch_of(3, None);
+        wire.imap
+            .deliver_unannounced(INBOX, mail("fifth", "ed@example.org", "Fifth", "five"));
+        wire.sync();
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (2, "<second@example.org>".to_string()),
+                (3, "<third@example.org>".to_string()),
+                (4, "<fourth@example.org>".to_string()),
+                (5, "<fifth@example.org>".to_string()),
+            ],
+            "both came alone, and the prune of UID 1 ran"
+        );
+        assert_eq!(attempts(&wire, 3), 0);
+        assert_eq!(attempts(&wire, 5), 0);
     }
 }
