@@ -17,6 +17,12 @@
 //!   renumbering while the claim read the copy's sequence number) or by
 //!   another machine's send. The send is refused with "outcome unknown: check Sent and Drafts,
 //!   then send again or discard".
+//! - A copy the row does not name, beside or instead of the one it names: the
+//!   copy changed since this machine last synced it (an Outlook save, in
+//!   place on Graph; another machine's push), whenever that was since the
+//!   last reconcile. The send is refused with nothing removed
+//!   ([`ChangedElsewhere`]) and the daemon runs the reconcile, which pulls
+//!   the change; the user reviews it and sends again.
 //! - No copy and a row: the row says this machine last saw the copy and did
 //!   not remove it, so the draft was sent or discarded on another machine or
 //!   in another client. The send is refused and the file left alone; the
@@ -122,6 +128,38 @@ pub fn guards(account: &AccountConfig, draft: &EmailDraft) -> bool {
     mirror_enabled(account) && draft.frontmatter.server_message_id.is_some()
 }
 
+/// The refusal when the draft's server copy is not the version this machine
+/// last synced (PERSO-182): Outlook saved an edit over it, in place on Graph
+/// or as a new copy on IMAP, or mp on the other machine pushed over it, at
+/// any time since the last reconcile. Claiming it would remove that edit and
+/// send the older local text, so nothing is removed and nothing sent; the
+/// reconcile pulls the edit, which the daemon asks for at once
+/// ([`changed_elsewhere`]).
+#[derive(Debug)]
+pub struct ChangedElsewhere {
+    mailbox: String,
+}
+
+impl std::fmt::Display for ChangedElsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this draft was changed in Outlook or on another machine since this machine last \
+             synced it, so nothing was sent; the change is being pulled from {} into the draft: \
+             review it, then send again",
+            self.mailbox
+        )
+    }
+}
+
+impl std::error::Error for ChangedElsewhere {}
+
+/// Whether `error` is a send refused as [`ChangedElsewhere`], after which the
+/// daemon runs the account's drafts reconcile so the edit is pulled.
+pub fn changed_elsewhere(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.is::<ChangedElsewhere>())
+}
+
 /// The refusal when the Drafts folder could not be read or written.
 fn unreachable(account: &str, e: anyhow::Error) -> anyhow::Error {
     anyhow!(
@@ -205,11 +243,22 @@ async fn claim<F: DraftsFolder>(
         .await
         .map_err(|e| unreachable(name, e))?;
     let id = draft.frontmatter.id.as_deref();
+    let row = match id {
+        Some(id) => draft_sync::get(store, name, id)?,
+        None => None,
+    };
+    if let Some(row) = &row {
+        let current = row.mailbox == mailbox && row.uidvalidity == info.uidvalidity;
+        let named = current && uids == [row.uid];
+        if !uids.is_empty() && !named {
+            return Err(ChangedElsewhere {
+                mailbox: mailbox.clone(),
+            }
+            .into());
+        }
+    }
     if uids.is_empty() {
-        let own = match id {
-            Some(id) => draft_sync::get(store, name, id)?.is_none(),
-            None => false,
-        };
+        let own = id.is_some() && row.is_none();
         if own {
             info!(
                 "[drafts] {name}: {message_id} has no server copy and no row: its copy went \
@@ -249,8 +298,10 @@ async fn claim<F: DraftsFolder>(
 ///
 /// On Graph a claim is a `permanentDelete` of the copy, which this request
 /// either removed or found gone ([`super::graph_folder`]), so two sends never
-/// both claim one copy; an edit Outlook saves between the lookup and the
-/// removal goes with the copy, a window of one round trip. A token the login
+/// both claim one copy. An Outlook save in place since the last reconcile is
+/// a version the row does not name, and refuses the send
+/// ([`ChangedElsewhere`]); one that lands between the lookup and the
+/// removal, a window of one round trip, goes with the copy. A token the login
 /// gate holds as refused is a folder out of reach.
 pub async fn guard_send(account: &AccountConfig, draft: &EmailDraft) -> Result<()> {
     if !guards(account, draft) {

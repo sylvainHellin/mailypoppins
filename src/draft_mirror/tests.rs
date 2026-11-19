@@ -3164,3 +3164,84 @@ fn the_account_executor_runs_draft_ops_on_graph() {
     };
     block_on(exec.execute_draft(&fx.store, &op)).unwrap();
 }
+
+/// An Outlook save in place changes a Graph copy's version after this
+/// machine's last sync: the send is refused before anything is removed, the
+/// edit stays in Drafts, and the reconcile pulls it into the draft.
+#[test]
+fn a_graph_draft_edited_in_outlook_since_the_last_sync_is_not_sent() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let mid = mid_of(&path);
+    let id = graph.drafts()[0].id.clone();
+    graph.edit(
+        &id,
+        &outlook_copy(
+            &mid,
+            "robin@example.com",
+            "Angebot",
+            "<p>Hallo aus Outlook</p>",
+        ),
+    );
+
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert!(refused.contains("nothing was sent"), "{refused}");
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+    assert!(String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo aus Outlook"));
+    assert!(fx.row("d1").is_some(), "the row stays for the pull");
+
+    let report = graph_reconciled(&fx, &mut graph);
+    assert_eq!(report.pulled, 1, "{report:?}");
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("Hallo aus Outlook"));
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("sent once reviewed");
+}
+
+/// The same on IMAP: mp on the other machine pushed an edit over the copy
+/// this machine last synced, so this machine's older text is not sent over
+/// it; the reconcile pulls the newer copy first.
+#[test]
+fn a_draft_pushed_over_by_the_other_machine_is_not_sent_from_the_older_text() {
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    {
+        let _guard = m1.enter();
+        Fixture::write_in_current("angebot", "d1", "", "Hallo");
+    }
+    m1.drain(&mut folder);
+    assert_eq!(m2.reconcile(&mut folder).imported, 1);
+    {
+        let _guard = m2.enter();
+        let path = find_local("tum", "d1").unwrap().path;
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Hallo", "Hallo Robin");
+        std::fs::write(&path, text).unwrap();
+    }
+    m2.drain(&mut folder);
+
+    let _guard = m1.enter();
+    let refused = guard(&m1.store, &m1.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert_eq!(folder.live().len(), 1);
+    drop(_guard);
+    assert_eq!(m1.reconcile(&mut folder).pulled, 1);
+    let _guard = m1.enter();
+    guard(&m1.store, &m1.account, &mut folder, "d1").expect("the pulled text goes");
+}

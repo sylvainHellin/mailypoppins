@@ -379,6 +379,7 @@ Graph's is the well-known `drafts` folder, whatever it is called in the mailbox'
 The trait speaks UIDs, so the Graph folder names each `(immutable id, changeKey)` it sees by a key from the `graph_draft_versions` table, minted in increasing order and never reused: an edit Outlook saves in place keeps the id and changes the `changeKey`, which is a new, higher key, as a new UID would be, and the reconcile pulls it like any changed copy.
 A push creates a new copy from MIME and removes the old one with `permanentDelete`, rather than patching it in place: the copy carries the draft file in `X-Mailypoppins-Draft-Source` headers, which Graph sets only when it creates an item, so a patched copy would carry the previous file and read as edited elsewhere.
 A claim is a `permanentDelete` this request answered with success, a 404 meaning another session took the copy first.
+A send of a mirrored draft claims its server copy first (`draft_mirror::send_guard`), and refuses with nothing removed when the folder holds a copy the draft's `draft_sync` row does not name: Outlook saved over it (in place on Graph, as a new copy on IMAP) or mp on the other machine pushed over it since the last reconcile, and claiming it would destroy that edit and send the older local text; the daemon then runs the reconcile, which pulls the edit for the user to review and send again (PERSO-182).
 The Graph listing leaves out a draft a staged send created (an outbox row's or a cleanup's `Message-ID`), so the reconcile never imports a message on its way out.
 
 ### Send

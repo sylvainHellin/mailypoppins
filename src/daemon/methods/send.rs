@@ -866,6 +866,26 @@ fn guarded_runtime(
         .flatten()
 }
 
+/// Run the drafts reconcile of `runtime`'s account in the background when
+/// `sent` is a send the guard refused because the draft's server copy changed
+/// since the last sync ([`crate::draft_mirror::send_guard::changed_elsewhere`],
+/// PERSO-182), so the change is pulled into the draft the user is told to
+/// review. Called once the send's turn is released, since the reconcile takes
+/// that turn.
+fn pull_after_refusal<T>(
+    runtime: Option<Arc<crate::daemon::runtime::account::AccountRuntime>>,
+    sent: &anyhow::Result<T>,
+) {
+    let refused = sent
+        .as_ref()
+        .is_err_and(crate::draft_mirror::send_guard::changed_elsewhere);
+    if let (true, Some(runtime)) = (refused, runtime) {
+        tokio::spawn(async move {
+            runtime.reconcile_drafts().await;
+        });
+    }
+}
+
 /// Ask `account`'s runtime for a drain once a send operation has ended.
 ///
 /// A send queues server work beside the message: the delete of the draft's
@@ -922,6 +942,8 @@ async fn perform(
             })
             .await
             .and_then(|inner| inner);
+            drop(_turn);
+            pull_after_refusal(runtime, &sent);
             match sent {
                 Ok((outcome, contacts)) => {
                     announce_contacts(&handle, &name, contacts);
@@ -1169,6 +1191,8 @@ async fn send_approved(
         })
         .await
         .and_then(|inner| inner);
+        drop(_turn);
+        pull_after_refusal(runtime, &sent);
         let result = match sent {
             Ok((result, contacts)) => {
                 announce_contacts(handle, &name, contacts);
