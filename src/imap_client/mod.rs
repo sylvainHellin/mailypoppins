@@ -1,5 +1,5 @@
 mod batch;
-/// The login-refusing IMAP server the daemon suites use too (PERSO-296).
+/// The IMAP server the daemon suites use too (PERSO-296, PERSO-210).
 #[cfg(test)]
 #[path = "../../tests/support/fake_imap.rs"]
 pub(crate) mod fake_imap;
@@ -13,6 +13,8 @@ mod sent;
 mod store_sync;
 mod uidplus;
 mod watch;
+#[cfg(test)]
+mod wire_tests;
 
 pub use batch::add_flag_in_mailboxes;
 /// The arrival arithmetic, so the engine's fake backend answers a pass that
