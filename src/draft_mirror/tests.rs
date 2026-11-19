@@ -1980,6 +1980,32 @@ fn on_proton_the_other_machine_imports_the_draft_under_its_own_id() {
     assert_eq!(only_draft_id(&m4), "d2");
 }
 
+/// Two copies naming one draft (a push appends before it deletes, and a
+/// failed delete leaves both) import as two drafts with two ids: the first
+/// takes the id its `Message-ID` names, the second a fresh one.
+#[test]
+fn two_bridged_copies_of_one_draft_never_import_under_one_id() {
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    {
+        let _guard = m1.enter();
+        Fixture::write_in_current("angebot", "d1", "", "Hallo Robin");
+    }
+    m1.drain(&mut folder);
+    bridged(&mut folder);
+    let raw = folder.live()[0].raw.clone();
+    folder.put(&raw);
+
+    assert_eq!(m2.reconcile(&mut folder).imported, 2);
+    let _guard = m2.enter();
+    let mut ids: Vec<String> = local_drafts("tum").into_iter().map(|l| l.id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(ids.iter().any(|id| id == "d1"), "{ids:?}");
+}
+
 /// A minted `Message-ID` names its draft's id, bracketed or bare; one an
 /// earlier build minted, one of another sender, and one whose id is not a
 /// plain token name none.

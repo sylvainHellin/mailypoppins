@@ -441,6 +441,9 @@ pub async fn reconcile<F: DraftsFolder>(
         draft_sync::delete(mirror.store, &account, &row.draft_id)?;
     }
 
+    // The ids this pass imported under, which `present` (read before the
+    // pass) does not hold: a second copy naming one of them takes a fresh id.
+    let mut imported_ids: HashSet<String> = HashSet::new();
     for copy in &copies {
         if claimed.contains(&copy.uid) {
             continue;
@@ -474,9 +477,10 @@ pub async fn reconcile<F: DraftsFolder>(
             }
             continue;
         }
-        if let Some((id, hash)) = imported(mirror, copy, &raw, &present)? {
+        if let Some((id, hash)) = imported(mirror, copy, &raw, &present, &imported_ids)? {
             claimed.insert(copy.uid);
             record(mirror, &id, copy.uid, &at, hash, linked_mid(copy))?;
+            imported_ids.insert(id);
             report.imported += 1;
         }
     }
@@ -1227,14 +1231,16 @@ fn revive(
 /// that id. Any other copy was started or last edited in another client, or
 /// lost its headers on the way (Proton Bridge drops them), and is imported by
 /// [`import_foreign`]: under the id its `Message-ID` names when mp minted it
-/// ([`super::draft_id_named`], PERSO-183) and no file here holds that id, so
-/// a draft the other machine pushed through Bridge stays one draft, and
-/// under a fresh id otherwise.
+/// ([`super::draft_id_named`], PERSO-183) and neither a file here nor an
+/// import earlier in the pass (`imported_ids`, two copies of one draft after
+/// a delete that failed) holds that id, so a draft the other machine pushed
+/// through Bridge stays one draft, and under a fresh id otherwise.
 fn imported(
     mirror: &Mirror<'_>,
     copy: &Copy,
     raw: &[u8],
     present: &HashSet<String>,
+    imported_ids: &HashSet<String>,
 ) -> Result<Option<(String, String)>> {
     let carried = carrier::read(raw);
     let exact = carried
@@ -1245,7 +1251,7 @@ fn imported(
             .message_id
             .as_deref()
             .and_then(super::draft_id_named)
-            .filter(|id| !present.contains(*id));
+            .filter(|id| !present.contains(*id) && !imported_ids.contains(*id));
         return import_foreign(mirror, copy, raw, named);
     };
     let email = crate::parse::parse_rfc822_to_fetched_email(raw);
