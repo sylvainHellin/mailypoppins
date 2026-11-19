@@ -309,3 +309,28 @@ async fn a_stalled_login_of_a_refused_password_is_a_step_of_its_hold() {
     assert!(!sending.is_finished(), "the send goes on");
     sending.abort();
 }
+
+/// A recipient deferred for one transaction is retryable in the server's
+/// words, and the next send to it is delivered: the deferral wears off as a
+/// server's does once it is back.
+#[tokio::test]
+async fn a_deferral_that_wears_off_is_retryable_then_delivered() {
+    let server = RecordingSmtpServer::start();
+    server.answer_for_next(
+        "ada@example.org",
+        SmtpStep::Rcpt,
+        SmtpAnswer::reply(
+            "451 4.7.1 <ada@example.org>: Recipient address rejected: try again later",
+        ),
+        1,
+    );
+    let first = verdict_of(&server, "deferred").await;
+    assert_eq!(first.verdict, RecipientVerdict::Retryable);
+    assert_eq!(
+        first.error.as_deref(),
+        Some("transient error (451): 4.7.1 <ada@example.org>: Recipient address rejected: try again later")
+    );
+    let second = verdict_of(&server, "deferred").await;
+    assert_eq!(second.verdict, RecipientVerdict::Delivered, "{second:?}");
+    assert_eq!(server.deliveries().len(), 1);
+}

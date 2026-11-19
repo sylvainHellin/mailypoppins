@@ -7,6 +7,14 @@
 //! its sidecar, which no ingest writes any more, so they now read the
 //! `message_blobs` rows and the blob bytes. The classification being asserted
 //! is unchanged.
+//!
+//! [`an_rsvp_reply_sent_over_smtp_reaches_the_organizer_as_a_reply`] sends
+//! the reply over the wire, through the fake SMTP server of `tests/support/`
+//! (PERSO-210), and ingests what that server received on the organizer's
+//! side.
+
+#[path = "support/fake_smtp.rs"]
+mod fake_smtp;
 
 use mailypoppins::parse::{parse_rfc822_to_fetched_email, CALENDAR_SIDECAR_NAME};
 use tempfile::tempdir;
@@ -795,6 +803,85 @@ fn an_rsvp_reply_reconciles_against_the_stored_invite() {
         mailypoppins::reconcile::reconcile_account(&ms.store, &ms.blobs, "acct"),
         first
     );
+}
+
+/// The reply goes out through `send::submit` over STARTTLS to the fake SMTP
+/// server, addressed to the organizer alone, and the bytes that server
+/// received, ingested into the organizer's store beside the invitation,
+/// fold into the attendee's `declined`: what mp sends over the wire is what
+/// an organizer's mp reads back.
+#[test]
+fn an_rsvp_reply_sent_over_smtp_reaches_the_organizer_as_a_reply() {
+    use mailypoppins::invite::Rsvp;
+
+    let attendee = Mailstore::new();
+    let request = attendee.ingest_raw(OUTLOOK_INLINE_REQUEST.as_bytes(), "inbox", 1);
+    let ics = mailypoppins::store::read::load_invite_ics(&attendee.store, &attendee.blobs, request)
+        .expect("the invite.ics blob");
+    let ctx = mailypoppins::invite::reply_context_from_ics(&ics).unwrap();
+    let reply_ics =
+        mailypoppins::invite::build_reply_ics(&ctx, "me@example.com", None, Rsvp::Declined)
+            .unwrap();
+    let built = mailypoppins::send::build_reply_message(
+        "me@example.com",
+        &ctx.organizer,
+        "Declined: LOC Day planning",
+        "Declined: LOC Day planning",
+        &reply_ics,
+        "",
+    )
+    .unwrap();
+
+    let server = fake_smtp::RecordingSmtpServer::start();
+    let smtp = mailypoppins::config::SmtpConfig {
+        account: format!("imip-{}", server.port()),
+        host: "127.0.0.1".into(),
+        port: server.port(),
+        username: "me@example.com".into(),
+        password: "secret".into(),
+        default_from: "me@example.com".into(),
+        accept_invalid_certs: true,
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let sent = runtime
+        .block_on(mailypoppins::send::submit(&built, &smtp))
+        .expect("the server answered");
+    assert!(sent.all_succeeded(), "{sent:?}");
+
+    let deliveries = server.deliveries();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].from, "me@example.com");
+    assert_eq!(
+        deliveries[0].recipients,
+        vec![mailypoppins::parse::extract_email_address(&ctx.organizer)],
+        "the reply goes to the organizer and nobody else"
+    );
+
+    let organizer = Mailstore::new();
+    organizer.ingest_raw(OUTLOOK_INLINE_REQUEST.as_bytes(), "sent", 1);
+    organizer.ingest_raw(&deliveries[0].data, "inbox", 1);
+    let invites = organizer.invites();
+    let reply = invites
+        .iter()
+        .find(|i| i.method() == "REPLY")
+        .expect("the received message is classified as an iMIP REPLY");
+    let replies = mailypoppins::reconcile::fold_replies(&invites);
+    let request = invites
+        .iter()
+        .find(|i| i.method() == "REQUEST")
+        .expect("the REQUEST");
+    let mut event = mailypoppins::calendar::event_frontmatter(&request.parsed);
+    mailypoppins::reconcile::apply_replies(
+        &mut event,
+        request.parsed.sequence,
+        replies.get(reply.parsed.uid.as_deref().expect("the reply's UID")),
+    );
+    let me = event
+        .attendees
+        .iter()
+        .find(|a| a.address == "me@example.com")
+        .expect("the attendee");
+    assert_eq!(me.status, "declined");
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,17 @@
 //! test stopping between two committed transitions and reopening the store,
 //! which is exactly what a `kill -9` leaves behind: WAL-committed rows and
 //! nothing in memory.
+//!
+//! The `wire` module at the end runs the same state machine against the fake
+//! SMTP and IMAP servers of `tests/support/` (PERSO-210): the submission over
+//! STARTTLS through `send::submit`, the APPEND and the dedup search through
+//! the real `ImapSentMailbox`, so the ambiguity the dedup exists for is a
+//! connection the server closed after it filed the copy.
 
+#[path = "support/fake_imap.rs"]
+mod fake_imap;
+#[path = "support/fake_smtp.rs"]
+mod fake_smtp;
 #[path = "support/gate.rs"]
 mod gate;
 
@@ -2292,4 +2302,225 @@ fn a_discarded_row_a_rebuild_parked_is_listed_and_can_be_discarded() {
         1,
         "the local copy stays"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Over the wire (PERSO-210)
+// ---------------------------------------------------------------------------
+
+mod wire {
+    use super::fake_imap::{LoginPolicy, RejectingImapServer};
+    use super::fake_smtp::RecordingSmtpServer;
+    use super::{enqueue, raw, state_of, Account, ACCOUNT, SENT};
+    use mailypoppins::config::{ImapConfig, SmtpConfig};
+    use mailypoppins::imap_client::ImapSentMailbox;
+    use mailypoppins::outbox::{self, OutboxState, SubmitOutcome};
+    use mailypoppins::send::{self, BuiltMessage, RecipientRole};
+
+    /// An IMAP server that takes the login and holds an empty Sent folder.
+    fn imap() -> RejectingImapServer {
+        let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+        server.set_folders(Vec::new());
+        server.set_mail(SENT, 5, Vec::new());
+        server
+    }
+
+    /// The account's IMAP login on `server`, a user of its own per server so
+    /// the process-wide session pool and login list keep tests apart.
+    fn imap_config(server: &RejectingImapServer) -> ImapConfig {
+        ImapConfig {
+            account: format!("{ACCOUNT}-{}", server.port()),
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            username: format!("alice-{}@example.com", server.port()),
+            password: "imap".into(),
+            accept_invalid_certs: true,
+            fetch_concurrency: 4,
+            body_fetch_deadline_secs: 30,
+        }
+    }
+
+    fn smtp_config(server: &RecordingSmtpServer) -> SmtpConfig {
+        SmtpConfig {
+            account: format!("{ACCOUNT}-{}", server.port()),
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            username: format!("alice-{}@example.com", server.port()),
+            password: "smtp".into(),
+            default_from: "alice@example.com".into(),
+            accept_invalid_certs: true,
+        }
+    }
+
+    /// The fixture's message to bob and, blind, to blind.
+    fn built(message_id: &str) -> BuiltMessage {
+        BuiltMessage {
+            raw: raw(message_id),
+            message_id: message_id.to_string(),
+            recipients: vec![
+                ("bob@example.com".into(), RecipientRole::To),
+                ("blind@example.com".into(), RecipientRole::Bcc),
+            ],
+            from: "alice@example.com".into(),
+            draft_key: None,
+            server_copy: None,
+        }
+    }
+
+    /// `(uid, Message-ID)` of each copy in the server's Sent folder.
+    fn sent_copies(server: &RejectingImapServer) -> Vec<(u32, String)> {
+        server
+            .contents(SENT)
+            .into_iter()
+            .map(|m| (m.uid, m.message_id))
+            .collect()
+    }
+
+    /// The whole path of a send: committed to the outbox, submitted over
+    /// SMTP, its verdicts recorded, its copy appended over IMAP with the
+    /// UID the server's `APPENDUID` named, and done.
+    #[tokio::test]
+    async fn a_message_goes_through_the_outbox_over_both_wires() {
+        let (smtp, imap) = (RecordingSmtpServer::start(), imap());
+        let account = Account::new();
+        let mid = "<over-the-wire@example.com>";
+        let id = enqueue(&account, mid, Some(SENT));
+        let (store, blobs) = account.open();
+
+        let result = send::submit(&built(mid), &smtp_config(&smtp))
+            .await
+            .expect("the server answered");
+        assert!(result.all_succeeded(), "{result:?}");
+        let state =
+            outbox::record_submission(&store, &blobs, id, &result.submit_outcome()).unwrap();
+        assert_eq!(state, OutboxState::SentPendingAppend);
+        let recipients: Vec<Vec<String>> = smtp
+            .deliveries()
+            .into_iter()
+            .map(|d| d.recipients)
+            .collect();
+        assert_eq!(
+            recipients,
+            vec![
+                vec!["bob@example.com".to_string()],
+                vec!["blind@example.com".to_string()]
+            ],
+            "the blind recipient is in an envelope of its own"
+        );
+
+        let mut sent = ImapSentMailbox::new(imap_config(&imap));
+        let drained = outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+            .await
+            .unwrap();
+        sent.close().await;
+        assert_eq!(drained.completed, 1);
+        assert_eq!(sent_copies(&imap), vec![(1, mid.to_string())]);
+        let row = outbox::load(&store, id).unwrap().unwrap();
+        assert_eq!(row.state, OutboxState::Done);
+        assert_eq!(row.appended_uid, Some(1), "APPENDUID landed on the row");
+    }
+
+    /// The server files the copy and closes the connection before its
+    /// answer: the row waits for its APPEND, and the retry's dedup search
+    /// finds the copy by its Message-ID instead of filing a second one.
+    #[tokio::test]
+    async fn an_append_whose_answer_was_lost_is_deduped_over_the_wire() {
+        let imap = imap();
+        let account = Account::new();
+        let mid = "<lost-ack@example.com>";
+        let id = enqueue(&account, mid, Some(SENT));
+        let (store, blobs) = account.open();
+        outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+
+        imap.hang_up_after_appends(1);
+        let mut sent = ImapSentMailbox::new(imap_config(&imap));
+        outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+            .await
+            .unwrap();
+        assert_eq!(state_of(&account, id), OutboxState::SentPendingAppend);
+        assert_eq!(
+            sent_copies(&imap),
+            vec![(1, mid.to_string())],
+            "the server has it"
+        );
+
+        let later = outbox::unix_now() + outbox::BACKOFF_MAX_SECS + 1;
+        let drained = outbox::drain(&store, &blobs, ACCOUNT, &mut sent, later)
+            .await
+            .unwrap();
+        sent.close().await;
+        assert_eq!(drained.deduped, 1, "the retry found the copy");
+        assert_eq!(
+            sent_copies(&imap),
+            vec![(1, mid.to_string())],
+            "and filed no second"
+        );
+        assert_eq!(state_of(&account, id), OutboxState::Done);
+    }
+
+    /// The server's own refusal of the APPEND leaves the row waiting for
+    /// it, the refusal's words on the row, and nothing filed.
+    #[tokio::test]
+    async fn a_refused_append_keeps_the_row_and_the_servers_words() {
+        let imap = imap();
+        imap.refuse("APPEND", Some("NO [OVERQUOTA] Mailbox is full"));
+        let account = Account::new();
+        let mid = "<over-quota@example.com>";
+        let id = enqueue(&account, mid, Some(SENT));
+        let (store, blobs) = account.open();
+        outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+
+        let mut sent = ImapSentMailbox::new(imap_config(&imap));
+        outbox::drain(&store, &blobs, ACCOUNT, &mut sent, outbox::unix_now())
+            .await
+            .unwrap();
+        sent.close().await;
+        let row = outbox::load(&store, id).unwrap().unwrap();
+        assert_eq!(row.state, OutboxState::SentPendingAppend);
+        assert!(
+            row.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("[OVERQUOTA] Mailbox is full")),
+            "{:?}",
+            row.last_error
+        );
+        assert!(sent_copies(&imap).is_empty());
+    }
+
+    /// Two drains of one account while the first is inside a slow APPEND:
+    /// the engine lock keeps the second out, and the server holds one copy.
+    #[tokio::test]
+    async fn a_drain_beside_a_slow_append_files_no_second_copy() {
+        let imap = imap();
+        imap.set_append_delay(std::time::Duration::from_millis(300));
+        let account = Account::new();
+        let mid = "<slow-append@example.com>";
+        let id = enqueue(&account, mid, Some(SENT));
+        let (store, blobs) = account.open();
+        outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+        let lock = account.lock_path();
+
+        let mut first = ImapSentMailbox::new(imap_config(&imap));
+        let mut second = ImapSentMailbox::new(imap_config(&imap));
+        let now = outbox::unix_now();
+        let holder = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut first, now);
+        let racer = async {
+            // The holder has the lock once its APPEND reached the server.
+            while imap.contents(SENT).is_empty() {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let (store, blobs) = account.open();
+            outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut second, now)
+                .await
+                .unwrap()
+        };
+        let (holder, refused) = tokio::join!(holder, racer);
+        assert!(refused.is_none(), "the second drain did not run");
+        assert_eq!(holder.unwrap().expect("the lock").completed, 1);
+        assert_eq!(sent_copies(&imap), vec![(1, mid.to_string())]);
+        assert_eq!(state_of(&account, id), OutboxState::Done);
+        first.close().await;
+        second.close().await;
+    }
 }

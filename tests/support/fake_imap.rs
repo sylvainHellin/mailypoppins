@@ -42,6 +42,14 @@
 //! every body download down ([`RejectingImapServer::set_body_delay`]) and
 //! count them ([`RejectingImapServer::body_fetches`]).
 //!
+//! A test can make the next APPENDs file their message and hang up before
+//! the answer ([`RejectingImapServer::hang_up_after_appends`]), or answer
+//! late ([`RejectingImapServer::set_append_delay`]), and can deliver a
+//! message to a folder while a session idles on it
+//! ([`RejectingImapServer::deliver`]), which that session is told of with an
+//! untagged `EXISTS` (RFC 2177 3); [`RejectingImapServer::idles`] counts the
+//! IDLEs entered, so a test delivers once the client is listening.
+//!
 //! A test can make the server refuse any command with a tagged answer of its
 //! own ([`RejectingImapServer::refuse`]), and answer a `SEARCH` the way TUM's
 //! Exchange does (PERSO-214): one under `CHARSET UTF-8` with
@@ -238,6 +246,17 @@ struct Shared {
     refusals: Mutex<HashMap<String, String>>,
     /// Whether CAPABILITY offers UIDPLUS.
     uidplus: AtomicBool,
+    /// How many of the next APPENDs file the message and then close the
+    /// connection instead of answering it.
+    append_hangups: AtomicUsize,
+    /// How long the server waits after it filed an APPEND's message before
+    /// it answers, in milliseconds.
+    append_delay_ms: AtomicU64,
+    /// The sessions in IDLE, each with the folder it has selected and the
+    /// channel that wakes it to report what arrived there.
+    idlers: Mutex<Vec<(String, futures::channel::mpsc::UnboundedSender<()>)>>,
+    /// How many IDLE commands the server has entered.
+    idles: AtomicUsize,
 }
 
 impl Shared {
@@ -303,6 +322,10 @@ impl RejectingImapServer {
             refuse_utf8_search: AtomicBool::new(false),
             refusals: Mutex::new(HashMap::new()),
             uidplus: AtomicBool::new(true),
+            append_hangups: AtomicUsize::new(0),
+            append_delay_ms: AtomicU64::new(0),
+            idlers: Mutex::new(Vec::new()),
+            idles: AtomicUsize::new(0),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -478,6 +501,48 @@ impl RejectingImapServer {
     /// default is to offer it, as every server mp has met does.
     pub fn set_uidplus(&self, offered: bool) {
         self.shared.uidplus.store(offered, Ordering::SeqCst);
+    }
+
+    /// File the message of each of the next `count` APPENDs and then close
+    /// the connection without the tagged answer: the copy is on the server
+    /// and the client cannot know it, which is the ambiguity the outbox's
+    /// dedup search exists for (#0116).
+    pub fn hang_up_after_appends(&self, count: usize) {
+        self.shared.append_hangups.store(count, Ordering::SeqCst);
+    }
+
+    /// Wait `delay` between filing each later APPEND's message and
+    /// answering it: the window in which a second drain could append the
+    /// same row again.
+    pub fn set_append_delay(&self, delay: std::time::Duration) {
+        let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.shared.append_delay_ms.store(millis, Ordering::SeqCst);
+    }
+
+    /// A message `raw` arrives in `folder` under its next UID, unseen, as
+    /// mail delivered by another server does, and every session idling on
+    /// that folder is told (RFC 2177 3, an untagged `EXISTS`). Answers the
+    /// new UID.
+    pub fn deliver(&self, folder: &str, raw: Vec<u8>) -> u32 {
+        let message_id = message_id_of(&raw).unwrap_or_default();
+        let uid = self
+            .shared
+            .change(folder, |mailbox| {
+                mailbox.take(message_id, Vec::new(), Some(raw))
+            })
+            .expect("the folder is served");
+        for (idling, wake) in self.shared.idlers.lock().expect("the idlers").iter() {
+            if idling == folder {
+                let _ = wake.unbounded_send(());
+            }
+        }
+        uid
+    }
+
+    /// How many IDLE commands the server has entered so far: what a test
+    /// waits on before it delivers, so the arrival is one IDLE reports.
+    pub fn idles(&self) -> usize {
+        self.shared.idles.load(Ordering::SeqCst)
     }
 
     /// How many `BODY.PEEK[]` fetches the server has answered so far.
@@ -938,17 +1003,64 @@ async fn serve(
                 )
                 .into_bytes()
             }
-            "APPEND" => append(&shared, &tag, args, selected.as_ref()),
+            "APPEND" => {
+                let answer = append(&shared, &tag, args, selected.as_ref());
+                let delay = shared.append_delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    async_std::task::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+                let filed = !answer.starts_with(format!("{tag} NO").as_bytes());
+                let hang_up = shared
+                    .append_hangups
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok();
+                if filed && hang_up {
+                    return tls.get_ref().get_ref().shutdown(std::net::Shutdown::Both);
+                }
+                answer
+            }
             "IDLE" => {
+                use futures::{FutureExt, StreamExt};
+                let (wake, mut woken) = futures::channel::mpsc::unbounded();
+                let folder = selected.as_ref().map(|(name, _)| name.clone());
+                if let Some(folder) = &folder {
+                    shared
+                        .idlers
+                        .lock()
+                        .expect("the idlers")
+                        .push((folder.clone(), wake));
+                }
                 reply(&mut tls, b"+ idling\r\n").await?;
-                loop {
+                shared.idles.fetch_add(1, Ordering::SeqCst);
+                let ended = loop {
                     let mut done = String::new();
-                    if tls.read_line(&mut done).await? == 0 {
-                        return Ok(());
+                    // The client sends nothing but DONE while it idles, so a
+                    // read dropped for a wake loses nothing.
+                    let event = futures::select! {
+                        read = tls.read_line(&mut done).fuse() => Some(read),
+                        _ = woken.next() => None,
+                    };
+                    match event {
+                        Some(Ok(0)) | Some(Err(_)) => break false,
+                        Some(Ok(_)) if done.trim().eq_ignore_ascii_case("DONE") => break true,
+                        Some(Ok(_)) => {}
+                        None => {
+                            // RFC 2177 3: the new size of the idling folder.
+                            let exists = folder
+                                .as_deref()
+                                .map_or(0, |name| shared.mailbox(name).messages.len());
+                            reply(&mut tls, format!("* {exists} EXISTS\r\n").as_bytes()).await?;
+                        }
                     }
-                    if done.trim().eq_ignore_ascii_case("DONE") {
-                        break;
-                    }
+                };
+                drop(woken);
+                shared
+                    .idlers
+                    .lock()
+                    .expect("the idlers")
+                    .retain(|(_, wake)| !wake.is_closed());
+                if !ended {
+                    return Ok(());
                 }
                 format!("{tag} OK IDLE terminated\r\n").into_bytes()
             }

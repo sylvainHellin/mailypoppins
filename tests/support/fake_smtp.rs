@@ -22,7 +22,8 @@
 //! recipient ([`RecordingSmtpServer::answer_for`]): a reply of its own (a
 //! `535 5.7.8` to AUTH, a `550 5.1.1` to RCPT), no answer at all while the
 //! connection stays open ([`SmtpAnswer::Stall`]), or the connection closed
-//! ([`SmtpAnswer::HangUp`]). [`RecordingSmtpServer::reached`] counts the
+//! ([`SmtpAnswer::HangUp`]), for good or for the next few transactions
+//! ([`RecordingSmtpServer::answer_for_next`]). [`RecordingSmtpServer::reached`] counts the
 //! times the server came to each step, so a test waits on a stall without
 //! sleeping.
 
@@ -102,6 +103,10 @@ impl SmtpAnswer {
     }
 }
 
+/// A step's answer for one recipient, keyed by the lowercase address and the
+/// step, with how many more times it is given (`None`: every time).
+type RecipientAnswers = HashMap<(String, SmtpStep), (SmtpAnswer, Option<usize>)>;
+
 /// What every connection shares with the test.
 #[derive(Default)]
 struct Shared {
@@ -110,8 +115,9 @@ struct Shared {
     /// The answer of each step for every recipient.
     answers: Mutex<HashMap<SmtpStep, SmtpAnswer>>,
     /// The answer of a step of one recipient's transaction, keyed by the
-    /// lowercase address.
-    recipient_answers: Mutex<HashMap<(String, SmtpStep), SmtpAnswer>>,
+    /// lowercase address, with how many more times it is given (`None`:
+    /// every time).
+    recipient_answers: Mutex<RecipientAnswers>,
     /// How many times the server came to each step.
     reached: Mutex<HashMap<SmtpStep, usize>>,
 }
@@ -128,11 +134,20 @@ impl Shared {
             .or_default() += 1;
         recipient
             .and_then(|address| {
-                self.recipient_answers
+                let mut answers = self
+                    .recipient_answers
                     .lock()
-                    .expect("the recipient answers")
-                    .get(&(address.to_ascii_lowercase(), step))
-                    .cloned()
+                    .expect("the recipient answers");
+                let key = (address.to_ascii_lowercase(), step);
+                let (answer, left) = answers.get_mut(&key)?;
+                let answer = answer.clone();
+                if let Some(left) = left {
+                    *left -= 1;
+                    if *left == 0 {
+                        answers.remove(&key);
+                    }
+                }
+                Some(answer)
             })
             .or_else(|| {
                 self.answers
@@ -220,9 +235,33 @@ impl RecordingSmtpServer {
             .lock()
             .expect("the recipient answers");
         match answer {
-            Some(answer) => answers.insert(key, answer),
+            Some(answer) => answers.insert(key, (answer, None)),
             None => answers.remove(&key),
         };
+    }
+
+    /// [`RecordingSmtpServer::answer_for`] for the next `times` transactions
+    /// to `recipient` that reach `step`, after which the server takes them
+    /// as before: a server that defers a recipient for a while and then
+    /// comes back.
+    pub fn answer_for_next(
+        &self,
+        recipient: &str,
+        step: SmtpStep,
+        answer: SmtpAnswer,
+        times: usize,
+    ) {
+        if times == 0 {
+            return;
+        }
+        self.shared
+            .recipient_answers
+            .lock()
+            .expect("the recipient answers")
+            .insert(
+                (recipient.to_ascii_lowercase(), step),
+                (answer, Some(times)),
+            );
     }
 
     /// How many times the server came to `step` so far, whatever it
