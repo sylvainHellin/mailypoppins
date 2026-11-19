@@ -38,7 +38,10 @@
 //!   is refused, since nothing then says the other machine has not sent it.
 //! - A copy edited in place while the claim ran (Graph: its `changeKey`
 //!   moved between the lookup and the removal) is left where it is, the row
-//!   is put back, and the send is refused as [`ChangedElsewhere`].
+//!   is put back, and the send is refused as [`ChangedElsewhere`]. The
+//!   copies this machine wrote beside the row's go first and the row's copy
+//!   last, in a claim of its own that an edit or a shortfall on the way
+//!   skips, so the row put back always names a copy still in the folder.
 //!
 //! Forgetting the row before the claim is the whole of the bookkeeping, save
 //! for a copy edited during the claim, whose row comes back: a
@@ -280,32 +283,53 @@ async fn claim<F: DraftsFolder>(
     if let Some(id) = id {
         draft_sync::delete(store, name, id)?;
     }
-    let claim = folder.claim(&uids).await.map_err(|e| {
-        outcome_unknown(
-            &mailbox,
-            &format!("the claim of this draft's server copy did not complete ({e:#})"),
-        )
-    })?;
-    if !claim.edited.is_empty() {
-        // An edit saved in place while this send claimed the copy (Graph):
-        // it stays, so the draft is not sent, and its row comes back so a
-        // retry before the pull is refused the same way rather than read as
-        // this machine's own earlier claim, and so the reconcile pulls the
-        // edit as a change of the copy the row names.
-        if let Some(row) = &row {
-            draft_sync::upsert(store, row)?;
+    // The copies this machine wrote beside the one the row names go first,
+    // and the row's copy last, in a claim of its own: an edit found on the
+    // way stops the claim with the row's copy still in the folder, so the row
+    // put back names a copy that exists and the reconcile reads the edit as
+    // one of an older copy (`DraftsFolder::concurrent_edit`) and keeps both
+    // texts.
+    let rows_copy = row
+        .as_ref()
+        .filter(|row| row.mailbox == mailbox && row.uidvalidity == info.uidvalidity)
+        .map(|row| row.uid)
+        .filter(|uid| uids.contains(uid));
+    let extras: Vec<u32> = uids
+        .iter()
+        .copied()
+        .filter(|uid| Some(*uid) != rows_copy)
+        .collect();
+    for batch in [extras, rows_copy.into_iter().collect::<Vec<u32>>()] {
+        if batch.is_empty() {
+            continue;
         }
-        return Err(ChangedElsewhere {
-            mailbox: mailbox.clone(),
+        let claim = folder.claim(&batch).await.map_err(|e| {
+            outcome_unknown(
+                &mailbox,
+                &format!("the claim of this draft's server copy did not complete ({e:#})"),
+            )
+        })?;
+        if !claim.edited.is_empty() {
+            // An edit saved in place while this send claimed the copy
+            // (Graph): it stays, so the draft is not sent, and its row comes
+            // back so a retry before the pull is refused the same way rather
+            // than read as this machine's own earlier claim, and so the
+            // reconcile pulls the edit as a change of the copy the row names.
+            if let Some(row) = &row {
+                draft_sync::upsert(store, row)?;
+            }
+            return Err(ChangedElsewhere {
+                mailbox: mailbox.clone(),
+            }
+            .into());
         }
-        .into());
-    }
-    if claim.removed.len() != uids.len() {
-        return Err(outcome_unknown(
-            &mailbox,
-            "another session removed this draft's server copy while this send was claiming it, \
-             another machine sending it or another client tidying the folder",
-        ));
+        if claim.removed.len() != batch.len() {
+            return Err(outcome_unknown(
+                &mailbox,
+                "another session removed this draft's server copy while this send was claiming \
+                 it, another machine sending it or another client tidying the folder",
+            ));
+        }
     }
     info!("[drafts] {name}: claimed the server copy of {message_id} (UIDs {uids:?}) for its send");
     Ok(())

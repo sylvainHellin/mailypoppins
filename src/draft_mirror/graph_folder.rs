@@ -468,6 +468,12 @@ pub mod fake {
         /// names, just before the read: a save that landed while a push
         /// uploaded its new copy.
         pub edit_before_read: Option<Vec<u8>>,
+        /// The next removal fails before it reaches the item, as a 503 or a
+        /// lost connection does: nothing is removed.
+        pub fail_next_remove: bool,
+        /// The next removal removes the item and then fails, as an answer
+        /// lost on its way back does.
+        pub lose_next_remove_answer: bool,
     }
 
     impl FakeGraph {
@@ -654,6 +660,10 @@ pub mod fake {
         /// version answers 412 and stays.
         async fn remove(&mut self, id: &str, change_key: &str) -> Result<DraftRemoval> {
             self.check()?;
+            if std::mem::take(&mut self.fail_next_remove) {
+                self.log.push(format!("remove {id} failed"));
+                return Err(anyhow!("Removing a Graph draft failed (HTTP 503)"));
+            }
             if let Some(raw) = self.edit_before_remove.take() {
                 self.edit(id, &raw);
             }
@@ -667,6 +677,9 @@ pub mod fake {
             }
             self.log.push(format!("remove {id}"));
             self.drop_item(id);
+            if std::mem::take(&mut self.lose_next_remove_answer) {
+                return Err(anyhow!("Removing a Graph draft: the connection dropped"));
+            }
             Ok(if self.removed_elsewhere {
                 DraftRemoval::Gone
             } else {

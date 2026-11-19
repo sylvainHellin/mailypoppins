@@ -3629,3 +3629,68 @@ fn a_smaller_attachment_pushes_an_oversized_graph_copy_again() {
     assert_eq!(result.completed, 1);
     assert_eq!(graph.drafts().len(), 1);
 }
+
+/// A push whose removal of the old copy failed leaves that copy beside the
+/// one its row names; the send claims it first. An Outlook save of the
+/// leftover that lands before its removal stops the claim there: the row's
+/// copy is never touched, the send is refused, and the reconcile keeps both
+/// the Outlook text and the local one.
+#[test]
+fn an_outlook_save_of_a_leftover_copy_stops_the_claim_before_the_rows_copy() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let leftover = graph.drafts()[0].id.clone();
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &text).unwrap();
+    graph.fail_next_remove = true;
+    block_on(push::push(
+        &fx.mirror(2),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    assert_eq!(
+        graph.drafts().len(),
+        2,
+        "the old copy stayed: {:?}",
+        graph.log
+    );
+    let rows_copy = graph
+        .drafts()
+        .iter()
+        .find(|d| d.id != leftover)
+        .unwrap()
+        .id
+        .clone();
+
+    graph.edit_before_remove = Some(outlook_copy(
+        &mid_of(&path),
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo aus Outlook</p>",
+    ));
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert!(
+        graph.drafts().iter().any(|d| d.id == rows_copy),
+        "the row's copy is untouched: {:?}",
+        graph.log
+    );
+
+    graph_reconciled(&fx, &mut graph);
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+}
