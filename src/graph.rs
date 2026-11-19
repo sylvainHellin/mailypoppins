@@ -3838,6 +3838,7 @@ impl GraphClient {
             stubs,
             more: truncated,
             capped: pages.capped,
+            local: None,
         })
     }
 

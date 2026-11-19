@@ -125,7 +125,10 @@ Backend honesty: on Gmail and Exchange every term runs server-side. On plain
 IMAP has:attachment has no server key, so it is answered from the local store
 (synced mail only): the run warns on stderr, the result header on stdout says
 \"local store only: has:attachment\", and --json sets coverage to \"local\" with
-the term in local_terms. filename: is Gmail/Exchange/--local only.
+the term in local_terms. filename: is Gmail/Exchange/--local only. A mailbox
+whose server cannot search non-ASCII text (BADCHARSET) is searched in the local
+store instead, named the same way with the reason, and in --json's
+local_mailboxes.
 
 The daemon runs a server search, the same one the TUI and the desktop app run:
 each mailbox is asked for its newest --limit matches (its oldest under
@@ -591,11 +594,13 @@ Examples:
         #[arg(long)]
         local: bool,
         /// Emit one JSON object {account, query, source: local|server,
-        /// coverage: server|local, local_terms: [...], truncated: bool,
-        /// messages: [...]} on stdout, messages as in `mp list-messages
-        /// --json` plus body (--full) or preview (server hit); coverage is
-        /// local when the store answered any term, which local_terms names
-        /// (empty under --local, where the store answered the whole query);
+        /// coverage: server|local, local_terms: [...], local_mailboxes:
+        /// [{mailbox, reason}], truncated: bool, messages: [...]} on stdout,
+        /// messages as in `mp list-messages --json` plus body (--full) or
+        /// preview (server hit); coverage is local when the store answered
+        /// any term, which local_terms names, or searched a mailbox the server
+        /// could not, which local_mailboxes names with why (both empty under
+        /// --local, where the store answered the whole query);
         /// truncated is true when more matched than --limit let through;
         /// warnings stay on stderr
         #[arg(long)]
@@ -3485,6 +3490,7 @@ async fn routed_server_search(
             account,
             query,
             &settled.local_terms,
+            &settled.local_mailboxes,
             settled.truncated,
             hits.iter()
                 .map(|hit| {

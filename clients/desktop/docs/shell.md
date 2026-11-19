@@ -143,6 +143,7 @@ With nothing typed and no search shown, the server button opens the Server Searc
 `state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`), the list selection and focus to restore, the one mailbox searched (`null` for the whole account), whether a server leg follows the local pass (`chain`), and the form it came from.
 A failed or dropped search's status wraps, so the daemon's whole sentence reads; progress stays on one line.
 A settled server search shows the count, then the caveat `mp search` prints when the settle's `coverage` is `local` ("1 result on the server (local store only: has:attachment)"), then the mailboxes it could not reach; on plain IMAP the daemon answers `has:attachment` from the store, so un-synced mail is not among the hits (PERSO-131).
+A mailbox the server cannot search for its charset (a `NO [BADCHARSET]` to a non-ASCII value) is searched in the store too, and the caveat names why: "1 result on the server (local store only: the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET))" (PERSO-214).
 
 ### The order of the results
 

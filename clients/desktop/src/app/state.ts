@@ -343,14 +343,16 @@ export type SearchState = {
    * The settled summary: hits the server counted, mailboxes it could not
    * reach, the terms the local store answered rather than the server
    * (`local_terms` of a `coverage: "local"` settle, PERSO-131), empty when the
-   * server answered every term, and whether the limit cut the answer
-   * (`truncated`) or Microsoft Graph's 1000-result cap did (`capped`,
-   * PERSO-175).
+   * server answered every term, why the local store searched a mailbox the
+   * server could not search (the distinct reasons of `local_mailboxes`,
+   * PERSO-214), and whether the limit cut the answer (`truncated`) or
+   * Microsoft Graph's 1000-result cap did (`capped`, PERSO-175).
    */
   summary: {
     hits: number;
     unreachable: number;
     localTerms: string[];
+    localReasons: string[];
     truncated: boolean;
     capped: boolean;
   } | null;

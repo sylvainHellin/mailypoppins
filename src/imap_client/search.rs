@@ -89,9 +89,35 @@ where
     }
 }
 
-/// The error for a search the server refused: a `BADCHARSET` names the
-/// charsets the server does search in, since the fix is not on the server's
-/// side; anything else carries the server's own words.
+/// A server's `NO [BADCHARSET]` to a search (RFC 3501 section 6.4.4): it
+/// cannot search in the charset the search named, `CHARSET UTF-8` being the
+/// only one mailypoppins names, and `charsets` are the ones it can, as it
+/// listed them, `US-ASCII` when it listed none.
+///
+/// A type of its own because the caller answers it rather than reporting it:
+/// the daemon searches that mailbox in the local store instead
+/// ([`crate::server_search::StoreFallback`], PERSO-214).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadCharset {
+    pub charsets: String,
+}
+
+impl fmt::Display for BadCharset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the server cannot search for non-ASCII text, only in {} (BADCHARSET)",
+            self.charsets
+        )
+    }
+}
+
+impl std::error::Error for BadCharset {}
+
+/// The error for a search the server refused: a `BADCHARSET` is a
+/// [`BadCharset`], naming the charsets the server does search in, since the
+/// fix is not on the server's side; anything else carries the server's own
+/// words.
 fn search_refusal(
     status: &Status,
     code: Option<&ResponseCode<'_>>,
@@ -102,9 +128,7 @@ fn search_refusal(
             Some(names) if !names.is_empty() => names.join(", "),
             _ => "US-ASCII".to_string(),
         };
-        return anyhow!(
-            "the server cannot search for non-ASCII text, only in {charsets} (BADCHARSET); search locally instead"
-        );
+        return anyhow::Error::new(BadCharset { charsets });
     }
     let status = match status {
         Status::Bad => "BAD",

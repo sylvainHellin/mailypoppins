@@ -718,10 +718,12 @@ pub struct MessageListingJson {
 ///
 /// `coverage` says whether un-synced mail can be among the hits: `"server"`
 /// when the server answered every term, `"local"` when the store answered at
-/// least one (a server search on plain IMAP with `has:attachment`) or all of
-/// them (`--local`). `local_terms` names the terms a server search had to
-/// answer from the store; a `--local` search answers the whole query there and
-/// leaves it empty.
+/// least one (a server search on plain IMAP with `has:attachment`), a whole
+/// mailbox, or all of them (`--local`). `local_terms` names the terms a server
+/// search had to answer from the store, and `local_mailboxes` the mailboxes
+/// it searched in the store because the server could not, each with why
+/// (PERSO-214); a `--local` search answers the whole query there and leaves
+/// both empty.
 ///
 /// `truncated` says the query matched more than `messages` holds, because
 /// `--limit` cut it (PERSO-175): `coverage` alone read as completeness when a
@@ -733,6 +735,7 @@ pub struct SearchResultsJson {
     pub source: &'static str,
     pub coverage: &'static str,
     pub local_terms: Vec<String>,
+    pub local_mailboxes: Vec<mp_protocol::listing::LocalMailbox>,
     pub truncated: bool,
     pub messages: Vec<ListedMessage>,
 }
@@ -751,16 +754,19 @@ impl SearchResultsJson {
             source: "local",
             coverage: "local",
             local_terms: Vec::new(),
+            local_mailboxes: Vec::new(),
             truncated,
             messages,
         }
     }
 
-    /// A server search, `local_terms` being what the server had no key for.
+    /// A server search, `local_terms` being what the server had no key for
+    /// and `local_mailboxes` the mailboxes it could not search.
     pub fn server(
         account: &str,
         query: &str,
         local_terms: &[String],
+        local_mailboxes: &[mp_protocol::listing::LocalMailbox],
         truncated: bool,
         messages: Vec<ListedMessage>,
     ) -> SearchResultsJson {
@@ -768,12 +774,13 @@ impl SearchResultsJson {
             account: account.to_string(),
             query: query.to_string(),
             source: "server",
-            coverage: if local_terms.is_empty() {
+            coverage: if local_terms.is_empty() && local_mailboxes.is_empty() {
                 "server"
             } else {
                 "local"
             },
             local_terms: local_terms.to_vec(),
+            local_mailboxes: local_mailboxes.to_vec(),
             truncated,
             messages,
         }
@@ -851,8 +858,9 @@ pub fn no_server_results(settled: &mp_protocol::listing::ServerSearchSettled) ->
 /// daemon's settle (`LST-06`, PERSO-175).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ServerSearchLines {
-    /// Warnings on stderr ahead of the answer: the store-coverage sentence,
-    /// and Graph's cap beside `--json`, where no text trailer goes.
+    /// Warnings on stderr ahead of the answer: the store-coverage sentences,
+    /// for the terms and for the mailboxes the store answered, and Graph's
+    /// cap beside `--json`, where no text trailer goes.
     pub before: Vec<String>,
     /// The stdout line under the text answer: Graph's cap, or the
     /// [`more_results_line`] when the limit cut it.
@@ -877,12 +885,18 @@ pub fn server_search_lines(
     json: bool,
 ) -> ServerSearchLines {
     let mut lines = ServerSearchLines::default();
-    if settled.local_store_note().is_some() {
+    let local = settled.coverage == mp_protocol::listing::SearchCoverage::Local;
+    if local && !settled.local_terms.is_empty() {
         lines.before.push(format!(
             "{} on plain IMAP is answered from the local store, so un-synced mail is not \
              covered. Run `mp sync` for full coverage.",
             settled.local_terms.join(", ")
         ));
+    }
+    if local {
+        lines
+            .before
+            .extend(local_mailbox_lines(&settled.local_mailboxes));
     }
     let cut = if settled.capped {
         Some(mp_client::format::graph_search_cap_line())
@@ -904,6 +918,42 @@ pub fn server_search_lines(
         .map(|refused| format!("Search in {} failed: {}", refused.mailbox, refused.error))
         .collect();
     lines
+}
+
+/// One stderr sentence per reason the store searched mailboxes in the
+/// server's stead (PERSO-214), naming them: `The server cannot search for
+/// non-ASCII text, only in US-ASCII (BADCHARSET), so Inbox and Sent were
+/// searched in the local store and un-synced mail is not covered.`
+fn local_mailbox_lines(local: &[mp_protocol::listing::LocalMailbox]) -> Vec<String> {
+    let mut reasons: Vec<(&str, Vec<&str>)> = Vec::new();
+    for entry in local {
+        match reasons
+            .iter_mut()
+            .find(|(reason, _)| *reason == entry.reason)
+        {
+            Some((_, mailboxes)) => mailboxes.push(&entry.mailbox),
+            None => reasons.push((&entry.reason, vec![&entry.mailbox])),
+        }
+    }
+    reasons
+        .into_iter()
+        .map(|(reason, mailboxes)| {
+            let mut reason = reason.chars();
+            let reason: String = reason
+                .next()
+                .map(|first| first.to_uppercase().chain(reason).collect())
+                .unwrap_or_default();
+            let (named, verb) = match mailboxes.split_last() {
+                Some((last, [])) => (last.to_string(), "was"),
+                Some((last, rest)) => (format!("{} and {last}", rest.join(", ")), "were"),
+                None => (String::new(), "was"),
+            };
+            format!(
+                "{reason}, so {named} {verb} searched in the local store and un-synced mail is \
+                 not covered. Run `mp sync` for full coverage."
+            )
+        })
+        .collect()
 }
 
 /// The lines `mp list-mailboxes` prints for a `mailbox.list_server` answer
@@ -1645,6 +1695,43 @@ mod tests {
         assert_eq!(json.trailer, None);
     }
 
+    /// Mailboxes the store searched because the server could not are named
+    /// before the answer, one sentence per reason, and are not failures; the
+    /// stdout note says the store answered and why (PERSO-214).
+    #[test]
+    fn a_mailbox_the_store_answered_is_named_with_why() {
+        let reason = "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)";
+        let mut settled = settle(false, false, false);
+        settled.coverage = mp_protocol::listing::SearchCoverage::Local;
+        settled.local_mailboxes = ["Inbox", "Sent", "Archive"]
+            .map(|mailbox| mp_protocol::listing::LocalMailbox {
+                mailbox: mailbox.into(),
+                reason: reason.into(),
+            })
+            .to_vec();
+        let lines = server_search_lines(&settled, &[], false);
+        assert_eq!(
+            lines.before,
+            [
+                "The server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET), so \
+                 Inbox, Sent and Archive were searched in the local store and un-synced mail is \
+                 not covered. Run `mp sync` for full coverage."
+            ]
+        );
+        assert!(lines.after.is_empty());
+        assert_eq!(
+            no_server_results(&settled),
+            format!("No results found (local store only: {reason})")
+        );
+
+        settled.local_mailboxes.truncate(1);
+        assert!(
+            server_search_lines(&settled, &[], true).before[0]
+                .contains("so Inbox was searched in the local store"),
+            "one mailbox, and --json keeps the stderr sentence"
+        );
+    }
+
     /// A mailbox the server refused is reported after the answer, in the
     /// words `mp search` always used, from the settle's `unreachable`.
     #[test]
@@ -1724,6 +1811,7 @@ mod tests {
             "tum",
             "has:attachment",
             &render.local_terms(),
+            &[],
             false,
             Vec::new(),
         );
@@ -1734,11 +1822,37 @@ mod tests {
         assert_eq!(json["truncated"], false);
         assert_eq!(json["messages"], serde_json::json!([]));
 
-        let full = SearchResultsJson::server("tum", "from:borrmann", &[], true, Vec::new());
+        let full = SearchResultsJson::server("tum", "from:borrmann", &[], &[], true, Vec::new());
         let json = serde_json::to_value(&full).unwrap();
         assert_eq!(json["coverage"], "server");
         assert_eq!(json["local_terms"], serde_json::json!([]));
+        assert_eq!(json["local_mailboxes"], serde_json::json!([]));
         assert_eq!(json["truncated"], true);
+
+        // A mailbox the server could not search for its charset (PERSO-214).
+        let refused = [mp_protocol::listing::LocalMailbox {
+            mailbox: "Inbox".into(),
+            reason: "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)"
+                .into(),
+        }];
+        let json = serde_json::to_value(SearchResultsJson::server(
+            "tum",
+            "from:Förster",
+            &[],
+            &refused,
+            false,
+            Vec::new(),
+        ))
+        .unwrap();
+        assert_eq!(json["coverage"], "local");
+        assert_eq!(json["local_terms"], serde_json::json!([]));
+        assert_eq!(
+            json["local_mailboxes"],
+            serde_json::json!([{
+                "mailbox": "Inbox",
+                "reason": "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)",
+            }])
+        );
 
         let offline = SearchResultsJson::local("tum", "ledger", false, Vec::new());
         let json = serde_json::to_value(&offline).unwrap();

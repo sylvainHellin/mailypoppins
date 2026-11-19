@@ -3,6 +3,6 @@
 /**
  * Whether un-synced mail can be missing from a server search's hits, the
  * `coverage` of [`ServerSearchSettled`] and of `mp search --json` (PERSO-122,
- * PERSO-131).
+ * PERSO-131, PERSO-214).
  */
 export type SearchCoverage = "server" | "local";

@@ -14,9 +14,10 @@ function describe(search: SearchState): string {
       return `Searching the server… ${results} so far`;
     case "done": {
       const unreachable = search.summary?.unreachable ?? 0;
-      // The CLI's caveat (PERSO-122): un-synced mail is not covered by a term the store answered.
-      const localTerms = search.summary?.localTerms ?? [];
-      const local = localTerms.length ? ` (local store only: ${localTerms.join(", ")})` : "";
+      // The CLI's caveat (PERSO-122): un-synced mail is not covered by a term the store answered,
+      // nor in a mailbox the store searched because the server could not (PERSO-214).
+      const answered = [...(search.summary?.localTerms ?? []), ...(search.summary?.localReasons ?? [])];
+      const local = answered.length ? ` (local store only: ${answered.join(", ")})` : "";
       const line = `${results} ${where}${local}${unreachable ? `, ${unreachable} mailbox${unreachable === 1 ? "" : "es"} unreachable` : ""}`;
       return `${line}${cutNote(search)}`;
     }

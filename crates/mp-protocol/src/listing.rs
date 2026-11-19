@@ -572,7 +572,7 @@ pub struct ServerSearchHitEvent {
 
 /// Whether un-synced mail can be missing from a server search's hits, the
 /// `coverage` of [`ServerSearchSettled`] and of `mp search --json` (PERSO-122,
-/// PERSO-131).
+/// PERSO-131, PERSO-214).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
@@ -581,7 +581,8 @@ pub enum SearchCoverage {
     #[default]
     Server,
     /// The local store answered at least one term, which `local_terms` names,
-    /// so a message the account has not synced cannot be among the hits.
+    /// or a whole mailbox, which `local_mailboxes` names, so a message the
+    /// account has not synced cannot be among the hits.
     Local,
 }
 
@@ -724,6 +725,20 @@ pub struct UnreachableMailbox {
     pub error: String,
 }
 
+/// One mailbox whose server search the local store answered instead
+/// (PERSO-214): the server refused the search for a reason the store can
+/// stand in for, today a `NO [BADCHARSET]` to a non-ASCII value, so the hits
+/// listed under it are the synced mail that matches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct LocalMailbox {
+    /// The sidebar label of the mailbox.
+    pub mailbox: String,
+    /// Why the server did not answer, as one sentence.
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// The most results a Microsoft Graph `$search` on messages answers across
 /// all its pages: "A `$search` request returns up to 1,000 results" (Microsoft
 /// Learn, "Use the $search query parameter"). A `$filter` pages on past it.
@@ -741,8 +756,10 @@ pub const GRAPH_SEARCH_CAP: usize = 1000;
 /// coverage (PERSO-131): on a plain IMAP server `has:attachment` has no search
 /// key, so the daemon keeps only the hits the local store marks as carrying an
 /// attachment, and an un-synced message cannot be among them; the two fields
-/// mean what `mp search --json`'s do (PERSO-122). Last, whether the limit cut
-/// the answer and whether Graph's cap did (PERSO-175).
+/// mean what `mp search --json`'s do (PERSO-122). A mailbox whose server
+/// cannot run the search for its charset is searched in the store instead,
+/// and `local_mailboxes` names it and why (PERSO-214). Last, whether the
+/// limit cut the answer and whether Graph's cap did (PERSO-175).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServerSearchSettled {
@@ -760,14 +777,20 @@ pub struct ServerSearchSettled {
     /// The mailboxes the server refused, in search order.
     #[serde(default)]
     pub unreachable: Vec<UnreachableMailbox>,
-    /// `local` when the store answered a term, `server` otherwise. Absent from
-    /// a daemon that predates PERSO-131, which reads as `server`.
+    /// `local` when the store answered a term or a mailbox, `server`
+    /// otherwise. Absent from a daemon that predates PERSO-131, which reads as
+    /// `server`.
     #[serde(default)]
     pub coverage: SearchCoverage,
     /// The terms the store answered, in the grammar's own spelling
     /// (`has:attachment`), and `[]` when the server answered every term.
     #[serde(default)]
     pub local_terms: Vec<String>,
+    /// The mailboxes the store searched in the server's stead, in search
+    /// order, each with why (PERSO-214); `[]` when the server ran the search
+    /// in every mailbox, and from a daemon that predates the field.
+    #[serde(default)]
+    pub local_mailboxes: Vec<LocalMailbox>,
     /// More matched than the hits hold: a mailbox matched more than the
     /// limit, or the merge of every mailbox's newest hits cut some
     /// (PERSO-175). Absent from an older daemon, which reads as `false`.
@@ -858,12 +881,24 @@ impl ServerSearchSettled {
         merged
     }
 
-    /// The caveat a client appends to its hit count, `local store only:
-    /// has:attachment`, or `None` when the server answered every term: the
-    /// words `mp search` prints in its result header.
+    /// The caveat a client appends to its hit count, or `None` when the
+    /// server answered every term in every mailbox: the words `mp search`
+    /// prints in its result header. It names the terms the store answered
+    /// (`local store only: has:attachment`), then why it searched a mailbox
+    /// in the server's stead, each reason once (`local store only: the server
+    /// cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)`,
+    /// PERSO-214).
     pub fn local_store_note(&self) -> Option<String> {
-        (self.coverage == SearchCoverage::Local && !self.local_terms.is_empty())
-            .then(|| format!("local store only: {}", self.local_terms.join(", ")))
+        if self.coverage != SearchCoverage::Local {
+            return None;
+        }
+        let mut answered: Vec<&str> = self.local_terms.iter().map(String::as_str).collect();
+        for local in &self.local_mailboxes {
+            if !answered.contains(&local.reason.as_str()) {
+                answered.push(&local.reason);
+            }
+        }
+        (!answered.is_empty()).then(|| format!("local store only: {}", answered.join(", ")))
     }
 }
 
@@ -888,6 +923,7 @@ mod tests {
             }],
             coverage: SearchCoverage::Local,
             local_terms: vec!["has:attachment".to_string()],
+            local_mailboxes: Vec::new(),
             truncated: true,
             capped: false,
             order: SearchOrder::Oldest,
@@ -918,10 +954,53 @@ mod tests {
         .expect("a settle without the two fields decodes");
         assert_eq!(older.coverage, SearchCoverage::Server);
         assert!(older.local_terms.is_empty());
+        assert!(older.local_mailboxes.is_empty());
         assert!(!older.truncated && !older.capped);
         assert_eq!(older.local_store_note(), None);
         assert_eq!(older.order, SearchOrder::Newest);
         assert!(older.hit_order.is_empty());
+    }
+
+    /// A mailbox the store searched in the server's stead travels with why,
+    /// and the caveat names the reason once however many mailboxes share it,
+    /// after any term the store answered (PERSO-214).
+    #[test]
+    fn a_mailbox_the_store_answered_is_named_with_why() {
+        let badcharset =
+            "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)";
+        let local = |mailbox: &str| LocalMailbox {
+            mailbox: mailbox.to_string(),
+            reason: badcharset.to_string(),
+        };
+        let mut settled = ServerSearchSettled {
+            account: "tum".to_string(),
+            query: "from:Förster".to_string(),
+            coverage: SearchCoverage::Local,
+            local_mailboxes: vec![local("Inbox"), local("Sent")],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&settled).expect("it serialises");
+        assert_eq!(
+            encoded["local_mailboxes"],
+            json!([
+                {"mailbox": "Inbox", "reason": badcharset},
+                {"mailbox": "Sent", "reason": badcharset},
+            ])
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerSearchSettled>(encoded).expect("it decodes"),
+            settled
+        );
+        assert_eq!(
+            settled.local_store_note(),
+            Some(format!("local store only: {badcharset}"))
+        );
+
+        settled.local_terms = vec!["has:attachment".to_string()];
+        assert_eq!(
+            settled.local_store_note(),
+            Some(format!("local store only: has:attachment, {badcharset}"))
+        );
     }
 
     /// The three orders travel lowercase, absent reads as newest, and an

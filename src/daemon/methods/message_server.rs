@@ -67,6 +67,13 @@
 //! (PERSO-131), the two fields `mp search --json` carries (PERSO-122): an
 //! un-synced message cannot be among those hits, and a client says so beside
 //! its count.
+//!
+//! A mailbox whose server refuses the search for its charset (TUM's Exchange
+//! answers `CHARSET UTF-8` with `NO [BADCHARSET]`) is searched in the local
+//! store instead ([`crate::server_search::StoreFallback`]), and the settle
+//! names it in `local_mailboxes` with the refusal's sentence, `coverage:
+//! "local"` again (PERSO-214): before, such a search listed the mailbox as
+//! unreachable and read as "no results" with the mail in the store.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -75,7 +82,7 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::listing::{
-    MessageFlags, SearchCoverage, SearchOrder, ServerSearchHit, ServerSearchHitEvent,
+    LocalMailbox, MessageFlags, SearchCoverage, SearchOrder, ServerSearchHit, ServerSearchHitEvent,
     ServerSearchSettled, UnreachableMailbox,
 };
 use mp_protocol::RpcError;
@@ -86,7 +93,9 @@ use crate::daemon::state::{CanonicalState, Change};
 use crate::parse::resolve_date;
 use crate::parse::FetchedEmail;
 use crate::selector::Selector;
-use crate::server_search::{two_phase, Cut, GraphSearch, ImapSearch, Scope, SearchSink};
+use crate::server_search::{
+    two_phase, Cut, GraphSearch, ImapSearch, Scope, SearchSink, StoreFallback,
+};
 use crate::store::{read, BlobStore, Store};
 
 use super::super::config::ConfigStore;
@@ -859,10 +868,18 @@ async fn search_imap(
     );
 
     let mut session = crate::imap_client::open_imap_session(&imap).await?;
-    let mut backend = ImapSearch {
-        session: &mut session,
-        search: imap_search,
-        message_id: request.parsed.message_id.clone(),
+    // A mailbox the server cannot search for its charset is searched in the
+    // store instead (PERSO-214).
+    let mut backend = StoreFallback {
+        inner: ImapSearch {
+            session: &mut session,
+            search: imap_search,
+            message_id: request.parsed.message_id.clone(),
+        },
+        account: &request.account.name,
+        account_dir: crate::config::account_dir(&request.account.name),
+        query: &request.parsed,
+        mailboxes: store_keys(&request.targets),
     };
     let cut = two_phase(
         &mut backend,
@@ -874,6 +891,19 @@ async fn search_imap(
     .await;
     session.logout().await.ok();
     Ok(stream.settle(cut))
+}
+
+/// The store key of each target mailbox, by the server name its scope
+/// carries, which is what the store searches a mailbox the server cannot
+/// search by.
+fn store_keys(targets: &Targets) -> std::collections::HashMap<String, String> {
+    match targets {
+        Targets::Mailboxes(targets) => targets
+            .iter()
+            .map(|target| (target.server_name.clone(), target.slug.clone()))
+            .collect(),
+        Targets::EveryFolder => Default::default(),
+    }
 }
 
 /// The SEARCH command one IMAP server runs for `parsed`, whether the hits
@@ -944,6 +974,9 @@ struct Stream<'a> {
     /// The terms the store answered rather than the server, which the settle
     /// reports so a client can say un-synced mail is not covered (PERSO-131).
     local_terms: Vec<String>,
+    /// The mailboxes the store searched in the server's stead, with why
+    /// (PERSO-214).
+    local_mailboxes: Vec<LocalMailbox>,
     /// The `date_sort` of each hit published, indexed by its `seq`, which
     /// the settle's `hit_order` is sorted by.
     published: Vec<String>,
@@ -991,6 +1024,7 @@ impl<'a> Stream<'a> {
             canonical,
             with_attachments,
             local_terms,
+            local_mailboxes: Vec::new(),
             published: Vec::new(),
             deduplicated: 0,
             unreachable: Vec::new(),
@@ -1000,7 +1034,11 @@ impl<'a> Stream<'a> {
 
     /// What the operation settles with.
     fn settle(self, cut: Cut) -> ServerSearchSettled {
-        let coverage = coverage_of(&self.local_terms);
+        let coverage = if self.local_mailboxes.is_empty() {
+            coverage_of(&self.local_terms)
+        } else {
+            SearchCoverage::Local
+        };
         let order = self.request.order.on_server();
         ServerSearchSettled {
             account: self.request.account.name.clone(),
@@ -1010,6 +1048,7 @@ impl<'a> Stream<'a> {
             unreachable: self.unreachable,
             coverage,
             local_terms: self.local_terms,
+            local_mailboxes: self.local_mailboxes,
             truncated: cut.truncated,
             capped: cut.capped,
             order,
@@ -1083,6 +1122,16 @@ impl SearchSink for Stream<'_> {
         self.unreachable.push(UnreachableMailbox {
             mailbox: label.to_string(),
             error: format!("{error}"),
+        });
+    }
+
+    /// One mailbox the store searched in the server's stead (PERSO-214).
+    fn answered_locally(&mut self, mailbox: usize, reason: &str) {
+        let label = target_label(self.request, mailbox);
+        log::info!("[search_server] '{label}' searched in the local store: {reason}");
+        self.local_mailboxes.push(LocalMailbox {
+            mailbox: label.to_string(),
+            reason: reason.to_string(),
         });
     }
 }

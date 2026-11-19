@@ -73,9 +73,17 @@ where
         .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
 
+    // A `BADCHARSET` keeps its type, which the caller answers from the store
+    // (PERSO-214); its sentence already says it is the search that failed.
     let uids = super::search::uid_search_with_literals(session, imap_search)
         .await
-        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+        .map_err(|e| {
+            if e.is::<super::search::BadCharset>() {
+                e
+            } else {
+                anyhow!("IMAP search failed: {}", e)
+            }
+        })?;
 
     let matched = uids.len();
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
@@ -92,6 +100,7 @@ where
             stubs: Vec::new(),
             more,
             capped: false,
+            local: None,
         });
     }
 
@@ -137,6 +146,7 @@ where
         stubs,
         more,
         capped: false,
+        local: None,
     })
 }
 
@@ -2065,10 +2075,17 @@ mod tests {
                 "A0003 UID SEARCH CHARSET UTF-8 TEXT {7}\r\n".to_string(),
             ]
         );
-        let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("cannot search for non-ASCII text") && error.contains("US-ASCII"),
-            "{error}"
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<super::super::search::BadCharset>(),
+            Some(&super::super::search::BadCharset {
+                charsets: "US-ASCII".to_string()
+            }),
+            "the refusal keeps its type, which the daemon answers from the store"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)"
         );
     }
 }

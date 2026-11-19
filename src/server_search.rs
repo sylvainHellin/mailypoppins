@@ -33,12 +33,21 @@
 //! matches. Each of its stubs then carries the label of the folder it sits
 //! in, which is what its hit is listed under.
 //!
+//! A mailbox whose server refuses the search for its charset, as TUM's
+//! Exchange answers `CHARSET UTF-8` with `NO [BADCHARSET]`, is searched in
+//! the local store instead ([`StoreFallback`], PERSO-214): its stubs are the
+//! stored rows that match, they compete in the same merge, and the sink is
+//! told the store answered that mailbox and why, so the answer never reads
+//! as "nothing found" while the mail sits in the store.
+//!
 //! The backend is a [`SearchBackend`]: one IMAP session ([`ImapSearch`]) or
 //! one Graph client ([`GraphSearch`]). What the hits become is the caller's
 //! [`SearchSink`], which is where the daemon's dedup, attachment post-filter
 //! and event stream live (`src/daemon/methods/message_server.rs`).
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -87,6 +96,9 @@ pub struct MailboxStubs<K> {
     pub more: bool,
     /// Microsoft Graph's `$search` cap stopped it short of the limit.
     pub capped: bool,
+    /// Why the local store answered in the server's stead, when it did
+    /// ([`StoreFallback`], PERSO-214); `None` for the server's own answer.
+    pub local: Option<String>,
 }
 
 /// The stubs of the scope at an index, as the merge takes and hands them
@@ -155,6 +167,9 @@ pub trait SearchSink {
     /// The `mailbox`-th mailbox failed, or some of its hits could not be
     /// downloaded, which does not fail the search.
     fn refused(&mut self, mailbox: usize, error: &anyhow::Error);
+    /// The local store searched the `mailbox`-th mailbox in the server's
+    /// stead, for `reason` ([`MailboxStubs::local`], PERSO-214).
+    fn answered_locally(&mut self, mailbox: usize, reason: &str);
 }
 
 /// Search `scopes` for the first `limit` hits in `order` across all of them
@@ -181,6 +196,9 @@ pub async fn two_phase<B: SearchBackend, S: SearchSink>(
                 );
                 cut.truncated |= found.more;
                 cut.capped |= found.capped;
+                if let Some(reason) = &found.local {
+                    sink.answered_locally(index, reason);
+                }
                 let admitted = found
                     .stubs
                     .into_iter()
@@ -327,6 +345,235 @@ impl SearchBackend for ImapSearch<'_> {
 
     async fn fetch(&mut self, scope: &Scope, uids: &[u32]) -> Result<Fetched<u32>> {
         crate::imap_client::fetch_uids_on_session(self.session, imap_mailbox(scope)?, uids).await
+    }
+}
+
+/// What a [`StoreFallback`] stub names its message by: the server's own key,
+/// or the store row of a mailbox the store answered.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FallbackKey<K> {
+    Server(K),
+    Stored(i64),
+}
+
+/// A backend whose mailbox the server cannot search for its charset is
+/// searched in the account's local store instead (PERSO-214).
+///
+/// TUM's Exchange answers a search under `CHARSET UTF-8` with `NO
+/// [BADCHARSET (US-ASCII)]` in every folder, so `from:Förster` found nothing
+/// there while the mail sat in the store. The refusal
+/// ([`crate::imap_client::search::BadCharset`]) is answered here, once per
+/// mailbox and without a second server search in another charset: the stubs
+/// are the stored rows of that mailbox that match the query, newest or
+/// oldest first as asked, and they compete in the merge like the server's.
+/// The mailbox's stubs carry the refusal's sentence in
+/// [`MailboxStubs::local`], which the sink reports. Un-synced mail cannot be
+/// among them, as for a plain IMAP `has:attachment`.
+///
+/// Any other failure is the server's and passes through, and so does the
+/// refusal when the account has no store to stand in.
+pub struct StoreFallback<'a, B> {
+    pub inner: B,
+    /// The account the store is searched for.
+    pub account: &'a str,
+    /// The account's directory, which holds its store and its blobs.
+    pub account_dir: PathBuf,
+    /// The query the store runs, the one `inner` rendered for the server.
+    pub query: &'a crate::search::Query,
+    /// The store key of each mailbox, by the server name its scope carries;
+    /// a name it lacks is its own key.
+    pub mailboxes: HashMap<String, String>,
+}
+
+impl<B> SearchBackend for StoreFallback<'_, B>
+where
+    B: SearchBackend + Send,
+{
+    type Key = FallbackKey<B::Key>;
+
+    async fn stubs(
+        &mut self,
+        scope: &Scope,
+        limit: usize,
+        order: SearchOrder,
+    ) -> Result<MailboxStubs<Self::Key>> {
+        let error = match self.inner.stubs(scope, limit, order).await {
+            Ok(found) => {
+                return Ok(MailboxStubs {
+                    stubs: found
+                        .stubs
+                        .into_iter()
+                        .map(|stub| SearchStub {
+                            key: FallbackKey::Server(stub.key),
+                            date: stub.date,
+                            message_id: stub.message_id,
+                            folder: stub.folder,
+                        })
+                        .collect(),
+                    more: found.more,
+                    capped: found.capped,
+                    local: found.local,
+                })
+            }
+            Err(error) => error,
+        };
+        let Some(refusal) = error.downcast_ref::<crate::imap_client::search::BadCharset>() else {
+            return Err(error);
+        };
+        let reason = refusal.to_string();
+        match self.stored_stubs(scope, limit, order) {
+            None => Err(error),
+            Some(Err(e)) => Err(anyhow::anyhow!(
+                "{error}, and the local store could not search it either: {e:#}"
+            )),
+            Some(Ok(mut found)) => {
+                log::info!(
+                    "[server_search] {scope:?} searched in the local store, {} match(es): {reason}",
+                    found.stubs.len()
+                );
+                found.local = Some(reason);
+                Ok(found)
+            }
+        }
+    }
+
+    async fn fetch(&mut self, scope: &Scope, keys: &[Self::Key]) -> Result<Fetched<Self::Key>> {
+        let mut server = Vec::new();
+        let mut stored = Vec::new();
+        for key in keys {
+            match key {
+                FallbackKey::Server(key) => server.push(key.clone()),
+                FallbackKey::Stored(id) => stored.push(*id),
+            }
+        }
+        // The store's part first and whole, so no store is held across the
+        // server's await.
+        let mut answer = self.stored_emails(&stored);
+        if !server.is_empty() {
+            let fetched = self.inner.fetch(scope, &server).await?;
+            answer.emails.extend(
+                fetched
+                    .emails
+                    .into_iter()
+                    .map(|(key, email)| (FallbackKey::Server(key), email)),
+            );
+            answer.missing.extend(
+                fetched
+                    .missing
+                    .into_iter()
+                    .map(|(key, why)| (FallbackKey::Server(key), why)),
+            );
+        }
+        Ok(answer)
+    }
+}
+
+impl<B: SearchBackend> StoreFallback<'_, B> {
+    /// The stored rows of `scope`'s mailbox that match the query, as stubs,
+    /// or `None` when there is no store to search or the scope is not one
+    /// mailbox.
+    fn stored_stubs(
+        &self,
+        scope: &Scope,
+        limit: usize,
+        order: SearchOrder,
+    ) -> Option<Result<MailboxStubs<FallbackKey<B::Key>>>> {
+        let Scope::Mailbox(server) = scope else {
+            return None;
+        };
+        let mailbox = self.mailboxes.get(server).unwrap_or(server);
+        let store = crate::store::open_store_in(&self.account_dir)?;
+        // One past the limit, to know whether the mailbox matched more.
+        let hits = crate::store::search::search_ast(
+            &store,
+            self.account,
+            self.query,
+            Some(mailbox),
+            limit.saturating_add(1),
+            order,
+        );
+        Some(hits.map(|hits| {
+            MailboxStubs {
+                more: hits.len() > limit,
+                stubs: hits
+                    .into_iter()
+                    .take(limit)
+                    .map(|hit| SearchStub {
+                        key: FallbackKey::Stored(hit.row.id),
+                        date: hit.row.date_display.unwrap_or_default(),
+                        message_id: Some(hit.row.message_id),
+                        folder: None,
+                    })
+                    .collect(),
+                capped: false,
+                local: None,
+            }
+        }))
+    }
+
+    /// The stored messages behind `ids`, as a download brings them back; a
+    /// row gone since the first pass is missing, with why.
+    fn stored_emails(&self, ids: &[i64]) -> Fetched<FallbackKey<B::Key>> {
+        let mut answer = Fetched::default();
+        if ids.is_empty() {
+            return answer;
+        }
+        let Some(store) = crate::store::open_store_in(&self.account_dir) else {
+            answer.missing = ids
+                .iter()
+                .map(|id| {
+                    (
+                        FallbackKey::Stored(*id),
+                        "the local store is gone".to_string(),
+                    )
+                })
+                .collect();
+            return answer;
+        };
+        // `crate::config::blobs_dir`, for the directory already resolved.
+        let blobs = crate::store::BlobStore::new(self.account_dir.join("blobs"));
+        for id in ids {
+            match crate::store::read::find_by_id(&store, *id) {
+                Ok(Some(row)) => {
+                    let body = crate::store::read::load_body(&store, &blobs, row.id);
+                    answer
+                        .emails
+                        .push((FallbackKey::Stored(*id), stored_email(row, body)));
+                }
+                Ok(None) => answer.missing.push((
+                    FallbackKey::Stored(*id),
+                    "no longer in the local store".to_string(),
+                )),
+                Err(e) => answer
+                    .missing
+                    .push((FallbackKey::Stored(*id), format!("{e:#}"))),
+            }
+        }
+        answer
+    }
+}
+
+/// A stored row as the message a download would have brought back: its
+/// headers, flags and body as the store holds them.
+fn stored_email(row: crate::store::read::MessageRow, body: Option<String>) -> FetchedEmail {
+    let flags = row.flags();
+    FetchedEmail {
+        from: row.from.unwrap_or_default(),
+        to: row.to.unwrap_or_default(),
+        cc: row.cc,
+        reply_to: row.reply_to,
+        bcc: row.bcc,
+        subject: row.subject.unwrap_or_default(),
+        date: row.date_display.unwrap_or_default(),
+        body_text: body.unwrap_or_default(),
+        html_body: None,
+        has_attachments: row.has_attachments,
+        server_has_attachments: None,
+        message_id: Some(row.message_id),
+        attachments: Vec::new(),
+        flags,
+        calendar_ics: None,
+        event: None,
     }
 }
 
@@ -596,6 +843,8 @@ mod tests {
     struct Script {
         matches: HashMap<String, Vec<SearchStub<u32>>>,
         refuse: HashSet<String>,
+        /// Mailboxes that answer `NO [BADCHARSET (US-ASCII)]`.
+        badcharset: HashSet<String>,
         /// UIDs the second pass does not bring back, and why.
         vanish: HashMap<u32, &'static str>,
         asked: Vec<(String, usize)>,
@@ -619,6 +868,11 @@ mod tests {
             if self.refuse.contains(&mailbox) {
                 anyhow::bail!("NO no such mailbox");
             }
+            if self.badcharset.contains(&mailbox) {
+                return Err(anyhow::Error::new(crate::imap_client::search::BadCharset {
+                    charsets: "US-ASCII".to_string(),
+                }));
+            }
             let mut all = self.matches.get(&mailbox).cloned().unwrap_or_default();
             if order == SearchOrder::Oldest {
                 all.reverse();
@@ -627,6 +881,7 @@ mod tests {
                 more: all.len() > limit,
                 stubs: all.into_iter().take(limit).collect(),
                 capped: false,
+                local: None,
             })
         }
 
@@ -678,6 +933,8 @@ mod tests {
         landed_in: Vec<Option<String>>,
         refused: Vec<usize>,
         errors: Vec<String>,
+        /// Each mailbox the store answered, with why.
+        local: Vec<(usize, String)>,
     }
 
     impl SearchSink for Collect {
@@ -692,6 +949,9 @@ mod tests {
         fn refused(&mut self, mailbox: usize, error: &anyhow::Error) {
             self.refused.push(mailbox);
             self.errors.push(format!("{error}"));
+        }
+        fn answered_locally(&mut self, mailbox: usize, reason: &str) {
+            self.local.push((mailbox, reason.to_string()));
         }
     }
 
@@ -733,6 +993,132 @@ mod tests {
 
     fn day(n: u32) -> String {
         format!("{n} Mar 2026 10:00:00 +0000")
+    }
+
+    /// PERSO-214: a mailbox whose server refuses the search for its charset
+    /// is searched in the local store, once, and its stored matches compete
+    /// in the merge with the server's own; the sink hears which mailbox the
+    /// store answered and why. Another refusal stays the server's, and with
+    /// no store the charset refusal does too.
+    #[tokio::test]
+    async fn a_mailbox_the_server_cannot_search_for_its_charset_is_searched_in_the_store() {
+        use crate::ingest::{ingest_message, IngestInput};
+        use crate::store::{BlobStore, Store};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let stored = |subject: &str, date: &str, id: &str| FetchedEmail {
+            from: "Nick Förster <foerster@example.com>".to_string(),
+            to: "sylvain@example.com".to_string(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: subject.to_string(),
+            date: date.to_string(),
+            body_text: "Antrag anbei\n".to_string(),
+            html_body: None,
+            has_attachments: false,
+            server_has_attachments: None,
+            message_id: Some(id.to_string()),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        for (uid, (mailbox, email)) in [
+            ("inbox", stored("LOC Antrag BIM Lab", &day(19), "<bim@x>")),
+            ("inbox", stored("Older", &day(1), "<older@x>")),
+            ("archive", stored("Archived", &day(18), "<archived@x>")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ingest_message(
+                &store,
+                &blobs,
+                &IngestInput {
+                    account: "tum",
+                    mailbox,
+                    uid: uid as i64 + 1,
+                    email: &email,
+                    raw: None,
+                },
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let mut script = Script::default();
+        script.badcharset.insert("INBOX".into());
+        script
+            .matches
+            .insert("Sent Items".into(), vec![stub(7, &day(10), "<sent@x>")]);
+        script.refuse.insert("Spesen".into());
+        let query = crate::search::parse("from:Förster").unwrap();
+        let mut backend = StoreFallback {
+            inner: script,
+            account: "tum",
+            account_dir: dir.path().to_path_buf(),
+            query: &query,
+            mailboxes: HashMap::from([
+                ("INBOX".to_string(), "inbox".to_string()),
+                ("Sent Items".to_string(), "sent".to_string()),
+            ]),
+        };
+        let mut sink = Collect::default();
+
+        let cut = two_phase(
+            &mut backend,
+            &scopes(&["INBOX", "Sent Items", "Spesen"]),
+            2,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
+
+        let badcharset =
+            "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)";
+        assert_eq!(sink.local, [(0, badcharset.to_string())]);
+        assert_eq!(
+            backend.inner.asked,
+            [
+                ("INBOX".to_string(), 2),
+                ("Sent Items".to_string(), 2),
+                ("Spesen".to_string(), 2)
+            ],
+            "one server search per mailbox, none again in another charset"
+        );
+        assert_eq!(
+            sink.landed,
+            [
+                (0, vec!["<bim@x>".to_string()]),
+                (1, vec!["<sent@x>".to_string()]),
+            ],
+            "the store's newest match and the server's, merged under the limit; \
+             the archive's row is not the Inbox's"
+        );
+        assert_eq!(
+            backend.inner.fetched,
+            [("Sent Items".to_string(), vec![7])],
+            "a stored hit is not downloaded"
+        );
+        assert_eq!(sink.refused, [2], "another refusal stays the server's");
+        assert_eq!(sink.errors, ["NO no such mailbox"]);
+        assert!(cut.truncated, "the Inbox's older row was cut");
+
+        let mut sink = Collect::default();
+        backend.account_dir = dir.path().join("no-store");
+        two_phase(
+            &mut backend,
+            &scopes(&["INBOX"]),
+            2,
+            SearchOrder::Newest,
+            &mut sink,
+        )
+        .await;
+        assert!(sink.local.is_empty());
+        assert_eq!(sink.errors, [badcharset], "no store, nothing stands in");
     }
 
     /// A search across every folder at once is one first-pass query, and its

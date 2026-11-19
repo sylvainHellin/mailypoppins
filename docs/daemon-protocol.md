@@ -1105,7 +1105,8 @@ message.search_server {account, query, mailboxes?: [str], limit?, order?, exclud
         -> {operation_id}
    streams  state.event kind `message.server_hit`, payload {operation_id, seq, hit}
    settles  {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
-             coverage: "server"|"local", local_terms: [str], truncated, capped,
+             coverage: "server"|"local", local_terms: [str],
+             local_mailboxes: [{mailbox, reason}], truncated, capped,
              order: "newest"|"oldest", hit_order: [seq]}
 
 message.fetch {account, mailbox, message_id} -> {operation_id}
@@ -1155,6 +1156,12 @@ An account that configures no server at all is `-32006` with `{account, state: "
 A plain IMAP server has no search key for `has:attachment`, so the daemon searches without it and keeps the hits the local store marks as carrying an attachment; a message the account has not synced, or one without a `Message-ID`, cannot be among them.
 The settle then carries `coverage: "local"` and `local_terms: ["has:attachment"]`, and `coverage: "server"` with `local_terms: []` when the server answered every term, as on Gmail and Graph; the two fields mean what `mp search --json`'s do.
 A client puts the caveat `mp search` prints, `local store only: has:attachment`, after its count, so an empty or short answer does not read as "no such mail"; `mp search` also keeps its stderr warning and its `--json` `coverage` and `local_terms`, all read off this settle.
+
+**A mailbox the server cannot search for its charset is searched in the store** (PERSO-214).
+A non-ASCII value goes out as a UTF-8 literal under `CHARSET UTF-8`, and a server that cannot search UTF-8 answers `NO [BADCHARSET]`, as TUM's Exchange does in every folder.
+The daemon then runs the query against that mailbox's stored rows, once and without trying the server again in another charset, and those rows compete in the merge under `limit` like the server's stubs (`server_search::StoreFallback`).
+The settle names the mailbox in `local_mailboxes`, `{mailbox, reason}` with the refusal's sentence ("the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)"), sets `coverage: "local"`, and leaves it out of `unreachable`; with no store to stand in, the refusal stays an `unreachable` entry.
+The caveat after a client's count names each reason once, after any term the store answered (`local store only: the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)`, `ServerSearchSettled::local_store_note`), and `mp search` adds a stderr sentence naming the mailboxes and its `--json` carries `local_mailboxes`.
 The settle is `mp_protocol::listing::ServerSearchSettled`.
 
 **`message.fetch` is idempotent rather than a refusal.**
@@ -1983,6 +1990,10 @@ PERSO-131 added two members to `message.search_server`'s settle, additively; no 
 `coverage` is `"server"` or `"local"` and `local_terms` names the terms the store answered, today `has:attachment` on a plain IMAP server, with the semantics of `mp search --json`'s two fields (PERSO-122); both are `default` on the way in, so a settle from a daemon that predates them reads as a search the server answered whole.
 The settle is typed for the first time, as `mp_protocol::listing::ServerSearchSettled` with `SearchCoverage` and `UnreachableMailbox`, whose TypeScript bindings the desktop reads; the shape it carried before is unchanged.
 No fixture pinned the settle and none was added, since the success path needs a server; the key list in `tests/daemon_server_leg_slice.rs` is seven names.
+
+PERSO-214 added `local_mailboxes` to `message.search_server`'s settle, additively: `[{mailbox, reason}]`, the mailboxes the store searched because the server refused the search for its charset (`NO [BADCHARSET]`), typed as `mp_protocol::listing::LocalMailbox`.
+It is `default` on the way in, so a settle from a daemon that predates it reads as one where the server searched every mailbox; such a mailbox now counts toward `coverage: "local"` and is no longer listed in `unreachable`.
+`mp search --json` gained the same `local_mailboxes` member.
 
 PERSO-136 added `draft.html`, one query, additively; no field was renamed, none was dropped, and no command's output moved.
 `draft.html` `{account, id|selector}` -> `{account, id, selector, html, bytes}` answers the `text/html` part `send.draft` would send for a draft, hardened for a browser, so a client previews a draft before sending it; its shape is in [the family's section](#the-draft-family).

@@ -146,7 +146,8 @@ fn rerun_search_after_rollback(app: &mut App, account_index: usize) {
 
 /// The overlay footer a settled `message.search_server` paints: the count of
 /// hits in the list, the CLI's caveat when the store answered a term (`local
-/// store only: has:attachment`, PERSO-131), the mailboxes that refused, and
+/// store only: has:attachment`, PERSO-131) or searched a mailbox the server
+/// could not, with why (PERSO-214), the mailboxes that refused, and
 /// the CLI's sentence when the limit or Graph's cap cut the answer
 /// (PERSO-175), with a narrower search as the remedy, since the overlay takes
 /// no limit.
@@ -884,6 +885,27 @@ mod tests {
         assert_eq!(
             server_search_footer(3, None, &older),
             "3 results; 2 mailboxes unreachable"
+        );
+    }
+
+    /// A settle whose mailboxes the store searched because the server could
+    /// not run the search for its charset says so beside the count, with why,
+    /// in the CLI's words (PERSO-214).
+    #[test]
+    fn a_mailbox_the_store_answered_is_named_in_the_overlay_footer() {
+        let settled = serde_json::json!({
+            "account": "tum", "query": "from:Förster", "hits": 1,
+            "deduplicated": 0, "unreachable": [],
+            "coverage": "local", "local_terms": [],
+            "local_mailboxes": [
+                {"mailbox": "Inbox", "reason": "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)"},
+                {"mailbox": "Sent", "reason": "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)"},
+            ],
+        });
+        assert_eq!(
+            server_search_footer(1, None, &settled),
+            "1 result (local store only: the server cannot search for non-ASCII text, only in \
+             US-ASCII (BADCHARSET))"
         );
     }
 

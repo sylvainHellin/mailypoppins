@@ -471,10 +471,21 @@ function summaryOf(result: unknown): SearchState["summary"] {
     r.coverage === "local" && Array.isArray(r.local_terms)
       ? r.local_terms.filter((t): t is string => typeof t === "string")
       : [];
+  // Why the store searched a mailbox the server could not (PERSO-214), each
+  // reason once, after the terms: the note `mp search` prints. A daemon that
+  // predates the field sends none.
+  const localReasons: string[] = [];
+  if (r.coverage === "local" && Array.isArray(r.local_mailboxes)) {
+    for (const local of r.local_mailboxes) {
+      const reason = typeof local === "object" && local !== null ? (local as { reason?: unknown }).reason : null;
+      if (typeof reason === "string" && reason !== "" && !localReasons.includes(reason)) localReasons.push(reason);
+    }
+  }
   return {
     hits: typeof r.hits === "number" ? r.hits : 0,
     unreachable: Array.isArray(r.unreachable) ? r.unreachable.length : 0,
     localTerms,
+    localReasons,
     // A daemon that predates PERSO-175 sends neither: an answer it never cut.
     truncated: r.truncated === true,
     capped: r.capped === true,

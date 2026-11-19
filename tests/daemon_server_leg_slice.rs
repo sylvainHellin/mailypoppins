@@ -20,7 +20,8 @@
 //!   streams             state.event kind `message.server_hit`
 //!                       payload {operation_id, hit: ServerSearchHit}
 //!   settles with        {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
-//!                        coverage: server|local, local_terms, truncated, capped}
+//!                        coverage: server|local, local_terms, local_mailboxes,
+//!                        truncated, capped}
 //! ```
 //!
 //! `coverage` and `local_terms` joined the settle in PERSO-131: on a plain IMAP
@@ -845,4 +846,120 @@ async fn the_server_search_settle_shape_is_the_documented_one() {
         ),
         other => panic!("a settled operation is succeeded or failed, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// A search the server cannot run (PERSO-214)
+// ---------------------------------------------------------------------------
+
+/// The read fixture's stores with `alpha` pointed at `server`, and a daemon
+/// over them: a plain IMAP account whose local store holds `Bericht über
+/// Anträge` from Ivana Hečimović in its Inbox. `None` on a host with no
+/// readable machine ID, where the sandbox cannot hold the password
+/// (`sync_fixture::seed_secrets`).
+fn alpha_on(server: &support::fake_imap::RejectingImapServer) -> Option<(TempDir, DaemonFixture)> {
+    use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+
+    let tmp = TempDir::new().expect("a temporary server-leg root");
+    support::read_fixture::seed(tmp.path());
+    let alpha = format!(
+        "\n[accounts.imap]\nhost = \"127.0.0.1\"\nport = {}\nusername = \"alpha@example.com\"\n\
+         accept_invalid_certs = true\nsync_interval_secs = 0\n",
+        server.port()
+    );
+    let config = support::read_fixture::CONFIG.replacen(
+        "default_from = \"alpha@example.com\"\n",
+        &format!("default_from = \"alpha@example.com\"\n{alpha}"),
+        1,
+    );
+    std::fs::write(tmp.path().join("config.toml"), config).expect("write config.toml");
+    let secrets = EncryptedFileBackend::open(tmp.path().join("secrets.enc")).ok()?;
+    secrets
+        .set("imap-password-alpha", "hunter2")
+        .expect("the sandbox's secrets file takes the password");
+    let daemon = DaemonFixture::start(tmp.path());
+    Some((tmp, daemon))
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// TUM's Exchange answers a search under `CHARSET UTF-8` with `NO
+/// [BADCHARSET (US-ASCII)]` in every folder, which read as "No results found"
+/// with the mail sitting in the local store (PERSO-214). Such a mailbox is
+/// searched in the local store instead, as `has:attachment` is on plain
+/// IMAP: the hit is listed, the result header says the local store answered
+/// and why, stderr says un-synced mail is not covered, and `--json` says
+/// `coverage: "local"` and names the mailbox and the reason.
+#[test]
+fn a_search_the_server_cannot_run_for_its_charset_is_answered_from_the_store() {
+    use support::fake_imap::{LoginPolicy, RejectingImapServer};
+
+    let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+    server.refuse_utf8_search(true);
+    let Some((_tmp, daemon)) = alpha_on(&server) else {
+        return;
+    };
+
+    let out = daemon.mp(&[
+        "search",
+        "-A",
+        "alpha",
+        "--mailbox",
+        "Inbox",
+        "subject:über",
+    ]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Bericht über Anträge"),
+        "the stored message is the answer: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "local store only: the server cannot search for non-ASCII text, only in US-ASCII \
+             (BADCHARSET)"
+        ),
+        "the result header says the local store answered and why: {stdout}"
+    );
+    assert!(
+        stderr.contains("Inbox was searched in the local store")
+            && stderr.contains("un-synced mail is not covered"),
+        "stderr says which mailbox the store answered and what that leaves out: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Search in Inbox failed"),
+        "a mailbox the store answered did not fail: {stderr}"
+    );
+
+    let out = daemon.mp(&[
+        "search",
+        "-A",
+        "alpha",
+        "--mailbox",
+        "Inbox",
+        "--json",
+        "subject:über",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let json: Value = serde_json::from_slice(&out.stdout).expect("--json is one JSON object");
+    assert_eq!(json["coverage"], json!("local"), "{json}");
+    assert_eq!(
+        json["local_mailboxes"],
+        json!([{
+            "mailbox": "Inbox",
+            "reason": "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)",
+        }]),
+        "{json}"
+    );
+    assert_eq!(
+        json["messages"][0]["subject"],
+        json!("Bericht über Anträge"),
+        "{json}"
+    );
 }

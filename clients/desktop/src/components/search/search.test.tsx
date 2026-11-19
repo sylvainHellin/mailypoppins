@@ -269,6 +269,37 @@ describe("server search", () => {
     );
   });
 
+  it("says the local store searched a mailbox the server could not, and why (PERSO-214)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchServer(user, "from:Förster");
+    event("message.server_hit", { operation_id: "op-1", hit: serverHit("Inbox", 1005, "LOC Antrag BIM Lab") });
+    const list = await results();
+    await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(1));
+
+    const reason = "the server cannot search for non-ASCII text, only in US-ASCII (BADCHARSET)";
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: {
+        account: "work",
+        query: "from:Förster",
+        hits: 1,
+        deduplicated: 0,
+        unreachable: [],
+        coverage: "local",
+        local_terms: [],
+        local_mailboxes: [
+          { mailbox: "Inbox", reason },
+          { mailbox: "Sent", reason },
+        ],
+      },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(status()).toHaveTextContent(`1 result on the server (local store only: ${reason})`);
+    expect(status()).not.toHaveTextContent("unreachable");
+  });
+
   it("keeps the plain count when the server answered every term", async () => {
     const { user } = renderApp();
     await shellReady();

@@ -165,6 +165,7 @@ fn export_into(dir: &Path) -> usize {
         listing::SearchCoverage,
         listing::SearchOrder,
         listing::UnreachableMailbox,
+        listing::LocalMailbox,
         listing::ServerSearchSettled,
         mp_protocol::RequestId,
         mp_protocol::Request,

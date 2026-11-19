@@ -34,6 +34,12 @@
 //! slow every body download down ([`RejectingImapServer::set_body_delay`])
 //! and count them ([`RejectingImapServer::body_fetches`]).
 //!
+//! A test can make the server answer a `SEARCH` the way TUM's Exchange does
+//! (PERSO-214): one under `CHARSET UTF-8` with `NO [BADCHARSET (US-ASCII)]`,
+//! before the literal ([`RejectingImapServer::refuse_utf8_search`]), or every
+//! one with a refusal of the test's own
+//! ([`RejectingImapServer::refuse_searches`]).
+//!
 //! Two test trees use it: the daemon suites through `mod support;`, and the
 //! library's own unit tests, which include this file by path from
 //! `src/imap_client/mod.rs`, so the pool's test and the health row drive the
@@ -42,7 +48,7 @@
 // Each test tree uses a different part of it.
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_std::net::{TcpListener, TcpStream};
@@ -63,6 +69,11 @@ pub const LOGIN_ALERT: &str = "NO [ALERT] Too many simultaneous connections. (Fa
 
 /// A `BAD` to LOGIN, which says nothing about the password.
 pub const LOGIN_BAD: &str = "BAD LOGIN command garbled";
+
+/// What [`RejectingImapServer::refuse_utf8_search`] answers a `SEARCH` under a
+/// `CHARSET` with, after the tag.
+pub const SEARCH_BADCHARSET: &str =
+    "NO [BADCHARSET (US-ASCII)] The specified charset is not supported.";
 
 /// What the server answers a LOGIN with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +160,10 @@ struct Shared {
     /// How long the server waits before it answers a LOGIN, in milliseconds,
     /// as a server delays a refused login.
     login_delay_ms: AtomicU64,
+    /// Whether a `SEARCH` under a `CHARSET` is answered `NO [BADCHARSET]`.
+    refuse_utf8_search: AtomicBool,
+    /// The tagged answer every `SEARCH` gets, when set.
+    search_refusal: Mutex<Option<String>>,
 }
 
 /// One whole message of a folder a sync runs against: its UID and its bytes.
@@ -195,6 +210,8 @@ impl RejectingImapServer {
             body_delay_ms: AtomicU64::new(0),
             body_fetches: AtomicUsize::new(0),
             login_delay_ms: AtomicU64::new(0),
+            refuse_utf8_search: AtomicBool::new(false),
+            search_refusal: Mutex::new(None),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -292,6 +309,26 @@ impl RejectingImapServer {
     pub fn set_login_delay(&self, delay: std::time::Duration) {
         let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
         self.shared.login_delay_ms.store(millis, Ordering::SeqCst);
+    }
+
+    /// Answer each later `SEARCH` that names a `CHARSET` with
+    /// [`SEARCH_BADCHARSET`], as TUM's Exchange answers `CHARSET UTF-8`
+    /// (PERSO-214); a search in plain ASCII is answered as before.
+    pub fn refuse_utf8_search(&self, refuse: bool) {
+        self.shared
+            .refuse_utf8_search
+            .store(refuse, Ordering::SeqCst);
+    }
+
+    /// Answer every later `SEARCH` with `answer`, the tagged status and text
+    /// after the tag (`NO [UNAVAILABLE] search is down`), or as before with
+    /// `None`.
+    pub fn refuse_searches(&self, answer: Option<&str>) {
+        *self
+            .shared
+            .search_refusal
+            .lock()
+            .expect("the search refusal") = answer.map(str::to_string);
     }
 
     /// How many `BODY.PEEK[]` fetches the server has answered so far.
@@ -490,6 +527,26 @@ async fn serve(
                     }
                 }
                 format!("{reply}{tag} OK FETCH completed\r\n")
+            }
+            "SEARCH"
+                if shared
+                    .search_refusal
+                    .lock()
+                    .expect("the search refusal")
+                    .is_some() =>
+            {
+                let answer = shared
+                    .search_refusal
+                    .lock()
+                    .expect("the search refusal")
+                    .clone();
+                format!("{tag} {}\r\n", answer.unwrap_or_default())
+            }
+            "SEARCH"
+                if shared.refuse_utf8_search.load(Ordering::SeqCst)
+                    && line.to_ascii_uppercase().contains(" CHARSET ") =>
+            {
+                format!("{tag} {SEARCH_BADCHARSET}\r\n")
             }
             "SEARCH" => {
                 let uids: String = selected

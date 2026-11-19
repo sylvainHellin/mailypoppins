@@ -762,6 +762,16 @@ mp calendar reminder dismiss AAMkADev2 -A evoqs`}
         same caveat after their count, as in
         <code>2 results (local store only: has:attachment)</code>.
       </p>
+      <p>
+        A non-ASCII value (<code>from:Förster</code>) goes to the server as UTF-8.
+        A server that cannot search UTF-8, such as some Microsoft Exchange IMAP
+        servers, refuses with <code>BADCHARSET</code>; <code>mp</code> then searches
+        that mailbox in the local store instead of reporting no results, and says so
+        the same way: a stderr line names the mailboxes, the header reads
+        <code>Fetched Emails (1 result, local store only: the server cannot search for
+        non-ASCII text, only in US-ASCII (BADCHARSET))</code>, and <code>--json</code>
+        lists them in <code>local_mailboxes</code> with the reason.
+      </p>
 
       <h3 id="local-search-syntax">Local full-text search (<code>--local</code>)</h3>
       <p>
