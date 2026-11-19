@@ -2680,6 +2680,21 @@ fn mp_path_on_a_sent_draft_says_it_was_already_sent() {
         !err.contains("no match for"),
         "a sent draft does not read as a wrong selector:\n{err}"
     );
+
+    // When it went, from the record's own `sent_at:`, in UTC.
+    let sent_at = frontmatter_value(&record, "sent_at");
+    let when = chrono::DateTime::parse_from_rfc3339(&sent_at)
+        .unwrap_or_else(|e| panic!("sent_at {sent_at:?} is RFC 3339: {e}"))
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%d at %H:%M UTC");
+    assert!(
+        err.contains(&format!(
+            "{} in {}/drafts was already sent on {when}",
+            fixture::APPROVED,
+            fixture::ACCOUNT
+        )),
+        "the refusal says when the draft was sent ({when}):\n{err}"
+    );
 }
 
 /// The guard beside it: a drafts selector that never named a draft keeps the
@@ -2697,6 +2712,227 @@ fn mp_path_on_a_draft_that_never_existed_still_answers_no_match() {
         err.contains(&format!(
             "no match for {} in the drafts index of {}/drafts",
             fixture::UNKNOWN_DRAFT,
+            fixture::ACCOUNT
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("already sent"), "{err}");
+}
+
+/// One frontmatter value of a draft record, as its line spells it with the
+/// YAML quotes taken off.
+fn frontmatter_value(record: &str, key: &str) -> String {
+    let prefix = format!("{key}: ");
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .unwrap_or_else(|| panic!("the record carries {key}:\n{record}"))
+}
+
+/// `mp send -y` of the approved draft, then the record it retired into
+/// `drafts/.retired/`, with the selector that named it.
+fn send_the_approved_draft(slice: &Slice) -> (String, String) {
+    let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
+    let sent = slice.routed(&["send", &selector, "-y"]);
+    assert_eq!(
+        sent.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(&sent),
+        stderr(&sent)
+    );
+    let retired = fixture::drafts_dir(slice.root(), fixture::ACCOUNT)
+        .join(mailypoppins::draft::RETIRED_DIR)
+        .join(fixture::APPROVED_FILE);
+    let record = std::fs::read_to_string(&retired)
+        .unwrap_or_else(|e| panic!("the sent draft is retired to {}: {e}", retired.display()));
+    assert!(record.contains("status: sent\n"), "{record}");
+    (selector, record)
+}
+
+/// The store's rows for `message_id` that sit in a sent mailbox.
+fn stored_sent_copies(root: &Path, message_id: &str) -> Vec<String> {
+    let store = fixture::store(root, fixture::ACCOUNT);
+    mailypoppins::store::read::find_by_message_id(&store, fixture::ACCOUNT, message_id)
+        .expect("the store answers a Message-ID lookup")
+        .into_iter()
+        .filter(|row| mailypoppins::reconcile::is_sent_copy(&row.mailbox))
+        .map(|row| row.mailbox)
+        .collect()
+}
+
+/// PERSO-317, the copy found: a send whose APPEND the server took finishes its
+/// outbox row, and finishing it ingests the sent copy into the store's `sent`
+/// mailbox (`outbox::finish_done`). So the refusal names that copy by its
+/// selector, and `mp show` reads it; the daemon's `-32602` carries the same
+/// facts as fields.
+///
+/// Routed side only (fake transport, APPEND acknowledged).
+#[tokio::test]
+async fn a_sent_draft_whose_copy_is_stored_names_the_copy_mp_show_reads() {
+    let slice = Slice::with_fake_transport();
+    let (selector, record) = send_the_approved_draft(&slice);
+    let sent_at = frontmatter_value(&record, "sent_at");
+    let message_id = frontmatter_value(&record, "message_id");
+    assert_eq!(
+        stored_sent_copies(slice.root(), &message_id),
+        vec!["sent".to_string()],
+        "the send ingested its copy into the store's sent mailbox"
+    );
+
+    let out = slice.routed(&["path", &selector]);
+    let err = stderr(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a sent draft has no path: {out:?}"
+    );
+    let prefix = format!("; its sent copy is mp://{}/sent/", fixture::ACCOUNT);
+    let copy = err
+        .find(&prefix)
+        .map(|at| &err[at + "; its sent copy is ".len()..])
+        .and_then(|rest| rest.split(',').next())
+        .unwrap_or_else(|| panic!("the refusal names the sent copy by its selector:\n{err}"))
+        .to_string();
+    assert!(
+        !err.contains("Message-ID"),
+        "a stored copy is named by its selector, not its Message-ID:\n{err}"
+    );
+
+    let shown = slice.routed(&["show", &copy]);
+    assert_eq!(
+        shown.status.code(),
+        Some(0),
+        "`mp show {copy}` reads the sent copy:\nstdout: {}\nstderr: {}",
+        stdout(&shown),
+        stderr(&shown)
+    );
+    assert!(
+        stdout(&shown).contains("Freigabe"),
+        "and it is the message that went out:\n{}",
+        stdout(&shown)
+    );
+
+    let mut conn = slice.connect().await;
+    let refused = call_err(
+        &mut conn,
+        "draft.path",
+        json!({"account": fixture::ACCOUNT, "selector": selector}),
+    )
+    .await;
+    assert_eq!(refused.code, INVALID_PARAMS);
+    assert_eq!(
+        data_of(&refused),
+        &json!({
+            "account": fixture::ACCOUNT,
+            "id": fixture::APPROVED,
+            "status": "sent",
+            "sent_at": sent_at,
+            "message_id": message_id,
+            "sent_copy": copy,
+        })
+    );
+}
+
+/// PERSO-317, the copy not found: a send whose APPEND the server refused has
+/// delivered every recipient, so the draft is retired as sent, but its outbox
+/// row waits on the APPEND and the store holds no sent copy yet. The refusal
+/// then names the `Message-ID` it went out with, and the daemon's `-32602`
+/// carries `sent_copy: null`.
+///
+/// Routed side only (fake transport, APPEND refused).
+#[tokio::test]
+async fn a_sent_draft_whose_copy_is_not_stored_names_its_message_id() {
+    let slice = Slice::with_transport(|log| fixture::fake_transport_appending(log, "fail", 0));
+    let (selector, record) = send_the_approved_draft(&slice);
+    let sent_at = frontmatter_value(&record, "sent_at");
+    let message_id = frontmatter_value(&record, "message_id");
+    assert_eq!(
+        stored_sent_copies(slice.root(), &message_id),
+        Vec::<String>::new(),
+        "a refused APPEND leaves no sent copy in the store"
+    );
+
+    let out = slice.routed(&["path", &selector]);
+    let err = stderr(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a sent draft has no path: {out:?}"
+    );
+    assert!(
+        err.contains(&format!("; it went out as Message-ID {message_id}")),
+        "the refusal names the Message-ID it went out with:\n{err}"
+    );
+    assert!(
+        !err.contains("/sent/"),
+        "no selector names a copy the store does not hold:\n{err}"
+    );
+
+    let mut conn = slice.connect().await;
+    let refused = call_err(
+        &mut conn,
+        "draft.path",
+        json!({"account": fixture::ACCOUNT, "selector": selector}),
+    )
+    .await;
+    assert_eq!(refused.code, INVALID_PARAMS);
+    assert_eq!(
+        data_of(&refused),
+        &json!({
+            "account": fixture::ACCOUNT,
+            "id": fixture::APPROVED,
+            "status": "sent",
+            "sent_at": sent_at,
+            "message_id": message_id,
+            "sent_copy": null,
+        })
+    );
+}
+
+/// A draft discarded rather than sent is retired into `drafts/.retired/` too,
+/// but with its own status, so its selector keeps the plain "no match": only a
+/// sent record answers "already sent".
+#[test]
+fn mp_path_on_a_discarded_draft_still_answers_no_match() {
+    let slice = Slice::with_fake_transport();
+    let made = slice.routed(&["new", "verworfen"]);
+    assert_eq!(made.status.code(), Some(0), "{}", stderr(&made));
+    let selector = stdout(&made).trim().to_string();
+    let id = selector
+        .rsplit('/')
+        .next()
+        .expect("`mp new` prints the draft's selector")
+        .to_string();
+
+    let discarded = slice.routed(&["delete", &selector]);
+    assert_eq!(discarded.status.code(), Some(0), "{}", stderr(&discarded));
+    let retired =
+        fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(mailypoppins::draft::RETIRED_DIR);
+    let records: Vec<String> = std::fs::read_dir(&retired)
+        .unwrap_or_else(|e| panic!("the discard retires into {}: {e}", retired.display()))
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter(|record| record.contains(&format!("id: {id}\n")))
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "the discarded draft is retired, not deleted"
+    );
+    assert!(
+        !records[0].contains("status: sent"),
+        "and it was not sent:\n{}",
+        records[0]
+    );
+
+    let out = slice.routed(&["path", &selector]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "a miss exits 1: {out:?}");
+    assert!(
+        err.contains(&format!(
+            "no match for {id} in the drafts index of {}/drafts",
             fixture::ACCOUNT
         )),
         "{err}"
