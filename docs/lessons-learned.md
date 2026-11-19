@@ -3820,3 +3820,21 @@ A send whose account has a drain already running returns before its Sent copy is
 The daemon starts no account runtime for an account without a store, so a test account needs store.sqlite3 created before the daemon starts.
 send.outbox_retry's completed and deduped count every row the drain finished, not the retried one; a client speaks for the row only through state and partial.
 mp-protocol result types are also built as struct literals in clients/desktop/src-tauri/src/fixture.rs, which builds only on the Mac: a new field needs those literals edited by hand, a check in a scratch crate under /var/tmp, and the binding regenerated with `cargo test -p mp-protocol --features ts --test ts_bindings -- --ignored export_bindings`.
+
+## lettre bounds only the TCP connect, so the submission needs its own deadline (2026-11-20, PERSO-330)
+
+lettre 0.11's AsyncSmtpTransport bounds only the TCP connect; bound send_raw from outside.
+A send_raw dropped past the connect returns its connection to lettre's pool unbroken mid-conversation, and the pool's teardown sends QUIT and awaits the reply with no deadline in a spawned task, so never reuse a transport after a cut.
+lettre raises a failed lookup, a refused or timed-out connect and a failed TLS handshake (an untrusted certificate) all as "Connection error", never is_tls(), and only before MAIL FROM; a connect timeout is also is_timeout(). Walk the source chain for the io::Error to tell them apart.
+No search runs before an SMTP re-send: mp outbox retry re-submits every outstanding recipient, and the Message-ID search on the APPEND path prevents only a second Sent copy, not a second delivery.
+
+## Whether a retry may deliver twice is stored, never read from the reason text (2026-11-20, PERSO-330)
+
+The outbox envelope records delivered, rejected and unsent recipients; a no-verdict recipient and a 4xx one are both just outstanding, so whether a retry may deliver twice is decided from unsent and the submission marker, never from last_error text.
+A wire flag a client words from belongs in the daemon's answer, not in the client's reading of a reason string: the server's own words land in that string.
+An envelope line that describes one submission pass carries that pass's marker (unsent-at:) and counts only while it equals the row's current submission_started_at: an older build's retry clears the marker and keeps the envelope, so an untied line would outlive its pass.
+An additive bool member whose usual value is false can be sent only when true (skip_serializing_if = "std::ops::Not::not"), which keeps every pinned JSON shape and makes the ts-rs binding optional; a member whose absence must keep an older daemon's behaviour gets a serde default of that behaviour, true where true warns.
+
+## clippy --workspace lints only the test-support side of a cfg split in mp-tui (2026-11-20, PERSO-332)
+
+cargo clippy --workspace --all-targets turns the test-support feature on in mp-tui, so the non-test branch of a cfg(any(test, feature = "test-support")) split is only linted by cargo clippy -p mp-tui --lib.
