@@ -543,10 +543,9 @@ impl CalendarBackendKind {
 /// its server Drafts folder, where Outlook, Apple Mail, the Proton app and mp
 /// on another machine see them and edit them.
 ///
-/// On by default. `mirror = false` keeps the account's drafts local-only,
-/// which is what an account whose server mangles drafts wants. A Graph
-/// account is not mirrored yet whatever this says, since the Graph half is not
-/// built.
+/// On by default, for IMAP and Graph accounts alike. `mirror = false` keeps
+/// the account's drafts local-only, which is what an account whose server
+/// mangles drafts wants.
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct DraftsConfig {
     #[serde(default = "default_true")]

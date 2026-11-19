@@ -482,6 +482,29 @@ pub mod fake {
         }
     }
 
+    /// One fake mailbox for two machines' folders, each with its own store.
+    impl<A: GraphDraftsApi> GraphDraftsApi for &mut A {
+        async fn list(&mut self, folder: &str) -> Result<Vec<GraphDraftHead>> {
+            (**self).list(folder).await
+        }
+
+        async fn find(&mut self, folder: &str, message_id: &str) -> Result<Vec<GraphDraftHead>> {
+            (**self).find(folder, message_id).await
+        }
+
+        async fn create(&mut self, raw: &[u8]) -> Result<GraphDraftHead> {
+            (**self).create(raw).await
+        }
+
+        async fn mime(&mut self, id: &str) -> Result<Option<Vec<u8>>> {
+            (**self).mime(id).await
+        }
+
+        async fn remove(&mut self, id: &str) -> Result<bool> {
+            (**self).remove(id).await
+        }
+    }
+
     impl GraphDraftsApi for FakeGraph {
         async fn list(&mut self, folder: &str) -> Result<Vec<GraphDraftHead>> {
             self.check()?;

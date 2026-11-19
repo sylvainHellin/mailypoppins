@@ -243,23 +243,44 @@ async fn claim<F: DraftsFolder>(
     Ok(())
 }
 
-/// [`claim_for_send`] against the account's IMAP Drafts folder, as the
-/// daemon's send runs it. A configuration that does not load is a server the
-/// guard cannot reach, and refuses the send the same way.
+/// [`claim_for_send`] against the account's Drafts folder, over IMAP or
+/// Graph, as the daemon's send runs it. A configuration that does not load is
+/// a server the guard cannot reach, and refuses the send the same way.
+///
+/// On Graph a claim is a `permanentDelete` of the copy, which this request
+/// either removed or found gone ([`super::graph_folder`]), so two sends never
+/// both claim one copy; an edit Outlook saves between the lookup and the
+/// removal goes with the copy, a window of one round trip. A token the login
+/// gate holds as refused is a folder out of reach.
 pub async fn guard_send(account: &AccountConfig, draft: &EmailDraft) -> Result<()> {
     if !guards(account, draft) {
         return Ok(());
     }
-    let opened = crate::config::ImapConfig::load(account)
+    let opened = crate::ops::Backend::resolve(account)
         .map_err(|e| unreachable(&account.name, e))
-        .and_then(|imap| Ok((imap, Store::open(crate::config::store_path(&account.name))?)));
-    let (imap, store) = match opened {
+        .and_then(|backend| {
+            Ok((
+                backend,
+                Store::open(crate::config::store_path(&account.name))?,
+            ))
+        });
+    let (backend, store) = match opened {
         Ok(opened) => opened,
         Err(e) => {
             log_refusal(account, draft, &e);
             return Err(e);
         }
     };
-    let mut folder = super::folder::ImapDraftsFolder::new(imap);
-    claim_for_send(&store, account, &mut folder, draft).await
+    match backend {
+        crate::ops::Backend::Imap(imap) => {
+            let mut folder = super::folder::ImapDraftsFolder::new(*imap);
+            claim_for_send(&store, account, &mut folder, draft).await
+        }
+        crate::ops::Backend::Graph(graph) => {
+            let api = super::graph_folder::LiveGraphDrafts::new(*graph);
+            let mut folder =
+                super::graph_folder::GraphDraftsFolder::new(&store, &account.name, api);
+            claim_for_send(&store, account, &mut folder, draft).await
+        }
+    }
 }

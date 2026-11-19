@@ -625,19 +625,20 @@ fn a_push_parked_offline_is_retried_after_the_cool_down() {
 }
 
 /// A push for a draft that is gone does nothing and succeeds; a Graph
-/// account mirrors nothing.
+/// account mirrors its drafts too, into Graph's well-known Drafts folder
+/// (PERSO-182).
 #[test]
-fn a_push_of_a_gone_draft_or_on_graph_does_nothing() {
+fn a_push_of_a_gone_draft_does_nothing_and_a_graph_account_mirrors() {
     let mut fx = Fixture::new();
     let mut folder = FakeFolder::default();
     block_on(push::push(&fx.mirror(1), &mut folder, "missing")).unwrap();
     assert!(folder.log.is_empty());
 
-    fx.write("a", "d1", "", "eins");
     fx.account.auth_method = crate::config::AuthMethod::Graph;
+    assert!(mirror_enabled(&fx.account));
+    assert_eq!(drafts_mailbox(&fx.store, &fx.account), "drafts");
+    fx.account.drafts.mirror = false;
     assert!(!mirror_enabled(&fx.account));
-    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
-    assert!(folder.log.is_empty());
 }
 
 /// A header edit (`draft.set_headers`, which rewrites the frontmatter in
@@ -2806,4 +2807,360 @@ fn a_retired_draft_without_its_key_deletes_its_copy_by_the_rows_message_id() {
         "{:?}",
         queued[0].op
     );
+}
+
+// ---------------------------------------------------------------------------
+// Graph (#0143 slice 3, PERSO-182)
+// ---------------------------------------------------------------------------
+
+use super::graph_folder::fake::FakeGraph;
+use super::graph_folder::{GraphDraftsFolder, GRAPH_UIDVALIDITY};
+
+/// [`Fixture`] for an account that uses Microsoft Graph.
+fn graph_fixture() -> Fixture {
+    let mut fx = Fixture::new();
+    fx.account.auth_method = crate::config::AuthMethod::Graph;
+    fx
+}
+
+/// The Drafts folder of `store`'s Graph account over the fake mailbox.
+fn on_graph<'s, 'g>(
+    store: &'s Store,
+    graph: &'g mut FakeGraph,
+) -> GraphDraftsFolder<'s, &'g mut FakeGraph> {
+    GraphDraftsFolder::new(store, "tum", graph)
+}
+
+fn graph_reconciled(fx: &Fixture, graph: &mut FakeGraph) -> ReconcileReport {
+    block_on(reconcile(&fx.mirror(9000), &mut on_graph(&fx.store, graph))).unwrap()
+}
+
+/// A Graph draft's first push creates its copy in Drafts under the draft's
+/// `Message-ID`, recorded under the Graph folder; an edit creates the new
+/// copy before it removes the old one for good, and leaves the file alone.
+#[test]
+fn a_graph_draft_is_created_in_drafts_and_an_edit_replaces_its_copy() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    link_new_draft(&fx.account, &path).unwrap();
+    let mid = mid_of(&path);
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1000),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    assert_eq!(graph.drafts().len(), 1);
+    let first = graph.drafts()[0].id.clone();
+    assert_eq!(
+        header_value(&graph.drafts()[0].raw, "Message-ID").as_deref(),
+        Some(mid.as_str())
+    );
+    let row = fx.row("d1").expect("a row");
+    assert_eq!(
+        (row.mailbox.as_str(), row.uidvalidity),
+        ("drafts", GRAPH_UIDVALIDITY)
+    );
+    assert_eq!(row.message_id.as_deref(), Some(mid.as_str()));
+
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &edited).unwrap();
+    block_on(push::push(
+        &fx.mirror(2000),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "untouched");
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+    assert!(String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo Robin"));
+    assert_eq!(
+        graph.log,
+        vec![
+            "create".to_string(),
+            "create".to_string(),
+            format!("remove {first}")
+        ],
+        "the new copy before the removal"
+    );
+    assert_ne!(fx.row("d1").unwrap().uid, row.uid);
+
+    block_on(push::push(
+        &fx.mirror(3000),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    assert_eq!(graph.log.len(), 3, "nothing owed");
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
+}
+
+/// Outlook edits a Graph draft in place, keeping its id: the new version is
+/// pulled into the file, and the reconcile after it has nothing to do.
+#[test]
+fn an_outlook_edit_in_place_of_a_graph_draft_is_pulled() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let mid = mid_of(&path);
+    let id = graph.drafts()[0].id.clone();
+    graph.edit(
+        &id,
+        &outlook_copy(
+            &mid,
+            "robin@example.com, kim@example.com",
+            "Angebot",
+            "<p>Hallo aus Outlook</p>",
+        ),
+    );
+
+    let report = graph_reconciled(&fx, &mut graph);
+    assert_eq!(report.pulled, 1, "{report:?}");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+    assert!(text.contains("kim@example.com"), "{text}");
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+    assert_eq!(
+        graph_reconciled(&fx, &mut graph),
+        ReconcileReport::default()
+    );
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
+}
+
+/// A draft started in Outlook on a Graph account becomes a Markdown file,
+/// and nothing is written back to the mailbox for it.
+#[test]
+fn a_draft_started_in_outlook_on_graph_is_imported() {
+    let fx = graph_fixture();
+    let mut graph = FakeGraph::default();
+    graph.put(&outlook_new_draft());
+    let report = graph_reconciled(&fx, &mut graph);
+    assert_eq!(report.imported, 1, "{report:?}");
+    let drafts = local_drafts("tum");
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].draft.frontmatter.subject, "Termin");
+    assert_eq!(
+        drafts[0].draft.frontmatter.server_message_id.as_deref(),
+        Some("<AM0PR-outlook-1@tum.de>")
+    );
+    assert_eq!(
+        graph_reconciled(&fx, &mut graph),
+        ReconcileReport::default()
+    );
+    assert!(graph.log.is_empty(), "{:?}", graph.log);
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
+}
+
+/// A Graph draft sent or deleted in Outlook retires its file once two
+/// reconciles in a row miss the copy; a discard in mp removes the copy.
+#[test]
+fn a_graph_copy_gone_retires_the_draft_and_a_discard_removes_the_copy() {
+    let fx = graph_fixture();
+    let gone = fx.write("weg", "d1", "", "eins");
+    let kept = fx.write("bleibt", "d2", "", "zwei");
+    let mut graph = FakeGraph::default();
+    for id in ["d1", "d2"] {
+        block_on(push::push(
+            &fx.mirror(1),
+            &mut on_graph(&fx.store, &mut graph),
+            id,
+        ))
+        .unwrap();
+    }
+    let first = graph.drafts()[0].id.clone();
+    graph.drop_item(&first);
+    assert_eq!(graph_reconciled(&fx, &mut graph).retired, 0, "one miss");
+    assert_eq!(graph_reconciled(&fx, &mut graph).retired, 1);
+    assert!(!gone.exists());
+
+    let mid = mid_of(&kept);
+    assert!(push::forget_retired(&fx.store, &fx.account, "d2", Some(&mid)).unwrap());
+    let queued = pending_ops::queued_ops(&fx.store, "tum").unwrap();
+    assert!(
+        matches!(&queued[0].op, ServerOp::DeleteDraft { mailbox, .. } if mailbox == "drafts"),
+        "{:?}",
+        queued[0].op
+    );
+    block_on(push::run(
+        &fx.mirror(2),
+        &mut on_graph(&fx.store, &mut graph),
+        &queued[0].op,
+    ))
+    .unwrap();
+    assert!(graph.drafts().is_empty(), "{:?}", graph.log);
+}
+
+fn graph_guard(
+    store: &Store,
+    account: &AccountConfig,
+    graph: &mut FakeGraph,
+    id: &str,
+) -> Result<(), String> {
+    let draft = find_local("tum", id).unwrap().draft;
+    block_on(send_guard::claim_for_send(
+        store,
+        account,
+        &mut on_graph(store, graph),
+        &draft,
+    ))
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// The approved draft on two machines sharing one Graph mailbox: the first
+/// send claims the copy, the second finds it gone and is refused.
+#[test]
+fn two_machines_sending_one_graph_draft_send_it_once() {
+    use crate::types::EmailStatus;
+    let mut graph = FakeGraph::default();
+    let mut m1 = Machine::new();
+    let mut m2 = Machine::new();
+    m1.account.auth_method = crate::config::AuthMethod::Graph;
+    m2.account.auth_method = crate::config::AuthMethod::Graph;
+    {
+        let _guard = m1.enter();
+        let path = Fixture::write_in_current("angebot", "d1", "", "Hallo Robin");
+        approve(&path);
+        block_on(push::push(
+            &m1.mirror(),
+            &mut on_graph(&m1.store, &mut graph),
+            "d1",
+        ))
+        .unwrap();
+    }
+    {
+        let _guard = m2.enter();
+        let report = block_on(reconcile(
+            &m2.mirror(),
+            &mut on_graph(&m2.store, &mut graph),
+        ))
+        .unwrap();
+        assert_eq!(report.imported, 1, "{report:?}");
+    }
+    assert_eq!(status_of(&m2, "d1"), EmailStatus::Approved);
+
+    {
+        let _guard = m1.enter();
+        graph_guard(&m1.store, &m1.account, &mut graph, "d1").expect("the first send goes ahead");
+    }
+    assert!(graph.drafts().is_empty(), "claimed: {:?}", graph.log);
+
+    let _guard = m2.enter();
+    let refused = graph_guard(&m2.store, &m2.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        refused.contains("sent or discarded on another machine"),
+        "{refused}"
+    );
+}
+
+/// A copy another session removed first is not this send's claim: the send
+/// is refused with its outcome unknown. A mailbox out of reach refuses it
+/// too, and nothing is sent.
+#[test]
+fn a_graph_claim_another_session_took_or_could_not_make_refuses_the_send() {
+    let fx = graph_fixture();
+    fx.write("angebot", "d1", "", "eins");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+
+    graph.unreachable = true;
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(refused.contains("could not be reached"), "{refused}");
+    graph.unreachable = false;
+
+    graph.removed_elsewhere = true;
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(refused.contains("outcome unknown"), "{refused}");
+}
+
+/// The drain over a Graph mailbox, as the daemon's executor runs it.
+struct GraphExecutor<'g> {
+    graph: &'g mut FakeGraph,
+    account: AccountConfig,
+}
+
+impl OpExecutor for GraphExecutor<'_> {
+    async fn execute(&mut self, op: &ServerOp) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("no message op in this test: {}", op.kind()))
+    }
+
+    async fn execute_draft(&mut self, store: &Store, op: &ServerOp) -> anyhow::Result<()> {
+        let email = EmailSettings::default();
+        let mirror = Mirror {
+            store,
+            account: &self.account,
+            email: &email,
+            now: 5000,
+        };
+        push::run(&mirror, &mut on_graph(store, self.graph), op).await
+    }
+}
+
+/// A push on a Graph account whose token the login gate holds as refused
+/// stays queued with no attempt spent and no request made, and lands once
+/// the sign-in works again: the refusal never loops.
+#[test]
+fn a_graph_push_behind_a_refused_token_stays_queued_and_asks_nothing() {
+    let fx = graph_fixture();
+    fx.write("a", "d1", "", "eins");
+    push::enqueue_owed(&fx.store, &fx.account).unwrap();
+    let blobs = BlobStore::for_account("tum");
+    let mut graph = FakeGraph::default();
+    graph.refused = true;
+    let mut now = crate::outbox::unix_now();
+    for _ in 0..pending_ops::MAX_ATTEMPTS * 2 {
+        let mut exec = GraphExecutor {
+            graph: &mut graph,
+            account: fx.account.clone(),
+        };
+        let result =
+            block_on(pending_ops::drain(&fx.store, &blobs, "tum", &mut exec, now)).unwrap();
+        assert_eq!((result.failed, result.still_open), (0, 1));
+        now += 100_000;
+    }
+    assert_eq!(graph.requests, 0);
+    assert_eq!(
+        pending_ops::queued_ops(&fx.store, "tum").unwrap()[0].attempts,
+        0
+    );
+
+    graph.refused = false;
+    let mut exec = GraphExecutor {
+        graph: &mut graph,
+        account: fx.account.clone(),
+    };
+    let result = block_on(pending_ops::drain(&fx.store, &blobs, "tum", &mut exec, now)).unwrap();
+    assert_eq!(result.completed, 1);
+    assert_eq!(graph.drafts().len(), 1);
+}
+
+/// The daemon's drain runs a Graph account's draft ops against its Graph
+/// mailbox rather than refusing them: a push of a draft that is gone
+/// succeeds without a request.
+#[test]
+fn the_account_executor_runs_draft_ops_on_graph() {
+    let mut fx = graph_fixture();
+    fx.account.oauth2 = Some(crate::config::OAuth2Settings {
+        client_id: "client".to_string(),
+        tenant_id: "tenant".to_string(),
+    });
+    let mut exec = pending_ops::AccountExecutor::resolve(&fx.account).unwrap();
+    let op = ServerOp::PushDraft {
+        draft_id: "missing".to_string(),
+        hash: None,
+    };
+    block_on(exec.execute_draft(&fx.store, &op)).unwrap();
 }

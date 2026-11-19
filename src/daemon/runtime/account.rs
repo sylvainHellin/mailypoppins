@@ -1292,10 +1292,8 @@ fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatchCell)
                 // failed sync of the mail folders does not hold it back, and
                 // a failed reconcile is logged rather than failing the tick.
                 // A refused login is the exception, since the reconcile needs
-                // the same login.
-                if cfg.auth_method != crate::config::AuthMethod::Graph
-                    && !login_was_refused(&synced)
-                {
+                // the same login, over IMAP or Graph alike.
+                if !login_was_refused(&synced) {
                     if let Err(e) = crate::draft_mirror::reconcile_account(&cfg).await {
                         warn!(
                             "[drafts] reconciling the drafts of {} failed: {e:#}",

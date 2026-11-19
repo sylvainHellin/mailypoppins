@@ -12,7 +12,7 @@
 //!
 //! The poll reconciles alone, without a sync: one `SELECT` of the Drafts
 //! folder, a `UID SEARCH` and the linking headers of each copy, on a pooled
-//! session. It waits [`DRAFTS_POLL`] from the last tick or the last poll,
+//! session; on Graph, one listing of the Drafts folder. It waits [`DRAFTS_POLL`] from the last tick or the last poll,
 //! whichever is later, so an account whose ticks come often enough is not
 //! polled at all. It runs under the runtime's turn
 //! ([`AccountRuntime::reconcile_drafts`]), so it never runs beside a tick or a
@@ -20,8 +20,8 @@
 //!
 //! # What gets a poll
 //!
-//! A ready runtime of an account that mirrors its drafts over IMAP and syncs
-//! on a schedule slower than the poll: an account with `sync_interval_secs =
+//! A ready runtime of an account that mirrors its drafts over IMAP or Graph
+//! (PERSO-182) and syncs on a schedule slower than the poll: an account with `sync_interval_secs =
 //! 0` asked for no background network, and one whose interval is no longer
 //! than the poll's is reconciled often enough by its ticks.
 //!
@@ -72,7 +72,8 @@ pub fn spawn(runtime: &Arc<AccountRuntime>, cfg: &AccountConfig) -> Option<JoinH
 fn pollable(runtime: &AccountRuntime, cfg: &AccountConfig, poll: Duration) -> Option<Duration> {
     let why_not = if !crate::draft_mirror::mirror_enabled(cfg) {
         "does not mirror its drafts"
-    } else if cfg.imap.host.trim().is_empty() {
+    } else if cfg.auth_method != crate::config::AuthMethod::Graph && cfg.imap.host.trim().is_empty()
+    {
         "has no IMAP server"
     } else if runtime.readiness() != Readiness::Ready {
         "is blocked"
@@ -283,5 +284,21 @@ mod tests {
         let mut never = cfg;
         never.imap.sync_interval_secs = 0;
         assert_eq!(pollable(&runtime, &never, DRAFTS_POLL), None);
+    }
+
+    /// A Graph account mirrors its drafts with no IMAP server, and is polled
+    /// on the same terms (PERSO-182).
+    #[tokio::test]
+    async fn a_mirrored_graph_account_is_polled_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let reconciles = Arc::new(AtomicUsize::new(0));
+        let runtime = started(dir.path(), &reconciles);
+        let mut graph = config("tum");
+        graph.auth_method = crate::config::AuthMethod::Graph;
+        graph.imap.host = String::new();
+        graph.imap.sync_interval_secs = 900;
+        assert_eq!(pollable(&runtime, &graph, DRAFTS_POLL), Some(DRAFTS_POLL));
+        graph.drafts.mirror = false;
+        assert_eq!(pollable(&runtime, &graph, DRAFTS_POLL), None);
     }
 }

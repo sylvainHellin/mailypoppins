@@ -906,27 +906,27 @@ impl OpExecutor for AccountExecutor {
     }
 
     async fn execute_draft(&mut self, store: &Store, op: &ServerOp) -> Result<()> {
+        use crate::draft_mirror::{folder, graph_folder, push};
+        let email = crate::config::load_global_config()
+            .map(|config| config.email)
+            .unwrap_or_default();
+        let mirror = push::Mirror {
+            store,
+            account: &self.account,
+            email: &email,
+            now: unix_now(),
+        };
         match &self.backend {
             Backend::Imap(config) => {
-                let email = crate::config::load_global_config()
-                    .map(|config| config.email)
-                    .unwrap_or_default();
-                let mirror = crate::draft_mirror::push::Mirror {
-                    store,
-                    account: &self.account,
-                    email: &email,
-                    now: unix_now(),
-                };
-                let mut folder =
-                    crate::draft_mirror::folder::ImapDraftsFolder::new((**config).clone());
-                crate::draft_mirror::push::run(&mirror, &mut folder, op).await
+                let mut folder = folder::ImapDraftsFolder::new((**config).clone());
+                push::run(&mirror, &mut folder, op).await
             }
-            // Not built: a Graph account mirrors nothing, so nothing queues
-            // one of these for it, and a row that predates the switch is
-            // refused into `failed` rather than run against the wrong folder.
-            Backend::Graph(_) => Err(anyhow::anyhow!(
-                "the drafts mirror is not built for Graph accounts"
-            )),
+            Backend::Graph(config) => {
+                let api = graph_folder::LiveGraphDrafts::new((**config).clone());
+                let mut folder =
+                    graph_folder::GraphDraftsFolder::new(store, &self.account.name, api);
+                push::run(&mirror, &mut folder, op).await
+            }
         }
     }
 }

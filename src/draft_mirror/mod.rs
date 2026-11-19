@@ -63,10 +63,9 @@ pub const fn approval_travels() -> bool {
 }
 
 /// Whether `account`'s drafts are mirrored: `[accounts.drafts] mirror`, on by
-/// default, and never on a Graph account, whose half of the mirror is not
-/// built.
+/// default, over IMAP and over Graph alike (PERSO-182).
 pub fn mirror_enabled(account: &AccountConfig) -> bool {
-    account.drafts.mirror && account.auth_method != AuthMethod::Graph
+    account.drafts.mirror
 }
 
 /// The hash a [`draft_sync`](crate::store::draft_sync) row records of a draft
@@ -86,8 +85,13 @@ pub fn file_hash(bytes: &[u8]) -> String {
 /// The server folder `account` mirrors its drafts into: the `drafts` role of
 /// its mailbox catalogue (#0141), which is the folder the server marks
 /// `\Drafts`, the one config names, or the one called `Drafts`; `Drafts`
-/// itself for an account whose server was never listed.
+/// itself for an account whose server was never listed. A Graph account's is
+/// Graph's well-known `drafts`, whatever the folder is called in its language
+/// ([`graph_folder`]).
 pub fn drafts_mailbox(store: &Store, account: &AccountConfig) -> String {
+    if account.auth_method == AuthMethod::Graph {
+        return crate::graph::drafts::DRAFTS_FOLDER.to_string();
+    }
     crate::catalogue::Catalogue::from_store(store, account)
         .role(crate::catalogue::FolderRole::Drafts)
         .map(|folder| folder.server.clone())
@@ -299,16 +303,17 @@ pub fn find_local(account: &str, id: &str) -> Option<LocalDraft> {
         .find(|draft| draft.id == id)
 }
 
-/// Reconcile `account`'s drafts with its server Drafts folder over IMAP, the
-/// pass the daemon runs after every sync (#0143). Nothing on an account that
-/// does not mirror; the configuration's credentials are what the sync used.
+/// Reconcile `account`'s drafts with its server Drafts folder over IMAP or
+/// Graph, the pass the daemon runs after every sync (#0143). Nothing on an
+/// account that does not mirror; the configuration's credentials are what the
+/// sync used.
 pub async fn reconcile_account(
     account: &AccountConfig,
 ) -> anyhow::Result<reconcile::ReconcileReport> {
     if !mirror_enabled(account) {
         return Ok(reconcile::ReconcileReport::default());
     }
-    let imap = crate::config::ImapConfig::load(account)?;
+    let backend = crate::ops::Backend::resolve(account)?;
     let store = Store::open(crate::config::store_path(&account.name))?;
     let email = crate::config::load_global_config()
         .map(|config| config.email)
@@ -319,8 +324,17 @@ pub async fn reconcile_account(
         email: &email,
         now: crate::outbox::unix_now(),
     };
-    let mut folder = folder::ImapDraftsFolder::new(imap);
-    reconcile::reconcile(&mirror, &mut folder).await
+    match backend {
+        crate::ops::Backend::Imap(imap) => {
+            let mut folder = folder::ImapDraftsFolder::new(*imap);
+            reconcile::reconcile(&mirror, &mut folder).await
+        }
+        crate::ops::Backend::Graph(graph) => {
+            let api = graph_folder::LiveGraphDrafts::new(*graph);
+            let mut folder = graph_folder::GraphDraftsFolder::new(&store, &account.name, api);
+            reconcile::reconcile(&mirror, &mut folder).await
+        }
+    }
 }
 
 #[cfg(test)]
