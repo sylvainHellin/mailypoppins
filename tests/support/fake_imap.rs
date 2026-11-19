@@ -1077,7 +1077,18 @@ async fn serve(
                     }
                     shared.body_fetches.fetch_add(1, Ordering::SeqCst);
                 }
-                on_selected(&shared, &tag, &command, uid, args, &line, &name, read_only)
+                on_selected(
+                    &shared,
+                    &Command {
+                        tag: &tag,
+                        verb: &command,
+                        uid,
+                        args,
+                        line: &line,
+                    },
+                    &name,
+                    read_only,
+                )
             }
             _ => format!("{tag} OK {command} completed\r\n").into_bytes(),
         };
@@ -1141,18 +1152,29 @@ fn append(
     format!("{exists}{tag} OK {code}APPEND completed\r\n").into_bytes()
 }
 
-/// The commands that act on the selected folder `name`.
-#[allow(clippy::too_many_arguments)]
-fn on_selected(
-    shared: &Shared,
-    tag: &str,
-    command: &str,
+/// One command line as the client sent it.
+struct Command<'a> {
+    tag: &'a str,
+    /// The verb, upper case, the one after `UID` for a UID command.
+    verb: &'a str,
+    /// Whether it came as `UID <verb>`, its numbers UIDs.
     uid: bool,
-    args: &[Token],
-    line: &str,
-    name: &str,
-    read_only: bool,
-) -> Vec<u8> {
+    /// The arguments after the verb.
+    args: &'a [Token],
+    /// The whole line, for what the tokens do not keep apart.
+    line: &'a str,
+}
+
+/// The commands that act on the selected folder `name`, opened read-only
+/// when `read_only`.
+fn on_selected(shared: &Shared, cmd: &Command<'_>, name: &str, read_only: bool) -> Vec<u8> {
+    let Command {
+        tag,
+        verb: command,
+        uid,
+        args,
+        line,
+    } = *cmd;
     let mailbox = shared.mailbox(name);
     let max = if uid {
         mailbox.max_uid()
