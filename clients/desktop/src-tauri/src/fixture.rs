@@ -3462,6 +3462,7 @@ impl State {
                 state: None,
                 completed: 0,
                 deduped: 0,
+                partial: false,
             };
         };
         row.updated = now;
@@ -3477,6 +3478,7 @@ impl State {
                     state: Some(row.state.clone()),
                     completed: 0,
                     deduped: 0,
+                    partial: false,
                 };
             }
             Some(SendSimulation::Partial) => {
@@ -3496,6 +3498,7 @@ impl State {
                     state: Some("done".into()),
                     completed: usize::from(owes_copy),
                     deduped: 0,
+                    partial: true,
                 };
             }
             Some(SendSimulation::PendingAppend) => {
@@ -3507,6 +3510,7 @@ impl State {
                     state: Some(row.state.clone()),
                     completed: 0,
                     deduped: 0,
+                    partial: false,
                 };
             }
             None => {}
@@ -3519,6 +3523,7 @@ impl State {
             state: None,
             completed: usize::from(owes_copy),
             deduped: 0,
+            partial: false,
         }
     }
 
@@ -9512,7 +9517,8 @@ mod tests {
                 row_id: row.id,
                 state: None,
                 completed: 1,
-                deduped: 0
+                deduped: 0,
+                partial: false
             }
         );
         let listing = outbox_of(&f, "work");

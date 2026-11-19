@@ -356,16 +356,22 @@ function retryStarting(s: AppState): boolean {
   return s.outboxActions.some((a) => a.kind === "retry" && a.operation_id === null);
 }
 
+/** The Sent copies a retry's drain filed and found already filed, as a suffix, empty when it did neither. */
+function copyCounts(completed: number, deduped: number): string {
+  const filed = completed - deduped;
+  const parts: string[] = [];
+  if (filed > 0) parts.push(`${filed} Sent ${filed === 1 ? "copy" : "copies"} filed`);
+  if (deduped > 0) parts.push(filed > 0 ? `${deduped} already on the server` : `${deduped} Sent ${deduped === 1 ? "copy" : "copies"} already on the server`);
+  return parts.length > 0 ? `; ${parts.join(", ")}` : "";
+}
+
 /** What a settled retry says: the CLI's "row N is gone" or "row N is now …", in the GUI's words. */
 export function retryResult(outcome: OutboxRetryOutcome): { kind: "applied" | "send_failed" | "send_partial"; text: string } {
   const id = outcome.row_id;
-  // `deduped` is absent from a daemon before PERSO-210.
-  const copies =
-    (outcome.deduped ?? 0) > 0
-      ? "; its Sent copy was already on the server"
-      : outcome.completed > 0
-        ? "; its Sent copy is filed"
-        : "";
+  // The counts are every row the retry's drain finished, not this row's alone,
+  // so they are said as counts, as the CLI says them. `deduped` and `partial`
+  // are absent from a daemon before PERSO-210.
+  const copies = copyCounts(outcome.completed, outcome.deduped ?? 0);
   switch (outcome.state) {
     case null:
       return { kind: "applied", text: `Outbox row ${id} sent${copies}` };
@@ -374,7 +380,9 @@ export function retryResult(outcome: OutboxRetryOutcome): { kind: "applied" | "s
     case "sent_pending_append":
       return { kind: "applied", text: `Outbox row ${id} sent; its Sent copy is still owed` };
     case "done":
-      return { kind: "send_partial", text: `Outbox row ${id} partly delivered; the outbox names who never got it` };
+      return outcome.partial
+        ? { kind: "send_partial", text: `Outbox row ${id} partly delivered; the outbox names who never got it` }
+        : { kind: "applied", text: `Outbox row ${id} sent${copies}` };
     case "pending_send":
       return { kind: "applied", text: `Outbox row ${id} is queued again; the next sync sends it` };
     default:
@@ -393,7 +401,7 @@ function retryEnded(s: AppState, action: OutboxAction, end: OperationEnd): AppSt
     const why = end.error ?? end.state;
     return pushNotice(next, { kind: "send_failed", account, text: `The retry of outbox row ${action.row_id} failed: ${why}` });
   }
-  const outcome = (end.result ?? { row_id: action.row_id, state: null, completed: 0, deduped: 0 }) as OutboxRetryOutcome;
+  const outcome = (end.result ?? { row_id: action.row_id, state: null, completed: 0, deduped: 0, partial: false }) as OutboxRetryOutcome;
   const { kind, text } = retryResult(outcome);
   return pushNotice(next, { kind, account, text });
 }

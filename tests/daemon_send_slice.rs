@@ -1619,6 +1619,7 @@ fn the_retry_wordings_report_the_row_and_the_copies() {
         state: Some(OutboxState::Done.as_str().to_string()),
         completed: 1,
         deduped: 0,
+        partial: false,
     };
     assert_eq!(
         outbox_retry_lines(&landed),
@@ -1639,6 +1640,7 @@ fn the_retry_wordings_report_the_row_and_the_copies() {
         state: None,
         completed: 0,
         deduped: 0,
+        partial: false,
     };
     assert_eq!(
         outbox_retry_lines(&gone),
@@ -1658,6 +1660,7 @@ fn the_retry_wordings_report_the_row_and_the_copies() {
         state: Some(OutboxState::Done.as_str().to_string()),
         completed: 3,
         deduped: 1,
+        partial: false,
     };
     assert_eq!(
         outbox_retry_lines(&found)[2..],
@@ -3239,6 +3242,28 @@ fn a_routed_send_refused_by_every_recipient_can_be_corrected_and_sent() {
     );
     assert_eq!(resent[0].1, fixture::TO);
     assert!(resent[0].2, "and the server took it: {resent:?}");
+}
+
+/// A retry that delivers a parked row to every recipient settles with the
+/// row `done` and not partial, so a client tells it from a partly delivered
+/// row, which is `done` too.
+///
+/// Routed side only (fake transport).
+#[tokio::test]
+async fn a_retry_that_delivers_to_everyone_is_done_and_not_partial() {
+    let slice = Slice::with_fake_transport();
+    let mut conn = slice.connect().await;
+    let started = call(
+        &mut conn,
+        "send.outbox_retry",
+        json!({"account": fixture::ACCOUNT, "row_id": fixture::FAILED_ROW}),
+    )
+    .await;
+    let settled = settle(&mut conn, &operation_id(&started)).await;
+    assert_eq!(settled["state"], "succeeded", "{settled}");
+    let result = &settled["result"];
+    assert_eq!(result["state"], "done", "{result}");
+    assert_eq!(result["partial"], false, "{result}");
 }
 
 /// `tests/outbox_integration.rs::two_racing_drains_append_each_row_exactly_once`,

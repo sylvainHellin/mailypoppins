@@ -23,4 +23,12 @@ completed: number,
  * folder, by the Message-ID search an earlier APPEND whose answer was
  * lost arms, and filed none: absent from a daemon before PERSO-210.
  */
-deduped: number, };
+deduped: number,
+/**
+ * Whether the row is a `done` row that kept a note, a message some
+ * recipient never got (`SND-08`), rather than one that reached everyone;
+ * absent from a daemon before PERSO-210. `completed` and `deduped` are
+ * the whole drain's, every row of the account it finished, so this is
+ * what speaks for the retried row alone.
+ */
+partial: boolean, };

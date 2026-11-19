@@ -218,4 +218,11 @@ pub struct OutboxRetryOutcome {
     /// lost arms, and filed none: absent from a daemon before PERSO-210.
     #[serde(default)]
     pub deduped: usize,
+    /// Whether the row is a `done` row that kept a note, a message some
+    /// recipient never got (`SND-08`), rather than one that reached everyone;
+    /// absent from a daemon before PERSO-210. `completed` and `deduped` are
+    /// the whole drain's, every row of the account it finished, so this is
+    /// what speaks for the retried row alone.
+    #[serde(default)]
+    pub partial: bool,
 }

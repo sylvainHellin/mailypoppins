@@ -142,7 +142,7 @@ describe("retry and discard", () => {
     s = run(s, finished("op-r", "succeeded", { row_id: 5, state: null, completed: 1 }));
     expect(s.outboxActions).toEqual([]);
     expect(isStale(s.outbox.work)).toBe(true);
-    expect(last(s)).toMatchObject({ kind: "applied", text: "Outbox row 5 sent; its Sent copy is filed" });
+    expect(last(s)).toMatchObject({ kind: "applied", text: "Outbox row 5 sent; 1 Sent copy filed" });
   });
 
   it("an end that overtakes the retry's answer is held for it", () => {
@@ -157,7 +157,7 @@ describe("retry and discard", () => {
 
   it("a settle or a drop after a restart ends the retry", () => {
     const status = (state: string): OperationStatus =>
-      ({ operation_id: "op-r", method: "send.outbox_retry", state, scope: "durable", progress: null, result: { row_id: 5, state: "done", completed: 1 }, error: null }) as OperationStatus;
+      ({ operation_id: "op-r", method: "send.outbox_retry", state, scope: "durable", progress: null, result: { row_id: 5, state: "done", completed: 1, deduped: 0, partial: true }, error: null }) as OperationStatus;
     let s = opened([row(5)]);
     s = run(s, { type: "outbox_action_requested", token: 1, kind: "retry", account: "work", row_id: 5 }, { type: "outbox_retry_started", token: 1, operation_id: "op-r" });
     const settled = run(s, { type: "gui_event", event: { type: "operation_settled", operation_id: "op-r", kind: "outbox_retry", status: status("succeeded") } });
@@ -229,11 +229,15 @@ describe("the confirmations and the words", () => {
   });
 
   it("says a retry's outcome in each of the row's ends", () => {
-    expect(retryResult({ row_id: 5, state: "sent_pending_append", completed: 0, deduped: 0 }).text).toBe("Outbox row 5 sent; its Sent copy is still owed");
-    expect(retryResult({ row_id: 5, state: "pending_send", completed: 0, deduped: 0 }).text).toBe("Outbox row 5 is queued again; the next sync sends it");
-    expect(retryResult({ row_id: 5, state: null, completed: 0, deduped: 0 }).text).toBe("Outbox row 5 sent");
-    // A copy the dedup search found, after an APPEND whose answer was lost, was not filed by this retry (PERSO-210).
-    expect(retryResult({ row_id: 5, state: null, completed: 1, deduped: 1 }).text).toBe("Outbox row 5 sent; its Sent copy was already on the server");
+    expect(retryResult({ row_id: 5, state: "sent_pending_append", completed: 0, deduped: 0, partial: false }).text).toBe("Outbox row 5 sent; its Sent copy is still owed");
+    expect(retryResult({ row_id: 5, state: "pending_send", completed: 0, deduped: 0, partial: false }).text).toBe("Outbox row 5 is queued again; the next sync sends it");
+    expect(retryResult({ row_id: 5, state: null, completed: 0, deduped: 0, partial: false }).text).toBe("Outbox row 5 sent");
+    // The counts are the whole drain's, so they are worded as counts, never as this row's copy (PERSO-210).
+    expect(retryResult({ row_id: 5, state: null, completed: 1, deduped: 1, partial: false }).text).toBe("Outbox row 5 sent; 1 Sent copy already on the server");
+    expect(retryResult({ row_id: 5, state: null, completed: 3, deduped: 1, partial: false }).text).toBe("Outbox row 5 sent; 2 Sent copies filed, 1 already on the server");
+    // A row the retry delivered to everyone is done and not partial; only a done row that kept a note is partly delivered.
+    expect(retryResult({ row_id: 5, state: "done", completed: 1, deduped: 0, partial: false })).toEqual({ kind: "applied", text: "Outbox row 5 sent; 1 Sent copy filed" });
+    expect(retryResult({ row_id: 5, state: "done", completed: 0, deduped: 0, partial: true }).kind).toBe("send_partial");
   });
 
   it("counts the queue depth from the outbox, the sends and the pending changes", () => {

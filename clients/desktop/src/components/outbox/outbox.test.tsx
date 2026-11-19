@@ -132,7 +132,7 @@ describe("the outbox view", () => {
     act(() => emitEnvelope("state.invalidate", { resource: "outbox:work", scope: { query: "counts" } }));
     act(() => emitEnvelope("operation.finished", { operation_id: "fixture-op-retry-1", state: "succeeded", result: { row_id: 5, state: null, completed: 1 } }));
     const area = screen.getByRole("region", { name: "Activity" });
-    await waitFor(() => expect(area).toHaveTextContent("Outbox row 5 sent; its Sent copy is filed"));
+    await waitFor(() => expect(area).toHaveTextContent("Outbox row 5 sent; 1 Sent copy filed"));
     await waitFor(() => expect(rowEl(5)).toBeNull());
   });
 
