@@ -312,33 +312,123 @@ async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Ar
     }
 }
 
-/// Bring the message `message_id` of `mailbox` (a mailbox key) of
-/// `account` into the store from the server, as `message.fetch` does, for a
-/// caller that is no operation: a delete the server refused, whose row the
-/// commit already dropped (PERSO-210). Logs what it came to.
-pub(crate) async fn refetch_into_store(
+/// Restore the row a delete the server refused had dropped (PERSO-210): the
+/// copy of `message_id` under `uid` in `mailbox` (a mailbox key) of
+/// `account`, fetched from the server by that UID and ingested under it, for
+/// a caller that is no operation. Logs what it came to.
+///
+/// The row is judged present by its mailbox and UID, not by its Message-ID
+/// across the account as `message.fetch` judges a search hit: the same
+/// message in Sent, in Archive or as a twin in the same mailbox is another
+/// row and restores nothing. A twin is no rebind candidate either, its UID
+/// being one the server still lists ([`crate::ingest::RebindPolicy`]).
+pub(crate) async fn restore_deleted_row(
     snapshot: &super::super::config::Snapshot,
     account: &str,
     mailbox: &str,
+    uid: i64,
     message_id: &str,
     canonical: &Arc<CanonicalState>,
 ) {
     let params = json!({"account": account, "mailbox": mailbox, "message_id": message_id});
-    let fetched = match fetch_request(&params, snapshot) {
-        Ok(request) => fetch_into_store(request, canonical).await,
-        Err(e) => Err(e),
-    };
-    match fetched {
-        Ok(settled) => log::info!(
-            "[mutation] {message_id} is back in {account}/{mailbox} from the server: {}",
-            settled["selector"]
+    match restore(snapshot, &params, uid, canonical).await {
+        Ok(Some(selector)) => {
+            log::info!("[mutation] {selector} is back in the store from the server")
+        }
+        Ok(None) => log::info!(
+            "[mutation] {account}/{mailbox} UID {uid} is in the store; nothing to restore"
         ),
         Err(e) => log::warn!(
-            "[mutation] could not fetch {message_id} of {account}/{mailbox} back from the \
-             server; the next sync that reaches it brings it back: {}",
+            "[mutation] could not fetch {account}/{mailbox} UID {uid} ({message_id}) back from \
+             the server; the next sync that reaches it brings it back: {}",
             e.message
         ),
     }
+}
+
+/// [`restore_deleted_row`]'s work: the selector of the row restored, `None`
+/// when the store holds that UID of that mailbox already.
+async fn restore(
+    snapshot: &super::super::config::Snapshot,
+    params: &Value,
+    uid: i64,
+    canonical: &Arc<CanonicalState>,
+) -> Result<Option<String>, RpcError> {
+    let request = fetch_request(params, snapshot)?;
+    let name = request.account.name.clone();
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let copies = read::find_by_message_id(&store, &name, &request.message_id).map_err(|e| {
+        internal(format!(
+            "looking up {} in {name}: {e:#}",
+            request.message_id
+        ))
+    })?;
+    let twins: std::collections::HashSet<i64> = copies
+        .iter()
+        .filter(|row| row.mailbox == request.mailbox)
+        .map(|row| row.uid)
+        .collect();
+    if twins.contains(&uid) {
+        return Ok(None);
+    }
+    super::open_secrets(&name, request.secrets)?;
+    let fetched = if request.account.auth_method == AuthMethod::Graph {
+        // A Graph row's UID is the hash of its Message-ID, so the copy the
+        // Message-ID names is the one deleted.
+        graph_fetch(&request)
+            .await
+            .map(|f| (f.uid, f.raw, f.email, f.threading))
+    } else {
+        imap_fetch_uid(&request, uid)
+            .await
+            .map(|(raw, email)| (uid, Some(raw), email, None))
+    };
+    let (uid, raw, email, threading) = fetched.map_err(|e| super::server_error(&name, &e))?;
+    let blobs = BlobStore::for_account(&name);
+    let outcome = crate::ingest::ingest_message_threaded(
+        &store,
+        &blobs,
+        &crate::ingest::IngestInput {
+            account: &name,
+            mailbox: &request.mailbox,
+            uid,
+            email: &email,
+            raw: raw.as_deref(),
+        },
+        &crate::ingest::RebindPolicy::UnlessListed(&twins),
+        threading.as_ref(),
+    )
+    .map_err(|e| internal(format!("{e:#}")))?;
+    let row = read::find_by_id(&store, outcome.row_id)
+        .map_err(|e| internal(format!("{e:#}")))?
+        .ok_or_else(|| internal("the restored row vanished".to_string()))?;
+    if let Ok(counts) = read::mailbox_read_counts(&store, &name) {
+        if let Some((mailbox, counts)) = counts.into_iter().find(|(m, _)| *m == request.mailbox) {
+            canonical.apply(Change::MailboxCounts {
+                account: name.clone(),
+                mailbox,
+                total: counts.total as u64,
+                unread: counts.unread as u64,
+                badge: counts.total as u64,
+            });
+        }
+    }
+    Ok(Some(Selector::for_message(&name, &row).to_string()))
+}
+
+/// The raw bytes and parse of the copy under `uid` in the request's server
+/// mailbox, an error when the server no longer holds it.
+async fn imap_fetch_uid(
+    request: &FetchRequest,
+    uid: i64,
+) -> anyhow::Result<(Vec<u8>, FetchedEmail)> {
+    let uid = u32::try_from(uid).map_err(|_| anyhow::anyhow!("UID {uid} is no server UID"))?;
+    let imap = crate::config::ImapConfig::load(&request.account)?;
+    let mut session = crate::imap_client::open_imap_session(&imap).await?;
+    let found = crate::imap_client::fetch_raw_by_uid(&mut session, &request.server_name, uid).await;
+    session.logout().await.ok();
+    found?.ok_or_else(|| anyhow::anyhow!("the server no longer has UID {uid}"))
 }
 
 /// [`run_fetch`]'s work: the settled answer, or the refusal.

@@ -24,7 +24,8 @@ pub use batch::add_flag_in_mailboxes;
 #[cfg(test)]
 pub(crate) use fetch::{arrival_coverage, ceiling};
 pub use fetch::{
-    fetch_raw_by_message_id, fetch_uids_on_session, search_stubs_on_session, vanished_uids,
+    fetch_raw_by_message_id, fetch_raw_by_uid, fetch_uids_on_session, search_stubs_on_session,
+    vanished_uids,
 };
 pub use ops::{
     add_flag_on_server, delete_email_on_server, mark_read_on_server, mark_unread_on_server,

@@ -2283,16 +2283,18 @@ async fn mutate_with<E: OpExecutor>(
         }
         if settled.is_err() && kind == Kind::Delete {
             // A delete has no rollback: its row is gone though the server,
-            // which refused it, still holds the message. The message is
-            // fetched back by its Message-ID, as `message.fetch` does, before
-            // the refusal is answered, whatever its age: a quick sync reaches
-            // only the newest UIDs of the mailbox (PERSO-210). Only a settle
+            // which refused it, still holds the message. That copy is fetched
+            // back by its mailbox and UID before the refusal is answered,
+            // whatever its age (a quick sync reaches only the newest UIDs of
+            // the mailbox) and whatever other copies of the message the store
+            // holds (PERSO-210). Only a settle
             // the server refused: a refusal before the commit left the row
             // where it was.
-            super::message_server::refetch_into_store(
+            super::message_server::restore_deleted_row(
                 snapshot,
                 &name,
                 &row.mailbox,
+                row.uid,
                 &row.message_id,
                 canonical,
             )

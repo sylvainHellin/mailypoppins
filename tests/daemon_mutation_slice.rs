@@ -1848,7 +1848,7 @@ fn twin_a_selector_naming_an_unconfigured_account_fails_with_that_account_named(
 
 mod wire {
     use super::support::wire_fixture::{
-        assert_ok, mail, stderr, stdout, WireRoot, ARCHIVE, INBOX, TRASH,
+        assert_ok, mail, stderr, stdout, WireRoot, ARCHIVE, INBOX, SENT, TRASH,
     };
 
     /// Every op the store still owes the server: `(kind, state)`.
@@ -2097,5 +2097,68 @@ mod wire {
             Some(&(1, "<m1@example.org>".to_string()))
         );
         assert_eq!(wire.local("inbox").len(), 120);
+    }
+
+    /// A refused delete restores the row it deleted even when another row
+    /// keeps the Message-ID: here the message is also in Sent, as mail sent to
+    /// oneself is. Judged by the Message-ID across the account, the refusal
+    /// took the Sent row for the deleted one and restored nothing.
+    #[test]
+    fn a_refused_delete_restores_its_row_when_sent_holds_the_same_message() {
+        let mut wire = WireRoot::new();
+        let own = mail("own", "wire@example.com", "To myself", "a note");
+        wire.imap.set_mail(INBOX, 11, vec![(1, own.clone())]);
+        wire.imap.set_mail(SENT, 12, vec![(1, own)]);
+        wire.start(&[]);
+        wire.sync();
+        assert_eq!(
+            wire.local("sent"),
+            vec![(1, "<own@example.org>".to_string())]
+        );
+
+        wire.imap
+            .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
+        let out = wire.mp(&["delete", "mp://wire/inbox/<own@example.org>"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+
+        assert_eq!(
+            wire.local("inbox"),
+            vec![(1, "<own@example.org>".to_string())],
+            "the deleted inbox row is back"
+        );
+        assert_eq!(
+            wire.local("sent"),
+            vec![(1, "<own@example.org>".to_string())]
+        );
+    }
+
+    /// A refused delete of one of two copies in a mailbox, one Message-ID
+    /// under two UIDs, restores that copy under its own UID and leaves the
+    /// other where it was, rather than taking the twin for it or rebinding
+    /// the twin to the restored UID.
+    #[test]
+    fn a_refused_delete_of_one_twin_restores_it_beside_the_other() {
+        let mut wire = WireRoot::new();
+        let twin = mail("twin", "ada@example.org", "Twice", "the same");
+        wire.imap
+            .set_mail(INBOX, 11, vec![(1, twin.clone()), (2, twin)]);
+        wire.start(&[]);
+        wire.sync();
+        let both = vec![
+            (1, "<twin@example.org>".to_string()),
+            (2, "<twin@example.org>".to_string()),
+        ];
+        assert_eq!(wire.local("inbox"), both);
+
+        wire.imap
+            .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
+        let out = wire.mp(&["delete", "mp://wire/inbox/twin@example.org/2"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+
+        assert_eq!(
+            wire.local("inbox"),
+            both,
+            "both copies, each under its own UID"
+        );
     }
 }
