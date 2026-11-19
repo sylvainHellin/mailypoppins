@@ -934,7 +934,8 @@ A sent draft is retired into `drafts/.retired/`, out of the scan, so its id reso
 `sent_copy` is the selector of the sent copy the account's store holds, `null` when the store is not ready or holds no copy, and the message then names the `Message-ID` instead when the record has one.
 A draft the draft mirror retired as `drafts/.retired/<stem>.copy-gone.md` (or `.copy-gone-<n>.md`), because its copy left the server's Drafts folder, was sent or discarded from another machine or mail client, which the mirror cannot tell apart.
 With no `status: sent` record of the id, which wins when both exist, every method that resolves a draft id answers it as `-32602` with `{account, id, copy_gone: true}` (PERSO-317).
-Its message says the copy left the Drafts folder and that the draft was sent or discarded elsewhere, and names `mp search -A <account> --mailbox sent --subject <subject>`, the server search of the account's sent mail, which drops `--subject` when the record has none.
+Its message says the copy left the Drafts folder and that the draft was sent or discarded elsewhere, and names `mp search -A <account> --mailbox sent --subject=<subject>`, the server search of the account's sent mail, which drops `--subject` when the record has none.
+The subject shares one word with its flag, so a subject starting with `-` is not read as a flag.
 A copy that comes back is revived into `drafts/` by the mirror and resolves as a live draft again.
 A retired draft that was discarded here rather than sent keeps the plain `{account, id}` miss.
 An invalid draft is not a refusal: `draft.validate` reports it and the exit code stays the client's.

@@ -1635,12 +1635,16 @@ fn retired_records(account: &str, id: &str) -> Vec<(PathBuf, EmailFrontmatter)> 
 /// machine or mail client, and the mirror cannot tell which, so the answer
 /// says both and names the server search of the account's sent mail that
 /// tells them apart, by the draft's subject when it has one.
+/// The subject goes in the same word as its flag, `--subject=<subject>`: as
+/// a word of its own, a subject starting with `-` is read as a flag and the
+/// command fails as printed.
 /// `copy_gone: true` in the data tells the case apart from a plain miss.
 fn copy_gone(account: &str, id: &str, record: &EmailFrontmatter) -> RpcError {
     let subject = record.subject.trim();
+    let subject_arg = format!("--subject={subject}");
     let mut args = vec!["search", "-A", account, "--mailbox", "sent"];
     if !subject.is_empty() {
-        args.extend(["--subject", subject]);
+        args.push(&subject_arg);
     }
     let search = mp_core::mp_command::here(&args);
     RpcError {
@@ -1938,7 +1942,7 @@ mod tests {
             gone.message,
             "the copy of aaa111 in tum/drafts left the server's Drafts folder, \
              so it was sent or discarded from another machine or mail client; \
-             `mp search -A tum --mailbox sent --subject 'Robin'\\''s offer'` \
+             `mp search -A tum --mailbox sent '--subject=Robin'\\''s offer'` \
              shows whether it went out"
         );
         assert_eq!(
@@ -1968,6 +1972,52 @@ mod tests {
             );
             assert_eq!(miss.data, Some(json!({"account": "tum", "id": id})));
         }
+    }
+
+    /// The search a copy-gone answer names carries the subject in the same
+    /// word as its flag (PERSO-317): a subject that starts with `-`, read as
+    /// a word of its own, is a flag to `mp`'s parser, which refuses it, so
+    /// the command would fail as printed. The parser lives in the binary and
+    /// the repo has no shell splitter, so the printed string is the check.
+    #[test]
+    fn the_copy_gone_search_keeps_a_dash_subject_with_its_flag() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let accounts = vec![AccountConfig {
+            name: "tum".to_string(),
+            default_from: "me@tum.de".to_string(),
+            ..Default::default()
+        }];
+        let retired = crate::config::drafts_dir("tum").join(crate::draft::RETIRED_DIR);
+        std::fs::create_dir_all(&retired).expect("the retired dir");
+        std::fs::write(
+            retired.join("rechnung.copy-gone.md"),
+            "---\nid: \"eee555\"\nsubject: \"- Rechnung\"\nstatus: draft\n---\n\nHallo\n",
+        )
+        .expect("a retired record");
+
+        let gone = path(&json!({"account": "tum", "selector": "eee555"}), &accounts)
+            .expect_err("a retired draft has no path");
+        assert!(
+            gone.message
+                .ends_with("`mp search -A tum --mailbox sent '--subject=- Rechnung'` shows whether it went out"),
+            "the subject stays one word with its flag:\n{}",
+            gone.message
+        );
+
+        std::fs::write(
+            retired.join("angebot.copy-gone.md"),
+            "---\nid: \"fff666\"\nsubject: \"Angebot\"\nstatus: draft\n---\n\nHallo\n",
+        )
+        .expect("a retired record");
+        let plain = path(&json!({"account": "tum", "selector": "fff666"}), &accounts)
+            .expect_err("a retired draft has no path");
+        assert!(
+            plain.message.ends_with(
+                "`mp search -A tum --mailbox sent '--subject=Angebot'` shows whether it went out"
+            ),
+            "every subject takes the one form:\n{}",
+            plain.message
+        );
     }
 
     /// `w` on a search hit the store does not hold is `draft.forward` with
