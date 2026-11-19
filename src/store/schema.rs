@@ -768,6 +768,7 @@ pub fn ensure_additive_tables(conn: &Connection) -> Result<()> {
     }
     crate::catalogue::listing::ensure_columns(conn)?;
     super::draft_sync::ensure_columns(conn)?;
+    super::graph_draft_versions::ensure_columns(conn)?;
     super::calendar::ensure_columns(conn)
 }
 

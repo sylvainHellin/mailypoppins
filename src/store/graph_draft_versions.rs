@@ -38,6 +38,15 @@ pub fn create_sql() -> String {
     )
 }
 
+/// Add the `item_key` column to a table the build before it created
+/// ([`super::schema::add_columns`]). A read when nothing is missing; the
+/// versions it leaves `NULL` read their own key as their draft's first
+/// ([`version`]). One such table exists: a test run of that build opened a
+/// stray store under the data directory on the home server.
+pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
+    super::schema::add_columns(conn, &[(TABLE, "item_key", "INTEGER")])
+}
+
 /// One version of one Graph draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
@@ -68,10 +77,9 @@ pub fn key_of(store: &Store, account: &str, graph_id: &str, change_key: &str) ->
     if inserted > 0 {
         conn.execute(
             &format!(
-                "UPDATE {TABLE} SET item_key = COALESCE(
-                    (SELECT MIN(item_key) FROM {TABLE}
-                     WHERE account = ?1 AND graph_id = ?2 AND item_key IS NOT NULL),
-                    key)
+                "UPDATE {TABLE} SET item_key = (
+                    SELECT MIN(COALESCE(item_key, key)) FROM {TABLE}
+                    WHERE account = ?1 AND graph_id = ?2)
                  WHERE key = last_insert_rowid()"
             ),
             [account, graph_id],
@@ -191,6 +199,44 @@ mod tests {
         assert_eq!(version(&store, "tum", edited).unwrap(), None);
         assert_eq!(latest_key(&store, "evoqs", "AAMk-1").unwrap(), Some(edited));
         assert_eq!(latest_key(&store, "evoqs", "AAMk-9").unwrap(), None);
+    }
+
+    /// A table the build before `item_key` created gains the column when the
+    /// store is opened (a test run of that build left one in a stray store
+    /// on the home server), and its versions read and mint as before.
+    #[test]
+    fn a_table_created_without_item_key_gains_it_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .conn()
+                .execute_batch(&format!(
+                    "DROP TABLE {TABLE};
+                     CREATE TABLE {TABLE} (
+                        key        INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account    TEXT NOT NULL,
+                        graph_id   TEXT NOT NULL,
+                        change_key TEXT NOT NULL,
+                        UNIQUE (account, graph_id, change_key)
+                     );
+                     INSERT INTO {TABLE} (account, graph_id, change_key)
+                        VALUES ('evoqs', 'AAMk-1', 'ck1');"
+                ))
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let first = key_of(&store, "evoqs", "AAMk-1", "ck1").unwrap();
+        assert_eq!(
+            version(&store, "evoqs", first).unwrap().unwrap().item_key,
+            first
+        );
+        let edited = key_of(&store, "evoqs", "AAMk-1", "ck2").unwrap();
+        assert_eq!(
+            version(&store, "evoqs", edited).unwrap().unwrap().item_key,
+            first
+        );
     }
 
     /// A prune keeps what the listing showed and what a row names, and a
