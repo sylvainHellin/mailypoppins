@@ -302,20 +302,88 @@ async fn a_move_whose_store_or_expunge_is_refused_fails() {
     }
 }
 
-/// A body download the server refuses fails the search's second pass in
-/// its words, instead of reporting every message as gone from the mailbox.
+/// Gmail's tagged answer to a FETCH some of whose messages it could not
+/// read, after the ones it could (RFC 2180 4.1.2).
+const NOT_FETCHED: &str = "NO Some messages could not be FETCHed (Failure)";
+
+/// How async-imap renders [`NOT_FETCHED`].
+const NOT_FETCHED_WORDS: &str =
+    "no response: code: None, info: Some(\"Some messages could not be FETCHed (Failure)\")";
+
+/// A body chunk the server answers `NO` after sending some of its messages
+/// keeps the ones it sent: one message the server cannot read must not hold
+/// back the rest of its chunk, pass after pass.
 #[tokio::test]
-async fn a_refused_body_fetch_is_an_error_not_an_empty_mailbox() {
+async fn a_body_chunk_refused_for_one_message_keeps_the_others() {
+    let server = server(&["one", "two", "three"]);
+    server.refuse_fetch_of(2, Some(NOT_FETCHED));
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    session.select("INBOX").await.unwrap();
+    let fetched = super::fetch::fetch_body_chunk_on_session(&mut session, &[1, 2, 3])
+        .await
+        .expect("the messages the server sent");
+    let uids: Vec<i64> = fetched.iter().map(|m| m.uid).collect();
+    assert_eq!(uids, vec![1, 3]);
+    session.logout().await.ok();
+}
+
+/// The search's second pass keeps the bodies the server sent and names the
+/// one it refused, in its words, rather than as gone from the mailbox.
+#[tokio::test]
+async fn a_search_fetch_refused_for_one_message_keeps_the_others_and_says_why() {
+    let server = server(&["one", "two", "three"]);
+    server.refuse_fetch_of(2, Some(NOT_FETCHED));
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    let fetched = super::fetch_uids_on_session(&mut session, "INBOX", &[1, 2, 3])
+        .await
+        .expect("the messages the server sent");
+    let uids: Vec<u32> = fetched.emails.iter().map(|(uid, _)| *uid).collect();
+    assert_eq!(uids, vec![1, 3]);
+    assert_eq!(
+        fetched.missing,
+        vec![(
+            2,
+            format!("the server refused to fetch it: {NOT_FETCHED_WORDS}")
+        )]
+    );
+    session.logout().await.ok();
+}
+
+/// A body download the server refuses outright names that refusal for
+/// every message, instead of reporting them gone from the mailbox.
+#[tokio::test]
+async fn a_refused_body_fetch_names_the_refusal_not_an_empty_mailbox() {
     let server = server(&["one", "two"]);
     let mut session = super::open_imap_session(&config(&server)).await.unwrap();
     server.refuse("FETCH", Some(LOCKED));
-    let refused = super::fetch_uids_on_session(&mut session, "INBOX", &[1, 2])
+    let fetched = super::fetch_uids_on_session(&mut session, "INBOX", &[1, 2])
         .await
-        .expect_err("the server refused the fetch");
+        .expect("an answer");
+    assert!(fetched.emails.is_empty());
+    let why = format!("the server refused to fetch it: {LOCKED_WORDS}");
+    assert_eq!(fetched.missing, vec![(1, why.clone()), (2, why)]);
+    session.logout().await.ok();
+}
+
+/// A fetch by Message-ID whose message the server refuses to send is that
+/// refusal, not "no such message".
+#[tokio::test]
+async fn a_fetch_by_message_id_the_server_refuses_is_its_refusal() {
+    let server = server(&["one", "two"]);
+    server.refuse_fetch_of(2, Some(NOT_FETCHED));
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    let refused = super::fetch_raw_by_message_id(&mut session, "INBOX", &id("two"))
+        .await
+        .expect_err("the server refused the message");
     assert_eq!(
         format!("{refused:#}"),
-        format!("Failed to fetch emails: {LOCKED_WORDS}")
+        format!("Failed to fetch email: {NOT_FETCHED_WORDS}")
     );
+    let found = super::fetch_raw_by_message_id(&mut session, "INBOX", &id("one"))
+        .await
+        .unwrap()
+        .expect("the other message");
+    assert_eq!(found.0, 1);
     session.logout().await.ok();
 }
 

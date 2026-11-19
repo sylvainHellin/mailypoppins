@@ -158,6 +158,23 @@ pub(crate) async fn answer_of<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
+    match partial_answer_of(session, command).await? {
+        (answer, None) => Ok(answer),
+        (_, Some(refusal)) => Err(refusal),
+    }
+}
+
+/// [`answer_of`], keeping the untagged answer a `NO` came after: a server
+/// that cannot send some of the messages a `FETCH` named sends the others
+/// and then says `NO` (RFC 2180 4.1.2; Gmail's `NO Some messages could not
+/// be FETCHed`). A `BAD` and a connection that ends are errors as before.
+pub(crate) async fn partial_answer_of<T>(
+    session: &mut async_imap::Session<T>,
+    command: &str,
+) -> Result<(Vec<Untagged>, Option<Error>)>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
     let tag = session.run_command(command).await?;
     let mut answer = Vec::new();
     loop {
@@ -174,8 +191,11 @@ where
                 // async-imap's own wording for a refused SELECT or COPY, so a
                 // refusal reads the same whichever command met it.
                 return match status {
-                    Status::Ok => Ok(answer),
-                    Status::No => Err(Error::No(format!("code: {code:?}, info: {information:?}"))),
+                    Status::Ok => Ok((answer, None)),
+                    Status::No => Ok((
+                        answer,
+                        Some(Error::No(format!("code: {code:?}, info: {information:?}"))),
+                    )),
                     Status::Bad => {
                         Err(Error::Bad(format!("code: {code:?}, info: {information:?}")))
                     }
@@ -194,6 +214,10 @@ pub(crate) trait Checked {
     /// `UID FETCH set query`: the messages, by the order the server sent
     /// them.
     async fn uid_fetch_checked(&mut self, set: &str, query: &str) -> Result<Vec<FetchResponse>>;
+
+    /// `UID FETCH set query`, keeping what the server sent before a `NO`:
+    /// the messages it sent, and its refusal of the others.
+    async fn uid_fetch_partial(&mut self, set: &str, query: &str) -> Result<PartialFetch>;
 
     /// `UID STORE set change`: the messages whose flags the server reported.
     async fn uid_store_checked(&mut self, set: &str, change: &str) -> Result<Vec<FetchResponse>>;
@@ -226,6 +250,15 @@ where
         Ok(fetches(
             answer_of(self, &format!("UID FETCH {set} {query}")).await?,
         ))
+    }
+
+    async fn uid_fetch_partial(&mut self, set: &str, query: &str) -> Result<PartialFetch> {
+        let (answer, refused) =
+            partial_answer_of(self, &format!("UID FETCH {set} {query}")).await?;
+        Ok(PartialFetch {
+            messages: fetches(answer),
+            refused,
+        })
     }
 
     async fn uid_store_checked(&mut self, set: &str, change: &str) -> Result<Vec<FetchResponse>> {
@@ -283,6 +316,15 @@ where
     async fn noop_checked(&mut self) -> Result<()> {
         answer_of(self, "NOOP").await.map(drop)
     }
+}
+
+/// What a `UID FETCH` answered, a `NO` after its data included.
+#[derive(Debug)]
+pub(crate) struct PartialFetch {
+    /// The messages the server sent.
+    pub messages: Vec<FetchResponse>,
+    /// Its `NO`, when it refused some or all of the others.
+    pub refused: Option<Error>,
 }
 
 /// The `FETCH` responses of an answer.

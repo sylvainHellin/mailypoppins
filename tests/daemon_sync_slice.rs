@@ -2063,4 +2063,30 @@ mod wire {
             "Watching INBOX for changes...\nℹ Timed out.\n"
         );
     }
+
+    /// A message the server cannot send, answered `NO` with the rest of its
+    /// chunk (RFC 2180 4.1.2, Gmail's wording), does not hold back the
+    /// others: the sync ingests them, and the refused one on a later pass
+    /// once the server sends it.
+    #[test]
+    fn a_message_the_server_refuses_to_send_does_not_hold_back_the_others() {
+        let wire = served();
+        wire.imap
+            .deliver(INBOX, mail("third", "cy@example.org", "Third", "three"));
+        wire.imap
+            .refuse_fetch_of(2, Some("NO Some messages could not be FETCHed (Failure)"));
+
+        wire.sync();
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (3, "<third@example.org>".to_string())
+            ]
+        );
+
+        wire.imap.refuse_fetch_of(2, None);
+        wire.sync();
+        assert_eq!(wire.local("inbox").len(), 3, "{:?}", wire.local("inbox"));
+    }
 }

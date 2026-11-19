@@ -165,10 +165,17 @@ pub async fn fetch_uids_on_session(
         .select(mailbox)
         .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
-    let fetched = session
-        .uid_fetch_checked(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
+    // A `NO` after some of the messages keeps those (RFC 2180 4.1.2), and
+    // names the refusal as the reason the others are missing.
+    let partial = session
+        .uid_fetch_partial(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
+    let absent = match &partial.refused {
+        Some(refusal) => format!("the server refused to fetch it: {refusal}"),
+        None => "no longer in the mailbox".to_string(),
+    };
+    let fetched = partial.messages;
     let mut answer = Fetched::default();
     let mut answered = std::collections::HashSet::new();
     for msg in fetched.iter() {
@@ -185,7 +192,7 @@ pub async fn fetch_uids_on_session(
     answer.missing.extend(
         uids.iter()
             .filter(|uid| !answered.contains(uid))
-            .map(|uid| (*uid, "no longer in the mailbox".to_string())),
+            .map(|uid| (*uid, absent.clone())),
     );
     Ok(answer)
 }
@@ -221,11 +228,18 @@ pub async fn fetch_raw_by_message_id(
     let wanted = super::search::normalize_message_id(message_id).to_string();
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort_unstable();
+    let mut refused = None;
     for uid in uid_list {
-        let fetched = session
-            .uid_fetch_checked(&uid.to_string(), "(BODY.PEEK[] FLAGS)")
+        // One UID per command, so a `NO` is about this message; the others
+        // the search found may still be the one.
+        let partial = session
+            .uid_fetch_partial(&uid.to_string(), "(BODY.PEEK[] FLAGS)")
             .await
             .map_err(|e| anyhow!("Failed to fetch email: {}", e))?;
+        if let Some(refusal) = partial.refused {
+            refused.get_or_insert(refusal);
+        }
+        let fetched = partial.messages;
         for msg in fetched.iter() {
             let body_raw = msg.body().unwrap_or_default();
             let Some(mut email) = parse_rfc822_to_fetched_email(body_raw) else {
@@ -241,7 +255,12 @@ pub async fn fetch_raw_by_message_id(
             return Ok(Some((uid, body_raw.to_vec(), email)));
         }
     }
-    Ok(None)
+    // A copy the server would not send may be the one: that is its answer,
+    // not "no such message".
+    match refused {
+        Some(refusal) => Err(anyhow!("Failed to fetch email: {refusal}")),
+        None => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -992,10 +1011,24 @@ pub(crate) async fn fetch_body_chunk_on_session(
     session: &mut ImapSession,
     uids: &[u32],
 ) -> Result<Vec<FetchedMessage>> {
-    let mut out: Vec<FetchedMessage> = session
-        .uid_fetch_checked(&compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
+    // A `NO` after some of the bodies keeps those (RFC 2180 4.1.2): the UIDs it
+    // left out are absent, which the coverage counts as not downloaded and a
+    // later pass asks for again, so one message the server cannot send holds
+    // back neither its chunk nor the chunks after it.
+    let partial = session
+        .uid_fetch_partial(&compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
         .await
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
+    if let Some(refusal) = &partial.refused {
+        warn!(
+            "[sync] the server sent {} of {} message(s) of a body chunk and refused the rest: \
+             {refusal}",
+            partial.messages.len(),
+            uids.len()
+        );
+    }
+    let mut out: Vec<FetchedMessage> = partial
+        .messages
         .into_iter()
         .filter_map(|mut msg| {
             let flags = flags_of(&msg);

@@ -257,6 +257,9 @@ struct Shared {
     idlers: Mutex<Vec<(String, futures::channel::mpsc::UnboundedSender<()>)>>,
     /// How many IDLE commands the server has entered.
     idles: AtomicUsize,
+    /// The messages, by UID, a FETCH leaves out, and the tagged answer it
+    /// ends with when it named one of them.
+    fetch_refusals: Mutex<HashMap<u32, String>>,
 }
 
 impl Shared {
@@ -326,6 +329,7 @@ impl RejectingImapServer {
             append_delay_ms: AtomicU64::new(0),
             idlers: Mutex::new(Vec::new()),
             idles: AtomicUsize::new(0),
+            fetch_refusals: Mutex::new(HashMap::new()),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -537,6 +541,20 @@ impl RejectingImapServer {
             }
         }
         uid
+    }
+
+    /// Leave the message `uid` out of every later FETCH of bodies that names
+    /// it, its flags and headers still answered, and end that FETCH with
+    /// `answer`, the tagged status and text after the
+    /// tag, after the messages it did send; or fetch it again with `None`.
+    /// A server answers `NO` with partial data so (RFC 2180 4.1.2), Gmail's
+    /// `NO Some messages could not be FETCHed (Failure)` among them.
+    pub fn refuse_fetch_of(&self, uid: u32, answer: Option<&str>) {
+        let mut refusals = self.shared.fetch_refusals.lock().expect("the refusals");
+        match answer {
+            Some(answer) => refusals.insert(uid, answer.to_string()),
+            None => refusals.remove(&uid),
+        };
     }
 
     /// How many IDLE commands the server has entered so far: what a test
@@ -1201,17 +1219,30 @@ fn on_selected(shared: &Shared, cmd: &Command<'_>, name: &str, read_only: bool) 
     match command {
         "FETCH" => {
             let mut out = Vec::new();
+            let refusals = shared.fetch_refusals.lock().expect("the refusals").clone();
+            let mut refused = None;
             for (index, message) in mailbox.messages.iter().enumerate() {
                 let header_only = line.to_ascii_uppercase().contains("HEADER.FIELDS");
                 // A folder of Message-IDs has no flags or bodies to fetch.
                 if !named(&set, index + 1, message) || (message.raw.is_none() && !header_only) {
                     continue;
                 }
+                // The message is there and its flags and headers read; it is
+                // its body the server cannot produce.
+                let body = line.to_ascii_uppercase().contains("BODY.PEEK[]")
+                    || line.to_ascii_uppercase().contains("BODY[]");
+                if let Some(answer) = refusals.get(&message.uid).filter(|_| body) {
+                    refused = Some(answer.clone());
+                    continue;
+                }
                 out.extend_from_slice(format!("* {} FETCH (", index + 1).as_bytes());
                 out.extend_from_slice(&fetch_items(message, line));
                 out.extend_from_slice(b")\r\n");
             }
-            out.extend_from_slice(&ok("FETCH"));
+            match refused {
+                Some(answer) => out.extend_from_slice(format!("{tag} {answer}\r\n").as_bytes()),
+                None => out.extend_from_slice(&ok("FETCH")),
+            }
             out
         }
         "SEARCH" => {
