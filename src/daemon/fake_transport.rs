@@ -1,14 +1,18 @@
 //! The daemon-side transport fake (P4-U12), in the shape of
 //! [`FAKE_SYNC_OUTCOME_ENV`](super::sync_outcome::FAKE_SYNC_OUTCOME_ENV).
 //!
-//! `send::build_smtp_transport` is TLS-only on both of its branches, so a
-//! plaintext `TcpListener` cannot serve it and a TLS one would need a
-//! certificate generator this tree does not depend on. Without something in its
-//! place the whole success half of the send slice - a message that goes out, a
-//! draft that is retired, a Sent copy that is filed - would be unpinned, so
 //! [`FAKE_TRANSPORT_ENV`] serves the SMTP submission and the Sent-mailbox
 //! APPEND in process and writes one line per transport event to a log the test
-//! reads.
+//! reads, so a suite built on a local-only account (`tests/support/read_fixture.rs`'s
+//! `alpha`, which the parity rows compare against the pre-daemon oracle) can
+//! reach the success half of a send.
+//!
+//! Every behaviour it fakes also runs over the wire, against the fake SMTP and
+//! IMAP servers of `tests/support/` on an account with its passwords stored
+//! (`tests/support/wire_fixture.rs`, PERSO-210): a send, a refused recipient, a
+//! parked send and its retry, a deferral that wears off, a lost or refused
+//! APPEND, and a drain beside a slow one. The hook stays for the suites that
+//! still use it, which would each need their accounts moved onto those servers.
 //!
 //! ```json
 //! {

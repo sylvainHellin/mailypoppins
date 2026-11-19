@@ -158,16 +158,9 @@
 //!
 //! # What this fixture cannot reach, and the hook that fixes it
 //!
-//! `rg -n 'smtp|TcpListener|MockSmtp' tests/*.rs tests/support/*.rs` finds no
-//! server. `tests/outbox_integration.rs` fakes the *Sent mailbox* behind the
-//! `SentMailbox` trait and drives `outbox::drain_guarded_at` in process;
-//! `tests/imip_integration.rs` never sends at all - it parses RFC822 and
-//! ingests. So there is no SMTP fake in this repository to reuse, and
-//! `send::build_smtp_transport` is TLS-only on both branches, which a
-//! plaintext `TcpListener` cannot serve.
-//!
-//! Rather than leave every success path unpinned, this slice fixes a
-//! daemon-side hook, [`send::FAKE_TRANSPORT_ENV`], in the shape of the
+//! The fixture's accounts are the read fixture's, which configure no server,
+//! so the parity rows can compare against the pre-daemon oracle. To reach the
+//! success paths over them this slice fixes a daemon-side hook, [`send::FAKE_TRANSPORT_ENV`], in the shape of the
 //! `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` hook `tests/daemon_sync_outcome.rs`
 //! already uses: it serves the SMTP submission and the Sent-mailbox APPEND in
 //! process and writes one line per transport event to a log the test reads.
@@ -180,10 +173,14 @@
 //! one says so in its own doc comment. That is the same licence
 //! `tests/daemon_sync_slice.rs` takes for its engine-lock row.
 //!
-//! What stays out of reach even with the hook:
+//! The real SMTP conversation and the Sent APPEND over IMAP run in the `wire`
+//! module at the end of this file (PERSO-210), on an account the fake servers
+//! of `tests/support/` serve, with no hook: a send, a refused recipient in the
+//! server's words, a send with no verdict parked and retried, and a lost
+//! APPEND answer deduped on retry.
 //!
-//! - A real SMTP conversation, its error strings and its timeouts. Nothing
-//!   here asserts on a network error's text.
+//! What stays out of reach:
+//!
 //! - The Graph *send* path (#0036, blocked on #0035). Only its refusals and
 //!   its preview shape are pinned.
 //!
@@ -3754,5 +3751,92 @@ mod wire {
             .collect();
         assert_eq!(delivered, vec!["ada@example.org".to_string()]);
         wait_for("the Sent copy", || wire.imap.contents(SENT).len() == 1);
+    }
+
+    /// The connection closes after the message went in and before the
+    /// server's answer: the send fails with no verdict, the row is parked
+    /// for a human rather than sent again on its own, and `mp outbox retry`
+    /// re-sends it. The server then holds two copies, the first one the
+    /// client never heard about, which is the price of the retry the user
+    /// asked for and why it is never automatic.
+    #[test]
+    fn a_send_with_no_verdict_is_parked_and_a_retry_sends_it_again() {
+        let mut wire = WireRoot::new();
+        wire.smtp
+            .answer_for_next("ada@example.org", SmtpStep::Message, SmtpAnswer::HangUp, 1);
+        let selector = wire.draft("a0000000000000w3", "ada@example.org", "Unconfirmed", "x\n");
+        wire.start(&[]);
+
+        let out = wire.mp(&["send", &selector, "-y"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            stdout(&out)
+                .contains("  ✗ ada@example.org (To): response error: incomplete response\n"),
+            "{}",
+            stdout(&out)
+        );
+        assert_eq!(
+            super::stderr(&out),
+            "Error: Failed to send to all 1 recipient(s)\n"
+        );
+        let listing = stdout(&wire.mp(&["outbox", "list"]));
+        assert!(
+            listing.contains(" failed ")
+                && listing.contains(
+                    "last error: no verdict for ada@example.org: response error: incomplete response"
+                ),
+            "{listing}"
+        );
+
+        let out = wire.mp(&["outbox", "retry", "1"]);
+        assert_ok(&out, "mp outbox retry");
+        assert!(
+            stdout(&out).starts_with("  ↻ row 1 is queued again; sending it now\n"),
+            "{}",
+            stdout(&out)
+        );
+        let acknowledged: Vec<bool> = wire
+            .smtp
+            .deliveries()
+            .iter()
+            .map(|d| d.acknowledged)
+            .collect();
+        assert_eq!(acknowledged, vec![false, true]);
+        wait_for("the Sent copy", || wire.imap.contents(SENT).len() == 1);
+    }
+
+    /// The server files the Sent copy and closes the connection before its
+    /// answer: the row waits for its APPEND with the broken connection as its
+    /// error, and `mp outbox retry` finds the copy by its Message-ID and
+    /// files no second one.
+    #[test]
+    fn a_retry_after_a_lost_append_answer_finds_the_copy_and_files_no_other() {
+        let mut wire = WireRoot::new();
+        wire.imap.hang_up_after_appends(1);
+        let selector = wire.draft("a0000000000000w4", "ada@example.org", "Lost answer", "x\n");
+        wire.start(&[]);
+
+        assert_ok(&wire.mp(&["send", &selector, "-y"]), "mp send -y");
+        wait_for("the APPEND to fail", || {
+            mailypoppins::outbox::load(&wire.store(), 1)
+                .expect("the row")
+                .and_then(|row| row.last_error)
+                .is_some_and(|e| e.contains("the connection closed during the APPEND to 'Sent'"))
+        });
+        assert_eq!(
+            super::fixture::row_state(wire.root(), super::support::wire_fixture::ACCOUNT, 1),
+            Some(OutboxState::SentPendingAppend)
+        );
+        assert_eq!(wire.imap.contents(SENT).len(), 1, "the server has the copy");
+
+        let out = wire.mp(&["outbox", "retry", "1"]);
+        assert_ok(&out, "mp outbox retry");
+        assert_eq!(
+            stdout(&out),
+            "  ↻ row 1 is queued again; sending it now\n  ✓ row 1 is now done\n  \
+             ✓ 1 sent copy/copies filed\n"
+        );
+        assert_eq!(wire.imap.contents(SENT).len(), 1, "and no second one");
+        assert_eq!(wire.smtp.deliveries().len(), 1, "the message went out once");
     }
 }

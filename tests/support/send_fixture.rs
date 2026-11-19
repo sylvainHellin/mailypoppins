@@ -18,20 +18,12 @@
 //! additions are made here so no listing, dump or search expectation the read
 //! and draft slices pin has to move.
 //!
-//! # No SMTP server, no IMAP server, and what that costs
+//! # No server, and the hook that stands in for one
 //!
-//! `rg -n 'smtp|TcpListener|MockSmtp' tests/*.rs tests/support/*.rs` finds no
-//! server: `tests/outbox_integration.rs` fakes the *Sent mailbox* behind the
-//! [`mailypoppins::outbox::SentMailbox`] trait and drives
-//! `outbox::drain_guarded_at` in process, and `tests/imip_integration.rs` never
-//! sends at all - it parses and ingests. So the premise "reuse the legacy
-//! suites' SMTP fake" has nothing to reuse, and the repository's transport
-//! (`send::build_smtp_transport`) is TLS-only on both of its branches: implicit
-//! TLS on 465, `Tls::Required` STARTTLS otherwise. A plaintext `TcpListener`
-//! cannot serve it and a TLS one would need a certificate generator this tree
-//! does not depend on.
-//!
-//! What this fixture does instead is [`FAKE_TRANSPORT_ENV`]: a daemon-side
+//! This fixture's accounts configure no server they can log in to, so the
+//! parity rows can compare against the pre-daemon oracle. An account on the
+//! fake SMTP and IMAP servers is [`super::wire_fixture`]'s (PERSO-210); this
+//! one uses [`FAKE_TRANSPORT_ENV`] instead: a daemon-side
 //! hook, in the shape of the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` hook
 //! `tests/daemon_sync_outcome.rs` and `tests/daemon_sync_slice.rs` already use,
 //! that serves the SMTP submission and the Sent-mailbox APPEND in process and
