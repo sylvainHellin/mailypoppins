@@ -56,6 +56,7 @@ pub mod calendar;
 pub mod draft_sync;
 pub mod drafts;
 pub mod fts;
+pub mod graph_draft_versions;
 pub mod read;
 pub mod rebuild;
 pub mod reminders;

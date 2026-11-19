@@ -654,7 +654,9 @@ pub const DELETED_ADDRESSES_TRIGGER: &str = "messages_keep_deleted_addresses";
 /// re-derives every row from the server copy and the file. A table an earlier
 /// build created gains its `message_id` column here too. `draft_absence`
 /// beside it holds what the last reconcile found missing; losing it delays a
-/// retirement by one reconcile.
+/// retirement by one reconcile. `graph_draft_versions` is the key each version
+/// of a Graph draft is known by in `draft_sync` ([`super::graph_draft_versions`],
+/// PERSO-182) and goes with it.
 ///
 /// The calendar tables ([`super::calendar`], PERSO-200) are a disposable cache
 /// of the server calendar; losing them costs one baseline sync, and a hidden
@@ -705,6 +707,10 @@ fn additive_tables() -> Vec<(&'static str, String)> {
         (
             super::draft_sync::ABSENCE_TABLE,
             super::draft_sync::absence_create_sql(),
+        ),
+        (
+            super::graph_draft_versions::TABLE,
+            super::graph_draft_versions::create_sql(),
         ),
     ];
     tables.extend(super::calendar::create_sql());
