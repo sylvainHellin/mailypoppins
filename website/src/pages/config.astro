@@ -410,7 +410,8 @@ policy = "status-only"`} />
         Every account keeps a copy of each draft in its server Drafts folder, so Outlook,
         Apple Mail, the Proton app and mp on another machine see the same drafts
         (<a href="/draft-format/#server-drafts">how it works</a>). It is on by default; turn it
-        off for an account whose server mangles drafts. Graph accounts are not mirrored yet.
+        off for an account whose server mangles drafts. A Microsoft 365 account signed in through
+        Graph mirrors into its Drafts folder the same way.
       </p>
       <ConfigExample title="Keep one account's drafts local" code={`[[accounts]]
 name = "personal"
