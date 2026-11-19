@@ -6,7 +6,6 @@ use std::fmt;
 use std::future::Future;
 
 use anyhow::{anyhow, Result};
-use async_imap::types::UnsolicitedResponse;
 use futures::io::{AsyncRead, AsyncWrite};
 
 use crate::imap_client::checked::Checked;
@@ -361,24 +360,6 @@ impl DraftsFolder for ImapDraftsFolder {
 /// before it gives up on a folder another client keeps expunging in.
 const CLAIM_FETCH_ATTEMPTS: usize = 4;
 
-/// Empty `session`'s unsolicited responses, answering whether an `EXPUNGE`
-/// was among them.
-///
-/// `async-imap` sends an untagged `EXPUNGE` that arrives during any command
-/// but `UID EXPUNGE` there, out of order with the command's own answer, and
-/// drops what arrives once 100 are queued, which a pooled session nobody
-/// drains reaches.
-fn drain_unsolicited<T>(session: &async_imap::Session<T>) -> bool
-where
-    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug,
-{
-    let mut expunged = false;
-    while let Ok(response) = session.unsolicited_responses.try_recv() {
-        expunged |= matches!(response, UnsolicitedResponse::Expunge(_));
-    }
-    expunged
-}
-
 /// [`DraftsFolder::claim`] on a session with the folder selected and
 /// `UIDPLUS`: `UID STORE +FLAGS.SILENT (\Deleted)`, a `UID FETCH` of each
 /// copy's sequence number, then `UID EXPUNGE`, whose untagged `EXPUNGE`s
@@ -387,10 +368,14 @@ where
 /// The numbers must be the ones the server holds when the `UID EXPUNGE`
 /// starts. An `EXPUNGE` another client caused during the `UID FETCH` is in the
 /// fetch's answer, with nothing to say whether it came before or after the
-/// copies' `FETCH` lines; a fetch that saw one is read again, until one completes without any, so a
-/// renumbering below a copy is never missed and its own `EXPUNGE` taken for
-/// someone else's. The channel is emptied before the `STORE` so what earlier
-/// commands left queued neither counts nor fills it.
+/// copies' `FETCH` lines; a fetch that saw one is read again, until one
+/// completes without any, so a renumbering below a copy is never missed and
+/// its own `EXPUNGE` taken for someone else's.
+///
+/// Every command here is a checked one ([`crate::imap_client::checked`]),
+/// which reads its own untagged answers and hands none to the session's
+/// unsolicited channel, so what an earlier `async-imap` command (the
+/// folder's `SELECT`) left queued there is never read as a renumbering.
 async fn claim_on<T>(session: &mut async_imap::Session<T>, uids: &[u32]) -> Result<Vec<u32>>
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
@@ -400,7 +385,6 @@ where
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    drain_unsolicited(session);
     session
         .uid_store_checked(&set, "+FLAGS.SILENT (\\Deleted)")
         .await
@@ -409,15 +393,13 @@ where
     for _ in 0..CLAIM_FETCH_ATTEMPTS {
         // An expunge reported during the STORE is in the numbers this fetch
         // reads, so it does not count.
-        drain_unsolicited(session);
         let answer =
             crate::imap_client::checked::answer_of(session, &format!("UID FETCH {set} (UID)"))
                 .await
                 .map_err(|e| anyhow!("Failed to fetch {set}: {e}"))?;
         // The fetch's own answer carries an EXPUNGE another client caused
-        // during it; an earlier command's may still be in the channel.
-        let expunged_during = !crate::imap_client::checked::expunges(&answer).is_empty();
-        if drain_unsolicited(session) || expunged_during {
+        // during it.
+        if !crate::imap_client::checked::expunges(&answer).is_empty() {
             continue;
         }
         pending = Some(
@@ -585,32 +567,38 @@ mod tests {
     /// What earlier commands left queued, an `EXPUNGE` among them and enough
     /// to fill the channel, is neither taken for a renumbering during the
     /// claim nor stops one from being heard.
+    ///
+    /// Queued by a `SELECT`, an `async-imap` command that still hands every
+    /// untagged answer it does not read itself to the channel, as the claim's
+    /// own `SELECT` in [`ImapDraftsFolder`] does; the checked commands keep
+    /// theirs ([`crate::imap_client::checked`]). The `SELECT` reads `EXISTS`
+    /// itself, so the filler is `FETCH` lines, which it hands on.
     #[test]
     fn a_claim_starts_from_an_empty_unsolicited_queue() {
-        let mut noop = "* 2 EXPUNGE\r\n".to_string();
+        let mut select = "* 2 EXPUNGE\r\n".to_string();
         for _ in 0..120 {
-            noop.push_str("* 9 EXISTS\r\n");
+            select.push_str("* 9 FETCH (FLAGS (\\Seen))\r\n");
         }
-        noop.push_str("{tag} OK NOOP completed\r\n");
+        select.push_str("{tag} OK [READ-WRITE] SELECT completed\r\n");
         let mut session = scripted(&[
-            &noop,
+            &select,
             STORED,
             "* 5 FETCH (UID 120)\r\n* 3 EXPUNGE\r\n{tag} OK FETCH completed\r\n",
             "* 4 FETCH (UID 120)\r\n{tag} OK FETCH completed\r\n",
             "* 4 EXPUNGE\r\n{tag} OK EXPUNGE completed\r\n",
         ]);
-        futures::executor::block_on(session.noop_checked()).unwrap();
+        futures::executor::block_on(session.select("Drafts")).unwrap();
         let claimed = futures::executor::block_on(claim_on(&mut session, &[120])).unwrap();
         assert_eq!(claimed, vec![120]);
 
         // Only stale ones: one read is enough.
         let mut session = scripted(&[
-            "* 2 EXPUNGE\r\n{tag} OK NOOP completed\r\n",
+            "* 2 EXPUNGE\r\n{tag} OK [READ-WRITE] SELECT completed\r\n",
             STORED,
             "* 5 FETCH (UID 120)\r\n{tag} OK FETCH completed\r\n",
             "* 5 EXPUNGE\r\n{tag} OK EXPUNGE completed\r\n",
         ]);
-        futures::executor::block_on(session.noop_checked()).unwrap();
+        futures::executor::block_on(session.select("Drafts")).unwrap();
         let claimed = futures::executor::block_on(claim_on(&mut session, &[120])).unwrap();
         assert_eq!(claimed, vec![120]);
     }
