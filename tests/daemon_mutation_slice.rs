@@ -2012,4 +2012,37 @@ mod wire {
         );
         assert!(owed(&wire).is_empty(), "{:?}", owed(&wire));
     }
+
+    /// A server that refuses the `\Deleted` STORE fails the delete in its
+    /// own words, as a refused COPY fails an archive: nothing reports
+    /// success, the row is back in `inbox` where the server still holds the
+    /// message, and no op is left owed. The STORE's reader used to end at
+    /// the tagged answer without reading it, so the refusal was an empty
+    /// success: `✓ deleted`, the row gone, the message still on the server
+    /// for the next sync to bring back.
+    #[test]
+    fn a_refused_server_delete_keeps_the_row() {
+        let wire = synced();
+        wire.imap
+            .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
+
+        let out = wire.mp(&["delete", SECOND]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+        assert_eq!(stdout(&out), "");
+        assert_eq!(
+            stderr(&out),
+            "Error: Failed to mark email as deleted: no response: code: None, \
+             info: Some(\"[CANNOT] Mailbox is locked\")\n"
+        );
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (2, "<second@example.org>".to_string())
+            ],
+            "the row is back where the server still holds it"
+        );
+        assert_eq!(server(&wire, INBOX).len(), 2);
+        assert!(owed(&wire).is_empty(), "{:?}", owed(&wire));
+    }
 }

@@ -219,3 +219,165 @@ async fn an_expunge_numbers_each_message_after_the_ones_before_it() {
     assert_eq!(inbox, vec![1]);
     session.logout().await.ok();
 }
+
+/// The refusal the tests below make the server give.
+const LOCKED: &str = "NO [CANNOT] Mailbox is locked";
+
+/// How async-imap renders [`LOCKED`], which is what every refused command's
+/// error carries after the caller's own words.
+const LOCKED_WORDS: &str = "no response: code: None, info: Some(\"[CANNOT] Mailbox is locked\")";
+
+/// A server's NO to the `UID STORE` of the read toggle and the flag changes
+/// is the op's error in its words, never an empty success: the op is then
+/// retried or rolled back instead of retired with the server unchanged.
+#[tokio::test]
+async fn a_refused_flag_store_is_the_ops_error() {
+    let server = server(&["one"]);
+    server.refuse("STORE", Some(LOCKED));
+    let config = config(&server);
+    let ops = [
+        (
+            super::ops::mark_read_on_server(&config, &id("one"), "INBOX", None).await,
+            "+FLAGS (\\Seen)",
+        ),
+        (
+            super::ops::mark_unread_on_server(&config, &id("one"), "INBOX", None).await,
+            "-FLAGS (\\Seen)",
+        ),
+        (
+            super::ops::add_flag_on_server(&config, &id("one"), "INBOX", None, "\\Flagged").await,
+            "+FLAGS (\\Flagged)",
+        ),
+        (
+            super::ops::remove_flag_on_server(&config, &id("one"), "INBOX", None, "\\Flagged")
+                .await,
+            "-FLAGS (\\Flagged)",
+        ),
+    ];
+    for (result, change) in ops {
+        let refused = result.expect_err(change);
+        assert_eq!(
+            format!("{refused:#}"),
+            format!("Failed to store {change}: {LOCKED_WORDS}")
+        );
+    }
+    assert!(held(&server, "INBOX")[0].2.is_empty(), "nothing changed");
+}
+
+/// A move whose `\Deleted` STORE or whose EXPUNGE the server refuses fails
+/// in the server's words: the copy reached the destination, the source is
+/// not gone, and the op is not done.
+#[tokio::test]
+async fn a_move_whose_store_or_expunge_is_refused_fails() {
+    for (verb, uidplus, words) in [
+        (
+            "STORE",
+            true,
+            format!("Failed to mark email as deleted: {LOCKED_WORDS}"),
+        ),
+        (
+            "EXPUNGE",
+            true,
+            format!("Failed to expunge 1: {LOCKED_WORDS}"),
+        ),
+        (
+            "EXPUNGE",
+            false,
+            format!("Failed to expunge: {LOCKED_WORDS}"),
+        ),
+    ] {
+        let server = server(&["one"]);
+        server.set_uidplus(uidplus);
+        server.refuse(verb, Some(LOCKED));
+        let refused = super::ops::move_email_on_server(
+            &config(&server),
+            &id("one"),
+            "INBOX",
+            None,
+            "Archive",
+        )
+        .await
+        .expect_err(verb);
+        assert_eq!(format!("{refused:#}"), words, "{verb}, UIDPLUS {uidplus}");
+        assert_eq!(
+            held(&server, "INBOX").len(),
+            1,
+            "{verb}: the source copy stays"
+        );
+    }
+}
+
+/// A body download the server refuses fails the search's second pass in
+/// its words, instead of reporting every message as gone from the mailbox.
+#[tokio::test]
+async fn a_refused_body_fetch_is_an_error_not_an_empty_mailbox() {
+    let server = server(&["one", "two"]);
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    server.refuse("FETCH", Some(LOCKED));
+    let refused = super::fetch_uids_on_session(&mut session, "INBOX", &[1, 2])
+        .await
+        .expect_err("the server refused the fetch");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!("Failed to fetch emails: {LOCKED_WORDS}")
+    );
+    session.logout().await.ok();
+}
+
+/// A dedup search the server refuses is an error, never "no copy": the
+/// drain would otherwise APPEND a second copy of a message the server may
+/// hold. A busy server's refusal is no refusal of the copy (PERSO-304).
+#[tokio::test]
+async fn a_refused_sent_search_is_an_error_not_an_absent_copy() {
+    let server = server(&[]);
+    server.set_mail("Sent", 3, vec![(1, mail("filed"))]);
+    server.refuse("SEARCH", Some("NO [UNAVAILABLE] Search is down"));
+    let mut sent = super::sent::ImapSentMailbox::new(config(&server));
+    let refused = sent
+        .search_message_id("Sent", &id("filed"))
+        .await
+        .expect_err("the server refused the search");
+    assert!(!crate::outbox::is_sent_refusal(&refused), "{refused:#}");
+    assert_eq!(
+        format!("{refused:#}"),
+        "UID SEARCH in Sent failed: no response: code: None, \
+         info: Some(\"[UNAVAILABLE] Search is down\")"
+    );
+}
+
+/// A move whose copy search the server refuses fails in its words: the
+/// copy was not found missing, so the op must not converge as done.
+#[tokio::test]
+async fn a_move_whose_search_is_refused_is_not_a_missing_copy() {
+    let server = server(&["one"]);
+    server.refuse("SEARCH", Some(LOCKED));
+    let refused =
+        super::ops::move_email_on_server(&config(&server), &id("one"), "INBOX", None, "Archive")
+            .await
+            .expect_err("the server refused the search");
+    assert!(
+        refused
+            .downcast_ref::<crate::ops::NotFoundOnServer>()
+            .is_none(),
+        "{refused:#}"
+    );
+    assert_eq!(
+        format!("{refused:#}"),
+        format!("IMAP search failed: {LOCKED_WORDS}")
+    );
+    assert!(held(&server, "Archive").is_empty());
+}
+
+/// A LIST the server refuses is an error, not a server with no folders.
+#[tokio::test]
+async fn a_refused_list_is_an_error_not_an_empty_server() {
+    let server = server(&["one"]);
+    server.refuse("LIST", Some(LOCKED));
+    let refused = super::list_mailboxes_detailed(&config(&server))
+        .await
+        .expect_err("the server refused the listing");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!("Failed to list mailboxes: {LOCKED_WORDS}")
+    );
+}
