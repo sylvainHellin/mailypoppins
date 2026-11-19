@@ -296,13 +296,15 @@ async fn claim<F: DraftsFolder>(
 /// Graph, as the daemon's send runs it. A configuration that does not load is
 /// a server the guard cannot reach, and refuses the send the same way.
 ///
-/// On Graph a claim is a `permanentDelete` of the copy, which this request
-/// either removed or found gone ([`super::graph_folder`]), so two sends never
-/// both claim one copy. An Outlook save in place since the last reconcile is
-/// a version the row does not name, and refuses the send
-/// ([`ChangedElsewhere`]); one that lands between the lookup and the
-/// removal, a window of one round trip, goes with the copy. A token the login
-/// gate holds as refused is a folder out of reach.
+/// On Graph a claim is a `permanentDelete` of exactly the version the lookup
+/// found ([`super::graph_folder`]), which this request either removed or
+/// did not, so two sends never both claim one copy. An Outlook save in place
+/// since the last reconcile is a version the row does not name, and refuses
+/// the send ([`ChangedElsewhere`]); one that lands between the lookup and the
+/// removal changes the draft's `changeKey`, which the removal reads first and
+/// names in `If-Match`, so the copy is not claimed and the send is refused
+/// with its outcome unknown, the edit kept. A token the login gate holds as
+/// refused is a folder out of reach.
 pub async fn guard_send(account: &AccountConfig, draft: &EmailDraft) -> Result<()> {
     if !guards(account, draft) {
         return Ok(());

@@ -95,6 +95,18 @@ pub trait DraftsFolder {
 
     /// One message whole, `None` when the UID is gone.
     fn fetch(&mut self, uid: u32) -> impl Future<Output = Result<Option<Vec<u8>>>>;
+
+    /// Whether the copy `newer` is an edit, saved after the copy `linked` was
+    /// written, of a message that existed before it: another client editing
+    /// an older copy at the moment mp replaced it, so nothing says `newer`
+    /// holds what `linked` holds and the reconcile keeps the local text as a
+    /// conflict copy. Only a folder whose messages are edited in place can
+    /// tell (Graph, PERSO-182); an IMAP message never changes, and the
+    /// default answers `false`.
+    fn concurrent_edit(&self, linked: u32, newer: u32) -> Result<bool> {
+        let _ = (linked, newer);
+        Ok(false)
+    }
 }
 
 /// `<id>` without its brackets and surrounding space, which is how two

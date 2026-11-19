@@ -3245,3 +3245,138 @@ fn a_draft_pushed_over_by_the_other_machine_is_not_sent_from_the_older_text() {
     let _guard = m1.enter();
     guard(&m1.store, &m1.account, &mut folder, "d1").expect("the pulled text goes");
 }
+
+/// The text of every draft file of the account, conflict copies included.
+fn all_draft_text() -> String {
+    local_drafts("tum")
+        .iter()
+        .map(|d| String::from_utf8_lossy(&d.bytes).to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An Outlook save in place that lands while a push uploads the new copy is
+/// not removed with the old version: both copies stay, and the reconcile
+/// keeps the local text and the Outlook text, one of them as a conflict copy.
+#[test]
+fn an_outlook_save_during_a_graph_push_survives_it() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let mid = mid_of(&path);
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &edited).unwrap();
+    graph.edit_before_remove = Some(outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo aus Outlook</p>",
+    ));
+    block_on(push::push(
+        &fx.mirror(2),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    assert_eq!(graph.drafts().len(), 2, "{:?}", graph.log);
+    assert!(graph
+        .drafts()
+        .iter()
+        .any(|d| String::from_utf8_lossy(&d.raw).contains("Hallo aus Outlook")));
+
+    let report = graph_reconciled(&fx, &mut graph);
+    assert_eq!(report.conflicts, 1, "{report:?}");
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+}
+
+/// An Outlook save that lands between the guard's lookup and its removal is
+/// not claimed: the send is refused with its outcome unknown, the edit stays
+/// in Drafts, and the reconcile keeps both texts.
+#[test]
+fn an_outlook_save_during_a_graph_claim_survives_it() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo Robin");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let mid = mid_of(&path);
+    graph.edit_before_remove = Some(outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo aus Outlook</p>",
+    ));
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(refused.contains("outcome unknown"), "{refused}");
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+    assert!(String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo aus Outlook"));
+
+    graph_reconciled(&fx, &mut graph);
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+}
+
+/// An Outlook save that landed before the push's removal reads its version:
+/// the changed `changeKey` stops the removal before any request, and the
+/// reconcile keeps both texts.
+#[test]
+fn an_outlook_save_seen_before_a_graph_removal_is_never_removed() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let first = graph.drafts()[0].id.clone();
+    let mid = mid_of(&path);
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &edited).unwrap();
+    graph.edit_before_read = Some(outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo aus Outlook</p>",
+    ));
+    block_on(push::push(
+        &fx.mirror(2),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    assert!(
+        !graph
+            .log
+            .iter()
+            .any(|l| l.starts_with(&format!("remove {first}"))),
+        "{:?}",
+        graph.log
+    );
+    assert_eq!(graph.drafts().len(), 2);
+    assert_eq!(graph_reconciled(&fx, &mut graph).conflicts, 1);
+    let text = all_draft_text();
+    assert!(
+        text.contains("Hallo Robin") && text.contains("Hallo aus Outlook"),
+        "{text}"
+    );
+}

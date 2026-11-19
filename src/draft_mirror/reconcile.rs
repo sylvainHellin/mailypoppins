@@ -356,12 +356,21 @@ pub async fn reconcile<F: DraftsFolder>(
                 // Another machine pushed over the copy this one wrote. Its
                 // text wins; the local text is a conflict only if it moved
                 // since the row and is not what the newer copy holds.
+                // On Graph the newer copy may instead be an Outlook save of
+                // an older copy that landed while this machine replaced it,
+                // which holds nothing of the row's text: a conflict too.
                 let raw = folder.fetch(newest.uid).await?.unwrap_or_default();
                 let same = carrier::read(&raw).is_some_and(|c| c.file_hash == local.hash);
                 let moved = local.hash != row.synced_hash;
-                if let Some(hash) =
-                    pull_into(mirror, local, &raw, moved && !same, None, &mut report)?
-                {
+                let concurrent = folder.concurrent_edit(row.uid, newest.uid)?;
+                if let Some(hash) = pull_into(
+                    mirror,
+                    local,
+                    &raw,
+                    (moved || concurrent) && !same,
+                    None,
+                    &mut report,
+                )? {
                     record(mirror, &local.id, newest.uid, &at, hash, Some(mid.clone()))?;
                     report.pulled += 1;
                 }

@@ -255,16 +255,88 @@ impl GraphClient {
     /// in Deleted Items): `true` when this request removed it, `false` when no
     /// item had the id any more.
     pub async fn remove_draft(&self, id: &str) -> Result<bool> {
-        let what = "Removing a Graph draft";
-        let resp = self.discard_draft_request(id).send().await.context(what)?;
+        let resp = self
+            .discard_draft_request(id)
+            .send()
+            .await
+            .context(REMOVE_WHAT)?;
+        removed(resp).await
+    }
+
+    /// The `changeKey` the draft `id` holds now, `None` when no item has the
+    /// id: `GET /me/messages/{id}?$select=changeKey`.
+    pub async fn draft_change_key(&self, id: &str) -> Result<Option<String>> {
+        let what = "Reading a Graph draft's change key";
+        let resp = self.change_key_request(id)?.send().await.context(what)?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(false);
+            return Ok(None);
         }
         if !resp.status().is_success() {
             return Err(status_error(resp, what).await);
         }
-        Ok(true)
+        let version: ChangeKey = resp
+            .json()
+            .await
+            .with_context(|| format!("{what}: reading the answer"))?;
+        Ok(Some(version.change_key))
     }
+
+    fn change_key_request(&self, id: &str) -> Result<reqwest::RequestBuilder> {
+        let mut url = reqwest::Url::parse(&format!("{GRAPH_BASE}/me/messages"))
+            .context("parsing the Graph messages URL")?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("the Graph messages URL cannot take a path"))?
+            .push(id);
+        url.set_query(Some("$select=changeKey"));
+        Ok(self.item_request(reqwest::Method::GET, url))
+    }
+
+    /// Remove the version `change_key` of the draft `id` for good, and no
+    /// other: `permanentDelete` with `If-Match: W/"<changeKey>"`. `true` when
+    /// this request removed it; `false` when the item is gone (404) or holds
+    /// another version (412), an edit saved since, which stays.
+    pub async fn remove_draft_version(&self, id: &str, change_key: &str) -> Result<bool> {
+        let resp = self
+            .remove_version_request(id, change_key)
+            .send()
+            .await
+            .context(REMOVE_WHAT)?;
+        removed(resp).await
+    }
+
+    fn remove_version_request(&self, id: &str, change_key: &str) -> reqwest::RequestBuilder {
+        self.discard_draft_request(id)
+            .header(reqwest::header::IF_MATCH, if_match(change_key))
+    }
+}
+
+const REMOVE_WHAT: &str = "Removing a Graph draft";
+
+/// The `If-Match` value naming one version: the weak entity tag Graph
+/// answers as a message's `@odata.etag`, `W/"<changeKey>"`.
+fn if_match(change_key: &str) -> String {
+    format!("W/\"{change_key}\"")
+}
+
+/// What a removal's answer says: removed, or not there to remove (404, gone;
+/// 412, another version).
+async fn removed(resp: reqwest::Response) -> Result<bool> {
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::PRECONDITION_FAILED
+    {
+        return Ok(false);
+    }
+    if !status.is_success() {
+        return Err(status_error(resp, REMOVE_WHAT).await);
+    }
+    Ok(true)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeKey {
+    change_key: String,
 }
 
 #[cfg(test)]
@@ -311,8 +383,9 @@ mod tests {
     }
 
     /// Every request of the mirror asks for immutable ids and carries the
-    /// token; the create posts base64 MIME, the read asks for `$value` and
-    /// the removal is `permanentDelete`.
+    /// token; the create posts base64 MIME, the read asks for `$value`, and
+    /// the removal is a `permanentDelete` of one version, named by
+    /// `If-Match`.
     #[test]
     fn every_mirror_request_asks_for_immutable_ids() {
         let client = GraphClient::for_tests();
@@ -329,7 +402,22 @@ mod tests {
         let mime = client.draft_mime_request("AAMk-1").build().unwrap();
         assert_eq!(mime.method(), reqwest::Method::GET);
         assert_eq!(mime.url().path(), "/v1.0/me/messages/AAMk-1/$value");
-        let remove = client.discard_draft_request("AAMk-1").build().unwrap();
+        let remove = client
+            .remove_version_request("AAMk-1", "CQAB")
+            .build()
+            .unwrap();
+        assert_eq!(
+            remove.headers().get(reqwest::header::IF_MATCH).unwrap(),
+            r#"W/"CQAB""#
+        );
+        let version = client
+            .change_key_request("AAMk-1")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(version.method(), reqwest::Method::GET);
+        assert_eq!(version.url().path(), "/v1.0/me/messages/AAMk-1");
+        assert_eq!(version.url().query(), Some("$select=changeKey"));
         assert_eq!(remove.method(), reqwest::Method::POST);
         assert_eq!(
             remove.url().path(),
@@ -343,6 +431,7 @@ mod tests {
             ("create", create),
             ("mime", mime),
             ("remove", remove),
+            ("version", version),
             ("list", list),
         ] {
             assert_eq!(

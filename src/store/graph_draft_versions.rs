@@ -32,6 +32,7 @@ pub fn create_sql() -> String {
             account    TEXT NOT NULL,
             graph_id   TEXT NOT NULL,
             change_key TEXT NOT NULL,
+            item_key   INTEGER,
             UNIQUE (account, graph_id, change_key)
         )"
     )
@@ -44,20 +45,39 @@ pub struct Version {
     /// The draft's immutable id.
     pub graph_id: String,
     pub change_key: String,
+    /// The key of the first version of this draft the mirror saw, which every
+    /// later version repeats and a prune keeps: it orders the drafts by when
+    /// they appeared, whatever was edited since.
+    pub item_key: u32,
 }
 
 /// The key of the version `change_key` of the draft `graph_id`, minted when
-/// it is new, above every key minted before.
+/// it is new, above every key minted before; a new version of a draft seen
+/// before repeats that draft's [`Version::item_key`].
 pub fn key_of(store: &Store, account: &str, graph_id: &str, change_key: &str) -> Result<u32> {
     let conn = store.conn();
-    conn.execute(
-        &format!(
-            "INSERT INTO {TABLE} (account, graph_id, change_key) VALUES (?1, ?2, ?3)
-             ON CONFLICT (account, graph_id, change_key) DO NOTHING"
-        ),
-        [account, graph_id, change_key],
-    )
-    .context("recording a Graph draft version")?;
+    let inserted = conn
+        .execute(
+            &format!(
+                "INSERT INTO {TABLE} (account, graph_id, change_key) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (account, graph_id, change_key) DO NOTHING"
+            ),
+            [account, graph_id, change_key],
+        )
+        .context("recording a Graph draft version")?;
+    if inserted > 0 {
+        conn.execute(
+            &format!(
+                "UPDATE {TABLE} SET item_key = COALESCE(
+                    (SELECT MIN(item_key) FROM {TABLE}
+                     WHERE account = ?1 AND graph_id = ?2 AND item_key IS NOT NULL),
+                    key)
+                 WHERE key = last_insert_rowid()"
+            ),
+            [account, graph_id],
+        )
+        .context("recording a Graph draft's first version")?;
+    }
     let key: i64 = conn
         .query_row(
             &format!(
@@ -75,13 +95,17 @@ pub fn version(store: &Store, account: &str, key: u32) -> Result<Option<Version>
     store
         .conn()
         .query_row(
-            &format!("SELECT graph_id, change_key FROM {TABLE} WHERE account = ?1 AND key = ?2"),
+            &format!(
+                "SELECT graph_id, change_key, COALESCE(item_key, key) FROM {TABLE}
+                 WHERE account = ?1 AND key = ?2"
+            ),
             rusqlite::params![account, i64::from(key)],
             |row| {
                 Ok(Version {
                     key,
                     graph_id: row.get(0)?,
                     change_key: row.get(1)?,
+                    item_key: row.get::<_, i64>(2)? as u32,
                 })
             },
         )
@@ -161,6 +185,7 @@ mod tests {
                 key: edited,
                 graph_id: "AAMk-1".to_string(),
                 change_key: "ck2".to_string(),
+                item_key: first,
             })
         );
         assert_eq!(version(&store, "tum", edited).unwrap(), None);
@@ -198,5 +223,15 @@ mod tests {
         assert!(version(&store, "tum", elsewhere).unwrap().is_some());
         let back = key_of(&store, "evoqs", "AAMk-3", "ck1").unwrap();
         assert!(back > elsewhere, "{back} is a fresh key");
+
+        // A version of a draft whose first version was pruned keeps the
+        // draft's first key.
+        let edited = key_of(&store, "evoqs", "AAMk-2", "ck2").unwrap();
+        assert_eq!(prune(&store, "evoqs", &[edited]).unwrap(), 2);
+        let again = key_of(&store, "evoqs", "AAMk-2", "ck3").unwrap();
+        assert_eq!(
+            version(&store, "evoqs", again).unwrap().unwrap().item_key,
+            listed
+        );
     }
 }
