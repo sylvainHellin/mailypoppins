@@ -3644,3 +3644,94 @@ A command printed for the reader carries a value that may start with a dash in o
 
 `message.get` and `message.thread` check the account, refuse a drafts selector, and only then call `ready_account`; in the other order an account with no store answers a drafts selector with the advice to run `mp sync`, which no sync makes true.
 Only `message.get` adds the hint naming `mp <selector>`, `mp path` and `mp list`, since `mp show` and `mp export` are the reads it serves; `message.thread`, moves, flags and replies keep the selector's bare refusal.
+
+## The outbox sweep leaves alone a row a send in this process holds (2026-11-19, PERSO-280)
+
+`outbox::sweep_pending_sends` runs on every drain, not only after a restart, so a `pending_send` row with a start marker can be a submission this process is still running rather than a crash leftover.
+A send or a resume claims the row's `outbox::LiveSubmission` before it commits the marker and holds it until the verdict is committed; the sweep and a resume skip a held row.
+A slot dropped without a verdict leaves the row as ambiguous as a crash would, and the next sweep parks it.
+
+## Restart a login service through the manager's restart, not a start after the socket stop (2026-11-19, PERSO-109)
+
+systemd may still count the unit active for a moment after the daemon that took the socket stop has exited, and a `systemctl --user start` sent in that moment is a no-op that leaves the unit dead once systemd notices.
+`mp daemon restart` asks for `systemctl --user restart` (`launchctl kickstart -k` on macOS) instead, which waits for the manager to see the exit (`start_route` in `src/daemon/service.rs`).
+
+## A connect the daemon socket accepts proves a live daemon (2026-11-19, PERSO-109)
+
+A Unix socket's listen backlog accepts a connect before the daemon's accept loop runs, so a daemon still starting accepts and does not answer yet, while a socket file whose daemon died refuses the connect.
+`probe` in `src/daemon/lifecycle.rs` reads an accepted connect without an answer as a bound daemon worth waiting for, and a refused one as a stale file, which ends the wait at the answer window.
+
+## The daemon answers before it opens any store (2026-11-19, PERSO-109)
+
+`DaemonState::new` used to open every account's store on the main thread before `serve()`, and `Store::open` runs `PRAGMA integrity_check`, a walk of the whole file, on the first open of each store in a process, so the daemon answered nobody until the slowest check of its largest store was done.
+`DaemonState::with_fetcher` now seeds every account from `config.toml` alone (`config_seeds`), each runtime start opens its store off the accept loop, and a store method refuses an account still opening with -32006 state `opening` rather than opening the store a second time.
+
+## A status inside the server-search overlay goes through `App::set_visible_status` (2026-11-19, PERSO-216)
+
+The search overlay covers the status bar and paints only `server_search_status` on its own line, so a `set_status` or `set_status_level` called while it is open is never seen.
+`App::set_visible_status` in `clients/tui/src/app/mod.rs` writes `server_search_status` while the search overlay is open and the status bar otherwise, so an action reachable from the overlay and from the list calls it.
+
+## A centred overlay's bottom title gets only its inner width (2026-11-19, PERSO-218)
+
+`title_bottom` has the width inside the overlay's border, 62 cells for the activity overlay on an 80-column terminal, and ratatui cuts a longer line.
+A footer change is rendered at 80 columns in a test, as `clients/tui/src/ui/activity.rs` pins its 61-cell footer.
+
+## An RFC 5530 response code reaches async-imap as text (2026-11-19, PERSO-296)
+
+imap-proto 0.16 does not parse RFC 5530's codes, so `NO [AUTHENTICATIONFAILED] ...` reaches async-imap as `Error::No("code: None, info: Some(\"[AUTHENTICATIONFAILED] ...\")")`, while a code it knows renders parsed, `ALERT` as `code: Some(Alert)`.
+`is_rejection` in `src/imap_client/mod.rs` matches the credential codes at the start of the info text, ignoring case, and takes `ALERT` or any other parsed code as saying nothing certain about the password.
+
+## A body is stored as sent and cleaned where the daemon serves it (2026-11-19, PERSO-291)
+
+A text/plain body keeps its blank lines in the store, and `mp_core::body::for_reading` drops the leading and trailing ones and collapses longer runs where the daemon hands it out: `message.get`, `message.search`, the server-search hits (`to_hit` in `src/daemon/methods/message_server.rs`), `view_markdown` in `src/store/read.rs` and the reply and forward quote in `mp_core::draft`.
+The list snippet needs no such pass, since `snippet_for` in `src/ingest.rs` already collapses every whitespace run.
+
+## A UID SEARCH with a literal needs its own sender (2026-11-19, PERSO-214)
+
+async-imap's `uid_search` writes the whole command at once and cannot wait for the `+` continuation RFC 3501 requires before a literal's bytes.
+A search carrying a UTF-8 literal goes through `uid_search_with_literals` in `src/imap_client/search.rs`, which waits for the continuation at each CRLF of the rendered search.
+
+## Exchange IMAP refuses a UTF-8 search with BADCHARSET (2026-11-19, PERSO-214)
+
+TUM's Exchange answers `SEARCH CHARSET UTF-8` with `NO [BADCHARSET]` on the first line, so the literal is never sent and no non-ASCII search reaches the server.
+`src/server_search.rs` searches such a mailbox in the local store instead (`StoreFallback`) and tells the sink the store answered it and why, so the answer never reads as "nothing found" while the mail sits in the store.
+
+## Publish a row's removal under the mailbox and uid it had before the move (2026-11-19, PERSO-286)
+
+A move rewrites the row's uid to `-id`, so a removal read after the commit names a row no client ever listed.
+`publish_departures` in `src/daemon/runtime/publish.rs` announces one `state.remove` per row by the mailbox and uid it had there, which is what a client's listing and search hits know it by.
+
+## An empty attachment entry resolves to no path (2026-11-19, PERSO-215)
+
+An empty path joined to a folder is that folder, so an attachment entry empty after trimming resolved to the drafts directory and a send attached the draft and its siblings.
+`draft::resolve_attachment_entry` in `crates/mp-core/src/draft.rs` answers an `Option`, `None` for such an entry, so the send, `mp validate`, the send preview, the drafts mirror and `draft.attachments` each have to handle it.
+
+## Build and test after every rebase (2026-11-19, PERSO-109)
+
+A branch that rebases without a conflict can still fail to build when main changed a type it uses.
+PERSO-286 changed the senders move's result to `Moved::Rows` while the PERSO-109 branch was open, and that branch's owed Inbox move had to be rebuilt on it.
+
+## `daemon.status` says ready only once an account's start has committed (2026-11-19, PERSO-109)
+
+The runtime table is filled before a startup start lifts the store methods' opening refusal, so `daemon.status` read an account as ready while those methods still answered -32006, and a client that waited for no account to be opening could still be refused.
+`RuntimeTable::state_of` in `src/daemon/server.rs` reads a runtime whose startup start has not committed (`opening::is_starting`) as `opening`.
+
+## A test copies `accounts/` only with no daemon holding a store (2026-11-19, PERSO-222)
+
+A starting daemon deletes and recreates a store's `-wal` and `-shm` sidecars, so a copy of `accounts/` taken beside a live daemon can lose a file between the walk and the read.
+`Pristine::take` in `tests/support/send_fixture.rs` refuses while an account's engine lock is held, waiting up to two seconds for a lock a forked child still shares, and the mutating parity harnesses stop the daemon before the copy.
+
+## An EWS cancel and a reminder action need the item's change key (2026-11-19, PERSO-256)
+
+TUM's Exchange takes an accept, a tentative or a decline naming the meeting by its ItemId alone, but refuses `CancelCalendarItem` without the ChangeKey (`ErrorChangeKeyRequiredForWriteOperations`) and answers `PerformReminderAction` without it with NoError and an empty `UpdatedItemIds`, changing nothing.
+`src/calendar_backend/ews/write.rs` reads the current key with a GetItem first, and an answer that updated no item counts as a failure.
+
+## GetUserAvailability refuses a time zone with both transitions on one day (2026-11-19, PERSO-256)
+
+Exchange answers a TimeZone whose standard and daylight transitions fall on the same day with a SOAP fault, "The specified time zone isn't valid", so UTC goes out as Microsoft's own client sends it: two transitions on distinct days that change the offset by nothing.
+Its merged free/busy view also counts a working-elsewhere block as free, so each slot is raised to the heaviest block of the detailed view over it (`calendar_freebusy::raised_by`, called from `src/calendar_backend/ews/freebusy.rs`).
+
+## An EWS FindItem over several folders answers one response message per folder (2026-11-19, PERSO-256)
+
+The invitation lookup by Message-ID over the Inbox and Deleted Items got two response messages from TUM's server and refused the answer as one too many, so an invitation mail never named its server event.
+`found_ids` in `src/calendar_backend/ews/parse.rs` collects the ids of every response message in folder order and fails on a folder the server refuses.
