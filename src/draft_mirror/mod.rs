@@ -9,10 +9,12 @@
 //! the draft ([`link_new_draft`], PERSO-231), or at the first push for a file
 //! written outside mp, and carried by every copy mp writes; Outlook and the
 //! Proton app keep it across their own edits (the probe of 2026-10-20). The
-//! volatile state, the copy's UID and the hash of the file at the last
-//! convergence, lives in the store's [`draft_sync`](crate::store::draft_sync)
-//! table, which a store rebuild drops
-//! and the reconcile re-derives. The row repeats the `Message-ID`, so a file
+//! `Message-ID` also names the draft's id ([`mint_server_message_id`]), so mp
+//! on the other machine imports a copy whose server dropped mp's headers
+//! (Proton Bridge) under the draft's own id (PERSO-183). The volatile state,
+//! the copy's UID and the hash of the file at the last convergence, lives in
+//! the store's [`draft_sync`](crate::store::draft_sync) table, which a store
+//! rebuild drops and the reconcile re-derives. The row repeats the `Message-ID`, so a file
 //! rewritten without the key gets it back before the push, the reconcile or
 //! a send reads it ([`restore_server_message_id`]).
 //!
@@ -91,9 +93,21 @@ pub fn drafts_mailbox(store: &Store, account: &AccountConfig) -> String {
         .unwrap_or_else(|| "Drafts".to_string())
 }
 
-/// A fresh `Message-ID` for a draft's server copies, under the domain of the
-/// account's address, distinct from any a send mints.
-pub fn mint_server_message_id(account: &AccountConfig) -> String {
+/// The prefix of the local part of every `Message-ID` the mirror mints.
+const MINTED_PREFIX: &str = "mp-draft.";
+
+/// A fresh `Message-ID` for the server copies of the draft `draft_id`, under
+/// the domain of the account's address, distinct from any a send mints:
+/// `<mp-draft.<24 hex>.<draft id>@<domain>>`.
+///
+/// The `Message-ID` is the one thing every server keeps of a copy mp wrote:
+/// Proton Bridge drops the headers that carry the draft and its id at the
+/// APPEND (the probe of 2026-10-20). Naming the id in it lets mp on the other
+/// machine import such a copy under the draft's own id ([`draft_id_named`],
+/// PERSO-183) rather than as a foreign draft under a fresh one. An id that is
+/// not a plain token (letters, digits, `-`, `_`) is left out, and the
+/// `Message-ID` then names no draft, as one an earlier build minted.
+pub fn mint_server_message_id(account: &AccountConfig, draft_id: &str) -> String {
     let domain = account
         .default_from
         .rsplit_once('@')
@@ -102,7 +116,30 @@ pub fn mint_server_message_id(account: &AccountConfig) -> String {
         .unwrap_or("mailypoppins.invalid");
     let random: [u8; 12] = rand::random();
     let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    format!("<mp-draft.{hex}@{domain}>")
+    if is_plain_id(draft_id) {
+        format!("<{MINTED_PREFIX}{hex}.{draft_id}@{domain}>")
+    } else {
+        format!("<{MINTED_PREFIX}{hex}@{domain}>")
+    }
+}
+
+/// The draft id a `Message-ID` [`mint_server_message_id`] minted names, with
+/// or without its angle brackets; `None` for any other `Message-ID`, one an
+/// earlier build minted included.
+pub fn draft_id_named(message_id: &str) -> Option<&str> {
+    let bare = folder::bare_message_id(message_id);
+    let (local, _domain) = bare.rsplit_once('@')?;
+    let (hex, id) = local.strip_prefix(MINTED_PREFIX)?.split_once('.')?;
+    let minted = hex.len() == 24 && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    (minted && is_plain_id(id)).then_some(id)
+}
+
+/// Whether `id` can stand in a `Message-ID` as it is and be read back whole.
+fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Give the draft the daemon just wrote at `path` the `server_message_id` its
@@ -118,7 +155,11 @@ pub fn link_new_draft(account: &AccountConfig, path: &Path) -> anyhow::Result<()
     if !mirror_enabled(account) {
         return Ok(());
     }
-    crate::draft::set_draft_server_message_id(path, &mint_server_message_id(account))
+    let id = crate::draft::parse_email_draft(path)
+        .ok()
+        .and_then(|draft| draft.frontmatter.id)
+        .unwrap_or_default();
+    crate::draft::set_draft_server_message_id(path, &mint_server_message_id(account, &id))
 }
 
 /// One draft file the mirror may act on, read once.

@@ -1226,7 +1226,10 @@ fn revive(
 /// machine: it is written under its own id, unless a file here already holds
 /// that id. Any other copy was started or last edited in another client, or
 /// lost its headers on the way (Proton Bridge drops them), and is imported by
-/// [`import_foreign`].
+/// [`import_foreign`]: under the id its `Message-ID` names when mp minted it
+/// ([`super::draft_id_named`], PERSO-183) and no file here holds that id, so
+/// a draft the other machine pushed through Bridge stays one draft, and
+/// under a fresh id otherwise.
 fn imported(
     mirror: &Mirror<'_>,
     copy: &Copy,
@@ -1238,7 +1241,12 @@ fn imported(
         .as_ref()
         .is_some_and(carrier::MpCopy::reproduces_file);
     let Some(bytes) = carried.and_then(|c| c.source) else {
-        return import_foreign(mirror, copy, raw);
+        let named = copy
+            .message_id
+            .as_deref()
+            .and_then(super::draft_id_named)
+            .filter(|id| !present.contains(*id));
+        return import_foreign(mirror, copy, raw, named);
     };
     let email = crate::parse::parse_rfc822_to_fetched_email(raw);
     let dir = crate::config::drafts_dir(&mirror.account.name);
@@ -1274,6 +1282,9 @@ fn imported(
 
 /// Import a draft started in Outlook, Apple Mail or the Proton app (slice 2):
 /// a new file under a fresh id, linked to the copy by its own `Message-ID`.
+/// `own_id` is the id of a draft mp pushed on the other machine whose copy
+/// reached here without the headers that carry it (Proton Bridge), which the
+/// file takes instead of a fresh one (PERSO-183).
 ///
 /// The recipients, the subject and the reply target come from the copy's
 /// headers, the body from its HTML in Markdown, with a quoted thread below a
@@ -1285,6 +1296,7 @@ fn import_foreign(
     mirror: &Mirror<'_>,
     copy: &Copy,
     raw: &[u8],
+    own_id: Option<&str>,
 ) -> Result<Option<(String, String)>> {
     let Some(message_id) = copy.message_id.clone() else {
         return Ok(None);
@@ -1308,7 +1320,7 @@ fn import_foreign(
     };
     let dir = crate::config::drafts_dir(&mirror.account.name);
     crate::config::create_private_dir_all(&dir)?;
-    let id = crate::store::drafts::new_id();
+    let id = own_id.map_or_else(crate::store::drafts::new_id, str::to_string);
     let staging = dir.join(format!(".import-{}.mp-staging", copy.uid));
     std::fs::write(
         &staging,
@@ -1344,10 +1356,18 @@ fn import_foreign(
     let hash = file_hash(&std::fs::read(&staging)?);
     let target = unique_draft_path(&dir, &crate::parse::slugify_subject(&copy.subject), &id);
     place_new(&staging, &target)?;
-    info!(
-        "[drafts] imported {}/{id}, a draft started in another client",
-        mirror.account.name
-    );
+    if own_id.is_some() {
+        info!(
+            "[drafts] imported {}/{id} from the server, pushed by mp elsewhere and read \
+             through its HTML",
+            mirror.account.name
+        );
+    } else {
+        info!(
+            "[drafts] imported {}/{id}, a draft started in another client",
+            mirror.account.name
+        );
+    }
     Ok(Some((id, hash)))
 }
 

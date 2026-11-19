@@ -1926,6 +1926,109 @@ fn on_proton_an_approval_does_not_travel() {
     );
 }
 
+/// Every copy in `folder` as Proton Bridge keeps it: without mp's headers.
+fn bridged(folder: &mut FakeFolder) {
+    for copy in &mut folder.copies {
+        copy.raw = without_mp_headers(&copy.raw);
+    }
+}
+
+/// The id of the one draft `machine` holds.
+fn only_draft_id(machine: &Machine) -> String {
+    let _guard = machine.enter();
+    let mut locals = local_drafts("tum");
+    assert_eq!(locals.len(), 1, "one draft");
+    locals.pop().unwrap().id
+}
+
+/// PERSO-183: Bridge keeps a copy's `Message-ID` and drops the headers that
+/// carry the draft, so the `Message-ID` names the draft: the other machine
+/// imports the copy under the draft's own id, linked to it, rather than as a
+/// second, foreign draft. A draft pushed by its first push and one the daemon
+/// created both carry it.
+#[test]
+fn on_proton_the_other_machine_imports_the_draft_under_its_own_id() {
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    {
+        let _guard = m1.enter();
+        Fixture::write_in_current("angebot", "d1", "", "Hallo Robin");
+    }
+    m1.drain(&mut folder);
+    bridged(&mut folder);
+
+    assert_eq!(m2.reconcile(&mut folder).imported, 1);
+    assert_eq!(only_draft_id(&m2), "d1");
+    assert_eq!(
+        m2.reconcile(&mut folder),
+        ReconcileReport::default(),
+        "linked: nothing left to settle"
+    );
+
+    let mut folder = FakeFolder::default();
+    let m3 = Machine::new();
+    let m4 = Machine::new();
+    {
+        let _guard = m3.enter();
+        let path = Fixture::write_in_current("termin", "d2", "", "Hallo Kim");
+        link_new_draft(&m3.account, &path).unwrap();
+    }
+    m3.drain(&mut folder);
+    bridged(&mut folder);
+    assert_eq!(m4.reconcile(&mut folder).imported, 1);
+    assert_eq!(only_draft_id(&m4), "d2");
+}
+
+/// A minted `Message-ID` names its draft's id, bracketed or bare; one an
+/// earlier build minted, one of another sender, and one whose id is not a
+/// plain token name none.
+#[test]
+fn a_minted_message_id_names_its_draft_and_no_other_does() {
+    let fx = Fixture::new();
+    let mid = mint_server_message_id(&fx.account, "a4d27daceaae86df");
+    assert!(mid.ends_with(".a4d27daceaae86df@tum.de>"), "{mid}");
+    assert_eq!(draft_id_named(&mid), Some("a4d27daceaae86df"));
+    let bare = mid.trim_start_matches('<').trim_end_matches('>');
+    assert_eq!(draft_id_named(bare), Some("a4d27daceaae86df"));
+
+    let odd = mint_server_message_id(&fx.account, "d 1@x");
+    assert_eq!(draft_id_named(&odd), None, "{odd}");
+    for other in [
+        "<mp-draft.0123456789abcdef01234567@tum.de>",
+        "<mp-draft.1@tum.de>",
+        "<mp-draft.xyz.d1@tum.de>",
+        "<CAF=abc.d1@mail.gmail.com>",
+        "<mp-draft.0123456789abcdef01234567.@tum.de>",
+    ] {
+        assert_eq!(draft_id_named(other), None, "{other}");
+    }
+}
+
+/// A copy whose `Message-ID` names an id a draft here already holds, or no
+/// id at all, is imported under a fresh id, as before: the name is a hint,
+/// never a reason to write over a draft.
+#[test]
+fn a_message_id_naming_a_draft_held_here_imports_under_a_fresh_id() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let held = fx.write("lokal", "d1", "", "Mein Text");
+    let before = std::fs::read_to_string(&held).unwrap();
+    let text = "---\nid: \"d1\"\nto: a@example.com\nsubject: x\nstatus: draft\n\
+                server_message_id: \"<mp-draft.0123456789abcdef01234567.d1@tum.de>\"\n\
+                ---\n\nhi\n";
+    folder.put(&without_mp_headers(&server_copy_of(
+        text,
+        "<mp-draft.0123456789abcdef01234567.d1@tum.de>",
+    )));
+
+    assert_eq!(reconciled(&fx, &mut folder).imported, 1);
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), before);
+    let ids: Vec<String> = local_drafts("tum").into_iter().map(|l| l.id).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(ids.iter().any(|id| id != "d1"), "{ids:?}");
+}
+
 /// An attachment the copy does not carry, a file missing when the other
 /// machine pushed, means the draft here is not the one approved there; one
 /// the copy carries, written here under the stable attachments directory,

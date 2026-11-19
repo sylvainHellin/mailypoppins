@@ -221,7 +221,8 @@ Email body here.`;
         Mail or the Proton app, or an attachment the copy no longer carries, brings it back as
         <code>status: draft</code>. On Proton the approval does not travel: Proton Bridge drops
         the headers mp's own copy carries, so the other machine sees the text and not the
-        approval, and you approve the draft again there.
+        approval, and you approve the draft again there. The draft is still the same draft
+        there, under the same id: the copy's Message-ID, which Bridge keeps, names it.
       </p>
       <p>
         <code>[accounts.drafts] mirror = false</code> in <code>config.toml</code> keeps an

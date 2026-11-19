@@ -103,7 +103,8 @@ pub async fn push<F: DraftsFolder>(
                     .map(|mid| format!("<{}>", bare_message_id(&mid))),
                 _ => None,
             };
-            let message_id = carried.unwrap_or_else(|| mint_server_message_id(mirror.account));
+            let message_id =
+                carried.unwrap_or_else(|| mint_server_message_id(mirror.account, draft_id));
             // The draft's one write by the mirror, read back so the hash the
             // row records is the file's as it now is.
             crate::draft::set_draft_server_message_id(&local.path, &message_id)
