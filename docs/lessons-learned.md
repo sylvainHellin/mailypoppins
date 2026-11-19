@@ -3735,3 +3735,9 @@ Its merged free/busy view also counts a working-elsewhere block as free, so each
 
 The invitation lookup by Message-ID over the Inbox and Deleted Items got two response messages from TUM's server and refused the answer as one too many, so an invitation mail never named its server event.
 `found_ids` in `src/calendar_backend/ews/parse.rs` collects the ids of every response message in folder order and fails on a folder the server refuses.
+
+## A derived index that counts "ever seen" cannot be rebuilt from a cache that forgets (2026-11-19, PERSO-237)
+
+The contact index counted every message ever indexed, while a rebuild recounted from the messages still in the store, so the two disagreed after any delete.
+`deleted_addresses` is filled by a delete trigger on the messages table, which catches every delete path, and is carried across a rebuild; deletes made before the table existed stay lost.
+
