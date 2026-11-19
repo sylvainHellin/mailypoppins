@@ -36,7 +36,9 @@
 //! answers are worth having when the fifth is refused. `unreachable` is that
 //! list and the operation still succeeds. What does fail it is a credential
 //! that cannot be resolved, which happens once, before any mailbox is
-//! selected.
+//! selected, and every mailbox refusing with none answered from the store
+//! (PERSO-214): there is no answer then, and the error names each mailbox and
+//! why rather than settling as zero hits.
 //!
 //! # What the limit means
 //!
@@ -890,7 +892,7 @@ async fn search_imap(
     )
     .await;
     session.logout().await.ok();
-    Ok(stream.settle(cut))
+    stream.settle(cut)
 }
 
 /// The store key of each target mailbox, by the server name its scope
@@ -954,7 +956,7 @@ async fn search_graph(
         &mut stream,
     )
     .await;
-    Ok(stream.settle(cut))
+    stream.settle(cut)
 }
 
 /// What a running search has dropped and published so far.
@@ -984,6 +986,8 @@ struct Stream<'a> {
     deduplicated: usize,
     /// One `{mailbox, error}` per mailbox that refused.
     unreachable: Vec<UnreachableMailbox>,
+    /// The index of every scope that refused, its search or its download.
+    refused_scopes: HashSet<usize>,
     /// Message-IDs this search has already admitted, so two mailboxes holding
     /// one message report it once.
     seen: HashSet<String>,
@@ -1028,19 +1032,34 @@ impl<'a> Stream<'a> {
             published: Vec::new(),
             deduplicated: 0,
             unreachable: Vec::new(),
+            refused_scopes: HashSet::new(),
             seen: HashSet::new(),
         }
     }
 
-    /// What the operation settles with.
-    fn settle(self, cut: Cut) -> ServerSearchSettled {
+    /// What the operation settles with, or the error it fails with when
+    /// every mailbox refused and none was answered (PERSO-214).
+    ///
+    /// A refused mailbox does not fail the search while another answered,
+    /// even with nothing: four folders of answers are worth having. When
+    /// every one refused and the store stood in for none, there is no answer
+    /// at all, and settling with zero hits read as "No results found".
+    fn settle(self, cut: Cut) -> anyhow::Result<ServerSearchSettled> {
+        let scopes = scopes(self.request).len();
+        if scopes > 0
+            && self.refused_scopes.len() >= scopes
+            && self.published.is_empty()
+            && self.local_mailboxes.is_empty()
+        {
+            anyhow::bail!("{}", every_mailbox_failed(&self.unreachable));
+        }
         let coverage = if self.local_mailboxes.is_empty() {
             coverage_of(&self.local_terms)
         } else {
             SearchCoverage::Local
         };
         let order = self.request.order.on_server();
-        ServerSearchSettled {
+        Ok(ServerSearchSettled {
             account: self.request.account.name.clone(),
             query: self.request.query.clone(),
             hits: self.published.len() as u64,
@@ -1053,8 +1072,37 @@ impl<'a> Stream<'a> {
             capped: cut.capped,
             order,
             hit_order: hit_order(&self.published, order),
-        }
+        })
     }
+}
+
+/// The error of a search every mailbox refused (PERSO-214): the mailboxes and
+/// the reason, once when they share it, as a server refusing every folder
+/// for one cause does, else each mailbox with its own.
+fn every_mailbox_failed(unreachable: &[UnreachableMailbox]) -> String {
+    let first = unreachable.first().map(|refused| refused.error.as_str());
+    if unreachable
+        .iter()
+        .all(|refused| Some(refused.error.as_str()) == first)
+    {
+        let mailboxes: Vec<&str> = unreachable
+            .iter()
+            .map(|refused| refused.mailbox.as_str())
+            .collect();
+        return format!(
+            "The server search failed in every mailbox ({}): {}",
+            mailboxes.join(", "),
+            first.unwrap_or("no reason given")
+        );
+    }
+    let each: Vec<String> = unreachable
+        .iter()
+        .map(|refused| format!("{}: {}", refused.mailbox, refused.error))
+        .collect();
+    format!(
+        "The server search failed in every mailbox: {}",
+        each.join("; ")
+    )
 }
 
 /// The `seq` of every published hit, `date_sort` keys indexed by `seq`, in
@@ -1119,6 +1167,7 @@ impl SearchSink for Stream<'_> {
     fn refused(&mut self, mailbox: usize, error: &anyhow::Error) {
         let label = target_label(self.request, mailbox);
         log::warn!("[search_server] search in {label} failed: {error}");
+        self.refused_scopes.insert(mailbox);
         self.unreachable.push(UnreachableMailbox {
             mailbox: label.to_string(),
             error: format!("{error}"),
@@ -1280,6 +1329,36 @@ mod tests {
             .expect("the query parses");
         let (_, _, local_terms) = imap_lowering(&plain, false).expect("plain IMAP");
         assert_eq!(coverage_of(&local_terms), SearchCoverage::Server);
+    }
+
+    /// A search every mailbox refused fails with the mailboxes and the reason
+    /// once when they share it, as a server refusing every folder does, and
+    /// each mailbox with its own otherwise (PERSO-214).
+    #[test]
+    fn a_search_every_mailbox_refused_names_where_and_why() {
+        let refused = |mailbox: &str, error: &str| UnreachableMailbox {
+            mailbox: mailbox.to_string(),
+            error: error.to_string(),
+        };
+        assert_eq!(
+            every_mailbox_failed(&[
+                refused("Inbox", "IMAP search failed: the server answered NO: down"),
+                refused("Sent", "IMAP search failed: the server answered NO: down"),
+            ]),
+            "The server search failed in every mailbox (Inbox, Sent): IMAP search failed: \
+             the server answered NO: down"
+        );
+        assert_eq!(
+            every_mailbox_failed(&[
+                refused("Inbox", "timeout"),
+                refused(
+                    "Spesen",
+                    "Failed to select mailbox 'Spesen': NO no such mailbox"
+                ),
+            ]),
+            "The server search failed in every mailbox: Inbox: timeout; Spesen: Failed to \
+             select mailbox 'Spesen': NO no such mailbox"
+        );
     }
 
     /// A target is named by its label or by its server name, and any other

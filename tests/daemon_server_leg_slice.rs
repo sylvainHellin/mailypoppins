@@ -963,3 +963,42 @@ fn a_search_the_server_cannot_run_for_its_charset_is_answered_from_the_store() {
         "{json}"
     );
 }
+
+/// A search every mailbox refused, and the store answered none of, has no
+/// answer to give: "No results found" with exit 0 read as "no such mail"
+/// (PERSO-214). The operation fails instead, naming each mailbox and why, and
+/// `mp search` exits non-zero with it.
+#[test]
+fn a_search_every_mailbox_refused_fails_naming_why() {
+    use support::fake_imap::{LoginPolicy, RejectingImapServer};
+
+    let server = RejectingImapServer::start_with(LoginPolicy::Accept);
+    server.refuse_searches(Some("NO [UNAVAILABLE] search is down"));
+    let Some((_tmp, daemon)) = alpha_on(&server) else {
+        return;
+    };
+
+    let out = daemon.mp(&["search", "-A", "alpha", "from:ivana"]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a search no mailbox answered did not succeed: stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("No results found"),
+        "nothing was searched, so nothing was not found: {stdout}"
+    );
+    assert!(
+        stderr.contains("failed in every mailbox")
+            && stderr.contains("Inbox")
+            && stderr.contains("search is down"),
+        "stderr says what failed, where and why: {stderr}"
+    );
+
+    // One mailbox that answers keeps the search a success, the refusals
+    // reported beside it.
+    server.refuse_searches(None);
+    let out = daemon.mp(&["search", "-A", "alpha", "--mailbox", "Inbox", "from:ivana"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}

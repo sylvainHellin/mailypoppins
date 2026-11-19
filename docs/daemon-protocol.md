@@ -1150,6 +1150,8 @@ A hit that resolves to a local row is not dropped: it arrives with its `row_id` 
 Four folders of answers are worth having when the fifth is refused, so `unreachable` lists the refused ones and the operation still `succeeded`; `mp search` prints one `Search in <mailbox> failed: <error>` line per entry on stderr after its results.
 A mailbox whose second pass fell short is an entry too, `N of M hits could not be downloaded (<count> <why>, ...)`, beside the hits that did land: a hit expunged or moved between the passes, or one Graph still throttled after three requests paced by its `Retry-After`, is reported rather than dropped.
 What does fail the operation is a credential that cannot be resolved, which happens once, before any mailbox is selected.
+It also fails when every mailbox refused, its search or its download, no hit landed and the store stood in for none (PERSO-214): there is no answer to give, and settling with zero hits read as "No results found".
+The error names the mailboxes and the reason once when they share it (`The server search failed in every mailbox (Inbox, Sent): <error>`), else each mailbox with its own; `mp search` exits 1 with it, and the TUI and the desktop show it as a failed search.
 An account that configures no server at all is `-32006` with `{account, state: "local_only"}` at the call, the same refusal a sync of it makes.
 
 **The settle says which terms the store answered.**

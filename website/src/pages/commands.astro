@@ -721,6 +721,9 @@ mp calendar reminder dismiss AAMkADev2 -A evoqs`}
         server refuses does not stop the others: <code>mp search</code> prints
         <code>Search in &lt;mailbox&gt; failed</code> on stderr after the results,
         and the same line names any hit the server matched but did not hand over.
+        When every mailbox refuses, there is no answer to give, so the search fails
+        with the mailboxes and the reason, and <code>mp search</code> exits 1 rather
+        than printing <code>No results found</code>.
         When more matched than are shown, <code>mp search</code> ends with
         <code>More results than the 20 shown: raise -n to see them.</code>, and the
         TUI and the desktop app end their count with the same sentence and a

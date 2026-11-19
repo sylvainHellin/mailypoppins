@@ -135,6 +135,7 @@ each mailbox is asked for its newest --limit matches (its oldest under
 --sort oldest), those are merged in that order and cut to --limit, and only the
 survivors are downloaded. A mailbox the server refuses does not stop the
 others; a \"Search in <mailbox> failed\" line on stderr follows the results.
+When every mailbox refuses, the search fails naming them and why (exit 1).
 
 Order: hits are listed newest first unless --sort says otherwise, in --local
 and server searches alike. --sort relevance ranks --local hits best match
