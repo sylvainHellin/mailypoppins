@@ -3631,3 +3631,14 @@ On a machine without `herdr-app` (ENOENT, or "no Herdr window"), `hc run --bg --
 
 Text that a daemon call returns later goes to `clipboard.write` as a `ClipboardItem` whose value is the pending `Promise<Blob>`, created inside the key handler (`clients/desktop/src/lib/clipboard.ts` `copyLater`).
 A modal dialog also makes the shell behind it inert, so a panel its action opens stays out of the accessibility tree (and the tests) until the dialog closes in the same reducer step.
+
+## A sent draft's id is answered from drafts/.retired/, for 30 days (2026-11-19, PERSO-317)
+
+A fully sent draft is marked `status: sent` with `sent_at` and `message_id` and moved to `drafts/.retired/`, and the daemon's draft lookup scans only the top level of `drafts/`, so its id used to answer "no match".
+The draft miss (`not_found` in `src/daemon/methods/draft.rs`) now reads the retired record to answer "already sent"; after the 30-day prune of `.retired/` the same id answers "no match" again.
+A discarded draft is retired too, without `status: sent`, and keeps "no match".
+
+## A method that reads received mail refuses a drafts selector before it asks for the store (2026-11-19, PERSO-316)
+
+`message.get` and `message.thread` check the account, refuse a drafts selector, and only then call `ready_account`; in the other order an account with no store answers a drafts selector with the advice to run `mp sync`, which no sync makes true.
+Only `message.get` adds the hint naming `mp <selector>`, `mp path` and `mp list`, since `mp show` and `mp export` are the reads it serves; `message.thread`, moves, flags and replies keep the selector's bare refusal.
