@@ -356,8 +356,8 @@ pub fn outbox_discard_line(row_id: i64, message_id: &str) -> String {
     format!("  \u{2713} discarded row {row_id} ({message_id}); its bytes are released")
 }
 
-/// The two lines a retry prints, and the third it prints only when a copy was
-/// filed.
+/// The two lines a retry prints, then one for the copies it filed and one
+/// for those it found already on the server, each only when there are any.
 pub fn outbox_retry_lines(outcome: &OutboxRetryOutcome) -> Vec<String> {
     let mut lines = vec![format!(
         "  \u{21bb} row {} is queued again; sending it now",
@@ -367,10 +367,14 @@ pub fn outbox_retry_lines(outcome: &OutboxRetryOutcome) -> Vec<String> {
         Some(state) => format!("  \u{2713} row {} is now {state}", outcome.row_id),
         None => format!("  \u{2713} row {} is gone", outcome.row_id),
     });
-    if outcome.completed > 0 {
+    let filed = outcome.completed.saturating_sub(outcome.deduped);
+    if filed > 0 {
+        lines.push(format!("  \u{2713} {filed} sent copy/copies filed"));
+    }
+    if outcome.deduped > 0 {
         lines.push(format!(
-            "  \u{2713} {} sent copy/copies filed",
-            outcome.completed
+            "  \u{2713} {} sent copy/copies already on the server, none filed again",
+            outcome.deduped
         ));
     }
     lines

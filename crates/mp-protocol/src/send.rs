@@ -210,6 +210,12 @@ pub struct OutboxRetryOutcome {
     /// What became of it, `None` when the retry finished it and the row is
     /// gone.
     pub state: Option<String>,
-    /// How many Sent copies the drain filed on the way.
+    /// How many rows the drain finished on the way, their Sent copies
+    /// filed or found already filed.
     pub completed: usize,
+    /// How many of those `completed` found their copy already in the Sent
+    /// folder, by the Message-ID search an earlier APPEND whose answer was
+    /// lost arms, and filed none: absent from a daemon before PERSO-210.
+    #[serde(default)]
+    pub deduped: usize,
 }

@@ -1611,13 +1611,14 @@ async fn the_empty_outbox_wordings_are_two_different_sentences() {
 }
 
 /// The two lines a retry prints, and the third it prints only when a copy was
-/// filed.
+/// filed or found already on the server.
 #[test]
 fn the_retry_wordings_report_the_row_and_the_copies() {
     let landed = OutboxRetryOutcome {
         row_id: fixture::FAILED_ROW,
         state: Some(OutboxState::Done.as_str().to_string()),
         completed: 1,
+        deduped: 0,
     };
     assert_eq!(
         outbox_retry_lines(&landed),
@@ -1637,6 +1638,7 @@ fn the_retry_wordings_report_the_row_and_the_copies() {
         row_id: fixture::FAILED_ROW,
         state: None,
         completed: 0,
+        deduped: 0,
     };
     assert_eq!(
         outbox_retry_lines(&gone),
@@ -1646,6 +1648,22 @@ fn the_retry_wordings_report_the_row_and_the_copies() {
                 fixture::FAILED_ROW
             ),
             format!("  ✓ row {} is gone", fixture::FAILED_ROW),
+        ]
+    );
+
+    // A copy the dedup search found already on the server, after an APPEND
+    // whose answer was lost, is no copy filed by this retry (PERSO-210).
+    let found = OutboxRetryOutcome {
+        row_id: fixture::FAILED_ROW,
+        state: Some(OutboxState::Done.as_str().to_string()),
+        completed: 3,
+        deduped: 1,
+    };
+    assert_eq!(
+        outbox_retry_lines(&found)[2..],
+        [
+            "  ✓ 2 sent copy/copies filed".to_string(),
+            "  ✓ 1 sent copy/copies already on the server, none filed again".to_string(),
         ]
     );
 }
@@ -3834,7 +3852,7 @@ mod wire {
         assert_eq!(
             stdout(&out),
             "  ↻ row 1 is queued again; sending it now\n  ✓ row 1 is now done\n  \
-             ✓ 1 sent copy/copies filed\n"
+             ✓ 1 sent copy/copies already on the server, none filed again\n"
         );
         assert_eq!(wire.imap.contents(SENT).len(), 1, "and no second one");
         assert_eq!(wire.smtp.deliveries().len(), 1, "the message went out once");

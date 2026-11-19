@@ -359,7 +359,13 @@ function retryStarting(s: AppState): boolean {
 /** What a settled retry says: the CLI's "row N is gone" or "row N is now …", in the GUI's words. */
 export function retryResult(outcome: OutboxRetryOutcome): { kind: "applied" | "send_failed" | "send_partial"; text: string } {
   const id = outcome.row_id;
-  const copies = outcome.completed > 0 ? "; its Sent copy is filed" : "";
+  // `deduped` is absent from a daemon before PERSO-210.
+  const copies =
+    (outcome.deduped ?? 0) > 0
+      ? "; its Sent copy was already on the server"
+      : outcome.completed > 0
+        ? "; its Sent copy is filed"
+        : "";
   switch (outcome.state) {
     case null:
       return { kind: "applied", text: `Outbox row ${id} sent${copies}` };
@@ -387,7 +393,7 @@ function retryEnded(s: AppState, action: OutboxAction, end: OperationEnd): AppSt
     const why = end.error ?? end.state;
     return pushNotice(next, { kind: "send_failed", account, text: `The retry of outbox row ${action.row_id} failed: ${why}` });
   }
-  const outcome = (end.result ?? { row_id: action.row_id, state: null, completed: 0 }) as OutboxRetryOutcome;
+  const outcome = (end.result ?? { row_id: action.row_id, state: null, completed: 0, deduped: 0 }) as OutboxRetryOutcome;
   const { kind, text } = retryResult(outcome);
   return pushNotice(next, { kind, account, text });
 }

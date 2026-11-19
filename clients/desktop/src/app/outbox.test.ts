@@ -229,9 +229,11 @@ describe("the confirmations and the words", () => {
   });
 
   it("says a retry's outcome in each of the row's ends", () => {
-    expect(retryResult({ row_id: 5, state: "sent_pending_append", completed: 0 }).text).toBe("Outbox row 5 sent; its Sent copy is still owed");
-    expect(retryResult({ row_id: 5, state: "pending_send", completed: 0 }).text).toBe("Outbox row 5 is queued again; the next sync sends it");
-    expect(retryResult({ row_id: 5, state: null, completed: 0 }).text).toBe("Outbox row 5 sent");
+    expect(retryResult({ row_id: 5, state: "sent_pending_append", completed: 0, deduped: 0 }).text).toBe("Outbox row 5 sent; its Sent copy is still owed");
+    expect(retryResult({ row_id: 5, state: "pending_send", completed: 0, deduped: 0 }).text).toBe("Outbox row 5 is queued again; the next sync sends it");
+    expect(retryResult({ row_id: 5, state: null, completed: 0, deduped: 0 }).text).toBe("Outbox row 5 sent");
+    // A copy the dedup search found, after an APPEND whose answer was lost, was not filed by this retry (PERSO-210).
+    expect(retryResult({ row_id: 5, state: null, completed: 1, deduped: 1 }).text).toBe("Outbox row 5 sent; its Sent copy was already on the server");
   });
 
   it("counts the queue depth from the outbox, the sends and the pending changes", () => {

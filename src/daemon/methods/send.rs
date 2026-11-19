@@ -1301,6 +1301,7 @@ async fn retry_row(account: &AccountConfig, row_id: i64) -> anyhow::Result<Outbo
         row_id,
         state: outbox::load(&store, row_id)?.map(|row| row.state.as_str().to_string()),
         completed: result.completed,
+        deduped: result.deduped,
     })
 }
 
