@@ -59,6 +59,13 @@ use crate::fixture::Fixture;
 use crate::session::SessionHandle;
 pub(crate) use crate::settings::settings_file;
 use crate::settings::{self, SettingKey};
+// The editors that need a terminal (`MP_DESKTOP_EDITOR`, the setting,
+// `$VISUAL` or `$EDITOR` naming one runs in a terminal emulator, or is
+// skipped when none is found), the split of a template into words and the
+// order of `$VISUAL` and `$EDITOR` are `mp_core::editor`'s, which the CLI
+// and the TUI resolve their editor with too (PERSO-320).
+pub(crate) use mp_core::editor::needs_terminal;
+pub use mp_core::editor::{command_line, quote, split, TERMINAL_EDITORS};
 
 /// The environment override of the editor command.
 pub const EDITOR_ENV: &str = "MP_DESKTOP_EDITOR";
@@ -72,13 +79,6 @@ pub const PROBE_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/b
 
 /// How long a launch is watched for an early failure.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
-
-/// Editors that need a terminal; `MP_DESKTOP_EDITOR`, the setting, `$VISUAL`
-/// or `$EDITOR` naming one runs in a terminal emulator, or is skipped when
-/// none is found.
-pub const TERMINAL_EDITORS: &[&str] = &[
-    "vi", "vim", "nvim", "hx", "helix", "nano", "pico", "micro", "kak", "joe", "ne", "mg", "ed",
-];
 
 /// A terminal emulator a terminal editor can run in.
 pub struct TerminalApp {
@@ -353,19 +353,18 @@ pub fn resolve_terminal_editor(lookup: &Lookup) -> Result<Option<Resolved>, Reso
             Err(r)
         };
     }
-    let mut gui = None;
-    for (name, source) in [
-        ("VISUAL", EditorSource::Visual),
-        ("EDITOR", EditorSource::Editor),
-    ] {
-        if let Some(v) = lookup.var(name) {
-            if needs_terminal(&v) {
-                return Ok(Some(found(v, source)));
-            }
-            gui.get_or_insert(found(v, source));
-        }
+    let source = |var| match var {
+        mp_core::editor::EnvVar::Visual => EditorSource::Visual,
+        mp_core::editor::EnvVar::Editor => EditorSource::Editor,
+    };
+    match mp_core::editor::pick(
+        lookup.var("VISUAL").as_deref(),
+        lookup.var("EDITOR").as_deref(),
+    ) {
+        Ok(Some((var, v))) => Ok(Some(found(v, source(var)))),
+        Ok(None) => Ok(None),
+        Err((var, v)) => Err(found(v, source(var))),
     }
-    gui.map_or(Ok(None), Err)
 }
 
 /// `editor` (a terminal editor's template with its own arguments, from
@@ -433,115 +432,6 @@ pub fn terminal_template(lookup: &Lookup, editor: &str) -> Option<String> {
     let all = prefix?.into_iter().chain(words);
     let quoted = all.map(|w| if w == "{path}" { w } else { quote(&w) });
     Some(quoted.collect::<Vec<_>>().join(" "))
-}
-
-/// Whether a template's program is a terminal-only editor.
-pub(crate) fn needs_terminal(template: &str) -> bool {
-    split(template)
-        .ok()
-        .and_then(|w| w.into_iter().next())
-        .is_some_and(|program| {
-            let name = Path::new(&program)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or(program);
-            TERMINAL_EDITORS.contains(&name.as_str())
-        })
-}
-
-/// Split a command template the way a POSIX shell splits words, without any
-/// expansion: single quotes are literal, double quotes honour `\"`, `\\`,
-/// `\$` and `` \` ``, and a backslash outside quotes escapes the next
-/// character.
-pub fn split(template: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut chars = template.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            c if c.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(x) => word.push(x),
-                        None => return Err(format!("unclosed single quote in `{template}`")),
-                    }
-                }
-            }
-            '"' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(x @ ('"' | '\\' | '$' | '`')) => word.push(x),
-                            Some('\n') => {}
-                            Some(x) => {
-                                word.push('\\');
-                                word.push(x);
-                            }
-                            None => return Err(format!("unclosed double quote in `{template}`")),
-                        },
-                        Some(x) => word.push(x),
-                        None => return Err(format!("unclosed double quote in `{template}`")),
-                    }
-                }
-            }
-            '\\' => {
-                in_word = true;
-                match chars.next() {
-                    Some('\n') => {}
-                    Some(x) => word.push(x),
-                    None => return Err(format!("a trailing backslash in `{template}`")),
-                }
-            }
-            c => {
-                in_word = true;
-                word.push(c);
-            }
-        }
-    }
-    if in_word {
-        words.push(word);
-    }
-    Ok(words)
-}
-
-/// One word quoted so [`split`] reads it back unchanged.
-pub fn quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
-    }
-}
-
-/// The argument vector a template runs with on `path`.
-pub fn command_line(template: &str, path: &str) -> Result<Vec<String>, String> {
-    let mut words = split(template)?;
-    if words.is_empty() {
-        return Err(format!("the editor command `{template}` is empty"));
-    }
-    if words.iter().any(|w| w.contains("{path}")) {
-        for w in &mut words {
-            *w = w.replace("{path}", path);
-        }
-    } else {
-        words.push(path.to_string());
-    }
-    Ok(words)
 }
 
 /// A bare program name found on `path_var`, then in [`PROBE_DIRS`]; a name
@@ -1154,17 +1044,6 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_editor_is_known_by_its_program_name() {
-        assert!(needs_terminal("nvim"));
-        assert!(needs_terminal("/usr/bin/vim -u x"));
-        assert!(needs_terminal("'/opt/my bin/hx' {path}"));
-        assert!(!needs_terminal("code -w"));
-        assert!(!needs_terminal("nvim-qt"));
-        assert!(!needs_terminal("'nvim"), "a template that does not split");
-        assert!(!needs_terminal("  "));
-    }
-
-    #[test]
     fn with_nothing_found_the_fallback_opens_the_default_app() {
         let none = |_: &Path| false;
         let env = env_of(&[]);
@@ -1180,43 +1059,6 @@ mod tests {
             command_line("open -t", "/d/a b.md").expect("line"),
             ["open", "-t", "/d/a b.md"]
         );
-    }
-
-    #[test]
-    fn the_path_replaces_the_placeholder_or_is_appended() {
-        assert_eq!(
-            command_line("wezterm start -- hx {path}", "/d/x.md").expect("line"),
-            ["wezterm", "start", "--", "hx", "/d/x.md"]
-        );
-        assert_eq!(
-            command_line("code --goto={path}:1", "/d/x.md").expect("line"),
-            ["code", "--goto=/d/x.md:1"]
-        );
-        assert_eq!(
-            command_line("'/Applications/My Editor/bin/ed' -w", "/d/x.md").expect("line"),
-            ["/Applications/My Editor/bin/ed", "-w", "/d/x.md"]
-        );
-        assert!(command_line("  ", "/d/x.md").is_err());
-    }
-
-    #[test]
-    fn a_template_splits_with_shell_words_rules() {
-        assert_eq!(
-            split(r#"a "b c" 'd "e"' f\ g "h\"i" 'j'k"#).expect("split"),
-            ["a", "b c", "d \"e\"", "f g", "h\"i", "jk"]
-        );
-        assert_eq!(split(r#""""#).expect("split"), [""]);
-        assert_eq!(
-            split("  $HOME  ").expect("split"),
-            ["$HOME"],
-            "no expansion"
-        );
-        assert!(split("'open").is_err());
-        assert!(split("\"open").is_err());
-        assert!(split("trailing\\").is_err());
-        for word in ["plain", "/a b/c", "it's", "", "{path}"] {
-            assert_eq!(split(&quote(word)).expect("round trip"), [word]);
-        }
     }
 
     #[test]

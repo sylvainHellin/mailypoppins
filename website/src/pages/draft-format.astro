@@ -233,8 +233,11 @@ Email body here.`;
       <h2 id="editing-drafts">Editing Drafts</h2>
       <p>
         A draft is edited as the file it is. The TUI and <code>mp edit</code> open the file in
-        <code>$VISUAL</code>, else <code>$EDITOR</code>, else <code>hx</code>, the TUI suspending
-        itself until the editor exits.
+        the first of <code>$VISUAL</code> and <code>$EDITOR</code> that names a terminal editor,
+        else the first that is set (a GUI editor such as <code>code -w</code>, which needs its
+        wait flag), else <code>hx</code>, the TUI suspending itself until the editor exits. A
+        value carrying arguments, such as <code>nvim -u 'my init.lua'</code>, is split as a
+        shell would split it.
       </p>
       <p>
         The desktop app runs a terminal editor such as Neovim inside its reader pane, with your

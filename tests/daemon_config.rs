@@ -1953,14 +1953,14 @@ async fn a_reload_that_changes_nothing_still_announces_itself() {
 // ---------------------------------------------------------------------------
 
 /// A stand-in editor: a `sh` script that appends `$MP_TEST_APPEND` to the file
-/// it is handed, and records that it ran in `<root>/editor.ran`.
+/// it is handed last, and records its arguments in `<root>/editor.ran`.
 fn stand_in_editor(sandbox: &Sandbox) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = sandbox.root.path().join("stand-in-editor.sh");
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\nprintf '%s' \"$MP_TEST_APPEND\" >> \"$1\"\n",
+            "#!/bin/sh\nprintf '[%s]' \"$@\" >> '{0}'\necho >> '{0}'\nfor last; do :; done\nprintf '%s' \"$MP_TEST_APPEND\" >> \"$last\"\n",
             sandbox.editor_ran().display()
         ),
     )
@@ -2036,7 +2036,7 @@ fn config_open_on_an_unchanged_file_says_so_and_calls_no_daemon() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         fs::read_to_string(sandbox.editor_ran()).expect("$VISUAL ran"),
-        format!("{}\n", sandbox.config_path().display()),
+        format!("[{}]\n", sandbox.config_path().display()),
         "$VISUAL, not the failing $EDITOR, was handed the file `mp config path` prints"
     );
     assert_eq!(
@@ -2051,6 +2051,34 @@ fn config_open_on_an_unchanged_file_says_so_and_calls_no_daemon() {
         !sandbox.socket().exists(),
         "no daemon was contacted or started"
     );
+}
+
+/// An editor value carrying arguments runs as a program and its arguments,
+/// with the file last, as a shell would split it.
+#[tokio::test]
+async fn config_open_runs_an_editor_value_that_carries_arguments() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let editor = format!("{} --wait 'two words'", stand_in_editor(&sandbox).display());
+    let out = sandbox
+        .cmd()
+        .args(["config", "open"])
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .env(
+            "MP_TEST_APPEND",
+            account_toml("beta", DEFAULT_BODY_FETCH_DEADLINE_SECS),
+        )
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run mp config open");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        fs::read_to_string(sandbox.editor_ran()).expect("the editor ran"),
+        format!("[--wait][two words][{}]\n", sandbox.config_path().display())
+    );
+    assert_eq!(text(&out.stdout), "✓ Configuration reloaded: added beta\n");
 }
 
 /// A changed file that loads is reloaded by the running daemon, which says

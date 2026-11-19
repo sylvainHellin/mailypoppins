@@ -6292,14 +6292,7 @@ async fn routed_signature(account: &str, action: SignatureAction) -> Result<()> 
                 )
                 .await?,
             )?;
-            let editor = mp_core::editor::command();
-            let status = std::process::Command::new(&editor)
-                .arg(&read.path)
-                .status()
-                .with_context(|| format!("running {editor}"))?;
-            if !status.success() {
-                return Err(anyhow!("{editor} exited with {status}"));
-            }
+            run_editor(std::path::Path::new(&read.path))?;
             println!("{} Signature '{name}' edited", "\u{2713}".green());
         }
         SignatureAction::Rename { old, new } => {
@@ -6688,6 +6681,20 @@ async fn settle(
     }
 }
 
+/// Run the editor `mp_core::editor` resolves on `path` in this terminal and
+/// wait for it: an editor is a terminal session, which only the client has.
+fn run_editor(path: &std::path::Path) -> Result<()> {
+    let editor = mp_core::editor::template();
+    let status = mp_core::editor::command(&editor, path)
+        .map_err(|e| anyhow!("{e}"))?
+        .status()
+        .with_context(|| format!("running {editor}"))?;
+    if !status.success() {
+        return Err(anyhow!("{editor} exited with {status}"));
+    }
+    Ok(())
+}
+
 /// `mp config open` (PERSO-320): `config.toml` in the editor, then a
 /// `config.reload` when the editor changed it, and the outcome in words.
 ///
@@ -6707,14 +6714,7 @@ async fn cmd_config_open() -> Result<()> {
         std::process::exit(1);
     }
     let before = std::fs::read(&path).with_context(|| format!("reading {shown}"))?;
-    let editor = mp_core::editor::command();
-    let status = std::process::Command::new(&editor)
-        .arg(&path)
-        .status()
-        .with_context(|| format!("running {editor}"))?;
-    if !status.success() {
-        return Err(anyhow!("{editor} exited with {status}"));
-    }
+    run_editor(&path)?;
     // A file the editor removed is not reloaded: the daemon would read its
     // absence as "no configuration" and stop every account.
     let after = std::fs::read_to_string(&path).with_context(|| format!("reading {shown}"))?;
@@ -7269,14 +7269,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
                 serde_json::json!({"account": account_config.name, "selector": selector}),
             )
             .await?;
-            let editor = mp_core::editor::command();
-            let status = std::process::Command::new(&editor)
-                .arg(&location.path)
-                .status()
-                .with_context(|| format!("running {editor}"))?;
-            if !status.success() {
-                return Err(anyhow!("{editor} exited with {status}"));
-            }
+            run_editor(std::path::Path::new(&location.path))?;
             hand_back(
                 &format!("{} {}", "\u{2713}".green(), location.selector),
                 &location.selector,

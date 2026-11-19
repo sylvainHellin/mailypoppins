@@ -68,9 +68,9 @@ pub(super) fn install_panic_hook() {
 // ---------------------------------------------------------------------------
 
 pub(super) fn edit_file(path: &Path) -> Result<()> {
-    let editor = mp_core::editor::command();
-    let status = std::process::Command::new(&editor)
-        .arg(path)
+    let editor = mp_core::editor::template();
+    let status = mp_core::editor::command(&editor, path)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
         .status()
         .with_context(|| format!("Failed to launch editor: {}", editor))?;
     if !status.success() {

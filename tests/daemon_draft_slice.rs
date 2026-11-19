@@ -2111,9 +2111,10 @@ fn mp_edit_hands_the_editor_the_path_mp_path_prints() {
     }
 }
 
-/// `$VISUAL` names the editor before `$EDITOR`, the one resolver `mp config
-/// open` and the TUI take too (PERSO-320): with a failing `$EDITOR` beside it,
-/// `mp edit` runs `$VISUAL` and succeeds.
+/// Of two editors neither of which needs a terminal, `$VISUAL` runs before
+/// `$EDITOR`, by the one resolver `mp config open`, the TUI and the desktop
+/// take too (`mp_core::editor`, PERSO-320): with a failing `$EDITOR` beside
+/// it, `mp edit` runs `$VISUAL` and succeeds.
 #[test]
 fn mp_edit_runs_visual_before_editor() {
     let slice = Slice::start();
