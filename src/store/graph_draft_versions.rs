@@ -259,6 +259,7 @@ mod tests {
                 synced_at: 0,
                 synced_hash: String::new(),
                 message_id: None,
+                claiming: None,
             },
         )
         .unwrap();

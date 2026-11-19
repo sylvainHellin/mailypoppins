@@ -18,6 +18,11 @@
 //! `server_message_id` names and the file ([`crate::draft_mirror`]). Nothing
 //! in it is the only copy of anything the user typed.
 //!
+//! `claiming` marks a row whose copy a send began to claim and whose claim has
+//! not settled ([`crate::draft_mirror::send_guard`], PERSO-182): the row
+//! stays, so a retry still checks the folder against it, until the claim
+//! settles or the reconcile sees the copy again or misses it twice.
+//!
 //! The volatile state lives here rather than in the frontmatter because every
 //! push replaces the server copy and changes its UID: written into the file,
 //! it would rewrite a draft an editor holds open a few seconds after every
@@ -53,8 +58,17 @@ pub fn create_sql() -> String {
 /// it ([`super::schema::add_columns`]). A read when nothing is missing, as
 /// [`create_sql`]'s caller requires; the rows it leaves `NULL` are filled by
 /// the next reconcile.
+///
+/// `claiming` (PERSO-182) is added the same way; a row without it reads as
+/// synced, which is what every row was before it existed.
 pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
-    super::schema::add_columns(conn, &[(TABLE, "message_id", "TEXT")])
+    super::schema::add_columns(
+        conn,
+        &[
+            (TABLE, "message_id", "TEXT"),
+            (TABLE, "claiming", "INTEGER"),
+        ],
+    )
 }
 
 /// One draft's server copy and the convergence it was recorded at.
@@ -76,6 +90,11 @@ pub struct DraftSyncRow {
     /// The copy's `Message-ID`, as the draft's `server_message_id` spells it;
     /// `None` on a row an earlier build wrote, until the reconcile fills it.
     pub message_id: Option<String>,
+    /// Unix seconds a send began to claim the copy, while that claim has not
+    /// settled (PERSO-182): it failed, its answer was lost, or the daemon
+    /// stopped before it ended. `None` for a row that names its copy as
+    /// synced. See [`crate::draft_mirror::send_guard`].
+    pub claiming: Option<i64>,
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftSyncRow> {
@@ -88,11 +107,12 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftSyncRow> {
         synced_at: row.get(5)?,
         synced_hash: row.get(6)?,
         message_id: row.get(7)?,
+        claiming: row.get(8)?,
     })
 }
 
 const COLUMNS: &str =
-    "account, draft_id, mailbox, uid, uidvalidity, synced_at, synced_hash, message_id";
+    "account, draft_id, mailbox, uid, uidvalidity, synced_at, synced_hash, message_id, claiming";
 
 /// Every row of `account`, by draft id.
 pub fn load(store: &Store, account: &str) -> Result<Vec<DraftSyncRow>> {
@@ -125,11 +145,12 @@ pub fn upsert(store: &Store, row: &DraftSyncRow) -> Result<()> {
         .conn()
         .execute(
             &format!(
-                "INSERT INTO {TABLE} ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO {TABLE} ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT (account, draft_id) DO UPDATE SET
                     mailbox = excluded.mailbox, uid = excluded.uid,
                     uidvalidity = excluded.uidvalidity, synced_at = excluded.synced_at,
-                    synced_hash = excluded.synced_hash, message_id = excluded.message_id"
+                    synced_hash = excluded.synced_hash, message_id = excluded.message_id,
+                    claiming = excluded.claiming"
             ),
             rusqlite::params![
                 row.account,
@@ -140,6 +161,7 @@ pub fn upsert(store: &Store, row: &DraftSyncRow) -> Result<()> {
                 row.synced_at,
                 row.synced_hash,
                 row.message_id,
+                row.claiming,
             ],
         )
         .context("writing a draft_sync row")?;
@@ -266,6 +288,7 @@ mod tests {
             synced_at: 1_700_000_000,
             synced_hash: format!("hash-{uid}"),
             message_id: Some(format!("<mp-draft.{uid}@tum.de>")),
+            claiming: None,
         }
     }
 
@@ -328,7 +351,44 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let old = get(&store, "tum", "a").unwrap().expect("the old row");
         assert_eq!(old.message_id, None);
+        assert_eq!(old.claiming, None);
         upsert(&store, &row("a", 10)).unwrap();
         assert_eq!(get(&store, "tum", "a").unwrap(), Some(row("a", 10)));
+    }
+
+    /// The table every installed store has, with `message_id` and without
+    /// `claiming`, gains `claiming` at the next open, its rows reading as
+    /// synced, and a claiming row round-trips and is cleared by a write that
+    /// names its copy as synced (PERSO-182).
+    #[test]
+    fn a_table_without_the_claiming_state_gains_it_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .conn()
+                .execute_batch(&format!(
+                    "DROP TABLE {TABLE};
+                     CREATE TABLE {TABLE} (
+                        account TEXT NOT NULL, draft_id TEXT NOT NULL,
+                        mailbox TEXT NOT NULL, uid INTEGER NOT NULL,
+                        uidvalidity INTEGER NOT NULL, synced_at INTEGER NOT NULL,
+                        synced_hash TEXT NOT NULL, message_id TEXT,
+                        PRIMARY KEY (account, draft_id));
+                     INSERT INTO {TABLE} VALUES ('tum', 'a', 'Drafts', 10, 7, 1, 'h', '<m@x>');"
+                ))
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(get(&store, "tum", "a").unwrap().unwrap().claiming, None);
+        let claiming = DraftSyncRow {
+            claiming: Some(1_700_000_100),
+            ..row("a", 10)
+        };
+        upsert(&store, &claiming).unwrap();
+        assert_eq!(get(&store, "tum", "a").unwrap(), Some(claiming));
+        upsert(&store, &row("a", 10)).unwrap();
+        assert_eq!(get(&store, "tum", "a").unwrap().unwrap().claiming, None);
     }
 }

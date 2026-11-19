@@ -221,6 +221,7 @@ pub async fn push<F: DraftsFolder>(
             synced_at: mirror.now,
             synced_hash: local.hash.clone(),
             message_id: Some(message_id.clone()),
+            claiming: None,
         },
     )?;
     crate::pending_ops::forget_failed_pushes(mirror.store, account, draft_id)?;

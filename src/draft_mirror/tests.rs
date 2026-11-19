@@ -339,6 +339,7 @@ fn the_owed_pushes_are_queued_once() {
             synced_at: 1,
             synced_hash: file_hash(&std::fs::read(&synced).unwrap()),
             message_id: None,
+            claiming: None,
         },
     )
     .unwrap();
@@ -2228,7 +2229,10 @@ fn a_copy_claimed_by_another_session_refuses_the_send_with_its_outcome_unknown()
     assert!(refused.contains("another session removed"), "{refused}");
     assert!(refused.contains("outcome unknown"), "{refused}");
     assert!(refused.contains("check Sent and Drafts"), "{refused}");
-    assert!(fx.row("d1").is_none());
+    assert!(
+        fx.row("d1").unwrap().claiming.is_some(),
+        "kept, claiming, until the claim settles"
+    );
     for _ in 0..2 {
         let report = reconciled(&fx, &mut folder);
         assert_eq!(report.retired, 0, "{report:?}");
@@ -3693,4 +3697,184 @@ fn an_outlook_save_of_a_leftover_copy_stops_the_claim_before_the_rows_copy() {
     let text = all_draft_text();
     assert!(text.contains("Hallo Robin"), "{text}");
     assert!(text.contains("Hallo aus Outlook"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// A claim that did not settle (PERSO-182 third review)
+// ---------------------------------------------------------------------------
+
+/// A Graph claim that fails before it removed anything (a 503 on the
+/// removal) is refused with its outcome unknown and leaves the draft's row in
+/// its claiming state. An Outlook save in place made before the retry is not
+/// the copy the row names and carries no mark of mp's, so the retry is
+/// refused and the save stays in Drafts.
+#[test]
+fn a_retry_after_a_failed_graph_claim_never_takes_an_outlook_save() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    graph.fail_next_remove = true;
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(refused.contains("outcome unknown"), "{refused}");
+    assert!(fx.row("d1").unwrap().claiming.is_some(), "claiming");
+
+    let id = graph.drafts()[0].id.clone();
+    graph.edit(
+        &id,
+        &outlook_copy(
+            &mid_of(&path),
+            "robin@example.com",
+            "Angebot",
+            "<p>Hallo aus Outlook</p>",
+        ),
+    );
+    let again = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        again.contains("changed in Outlook or on another machine"),
+        "{again}"
+    );
+    assert_eq!(graph.drafts().len(), 1, "{:?}", graph.log);
+    assert!(String::from_utf8_lossy(&graph.drafts()[0].raw).contains("Hallo aus Outlook"));
+}
+
+/// The same on IMAP: a claim that failed before its `UID STORE`, then the
+/// other machine pushing over the copy; the retry is refused rather than
+/// taking the other machine's copy.
+#[test]
+fn a_retry_after_a_failed_imap_claim_never_takes_another_machines_push() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.fail_claim_untouched = true;
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(refused.contains("outcome unknown"), "{refused}");
+    folder.fail_claim_untouched = false;
+
+    let row_uid = fx.row("d1").unwrap().uid;
+    folder.remove(row_uid);
+    let other = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Servus");
+    folder.put(&server_copy_of(&other, &mid_of(&path)));
+    let again = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        again.contains("changed in Outlook or on another machine"),
+        "{again}"
+    );
+    assert_eq!(folder.live().len(), 1);
+}
+
+/// A removal that went through but whose answer was lost leaves no copy and
+/// the claiming row: the retry reads it as this machine's own claim and the
+/// send goes on, on Graph and on IMAP.
+#[test]
+fn a_retry_after_a_claim_whose_answer_was_lost_sends() {
+    let fx = graph_fixture();
+    fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    graph.lose_next_remove_answer = true;
+    let refused = graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(refused.contains("outcome unknown"), "{refused}");
+    assert!(graph.drafts().is_empty());
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("the retry sends");
+    assert!(fx.row("d1").is_none(), "forgotten once the claim settled");
+
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.fail_claim = true;
+    guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(fx.row("d1").unwrap().claiming.is_some());
+    folder.fail_claim = false;
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the retry sends");
+}
+
+/// The claiming state is in the store, so a daemon restarted between the
+/// failed claim and the retry still refuses an Outlook save made meanwhile.
+#[test]
+fn the_claiming_state_survives_a_restart() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    graph.fail_next_remove = true;
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+
+    let reopened = Store::open(crate::config::store_path("tum")).unwrap();
+    let row = draft_sync::get(&reopened, "tum", "d1").unwrap().unwrap();
+    assert!(row.claiming.is_some(), "{row:?}");
+    let id = graph.drafts()[0].id.clone();
+    graph.edit(
+        &id,
+        &outlook_copy(
+            &mid_of(&path),
+            "robin@example.com",
+            "Angebot",
+            "<p>Hallo aus Outlook</p>",
+        ),
+    );
+    let again = graph_guard(&reopened, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(
+        again.contains("changed in Outlook or on another machine"),
+        "{again}"
+    );
+    assert_eq!(graph.drafts().len(), 1);
+}
+
+/// The reconcile and a claiming row: a copy it names that is still listed
+/// ends the claiming state, since the claim took nothing of it; a copy that
+/// is gone never retires the draft as sent elsewhere, and once two
+/// reconciles miss it the row is let go, as a claim that settled leaves it,
+/// so the owed-push scan puts the draft back in Drafts.
+#[test]
+fn the_reconcile_never_retires_a_draft_whose_claim_did_not_settle() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    graph.fail_next_remove = true;
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert_eq!(
+        graph_reconciled(&fx, &mut graph),
+        ReconcileReport::default()
+    );
+    assert!(
+        fx.row("d1").unwrap().claiming.is_none(),
+        "the copy is still there: the claim took nothing"
+    );
+
+    graph.lose_next_remove_answer = true;
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").unwrap_err();
+    assert!(graph.drafts().is_empty());
+    for _ in 0..2 {
+        let report = graph_reconciled(&fx, &mut graph);
+        assert_eq!(report.retired, 0, "{report:?}");
+    }
+    assert!(path.exists(), "never retired");
+    assert!(fx.row("d1").is_none(), "let go after two misses");
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
 }

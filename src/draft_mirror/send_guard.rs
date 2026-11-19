@@ -30,10 +30,12 @@
 //!   it back meanwhile, the approval a send key makes before the send
 //!   included ([`super::push::push`]), so the claim never finds a fresh copy
 //!   of a draft sent elsewhere.
-//! - No copy and no row: this machine's own claim took the copy, and the
-//!   send after it failed or its outcome was unknown, or the push never
-//!   landed, or a rebuilt store dropped the row. The send goes ahead, since
-//!   the reconcile too holds such a draft for one never pushed.
+//! - No copy and a claiming row: an earlier claim of this machine's took the
+//!   copy and its answer was lost. The send goes ahead.
+//! - No copy and no row: this machine's own claim took the copy and the
+//!   send after it failed, or the push never landed, or a rebuilt store
+//!   dropped the row. The send goes ahead, since the reconcile too holds such
+//!   a draft for one never pushed.
 //! - A server that cannot be reached, or that offers no `UIDPLUS`: the send
 //!   is refused, since nothing then says the other machine has not sent it.
 //! - A copy edited in place while the claim ran (Graph: its `changeKey`
@@ -43,13 +45,24 @@
 //!   last, in a claim of its own that an edit or a shortfall on the way
 //!   skips, so the row put back always names a copy still in the folder.
 //!
-//! Forgetting the row before the claim is the whole of the bookkeeping, save
-//! for a copy edited during the claim, whose row comes back: a
-//! draft without a row is one the reconcile never retires as copy-gone and
-//! the owed-push scan pushes again, so whatever happens after the `STORE`,
-//! a crash included, leaves a draft this machine sends on a retry and that
-//! shows in Drafts again, never one presented as sent elsewhere. Should the
-//! other machine have sent it after all, its reconcile deletes the copy
+//! The row is not forgotten before the claim but marked claiming
+//! (`draft_sync.claiming`, PERSO-182), and forgotten once the claim
+//! settles. A claim that fails, loses its answer or never ends (a crash, a
+//! restart) leaves it claiming, and a retry then checks every copy against
+//! it like any row: a copy it does not name that this machine did not write
+//! (an Outlook save in place, another machine's push) refuses the send as
+//! [`ChangedElsewhere`], and no copy at all is this machine's own earlier
+//! claim, so the send goes on. Forgetting the row first, as the guard did
+//! until then, left a retry with no row, which claimed whatever copy the
+//! folder held under the draft's `Message-ID`, an Outlook save included.
+//!
+//! The reconcile never retires a draft whose row is claiming as sent
+//! elsewhere: it names the copy as synced again when it is still listed (the
+//! claim took nothing of it), and lets the row go once two reconciles in a
+//! row miss the copy, which leaves the state a settled claim leaves. A draft
+//! without a row is one the owed-push scan pushes again, so a failed send
+//! shows in Drafts again and is never presented as sent elsewhere. Should
+//! the other machine have sent it after all, its reconcile deletes the copy
 //! pushed again as a sent draft's and this one's then retires the file.
 //!
 //! A draft whose file lost its `server_message_id` while its row remembers it
@@ -265,7 +278,20 @@ async fn claim<F: DraftsFolder>(
             .into());
         }
     }
+    let claiming = row.as_ref().is_some_and(|row| row.claiming.is_some());
     if uids.is_empty() {
+        if claiming {
+            // A claim of this machine's that did not settle took the copy:
+            // its removal went through and its answer was lost.
+            if let Some(id) = id {
+                draft_sync::delete(store, name, id)?;
+            }
+            info!(
+                "[drafts] {name}: {message_id} has no server copy and its row is claiming it: \
+                 an earlier claim of this machine's took it; sending"
+            );
+            return Ok(());
+        }
         let own = id.is_some() && row.is_none();
         if own {
             info!(
@@ -280,8 +306,17 @@ async fn claim<F: DraftsFolder>(
              reconcile retires the file"
         );
     }
-    if let Some(id) = id {
-        draft_sync::delete(store, name, id)?;
+    // The row is marked claiming rather than forgotten until the claim
+    // settles: a claim that fails, loses its answer or never ends leaves it
+    // so, and a retry still checks every copy against it.
+    if let Some(row) = &row {
+        draft_sync::upsert(
+            store,
+            &draft_sync::DraftSyncRow {
+                claiming: Some(crate::outbox::unix_now()),
+                ..row.clone()
+            },
+        )?;
     }
     // The copies this machine wrote beside the one the row names go first,
     // and the row's copy last, in a claim of its own: an edit found on the
@@ -316,7 +351,13 @@ async fn claim<F: DraftsFolder>(
             // than read as this machine's own earlier claim, and so the
             // reconcile pulls the edit as a change of the copy the row names.
             if let Some(row) = &row {
-                draft_sync::upsert(store, row)?;
+                draft_sync::upsert(
+                    store,
+                    &draft_sync::DraftSyncRow {
+                        claiming: None,
+                        ..row.clone()
+                    },
+                )?;
             }
             return Err(ChangedElsewhere {
                 mailbox: mailbox.clone(),
@@ -330,6 +371,11 @@ async fn claim<F: DraftsFolder>(
                  it, another machine sending it or another client tidying the folder",
             ));
         }
+    }
+    // Settled: the row is forgotten, so a send that fails from here leaves a
+    // draft the owed-push scan pushes again and the reconcile never retires.
+    if let Some(id) = id {
+        draft_sync::delete(store, name, id)?;
     }
     info!("[drafts] {name}: claimed the server copy of {message_id} (UIDs {uids:?}) for its send");
     Ok(())

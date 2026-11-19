@@ -260,6 +260,17 @@ pub async fn reconcile<F: DraftsFolder>(
         .into_iter()
         .map(|row| (row.draft_id.clone(), row))
         .collect();
+    // A claim that left the copy its row names in the folder took nothing of
+    // it: the row names that copy as synced again (send_guard).
+    for row in rows.values_mut() {
+        let listed = row.mailbox == mailbox
+            && row.uidvalidity == info.uidvalidity
+            && copies.iter().any(|copy| copy.uid == row.uid);
+        if row.claiming.is_some() && listed {
+            row.claiming = None;
+            draft_sync::upsert(mirror.store, row)?;
+        }
+    }
     let locals = linked_locals(mirror, &mut rows, &copies, &at)?;
     let gone = retired(&account);
     let present = present_ids(&account);
@@ -301,6 +312,29 @@ pub async fn reconcile<F: DraftsFolder>(
                 // land: the owed-push scan queues it.
                 continue;
             };
+            if row.claiming.is_some() {
+                // A send's claim that did not settle may have taken the copy
+                // itself: never retired as sent elsewhere. Once two
+                // reconciles in a row miss the copy the row is let go, as a
+                // claim that settled leaves it, and the owed-push scan puts
+                // the draft back in Drafts.
+                absent.insert(local.id.clone());
+                if draft_sync::note_absent(
+                    mirror.store,
+                    &account,
+                    &local.id,
+                    COPY_ABSENT,
+                    info.uidvalidity,
+                )? {
+                    draft_sync::delete(mirror.store, &account, &local.id)?;
+                    info!(
+                        "[drafts] {account}/{}: its copy went with a claim that did not \
+                         settle; let go, so it is pushed again",
+                        local.id
+                    );
+                }
+                continue;
+            }
             match apple_mail_edit(&copies, &claimed, &linked_mids, local, row.uid) {
                 Some(edit) => {
                     claimed.insert(edit.uid);
@@ -739,6 +773,7 @@ fn record(
             synced_at: mirror.now,
             synced_hash: hash,
             message_id,
+            claiming: None,
         },
     )
 }

@@ -707,6 +707,9 @@ pub mod fake {
         /// A `claim` removes the copies it names and then fails: the
         /// connection dropping after the `UID EXPUNGE`.
         pub fail_claim: bool,
+        /// A `claim` fails before it touches anything: the connection
+        /// dropping before the `UID STORE`.
+        pub fail_claim_untouched: bool,
     }
 
     impl Default for FakeFolder {
@@ -724,6 +727,7 @@ pub mod fake {
                 touch_on_fetch: None,
                 claimed_elsewhere: false,
                 fail_claim: false,
+                fail_claim_untouched: false,
             }
         }
     }
@@ -812,6 +816,11 @@ pub mod fake {
         async fn claim(&mut self, uids: &[u32]) -> Result<Claim> {
             if !self.uidplus {
                 return Err(anyhow!("the fake server offers no UIDPLUS"));
+            }
+            if self.fail_claim_untouched {
+                return Err(anyhow!(
+                    "the fake server dropped the connection before the STORE"
+                ));
             }
             self.log.push(format!("claim {uids:?}"));
             let present: Vec<u32> = self
