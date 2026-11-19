@@ -45,7 +45,10 @@
 //!   which keeps the row only to file its copy (PERSO-304).
 //! - `failed`: an *ambiguous* SMTP failure, where the message may or may not
 //!   have been accepted. Automatic recovery cannot be safe in either direction,
-//!   so the row stops here for a human. It is never auto re-sent.
+//!   so the row stops here for a human. It is never auto re-sent. A
+//!   connection never set up (the lookup, the connect or the TLS handshake
+//!   failed) stops here too, its reason saying nothing was sent: whether a
+//!   later drain may send it on its own is not decided.
 //! - `done`: the message is in the Sent mailbox (or the account does not want a
 //!   local APPEND at all, see [`crate::config::appends_to_sent`]).
 //!
@@ -506,8 +509,8 @@ impl Envelope {
 
 /// What one submission pass did to each recipient it attempted (#0063).
 ///
-/// The four buckets are the four answers the state machine can act on, and
-/// every recipient of the pass lands in exactly one of them.
+/// The five buckets are the answers the state machine can act on, and every
+/// recipient of the pass lands in exactly one of them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RecipientVerdicts {
     /// A 250 of its own. Terminal for that recipient.
@@ -521,6 +524,12 @@ pub struct RecipientVerdicts {
     /// No verdict came back, so the recipient may or may not hold the message.
     /// Parks the whole row for a human, and is never attempted automatically.
     pub ambiguous: Vec<(String, String)>,
+    /// The connection was never set up (the lookup, the connect or the TLS
+    /// handshake failed), so nothing was sent. Parks the row as `ambiguous`
+    /// does, never attempted automatically: whether a later drain may send
+    /// it on its own, at a time the user did not choose, is not decided. Its
+    /// own bucket so the row's reason says nothing was sent.
+    pub unsent: Vec<(String, String)>,
 }
 
 impl RecipientVerdicts {
@@ -546,6 +555,9 @@ impl RecipientVerdicts {
         }
         if !self.ambiguous.is_empty() {
             parts.push(list("no verdict for", &self.ambiguous));
+        }
+        if !self.unsent.is_empty() {
+            parts.push(list("not sent to", &self.unsent));
         }
         if parts.is_empty() {
             "no recipients were attempted".to_string()
@@ -1178,7 +1190,7 @@ fn record_per_recipient(
     row.envelope = Some(envelope.clone());
 
     let summary = verdicts.summary();
-    if !verdicts.ambiguous.is_empty() {
+    if !verdicts.ambiguous.is_empty() || !verdicts.unsent.is_empty() {
         store
             .conn()
             .execute(
@@ -1188,7 +1200,7 @@ fn record_per_recipient(
             )
             .context("marking the outbox row failed")?;
         warn!(
-            "[outbox] row {} ({}) has a recipient with no verdict and will not be re-sent: {summary}",
+            "[outbox] row {} ({}) is parked and will not be re-sent on its own: {summary}",
             row.id, row.message_id
         );
         return Ok(OutboxState::Failed);

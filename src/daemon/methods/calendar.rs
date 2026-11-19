@@ -2628,7 +2628,7 @@ impl Reach {
         let results = &report.send_result.results;
         if results.iter().any(|result| result.success) {
             Reach::Delivered
-        } else if results.iter().any(crate::send::RecipientResult::ambiguous) {
+        } else if results.iter().any(crate::send::RecipientResult::parked) {
             Reach::Unconfirmed(None)
         } else if report.state == Some(crate::outbox::OutboxState::PendingSend) {
             Reach::Queued(None)

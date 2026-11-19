@@ -4,6 +4,8 @@
 //!
 //! Against the STARTTLS fake the daemon suites use, with a budget of half a
 //! second through [`submit_over_bounded`], so no test waits minutes.
+//!
+//! Beside them, a connection never set up, which sent nothing and says so.
 
 use super::*;
 use crate::outbox::{self, OutboxState, SubmitOutcome};
@@ -105,8 +107,12 @@ impl SmtpSubmit for BoundedSmtp {
 /// Submit `built` to `server`, failing the test if the submission outlives
 /// [`NEVER`].
 async fn submit_to(server: &RecordingSmtpServer, built: &BuiltMessage) -> SendResult {
-    let config = config(server.port());
-    tokio::time::timeout(NEVER, BoundedSmtp.submit(built, &config))
+    submit_with(&config(server.port()), built).await
+}
+
+/// [`submit_to`] with the configuration handed in.
+async fn submit_with(config: &SmtpConfig, built: &BuiltMessage) -> SendResult {
+    tokio::time::timeout(NEVER, BoundedSmtp.submit(built, config))
         .await
         .expect("the submission ends at its deadline")
         .expect("a submission that ran out of time is a result, not an error")
@@ -229,12 +235,28 @@ async fn the_recipients_after_a_deadline_are_left_for_a_later_send() {
 #[tokio::test]
 async fn a_drain_against_a_silent_server_parks_the_row() {
     let server = RecordingSmtpServer::start_silent(SilentAfter::Data);
-    let config = config(server.port());
+    let row = drained(
+        &config(server.port()),
+        &built("<silent-drain@example.com>", &["bob@example.com"]),
+    )
+    .await;
+    assert_eq!(row.state, OutboxState::Failed, "{:?}", row.last_error);
+    assert!(
+        row.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no verdict for") && e.contains("no answer")),
+        "{:?}",
+        row.last_error
+    );
+}
+
+/// `built` queued in a fresh outbox for `config`'s account and drained once
+/// through [`BoundedSmtp`]: its row as the drain left it.
+async fn drained(config: &SmtpConfig, built: &BuiltMessage) -> outbox::OutboxRow {
     let account = config.account.clone();
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
     let blobs = BlobStore::new(dir.path().join("blobs"));
-    let built = built("<silent-drain@example.com>", &["bob@example.com"]);
     let row_id = outbox::enqueue(
         &store,
         &blobs,
@@ -258,21 +280,90 @@ async fn a_drain_against_a_silent_server_parks_the_row() {
         &drafts,
         rows,
         outbox::unix_now(),
-        &config,
+        config,
         &BoundedSmtp,
     );
     tokio::time::timeout(NEVER, drain)
         .await
         .expect("the drain ends at the submission's deadline");
-    let row = outbox::load(&store, row_id).unwrap().unwrap();
-    assert_eq!(row.state, OutboxState::Failed, "{:?}", row.last_error);
+    outbox::load(&store, row_id).unwrap().unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// A connection never set up: nothing was sent, and the words say so
+// ---------------------------------------------------------------------------
+
+/// A connection the transport never set up (the lookup, the connect or the
+/// TLS handshake failed) sent nothing, and its reason says so in plain
+/// words, both on the recipient's line and on the parked row: never "no
+/// verdict" or "may have taken the message", which belong to a server that
+/// went quiet mid-conversation. The row is parked as failed all the same:
+/// whether a later drain sends it again on its own is a decision still
+/// open, so its state and its retry path stay as they are.
+async fn assert_nothing_sent(config: &SmtpConfig, reason_starts: &str) {
+    let message_id = format!("<unreached-{}@example.com>", config.port);
+    let result = submit_with(config, &built(&message_id, &["bob@example.com"])).await;
+    let bob = &result.results[0];
+    assert!(!bob.success);
+    let error = bob.error.as_deref().unwrap_or_default();
     assert!(
-        row.last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("no verdict for") && e.contains("no answer")),
-        "{:?}",
-        row.last_error
+        error.starts_with(reason_starts) && error.ends_with("; nothing was sent"),
+        "the recipient's reason says why in plain words and that nothing was sent: {error}"
     );
+
+    let row = drained(config, &built(&message_id, &["bob@example.com"])).await;
+    assert_eq!(row.state, OutboxState::Failed, "{:?}", row.last_error);
+    let last_error = row.last_error.unwrap_or_default();
+    assert!(
+        last_error.contains(reason_starts) && last_error.contains("nothing was sent"),
+        "{last_error}"
+    );
+    assert!(
+        !last_error.contains("no verdict") && !last_error.contains("may have"),
+        "the parked row does not read as one the server may hold: {last_error}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_connect_says_nothing_was_sent() {
+    // A port nothing listens on: bound, then let go.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert_nothing_sent(
+        &config(port),
+        &format!("could not connect to 127.0.0.1:{port}: connection refused"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_host_that_does_not_resolve_says_nothing_was_sent() {
+    // `.invalid` never resolves (RFC 6761), and the resolver says so at once.
+    let config = SmtpConfig {
+        host: "mp-smtp-test.invalid".to_string(),
+        accept_invalid_certs: false,
+        ..config(9)
+    };
+    assert_nothing_sent(
+        &config,
+        "could not look up the SMTP server mp-smtp-test.invalid",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_untrusted_certificate_says_nothing_was_sent() {
+    let server = RecordingSmtpServer::start();
+    let config = SmtpConfig {
+        accept_invalid_certs: false,
+        ..config(server.port())
+    };
+    assert_nothing_sent(&config, "the SMTP server's certificate was not trusted").await;
+    assert!(server.logins().is_empty(), "no password went out");
+    assert_eq!(server.messages(), 0);
 }
 
 /// The budget of a submission is the conversation's allowance plus the

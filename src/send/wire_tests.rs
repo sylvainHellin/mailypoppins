@@ -267,9 +267,11 @@ async fn an_untrusted_certificate_is_refused_before_the_login() {
         .expect("the send reports the recipient");
     let error = sent.results[0].error.clone().unwrap_or_default();
     assert!(
-        error.starts_with("Connection error: ") && error.contains("certificate verify failed"),
+        error.starts_with("the SMTP server's certificate was not trusted")
+            && error.ends_with("; nothing was sent"),
         "{error}"
     );
+    assert_eq!(sent.results[0].verdict, RecipientVerdict::Unreached);
     assert!(server.logins().is_empty(), "no password went out");
 }
 

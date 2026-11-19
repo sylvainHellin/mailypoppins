@@ -201,6 +201,7 @@ impl FakeTransport {
                         RecipientVerdict::Rejected => "rejected",
                         RecipientVerdict::Retryable => "deferred",
                         RecipientVerdict::Unknown => "unknown",
+                        RecipientVerdict::Unreached => "unreached",
                         RecipientVerdict::Delivered => "accepted",
                     }
                 ));

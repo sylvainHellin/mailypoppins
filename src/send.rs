@@ -67,11 +67,17 @@ pub enum RecipientVerdict {
     Delivered,
     /// A 5xx, or an address no envelope can be built from. Refused for good.
     Rejected,
-    /// A 4xx, no connection, no credentials: nothing was accepted and the next
-    /// pass may well succeed.
+    /// A 4xx, no credentials: nothing was accepted and the next pass may well
+    /// succeed.
     Retryable,
     /// No verdict came back, so the recipient may or may not hold the message.
     Unknown,
+    /// The connection was never set up (the lookup, the connect or the TLS
+    /// handshake failed), so nothing was sent. The outbox parks it as it
+    /// parks [`RecipientVerdict::Unknown`], never sending it again on its
+    /// own, since whether a later drain may send it at a time the user did
+    /// not choose is not decided; only the words differ.
+    Unreached,
 }
 
 #[derive(Debug)]
@@ -86,10 +92,14 @@ pub struct RecipientResult {
 }
 
 impl RecipientResult {
-    /// True when the failure leaves it unknown whether the server accepted the
-    /// message. Drives the outbox's never-auto-re-send rule.
-    pub fn ambiguous(&self) -> bool {
-        self.verdict == RecipientVerdict::Unknown
+    /// True when the outbox parks the recipient's row for a human and never
+    /// sends it again on its own: no verdict came back, or the connection
+    /// was never set up.
+    pub fn parked(&self) -> bool {
+        matches!(
+            self.verdict,
+            RecipientVerdict::Unknown | RecipientVerdict::Unreached
+        )
     }
 }
 
@@ -135,6 +145,7 @@ impl SendResult {
                 RecipientVerdict::Rejected => verdicts.rejected.push((r.address.clone(), reason)),
                 RecipientVerdict::Retryable => verdicts.retryable.push((r.address.clone(), reason)),
                 RecipientVerdict::Unknown => verdicts.ambiguous.push((r.address.clone(), reason)),
+                RecipientVerdict::Unreached => verdicts.unsent.push((r.address.clone(), reason)),
             }
         }
         crate::outbox::SubmitOutcome::PerRecipient(verdicts)
@@ -700,9 +711,16 @@ mod tests {
             .build();
         let from: lettre::Address = built.from.parse().unwrap();
         let watch = LoginWatch::new(None, crate::login_gate::LOGIN_DEADLINE);
-        let result = submit_through(built, &from, &mailer, watch, SubmissionBudget::STANDARD)
-            .await
-            .result;
+        let result = submit_through(
+            built,
+            &from,
+            ("127.0.0.1", port),
+            &mailer,
+            watch,
+            SubmissionBudget::STANDARD,
+        )
+        .await
+        .result;
         drop(mailer);
         let log = std::mem::take(&mut *log.lock().unwrap());
         (result, log)
@@ -1068,7 +1086,7 @@ mod tests {
         assert_eq!(verdicts.rejected[0].0, "refused@x.com");
         assert_eq!(verdicts.retryable[0].0, "later@x.com");
         assert_eq!(verdicts.ambiguous[0].0, "silent@x.com");
-        assert!(result.results[3].ambiguous());
+        assert!(result.results[3].parked());
     }
 
     /// The status line of a send that reached some recipients says so, rather
@@ -5131,6 +5149,7 @@ async fn submit_over_bounded(
     } = submit_through(
         built,
         &from_addr,
+        (&smtp_config.host, smtp_config.port),
         mailer,
         LoginWatch::new(Some(&mut dial), deadline),
         budget,
@@ -5268,7 +5287,88 @@ fn raised_before_auth(err: &lettre::transport::smtp::Error) -> bool {
     err.is_client()
         || err.is_tls()
         || err.is_transport_shutdown()
-        || err.to_string().starts_with("Connection error")
+        || is_connection_setup_failure(err)
+}
+
+/// Whether `err` is lettre's `Connection error`, which it raises only while
+/// it sets the connection up, before any SMTP command but STARTTLS: the
+/// lookup, the connect (refused, or timed out at [`SMTP_CONNECT_TIMEOUT`])
+/// and the TLS handshake, a certificate it does not trust included. The
+/// kind has no predicate of its own, and a failed handshake is not
+/// [`is_tls`](lettre::transport::smtp::Error::is_tls).
+fn is_connection_setup_failure(err: &lettre::transport::smtp::Error) -> bool {
+    err.to_string().starts_with("Connection error")
+}
+
+/// Why a connection to `server` (its host and port) was never set up, in
+/// plain words ending in "nothing was sent", or `None` when `err` is not a
+/// [connection-setup failure](is_connection_setup_failure).
+///
+/// lettre's own text (`Connection error: Connection refused (os error
+/// 111)`) names no server and reads like a connection lost mid-send, which
+/// the outbox used to file as "no verdict", the server possibly holding
+/// the message, though nothing reached it.
+fn unreached_reason(err: &lettre::transport::smtp::Error, server: (&str, u16)) -> Option<String> {
+    if !is_connection_setup_failure(err) {
+        return None;
+    }
+    let (host, port) = server;
+    let mut cause = std::error::Error::source(err);
+    while let Some(inner) = cause {
+        if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+            let text = io.to_string();
+            if let Some(why) = text.strip_prefix("failed to lookup address information: ") {
+                return Some(format!(
+                    "could not look up the SMTP server {host}: {}; nothing was sent",
+                    first_lowercase(why)
+                ));
+            }
+            let why = match io.kind() {
+                std::io::ErrorKind::ConnectionRefused => "connection refused".to_string(),
+                std::io::ErrorKind::TimedOut => "the connection timed out".to_string(),
+                _ => first_lowercase(text.split(" (os error").next().unwrap_or(&text)),
+            };
+            return Some(format!(
+                "could not connect to {host}:{port}: {why}; nothing was sent"
+            ));
+        }
+        cause = inner.source();
+    }
+    // No I/O error under it: lettre's own words, or the TLS library's.
+    let mut text = err.to_string();
+    while let Some(inner) = text.strip_prefix("Connection error: ") {
+        text = inner.to_string();
+    }
+    if text.starts_with("could not resolve to any") {
+        return Some(format!(
+            "could not look up the SMTP server {host}: it has no address to connect to; \
+             nothing was sent"
+        ));
+    }
+    if text.to_ascii_lowercase().contains("certificate") {
+        // OpenSSL ends its text with the verification's reason in
+        // parentheses, `(self-signed certificate)`; the rest is its codes.
+        let detail = text
+            .rfind(" (")
+            .filter(|_| text.ends_with(')'))
+            .map(|at| &text[at..])
+            .unwrap_or_default();
+        return Some(format!(
+            "the SMTP server's certificate was not trusted{detail}; nothing was sent"
+        ));
+    }
+    Some(format!(
+        "could not set up a secure connection to {host}:{port}: {text}; nothing was sent"
+    ))
+}
+
+/// `text` with its first letter lowercased, to follow a colon mid-sentence.
+fn first_lowercase(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// What [`submit_through`] did: the verdict of each recipient, and the
@@ -5339,9 +5439,13 @@ fn is_login_refusal(err: &lettre::transport::smtp::Error) -> bool {
 /// holding the message, and ends the loop too: every later recipient would
 /// wait out a deadline of its own against a server that has stopped
 /// answering, so each is left retryable, never tried.
+///
+/// `server` is the host and port `mailer` connects to, which a connection
+/// never set up names in its reason ([`unreached_reason`]).
 async fn submit_through(
     built: &BuiltMessage,
     from_addr: &lettre::Address,
+    server: (&str, u16),
     mailer: &AsyncSmtpTransport<Tokio1Executor>,
     mut watch: LoginWatch<'_>,
     budget: SubmissionBudget,
@@ -5483,13 +5587,16 @@ async fn submit_through(
                 login_refused = Some(e.to_string());
             }
             Err(e) => {
-                let err_msg = format!("{}", e);
-                error!("Failed to send to {} ({}): {}", addr, role, err_msg);
+                error!("Failed to send to {} ({}): {}", addr, role, e);
+                let (verdict, err_msg) = match unreached_reason(&e, server) {
+                    Some(reason) => (RecipientVerdict::Unreached, reason),
+                    None => (smtp_failure_verdict(&e), e.to_string()),
+                };
                 results.push(RecipientResult {
                     address: addr.clone(),
                     role: *role,
                     success: false,
-                    verdict: smtp_failure_verdict(&e),
+                    verdict,
                     error: Some(err_msg),
                 });
             }
