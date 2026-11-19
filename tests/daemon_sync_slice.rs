@@ -163,12 +163,14 @@
 //!
 //! # What this fixture cannot reach
 //!
-//! This file's fixture points its accounts at no server. The repository's one
-//! fake IMAP server, `tests/support/fake_imap.rs` (PERSO-296), serves an
-//! empty `INBOX` behind a switchable login policy: enough for the
-//! rejected-login rows of `tests/daemon_diagnostics.rs`, and not for a sync
-//! that ingests, since it holds no messages. What that puts out of reach,
-//! and where it is pinned instead:
+//! This file's fixture points its accounts at no server, so the parity rows
+//! pin the refusals. The success paths run in the `wire` module at the end of
+//! this file, on an account the fake IMAP server of `tests/support/fake_imap.rs`
+//! serves (PERSO-210): a sync that ingests and then only what is new,
+//! `mp list-mailboxes` over the server's LIST, `mp watch` reaching
+//! `✓ Mailbox changed.` on an IDLE the server fires, and `mp watch --timeout 1`
+//! reaching exit 2. Routed side only: the oracle has no account on that
+//! server. What the parity rows below pin in their place:
 //!
 //! - A sync that ingests. The operation is still pinned at the wire: an id is
 //!   issued, `operation.status` answers about it by method and scope, and it
@@ -188,8 +190,6 @@
 //!   emitted by a run. They are pinned as the client wordings that produce
 //!   them, which is where P4-U10 has to put them anyway.
 //!
-//! A fake IMAP server that holds mail would unlock all of it and is recorded
-//! as a follow-up.
 //!
 //! # The legacy suites, twinned
 //!
@@ -1943,4 +1943,124 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
         stdout(&out),
         stderr(&out)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Over the wire (PERSO-210)
+// ---------------------------------------------------------------------------
+
+mod wire {
+    use super::support::wire_fixture::{assert_ok, mail, stderr, stdout, WireRoot, INBOX};
+
+    use super::support::parity::{mp_command, DEADLINE, REQUIRE_ENV, TICK};
+
+    /// A root whose INBOX holds `first` and `second`.
+    fn served() -> WireRoot {
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (1, mail("first", "ada@example.org", "First", "one")),
+                (2, mail("second", "bob@example.org", "Second", "two")),
+            ],
+        );
+        wire.imap.set_flags(INBOX, 1, &["\\Seen"]);
+        wire.start(&[]);
+        wire
+    }
+
+    /// `mp sync` ingests what the server holds, a second run finds nothing
+    /// new, and mail that arrives later is the third run's.
+    #[test]
+    fn a_sync_ingests_what_the_server_holds_and_then_only_what_is_new() {
+        let wire = served();
+
+        assert_eq!(stdout(&wire.sync()), "✓ Synced: 2 email(s) ingested\n");
+        assert_eq!(
+            wire.local("inbox"),
+            vec![
+                (1, "<first@example.org>".to_string()),
+                (2, "<second@example.org>".to_string())
+            ]
+        );
+        assert_eq!(stdout(&wire.sync()), "✓ Synced: 0 new, 2 already present\n");
+
+        let uid = wire
+            .imap
+            .deliver(INBOX, mail("third", "cy@example.org", "Third", "three"));
+        assert_eq!(uid, 3, "the folder's next UID");
+        assert_eq!(stdout(&wire.sync()), "✓ Synced: 1 new, 2 already present\n");
+        assert_eq!(wire.local("inbox").len(), 3);
+    }
+
+    /// `mp list-mailboxes` lists the folders the server's LIST names, each
+    /// with the policy and the role the account gives it.
+    #[test]
+    fn list_mailboxes_lists_the_servers_folders() {
+        let wire = served();
+        let out = wire.mp(&["list-mailboxes"]);
+        assert_ok(&out, "mp list-mailboxes");
+        assert_eq!(
+            stdout(&out),
+            "ℹ Available mailboxes:\n  INBOX    sync         inbox\n  \
+             Sent     sync         sent\n  Drafts   ignore       drafts\n  \
+             Archive  sync         archive\n  Trash    status-only  trash\n"
+        );
+        assert_eq!(stderr(&out), "");
+    }
+
+    /// `mp watch` waits in IDLE and says the mailbox changed once the server
+    /// announces new mail. Each IDLE the server enters gets a delivery, so
+    /// the watch's own is answered whichever session idled first: the fake
+    /// counts an IDLE only once the session is listening, so no delivery
+    /// lands between the watch's SELECT and its IDLE.
+    #[test]
+    fn mp_watch_says_the_mailbox_changed_when_new_mail_arrives() {
+        let wire = served();
+        let mut seen = wire.imap.idles();
+        let mut watch = mp_command(wire.root())
+            .env(REQUIRE_ENV, "1")
+            .arg("watch")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mp watch");
+        let start = std::time::Instant::now();
+        let mut delivered = 0;
+        while watch.try_wait().expect("the watch's status").is_none() {
+            assert!(
+                start.elapsed() < DEADLINE,
+                "mp watch did not end within {DEADLINE:?}"
+            );
+            if wire.imap.idles() > seen {
+                seen = wire.imap.idles();
+                delivered += 1;
+                wire.imap.deliver(
+                    INBOX,
+                    mail(&format!("new{delivered}"), "cy@example.org", "New", "news"),
+                );
+            }
+            std::thread::sleep(TICK);
+        }
+        let out = watch.wait_with_output().expect("the watch's output");
+        assert_ok(&out, "mp watch");
+        assert_eq!(
+            stdout(&out),
+            "Watching INBOX for changes...\n✓ Mailbox changed.\n"
+        );
+    }
+
+    /// `mp watch --timeout 1` on a mailbox nothing arrives in gives up after
+    /// a second and exits 2, the code plan section 3.0 reserved for it.
+    #[test]
+    fn mp_watch_with_a_timeout_and_no_change_exits_2() {
+        let wire = served();
+        let out = wire.mp(&["watch", "--timeout", "1"]);
+        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+        assert_eq!(
+            stdout(&out),
+            "Watching INBOX for changes...\nℹ Timed out.\n"
+        );
+    }
 }
