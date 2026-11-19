@@ -305,7 +305,8 @@ pub struct FetchedMessage {
     _held: held_bodies::Held,
 }
 
-/// The two shapes a backend hands a message over in (PERSO-213).
+/// The shapes a backend hands a message over in (PERSO-213), and the one
+/// message it could not hand over (PERSO-333).
 pub enum FetchedBody {
     /// The RFC 822 bytes the server stores (IMAP): the engine parses them, and
     /// ingest keeps them as the row's raw blob and reads the threading headers
@@ -314,6 +315,11 @@ pub enum FetchedBody {
     /// A message the server only hands over parsed (Graph, which never returns
     /// the original MIME).
     Parsed(Box<ParsedMessage>),
+    /// A message the server listed and refused to send when asked for it
+    /// alone, in the server's words: the engine counts the refusal against
+    /// the message as it counts a failed write (#0074), so a server that
+    /// refuses it for good stops holding the prune after as many passes.
+    Refused(String),
 }
 
 /// A message as a backend without RFC 822 bytes hands it over.
@@ -334,6 +340,18 @@ impl FetchedMessage {
             uid,
             body: FetchedBody::Raw(raw),
             flags,
+            #[cfg(test)]
+            _held: held_bodies::Held::new(),
+        }
+    }
+
+    /// A message the server refused to send, `words` its answer as a user
+    /// reads it.
+    pub fn refused(uid: i64, words: String) -> FetchedMessage {
+        FetchedMessage {
+            uid,
+            body: FetchedBody::Refused(words),
+            flags: MessageFlags::default(),
             #[cfg(test)]
             _held: held_bodies::Held::new(),
         }

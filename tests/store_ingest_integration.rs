@@ -844,6 +844,7 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
         arrival_mark: None,
         prior_high_water: None,
         highest_modseq: None,
+        given_up: HashSet::new(),
     }
     .resolve(Some(42));
     assert!(!reset);

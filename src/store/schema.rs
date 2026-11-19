@@ -188,7 +188,8 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[];
 ///   return nothing and no error, which is the #0004 failure mode with no
 ///   symptom.
 /// - `ingest_failures` counts, per `(account, mailbox, uid)`, how many passes
-///   have downloaded a message and failed to write it (#0074). A message that
+///   have downloaded a message and failed to write it (#0074), or asked the
+///   server for it alone and been refused (PERSO-333). A message that
 ///   was fetched and not written is as absent as one never fetched, so the pass
 ///   lowers the arrival mark below its UID and the prune gate stays shut until
 ///   some pass writes it. That is a deadlock in the making for a message the
@@ -200,7 +201,9 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[];
 ///   UIDs they are keyed by then name different messages (#0074 review). The
 ///   Graph path shares the counter: it has no arrival mark (an id-based pull
 ///   has no positional window), so there the bound only releases the prune
-///   gate. Losing the table in a rebuild only costs the message its retries again,
+///   gate. An IMAP pass leaves a UID given up on out of its body download
+///   until [`crate::ingest::GIVEN_UP_RETRY_SECS`] after `updated`, the last
+///   attempt. Losing the table in a rebuild only costs the message its retries again,
 ///   which is the conservative direction.
 /// - `pending_ops` is the durable mutation queue #0039 will drain; only its
 ///   shape lives here so far. `updated` is the last-attempt timestamp the

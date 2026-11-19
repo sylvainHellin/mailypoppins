@@ -723,9 +723,16 @@ pub async fn run_sync<B: SyncBackend>(
                 }
             };
             batches += 1;
+            // A refused message counts as handled here, as one downloaded and
+            // not written does: what keeps it owed is `unmet`, until the
+            // refusal has been counted as often as #0074 bounds a failed
+            // write (PERSO-333).
             downloaded.extend(batch.iter().map(|message| message.uid));
             if dry_run {
-                result.saved += batch.len();
+                result.saved += batch
+                    .iter()
+                    .filter(|message| !matches!(message.body, FetchedBody::Refused(_)))
+                    .count();
                 continue;
             }
             for message in &batch {
@@ -754,6 +761,17 @@ pub async fn run_sync<B: SyncBackend>(
                         Some(&parsed.threading),
                         Some(parsed.item.as_str()),
                     ),
+                    FetchedBody::Refused(words) => {
+                        warn!(
+                            "Skipping UID {} in '{}': the server refused to send it: {words}",
+                            message.uid, target.server_name
+                        );
+                        note_failure(
+                            message.uid,
+                            &format!("the server refused to send it: {words}"),
+                        );
+                        continue;
+                    }
                 };
 
                 let outcome = ingest::ingest_listed(
@@ -841,7 +859,7 @@ pub async fn run_sync<B: SyncBackend>(
                         // A parsed message's UID is a hash; its Message-ID is
                         // what a reader of the failure can look up.
                         let error = match &message.body {
-                            FetchedBody::Raw(_) => format!("{e:#}"),
+                            FetchedBody::Raw(_) | FetchedBody::Refused(_) => format!("{e:#}"),
                             FetchedBody::Parsed(parsed) => format!(
                                 "{e:#} (message {})",
                                 ingest::resolve_message_id(&parsed.email, None)

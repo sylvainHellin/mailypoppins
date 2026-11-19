@@ -1768,7 +1768,25 @@ pub fn pass_may_prune(coverage: &[(bool, bool)]) -> bool {
 /// listing the message. Retrying forever is the deadlock #0072 closed from the
 /// other side: one unwritable message would suspend the prune for the whole
 /// account until someone noticed.
+///
+/// A body the IMAP server refuses to send when asked for alone counts the
+/// same way (PERSO-333): a refusal that lasts is as deterministic as a MIME
+/// the parser rejects, and one that passes clears on the next pass.
 pub const MAX_INGEST_ATTEMPTS: i64 = 3;
+
+/// How long an IMAP pass leaves a message it has given up on alone before it
+/// asks for it again (PERSO-333).
+///
+/// A message given up on is no longer owed, so downloading it on every pass
+/// buys nothing a daily retry does not: a body the server refuses to send
+/// (Gmail's `NO Some messages could not be FETCHed`) can be a transient
+/// refusal, and a message the store rejects can be one a later build accepts,
+/// and either comes in within a day. A retry that fails again refreshes the
+/// count's `updated`, so the message waits another day; one that succeeds
+/// clears the count. A UIDVALIDITY reset clears it too
+/// ([`clear_mailbox_ingest_failures`]), which makes every renumbered message
+/// owed again at once.
+pub const GIVEN_UP_RETRY_SECS: i64 = 86_400;
 
 /// Count one failed attempt to write `uid`, and answer whether the message is
 /// still owed, i.e. whether it must keep the arrival mark below itself.
@@ -1871,6 +1889,38 @@ pub fn clear_mailbox_ingest_failures(store: &Store, account: &str, mailbox: &str
     ) {
         warn!("Failed to clear the ingest failures of '{mailbox}': {e}");
     }
+}
+
+/// The UIDs of `mailbox` given up on less than [`GIVEN_UP_RETRY_SECS`] before
+/// `now`: what an IMAP pass leaves out of its body download and counts as
+/// covered (PERSO-333). A store that cannot answer leaves none out, the
+/// conservative side: the message is asked for and counted again.
+pub fn given_up_uids(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    now: i64,
+) -> std::collections::HashSet<i64> {
+    let read = || -> rusqlite::Result<std::collections::HashSet<i64>> {
+        let mut stmt = store.conn().prepare(
+            "SELECT uid FROM ingest_failures
+             WHERE account = ?1 AND mailbox = ?2 AND attempts >= ?3 AND updated > ?4",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                account,
+                mailbox,
+                MAX_INGEST_ATTEMPTS,
+                now - GIVEN_UP_RETRY_SECS
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        rows.collect()
+    };
+    read().unwrap_or_else(|e| {
+        warn!("Failed to read the messages given up on in '{mailbox}': {e}");
+        std::collections::HashSet::new()
+    })
 }
 
 /// How many passes have failed to write `uid`. `0` when nothing is recorded.
@@ -2857,6 +2907,12 @@ pub struct KnownUids {
     /// mod-sequences start at 1, so 0 is either a server that answered nothing
     /// or a column that was never written, and neither is a resume point.
     pub highest_modseq: Option<ModseqMark>,
+    /// The UIDs with no row that a pass has given up on and does not ask for
+    /// again yet ([`given_up_uids`], PERSO-333): an IMAP listing leaves them
+    /// out of its body download and counts them as covered, so they hold
+    /// neither the arrival mark nor the prune. Meaningless across a
+    /// UIDVALIDITY change, like the UID set it travels with.
+    pub given_up: std::collections::HashSet<i64>,
 }
 
 impl KnownUids {
@@ -2904,6 +2960,7 @@ pub fn known_uids_with_cursor(store: &Store, account: &str, mailbox: &str) -> Re
                 .unwrap_or(0)
         }),
         highest_modseq: cursor.as_ref().and_then(|c| c.highest_modseq),
+        given_up: given_up_uids(store, account, mailbox, crate::outbox::unix_now()),
     })
 }
 

@@ -281,7 +281,16 @@ async fn fetch_next_chunk(
         .expect("the caller checked a chunk is left");
     let session = pass.session.as_mut().expect("selected above");
     let fetched = fetch_body_chunk_on_session(session.session(), &chunk).await;
-    session.check(fetched)
+    let fetched = session.check(fetched)?;
+    let mut batch = fetched.messages;
+    batch.extend(
+        fetched
+            .refused
+            .into_iter()
+            .map(|(uid, words)| crate::sync::FetchedMessage::refused(i64::from(uid), words)),
+    );
+    batch.sort_by_key(|message| message.uid);
+    Ok(batch)
 }
 
 /// `error` again, for the next mailbox it fails: a refused login keeps its

@@ -791,7 +791,7 @@ pub(crate) async fn list_mailbox_on_session<T>(
     session: &mut async_imap::Session<T>,
     mailbox: &str,
     limit: Option<usize>,
-    known: KnownUids,
+    mut known: KnownUids,
     caps: ServerCaps,
 ) -> Result<(MailboxListing, BodyPlan)>
 where
@@ -827,7 +827,19 @@ where
     let stored_arrival_mark = known.arrival_mark;
     let stored_prior_high_water = known.prior_high_water;
     let stored_modseq = known.highest_modseq;
+    let given_up = std::mem::take(&mut known.given_up);
     let (known_uids, uidvalidity_reset) = known.resolve(state.uid_validity);
+    // The messages a pass has given up on (PERSO-333) are left out of the
+    // body download and count as covered, until their retry is due; their
+    // UIDs are renumbered by a reset like every other.
+    let given_up: std::collections::HashSet<u32> = if uidvalidity_reset {
+        std::collections::HashSet::new()
+    } else {
+        given_up
+            .into_iter()
+            .filter_map(|uid| u32::try_from(uid).ok())
+            .collect()
+    };
     // A mark and a recorded top are both UIDs, so a renumbering makes them
     // meaningless: they are dropped with the skip list they travelled with.
     let (carried_mark, prior_high_water) = if uidvalidity_reset {
@@ -980,6 +992,16 @@ where
         };
         covered_from = Some(flags.covered_from);
     }
+    let listed_new = new_uids.len();
+    new_uids.retain(|uid| !given_up.contains(uid));
+    if new_uids.len() < listed_new {
+        info!(
+            "Store fetch for '{}': {} message(s) given up on are not asked for again until \
+             their retry is due",
+            mailbox,
+            listed_new - new_uids.len()
+        );
+    }
     if !new_uids.is_empty() {
         info!(
             "Store fetch for '{}': {} new, {} already ingested",
@@ -1016,9 +1038,12 @@ where
         uidvalidity_reset,
         enumeration_complete,
         coverage: Box::new(move |downloaded: &[i64], bodies_complete: bool| {
+            // A message given up on is no longer owed (#0074, PERSO-333), so
+            // the coverage reads it as handled, as it reads one downloaded.
             let downloaded: Vec<u32> = downloaded
                 .iter()
                 .filter_map(|&uid| u32::try_from(uid).ok())
+                .chain(given_up.iter().copied())
                 .collect();
             let coverage = arrival_coverage(
                 &listed,
@@ -1047,6 +1072,15 @@ where
     Ok((listing, plan))
 }
 
+/// What one chunk of a body pass brought back.
+pub(crate) struct BodyChunk {
+    /// The messages the server sent, by ascending UID.
+    pub messages: Vec<FetchedMessage>,
+    /// The UIDs the server refused to send when asked for alone, each with
+    /// its answer as a user reads it, by ascending UID.
+    pub refused: Vec<(u32, String)>,
+}
+
 /// One chunk of a body pass: the bodies and flags of `uids`, in one
 /// `UID FETCH`, on a session that has `SELECT`ed their mailbox (PERSO-300).
 ///
@@ -1054,14 +1088,72 @@ where
 /// is held once and not twice, and a UID the answer does not carry is simply
 /// absent: the coverage arithmetic counts it as not downloaded. Ascending, the
 /// order ingest saw when the whole window was one command.
+///
+/// A `NO` keeps what came before it (RFC 2180 4.1.2), and names no message:
+/// Gmail's `Some messages could not be FETCHed` says some, an outage's `NO`
+/// with no data at all says all, and neither says which. So every UID the
+/// answer left out is asked for again alone (PERSO-333), and only the one a
+/// `NO` answers alone is [`BodyChunk::refused`], the refusal the engine counts
+/// towards giving up on it; a UID the retry sends is a message like the
+/// others, and one it answers `OK` without is gone from the mailbox. A
+/// one-UID chunk is already that retry.
 pub(crate) async fn fetch_body_chunk_on_session(
     session: &mut ImapSession,
     uids: &[u32],
-) -> Result<Vec<FetchedMessage>> {
-    // A `NO` after some of the bodies keeps those (RFC 2180 4.1.2): the UIDs it
-    // left out are absent, which the coverage counts as not downloaded and a
-    // later pass asks for again, so one message the server cannot send holds
-    // back neither its chunk nor the chunks after it.
+) -> Result<BodyChunk> {
+    let mut chunk = fetch_bodies(session, uids).await?;
+    let Some(refusal) = chunk.refused.take() else {
+        return Ok(BodyChunk {
+            messages: chunk.messages,
+            refused: Vec::new(),
+        });
+    };
+    let words = super::words::server_words(&refusal);
+    warn!(
+        "[sync] the server sent {} of {} message(s) of a body chunk and refused the rest: \
+         {words}",
+        chunk.messages.len(),
+        uids.len(),
+    );
+    let sent: std::collections::HashSet<i64> = chunk.messages.iter().map(|m| m.uid).collect();
+    let absent: Vec<u32> = uids
+        .iter()
+        .copied()
+        .filter(|&uid| !sent.contains(&i64::from(uid)))
+        .collect();
+    let mut refused = Vec::new();
+    if uids.len() == 1 {
+        refused.extend(absent.iter().map(|&uid| (uid, words.clone())));
+    } else {
+        for &uid in &absent {
+            let mut alone = fetch_bodies(session, &[uid]).await?;
+            match alone.refused {
+                Some(refusal) if alone.messages.is_empty() => {
+                    refused.push((uid, super::words::server_words(&refusal)));
+                }
+                _ => chunk.messages.append(&mut alone.messages),
+            }
+        }
+        info!(
+            "[sync] asked alone, the server refused {} of the {} message(s) left out",
+            refused.len(),
+            absent.len()
+        );
+    }
+    chunk.messages.sort_by_key(|m| m.uid);
+    Ok(BodyChunk {
+        messages: chunk.messages,
+        refused,
+    })
+}
+
+/// The messages one `UID FETCH` of the bodies of `uids` sent, and its `NO`.
+struct SentBodies {
+    messages: Vec<FetchedMessage>,
+    refused: Option<async_imap::error::Error>,
+}
+
+async fn fetch_bodies(session: &mut ImapSession, uids: &[u32]) -> Result<SentBodies> {
     let partial = session
         .uid_fetch_partial(&compress_uid_set(uids), "(UID BODY.PEEK[] FLAGS)")
         .await
@@ -1071,16 +1163,7 @@ pub(crate) async fn fetch_body_chunk_on_session(
                 crate::imap_client::words::server_words(&e)
             )
         })?;
-    if let Some(refusal) = &partial.refused {
-        warn!(
-            "[sync] the server sent {} of {} message(s) of a body chunk and refused the rest: \
-             {}",
-            partial.messages.len(),
-            uids.len(),
-            super::words::server_words(refusal)
-        );
-    }
-    let mut out: Vec<FetchedMessage> = partial
+    let messages = partial
         .messages
         .into_iter()
         .filter_map(|mut msg| {
@@ -1092,8 +1175,10 @@ pub(crate) async fn fetch_body_chunk_on_session(
             ))
         })
         .collect();
-    out.sort_by_key(|m| m.uid);
-    Ok(out)
+    Ok(SentBodies {
+        messages,
+        refused: partial.refused,
+    })
 }
 
 #[cfg(test)]
@@ -1956,6 +2041,7 @@ mod tests {
             arrival_mark: None,
             prior_high_water: Some(5),
             highest_modseq: stored,
+            given_up: Default::default(),
         };
         let caps = ServerCaps {
             condstore: true,

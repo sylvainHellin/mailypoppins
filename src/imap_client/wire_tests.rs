@@ -322,8 +322,44 @@ async fn a_body_chunk_refused_for_one_message_keeps_the_others() {
     let fetched = super::fetch::fetch_body_chunk_on_session(&mut session, &[1, 2, 3])
         .await
         .expect("the messages the server sent");
-    let uids: Vec<i64> = fetched.iter().map(|m| m.uid).collect();
+    let uids: Vec<i64> = fetched.messages.iter().map(|m| m.uid).collect();
     assert_eq!(uids, vec![1, 3]);
+    session.logout().await.ok();
+}
+
+/// A `NO` names no message, so a body chunk refused whole, with no data,
+/// is asked for again a message at a time (PERSO-333): the ones the server
+/// then sends are kept, and only the one it refuses alone is named
+/// refused, in its words.
+#[tokio::test]
+async fn a_body_chunk_refused_whole_is_narrowed_to_the_message_refused_alone() {
+    let server = server(&["one", "two", "three"]);
+    server.refuse_body_chunks(Some(LOCKED));
+    server.refuse_fetch_of(2, Some(NOT_FETCHED));
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    session.select("INBOX").await.unwrap();
+    let fetched = super::fetch::fetch_body_chunk_on_session(&mut session, &[1, 2, 3])
+        .await
+        .expect("the messages the server sent alone");
+    let uids: Vec<i64> = fetched.messages.iter().map(|m| m.uid).collect();
+    assert_eq!(uids, vec![1, 3]);
+    assert_eq!(fetched.refused, vec![(2, NOT_FETCHED_WORDS.to_string())]);
+    session.logout().await.ok();
+}
+
+/// A one-message chunk the server refuses is that message's refusal: there
+/// is nothing narrower to ask.
+#[tokio::test]
+async fn a_one_message_body_chunk_refused_names_its_message() {
+    let server = server(&["one"]);
+    server.refuse_fetch_of(1, Some(NOT_FETCHED));
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    session.select("INBOX").await.unwrap();
+    let fetched = super::fetch::fetch_body_chunk_on_session(&mut session, &[1])
+        .await
+        .expect("an answer");
+    assert!(fetched.messages.is_empty());
+    assert_eq!(fetched.refused, vec![(1, NOT_FETCHED_WORDS.to_string())]);
     session.logout().await.ok();
 }
 
