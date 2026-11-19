@@ -300,7 +300,9 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ),
     (
         "OpenConfigFile",
-        ActionRoute::ClientOnly("$EDITOR, over the configuration file the client resolves"),
+        // `$EDITOR` on the file the client resolves, then `config.reload`
+        // when the editor changed it (PERSO-320).
+        ActionRoute::Daemon(&["config.reload"]),
         true,
     ),
     (

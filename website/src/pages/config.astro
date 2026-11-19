@@ -31,7 +31,9 @@ import { codeTheme } from '../styles/code-theme';
         <code>$EDITOR</code>. When the editor exits with the file changed, the daemon reloads it
         and <code>mp</code> prints the outcome: the accounts the reload changed, or the line it
         refused while the configuration in use stays, and each key the load ignored. An
-        unchanged file is not reloaded. The daemon does not watch the file, so an edit made
+        unchanged file is not reloaded. <code>sc</code> in the TUI does the same, with the outcome
+        on its status line and each ignored key in its activity log (<code>sl</code>); a changed
+        <code>theme</code> shows when the TUI restarts. The daemon does not watch the file, so an edit made
         any other way waits for <code>mp daemon restart</code>, or Reload in the desktop app's
         Settings.
       </p>

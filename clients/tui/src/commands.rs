@@ -122,9 +122,9 @@ pub fn route(action: &Action) -> ActionRoute {
         }
         Action::CopyMessageRef => ActionRoute::ClientOnly("the system clipboard"),
         Action::OpenLogFile => ActionRoute::ClientOnly("$EDITOR, over this process's own log file"),
-        Action::OpenConfigFile => {
-            ActionRoute::ClientOnly("$EDITOR, over the configuration file the client resolves")
-        }
+        // The editor on the file the client resolves, then a reload when it
+        // changed the file (PERSO-320).
+        Action::OpenConfigFile => ActionRoute::Daemon(&["config.reload"]),
         // The materialisation is `message.materialise_attachment` and happens
         // when the key resolves the part list; the action carries the path it
         // produced, so what is left is the desktop's file opener.

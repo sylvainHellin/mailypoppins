@@ -959,15 +959,32 @@ pub(super) fn handle_action(
         Action::OpenConfigFile => {
             let path = mp_core::config::config_path();
             if path.exists() {
+                let before = std::fs::read(&path).unwrap_or_default();
                 suspend_terminal(terminal)?;
                 let result = edit_file(&path);
                 resume_terminal(terminal)?;
                 match result {
-                    // Theme and other settings are read once at startup
-                    // (theme is an `OnceLock`), so there is no hot-reload.
-                    Ok(()) => app.set_status(
-                        "Config saved \u{2014} restart mailypoppins to apply changes".to_string(),
-                    ),
+                    Ok(()) => {
+                        let mut outcome = config_edit_outcome(&door, &path, &before);
+                        // The TUI's own keys (notifications, the signature
+                        // default, the agent) follow the reload at once;
+                        // the theme is painted once at startup.
+                        if outcome.reloaded {
+                            if let Ok(next) = mp_core::config::load_global_config() {
+                                let note =
+                                    theme_restart_note(&app.global_config.theme, &next.theme);
+                                if let (Some(note), Some((last, _))) =
+                                    (note, outcome.lines.last_mut())
+                                {
+                                    last.push_str(note);
+                                }
+                                app.global_config = next;
+                            }
+                        }
+                        for (line, level) in outcome.lines {
+                            app.set_status_level(line, level);
+                        }
+                    }
                     Err(e) => {
                         app.set_status_level(format!("Open config failed: {e}"), StatusLevel::Error)
                     }
@@ -1591,6 +1608,106 @@ fn note_compose_signature_edited(app: &mut App) {
     if let Some(wizard) = app.compose_wizard_mut() {
         wizard.signature_edited = true;
     }
+}
+
+/// What `sc` came to once the editor returned: the lines to log, the last one
+/// the status line keeps, and whether the daemon took the file.
+pub(super) struct ConfigEditOutcome {
+    pub(super) lines: Vec<(String, StatusLevel)>,
+    pub(super) reloaded: bool,
+}
+
+/// `config.toml` after the editor, in `mp config open`'s words (PERSO-320).
+///
+/// An unchanged file asks the daemon nothing. A changed one is reloaded
+/// through `config.reload`: each key the load ignores is logged on its own,
+/// and the outcome comes last, counting them, so the status line names the
+/// reload or its refusal and `sl` lists the keys.
+pub(super) fn config_edit_outcome(
+    door: &dyn super::queries::Queries,
+    path: &Path,
+    before: &[u8],
+) -> ConfigEditOutcome {
+    use mp_client::format;
+    let shown = path.display().to_string();
+    let refused = |line: String| ConfigEditOutcome {
+        lines: vec![(line, StatusLevel::Error)],
+        reloaded: false,
+    };
+    let after = match std::fs::read_to_string(path) {
+        Ok(after) => after,
+        Err(e) => return refused(format!("Cannot read {shown} ({e}); nothing reloaded")),
+    };
+    if after.as_bytes() == before {
+        return ConfigEditOutcome {
+            lines: vec![(format::config_unchanged_line(&shown), StatusLevel::Info)],
+            reloaded: false,
+        };
+    }
+    let warnings = mp_core::config::config_warnings(&after);
+    let mut lines: Vec<(String, StatusLevel)> = warnings
+        .iter()
+        .map(|warning| {
+            (
+                format::config_warning_line(&shown, warning),
+                StatusLevel::Warning,
+            )
+        })
+        .collect();
+    match door.call("config.reload", json!({})) {
+        Ok(result) => {
+            let list = |key: &str| -> Vec<String> {
+                result[key]
+                    .as_array()
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(|name| name.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let mut line =
+                format::config_reloaded_line(&list("added"), &list("updated"), &list("removed"));
+            let level = match warnings.len() {
+                0 => StatusLevel::Success,
+                1 => {
+                    line.push_str("; 1 key ignored, sl lists it");
+                    StatusLevel::Warning
+                }
+                n => {
+                    line.push_str(&format!("; {n} keys ignored, sl lists them"));
+                    StatusLevel::Warning
+                }
+            };
+            lines.push((line, level));
+            ConfigEditOutcome {
+                lines,
+                reloaded: true,
+            }
+        }
+        Err(e) => {
+            let line = match mp_client::session::refusal(&e).and_then(format::config_refusal) {
+                Some(refusal) => format!(
+                    "{} {}",
+                    format::config_refused_line(&refusal),
+                    format::CONFIG_KEPT_LINE
+                ),
+                None => format!("Reload of {shown} failed: {e:#}"),
+            };
+            lines.push((line, StatusLevel::Error));
+            ConfigEditOutcome {
+                lines,
+                reloaded: false,
+            }
+        }
+    }
+}
+
+/// What the outcome line adds when a reload changed the theme, which the TUI
+/// paints once at startup.
+pub(super) fn theme_restart_note(held: &str, next: &str) -> Option<&'static str> {
+    (held != next).then_some("; the theme changes when the TUI restarts")
 }
 
 /// The file of the signature `name`, as the daemon's `signature.read` names
@@ -3433,5 +3550,140 @@ mod tests {
             Some("1 attachment missing: leer"),
             "an empty folder sends nothing"
         );
+    }
+}
+
+/// `sc` after the editor returned (PERSO-320): `mp config open`'s outcomes,
+/// against a door standing in for the daemon.
+#[cfg(test)]
+mod config_edit_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::queries::Queries;
+
+    /// A door that records each call and answers it with `answer`.
+    struct Door {
+        answer: fn() -> anyhow::Result<Value>,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl Queries for Door {
+        fn call(&self, method: &str, _params: Value) -> anyhow::Result<Value> {
+            self.calls.borrow_mut().push(method.to_string());
+            (self.answer)()
+        }
+    }
+
+    fn door(answer: fn() -> anyhow::Result<Value>) -> Door {
+        Door {
+            answer,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn reloaded() -> anyhow::Result<Value> {
+        Ok(json!({"added": [], "updated": ["alpha"], "removed": []}))
+    }
+
+    fn refused() -> anyhow::Result<Value> {
+        Err(anyhow::Error::new(mp_client::session::Refused {
+            method: "config.reload".into(),
+            error: mp_protocol::RpcError {
+                code: mp_protocol::ErrorCode::ConfigInvalid.code(),
+                message: "expected `=`".into(),
+                data: Some(json!({"path": "/c/config.toml", "line": 4, "message": "expected `=`"})),
+            },
+        }))
+    }
+
+    const BEFORE: &str = "[[accounts]]\nname = \"alpha\"\n";
+
+    /// The file after the editor, and the bytes it had before.
+    fn edited(after: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, after).unwrap();
+        (dir, path)
+    }
+
+    fn texts(outcome: &ConfigEditOutcome) -> Vec<String> {
+        outcome.lines.iter().map(|(line, _)| line.clone()).collect()
+    }
+
+    #[test]
+    fn an_unchanged_file_says_so_and_asks_the_daemon_nothing() {
+        let (_dir, path) = edited(BEFORE);
+        let door = door(reloaded);
+        let outcome = config_edit_outcome(&door, &path, BEFORE.as_bytes());
+        assert_eq!(
+            texts(&outcome),
+            vec![format!("No change to {}; nothing reloaded", path.display())]
+        );
+        assert!(!outcome.reloaded);
+        assert!(door.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_changed_file_is_reloaded_and_says_what_the_swap_did() {
+        let (_dir, path) = edited(&format!("{BEFORE}default_from = \"a@example.com\"\n"));
+        let door = door(reloaded);
+        let outcome = config_edit_outcome(&door, &path, BEFORE.as_bytes());
+        assert_eq!(
+            texts(&outcome),
+            vec!["Configuration reloaded: updated alpha"]
+        );
+        assert!(matches!(outcome.lines[0].1, StatusLevel::Success));
+        assert!(outcome.reloaded);
+        assert_eq!(*door.calls.borrow(), vec!["config.reload".to_string()]);
+    }
+
+    /// Each key the load ignored is its own activity line, and the outcome,
+    /// which the status line keeps, comes last and counts them.
+    #[test]
+    fn each_ignored_key_is_logged_before_the_outcome() {
+        let (_dir, path) = edited(&format!(
+            "{BEFORE}\n[accounts.mailboxes.sent]\nserver = \"Sent\"\ncalendar_backend = \"ews\"\n"
+        ));
+        let outcome = config_edit_outcome(&door(reloaded), &path, BEFORE.as_bytes());
+        assert_eq!(
+            texts(&outcome),
+            vec![
+                format!(
+                    "{}: account \"alpha\": unknown key `accounts.mailboxes.sent.calendar_backend` is ignored",
+                    path.display()
+                ),
+                "Configuration reloaded: updated alpha; 1 key ignored, sl lists it".to_string(),
+            ]
+        );
+        assert!(matches!(outcome.lines[0].1, StatusLevel::Warning));
+        assert!(matches!(outcome.lines[1].1, StatusLevel::Warning));
+    }
+
+    #[test]
+    fn a_refused_file_names_its_line_and_keeps_the_old_configuration() {
+        let (_dir, path) = edited(&format!("{BEFORE}broken\n"));
+        let outcome = config_edit_outcome(&door(refused), &path, BEFORE.as_bytes());
+        assert_eq!(
+            texts(&outcome),
+            vec![
+                "The configuration was refused (/c/config.toml, line 4): expected `=` \
+                 The daemon keeps the configuration it had."
+                    .to_string()
+            ]
+        );
+        assert!(matches!(outcome.lines[0].1, StatusLevel::Error));
+        assert!(!outcome.reloaded);
+    }
+
+    /// The theme is painted once at startup, so a reload that changed it says
+    /// when it shows; any other key needs no word.
+    #[test]
+    fn only_a_changed_theme_waits_for_the_tui_to_restart() {
+        assert_eq!(
+            theme_restart_note("dark", "light"),
+            Some("; the theme changes when the TUI restarts")
+        );
+        assert_eq!(theme_restart_note("dark", "dark"), None);
     }
 }
