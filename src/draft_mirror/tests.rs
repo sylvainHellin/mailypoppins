@@ -3467,3 +3467,105 @@ fn a_graph_copy_too_large_for_one_request_is_refused_once_and_not_retried() {
         "an edit retries"
     );
 }
+
+/// A push that put its copy in the folder and died before writing its row
+/// leaves a copy the row does not name that is this machine's own: it was
+/// written from the file as it is, so the send claims it with the row's copy
+/// rather than blaming Outlook.
+#[test]
+fn a_copy_this_machine_wrote_before_its_row_does_not_refuse_the_send() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &text).unwrap();
+    folder.put(&server_copy_of(&text, &mid_of(&path)));
+
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("both copies are this machine's");
+    assert!(folder.live().is_empty(), "{:?}", folder.log);
+}
+
+/// A push whose removal of the old copy failed after its row moved to the new
+/// one leaves an older copy mp wrote, which the reconcile would delete as a
+/// leftover: the send claims it too.
+#[test]
+fn an_older_copy_a_push_failed_to_remove_does_not_refuse_the_send() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let old = folder.live()[0].clone();
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &text).unwrap();
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    folder.copies.insert(0, old);
+    assert_eq!(folder.live().len(), 2);
+
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the leftover is this machine's");
+    assert!(folder.live().is_empty(), "{:?}", folder.log);
+}
+
+/// A copy beside the row's that mp did not write from this file, an older
+/// one edited elsewhere among them, still refuses the send with nothing
+/// removed.
+#[test]
+fn a_copy_written_from_other_text_still_refuses_the_send() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mut foreign = super::folder::fake::Copy {
+        uid: 1,
+        raw: outlook_copy(&mid_of(&path), "robin@example.com", "Angebot", "<p>alt</p>"),
+        deleted: false,
+    };
+    folder.copies.insert(0, foreign.clone());
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert_eq!(folder.live().len(), 2);
+
+    // A newer mp copy of other text: another machine's push.
+    folder.remove(1);
+    let other = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Servus");
+    foreign.raw = server_copy_of(&other, &mid_of(&path));
+    folder.put(&foreign.raw);
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("changed in Outlook or on another machine"),
+        "{refused}"
+    );
+    assert_eq!(folder.live().len(), 2);
+}
+
+/// On Graph too: a copy created from the file as it is, whose row the push
+/// did not live to write, is claimed with the row's copy.
+#[test]
+fn a_graph_copy_this_machine_created_before_its_row_does_not_refuse_the_send() {
+    let fx = graph_fixture();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut graph = FakeGraph::default();
+    block_on(push::push(
+        &fx.mirror(1),
+        &mut on_graph(&fx.store, &mut graph),
+        "d1",
+    ))
+    .unwrap();
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &text).unwrap();
+    graph.put(&server_copy_of(&text, &mid_of(&path)));
+
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("both copies are this machine's");
+    assert!(graph.drafts().is_empty(), "{:?}", graph.log);
+}

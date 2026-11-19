@@ -17,10 +17,10 @@
 //!   renumbering while the claim read the copy's sequence number) or by
 //!   another machine's send. The send is refused with "outcome unknown: check Sent and Drafts,
 //!   then send again or discard".
-//! - A copy the row does not name, beside or instead of the one it names: the
-//!   copy changed since this machine last synced it (an Outlook save, in
-//!   place on Graph; another machine's push), whenever that was since the
-//!   last reconcile. The send is refused with nothing removed
+//! - A copy the row does not name, beside or instead of the one it names,
+//!   that this machine did not write ([`own_copies`]): the copy changed since
+//!   this machine last synced it (an Outlook save, in place on Graph; another
+//!   machine's push), whenever that was since the last reconcile. The send is refused with nothing removed
 //!   ([`ChangedElsewhere`]) and the daemon runs the reconcile, which pulls
 //!   the change; the user reviews it and sends again.
 //! - No copy and a row: the row says this machine last saw the copy and did
@@ -252,9 +252,10 @@ async fn claim<F: DraftsFolder>(
         None => None,
     };
     if let Some(row) = &row {
-        let current = row.mailbox == mailbox && row.uidvalidity == info.uidvalidity;
-        let named = current && uids == [row.uid];
-        if !uids.is_empty() && !named {
+        if !own_copies(folder, row, &uids, &mailbox, info.uidvalidity, draft)
+            .await
+            .map_err(|e| unreachable(name, e))?
+        {
             return Err(ChangedElsewhere {
                 mailbox: mailbox.clone(),
             }
@@ -308,6 +309,46 @@ async fn claim<F: DraftsFolder>(
     }
     info!("[drafts] {name}: claimed the server copy of {message_id} (UIDs {uids:?}) for its send");
     Ok(())
+}
+
+/// Whether every copy `uids` names beside the one `row` names is this
+/// machine's own, so the claim may take them all: a copy written from the
+/// file as it is now (a push that died between creating its copy and writing
+/// its row), or one mp wrote that is older than the row's copy (a push whose
+/// removal of the old copy failed after the row moved on), which the
+/// reconcile would delete as a leftover. Any other copy is a change made
+/// elsewhere ([`ChangedElsewhere`]).
+async fn own_copies<F: DraftsFolder>(
+    folder: &mut F,
+    row: &draft_sync::DraftSyncRow,
+    uids: &[u32],
+    mailbox: &str,
+    uidvalidity: u32,
+    draft: &EmailDraft,
+) -> Result<bool> {
+    let current = row.mailbox == mailbox && row.uidvalidity == uidvalidity;
+    let others: Vec<u32> = uids
+        .iter()
+        .copied()
+        .filter(|uid| !(current && *uid == row.uid))
+        .collect();
+    if others.is_empty() {
+        return Ok(true);
+    }
+    let file_hash = super::LocalDraft::read(draft.path.clone()).map(|local| local.hash);
+    for uid in others {
+        let Some(raw) = folder.fetch(uid).await? else {
+            // Gone since the lookup: the claim's count tells.
+            continue;
+        };
+        let ours = super::carrier::read(&raw).is_some_and(|copy| {
+            Some(&copy.file_hash) == file_hash.as_ref() || (current && uid < row.uid)
+        });
+        if !ours {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// [`claim_for_send`] against the account's Drafts folder, over IMAP or
