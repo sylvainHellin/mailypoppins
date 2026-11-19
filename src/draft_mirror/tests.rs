@@ -2020,6 +2020,20 @@ fn a_minted_message_id_names_its_draft_and_no_other_does() {
 
     let odd = mint_server_message_id(&fx.account, "d 1@x");
     assert_eq!(draft_id_named(&odd), None, "{odd}");
+
+    // An id longer than a file name can hold names no draft: imported under
+    // it, the copy would fail its placement on every pass.
+    let longest = "a".repeat(64);
+    let fits = mint_server_message_id(&fx.account, &longest);
+    assert_eq!(draft_id_named(&fits), Some(longest.as_str()));
+    let long = "a".repeat(65);
+    let minted = mint_server_message_id(&fx.account, &long);
+    assert!(!minted.contains(&long), "{minted}");
+    let huge = format!(
+        "<mp-draft.0123456789abcdef01234567.{}@tum.de>",
+        "b".repeat(300)
+    );
+    assert_eq!(draft_id_named(&huge), None);
     for other in [
         "<mp-draft.0123456789abcdef01234567@tum.de>",
         "<mp-draft.1@tum.de>",

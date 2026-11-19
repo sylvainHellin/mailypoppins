@@ -105,7 +105,8 @@ const MINTED_PREFIX: &str = "mp-draft.";
 /// APPEND (the probe of 2026-10-20). Naming the id in it lets mp on the other
 /// machine import such a copy under the draft's own id ([`draft_id_named`],
 /// PERSO-183) rather than as a foreign draft under a fresh one. An id that is
-/// not a plain token (letters, digits, `-`, `_`) is left out, and the
+/// not a plain token (letters, digits, `-`, `_`, at most [`MAX_NAMED_ID`]
+/// characters) is left out, and the
 /// `Message-ID` then names no draft, as one an earlier build minted.
 pub fn mint_server_message_id(account: &AccountConfig, draft_id: &str) -> String {
     let domain = account
@@ -134,9 +135,16 @@ pub fn draft_id_named(message_id: &str) -> Option<&str> {
     (minted && is_plain_id(id)).then_some(id)
 }
 
-/// Whether `id` can stand in a `Message-ID` as it is and be read back whole.
+/// The longest draft id a `Message-ID` names: mp's own ids are 16
+/// characters, and a longer one would end in a file name the reconcile cannot
+/// place, on every pass.
+const MAX_NAMED_ID: usize = 64;
+
+/// Whether `id` can stand in a `Message-ID` as it is and be read back whole,
+/// and is short enough to name a draft file.
 fn is_plain_id(id: &str) -> bool {
     !id.is_empty()
+        && id.len() <= MAX_NAMED_ID
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
