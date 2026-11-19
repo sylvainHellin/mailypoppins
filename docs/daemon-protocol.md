@@ -2111,3 +2111,6 @@ An edit to either now counts as an update of the account at a reload.
 
 PERSO-210 added `deduped` to `send.outbox_retry`'s result (`mp_protocol::send::OutboxRetryOutcome`), one member, additively: of the `completed` rows, how many found their Sent copy already on the server by the Message-ID search, after an APPEND whose answer was lost, and filed none; it defaults to `0` when absent, so an older daemon's answer decodes as one that filed every copy.
 `completed` keeps its count and its doc says what it always counted, the rows the drain finished; `mp outbox retry` prints `✓ N sent copy/copies already on the server, none filed again` for them instead of counting them as filed, the desktop says `its Sent copy was already on the server`, and the binding `OutboxRetryOutcome.ts` moved with it.
+
+PERSO-210 also changed the spelling of one value: `moved_to.selector` in the `message.archive` and `message.move` results is the canonical selector, its Message-ID without angle brackets (`mp://work/archive/x@example.org`), as `message.delete`'s `selector`, a listed row's and every command's output spell it; it was the stored Message-ID with its brackets percent-encoded (`mp://work/archive/%3Cx@example.org%3E`).
+`mp archive` and `mp move` print the new one.

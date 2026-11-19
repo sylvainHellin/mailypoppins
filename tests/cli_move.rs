@@ -514,9 +514,9 @@ async fn message_move_lands_the_row_and_answers_the_new_selector() {
     .expect("message.move within the deadline")
     .unwrap_or_else(|e| panic!("message.move failed: {e:?}"));
 
-    // `moved_to.selector` carries the stored Message-ID, angle brackets
-    // percent-encoded, as `message.archive` does (docs/daemon-protocol.md).
-    let now = fixture::message_selector(fixture::ACCOUNT, "archive", &format!("%3C{KICKOFF}%3E"));
+    // `moved_to.selector` is the canonical selector, the Message-ID without
+    // its angle brackets, as every other command prints one (PERSO-210).
+    let now = fixture::message_selector(fixture::ACCOUNT, "archive", KICKOFF);
     assert_eq!(moved["selector"], json!(kickoff_in_inbox()));
     assert_eq!(moved["moved_to"]["mailbox"], json!("archive"));
     assert_eq!(moved["moved_to"]["selector"], json!(now));

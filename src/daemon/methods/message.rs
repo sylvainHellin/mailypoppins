@@ -2180,9 +2180,16 @@ async fn mutate_with<E: OpExecutor>(
                 "mailbox": row.mailbox,
                 "moved_to": {
                     "mailbox": destination,
-                    // The Message-ID as the store holds it, which is what the
-                    // pre-daemon "now" line printed.
-                    "selector": Selector::new(&name, destination, &row.message_id).to_string(),
+                    // The canonical selector, its Message-ID without the
+                    // angle brackets, which every other command prints and
+                    // `mp <selector>` reads. It used to carry the stored
+                    // Message-ID, brackets percent-encoded (PERSO-210).
+                    "selector": Selector::new(
+                        &name,
+                        destination,
+                        crate::selector::message_key(&row.message_id),
+                    )
+                    .to_string(),
                 },
             });
             (queued, result)

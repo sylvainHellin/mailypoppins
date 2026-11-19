@@ -1914,7 +1914,14 @@ mod wire {
 
         let out = wire.mp(&["archive", FIRST]);
         assert_ok(&out, "mp archive");
-        assert_eq!(stdout(&out), "mp://wire/archive/%3Cfirst@example.org%3E\n");
+        assert_eq!(
+            stdout(&out),
+            "mp://wire/archive/first@example.org\n",
+            "the selector mp show takes and mp delete prints, brackets dropped"
+        );
+        let read = wire.mp(&["show", "mp://wire/archive/first@example.org"]);
+        assert_ok(&read, "mp show <the printed selector>");
+        assert!(stdout(&read).contains("First"), "{}", stdout(&read));
 
         assert_eq!(
             server(&wire, ARCHIVE),
