@@ -319,7 +319,7 @@ The file watcher is a later unit; the mechanism it will drive is this one.
 
 A swap is atomic in the sense that matters: the candidate is parsed and validated in full before anything is stopped, written or installed.
 A candidate that does not load leaves the previous snapshot live, its runtimes running and their engine locks held, and the revision where it was; the caller gets `-32007` with `{path, line?, message}` and every bootstrapped client gets the same three fields as a `config.invalid` event.
-A candidate that loads is installed, and then the runtimes are reconciled in one order: stop the accounts that went, restart the accounts whose effective configuration changed, start the accounts that appeared, and announce the whole thing with one `config.changed`.
+A candidate that loads is installed, and then the runtimes are reconciled in one order: stop the accounts that went, restart the accounts whose effective configuration changed (what `config.get` reports for the account, plus the role folders, folder overrides and draft mirror switch it leaves out), start the accounts that appeared, and announce the whole thing with one `config.changed`.
 
 `config.reload` returns only once every runtime it touched has settled, so a removed account's engine lock is free by the time the call answers and an account can be renamed in one edit without the new runtime racing the old one.
 A runtime the swap stops or replaces is retired first: it refuses every tick from then on, and the swap waits up to 60 seconds for the tick already running to finish before it releases the engine lock and starts the replacement, which therefore comes up `ready`; a tick that outlives the 60 seconds keeps the lock until it ends, and the replacement comes up `blocked`.

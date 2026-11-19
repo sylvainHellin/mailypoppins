@@ -490,9 +490,10 @@ impl Reconcile {
             .collect()
     }
 
-    /// Which accounts changed, comparing the effective JSON of each: comparing
-    /// the loaded structs would need a `PartialEq` the config types do not
-    /// have, and comparing the raw text would call a reformatted file a change.
+    /// Which accounts changed, comparing the effective JSON of each and the
+    /// runtime keys it leaves out: comparing the loaded structs would need a
+    /// `PartialEq` the config types do not have, and comparing the raw text
+    /// would call a reformatted file a change.
     fn between(previous: &GlobalConfig, next: &GlobalConfig) -> Reconcile {
         let mut reconcile = Reconcile::default();
         for account in &next.accounts {
@@ -503,7 +504,9 @@ impl Reconcile {
             {
                 None => reconcile.added.push(account.name.clone()),
                 Some(before) => {
-                    if effective_account(previous, before) != effective_account(next, account) {
+                    if effective_account(previous, before) != effective_account(next, account)
+                        || runtime_keys(before) != runtime_keys(account)
+                    {
                         reconcile.updated.push(account.name.clone());
                     }
                 }
@@ -523,6 +526,29 @@ impl Reconcile {
         }
         reconcile
     }
+}
+
+/// The keys of an account its runtime reads from the configuration it started
+/// with that `config.get` does not report (PERSO-320): the role folders a
+/// server marks none of, the folder overrides and the draft mirror switch.
+/// Without them in [`Reconcile::between`], an edit of one alone left the
+/// running account on the old value until the next daemon restart.
+fn runtime_keys(account: &AccountConfig) -> Value {
+    let server = |mapping: &Option<crate::config::MailboxMapping>| {
+        mapping.as_ref().map(|mapping| mapping.server.clone())
+    };
+    let mailboxes = &account.mailboxes;
+    json!({
+        "drafts": server(&mailboxes.drafts),
+        "trash": server(&mailboxes.trash),
+        "junk": server(&mailboxes.junk),
+        "overrides": mailboxes
+            .overrides
+            .iter()
+            .map(|rule| json!([rule.pattern, rule.policy]))
+            .collect::<Vec<_>>(),
+        "mirror": account.drafts.mirror,
+    })
 }
 
 /// Install `config` and bring the runtimes in line with it.
@@ -1035,6 +1061,36 @@ mod tests {
             refused.message.contains("regular expression"),
             "{refused:?}"
         );
+    }
+
+    /// The keys an account runtime reads from the configuration it started
+    /// with and `config.get` does not report, the role folders a server marks
+    /// none of, the folder overrides and the draft mirror switch, update the
+    /// account too, so a reload restarts its runtime and the edit takes effect
+    /// without a daemon restart (PERSO-320).
+    #[test]
+    fn a_changed_runtime_key_that_config_get_does_not_report_updates_the_account() {
+        let base = "[[accounts]]\nname = \"alpha\"\n";
+        let previous = parse(base);
+        for edit in [
+            "\n[accounts.mailboxes]\ndrafts = { server = \"Entwürfe\" }\n",
+            "\n[accounts.mailboxes]\ntrash = { server = \"Papierkorb\" }\n",
+            "\n[accounts.mailboxes]\njunk = { server = \"Spam\" }\n",
+            "\n[[accounts.mailboxes.override]]\nmatch = \"Archive/*\"\npolicy = \"ignore\"\n",
+            "\n[accounts.drafts]\nmirror = false\n",
+        ] {
+            let next = parse(&format!("{base}{edit}"));
+            assert_eq!(
+                Reconcile::between(&previous, &next).updated,
+                vec!["alpha".to_string()],
+                "{edit}"
+            );
+            assert_eq!(
+                Reconcile::between(&next, &next),
+                Reconcile::default(),
+                "an unchanged {edit} is no change"
+            );
+        }
     }
 
     /// A reformatted file is not a change.

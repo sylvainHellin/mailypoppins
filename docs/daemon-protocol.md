@@ -764,7 +764,7 @@ A `line` is the 1-based line of the offending token, and `null` when the diagnos
 A removed account publishes `state.remove` of `account:<name>`; an updated or added one publishes `account.state_changed` when its runtime settles; `config.changed` is published after every per-account event of that swap, so everything the reload did is in front of the event that announces it.
 The order matters beyond tidiness: releasing a removed account's engine lock before an added account tries to take one is what lets an account be renamed in one edit without the new runtime losing a race to the old one.
 `config.reload` answers only once every runtime it touched has settled, so "the lock is free again" is not something a caller has to poll for.
-An account counts as *updated* when the object `config.get` reports for it changed; the three lists are sorted lexicographically, so two daemons reconciling the same edit report it identically.
+An account counts as *updated* when the object `config.get` reports for it changed, or one of the keys its runtime reads that the object leaves out: `mailboxes.drafts`, `mailboxes.trash`, `mailboxes.junk`, the `[[accounts.mailboxes.override]]` entries and `drafts.mirror` (PERSO-320); the three lists are sorted lexicographically, so two daemons reconciling the same edit report it identically.
 Every successful swap publishes exactly one `config.changed`, even when all three lists are empty.
 
 **A rejected candidate changes nothing.**
