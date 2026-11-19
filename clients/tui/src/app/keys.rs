@@ -4062,6 +4062,17 @@ impl Scorer {
 // Directory picker helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_FREQUENT_DIRS: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_frequent_dirs_for_test(dirs: Option<Vec<PathBuf>>) {
+    TEST_FREQUENT_DIRS.with(|frequent| *frequent.borrow_mut() = dirs);
+}
+
 /// Check whether `zoxide` is available on PATH.
 fn which_zoxide() -> bool {
     std::process::Command::new("zoxide")
@@ -5862,6 +5873,39 @@ mod tests {
         // The dir picker is now active; the error did NOT fire in between.
         assert!(matches!(app.overlay, Overlay::Dir(_)));
         assert!(app.pending_error.is_some());
+    }
+
+    /// PERSO-332: a test build never runs `zoxide`, whose query reads and
+    /// may rewrite the user's own database: the directory picker offers the
+    /// directories the test set in its place, narrowed by the query as
+    /// zoxide narrows them.
+    #[test]
+    fn the_dir_picker_offers_the_tests_directories_and_never_runs_zoxide() {
+        let reports = PathBuf::from("/srv/mp-test/Reports");
+        let notes = PathBuf::from("/srv/mp-test/notes");
+        set_frequent_dirs_for_test(Some(vec![reports.clone(), notes.clone()]));
+        let mut app = app_with_emails(sample());
+        app.open_dir_picker(vec![PathBuf::from("/tmp/a.pdf")]);
+        let picker = app.dir_picker_mut().expect("the dir picker is open");
+        assert_eq!(picker.mode, DirPickerMode::Zoxide);
+        assert_eq!(picker.zoxide_results, vec![reports.clone(), notes]);
+
+        for c in "rep".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let picker = app.dir_picker_mut().expect("still open");
+        assert_eq!(picker.zoxide_results, vec![reports]);
+    }
+
+    /// With no directories set, a test build has no zoxide, and the picker
+    /// opens on the file browser.
+    #[test]
+    fn the_dir_picker_of_a_test_build_has_no_zoxide_by_default() {
+        let mut app = app_with_emails(sample());
+        app.open_dir_picker(vec![PathBuf::from("/tmp/a.pdf")]);
+        let picker = app.dir_picker_mut().expect("the dir picker is open");
+        assert_eq!(picker.mode, DirPickerMode::Browser);
+        assert!(picker.zoxide_results.is_empty());
     }
 
     // -----------------------------------------------------------------------
