@@ -393,15 +393,26 @@ pub async fn reconcile<F: DraftsFolder>(
                 // On Graph the newer copy may instead be an Outlook save of
                 // an older copy that landed while this machine replaced it,
                 // which holds nothing of the row's text: a conflict too.
+                // On IMAP the same save arrives as a newer copy without mp's
+                // mark, edited in another client, beside the row's copy that
+                // is still listed (PERSO-328). An edit of the row's copy
+                // itself is expected to replace it (an Outlook save removes
+                // the message it edits), so such a copy is an edit of an
+                // older one and the local text is kept as a conflict copy;
+                // should a client keep the message it edits, the cost is a
+                // conflict copy holding text the pull also holds, never text
+                // lost.
                 let raw = folder.fetch(newest.uid).await?.unwrap_or_default();
-                let same = carrier::read(&raw).is_some_and(|c| c.file_hash == local.hash);
+                let marked = carrier::read(&raw);
+                let same = marked.as_ref().is_some_and(|c| c.file_hash == local.hash);
                 let moved = local.hash != row.synced_hash;
                 let concurrent = folder.concurrent_edit(row.uid, newest.uid)?;
+                let edited_elsewhere = marked.is_none();
                 if let Some(hash) = pull_into(
                     mirror,
                     local,
                     &raw,
-                    (moved || concurrent) && !same,
+                    (moved || concurrent || edited_elsewhere) && !same,
                     None,
                     &mut report,
                 )? {

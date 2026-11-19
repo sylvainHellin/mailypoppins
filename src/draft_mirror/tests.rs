@@ -4056,3 +4056,64 @@ fn a_draft_with_no_row_refuses_a_copy_pushed_from_other_text() {
     );
     assert_eq!(folder.live().len(), 2, "nothing removed: {:?}", folder.log);
 }
+
+// ---------------------------------------------------------------------------
+// An Outlook save of a copy a push replaced, on IMAP (PERSO-328)
+// ---------------------------------------------------------------------------
+
+/// A push replaces copy A (v1) with copy B (v2) while Outlook still holds A;
+/// Outlook's save of A arrives as a newer message C under the same
+/// Message-ID. The row names B, which is still listed, so C is an edit of an
+/// older copy: the reconcile keeps the local v2 as a conflict copy beside
+/// Outlook's text rather than pulling C over it.
+#[test]
+fn an_outlook_save_of_a_replaced_imap_copy_keeps_the_local_edit() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Hallo", "Hallo Robin");
+    std::fs::write(&path, &edited).unwrap();
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    assert_eq!(folder.live().len(), 1, "A replaced by B");
+    folder.put(&outlook_copy(
+        &mid_of(&path),
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo aus Outlook</p>",
+    ));
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.conflicts, 1, "{report:?}");
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+    assert!(text.contains("Hallo aus Outlook"), "{text}");
+}
+
+/// Should Outlook keep the message it edits (the live check owes this), its
+/// edit of B is a newer unmarked copy with B still listed, which the rule
+/// reads as an edit of an older copy: the cost is a conflict copy that holds
+/// the text B had, and no text is lost.
+#[test]
+fn an_outlook_edit_that_keeps_the_rows_copy_costs_only_a_spurious_conflict_copy() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo Robin");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.put(&outlook_copy(
+        &mid_of(&path),
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo Robin, aus Outlook</p>",
+    ));
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.conflicts, 1, "{report:?}");
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("aus Outlook"));
+    let text = all_draft_text();
+    assert!(text.contains("Hallo Robin"), "{text}");
+}
