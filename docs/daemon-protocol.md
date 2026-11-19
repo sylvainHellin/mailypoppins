@@ -538,7 +538,8 @@ The address makes a note to self listed in the Inbox `own` as much as its Sent c
 **A message with no relatives answers with itself alone.** A one-row conversation is the truthful answer to "what else is in this thread", and the client is what turns it into a sentence: the TUI says "No related emails for this message in the store" and opens no overlay for it.
 An empty `messages` array would be a different claim, that the store holds not even the message that was addressed, which is `-32602` instead.
 
-The address, the `mailbox` narrowing and their refusals are `message.get`'s, unchanged: naming none or more than one of the three is `-32602`, a `row_id` no message has is `-32602`, an unknown account is `-32005` and an account with no store is `-32006`.
+The address, the `mailbox` narrowing and their refusals are `message.get`'s but for a drafts selector: naming none or more than one of the three is `-32602`, a `row_id` no message has is `-32602`, an unknown account is `-32005` and an account with no store is `-32006`.
+A drafts selector is `-32602` in the selector's own words, without the hint `message.get` adds, and only on an account with a store: `message.thread` asks for the store before it reads the address, so an account with no store answers it with the `-32006` above.
 
 Two optional parameters make the answer the expansion of a conversation row ([The conversation listing](#the-conversation-listing)); without them the answer is the one above, byte for byte.
 
