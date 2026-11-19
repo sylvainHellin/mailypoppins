@@ -746,10 +746,11 @@ pub const PUSH_RETRY_COOL_DOWN_SECS: i64 = crate::outbox::BACKOFF_MAX_SECS;
 
 /// Whether a push of the draft `draft_id` for the bytes hashing to `hash` was
 /// parked `failed` less than [`PUSH_RETRY_COOL_DOWN_SECS`] before `now`
-/// (#0143): the owed-push scan does not queue it again until then, so a
-/// server out of reach is not hammered at every drain. Past the cool-down the
-/// scan queues one fresh push, and the next edit, a new hash, queues one at
-/// once.
+/// (#0143), or parked as [`Unretryable`] at any time: the owed-push scan does
+/// not queue it again until then, so a server out of reach is not hammered
+/// at every drain. Past the cool-down the scan queues one fresh push, never
+/// for a push the server can never take, and the next edit, a new hash,
+/// queues one at once.
 pub fn push_failed_for(
     store: &Store,
     account: &str,
@@ -758,7 +759,8 @@ pub fn push_failed_for(
     now: i64,
 ) -> Result<bool> {
     Ok(failed_ops(store, account)?.iter().any(|row| {
-        row.updated + PUSH_RETRY_COOL_DOWN_SECS > now
+        (row.updated + PUSH_RETRY_COOL_DOWN_SECS > now
+            || Unretryable::marks(row.last_error.as_deref()))
             && matches!(&row.op, ServerOp::PushDraft { draft_id: id, hash: Some(h) }
                 if id == draft_id && h == hash)
     }))
@@ -856,6 +858,41 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOp> {
 // ---------------------------------------------------------------------------
 // The drain
 // ---------------------------------------------------------------------------
+
+/// An op the server can never accept as it stands, whatever the retries: the
+/// drain parks it `failed` at its first refusal instead of spending the
+/// budget, and a drafts-mirror push refused this way is not queued again for
+/// the same bytes after the cool-down ([`push_failed_for`]), only after the
+/// draft changes (PERSO-182: a Graph copy too large for one request).
+///
+/// Its text opens with [`Unretryable::MARK`], which is how a parked row's
+/// `last_error` says so to the owed-push scan.
+#[derive(Debug)]
+pub struct Unretryable(pub String);
+
+impl Unretryable {
+    /// The words a parked row's `last_error` carries for an op refused this
+    /// way.
+    pub const MARK: &'static str = "not retried: ";
+
+    /// Whether `error` carries an [`Unretryable`].
+    pub fn is_in(error: &anyhow::Error) -> bool {
+        error.chain().any(|e| e.is::<Unretryable>())
+    }
+
+    /// Whether a parked row's `last_error` is an [`Unretryable`]'s.
+    fn marks(last_error: Option<&str>) -> bool {
+        last_error.is_some_and(|e| e.contains(Self::MARK))
+    }
+}
+
+impl std::fmt::Display for Unretryable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", Self::MARK, self.0)
+    }
+}
+
+impl std::error::Error for Unretryable {}
 
 /// The server side of the drain, as a trait so the state machine is testable
 /// against an in-memory fake. The live implementation is [`Backend`]; a test
@@ -1086,7 +1123,7 @@ pub(crate) async fn drain<E: OpExecutor>(
             }
             Err(e) => {
                 let err = format!("{e:#}");
-                if row.attempts + 1 >= MAX_ATTEMPTS {
+                if row.attempts + 1 >= MAX_ATTEMPTS || Unretryable::is_in(&e) {
                     match refuse(store, blobs, row.id, &err, Refusal::Park) {
                         Ok(later) => result.failed += later.len(),
                         Err(e) => {

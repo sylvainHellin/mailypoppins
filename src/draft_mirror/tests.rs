@@ -3380,3 +3380,63 @@ fn an_outlook_save_seen_before_a_graph_removal_is_never_removed() {
         "{text}"
     );
 }
+
+/// A Graph copy too large for one request is refused before any request:
+/// the push is parked `failed` on its first drain with a reason that says
+/// so, is not queued again for the same bytes after the cool-down, and the
+/// draft stays local and passes the send guard. An edit queues it again.
+#[test]
+fn a_graph_copy_too_large_for_one_request_is_refused_once_and_not_retried() {
+    let fx = graph_fixture();
+    let big = crate::config::drafts_dir("tum").join("plan.bin");
+    let bytes: Vec<u8> = (0..3_000_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(&big, bytes).unwrap();
+    let path = fx.write(
+        "gross",
+        "d1",
+        &format!("attachments:\n  - {}\n", big.display()),
+        "Anbei der Plan",
+    );
+    link_new_draft(&fx.account, &path).unwrap();
+    push::enqueue_owed(&fx.store, &fx.account).unwrap();
+    let blobs = BlobStore::for_account("tum");
+    let mut graph = FakeGraph::default();
+    let now = crate::outbox::unix_now();
+    let mut exec = GraphExecutor {
+        graph: &mut graph,
+        account: fx.account.clone(),
+    };
+    let result = block_on(pending_ops::drain(&fx.store, &blobs, "tum", &mut exec, now)).unwrap();
+    assert_eq!((result.failed, result.still_open), (1, 0), "parked at once");
+    assert!(graph.log.is_empty(), "nothing posted: {:?}", graph.log);
+    let failed = pending_ops::failed_ops(&fx.store, "tum").unwrap();
+    let reason = failed[0].last_error.clone().unwrap_or_default();
+    assert!(reason.contains("too large"), "{reason}");
+    assert!(reason.contains("stays local"), "{reason}");
+
+    fx.store
+        .conn()
+        .execute(
+            "UPDATE pending_ops SET updated = updated - ?1 WHERE state = 'failed'",
+            [pending_ops::PUSH_RETRY_COOL_DOWN_SECS + 1],
+        )
+        .unwrap();
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "not retried for the same bytes"
+    );
+    graph_guard(&fx.store, &fx.account, &mut graph, "d1").expect("the draft can still be sent");
+
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Anbei", "Hier");
+    std::fs::write(&path, edited).unwrap();
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        1,
+        "an edit retries"
+    );
+}

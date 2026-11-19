@@ -146,6 +146,30 @@ fn find_url(folder: &str, message_id: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+/// The refusal of a draft copy whose base64 MIME is above what one Graph
+/// request takes ([`super::fits_mime_send`]): every attempt would fail the
+/// same way, so it is [`crate::pending_ops::Unretryable`], parked at once and
+/// not tried again until the draft changes. The draft stays local and can
+/// still be sent, which a staged send does with its attachments added one
+/// request each. `None` for a copy that fits.
+pub fn copy_too_large(mime: &[u8]) -> Option<anyhow::Error> {
+    let base64_len = mime.len().div_ceil(3) * 4;
+    if super::fits_mime_send(base64_len) {
+        return None;
+    }
+    let mb = |bytes: usize| bytes as f64 / 1_000_000.0;
+    Some(
+        crate::pending_ops::Unretryable(format!(
+            "this draft is too large for its copy in Outlook's Drafts: {:.1} MB as a message, \
+             above the {:.1} MB one Graph request takes; it stays local and can still be sent, \
+             and an edit that makes it smaller pushes it again",
+            mb(mime.len()),
+            mb(super::MIME_SEND_MAX_BASE64_BYTES / 4 * 3),
+        ))
+        .into(),
+    )
+}
+
 /// The error a draft request's non-2xx answer becomes.
 async fn status_error(resp: reqwest::Response, what: &str) -> anyhow::Error {
     let status = resp.status();
@@ -214,6 +238,9 @@ impl GraphClient {
     /// what Graph made of it: `POST /me/messages` with the base64 MIME, the
     /// request the staged send creates its MIME drafts with.
     pub async fn create_draft_copy(&self, mime: &[u8]) -> Result<GraphDraftHead> {
+        if let Some(refused) = copy_too_large(mime) {
+            return Err(refused);
+        }
         let what = "Creating the Graph draft copy";
         let resp = self
             .create_draft_mime_request(super::mime_send_body(mime))
@@ -446,6 +473,22 @@ mod tests {
                 "{what}"
             );
         }
+    }
+
+    /// A copy whose base64 MIME is above one request is refused before it is
+    /// posted, as an op the drain does not retry; one just under passes.
+    #[test]
+    fn a_copy_above_one_request_is_refused_before_it_is_posted() {
+        let under = vec![b'a'; crate::graph::MIME_SEND_MAX_BASE64_BYTES / 4 * 3];
+        assert!(copy_too_large(&under).is_none());
+        let over = vec![b'a'; under.len() + 3];
+        let refused = copy_too_large(&over).expect("refused");
+        assert!(crate::pending_ops::Unretryable::is_in(&refused));
+        let text = format!("{refused:#}");
+        assert!(
+            text.contains("too large") && text.contains("stays local"),
+            "{text}"
+        );
     }
 
     /// A listing page as Graph answers it: recipients by address, the reply

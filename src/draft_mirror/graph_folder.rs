@@ -607,7 +607,12 @@ pub mod fake {
                 .collect())
         }
 
+        /// As [`GraphClient::create_draft_copy`]: a copy above one request is
+        /// refused before it is posted.
         async fn create(&mut self, raw: &[u8]) -> Result<GraphDraftHead> {
+            if let Some(refused) = crate::graph::drafts::copy_too_large(raw) {
+                return Err(refused);
+            }
             self.check()?;
             self.log.push("create".to_string());
             let raw = if self.rewrites_message_id {
