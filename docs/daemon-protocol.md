@@ -931,7 +931,7 @@ A `kind` outside the three words, and a `message` that is absent or is not an ob
 An id nothing resolves to is `-32602` with `{account, id}`; a name `draft.create` would overwrite is `-32602` with `{account, name, path}`; a draft already `sent` is `-32602` with `{account, id, status}` for both mutators; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload.
 A sent draft is retired into `drafts/.retired/`, out of the scan, so its id resolves to nothing; when that directory holds a `status: sent` record with the id, every method that resolves a draft id, `send.draft` included, answers "already sent" instead, as `-32602` with `{account, id, status: "sent", sent_at, message_id, sent_copy}` (PERSO-317).
 `sent_at` and `message_id` are the record's, `null` when it lacks the field.
-`sent_copy` is the selector of the sent copy the account's store holds, `null` when the store is not ready or holds no copy, and the message then names the `Message-ID` instead.
+`sent_copy` is the selector of the sent copy the account's store holds, `null` when the store is not ready or holds no copy, and the message then names the `Message-ID` instead when the record has one.
 A retired draft that was discarded rather than sent keeps the plain `{account, id}` miss.
 An invalid draft is not a refusal: `draft.validate` reports it and the exit code stays the client's.
 

@@ -836,6 +836,11 @@ async fn a_drafts_selector_is_refused_as_a_draft_before_the_store_is_asked_about
             "{account}: no sync gives a draft a received copy: {}",
             error.message
         );
+        assert!(
+            !error.message.contains("To read the draft"),
+            "{account}: no command offers a draft's conversation, so the read hint stays with message.get: {}",
+            error.message
+        );
         refusals.push(error.message.replace(account, "<account>"));
     }
     assert_eq!(
