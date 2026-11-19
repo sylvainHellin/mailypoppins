@@ -556,3 +556,66 @@ Why: a write built from schema documentation can mail the wrong people at the wr
 Rejected: merging on recorded answers alone; Sylvain running the calls by hand; a second address of his as counterpart (an agent never sends from his accounts).
 Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-18.
 Status: accepted
+
+## 2026-11-19 - An agent installs mp itself in the main checkout on the home server
+
+Why: the repo's instructions require `cargo install --path .` after every change, and a live check can then run in the session that made the change; the guardrail whitelist already lets exactly that command through (a variant with extra flags prompts, so job limits go in `CARGO_BUILD_JOBS`).
+Rejected: Sylvain running every install by hand (each merged fix waited for him).
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - The website is deployed with a release, not with each change
+
+Why: the pages describe commands, and a page ahead of the released version documents what a user cannot install yet.
+Rejected: deploying after every merge.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - Base UI's unnamed focus guards are reported upstream and not patched in the app (PERSO-278)
+
+Why: the two unnamed buttons are the library's focus guards on Apple WebKit, which a pointer never reaches; every button of the app itself has a name.
+Rejected: an app-level observer that names them (guesses at the library's markup); a patched dependency (carried on every update).
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - A contact's count is the mail ever seen, and a delete does not lower it (PERSO-237)
+
+Why: the count ranks correspondents for completion, and deleting a mail does not make its sender less of a correspondent; a rebuild must therefore keep deleted correspondents so that it agrees with the live count.
+Rejected: lowering the count on delete; marking the index dirty on delete and rebuilding it.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - A refused password's hold lives in memory only (PERSO-309)
+
+Why: the main daemon restarts rarely, and nothing about a password goes to disk.
+Rejected: a persistent hold (a hash of the refused password, its step and its next allowed time in the store), unless a locked account ever traces back to restarts.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - The Graph drafts mirror is built before the fake IMAP and SMTP server pair (PERSO-182, PERSO-210)
+
+Why: the mirror is the user-visible gain (drafts shared between mp and Outlook on every Microsoft 365 account); the server pair improves the tests only.
+Rejected: the server pair first; neither.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - Proton's re-imported drafts are linked to mp's own by Message-ID (PERSO-183)
+
+Why: Bridge re-imports a pushed draft under a new id but keeps its Message-ID, so the link removes the second, foreign draft on the other machine.
+Rejected: documenting the limit.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - IMAP IDLE pushes INBOX only (PERSO-184)
+
+Why: each pushed folder costs one more server connection, and every other folder waits at most for the 15-minute sync.
+Rejected: more pushed folders, until someone asks for them.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
+
+## 2026-11-19 - The desktop app is signed once it has users other than Sylvain (PERSO-84)
+
+Why: the Apple Developer membership costs 99 USD a year, and until then the only user approves the unsigned app once by hand.
+Rejected: buying it now.
+Source: report page 2026-11-12_calendar-and-open-tickets, comment export of 2026-11-19.
+Status: accepted
