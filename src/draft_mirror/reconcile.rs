@@ -155,6 +155,14 @@ fn copy_gone_original(retired_stem: &str) -> Option<&str> {
     (rest.is_empty() || counted).then_some(base)
 }
 
+/// Whether the file at `path` in `drafts/.retired/` was retired because its
+/// server copy went, by the name [`copy_gone_name`] gave it: the one test the
+/// mirror and the daemon's draft miss (PERSO-317) both read a retirement by.
+pub(crate) fn is_copy_gone(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|stem| copy_gone_original(&stem.to_string_lossy()).is_some())
+}
+
 /// The absence of a draft's server copy, as [`draft_sync::note_absent`]
 /// records it.
 const COPY_ABSENT: &str = "copy";
@@ -183,9 +191,7 @@ fn retired(account: &str) -> Vec<Retired> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
         .filter_map(|path| {
             let draft = crate::draft::parse_email_draft(&path).ok()?;
-            let copy_gone = path
-                .file_stem()
-                .is_some_and(|stem| copy_gone_original(&stem.to_string_lossy()).is_some());
+            let copy_gone = is_copy_gone(&path);
             Some(Retired {
                 id: draft.frontmatter.id,
                 message_id: draft

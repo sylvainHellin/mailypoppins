@@ -42,7 +42,11 @@
 //! been sent, carrying `{account, id, status}` so a client can tell the case
 //! apart without reading English. An id whose draft went out and was retired
 //! into `drafts/.retired/` is answered "already sent" with the same
-//! `status: sent` (PERSO-317), rather than "no match".
+//! `status: sent` (PERSO-317), rather than "no match". One the draft mirror
+//! retired because its copy left the server's Drafts folder, with no sent
+//! record of the id, is answered "sent or discarded from another machine or
+//! mail client" with `copy_gone: true`, and names the search of the account's
+//! sent mail that tells the two apart.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1576,12 +1580,26 @@ fn row_by_id(account: &str, id: &str) -> Option<DraftRow> {
 /// A draft that went out is not a wrong id (PERSO-317): a fully sent draft is
 /// retired into `drafts/.retired/`, out of the scan every resolver reads, so
 /// the miss looks there before it answers "no match", and a sent record with
-/// the id gets [`already_sent`] instead. Every draft method that resolves an id
-/// misses through here, so `mp path`, the preview, an edit, a send and a
-/// discard all say the same.
+/// the id gets [`already_sent`] instead. A draft the draft mirror retired
+/// because its copy left the server's Drafts folder is not a wrong id either:
+/// with no sent record of the id, it gets [`copy_gone`]. Every draft method
+/// that resolves an id misses through here, so `mp path`, the preview, an
+/// edit, a send and a discard all say the same.
 fn not_found(account: &str, id: &str) -> RpcError {
-    if let Some(sent) = retired_sent(account, id) {
-        return already_sent(account, id, &sent);
+    let retired = retired_records(account, id);
+    let sent = retired
+        .iter()
+        .filter(|(_, record)| record.status == EmailStatus::Sent)
+        .max_by(|(_, a), (_, b)| a.sent_at.cmp(&b.sent_at));
+    if let Some((_, sent)) = sent {
+        return already_sent(account, id, sent);
+    }
+    let gone = retired
+        .iter()
+        .filter(|(path, _)| crate::draft_mirror::reconcile::is_copy_gone(path))
+        .min_by(|(a, _), (b, _)| a.cmp(b));
+    if let Some((_, gone)) = gone {
+        return copy_gone(account, id, gone);
     }
     RpcError {
         code: super::INVALID_PARAMS,
@@ -1590,24 +1608,50 @@ fn not_found(account: &str, id: &str) -> RpcError {
     }
 }
 
-/// The frontmatter of the retired draft `id` of `account` that was sent, the
-/// latest one should the directory hold two.
+/// Every record in the retired drafts of `account` whose id is `id`, with its
+/// path, whatever it was retired for.
 ///
-/// A retired draft that was discarded rather than sent is no answer: its id
-/// keeps the plain "no match".
-fn retired_sent(account: &str, id: &str) -> Option<EmailFrontmatter> {
+/// A record that was neither sent nor retired by the mirror for a copy that
+/// went, a draft discarded here, is no answer: its id keeps the plain
+/// "no match".
+fn retired_records(account: &str, id: &str) -> Vec<(PathBuf, EmailFrontmatter)> {
     let dir = crate::config::drafts_dir(account).join(crate::draft::RETIRED_DIR);
-    std::fs::read_dir(dir)
-        .ok()?
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md"))
-        .filter_map(|path| crate::draft::parse_email_draft(&path).ok())
-        .map(|draft| draft.frontmatter)
-        .filter(|sent| {
-            sent.status == EmailStatus::Sent && sent.id.as_deref().map(str::trim) == Some(id)
+        .filter_map(|path| {
+            let record = crate::draft::parse_email_draft(&path).ok()?.frontmatter;
+            (record.id.as_deref().map(str::trim) == Some(id)).then_some((path, record))
         })
-        .max_by(|a, b| a.sent_at.cmp(&b.sent_at))
+        .collect()
+}
+
+/// `-32602` for a draft the draft mirror retired because its copy left the
+/// server's Drafts folder (PERSO-317): it was sent or discarded from another
+/// machine or mail client, and the mirror cannot tell which, so the answer
+/// says both and names the server search of the account's sent mail that
+/// tells them apart, by the draft's subject when it has one.
+/// `copy_gone: true` in the data tells the case apart from a plain miss.
+fn copy_gone(account: &str, id: &str, record: &EmailFrontmatter) -> RpcError {
+    let subject = record.subject.trim();
+    let mut args = vec!["search", "-A", account, "--mailbox", "sent"];
+    if !subject.is_empty() {
+        args.extend(["--subject", subject]);
+    }
+    let search = mp_core::mp_command::here(&args);
+    RpcError {
+        code: super::INVALID_PARAMS,
+        message: format!(
+            "the copy of {id} in {account}/drafts left the server's Drafts folder, \
+             so it was sent or discarded from another machine or mail client; \
+             `{search}` shows whether it went out"
+        ),
+        data: Some(json!({"account": account, "id": id, "copy_gone": true})),
+    }
 }
 
 /// `-32602` for a draft that was already sent: when it went, and where its
@@ -1754,6 +1798,176 @@ mod tests {
             refusal.message,
             "abc123 in work/drafts was already sent on 2026-11-19 at 07:55 UTC"
         );
+    }
+
+    /// PERSO-317, the case that still failed live: a draft sent (or discarded)
+    /// from another machine leaves the server's Drafts folder, and this
+    /// machine's mirror retires its file as `drafts/.retired/<stem>.copy-gone.md`
+    /// with the frontmatter untouched (`status: draft`, no `sent_at`, no
+    /// `message_id`). `mp path` on its selector must not answer "no match",
+    /// which reads as a wrong selector, nor "already sent", which the daemon
+    /// cannot know: it says the copy left the Drafts folder, so the draft was
+    /// sent or discarded elsewhere.
+    ///
+    /// The retirement is the mirror's own: a push into the fake Drafts folder,
+    /// the copy removed behind the mirror's back, and two reconciles, the first
+    /// a grace miss and the second the retirement.
+    #[test]
+    fn mp_path_on_a_draft_whose_copy_left_the_drafts_folder_says_so() {
+        use crate::draft_mirror::folder::fake::FakeFolder;
+        use crate::draft_mirror::push::{self, Mirror};
+        use crate::draft_mirror::reconcile::reconcile;
+
+        const ID: &str = "e1e165dc1b48d939";
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = AccountConfig {
+            name: "tum".to_string(),
+            default_from: "me@tum.de".to_string(),
+            ..Default::default()
+        };
+        let drafts = crate::config::drafts_dir("tum");
+        std::fs::create_dir_all(&drafts).expect("drafts dir");
+        let store = Store::open(crate::config::store_path("tum")).expect("the store");
+        let email = EmailSettings::default();
+        let mirror = |now| Mirror {
+            store: &store,
+            account: &account,
+            email: &email,
+            now,
+        };
+        let draft = drafts.join("angebot.md");
+        std::fs::write(
+            &draft,
+            format!(
+                "---\nid: \"{ID}\"\nto: robin@example.com\nsubject: Angebot\n\
+                 status: draft\n---\n\nHallo Robin\n"
+            ),
+        )
+        .expect("the draft");
+        let accounts = vec![account.clone()];
+        let params = json!({"account": "tum", "selector": format!("mp://tum/drafts/{ID}")});
+        assert!(
+            path(&params, &accounts).is_ok(),
+            "the draft resolves before its copy goes"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let mut folder = FakeFolder::default();
+        runtime
+            .block_on(push::push(&mirror(1), &mut folder, ID))
+            .expect("the push");
+        let uid = folder.live()[0].uid;
+        folder.remove(uid);
+        for _ in 0..2 {
+            runtime
+                .block_on(reconcile(&mirror(9000), &mut folder))
+                .expect("the reconcile");
+        }
+
+        let retired = drafts
+            .join(crate::draft::RETIRED_DIR)
+            .join("angebot.copy-gone.md");
+        assert!(!draft.exists(), "the draft left the drafts directory");
+        let record = crate::draft::parse_email_draft(&retired)
+            .unwrap_or_else(|e| panic!("the mirror retired {}: {e:#}", retired.display()))
+            .frontmatter;
+        assert_eq!(record.id.as_deref(), Some(ID));
+        assert_eq!(
+            record.status,
+            EmailStatus::Draft,
+            "the record keeps its status"
+        );
+        assert_eq!(record.sent_at, None);
+        assert_eq!(record.message_id, None);
+
+        let refusal = path(&params, &accounts).expect_err("a retired draft has no path");
+        let message = &refusal.message;
+        assert_eq!(refusal.code, super::super::INVALID_PARAMS, "{message}");
+        assert!(
+            !message.contains("no match for"),
+            "a draft whose copy left the Drafts folder is not a wrong selector:\n{message}"
+        );
+        assert!(
+            !message.contains("already sent"),
+            "the daemon cannot know the draft was sent rather than discarded:\n{message}"
+        );
+        for fragment in [ID, "tum/drafts", "Drafts folder", "sent or discarded"] {
+            assert!(
+                message.contains(fragment),
+                "the refusal says {fragment:?}:\n{message}"
+            );
+        }
+    }
+
+    /// The miss reads the retired records in one order (PERSO-317): a sent
+    /// record of the id wins over a copy-gone one, a copy-gone one answers
+    /// with the search of the sent mail by its subject (quoted for a shell,
+    /// or the bare listing without one), and a draft discarded here, retired
+    /// under its own name, keeps the plain "no match".
+    #[test]
+    fn the_draft_miss_reads_sent_then_copy_gone_then_no_match() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let accounts = vec![AccountConfig {
+            name: "tum".to_string(),
+            default_from: "me@tum.de".to_string(),
+            ..Default::default()
+        }];
+        let retired = crate::config::drafts_dir("tum").join(crate::draft::RETIRED_DIR);
+        std::fs::create_dir_all(&retired).expect("the retired dir");
+        let record = |name: &str, id: &str, subject: &str, status: &str| {
+            std::fs::write(
+                retired.join(name),
+                format!(
+                    "---\nid: \"{id}\"\nsubject: \"{subject}\"\nstatus: {status}\n---\n\nHallo\n"
+                ),
+            )
+            .expect("a retired record");
+        };
+        let refusal = |id: &str| {
+            path(&json!({"account": "tum", "selector": id}), &accounts)
+                .expect_err("a retired draft has no path")
+        };
+
+        record("angebot.copy-gone.md", "aaa111", "Robin's offer", "draft");
+        let gone = refusal("aaa111");
+        assert_eq!(gone.code, super::super::INVALID_PARAMS);
+        assert_eq!(
+            gone.message,
+            "the copy of aaa111 in tum/drafts left the server's Drafts folder, \
+             so it was sent or discarded from another machine or mail client; \
+             `mp search -A tum --mailbox sent --subject 'Robin'\\''s offer'` \
+             shows whether it went out"
+        );
+        assert_eq!(
+            gone.data,
+            Some(json!({"account": "tum", "id": "aaa111", "copy_gone": true}))
+        );
+
+        record("notiz.copy-gone-2.md", "bbb222", "", "approved");
+        assert!(
+            refusal("bbb222")
+                .message
+                .ends_with("`mp search -A tum --mailbox sent` shows whether it went out"),
+            "a draft with no subject names the listing of the sent mail"
+        );
+
+        record("angebot.md", "aaa111", "Robin's offer", "sent");
+        let sent = refusal("aaa111");
+        assert!(sent.message.contains("already sent"), "{}", sent.message);
+        assert_eq!(sent.data.as_ref().unwrap()["status"], "sent");
+
+        record("verworfen.md", "ccc333", "Verworfen", "draft");
+        for id in ["ccc333", "ddd444"] {
+            let miss = refusal(id);
+            assert_eq!(
+                miss.message,
+                format!("{:#}", crate::selector::draft_not_found("tum", id))
+            );
+            assert_eq!(miss.data, Some(json!({"account": "tum", "id": id})));
+        }
     }
 
     /// `w` on a search hit the store does not hold is `draft.forward` with
