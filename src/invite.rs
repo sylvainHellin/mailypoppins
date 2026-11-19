@@ -319,6 +319,12 @@ pub enum Unsettled {
     /// started and the server never answered for them, who may hold it; the
     /// row is parked for a human (`mp outbox retry` or `discard`).
     Unconfirmed,
+    /// `failed` with every recipient left one the transport never reached
+    /// (the lookup, the connect or the TLS handshake failed), so nothing
+    /// was sent and nobody holds it; parked for a human as
+    /// [`Unsettled::Unconfirmed`] is ([`crate::outbox::OutboxRow::may_be_delivered`],
+    /// PERSO-330).
+    Unsent,
 }
 
 /// The oldest outbox row of `account` that carries a `REQUEST` or `CANCEL`
@@ -351,7 +357,8 @@ pub fn unsettled_change(
             crate::outbox::OutboxState::SentPendingAppend => Unsettled::Filing,
             crate::outbox::OutboxState::Failed => match &row.envelope {
                 Some(envelope) if envelope.outstanding().is_empty() => continue,
-                _ => Unsettled::Unconfirmed,
+                _ if row.may_be_delivered() => Unsettled::Unconfirmed,
+                _ => Unsettled::Unsent,
             },
             crate::outbox::OutboxState::Done => continue,
         };
@@ -475,6 +482,66 @@ fn cancellation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An earlier change of an invitation parked with `verdicts`, in a
+    /// fresh store: where [`unsettled_change`] says it stands.
+    fn parked_change(verdicts: crate::outbox::RecipientVerdicts) -> Unsettled {
+        use crate::outbox::{self, SubmitOutcome};
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let raw = "From: me@example.com\r\nTo: bob@example.com\r\nSubject: Review\r\n\
+             Message-ID: <change@example.com>\r\nMIME-Version: 1.0\r\n\
+             Content-Type: text/calendar; method=REQUEST; charset=UTF-8\r\n\r\n\
+             BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nMETHOD:REQUEST\r\n\
+             BEGIN:VEVENT\r\nUID:review@example.com\r\nSEQUENCE:1\r\n\
+             DTSTAMP:20240101T120000Z\r\nDTSTART:20240110T090000Z\r\n\
+             ORGANIZER:mailto:me@example.com\r\nATTENDEE:mailto:bob@example.com\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let id = outbox::enqueue(
+            &store,
+            &blobs,
+            "acct",
+            None,
+            "<change@example.com>",
+            raw.as_bytes(),
+            &outbox::Envelope {
+                from: "me@example.com".into(),
+                recipients: vec![("bob@example.com".into(), crate::send::RecipientRole::To)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        outbox::mark_submission_started(&store, id).unwrap();
+        outbox::record_submission(&store, &blobs, id, &SubmitOutcome::PerRecipient(verdicts))
+            .unwrap();
+        let waiting = unsettled_change(&store, &blobs, "acct", "review@example.com")
+            .unwrap()
+            .expect("the parked change holds the next one back");
+        assert_eq!(waiting.row_id, id);
+        waiting.stage
+    }
+
+    /// PERSO-330: a parked change that never reached the server is told
+    /// apart from one with no verdict, by the outbox's own reading of it.
+    #[test]
+    fn a_parked_change_that_never_reached_the_server_is_unsent() {
+        let pair = |reason: &str| vec![("bob@example.com".to_string(), reason.to_string())];
+        assert_eq!(
+            parked_change(crate::outbox::RecipientVerdicts {
+                unsent: pair("could not connect; nothing was sent"),
+                ..Default::default()
+            }),
+            Unsettled::Unsent
+        );
+        assert_eq!(
+            parked_change(crate::outbox::RecipientVerdicts {
+                ambiguous: pair("connection reset after DATA"),
+                ..Default::default()
+            }),
+            Unsettled::Unconfirmed
+        );
+    }
 
     fn account() -> crate::config::AccountConfig {
         crate::config::AccountConfig {

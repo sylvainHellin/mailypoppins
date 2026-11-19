@@ -1199,6 +1199,11 @@ fn unsettled_refusal(
              {summary} once it is, or file it locally at once with mp outbox discard -A \
              {name} {id}, which leaves its copy in Sent to a later sync"
         ),
+        crate::invite::Unsettled::Unsent => format!(
+            "{lead}: it never reached the server, so nothing was sent, and {stale}; send it \
+             with mp outbox retry -A {name} {id} or drop it with mp outbox discard -A {name} \
+             {id}, and change {summary} after"
+        ),
         crate::invite::Unsettled::Unconfirmed => format!(
             "{lead}: the server gave no verdict for some of its attendees, who may have it, so \
              {stale}; check whether it arrived, then send it again with mp outbox retry -A \
@@ -3052,6 +3057,35 @@ mod tests {
             contacts: None,
         };
         unreached("work", &sent)
+    }
+
+    /// PERSO-330: a change refused because an earlier one is parked having
+    /// never reached the server says so, not that attendees may have it.
+    #[test]
+    fn a_change_held_by_a_parked_one_that_was_never_sent_says_so() {
+        let refusal = |stage| {
+            unsettled_refusal(
+                "Review",
+                "work",
+                &crate::invite::UnsettledChange { row_id: 9, stage },
+            )
+        };
+        let unsent = refusal(crate::invite::Unsettled::Unsent);
+        assert!(
+            unsent.contains("it never reached the server, so nothing was sent")
+                && unsent.contains("mp outbox retry -A work 9")
+                && unsent.contains("mp outbox discard -A work 9"),
+            "{unsent}"
+        );
+        assert!(
+            !unsent.contains("no verdict") && !unsent.contains("may have it"),
+            "{unsent}"
+        );
+        let unconfirmed = refusal(crate::invite::Unsettled::Unconfirmed);
+        assert!(
+            unconfirmed.contains("the server gave no verdict"),
+            "{unconfirmed}"
+        );
     }
 
     const REFUSED: &str =
