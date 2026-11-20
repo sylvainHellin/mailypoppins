@@ -2347,6 +2347,9 @@ mod wire {
             "the tick ran on past the cancel: {fetched} batches downloaded, {stored} rows"
         );
         wire.imap.set_body_delay(std::time::Duration::ZERO);
+        // The next pass runs the tick itself, so the hook would hold it at its
+        // second mailbox until released.
+        std::fs::write(hold.join("sync.quick.release"), b"").expect("release the hold");
         assert_ok(&wire.mp(&["sync", "-n", "100"]), "the next mp sync");
         assert_eq!(
             wire.local("inbox").len(),
