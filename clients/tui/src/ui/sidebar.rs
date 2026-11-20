@@ -529,6 +529,26 @@ mod tests {
         );
     }
 
+    /// A failed sync does not hide the messages given up on: the sidebar
+    /// carries both blocks, as the desktop's sidebar carries its badge and
+    /// its given-up line, and pays for both in the layout.
+    #[test]
+    fn a_sync_failure_and_messages_given_up_on_are_both_shown() {
+        let mut acct = account("perso", failed_at(15, 42));
+        acct.given_up = vec![mp_protocol::events::GivenUpMessage {
+            mailbox: "inbox".to_string(),
+            uid: Some(3),
+            kind: mp_protocol::events::GivenUpKind::Refused,
+            reason: "the server answered NO".to_string(),
+            retry_at: None,
+        }];
+        let app = app_with(vec![acct], 0);
+        let frame = render(&app, 40, 14);
+        assert!(frame.contains("sync failed 15:42"), "{frame}");
+        assert!(frame.contains("1 message not downloaded"), "{frame}");
+        assert_eq!(alert_rows(&app), 3 + 5);
+    }
+
     /// A healthy account, and an account that has not synced yet, add nothing.
     #[test]
     fn a_healthy_sidebar_says_nothing_about_sync_health() {
