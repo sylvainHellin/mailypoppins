@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Desktop: the embedded terminal draws Nerd Font icons (editor plugin marks, file-type and git symbols) with the Nerd Fonts symbols font the app now ships, on any machine, with no font to install.
+- Desktop: Settings sets the embedded terminal's font family and size (`terminal_font_family`, `terminal_font_size` in `desktop.json`), the family drawn before the app's mono font and the Nerd Font symbols, and open editor and agent terminals take a change at once.
 - `mp sync --full` runs the full sync the TUI's `sS` and the desktop app offer, every message of each mailbox, and ^C cancels it as it cancels the quick one.
 - A running sync can be cancelled from every client: ^C on `mp sync` (exit 130), `sx` in the TUI, and Cancel on the desktop's "Full sync of <account>…" card or its `sx`; the sync stops at its next mailbox or batch, what it already ingested stays, and a sync of the same account already running (the daemon's own or another client's) stops with it, every client saying its sync was cancelled; a calendar-only account's calendar sync has no point to stop at, so `mp sync` and the TUI say they stopped waiting and it finishes in the daemon (PERSO-321).
 - Sync status: a message mp has given up on downloading (the server refuses to send it, or mp could not store it) is listed in `mp sync`'s output, the TUI's sidebar and the desktop app's sidebar, by mailbox and IMAP UID, with the server's words and when mp asks again (a Graph message: on a full sync from the TUI or the desktop app), until a sync brings it in or the server no longer lists it; the server search's second pass narrows a refusal of the whole set to the message refused alone (PERSO-334).
