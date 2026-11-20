@@ -28,11 +28,22 @@ const xt = vi.hoisted(() => {
     addons: Addon[] = [];
     keyFilter: ((e: KeyboardEvent) => boolean) | null = null;
     focusCount = 0;
+    /** Each glyph cache rebuild, as the rows the refresh after it redrew. */
+    redraws: { start: number; end: number }[] = [];
+    atlasCleared = 0;
     disposed = false;
     private data: ((d: string) => void)[] = [];
     constructor(options: Record<string, unknown>) {
       this.options = { ...options };
       state.terms.push(this);
+    }
+    clearTextureAtlas() {
+      if (this.disposed) throw new Error("clearTextureAtlas after dispose");
+      this.atlasCleared++;
+    }
+    refresh(start: number, end: number) {
+      if (this.disposed) throw new Error("refresh after dispose");
+      this.redraws.push({ start, end });
     }
     open(el: HTMLElement) {
       this.element = el;
@@ -134,6 +145,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.ResizeObserver = NativeResizeObserver;
+  Reflect.deleteProperty(document, "fonts");
   document.documentElement.className = "";
   document.documentElement.removeAttribute("style");
 });
@@ -157,6 +169,19 @@ async function started(m: ReturnType<typeof mount>) {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A FontFaceSet whose load the test settles; jsdom has none. */
+function fakeFonts() {
+  let settle = { resolve: (_faces: unknown[]) => {}, reject: (_e: unknown) => {} };
+  const load = vi.fn(
+    (_font: string, _text?: string) =>
+      new Promise<unknown[]>((resolve, reject) => {
+        settle = { resolve, reject };
+      }),
+  );
+  Object.defineProperty(document, "fonts", { configurable: true, value: { load } });
+  return { load, resolve: () => settle.resolve([{}]), reject: (e: unknown) => settle.reject(e) };
+}
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
 describe("the terminal pane", () => {
@@ -324,6 +349,52 @@ describe("the terminal pane", () => {
     const webgl = xt.state.webgls[0];
     webgl.loseContext();
     expect(webgl.disposed).toBe(true);
+  });
+
+  it("draws in the app's mono font with the Nerd Font symbols after it", async () => {
+    const m = mount();
+    const term = await started(m);
+    const host = getComputedStyle(term.element as HTMLElement).fontFamily;
+    expect(term.options.fontFamily).toBe(`${host}, "Symbols Nerd Font Mono"`);
+  });
+
+  it("loads the symbols font without holding the spawn, and redraws its glyphs once it arrives", async () => {
+    const fonts = fakeFonts();
+    const m = mount();
+    const term = await started(m);
+    expect(fonts.load).toHaveBeenCalledTimes(1);
+    const [font, sample] = fonts.load.mock.calls[0];
+    expect(font).toBe(`${term.options.fontSize}px "Symbols Nerd Font Mono"`);
+    // A character of the face's unicode-range, or the set loads nothing.
+    expect(sample?.codePointAt(0)).toBeGreaterThanOrEqual(0xe000);
+    expect(term.atlasCleared).toBe(0);
+    fonts.resolve();
+    await waitFor(() => expect(term.atlasCleared).toBe(1));
+    expect(term.redraws).toEqual([{ start: 0, end: term.rows - 1 }]);
+  });
+
+  it("leaves a terminal unmounted before the symbols font arrives alone", async () => {
+    const fonts = fakeFonts();
+    const m = mount();
+    const term = await started(m);
+    m.unmount();
+    fonts.resolve();
+    await sleep(10);
+    expect(term.atlasCleared).toBe(0);
+  });
+
+  it("keeps working, and says so in the console, when the symbols font fails to load", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fonts = fakeFonts();
+    const m = mount();
+    const term = await started(m);
+    fonts.reject(new DOMException("font fetch failed", "NetworkError"));
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+    expect(term.atlasCleared).toBe(0);
+    expect(m.onError).not.toHaveBeenCalled();
+    term.type("i");
+    expect(m.bridge.of("write")).toEqual([{ cmd: "write", session: 1, data: "i" }]);
+    warn.mockRestore();
   });
 
   it("reports a refused spawn through onError", async () => {
