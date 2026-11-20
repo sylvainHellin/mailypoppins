@@ -2608,6 +2608,79 @@ mod tests {
         assert_eq!(lock(&order).len(), 4, "one more slice");
     }
 
+    /// A stop asked while a send holds the turn between two slices (a cancel,
+    /// the daemon's shutdown) ends the full tick as soon as it has the turn
+    /// back: no second slice, which would cost a login, a listing and a
+    /// drafts reconcile, and the first slice's results are kept.
+    #[tokio::test]
+    async fn a_stop_asked_between_two_slices_ends_the_tick_without_another() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hooks = sliced_hooks(
+            &report,
+            vec![(20, 5, 1), (7, 25, 0)],
+            &order,
+            &entered,
+            &release,
+        );
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 9), 1, hooks)
+                .expect("a free lock")
+                .with_report(report),
+        );
+        let asked = Arc::new(AtomicBool::new(false));
+        let stop = {
+            let asked = Arc::clone(&asked);
+            Stop::new(move |_| asked.load(Ordering::SeqCst))
+        };
+
+        let full = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .tick_until(TickKind::Full, None, Some(stop), None)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("the first slice runs");
+        let (holding, let_go) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let send = tokio::spawn({
+            let (runtime, holding, let_go) = (
+                Arc::clone(&runtime),
+                Arc::clone(&holding),
+                Arc::clone(&let_go),
+            );
+            async move {
+                let _turn = runtime.send_turn().await.expect("a ready runtime");
+                holding.notify_one();
+                let_go.notified().await;
+            }
+        });
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), holding.notified())
+            .await
+            .expect("the send takes the turn between the slices");
+        asked.store(true, Ordering::SeqCst);
+        let_go.notify_one();
+        send.await.expect("the send");
+
+        let full = tokio::time::timeout(Duration::from_secs(2), full)
+            .await
+            .unwrap_or_else(|_| panic!("a second slice ran: {:?}", lock(&order)))
+            .expect("the full tick");
+        assert_eq!(*lock(&order), ["slice"], "one slice ran");
+        assert!(full.stopped, "the tick ends stopped: {full:?}");
+        assert_eq!(full.sync.expect("the first slice's outcome").saved, 20);
+    }
+
     /// A quick tick with a bound above the usual one (`mp sync -n 150`) is a
     /// user asking for that many messages: it slices as a full tick does,
     /// until no mailbox stopped at the budget.
