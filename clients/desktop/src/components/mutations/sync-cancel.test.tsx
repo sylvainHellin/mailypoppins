@@ -6,12 +6,14 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { mock, settleSync } from "@/test/tauri-mock";
+import { act } from "react";
+import { emitEnvelope, mock, settleSync } from "@/test/tauri-mock";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const activity = () => screen.getByRole("region", { name: "Activity" });
 const CANCELLED = "Sync of work cancelled: what it already ingested stays, and the next sync goes on from there";
 const NONE = "No sync to cancel: none started from this window is running";
+const CUT = "Sync of work cut short by the daemon stopping: what it already ingested stays, and the next sync goes on from there";
 
 describe("cancelling a sync", () => {
   it("sS shows a running card whose Cancel cancels the sync, and the end says what stays", async () => {
@@ -50,6 +52,18 @@ describe("cancelling a sync", () => {
     settleSync({ silent: true });
     await user.click(within(card).getByRole("button", { name: "Cancel the sync" }));
     expect(await screen.findByText("The sync of work had already ended: nothing was cancelled")).toBeInTheDocument();
+    expect(screen.queryByText(CANCELLED)).toBeNull();
+  });
+
+  it("a sync the daemon's stop cancelled says the stop cut it short", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("sS");
+    await within(activity()).findByRole("group", { name: "Full sync of work…" });
+    const id = mock.syncs[0].operation_id;
+    act(() => emitEnvelope("daemon.shutting_down", { grace_secs: 0, pending: [] }));
+    act(() => emitEnvelope("operation.finished", { operation_id: id, state: "cancelled", error: { code: -32008, message: `operation ${id} was cancelled` } }));
+    expect(await within(activity()).findByText(CUT)).toBeInTheDocument();
     expect(screen.queryByText(CANCELLED)).toBeNull();
   });
 
