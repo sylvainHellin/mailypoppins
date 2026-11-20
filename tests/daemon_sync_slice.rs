@@ -2199,6 +2199,46 @@ mod wire {
         });
     }
 
+    /// A daemon that goes away while `mp sync` follows its pass is reported
+    /// as what happened: the command was cut off and is to be run again.
+    /// "No daemon could serve this command" and "start one" would be false
+    /// once a daemon is back, as a restart brings one back at once.
+    #[test]
+    fn a_daemon_that_goes_away_mid_sync_is_reported_as_gone_away() {
+        use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
+
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(INBOX, 11, numbered(2));
+        let hold = super::support::send_fixture::commit_hold_dir(wire.root());
+        let hold_env = hold.to_string_lossy().into_owned();
+        wire.start(&[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+
+        let sync = mp_command(wire.root())
+            .env(REQUIRE_ENV, "1")
+            .arg("sync")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mp sync");
+        wait_for("the pass to be held at its second mailbox", || {
+            hold.join("sync.quick.held").exists()
+        });
+        wire.stop();
+        let out = sync.wait_with_output().expect("mp sync's output");
+
+        assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains("✗ the mailypoppins daemon went away while this command ran"),
+            "{err}"
+        );
+        assert!(err.contains("run the command again"), "{err}");
+        assert!(
+            !err.contains("could serve this command") && !err.contains("start one"),
+            "{err}"
+        );
+    }
+
     /// `mp list-mailboxes` lists the folders the server's LIST names, each
     /// with the policy and the role the account gives it.
     #[test]
