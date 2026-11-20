@@ -18,8 +18,8 @@
 //! server it has no credentials for, for the sync/watch slice (plan unit
 //! P4-U9).
 //! [`send_fixture`] is the draft fixture plus a Graph account, an
-//! SMTP-configured account, a seeded outbox and the fake transport, for the
-//! send slice (plan unit P4-U11).
+//! SMTP-configured account and a seeded outbox, for the send slice (plan unit
+//! P4-U11).
 //! [`admin_fixture`] is the send fixture plus two invitations and a reply, a
 //! file-era mailstore, an id-less draft, a secrets file, a token cache and a
 //! prebuilt contact index, for the admin slice (plan unit P4-U13).
@@ -34,8 +34,9 @@
 //! every message it is given, and whose answer to each step a test switches
 //! (PERSO-199, PERSO-210); the library's unit tests include it by path.
 //! [`wire_fixture`] is one account served over the wire by those two
-//! servers, with its passwords stored, for the success paths no hook stands
-//! in for (PERSO-210).
+//! servers, with its passwords stored (PERSO-210), and `WireServers`, which
+//! moves an account of another fixture onto them when a row needs a send to
+//! go out (PERSO-331).
 //! [`readiness`] waits for a spawned daemon to answer `daemon.status`, and
 //! [`events`] reads `state.event` notifications past the daemon's own startup
 //! events; daemon suites that do not declare `mod support;` include either

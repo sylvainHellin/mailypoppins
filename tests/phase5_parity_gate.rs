@@ -3,8 +3,8 @@
 //! The plan's Phase 5 gate line is *"the complete TUI parity gate passes,
 //! oracles included"*, and section 3.7 names five oracles. Four of them are
 //! here; the fifth, the undo-send-hold criterion, is
-//! `tests/phase5_undo_send_hold.rs`, because it needs a fake transport and a
-//! live session rather than a byte comparison.
+//! `tests/phase5_undo_send_hold.rs`, because it needs the fake SMTP and IMAP
+//! servers and a live session rather than a byte comparison.
 //!
 //! | oracle | rows in this file |
 //! |---|---|

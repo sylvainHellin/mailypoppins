@@ -18,23 +18,21 @@
 //! additions are made here so no listing, dump or search expectation the read
 //! and draft slices pin has to move.
 //!
-//! # No server, and the hook that stands in for one
+//! # No server, and the servers a routed row moves an account onto
 //!
 //! This fixture's accounts configure no server they can log in to, so the
-//! parity rows can compare against the pre-daemon oracle. An account on the
-//! fake SMTP and IMAP servers is [`super::wire_fixture`]'s (PERSO-210); this
-//! one uses [`FAKE_TRANSPORT_ENV`] instead: a daemon-side
-//! hook, in the shape of the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` hook
-//! `tests/daemon_sync_outcome.rs` and `tests/daemon_sync_slice.rs` already use,
-//! that serves the SMTP submission and the Sent-mailbox APPEND in process and
-//! records every one of them in a log file. That is what makes a *successful*
-//! routed send, the partly-delivered outcome (`SND-08`), the sent-copy append
-//! (`SND-09`) and the racing-drain twin non-vacuous.
+//! parity rows can compare against the pre-daemon oracle. A row that needs a
+//! send to go out moves [`ACCOUNT`] onto the fake SMTP and IMAP servers of
+//! `tests/support/` before its daemon starts
+//! (`super::wire_fixture::WireServers`, PERSO-331), keeping every draft and
+//! outbox row seeded here, and reads back what the servers were given. That is
+//! what makes a *successful* routed send, the partly-delivered outcome
+//! (`SND-08`), the sent-copy append (`SND-09`) and the racing-drain twin
+//! non-vacuous.
 //!
-//! The hook lives in the **daemon**, so the pre-daemon oracle cannot see it and
-//! no row that uses it is a parity row. Every such row is a routed-side
-//! assertion and says so, exactly as `tests/daemon_sync_slice.rs`'s
-//! engine-lock row does.
+//! The oracle has no account on those servers, so no row that uses them is a
+//! parity row. Every such row is a routed-side assertion and says so, exactly
+//! as `tests/daemon_sync_slice.rs`'s engine-lock row does.
 //!
 //! # Determinism
 //!
@@ -216,156 +214,8 @@ pub const AMBIGUOUS: &str = "connection reset while waiting for the 250";
 pub const FIXED_UPDATED: i64 = 1_767_322_845;
 
 // ---------------------------------------------------------------------------
-// The fake transport
+// The commit hold
 // ---------------------------------------------------------------------------
-
-/// The daemon-side hook that serves SMTP and the Sent-mailbox APPEND in
-/// process.
-///
-/// Its value is a JSON object; every key is optional:
-///
-/// ```json
-/// {
-///   "log": "<path>",                       // one line per transport event
-///   "reject": {"carol@example.com": "550 …"},
-///   "defer": {"dan@example.com": "451 …"},
-///   "unknown": {"eve@example.com": "connection reset …"},
-///   "down": "connection refused",
-///   "passes": 1,
-///   "append": "ok" | "fail" | "swallow_ack",
-///   "append_delay_ms": 0
-/// }
-/// ```
-///
-/// - `log` is opened `O_APPEND` per event, so two concurrent drains cannot
-///   lose a line and the count is the ledger `tests/outbox_integration.rs`
-///   keeps in memory.
-/// - `reject` fails exactly those recipients, with the reason given, and
-///   accepts the rest: that is the partly-delivered outcome (`SND-08`) without
-///   a server.
-/// - `defer` refuses those recipients for now (a 4xx), which keeps the row
-///   `pending_send` for a later pass.
-/// - `unknown` gives those recipients no verdict, which parks the row in
-///   `failed` for a human (`mp outbox retry`).
-/// - `down` fails every submission with that error before any recipient is
-///   asked, as a server that cannot be reached does.
-/// - `passes` ends `defer` and `unknown` after that many submissions to the
-///   recipient, whatever the message, counted on the ledger, so every later
-///   one is delivered; unset, they last for ever.
-/// - `append` decides what the Sent-mailbox APPEND does. `swallow_ack` files
-///   the copy and reports a failure, which is the ambiguity the dedup search
-///   exists for.
-/// - `append_delay_ms` parks inside the APPEND, which is the window a second
-///   drain would slip into.
-///
-/// Set on the **daemon** (`DaemonFixture::start_with`), never on the client:
-/// after P4-U12 the client owns no transport.
-pub const FAKE_TRANSPORT_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_TRANSPORT";
-
-/// One event the fake transport recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransportEvent {
-    /// One recipient's `RCPT TO`/`DATA` verdict.
-    Submit {
-        message_id: String,
-        address: String,
-        accepted: bool,
-    },
-    /// One `APPEND` request that reached the fake Sent mailbox.
-    Append { mailbox: String, message_id: String },
-    /// One dedup `SEARCH HEADER Message-ID`.
-    Search { mailbox: String, message_id: String },
-}
-
-/// The hook's value for a transport that accepts everything and files the
-/// copy, writing its ledger to `log`.
-pub fn fake_transport(log: &Path) -> String {
-    serde_json::json!({"log": log.to_string_lossy()}).to_string()
-}
-
-/// The same, with `reject` naming the recipients the server refuses for good.
-pub fn fake_transport_rejecting(log: &Path, rejected: &[(&str, &str)]) -> String {
-    let mut map = serde_json::Map::new();
-    for (address, reason) in rejected {
-        map.insert((*address).to_string(), serde_json::json!(reason));
-    }
-    serde_json::json!({"log": log.to_string_lossy(), "reject": map}).to_string()
-}
-
-/// The same, with `deferred` naming the recipients the server refuses for
-/// now (a 4xx), which the outbox keeps for a later pass.
-pub fn fake_transport_deferring(log: &Path, deferred: &[(&str, &str)]) -> String {
-    let mut map = serde_json::Map::new();
-    for (address, reason) in deferred {
-        map.insert((*address).to_string(), serde_json::json!(reason));
-    }
-    serde_json::json!({"log": log.to_string_lossy(), "defer": map}).to_string()
-}
-
-/// The same, with `unknown` naming the recipients the server gives no
-/// verdict for, which the outbox parks for a human.
-pub fn fake_transport_unconfirming(log: &Path, unknown: &[(&str, &str)]) -> String {
-    let mut map = serde_json::Map::new();
-    for (address, reason) in unknown {
-        map.insert((*address).to_string(), serde_json::json!(reason));
-    }
-    serde_json::json!({"log": log.to_string_lossy(), "unknown": map}).to_string()
-}
-
-/// The same, with every submission failing with `error` before any
-/// recipient is asked, as a server that cannot be reached does.
-pub fn fake_transport_down(log: &Path, error: &str) -> String {
-    serde_json::json!({"log": log.to_string_lossy(), "down": error}).to_string()
-}
-
-/// The same, with the APPEND behaving as `append` says and parking for
-/// `delay_ms` inside the request.
-pub fn fake_transport_appending(log: &Path, append: &str, delay_ms: u64) -> String {
-    serde_json::json!({
-        "log": log.to_string_lossy(),
-        "append": append,
-        "append_delay_ms": delay_ms,
-    })
-    .to_string()
-}
-
-/// The ledger file the fake transport writes, under a root the test owns.
-pub fn transport_log(root: &Path) -> PathBuf {
-    root.join("transport.log")
-}
-
-/// Every event the fake transport recorded, in the order it wrote them.
-///
-/// The line format is the hook's contract: a kind, then its fields, separated
-/// by single spaces, one line per event, no field containing a space.
-pub fn transport_events(log: &Path) -> Vec<TransportEvent> {
-    let text = match fs::read_to_string(log) {
-        Ok(text) => text,
-        Err(_) => return Vec::new(),
-    };
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let field: Vec<&str> = line.split_whitespace().collect();
-            match field.as_slice() {
-                ["submit", message_id, address, verdict] => TransportEvent::Submit {
-                    message_id: (*message_id).to_string(),
-                    address: (*address).to_string(),
-                    accepted: *verdict == "accepted",
-                },
-                ["append", mailbox, message_id] => TransportEvent::Append {
-                    mailbox: (*mailbox).to_string(),
-                    message_id: (*message_id).to_string(),
-                },
-                ["search", mailbox, message_id] => TransportEvent::Search {
-                    mailbox: (*mailbox).to_string(),
-                    message_id: (*message_id).to_string(),
-                },
-                _ => panic!("the fake transport wrote a line nothing parses: {line:?}"),
-            }
-        })
-        .collect()
-}
 
 /// The directory the commit-hold hook
 /// ([`FAKE_COMMIT_HOLD_ENV`](mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV))
@@ -405,30 +255,6 @@ pub async fn await_commit_marker(
 pub fn release_commit_hold(dir: &Path, method: &str) {
     let path = dir.join(format!("{method}.release"));
     fs::write(&path, b"").unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-}
-
-/// How many `APPEND`s the fake transport served for `message_id`.
-pub fn appends_of(log: &Path, message_id: &str) -> usize {
-    transport_events(log)
-        .into_iter()
-        .filter(|event| matches!(event, TransportEvent::Append { message_id: mid, .. } if mid == message_id))
-        .count()
-}
-
-/// How many `APPEND`s the fake transport served in total.
-pub fn appends(log: &Path) -> usize {
-    transport_events(log)
-        .into_iter()
-        .filter(|event| matches!(event, TransportEvent::Append { .. }))
-        .count()
-}
-
-/// How many dedup searches it served.
-pub fn searches(log: &Path) -> usize {
-    transport_events(log)
-        .into_iter()
-        .filter(|event| matches!(event, TransportEvent::Search { .. }))
-        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -491,8 +317,8 @@ pub fn seed(root: &Path) {
     seed_outbox(root);
 }
 
-/// Give the approved draft a second recipient, the one address the fake
-/// transport's `reject` map names.
+/// Give the approved draft a second recipient, [`REJECTED`], the address a
+/// routed row has the SMTP server refuse.
 ///
 /// `draft_fixture`'s approved draft goes to `ivana@example.com` and to nobody
 /// else, so a send of it is delivered whole or refused whole: the partly
