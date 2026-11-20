@@ -736,6 +736,10 @@ struct SearchRequest {
     /// `(label, folder id or server name)`: the sidebar's under their labels,
     /// the ignored ones under their server names ([`hit_labels`]).
     configured: Vec<(String, String)>,
+    /// The store key of each folder a hit found across every folder is
+    /// listed under, by that label ([`hit_keys`]), which is what the hit's
+    /// row is looked up in.
+    hit_keys: std::collections::HashMap<String, String>,
     /// The number of hits the whole search answers with (PERSO-175).
     limit: usize,
     /// The order the hits are cut in and listed in (PERSO-273).
@@ -838,6 +842,7 @@ fn search_request(
         parsed,
         targets,
         configured: hit_labels(&catalogue, &configured),
+        hit_keys: hit_keys(&catalogue, &configured),
         limit,
         order,
         excluded,
@@ -878,6 +883,34 @@ fn hit_labels(
             }),
     );
     labels
+}
+
+/// The store key behind each label [`hit_labels`] lists a folder under: a
+/// sidebar mailbox's slug under its label, any other folder's key under its
+/// server name.
+///
+/// A label is the sidebar's (`Sent`) and a row's mailbox is the store's key
+/// (`sent`), so a hit is matched to the copy in its own folder by this key,
+/// never by the label it is listed under.
+fn hit_keys(
+    catalogue: &crate::catalogue::Catalogue,
+    sidebar: &[SearchTarget],
+) -> std::collections::HashMap<String, String> {
+    let mut keys: std::collections::HashMap<String, String> = catalogue
+        .folders
+        .iter()
+        .filter(|f| !f.listed() && !f.missing)
+        .map(|f| {
+            let label = f.listed_as.clone().unwrap_or_else(|| f.server.clone());
+            (label, f.key.clone())
+        })
+        .collect();
+    keys.extend(
+        sidebar
+            .iter()
+            .map(|target| (target.label.clone(), target.slug.clone())),
+    );
+    keys
 }
 
 /// What a search runs against, from its `mailboxes` param, the query's own
@@ -987,6 +1020,21 @@ fn scopes(request: &SearchRequest) -> Vec<Scope> {
             })
             .collect(),
         Targets::EveryFolder => vec![Scope::EveryFolder],
+    }
+}
+
+/// The store key of the folder the `index`-th scope's hits sit in: the
+/// target's own, or, for a hit found across every folder, the key of the
+/// folder it is listed under as `folder`.
+fn target_key<'r>(
+    request: &'r SearchRequest,
+    index: usize,
+    folder: Option<&str>,
+) -> Option<&'r str> {
+    match (folder, &request.targets) {
+        (Some(label), _) => request.hit_keys.get(label).map(String::as_str),
+        (None, Targets::Mailboxes(targets)) => Some(targets[index].slug.as_str()),
+        (None, Targets::EveryFolder) => None,
     }
 }
 
@@ -1298,11 +1346,12 @@ impl SearchSink for Stream<'_> {
     /// `None` store as "the local store knows nothing about this hit".
     fn land(&mut self, mailbox: usize, folder: Option<&str>, emails: Vec<FetchedEmail>) {
         let label = folder.unwrap_or_else(|| target_label(self.request, mailbox));
+        let key = target_key(self.request, mailbox, folder);
         log::info!("[search_server] '{label}' landed {} hit(s)", emails.len());
         let account = &self.request.account.name;
         let store = crate::store::open_store(account);
         for email in emails {
-            let hit = to_hit(store.as_ref(), account, label, &email);
+            let hit = to_hit(store.as_ref(), account, label, key, &email);
             let date_sort = hit.date_sort.clone();
             let event = ServerSearchHitEvent {
                 operation_id: self.handle.id().as_str().to_string(),
@@ -1399,16 +1448,20 @@ fn admission(
 /// ([`mp_core::body::for_reading`], PERSO-291): every client renders a hit
 /// out of it, and the 300-character preview of `mp search` and a reply to a
 /// server-only hit are cut from it.
+///
+/// `label` is the mailbox the hit is listed under, the sidebar's label, and
+/// `key` the store key of that mailbox, which the hit's row is looked up in:
+/// the copy in the mailbox it was found in. A mailbox whose key is unknown
+/// or holds no copy falls back to a stored copy, which is still the message.
 fn to_hit(
     store: Option<&Store>,
     account: &str,
     label: &str,
+    key: Option<&str>,
     email: &FetchedEmail,
 ) -> ServerSearchHit {
     // Every row of the Message-ID, so the twins of the one the hit resolves
-    // to are among them (PERSO-244). The hit is the copy in the mailbox it
-    // was found in; a mailbox holding none (a folder the store does not
-    // list) falls back to a stored copy, which is still the message.
+    // to are among them (PERSO-244).
     let row =
         store.zip(email.message_id.as_deref()).and_then(
             |(store, id)| match read::find_by_message_id(store, account, id) {
@@ -1416,7 +1469,7 @@ fn to_hit(
                     let twins = crate::selector::Twins::among(&rows);
                     let hit = rows
                         .iter()
-                        .position(|row| row.mailbox == label)
+                        .position(|row| Some(row.mailbox.as_str()) == key)
                         .unwrap_or(0);
                     (!rows.is_empty()).then(|| {
                         let row = rows.swap_remove(hit);
@@ -1756,7 +1809,7 @@ mod tests {
             "{} \r\nDear Sir,\r\n\r\n\r\n\r\nthanks.\r\n\r\n",
             "\r\n".repeat(314)
         );
-        let hit = to_hit(None, "acct", "Inbox", &fetched);
+        let hit = to_hit(None, "acct", "Inbox", Some("inbox"), &fetched);
         assert_eq!(hit.body_text, "Dear Sir,\r\n\r\nthanks.\r\n");
 
         let listed = crate::read_cmd::ListedMessage::from_server_hit("acct", None, &hit, false);
@@ -1766,10 +1819,11 @@ mod tests {
         );
     }
 
-    /// A hit names the copy that was hit: a self-sent message stored in the
-    /// inbox and in sent, hit in sent, resolves to the sent row, not to the
-    /// row that sorts first. A hit in a mailbox that holds no copy keeps
-    /// naming a stored one, which is still the message.
+    /// A hit names the copy in the mailbox it was found in, by that
+    /// mailbox's store key and never by the label it is listed under: a
+    /// self-sent message stored in the inbox and in sent, hit in Sent,
+    /// resolves to the sent row. A hit whose folder the store does not key
+    /// still names a stored copy, which is still the message.
     #[test]
     fn a_hit_resolves_to_the_copy_in_its_own_mailbox() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1798,16 +1852,39 @@ mod tests {
                 .id
         };
 
-        let hit = to_hit(Some(&store), "acct", "sent", &email(mid));
+        let hit = to_hit(Some(&store), "acct", "Sent", Some("sent"), &email(mid));
+        assert_eq!(hit.mailbox, "Sent", "listed under its label");
         assert_eq!(hit.selector.as_deref(), Some("mp://acct/sent/self@x"));
         assert_eq!(hit.row_id, Some(row_in("sent")));
 
-        let hit = to_hit(Some(&store), "acct", "inbox", &email(mid));
+        let hit = to_hit(Some(&store), "acct", "Inbox", Some("inbox"), &email(mid));
         assert_eq!(hit.selector.as_deref(), Some("mp://acct/inbox/self@x"));
         assert_eq!(hit.row_id, Some(row_in("inbox")));
 
-        let hit = to_hit(Some(&store), "acct", "archive", &email(mid));
+        let hit = to_hit(Some(&store), "acct", "Old/2019", None, &email(mid));
         assert!(hit.selector.is_some(), "{hit:?}");
+    }
+
+    /// The store key of a hit's folder: a named target's slug, and, across
+    /// every folder, the key behind the label a sidebar mailbox or an
+    /// ignored folder is listed under.
+    #[test]
+    fn a_hits_folder_is_matched_by_its_store_key() {
+        let target = |slug: &str, label: &str| SearchTarget {
+            slug: slug.to_string(),
+            label: label.to_string(),
+            server_name: label.to_string(),
+            folder_id: None,
+        };
+        let sidebar = [target("inbox", "Inbox"), target("sent", "Sent")];
+        let keys = hit_keys(&crate::catalogue::Catalogue::default(), &sidebar);
+        assert_eq!(keys.get("Sent").map(String::as_str), Some("sent"));
+        assert_eq!(keys.get("Inbox").map(String::as_str), Some("inbox"));
+        assert_eq!(
+            keys.get("sent"),
+            None,
+            "keyed by the label a hit is listed under"
+        );
     }
 
     /// A Graph hit `message.fetch` lands joins its stored parent at ingest and
