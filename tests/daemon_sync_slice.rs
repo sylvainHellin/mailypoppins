@@ -2127,6 +2127,58 @@ mod wire {
         );
     }
 
+    /// `mp sync -n 2` that arrives while a tick with the usual bound runs
+    /// joins that tick rather than running a second pass beside it, and says
+    /// in one line that its bound did not apply.
+    #[test]
+    fn a_bounded_sync_joins_a_tick_already_running_and_says_so() {
+        use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
+
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(INBOX, 11, numbered(3));
+        let hold = super::support::send_fixture::commit_hold_dir(wire.root());
+        let hold_env = hold.to_string_lossy().into_owned();
+        wire.start(&[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+
+        let running = mp_command(wire.root())
+            .env(REQUIRE_ENV, "1")
+            .arg("sync")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mp sync");
+        wait_for("the tick to be held at its second mailbox", || {
+            hold.join("sync.quick.held").exists()
+        });
+        let bounded = mp_command(wire.root())
+            .env(REQUIRE_ENV, "1")
+            .args(["sync", "-n", "2"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mp sync -n 2");
+        // Long enough for the bounded pass to reach the tick and join it.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        super::support::send_fixture::release_commit_hold(&hold, "sync.quick");
+
+        let running = running.wait_with_output().expect("mp sync's output");
+        assert_ok(&running, "mp sync");
+        let bounded = bounded.wait_with_output().expect("mp sync -n 2's output");
+        assert_ok(&bounded, "mp sync -n 2");
+        assert_eq!(
+            stdout(&bounded),
+            format!(
+                "ℹ Joined the sync of {ACCOUNT} already running, which takes the newest 100 \
+                 messages per mailbox instead of the bound this sync asked for\n"
+            )
+        );
+        assert_eq!(
+            wire.local("inbox").len(),
+            3,
+            "the running tick's bound held"
+        );
+    }
+
     /// `count` messages for a folder, on UIDs 1 to `count`.
     fn numbered(count: u32) -> Vec<(u32, Vec<u8>)> {
         (1..=count)

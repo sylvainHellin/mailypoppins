@@ -759,6 +759,30 @@ async fn a_tick_syncs_the_calendar_and_announces_it() {
     assert_eq!(listed["calendars"].as_array().unwrap().len(), 3, "{listed}");
 }
 
+/// A whole-account sync with a bound of its own (`mp sync -n 2`) is a tick
+/// like any other, so it syncs the calendar after the mail pass too.
+#[tokio::test]
+async fn a_bounded_sync_syncs_the_calendar_too() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    let listed = call(&mut conn, "calendar.list", json!({"account": SERVER})).await;
+    assert_eq!(listed["calendars"].as_array().unwrap().len(), 1, "{listed}");
+    let status = run_operation(
+        &mut conn,
+        "sync.quick",
+        json!({"account": SERVER, "limit": 2}),
+    )
+    .await;
+    let listed = call(&mut conn, "calendar.list", json!({"account": SERVER})).await;
+    assert_eq!(
+        listed["calendars"].as_array().unwrap().len(),
+        3,
+        "sync.quick settled as {status}, and the daemon logged {:#?}",
+        daemon_log(slice.root(), "[calendar]")
+    );
+}
+
 /// The calendar-only EWS account of [`calendar_only`]: a calendar backend and
 /// no IMAP, SMTP or Graph mail, ticked every second.
 const CALENDAR_ONLY: &str = "tum-calendar";
