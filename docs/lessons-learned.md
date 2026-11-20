@@ -3919,3 +3919,14 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 ## A closed stdout is a println panic in Rust (2026-11-20)
 
 - Rust starts with SIGPIPE ignored, so `mp ... | head` panicked in `println!`; resetting SIGPIPE to its default would also make a write to a daemon socket that went away kill the client without a word, so `main` keeps it ignored and its panic hook ends the process by SIGPIPE only for `std`'s "failed printing to stdout/stderr" panic carrying EPIPE; `mp daemon run` keeps the default hook, since a failed print in one task must not end the daemon.
+
+## A joined, sliced or stopped sync has to say what really happened (2026-11-20)
+
+- A joiner must keep the outcome it reports and skip only the commit: clearing `sync` to avoid a double `sync.completed` left the joined pass's own client with nothing to print and `mp sync` exiting 0.
+- A join must not hand a weaker pass to a stronger request: a full sync that joined the watcher's quick tick reported "succeeded" with the older bodies unfetched, so a full request now waits for a quick tick and runs its own.
+- The IMAP body budget counts network time only, so it does not bound wall time on a fast local server (Proton Bridge: Archive 207 s uncut). On a full pass it left bodies below every later quick window, where no quick sync would ever fetch them.
+- Releasing an async turn between slices is safe only once the slice's results are out of shared state: a drain in between calls `TickReport::reset`, which would wipe the tick's partial result and failed-mutation count.
+- A body run in turn-releasing slices has to ask its stop again once it has the turn back: a cancel that landed while a send held the turn otherwise cost a whole slice's login, listing and drafts reconcile.
+- `daemon.shutting_down` names no operation, so a follower that filters by operation id never saw it, and treated the cancel the stop caused like a user's.
+- A client's "the daemon is stopping" flag has to be read before the next bootstrap clears it: the TUI's `watermark` and the desktop's `bootstrapModel` reset it, and an orphaned sync is only found during that same bootstrap; with no daemon coming back there is no bootstrap, so the TUI says it at the disconnect.
+
