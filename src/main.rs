@@ -9032,6 +9032,54 @@ mod tests {
             assert_eq!(end.failed, ["a"]);
             assert_eq!(said.last(), Some(&(true, CUT_BY_SHUTDOWN.to_string())));
         }
+
+        /// `mp sync --full` is `sync.full`, and a full pass the daemon's stop
+        /// cut short ends as a quick one does: the line on stderr, a failed
+        /// account.
+        #[tokio::test]
+        async fn a_full_sync_the_daemons_stop_cut_short_says_so_and_fails() {
+            let (path, asked) = daemon("shutdown-full", |method, _| match method {
+                "sync.full" => (
+                    Ok(json!({"operation_id": "op-1"})),
+                    vec![
+                        event(
+                            "daemon.shutting_down",
+                            json!({"grace_secs": 0, "pending": []}),
+                        ),
+                        finished(
+                            "op-1",
+                            "cancelled",
+                            json!({"error": {"code": -32008, "message": "operation op-1 was cancelled"}}),
+                        ),
+                    ],
+                ),
+                other => panic!("unexpected {other}"),
+            });
+            let mut connection = mp_client::Connection::connect(&path)
+                .await
+                .expect("connect");
+            let mut record = Record::default();
+            let run = SyncRun {
+                limit: None,
+                mailbox: None,
+                dry_run: false,
+            };
+            let mut interrupts = Script {
+                taken: VecDeque::new(),
+                fires: 0,
+            };
+            let end = sync_accounts(
+                &mut connection,
+                &accounts(&["a"]),
+                &run,
+                &mut interrupts,
+                &mut record,
+            )
+            .await;
+            assert_eq!(end.failed, ["a"]);
+            assert_eq!(record.0.last(), Some(&(true, CUT_BY_SHUTDOWN.to_string())));
+            assert_eq!(*asked.lock().unwrap(), ["sync.full"]);
+        }
     }
 
     mod batch_lines {
