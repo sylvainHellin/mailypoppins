@@ -14,10 +14,10 @@ use std::process::{Output, Stdio};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV;
 use mailypoppins::draft::{QUOTE_MARKER, SIG_START};
 use support::parity::{mp_command, pin_font_size, DaemonFixture, REQUIRE_ENV};
 use support::send_fixture as fixture;
+use support::wire_fixture::WireServers;
 
 const ACCOUNT: &str = fixture::ACCOUNT;
 
@@ -41,15 +41,18 @@ fn with_signature(root: &Path) {
 }
 
 /// A seeded root whose config lists `accounts` for snapshots (or leaves the
-/// table out when `None`), and a daemon over it with the fake transport.
+/// table out when `None`), its default account on the fake SMTP and IMAP
+/// servers (PERSO-331), and a daemon over it.
 ///
-/// The account's drafts mirror is off: a new draft is otherwise linked to a
-/// server copy, and its send asks a Drafts folder the fixture has no server
-/// for, which is the mirror's business and not this suite's.
+/// The account's drafts mirror is off, as [`WireServers::wire`] leaves it: a
+/// new draft is otherwise linked to a server copy, and its send claims it
+/// from the server's Drafts folder first, which is the mirror's business and
+/// not this suite's.
 ///
 /// The field order is the drop order: the daemon dies before its root goes.
 struct Root {
     daemon: DaemonFixture,
+    wire: WireServers,
     tmp: TempDir,
 }
 
@@ -59,18 +62,6 @@ impl Root {
         fixture::seed(tmp.path());
         pin_font_size(tmp.path());
         let path = tmp.path().join("config.toml");
-        let from = format!("default_from = \"{ACCOUNT}@example.com\"\n");
-        let config = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            config.contains(&from),
-            "the fixture names {ACCOUNT}'s address"
-        );
-        let config = config.replacen(
-            &from,
-            &format!("{from}\n[accounts.drafts]\nmirror = false\n"),
-            1,
-        );
-        std::fs::write(&path, config).unwrap();
         if let Some(accounts) = accounts {
             let existing = std::fs::read_to_string(&path).unwrap();
             let list: Vec<String> = accounts.iter().map(|a| format!("{a:?}")).collect();
@@ -84,9 +75,11 @@ impl Root {
             .unwrap();
         }
         before(tmp.path());
-        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
-        let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_TRANSPORT_ENV, &hook)]);
-        Root { daemon, tmp }
+        let wire = WireServers::start();
+        wire.wire(tmp.path(), ACCOUNT);
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &[]);
+        wire.await_startup_drain(tmp.path(), ACCOUNT);
+        Root { daemon, wire, tmp }
     }
 
     fn root(&self) -> &Path {
@@ -474,13 +467,10 @@ fn mp_send_completes_the_snapshot_before_the_draft_is_retired() {
     assert_eq!(snapshot["created"], created["created"]);
     let mid = snapshot["sent_message_id"].as_str().expect("a Message-ID");
     assert!(mid.starts_with('<') && mid.ends_with('>'), "{mid}");
-    let events = fixture::transport_events(&fixture::transport_log(root.root()));
+    let submitted = root.wire.submitted_message_ids(&[]);
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            fixture::TransportEvent::Submit { message_id, .. } if message_id == mid
-        )),
-        "the recorded id is the one submitted: {events:?}"
+        submitted.iter().any(|message_id| message_id == mid),
+        "the recorded id is the one submitted: {submitted:?}"
     );
     assert!(snapshot["sent_at"]
         .as_str()
