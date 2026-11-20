@@ -2375,6 +2375,199 @@ mod tests {
         assert_eq!(*lock(&seen), [TickKind::Quick]);
     }
 
+    /// A body hook that answers its `n`th call with `results[n]` (the last one
+    /// once they run out) and holds each call until `release` is notified,
+    /// logging "slice" into `order` and notifying `entered` once inside.
+    fn sliced_hooks(
+        report: &TickReport,
+        results: Vec<(usize, usize, usize)>,
+        order: &Arc<Mutex<Vec<&'static str>>>,
+        entered: &Arc<tokio::sync::Notify>,
+        release: &Arc<tokio::sync::Notify>,
+    ) -> TickHooks {
+        let mut hooks = quiet_hooks();
+        let calls = Arc::new(AtomicU64::new(0));
+        hooks.body = {
+            let (report, order) = (report.clone(), Arc::clone(order));
+            let (entered, release) = (Arc::clone(entered), Arc::clone(release));
+            Arc::new(move |ctx: TickContext| {
+                let call = calls.fetch_add(1, Ordering::SeqCst) as usize;
+                let (saved, skipped, truncated) = results[call.min(results.len() - 1)];
+                let (report, order) = (report.clone(), Arc::clone(&order));
+                let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+                async move {
+                    assert_eq!(
+                        tick_time(ctx.kind, ctx.limit, ctx.body_deadline).body_budget,
+                        Some(Duration::from_secs(9)),
+                        "every slice spends the account's budget"
+                    );
+                    lock(&order).push("slice");
+                    entered.notify_one();
+                    release.notified().await;
+                    report.record_sync(SyncResult {
+                        saved,
+                        skipped,
+                        bodies_truncated: truncated,
+                        ..Default::default()
+                    });
+                    Ok(())
+                }
+                .boxed()
+            })
+        };
+        hooks
+    }
+
+    /// A full tick downloads in slices of the account's body budget and lets
+    /// go of the turn between two of them, so a send of a draft with a server
+    /// copy waiting for the turn gets it before the full sync ends, and the
+    /// full sync still ends with every body: it slices again until no
+    /// mailbox stopped at the budget, and reports one outcome for them all.
+    #[tokio::test]
+    async fn a_full_tick_lets_a_send_in_between_its_slices_and_ends_complete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hooks = sliced_hooks(
+            &report,
+            vec![(20, 5, 1), (7, 25, 0), (0, 0, 1)],
+            &order,
+            &entered,
+            &release,
+        );
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 9), 1, hooks)
+                .expect("a free lock")
+                .with_report(report),
+        );
+
+        let full = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Full).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("the first slice runs");
+        let send = tokio::spawn({
+            let (runtime, order) = (Arc::clone(&runtime), Arc::clone(&order));
+            async move {
+                let _turn = runtime.send_turn().await.expect("a ready runtime");
+                lock(&order).push("send");
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!send.is_finished(), "a slice holds the turn");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), send)
+            .await
+            .expect("the send gets the turn between two slices")
+            .expect("the send");
+        assert!(!full.is_finished(), "before the full sync ends");
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap_or_else(|_| panic!("no second slice ran: {:?}", lock(&order)));
+        release.notify_one();
+        let full = full.await.expect("the full tick");
+        assert_eq!(*lock(&order), ["slice", "send", "slice"]);
+        let sync = full.sync.expect("the full tick's outcome");
+        assert_eq!(sync.bodies_truncated, 0, "every body is in: {sync:?}");
+        assert_eq!(sync.saved, 27, "what every slice saved");
+        assert_eq!(sync.skipped, 5, "what the store held before the sync");
+        assert_eq!(
+            full.phases
+                .iter()
+                .filter(|&&phase| phase == Phase::Body)
+                .count(),
+            1,
+            "one body phase: {:?}",
+            full.phases
+        );
+
+        // A quick tick runs one slice, whatever it left.
+        release.notify_one();
+        let quick = runtime.tick(TickKind::Quick).await;
+        assert_eq!(quick.sync.expect("an outcome").bodies_truncated, 1);
+        assert_eq!(lock(&order).len(), 4, "one more slice");
+    }
+
+    /// A quick tick with a bound above the usual one (`mp sync -n 150`) is a
+    /// user asking for that many messages: it slices as a full tick does,
+    /// until no mailbox stopped at the budget.
+    #[tokio::test]
+    async fn a_quick_tick_above_the_usual_bound_slices_until_complete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hooks = sliced_hooks(
+            &report,
+            vec![(20, 5, 1), (7, 25, 0)],
+            &order,
+            &entered,
+            &release,
+        );
+        let runtime = AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 9), 1, hooks)
+            .expect("a free lock")
+            .with_report(report);
+        let releaser = tokio::spawn({
+            let release = Arc::clone(&release);
+            async move {
+                for _ in 0..8 {
+                    release.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let large = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.tick_until(TickKind::Quick, Some(QUICK_TICK_LIMIT + 50), None, None),
+        )
+        .await
+        .expect("the tick ends");
+        releaser.abort();
+        assert_eq!(lock(&order).len(), 2, "two slices: {:?}", lock(&order));
+        assert_eq!(large.sync.expect("an outcome").bodies_truncated, 0);
+    }
+
+    /// A slice that saved nothing ends the full tick even when a mailbox
+    /// stopped at the budget: another slice would only meet the same wall.
+    #[tokio::test]
+    async fn a_full_tick_stops_slicing_once_a_slice_saved_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hooks = sliced_hooks(
+            &report,
+            vec![(3, 0, 1), (0, 3, 1)],
+            &order,
+            &entered,
+            &release,
+        );
+        let runtime = AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 9), 1, hooks)
+            .expect("a free lock")
+            .with_report(report);
+        let releaser = tokio::spawn({
+            let release = Arc::clone(&release);
+            async move {
+                for _ in 0..8 {
+                    release.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let full = tokio::time::timeout(Duration::from_secs(2), runtime.tick(TickKind::Full))
+            .await
+            .expect("the full tick ends");
+        releaser.abort();
+        assert_eq!(lock(&order).len(), 2, "two slices: {:?}", lock(&order));
+        assert_eq!(full.sync.expect("an outcome").bodies_truncated, 1);
+    }
+
     /// A body that fails is reported on the outcome, and the tail still ran.
     #[tokio::test]
     async fn a_failing_body_is_carried_and_the_tail_still_runs() {
