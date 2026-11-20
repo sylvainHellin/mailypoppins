@@ -1884,6 +1884,53 @@ pub fn note_ingest_failure(
     false
 }
 
+/// Record that the server refused to send `uid` when asked for it alone, and
+/// answer whether it is still owed, as [`note_ingest_failure`] answers for a
+/// message the store would not write (PERSO-333): the same counter, spacing
+/// and bound. The give-up says so in the server's words and names when mp
+/// asks again ([`refusal_give_up_words`]).
+pub fn note_fetch_refusal(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    location: &str,
+    uid: i64,
+    words: &str,
+) -> bool {
+    let error = format!("the server refused to send it: {words}");
+    if record_ingest_failure(store, account, mailbox, uid, &error) {
+        return true;
+    }
+    let retry_at = crate::outbox::unix_now() + GIVEN_UP_RETRY_SECS;
+    warn!(
+        "{}",
+        refusal_give_up_words(uid, location, words, &local_minute(retry_at))
+    );
+    false
+}
+
+/// The warning a refusal given up on logs, `retry_at` the local time mp asks
+/// again.
+pub fn refusal_give_up_words(uid: i64, location: &str, words: &str, retry_at: &str) -> String {
+    let minutes = (MAX_INGEST_ATTEMPTS - 1) * FAILURE_SPACING_SECS / 60;
+    format!(
+        "Giving up for now on UID {uid} in '{location}': the server refused to send it on \
+         {MAX_INGEST_ATTEMPTS} passes over at least {minutes} minutes ({words}). It no longer \
+         holds the prune back; mp asks the server for it again after {retry_at}."
+    )
+}
+
+/// `at`, a Unix time, as the local minute a log line names.
+pub fn local_minute(at: i64) -> String {
+    chrono::DateTime::from_timestamp(at, 0)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| at.to_string())
+}
+
 /// Forget the failure history of `uid`, because a pass has now written it.
 ///
 /// Called on every successful ingest rather than only after a known failure:
@@ -1920,18 +1967,19 @@ pub fn clear_mailbox_ingest_failures(store: &Store, account: &str, mailbox: &str
 }
 
 /// The UIDs of `mailbox` given up on less than [`GIVEN_UP_RETRY_SECS`] before
-/// `now`: what an IMAP pass leaves out of its body download and counts as
-/// covered (PERSO-333). A store that cannot answer leaves none out, the
-/// conservative side: the message is asked for and counted again.
+/// `now`, each with the time its retry is due: what an IMAP pass leaves out of
+/// its body download and counts as covered (PERSO-333). A store that cannot
+/// answer leaves none out, the conservative side: the message is asked for and
+/// counted again.
 pub fn given_up_uids(
     store: &Store,
     account: &str,
     mailbox: &str,
     now: i64,
-) -> std::collections::HashSet<i64> {
-    let read = || -> rusqlite::Result<std::collections::HashSet<i64>> {
+) -> std::collections::BTreeMap<i64, i64> {
+    let read = || -> rusqlite::Result<std::collections::BTreeMap<i64, i64>> {
         let mut stmt = store.conn().prepare(
-            "SELECT uid FROM ingest_failures
+            "SELECT uid, updated + ?5 FROM ingest_failures
              WHERE account = ?1 AND mailbox = ?2 AND attempts >= ?3 AND updated > ?4",
         )?;
         let rows = stmt.query_map(
@@ -1939,15 +1987,16 @@ pub fn given_up_uids(
                 account,
                 mailbox,
                 MAX_INGEST_ATTEMPTS,
-                now - GIVEN_UP_RETRY_SECS
+                now - GIVEN_UP_RETRY_SECS,
+                GIVEN_UP_RETRY_SECS
             ],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )?;
         rows.collect()
     };
     read().unwrap_or_else(|e| {
         warn!("Failed to read the messages given up on in '{mailbox}': {e}");
-        std::collections::HashSet::new()
+        std::collections::BTreeMap::new()
     })
 }
 
@@ -2983,8 +3032,9 @@ pub struct KnownUids {
     /// again yet ([`given_up_uids`], PERSO-333): an IMAP listing leaves them
     /// out of its body download and counts them as covered, so they hold
     /// neither the arrival mark nor the prune. Meaningless across a
-    /// UIDVALIDITY change, like the UID set it travels with.
-    pub given_up: std::collections::HashSet<i64>,
+    /// UIDVALIDITY change, like the UID set it travels with. Each maps to
+    /// the Unix time its retry is due.
+    pub given_up: std::collections::BTreeMap<i64, i64>,
 }
 
 impl KnownUids {
@@ -3150,6 +3200,25 @@ mod tests {
         assert!(
             !record_ingest_failure(&store, "acct", "inbox", 7, "refused"),
             "and a given-up message stays given up on"
+        );
+    }
+
+    /// PERSO-333 review: the give-up of a refusal says the server refused
+    /// the message, in its words, and when mp asks again; not that the store
+    /// failed to write it.
+    #[test]
+    fn a_refusal_given_up_on_says_so_in_the_servers_words_and_when_mp_asks_again() {
+        assert_eq!(
+            refusal_give_up_words(
+                3,
+                "INBOX",
+                "the server answered NO: Some messages could not be FETCHed (Failure)",
+                "2026-11-21 10:00"
+            ),
+            "Giving up for now on UID 3 in 'INBOX': the server refused to send it on 3 passes \
+             over at least 60 minutes (the server answered NO: Some messages could not be \
+             FETCHed (Failure)). It no longer holds the prune back; mp asks the server for it \
+             again after 2026-11-21 10:00."
         );
     }
 

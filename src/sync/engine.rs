@@ -193,6 +193,15 @@ pub(crate) fn mark_below_unmet(pending: Option<u32>, unmet: &[i64]) -> Option<u3
     Some(pending.map_or(owed, |mark| mark.min(owed)))
 }
 
+/// Why a downloaded message has no row after its pass.
+#[derive(Clone, Copy)]
+enum Failure<'a> {
+    /// The store would not write it, for this reason.
+    Unwritable(&'a str),
+    /// The server refused to send it when asked for alone, in its words.
+    Refused(&'a str),
+}
+
 /// What one target's pass did, as far as its cursor is concerned.
 struct Closed<'a> {
     /// Every UID whose body came back, written or not.
@@ -667,15 +676,19 @@ pub async fn run_sync<B: SyncBackend>(
         // downloaded on purpose, and the next pass may download the copy again
         // while its move is still owed, so it says nothing about convergence.
         let mut withheld = false;
-        let mut note_failure = |uid: i64, error: &str| {
-            if ingest::note_ingest_failure(
-                store,
-                account,
-                target.role.as_str(),
-                &target.server_name,
-                uid,
-                error,
-            ) {
+        // A refused body is counted as a failed write is (PERSO-333), and
+        // only its give-up warning differs.
+        let mut note_failure = |uid: i64, failure: Failure<'_>| {
+            let (role, location) = (target.role.as_str(), target.server_name.as_str());
+            let owed = match failure {
+                Failure::Unwritable(error) => {
+                    ingest::note_ingest_failure(store, account, role, location, uid, error)
+                }
+                Failure::Refused(words) => {
+                    ingest::note_fetch_refusal(store, account, role, location, uid, words)
+                }
+            };
+            if owed {
                 unmet.push(uid);
             } else {
                 gave_up = true;
@@ -748,7 +761,10 @@ pub async fn run_sync<B: SyncBackend>(
                                 "Skipping UID {} in '{}': the message did not parse",
                                 message.uid, target.server_name
                             );
-                            note_failure(message.uid, "the message did not parse");
+                            note_failure(
+                                message.uid,
+                                Failure::Unwritable("the message did not parse"),
+                            );
                             continue;
                         };
                         email.flags = message.flags;
@@ -766,10 +782,7 @@ pub async fn run_sync<B: SyncBackend>(
                             "Skipping UID {} in '{}': the server refused to send it: {words}",
                             message.uid, target.server_name
                         );
-                        note_failure(
-                            message.uid,
-                            &format!("the server refused to send it: {words}"),
-                        );
+                        note_failure(message.uid, Failure::Refused(words));
                         continue;
                     }
                 };
@@ -869,7 +882,7 @@ pub async fn run_sync<B: SyncBackend>(
                             "Failed to ingest UID {} from '{}': {error}",
                             message.uid, target.server_name
                         );
-                        note_failure(message.uid, &error);
+                        note_failure(message.uid, Failure::Unwritable(&error));
                     }
                 }
             }

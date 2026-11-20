@@ -832,12 +832,12 @@ where
     // The messages a pass has given up on (PERSO-333) are left out of the
     // body download and count as covered, until their retry is due; their
     // UIDs are renumbered by a reset like every other.
-    let given_up: std::collections::HashSet<u32> = if uidvalidity_reset {
-        std::collections::HashSet::new()
+    let given_up: std::collections::BTreeMap<u32, i64> = if uidvalidity_reset {
+        std::collections::BTreeMap::new()
     } else {
         given_up
             .into_iter()
-            .filter_map(|uid| u32::try_from(uid).ok())
+            .filter_map(|(uid, retry_at)| Some((u32::try_from(uid).ok()?, retry_at)))
             .collect()
     };
     // A mark and a recorded top are both UIDs, so a renumbering makes them
@@ -992,15 +992,13 @@ where
         };
         covered_from = Some(flags.covered_from);
     }
-    let listed_new = new_uids.len();
-    new_uids.retain(|uid| !given_up.contains(uid));
-    if new_uids.len() < listed_new {
-        info!(
-            "Store fetch for '{}': {} message(s) given up on are not asked for again until \
-             their retry is due",
-            mailbox,
-            listed_new - new_uids.len()
-        );
+    let skipped_given_up: Vec<(u32, i64)> = new_uids
+        .iter()
+        .filter_map(|uid| given_up.get(uid).map(|&retry_at| (*uid, retry_at)))
+        .collect();
+    if !skipped_given_up.is_empty() {
+        new_uids.retain(|uid| !given_up.contains_key(uid));
+        info!("{}", given_up_skip_line(mailbox, &skipped_given_up));
     }
     if !new_uids.is_empty() {
         info!(
@@ -1043,7 +1041,7 @@ where
             let downloaded: Vec<u32> = downloaded
                 .iter()
                 .filter_map(|&uid| u32::try_from(uid).ok())
-                .chain(given_up.iter().copied())
+                .chain(given_up.keys().copied())
                 .collect();
             let coverage = arrival_coverage(
                 &listed,
@@ -1070,6 +1068,29 @@ where
         }),
     };
     Ok((listing, plan))
+}
+
+/// The one line a pass logs for the messages of `mailbox` it does not ask
+/// for, because it gave up on them and their retry is not due yet (PERSO-333):
+/// each UID with the local time of its retry, the first few of them only.
+pub(crate) fn given_up_skip_line(mailbox: &str, skipped: &[(u32, i64)]) -> String {
+    const NAMED: usize = 5;
+    let named: Vec<String> = skipped
+        .iter()
+        .take(NAMED)
+        .map(|&(uid, retry_at)| {
+            format!("UID {uid} until {}", crate::ingest::local_minute(retry_at))
+        })
+        .collect();
+    let more = match skipped.len().saturating_sub(NAMED) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        "Store fetch for '{mailbox}': not asking again for {} message(s) given up on: {}{more}",
+        skipped.len(),
+        named.join(", ")
+    )
 }
 
 /// What one chunk of a body pass brought back.
@@ -2017,6 +2038,30 @@ mod tests {
     /// A server that withholds `UIDNEXT` leaves the highest UID it did list,
     /// and one that lists neither leaves 0, which prunes nothing and makes
     /// every listed UID a placeholder rather than a prune candidate.
+    #[test]
+    fn the_skip_line_names_the_first_uids_given_up_on_and_when_each_is_retried() {
+        let at = |uid: u32| (uid, 1_800_000_000 + i64::from(uid) * 60);
+        let until = |uid: u32| crate::ingest::local_minute(at(uid).1);
+        assert_eq!(
+            given_up_skip_line("INBOX", &[at(3)]),
+            format!(
+                "Store fetch for 'INBOX': not asking again for 1 message(s) given up on: UID 3 \
+                 until {}",
+                until(3)
+            )
+        );
+        let many: Vec<(u32, i64)> = (1..=7).map(at).collect();
+        let line = given_up_skip_line("INBOX", &many);
+        assert!(
+            line.starts_with("Store fetch for 'INBOX': not asking again for 7 message(s)"),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(&format!("UID 5 until {} and 2 more", until(5))),
+            "{line}"
+        );
+    }
+
     #[test]
     fn the_ceiling_falls_back_to_the_listing_then_to_zero() {
         assert_eq!(ceiling(None, &[1, 2, 9]), 9);
