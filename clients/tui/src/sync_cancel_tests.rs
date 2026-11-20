@@ -25,6 +25,7 @@ use crate::queries::Queries;
 const INSTANCE: &str = "sync-cancel";
 const ACCOUNT: &str = "work";
 const FULL: &str = "op-full";
+const QUICK: &str = "op-quick";
 
 /// How the door answers `operation.cancel`.
 #[derive(Clone, Copy)]
@@ -36,8 +37,8 @@ enum CancelAnswer {
     TooLate,
 }
 
-/// A door that starts a full sync as [`FULL`], answers the cancel as told,
-/// and records every call.
+/// A door that starts a full sync as [`FULL`] and a quick one as [`QUICK`],
+/// answers the cancel as told, and records every call.
 struct Daemon {
     cancel: CancelAnswer,
     calls: RefCell<Vec<(String, Value)>>,
@@ -63,6 +64,7 @@ impl Queries for Daemon {
             .push((method.to_string(), params.clone()));
         match (method, self.cancel) {
             ("sync.full", _) => Ok(json!({"operation_id": FULL})),
+            ("sync.quick", _) => Ok(json!({"operation_id": QUICK})),
             ("operation.cancel", CancelAnswer::Cancelled) => {
                 Ok(json!({"operation_id": params["operation_id"], "state": "cancelled"}))
             }
@@ -180,6 +182,20 @@ fn sx_cancels_the_full_sync_this_window_started_and_its_end_says_what_stays() {
         app.status_message.as_deref(),
         Some("No sync to cancel: none started from this window is running")
     );
+}
+
+/// `sS` and `ss` name the account on their progress line, as the startup
+/// fetch's `Quick sync (<account>)...` does.
+#[test]
+fn both_sync_keys_name_the_account_they_sync() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    assert_eq!(app.status_message.as_deref(), Some("Full sync (work)..."));
+
+    let mut app = self::app();
+    press(&mut app, &daemon, "ss");
+    assert_eq!(app.status_message.as_deref(), Some("Quick sync (work)..."));
 }
 
 /// `ss` while `sS` runs is parked behind it; `sx` then cancels the full sync
